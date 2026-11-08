@@ -167,7 +167,7 @@ private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
 
 private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     val rows = frontRows(ws)
-    return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
+    return rows.count { it.indicator == ChatIndicator.WORKING || it.indicator == ChatIndicator.WAITING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -348,7 +348,7 @@ fun SessionsScreen(
                         }
                     }
                     Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, actions)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, actions)
+                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING || it.indicator == ChatIndicator.WAITING }, actions)
                     Filter.Pinned -> group("f", null, front.pinned, actions)
                 }
                 val empty = when (filter) {

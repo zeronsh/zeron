@@ -901,6 +901,42 @@ impl Client {
         self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
     }
 
+    /// Put a chat to sleep until `until_ms` (Unix ms; the Activity view's
+    /// Asleep), or wake it now (`None`). Synced per field, on every device;
+    /// the chat's host wakes it early the moment it asks for the person or
+    /// fails.
+    pub fn sleep_session(&self, chat_id: &str, until_ms: Option<i64>) -> Result<()> {
+        let until = match until_ms {
+            Some(at) => Some(
+                Utc.timestamp_millis_opt(at)
+                    .single()
+                    .ok_or_else(|| ClientError::InvalidArgument("sleep: no such time".into()))?,
+            ),
+            None => None,
+        };
+        self.chat_write(chat_id, |doc| doc.set_chat_sleep(chat_id, until, Utc::now()))
+    }
+
+    /// Stop waiting on the background processes a chat's agent said it
+    /// waits on (its host's `StopWaiting`): its turn then reads as finished.
+    /// `false` when it was no longer waiting.
+    pub async fn stop_waiting(&self, chat_id: &str) -> Result<bool> {
+        let chat = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let reply = self
+            .inner
+            .host_rpc(
+                &chat.device_id,
+                zeron_rpc::methods::STOP_WAITING,
+                serde_json::json!({ "chatId": chat_id }),
+            )
+            .await?;
+        Ok(reply["stopped"].as_bool().unwrap_or(false))
+    }
+
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))
     }

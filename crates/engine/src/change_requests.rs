@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::future::{BoxFuture, Shared};
 use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -67,11 +68,23 @@ struct CacheState {
     last_error: Option<ChangeRequestError>,
 }
 
+type InspectionRun = Shared<BoxFuture<'static, Result<CheckoutSourceContext, ChangeRequestError>>>;
+
+/// The latest Git inspection of one watched path. Every subscription on the
+/// path shares it, so a project with many chats runs Git once per poll
+/// interval instead of once per chat. Any waiter can drive the shared run,
+/// so a subscription that stops being polled mid-inspection blocks no one.
+struct Inspection {
+    started: Instant,
+    run: InspectionRun,
+}
+
 struct Inner {
     repos: Repos,
     device_id: String,
     lookup: Arc<dyn CheckoutChangeRequestLookup>,
     entries: Mutex<HashMap<ChangeRequestCacheKey, Arc<CacheEntry>>>,
+    inspections: Mutex<HashMap<PathBuf, Inspection>>,
     timing: Timing,
     shutdown: CancellationToken,
 }
@@ -108,6 +121,7 @@ impl CheckoutChangeRequests {
                 device_id: device_id.to_owned(),
                 lookup,
                 entries: Mutex::new(HashMap::new()),
+                inspections: Mutex::new(HashMap::new()),
                 timing,
                 shutdown: CancellationToken::new(),
             }),
@@ -166,13 +180,7 @@ impl CheckoutChangeRequests {
                 if state.service.inner.shutdown.is_cancelled() {
                     return None;
                 }
-                let mut source = match state
-                    .service
-                    .inner
-                    .lookup
-                    .inspect_checkout(&state.cwd)
-                    .await
-                {
+                let mut source = match state.service.inspect(&state.cwd).await {
                     Ok(source) => source,
                     Err(error) => {
                         tracing::debug!(%error, "change request checkout inspection unavailable");
@@ -216,6 +224,43 @@ impl CheckoutChangeRequests {
             }
         })
         .boxed()
+    }
+
+    /// Inspect `cwd`, joining an inspection started less than a poll
+    /// interval ago. Concurrent callers for one path share one run instead of
+    /// each starting their own Git processes.
+    async fn inspect(&self, cwd: &Path) -> Result<CheckoutSourceContext, ChangeRequestError> {
+        let max_age = self.inner.timing.context_poll_interval;
+        let run = {
+            let mut inspections = self
+                .inner
+                .inspections
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Forget paths no subscription has inspected for two intervals.
+            inspections.retain(|_, inspection| inspection.started.elapsed() < max_age * 2);
+            match inspections.get(cwd) {
+                Some(inspection) if inspection.started.elapsed() < max_age => {
+                    inspection.run.clone()
+                }
+                _ => {
+                    let lookup = self.inner.lookup.clone();
+                    let path = cwd.to_owned();
+                    let run = async move { lookup.inspect_checkout(&path).await }
+                        .boxed()
+                        .shared();
+                    inspections.insert(
+                        cwd.to_owned(),
+                        Inspection {
+                            started: Instant::now(),
+                            run: run.clone(),
+                        },
+                    );
+                    run
+                }
+            }
+        };
+        run.await
     }
 
     fn acquire(&self, key: ChangeRequestCacheKey) -> DemandLease {
@@ -421,6 +466,7 @@ mod tests {
         source: Mutex<CheckoutSourceContext>,
         results: Mutex<VecDeque<Result<Option<ChangeRequestSummary>, ChangeRequestError>>>,
         resolves: AtomicUsize,
+        inspects: AtomicUsize,
     }
 
     impl FakeLookup {
@@ -432,6 +478,7 @@ mod tests {
                 source: Mutex::new(source),
                 results: Mutex::new(results.into_iter().collect()),
                 resolves: AtomicUsize::new(0),
+                inspects: AtomicUsize::new(0),
             })
         }
 
@@ -442,6 +489,10 @@ mod tests {
         fn resolve_count(&self) -> usize {
             self.resolves.load(Ordering::Acquire)
         }
+
+        fn inspect_count(&self) -> usize {
+            self.inspects.load(Ordering::Acquire)
+        }
     }
 
     #[async_trait]
@@ -450,6 +501,9 @@ mod tests {
             &self,
             _cwd: &Path,
         ) -> Result<CheckoutSourceContext, ChangeRequestError> {
+            self.inspects.fetch_add(1, Ordering::AcqRel);
+            // Yield so concurrent subscribers overlap the way real Git runs do.
+            tokio::task::yield_now().await;
             Ok(self.source.lock().unwrap().clone())
         }
 
@@ -545,6 +599,43 @@ mod tests {
         assert_eq!(first.unwrap().change_request.unwrap().number, 90);
         assert_eq!(second.unwrap().change_request.unwrap().number, 90);
         assert_eq!(lookup.resolve_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn subscribers_on_one_path_share_one_git_inspection() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        let mut first = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        let mut second = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        let mut third = service.watch_checkout(PathBuf::from("/checkout"), identity());
+
+        let (first, second, third) = tokio::join!(first.next(), second.next(), third.next());
+
+        assert!(first.is_some() && second.is_some() && third.is_some());
+        assert_eq!(lookup.inspect_count(), 1);
+
+        // Another path is a different checkout as far as Git knows.
+        let mut other = service.watch_checkout(PathBuf::from("/checkout/sub"), identity());
+        other.next().await.unwrap();
+        assert_eq!(lookup.inspect_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_subscriber_does_not_hold_up_its_path() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        let mut stalled = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        // Start an inspection, then stop polling it partway through.
+        assert!(futures::poll!(stalled.next()).is_pending());
+
+        let mut live = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        let status = tokio::time::timeout(Duration::from_secs(1), live.next())
+            .await
+            .expect("the live subscriber finishes the shared inspection")
+            .unwrap();
+
+        assert_eq!(status.change_request.unwrap().number, 90);
+        assert_eq!(lookup.inspect_count(), 1);
     }
 
     #[tokio::test]
