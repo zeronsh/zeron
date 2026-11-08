@@ -226,12 +226,12 @@ end
 -- pace, waiting stands still at rest.
 export type Who = "agent" | "subagent"
 
--- The beat: what steps with the sweep (its steps, the dots' pulse), each
--- `every` steps a frame (`frame(k)`: the properties of its k-th), all set
--- at once by one timer on the step's own boundaries, from `ui.now()`, so
--- everything on screen shows the same step whenever it came into sight.
--- No animation plays for it: the animation engine stays idle (one capped
--- to six frames a second would keep any other that starts meanwhile
+-- The beat: what moves with the sweep (its band, the dots' pulse), each
+-- `every` beats a frame (`frame(k)`: the properties of its k-th), all set
+-- at once by one timer on the beat's own boundaries, from `ui.now()`, so
+-- everything on screen shows the same frame whenever it came into sight.
+-- No animation plays for it: the animation engine stays idle (a loop
+-- capped to a low frame rate would keep any other that starts meanwhile
 -- waiting for its next frame), and the timer runs only while something
 -- shows and motion isn't reduced, dropping what's gone from the window.
 type Beat = { every: number, frame: (k: number) -> { [string]: any }, el: Element?, last: number? }
@@ -246,14 +246,14 @@ local function beat()
 			beating[b] = nil
 			continue
 		end
-		local k = math.floor(now / (sweep.STEP * b.every) + 0.001)
+		local k = math.floor(now / (sweep.BEAT * b.every) + 0.001)
 		if k ~= b.last then
 			b.last = k
 			anime.utils.set(el, b.frame(k))
 		end
 	end
 	if next(beating) ~= nil then
-		next_beat = ui.after(sweep.STEP - now % sweep.STEP, beat)
+		next_beat = ui.after(sweep.BEAT - now % sweep.BEAT, beat)
 	end
 end
 -- `props` stepping on the beat while it can be seen.
@@ -280,8 +280,9 @@ function M.Sweep(props: sweep.Props): Node
 	if not every then
 		return ui.div(node)
 	end
+	local who = props.who or "agent"
 	return on_beat(node, every, function(k: number)
-		return { shaderTime = k % 8 }
+		return { shaderTime = sweep.band(who, k) }
 	end)
 end
 local function present(kind: Kind, size: number, who: Who?): Node
@@ -369,13 +370,14 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 	}
 end)
 
--- The dot's pulse, a step a frame: lit, a step down, dim, a step up.
+-- The dot's pulse, a frame every other beat: lit, a step down, dim, a
+-- step up.
 local PULSE = { 1, 1, 1, 1, 1, 0.75, 0.5, 0.5, 0.5, 0.5, 0.5, 0.75 }
 
 -- A list row's dot: 9 points, its state's hue, its long name a tooltip;
 -- working, waiting or connecting, it pulses (dimming to half and back every
 -- two seconds, in two steps each way, on the sweep's beat: the frames that
--- step a sweep step the dots).
+-- move a sweep move the dots).
 function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	local k = KINDS[props.kind]
 	local size = props.size or 9
@@ -391,7 +393,7 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	if not k.pulse then
 		return ui.div(dot)
 	end
-	return on_beat(dot, 1, function(k: number)
+	return on_beat(dot, 2, function(k: number)
 		return { opacity = PULSE[k % #PULSE + 1] }
 	end)
 end

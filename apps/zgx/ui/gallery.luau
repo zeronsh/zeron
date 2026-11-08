@@ -1737,7 +1737,7 @@ local GROUPS: { Group } = {
 							table.insert(sizes, ds.StatusIcon { kind = "working", size = size, who = who })
 						end
 						local held: { Node } = {}
-						for at = 0, 7 do
+						for at = -1, 7 do
 							table.insert(held, ui.div { color = "$zeron.status.working", ds.Sweep { who = who, size = 32, at = at } })
 						end
 						return ui.column { gap = "$space.3", row(table.unpack(paces)), row(table.unpack(sizes)), row(table.unpack(held)) }

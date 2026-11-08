@@ -1,51 +1,45 @@
--- An agent's presence is its light sweep: the band crosses every tile of the
--- mark (and of a sub-agent's dot glyph) and rests; it steps a sixth of a
--- second at a time, on one beat with the dots' pulse (one timer, no
--- animation playing); waiting and reduced motion stand still.
+-- An agent's presence is its light sweep: a soft band crosses the mark (and
+-- a sub-agent's dot glyph) diagonal by diagonal and rests; it moves twelve
+-- times a second, on one beat with the dots' pulse (one timer, no animation
+-- playing); waiting and reduced motion stand still.
 
 local sweep = require("@ds/sweep")
 
-local function has(mask: number, bit: number): boolean
-	return (mask // 2 ^ bit) % 2 == 1
-end
-
-test("the light sweep crosses every tile of the mark and of the dot, one band a step, then rests", function()
+test("the band crosses the mark in a second and the dot quicker, from its first diagonal to its last, then rests", function()
+	expect(sweep.BEAT).to_be(1000 / 12)
+	expect(sweep.GLYPHS.agent.beats * sweep.BEAT).to_be(1000)
+	expect(sweep.GLYPHS.subagent.beats < sweep.GLYPHS.agent.beats).to_be(true)
 	for who, g in sweep.GLYPHS do
-		expect(#g.steps).to_be(7)
-		local seen = 0
-		for i, lit in g.steps do
-			-- Only its own tiles, some each step; the mark's band moves every step.
-			expect(lit > 0).to_be(true)
-			for bit = 0, 14 do
-				if has(lit, bit) then
-					expect(has(g.shape, bit)).to_be(true)
-					if not has(seen, bit) then
-						seen += 2 ^ bit
-					end
-				end
-			end
-			if who == "agent" and i > 1 then
-				expect(lit ~= g.steps[i - 1]).to_be(true)
-			end
+		local moving = g.beats - g.rest
+		-- In at the first diagonal, out at the last, always onward.
+		expect(sweep.band(who, 0)).to_be(-1)
+		expect(sweep.band(who, moving - 1)).to_be(g.last + 1)
+		for i = 1, moving - 1 do
+			local step = sweep.band(who, i) - sweep.band(who, i - 1)
+			expect(step > 0 and step <= 1).to_be(true)
 		end
-		expect(seen).to_be(g.shape)
+		-- Then off the glyph, and round again.
+		for i = moving, g.beats - 1 do
+			expect(sweep.band(who, i) < -2).to_be(true)
+		end
+		expect(sweep.band(who, g.beats)).to_be(-1)
 	end
 end)
 
-test("working steps on the beat, connecting on every other, waiting, a held step and reduced motion stand still", function()
-	expect(sweep.STEP).to_be(1000 / 6)
-	local _, working = sweep.plan { who = "agent", pace = "working" }
+test("working moves on the beat, connecting on every other, waiting, a held place and reduced motion stand still", function()
+	local still, working = sweep.plan { who = "agent", pace = "working" }
+	expect(still).to_be_nil()
 	expect(working).to_be(1)
 	local _, connecting = sweep.plan { who = "subagent", pace = "connecting" }
 	expect(connecting).to_be(2)
-	local rest, still = sweep.plan { pace = "still" }
-	expect(still).to_be_nil()
-	expect(rest[1]).to_be(0)
+	local off, none = sweep.plan { pace = "still" }
+	expect(none).to_be_nil()
+	expect(off < -2).to_be(true)
 	local mid, reduced = sweep.plan { who = "agent", reduced = true }
 	expect(reduced).to_be_nil()
-	expect(mid[1] > 0).to_be(true)
-	local _, held = sweep.plan { who = "subagent", at = 2 }
-	expect(held).to_be_nil()
+	expect(mid).to_be(sweep.GLYPHS.agent.still)
+	local held = sweep.plan { who = "subagent", at = 2 }
+	expect(held).to_be(2)
 end)
 
 test("rows of working agents, a sub-agent, connecting and waiting draw, as rings too, and with motion reduced", function()
