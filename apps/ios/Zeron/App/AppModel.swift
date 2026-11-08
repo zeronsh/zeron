@@ -789,6 +789,15 @@ final class AppModel {
         (try? await client?.githubBranches(repo: repo)) ?? []
     }
 
+    /// The worktree a new session starts in. Only a git project can make one:
+    /// the pick outlives a switch to a plain folder (where its chip is hidden)
+    /// and the host would refuse the run, so there it's left for the next git
+    /// project rather than sent.
+    static func worktreeSpec(draft: NewSessionDraft, project: ProjectView?) -> WorktreeSpec? {
+        guard draft.worktree, let project, project.gitDetected else { return nil }
+        return WorktreeSpec(repoPath: project.path, base: draft.branch ?? "HEAD", spaceId: project.id)
+    }
+
     /// Create the chat, open it, and send the first message.
     func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
         guard let client else { return nil }
@@ -802,10 +811,9 @@ final class AppModel {
         }
         let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
         do {
-            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
+            let worktree = Self.worktreeSpec(draft: draft, project: rawProjects.first { $0.id == draft.projectId })
+            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: worktree == nil ? draft.branch : nil, cwd: nil, title: nil))
             let handle = try client.openSession(chatId: chatId)
-            let project = rawProjects.first { $0.id == draft.projectId }
-            let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
             noteDeliveryActivity()
             refreshWorkspace()
