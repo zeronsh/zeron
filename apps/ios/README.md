@@ -137,6 +137,19 @@ results are not release evidence for this build.
   Commands are persisted atomically before dispatch, sent once, and retained
   with confirmed/rejected/unknown outcomes. Reconciliation never creates a
   replacement sandbox or automatically replays an unknown operation.
+- New Session's **Run on** menu lists the desktop's Scaffold destinations in
+  a **New Scaffold sandbox** section below the devices (Local, Staging and
+  Production DB; the chip then reads **Scaffold (Staging DB)** as on the
+  desktop). Picking one provisions nothing: the model chip switches to the
+  managed OMP/Antigravity models of an online desktop controller, and the
+  project and branch chips hide. Send runs `zeron_client::crew_launch`
+  through that controller: create, then a distinct attach, each journaled in
+  the profile's `crew-launch.json` before it is sent. Unknown outcomes are
+  reconciled by command ID, never replayed. Once the sandbox host is online,
+  the launch applies the picked settings and sends the prompt once. The page
+  shows progress, and the launch outlives the page. A launch still owed
+  resumes on the next send; **Stop Waiting** in its failure alert forgets it
+  (a sandbox it created stays listed under Settings → Scaffold sandboxes).
 - Managed inference stays on the host through Agent Auth. Upstream's direct
   Codex voice route has no managed adapter: Crew voice is visibly unavailable
   and rejected in the shared client rather than falling back to host CLI

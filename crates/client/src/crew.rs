@@ -32,7 +32,7 @@ pub fn parse_session_link(url: &str) -> Option<SessionLink> {
 }
 
 impl Client {
-    fn crew_scope(&self, project: &str, deployment: &str) -> Result<()> {
+    pub(crate) fn crew_scope(&self, project: &str, deployment: &str) -> Result<()> {
         let Credentials::Scaffold { session_json, .. } = &self.inner.credentials else {
             return Err(ClientError::Auth("Sign in to Crew before accessing its scope".into()));
         };

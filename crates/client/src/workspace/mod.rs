@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
 
-pub(crate) use view::{DeriveContext, device_online};
+pub(crate) use view::{DeriveContext, device_online, is_cloud_device};
 pub use view::{
     DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
     SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,

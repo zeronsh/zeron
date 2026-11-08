@@ -32,6 +32,7 @@ pub mod cloud;
 pub mod config;
 pub mod connectivity;
 pub mod crew;
+pub mod crew_launch;
 pub mod legacy;
 mod demo;
 pub mod error;

@@ -108,6 +108,19 @@ final class AppModel {
 
     private static let newSessionDraftKey = "new-session"
 
+    /// The new session starting in a Scaffold sandbox, if any (one at a
+    /// time; see ScaffoldLaunch.swift).
+    var scaffoldLaunch: ScaffoldLaunch? {
+        didSet { if scaffoldLaunch != oldValue { observers.values.forEach { $0() } } }
+    }
+    /// The desktop controller sandboxes start through, as last resolved.
+    var scaffoldController: (id: String, at: Date)?
+    /// Shows a finished launch's outcome; without one, a toast does.
+    weak var scaffoldLaunchPresenter: ScaffoldLaunchPresenter?
+    /// Why the last launch failed, kept for the new-session page when it
+    /// finished while that page was closed.
+    var scaffoldFailure: String?
+
     var isSignedIn: Bool { client != nil }
     var isDemo: Bool { client?.isDemo() ?? false }
 
@@ -358,6 +371,9 @@ final class AppModel {
         lastDraft = NewSessionDraft()
         newSessionText = ""
         newSessionImages = []
+        scaffoldLaunch = nil
+        scaffoldController = nil
+        scaffoldFailure = nil
     }
 
     private var lastDeliveryActivity = Date.distantPast

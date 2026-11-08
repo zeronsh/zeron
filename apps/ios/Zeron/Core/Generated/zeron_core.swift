@@ -1389,6 +1389,27 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func crewControl(deviceId: String, commandId: String, controlJson: String, deployment: String) async throws  -> String
     
+    /**
+     * Start a new session in a new Scaffold sandbox and send `first` into
+     * it once its host is online. Returns the session id. A launch whose
+     * outcome is owed resumes here instead of creating another sandbox.
+     */
+    func crewLaunch(database: CrewDatabase, config: ChatConfig, first: SendRequest, deployment: String, progress: CrewLaunchProgress) async throws  -> String
+    
+    /**
+     * An online desktop controller that can start Scaffold sandboxes (its
+     * device id; the model catalog comes from it).
+     */
+    func crewLaunchController(deployment: String) async throws  -> String
+    
+    /**
+     * Stop waiting on the retained launch (the user's explicit choice). A
+     * sandbox it created stays listed under Scaffold sandboxes.
+     */
+    func crewLaunchForget() throws 
+    
+    func crewLaunchRetained() throws  -> CrewRetainedLaunch?
+    
     func crewReconcile(deviceId: String, commandId: String) async throws  -> String
     
     func crewRefresh(deviceId: String, deployment: String) async throws  -> String
@@ -2779,6 +2800,68 @@ open func crewControl(deviceId: String, commandId: String, controlJson: String, 
         )
 }
     
+    /**
+     * Start a new session in a new Scaffold sandbox and send `first` into
+     * it once its host is online. Returns the session id. A launch whose
+     * outcome is owed resumes here instead of creating another sandbox.
+     */
+open func crewLaunch(database: CrewDatabase, config: ChatConfig, first: SendRequest, deployment: String, progress: CrewLaunchProgress)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_crew_launch(
+                        self.uniffiCloneHandle(),FfiConverterTypeCrewDatabase_lower(database),FfiConverterTypeChatConfig_lower(config),FfiConverterTypeSendRequest_lower(first),FfiConverterString.lower(deployment),FfiConverterTypeCrewLaunchProgress_lower(progress)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * An online desktop controller that can start Scaffold sandboxes (its
+     * device id; the model catalog comes from it).
+     */
+open func crewLaunchController(deployment: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_crew_launch_controller(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deployment)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Stop waiting on the retained launch (the user's explicit choice). A
+     * sandbox it created stays listed under Scaffold sandboxes.
+     */
+open func crewLaunchForget()throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_crew_launch_forget(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+open func crewLaunchRetained()throws  -> CrewRetainedLaunch?  {
+    return try  FfiConverterOptionTypeCrewRetainedLaunch.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_crew_launch_retained(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func crewReconcile(deviceId: String, commandId: String)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
@@ -3064,6 +3147,210 @@ public func FfiConverterTypeCoreClient_lift(_ handle: UInt64) throws -> CoreClie
 #endif
 public func FfiConverterTypeCoreClient_lower(_ value: CoreClient) -> UInt64 {
     return FfiConverterTypeCoreClient.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Launch progress. Called on a client thread: hop to the main thread.
+ */
+public protocol CrewLaunchProgress: AnyObject, Sendable {
+    
+    func onPhase(phase: CrewLaunchPhase) 
+    
+}
+/**
+ * Launch progress. Called on a client thread: hop to the main thread.
+ */
+open class CrewLaunchProgressImpl: CrewLaunchProgress, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_crewlaunchprogress(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_crewlaunchprogress(handle, $0) }
+    }
+
+    
+
+    
+open func onPhase(phase: CrewLaunchPhase)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_crewlaunchprogress_on_phase(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCrewLaunchPhase_lower(phase),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceCrewLaunchProgress {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceCrewLaunchProgress = UniffiVTableCallbackInterfaceCrewLaunchProgress(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeCrewLaunchProgress.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface CrewLaunchProgress: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeCrewLaunchProgress.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface CrewLaunchProgress: handle missing in uniffiClone")
+            }
+        },
+        onPhase: { (
+            uniffiHandle: UInt64,
+            phase: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeCrewLaunchProgress.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onPhase(
+                     phase: try FfiConverterTypeCrewLaunchPhase_lift(phase)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceCrewLaunchProgress> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceCrewLaunchProgress>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitCrewLaunchProgress() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_crewlaunchprogress(UniffiCallbackInterfaceCrewLaunchProgress.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCrewLaunchProgress: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<CrewLaunchProgress>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = CrewLaunchProgress
+
+    public static func lift(_ handle: UInt64) throws -> CrewLaunchProgress {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return CrewLaunchProgressImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: CrewLaunchProgress) -> UInt64 {
+         if let rustImpl = value as? CrewLaunchProgressImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CrewLaunchProgress {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: CrewLaunchProgress, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewLaunchProgress_lift(_ handle: UInt64) throws -> CrewLaunchProgress {
+    return try FfiConverterTypeCrewLaunchProgress.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewLaunchProgress_lower(_ value: CrewLaunchProgress) -> UInt64 {
+    return FfiConverterTypeCrewLaunchProgress.lower(value)
 }
 
 
@@ -8744,6 +9031,73 @@ public func FfiConverterTypeCrewAccount_lift(_ buf: RustBuffer) throws -> CrewAc
 #endif
 public func FfiConverterTypeCrewAccount_lower(_ value: CrewAccount) -> RustBuffer {
     return FfiConverterTypeCrewAccount.lower(value)
+}
+
+
+/**
+ * A launch whose outcome is still owed (it resumes on the next launch).
+ */
+public struct CrewRetainedLaunch: Equatable, Hashable {
+    /**
+     * The desktop controller holding its command.
+     */
+    public var controllerId: String
+    public var sessionId: String
+    public var database: CrewDatabase
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The desktop controller holding its command.
+         */controllerId: String, sessionId: String, database: CrewDatabase) {
+        self.controllerId = controllerId
+        self.sessionId = sessionId
+        self.database = database
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CrewRetainedLaunch: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCrewRetainedLaunch: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CrewRetainedLaunch {
+        return
+            try CrewRetainedLaunch(
+                controllerId: FfiConverterString.read(from: &buf), 
+                sessionId: FfiConverterString.read(from: &buf), 
+                database: FfiConverterTypeCrewDatabase.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CrewRetainedLaunch, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.controllerId, into: &buf)
+        FfiConverterString.write(value.sessionId, into: &buf)
+        FfiConverterTypeCrewDatabase.write(value.database, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewRetainedLaunch_lift(_ buf: RustBuffer) throws -> CrewRetainedLaunch {
+    return try FfiConverterTypeCrewRetainedLaunch.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewRetainedLaunch_lower(_ value: CrewRetainedLaunch) -> RustBuffer {
+    return FfiConverterTypeCrewRetainedLaunch.lower(value)
 }
 
 
@@ -16239,6 +16593,168 @@ public func FfiConverterTypeCredentials_lower(_ value: Credentials) -> RustBuffe
 
 
 /**
+ * The database a new Scaffold sandbox starts with (the desktop's
+ * Scaffold destinations).
+ */
+
+public enum CrewDatabase: Equatable, Hashable {
+    
+    case local
+    case stagingSnapshot
+    case productionSnapshot
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CrewDatabase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCrewDatabase: FfiConverterRustBuffer {
+    typealias SwiftType = CrewDatabase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CrewDatabase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .local
+        
+        case 2: return .stagingSnapshot
+        
+        case 3: return .productionSnapshot
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CrewDatabase, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .local:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stagingSnapshot:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .productionSnapshot:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewDatabase_lift(_ buf: RustBuffer) throws -> CrewDatabase {
+    return try FfiConverterTypeCrewDatabase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewDatabase_lower(_ value: CrewDatabase) -> RustBuffer {
+    return FfiConverterTypeCrewDatabase.lower(value)
+}
+
+
+
+/**
+ * Where a sandbox launch stands.
+ */
+
+public enum CrewLaunchPhase: Equatable, Hashable {
+    
+    /**
+     * Reaching a desktop controller and creating the sandbox.
+     */
+    case creating
+    /**
+     * The sandbox exists; its session host is being attached.
+     */
+    case starting
+    /**
+     * Attached; waiting for the host to come online before sending.
+     */
+    case connecting
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CrewLaunchPhase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCrewLaunchPhase: FfiConverterRustBuffer {
+    typealias SwiftType = CrewLaunchPhase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CrewLaunchPhase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .creating
+        
+        case 2: return .starting
+        
+        case 3: return .connecting
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CrewLaunchPhase, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .creating:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .starting:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .connecting:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewLaunchPhase_lift(_ buf: RustBuffer) throws -> CrewLaunchPhase {
+    return try FfiConverterTypeCrewLaunchPhase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCrewLaunchPhase_lower(_ value: CrewLaunchPhase) -> RustBuffer {
+    return FfiConverterTypeCrewLaunchPhase.lower(value)
+}
+
+
+
+/**
  * Text decorations, painted relative to the run's baseline.
  */
 
@@ -19987,6 +20503,30 @@ fileprivate struct FfiConverterOptionTypeContextUsage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCrewRetainedLaunch: FfiConverterRustBuffer {
+    typealias SwiftType = CrewRetainedLaunch?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCrewRetainedLaunch.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCrewRetainedLaunch.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFrameImage: FfiConverterRustBuffer {
     typealias SwiftType = FrameImage?
 
@@ -21952,11 +22492,34 @@ public func workosAuthorizeUrl(state: String) -> String  {
     )
 })
 }
+/**
+ * "Scaffold (Local DB)" etc., as the desktop's device picker labels them.
+ */
+public func crewDatabaseLabel(database: CrewDatabase) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_crew_database_label(
+        FfiConverterTypeCrewDatabase_lower(database),uniffiCallStatus
+    )
+})
+}
 public func crewIsSessionLink(url: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_crew_is_session_link(
         FfiConverterString.lower(url),uniffiCallStatus
+    )
+})
+}
+/**
+ * A model a Scaffold sandbox can run (managed OMP/Antigravity routes).
+ */
+public func crewManagedModel(harness: String, model: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_crew_managed_model(
+        FfiConverterString.lower(harness),
+        FfiConverterString.lower(model),uniffiCallStatus
     )
 })
 }
@@ -22172,7 +22735,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_crew_database_label() != 43770) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_crew_is_session_link() != 31526) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_crew_managed_model() != 46603) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_crew_prepare_legacy_backup() != 27224) {
@@ -22478,6 +23047,18 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_crew_control() != 20236) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_crew_launch() != 65266) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_crew_launch_controller() != 44971) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_crew_launch_forget() != 22571) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_crew_launch_retained() != 56057) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_crew_reconcile() != 11002) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -22521,6 +23102,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_crewlaunchprogress_on_phase() != 29652) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_crewlogin_begin() != 20877) {
@@ -22831,6 +23415,7 @@ private let initializationResult: InitializationResult = {
     }
 
     uniffiCallbackInitClientListener()
+    uniffiCallbackInitCrewLaunchProgress()
     uniffiCallbackInitLayoutListener()
     uniffiCallbackInitPlatformMeasurer()
     uniffiCallbackInitTerminalListener()

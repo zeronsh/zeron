@@ -1,7 +1,87 @@
 //! Crew uses the same resource-bound OAuth implementation as the host.
 use std::sync::Arc;
+use zeron_client::crew_launch as launch;
+use zeron_proto::ScaffoldDatabaseEnvironment;
 use zeron_sync::scaffold_auth::{self, ScaffoldAuth, ScaffoldConfig, ScaffoldSession};
-use super::{CoreClient, CoreError, CoreResult, Credentials};
+use super::{ChatConfig, CoreClient, CoreError, CoreResult, Credentials, SendRequest};
+
+/// The database a new Scaffold sandbox starts with (the desktop's
+/// Scaffold destinations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CrewDatabase {
+    Local,
+    StagingSnapshot,
+    ProductionSnapshot,
+}
+
+impl From<CrewDatabase> for ScaffoldDatabaseEnvironment {
+    fn from(database: CrewDatabase) -> Self {
+        match database {
+            CrewDatabase::Local => Self::Local,
+            CrewDatabase::StagingSnapshot => Self::StagingSnapshot,
+            CrewDatabase::ProductionSnapshot => Self::ProductionSnapshot,
+        }
+    }
+}
+
+impl From<ScaffoldDatabaseEnvironment> for CrewDatabase {
+    fn from(database: ScaffoldDatabaseEnvironment) -> Self {
+        match database {
+            ScaffoldDatabaseEnvironment::Local => Self::Local,
+            ScaffoldDatabaseEnvironment::StagingSnapshot => Self::StagingSnapshot,
+            ScaffoldDatabaseEnvironment::ProductionSnapshot => Self::ProductionSnapshot,
+        }
+    }
+}
+
+/// Where a sandbox launch stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CrewLaunchPhase {
+    /// Reaching a desktop controller and creating the sandbox.
+    Creating,
+    /// The sandbox exists; its session host is being attached.
+    Starting,
+    /// Attached; waiting for the host to come online before sending.
+    Connecting,
+}
+
+impl From<launch::CrewLaunchPhase> for CrewLaunchPhase {
+    fn from(phase: launch::CrewLaunchPhase) -> Self {
+        match phase {
+            launch::CrewLaunchPhase::Creating => Self::Creating,
+            launch::CrewLaunchPhase::Starting => Self::Starting,
+            launch::CrewLaunchPhase::Connecting => Self::Connecting,
+        }
+    }
+}
+
+/// Launch progress. Called on a client thread: hop to the main thread.
+#[uniffi::export(with_foreign)]
+pub trait CrewLaunchProgress: Send + Sync {
+    fn on_phase(&self, phase: CrewLaunchPhase);
+}
+
+/// A launch whose outcome is still owed (it resumes on the next launch).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CrewRetainedLaunch {
+    /// The desktop controller holding its command.
+    pub controller_id: String,
+    pub session_id: String,
+    pub database: CrewDatabase,
+}
+
+/// "Scaffold (Local DB)" etc., as the desktop's device picker labels them.
+#[uniffi::export]
+pub fn crew_database_label(database: CrewDatabase) -> String {
+    launch::database_label(database.into()).to_owned()
+}
+
+/// A model a Scaffold sandbox can run (managed OMP/Antigravity routes).
+#[uniffi::export]
+pub fn crew_managed_model(harness: String, model: String) -> bool {
+    serde_json::from_value::<zeron_proto::HarnessId>(serde_json::Value::String(harness))
+        .is_ok_and(|harness| launch::is_managed_model(harness, &model))
+}
 
 #[derive(uniffi::Record)]
 pub struct CrewAccount {
@@ -120,4 +200,48 @@ impl CoreClient {
         Ok(value.to_string())
     }
 
+    /// An online desktop controller that can start Scaffold sandboxes (its
+    /// device id; the model catalog comes from it).
+    pub async fn crew_launch_controller(&self, deployment: String) -> CoreResult<String> {
+        let client = self.client.clone();
+        super::on_runtime(async move { client.crew_launch_controller(&deployment).await }).await
+    }
+
+    /// Start a new session in a new Scaffold sandbox and send `first` into
+    /// it once its host is online. Returns the session id. A launch whose
+    /// outcome is owed resumes here instead of creating another sandbox.
+    pub async fn crew_launch(
+        &self,
+        database: CrewDatabase,
+        config: ChatConfig,
+        first: SendRequest,
+        deployment: String,
+        progress: Arc<dyn CrewLaunchProgress>,
+    ) -> CoreResult<String> {
+        let request = launch::CrewLaunch {
+            database: database.into(),
+            config: config.try_into()?,
+            first: first.into(),
+        };
+        let client = self.client.clone();
+        super::on_runtime(async move {
+            let phase = move |phase: launch::CrewLaunchPhase| progress.on_phase(phase.into());
+            client.crew_launch(request, &deployment, &phase).await
+        })
+        .await
+    }
+
+    pub fn crew_launch_retained(&self) -> CoreResult<Option<CrewRetainedLaunch>> {
+        Ok(self.client.crew_launch_retained()?.map(|retained| CrewRetainedLaunch {
+            controller_id: retained.controller,
+            session_id: retained.session_id,
+            database: retained.database.into(),
+        }))
+    }
+
+    /// Stop waiting on the retained launch (the user's explicit choice). A
+    /// sandbox it created stays listed under Scaffold sandboxes.
+    pub fn crew_launch_forget(&self) -> CoreResult<()> {
+        Ok(self.client.crew_launch_forget()?)
+    }
 }

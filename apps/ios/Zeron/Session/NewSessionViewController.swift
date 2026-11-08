@@ -12,6 +12,10 @@ struct NewSessionDraft: Equatable, Codable {
     var effort: String?
     /// Run on its own Cloud machine (optional: drafts saved before Cloud).
     var cloud: Bool?
+    /// Run in a new Scaffold sandbox with this database (a `CrewDatabase`
+    /// key) instead of on a device. Project and host are kept for when the
+    /// user picks a device again.
+    var scaffold: String?
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -53,7 +57,7 @@ struct ModelChoice: Equatable {
 /// "Ask anything" → a composer-first canvas. Context is set with native menus
 /// (project, branch/worktree, model, effort) that load lazily; the composer is
 /// focused immediately so the common case is: tap, type, send.
-final class NewSessionViewController: UIViewController, UIGestureRecognizerDelegate {
+final class NewSessionViewController: UIViewController, UIGestureRecognizerDelegate, ScaffoldLaunchPresenter {
     private let app: AppModel
     private let onCreated: (String, DraftHandoff?) -> Void
     private let composer = ComposerBar()
@@ -62,6 +66,14 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    /// Shown while a sandbox starts (the launch outlives this page).
+    private let launchSpinner = UIActivityIndicatorView(style: .medium)
+    private var appToken: AnyObject?
+    /// The device-side provider and model to return to when the user picks
+    /// a device again after a Scaffold destination.
+    private var beforeScaffold: (harness: String, model: String?, effort: String?)?
+    /// The desktop controller a sandbox would start through, once known.
+    private var controllerName: String?
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -102,6 +114,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         rememberDraft()
+        if app.scaffoldLaunchPresenter === self { app.scaffoldLaunchPresenter = nil }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        app.scaffoldLaunchPresenter = self
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -133,7 +151,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         hero.font = Fonts.ui(.sansSemibold, 22)
         hero.textColor = Palette.text
         hero.textAlignment = .center
-        let heroStack = UIStackView(arrangedSubviews: [mark, hero])
+        launchSpinner.hidesWhenStopped = true
+        launchSpinner.color = Palette.secondary
+        let heroStack = UIStackView(arrangedSubviews: [mark, hero, launchSpinner])
         heroStack.axis = .vertical
         heroStack.spacing = 14
         heroStack.alignment = .center
@@ -151,14 +171,19 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         // The model chip opens the picker sheet (tabs per provider).
         composer.onChipTap = { [weak self] id, _ in
             guard let self, id == "model" else { return }
+            // The picker needs at least one provider tab.
+            guard !self.models.isEmpty else { return self.showNoManagedModels() }
             self.present(self.modelPicker(), animated: true)
         }
         composer.mentionSearch = { [weak self] q in
-            guard let self, let p = self.project else { return [] }
+            // A sandbox can't read this computer's files: no @mentions.
+            guard let self, self.scaffold == nil, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
         }
         composer.onSend = { [weak self] text, images, _ in
-            self?.create(text: text, images: images) ?? false ? .sent : .kept
+            guard let self else { return .kept }
+            if let database = self.scaffold { return self.launchScaffold(database, text: text, images: images) }
+            return self.create(text: text, images: images) ? .sent : .kept
         }
         view.addSubview(composer)
         heroStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24).isActive = true
@@ -193,7 +218,21 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             // No projects yet: run on the first reachable host.
             draft.hostId = app.hostOptions.first(where: \.online)?.id ?? app.hostOptions.first?.id
         }
+        if !app.offersScaffold { draft.scaffold = nil }
         loadModels()
+        if app.offersScaffold { resolveController() }
+        appToken = app.observe { [weak self] in self?.refreshLaunchState() }
+        refreshLaunchState()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if focusOnAppear, app.scaffoldLaunch == nil { composer.becomeFirstResponder() }
+        // A launch that failed while this page was closed.
+        if let failure = app.scaffoldFailure {
+            app.scaffoldFailure = nil
+            showLaunchFailure(failure)
+        }
     }
 
     /// The last catalog each host reported, so the chip opens on a real model
@@ -202,8 +241,10 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private var modelsDevice: String?
 
     /// Models for the draft's host: cached (or the built-in catalog) at once,
-    /// then the host's own list.
+    /// then the host's own list. A Scaffold destination lists the managed
+    /// models its desktop controller offers.
     private func loadModels() {
+        if scaffold != nil { return loadScaffoldModels() }
         let device = deviceId
         guard device != modelsDevice else { return refreshChips() }
         modelsDevice = device
@@ -226,9 +267,153 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         }
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        if focusOnAppear { composer.becomeFirstResponder() }
+    // MARK: Scaffold destinations
+
+    /// The draft's Scaffold destination (Crew accounts only).
+    private var scaffold: CrewDatabase? {
+        app.offersScaffold ? CrewDatabase(key: draft.scaffold) : nil
+    }
+
+    private static let scaffoldModelsKey = "scaffold"
+
+    private func loadScaffoldModels() {
+        let key = Self.scaffoldModelsKey
+        guard modelsDevice != key else { return refreshChips() }
+        modelsDevice = key
+        models = Self.modelCache[key] ?? []
+        refreshChips()
+        Task { [weak self] in
+            guard let self else { return }
+            let fresh = await self.app.scaffoldModels()
+            self.noteController()
+            guard !fresh.isEmpty else {
+                // Nothing reachable yet: ask again next time.
+                if self.modelsDevice == key, self.models.isEmpty { self.modelsDevice = nil }
+                return
+            }
+            Self.modelCache[key] = fresh
+            guard self.modelsDevice == key else { return }
+            self.models = fresh
+            self.refreshChips()
+        }
+    }
+
+    /// Learn which computer would start the sandbox (the menu names it).
+    private func resolveController() {
+        Task { [weak self] in
+            _ = await self?.app.scaffoldControllerId()
+            self?.noteController()
+        }
+    }
+
+    private func noteController() {
+        let name = app.scaffoldController.map { app.deviceName($0.id) }
+        guard name != controllerName else { return }
+        controllerName = name
+        refreshChips()
+    }
+
+    /// Like the desktop: a Scaffold destination runs a managed OMP model,
+    /// the first one listed until the user picks another.
+    private func pickScaffold(_ database: CrewDatabase) {
+        if draft.scaffold == nil {
+            beforeScaffold = (draft.harness, draft.model, draft.effort)
+            draft.harness = "omp"
+            draft.model = nil
+            draft.effort = nil
+        }
+        draft.scaffold = database.key
+        loadModels()
+    }
+
+    /// A device was picked: back to what it ran before the sandbox.
+    private func leaveScaffold() {
+        guard draft.scaffold != nil else { return }
+        draft.scaffold = nil
+        if let before = beforeScaffold {
+            draft.harness = before.harness
+            draft.model = before.model
+            draft.effort = before.effort
+            beforeScaffold = nil
+        }
+    }
+
+    /// The page mirrors a launch in flight, even one started before it opened.
+    private func refreshLaunchState() {
+        // Handed off: the composer is mid-flight into the chat.
+        guard !created else { return }
+        let launch = app.scaffoldLaunch
+        composer.isUserInteractionEnabled = launch == nil
+        composer.alpha = launch == nil ? 1 : 0.55
+        hero.text = launch?.phase.progressLabel ?? "What are we building?"
+        if launch == nil { launchSpinner.stopAnimating() } else { launchSpinner.startAnimating() }
+    }
+
+    private func launchScaffold(_ database: CrewDatabase, text: String, images: [StagedImage]) -> ComposerBar.SendResult {
+        guard app.scaffoldLaunch == nil else { return .kept }
+        // A picked model the list lacks is still the one to send (the core
+        // checks it is managed); nothing picked means the list's first.
+        guard let model = draft.model ?? draftModel?.id else {
+            showNoManagedModels()
+            return .kept
+        }
+        app.lastDraft = draft
+        view.endEditing(true)
+        let config = ChatConfig(harness: draft.harness, model: model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        app.launchScaffoldSession(database: database, config: config, text: text, images: images)
+        // The prompt stays in the composer until the sandbox takes it.
+        return .kept
+    }
+
+    func scaffoldLaunchFinished(chatId: String?, error: String?) {
+        refreshLaunchState()
+        guard let chatId else {
+            showLaunchFailure(error ?? "The sandbox didn't start.")
+            return
+        }
+        created = true
+        app.newSessionText = ""
+        app.newSessionImages = []
+        PushNotifications.shared.askAfterFirstSession()
+        onCreated(chatId, DraftHandoff.capture(from: self, composer: composer, text: composer.text))
+    }
+
+    private func showLaunchFailure(_ message: String) {
+        let alert = UIAlertController(title: "The sandbox didn't start", message: message, preferredStyle: .alert)
+        if app.retainedScaffoldLaunch != nil {
+            // Its outcome is still owed: the next send checks the same sandbox.
+            alert.addAction(UIAlertAction(title: "Stop Waiting", style: .destructive) { [weak self] _ in
+                self?.confirmForgetLaunch()
+            })
+        }
+        alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    private func showNoManagedModels() {
+        loadModels()
+        let alert = UIAlertController(
+            title: "No models yet",
+            message: scaffold == nil
+                ? "This computer hasn't listed its models yet. Try again in a moment."
+                : "Crew couldn't list managed models from your computer. Open Crew there and sign in, then try again.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    private func confirmForgetLaunch() {
+        let alert = UIAlertController(
+            title: "Stop waiting for this sandbox?",
+            message: "Your next send creates a new sandbox. If this one was created, it stays in Settings → Scaffold sandboxes.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Stop Waiting", style: .destructive) { [weak self] _ in
+            self?.app.forgetScaffoldLaunch()
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(alert, animated: true)
     }
 
     override func viewWillLayoutSubviews() {
@@ -265,7 +450,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func refreshChips() {
         var chips: [ComposerChip] = []
-        if let p = project {
+        if let database = scaffold {
+            // A sandbox runs its deployment's own checkout: no project or
+            // branch to pick (the desktop hides both too).
+            chips.append(ComposerChip(id: "host", title: database.label, symbol: "server.rack"))
+        } else if let p = project {
             // The project, then the host it runs on.
             chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
             chips.append(ComposerChip(id: "host", title: p.deviceName, symbol: "desktopcomputer"))
@@ -358,24 +547,40 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     /// With a project: its checkouts, by host (the path tells apart several
     /// on one host). Without: every host — project-less sessions run in its
-    /// home.
+    /// home. Crew accounts also get the desktop's Scaffold destinations.
     private func hostMenu() -> UIMenu {
         let checkouts = self.checkouts
+        let onDevice = scaffold == nil
+        var items: [UIMenuElement]
         if !checkouts.isEmpty || project != nil {
-            let items: [UIMenuElement] = checkouts.map { p in
+            items = checkouts.map { p in
                 let shared = checkouts.filter { $0.device == p.device }.count > 1
-                return UIAction(title: p.deviceName, subtitle: shared ? p.path : (p.online ? "Online" : "Offline"), image: UIImage(systemName: "desktopcomputer"), state: p.id == draft.projectId ? .on : .off) { [weak self] _ in
+                return UIAction(title: p.deviceName, subtitle: shared ? p.path : (p.online ? "Online" : "Offline"), image: UIImage(systemName: "desktopcomputer"), state: onDevice && p.id == draft.projectId ? .on : .off) { [weak self] _ in
+                    self?.leaveScaffold()
                     self?.pickCheckout(p)
                 }
             }
-            return UIMenu(title: "Run on", children: items)
-        }
-        return UIMenu(title: "Run on", children: app.hostOptions.map { h in
-            UIAction(title: h.name, subtitle: h.online ? "Online" : "Offline", image: UIImage(systemName: "desktopcomputer"), state: h.id == draft.hostId ? .on : .off) { [weak self] _ in
-                self?.draft.hostId = h.id
-                self?.loadModels()
+        } else {
+            items = app.hostOptions.map { h in
+                UIAction(title: h.name, subtitle: h.online ? "Online" : "Offline", image: UIImage(systemName: "desktopcomputer"), state: onDevice && h.id == draft.hostId ? .on : .off) { [weak self] _ in
+                    self?.leaveScaffold()
+                    self?.draft.hostId = h.id
+                    self?.loadModels()
+                }
             }
-        })
+        }
+        if app.offersScaffold {
+            // The desktop's Scaffold destinations, grouped so they fit a phone
+            // menu (the chip then reads "Scaffold (Staging DB)" as there).
+            // Selecting one provisions nothing; sending creates the sandbox.
+            let via = controllerName.map { "via \($0)" } ?? "via Crew on your computer"
+            items.append(UIMenu(title: "New Scaffold sandbox", options: .displayInline, children: CrewDatabase.all.map { database in
+                UIAction(title: database.shortLabel, subtitle: via, image: UIImage(systemName: "server.rack"), state: scaffold == database ? .on : .off) { [weak self] _ in
+                    self?.pickScaffold(database)
+                }
+            }))
+        }
+        return UIMenu(title: "Run on", children: items)
     }
 
     private func branchMenu() -> UIMenu {
@@ -410,7 +615,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             let rows = choices.map { ModelPickerRow(id: $0.id, label: $0.label, detail: $0.detail) }
             return ModelPickerTab(harness: h, label: first.harnessLabel) { rows }
         }
-        let host = (name: app.deviceName(deviceId), symbol: "desktopcomputer")
+        let host = scaffold.map { (name: $0.label, symbol: "server.rack") } ?? (name: app.deviceName(deviceId), symbol: "desktopcomputer")
         return ModelPickerViewController.sheet(tabs: tabs, harness: draft.harness, model: draft.model, host: host) { [weak self] harness, model in
             guard let self else { return }
             if harness != self.draft.harness { self.draft.effort = nil }
