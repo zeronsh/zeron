@@ -636,3 +636,52 @@ fn provider_switch_needs_a_host_that_switches() {
     model.model = Some("another-model".into());
     client.set_session_config("chat-blog", &model).unwrap();
 }
+
+/// The Activity view's data: a wait reads as Waiting (stoppable when it's a
+/// process), sleep is a synced write that reads back as Asleep, its time
+/// passing reads as woke until seen, and waking clears it.
+#[test]
+fn activity_sleep_wake_and_stop_waiting() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let keyboard = ws.session("chat-ios-keyboard").unwrap();
+    assert_eq!(keyboard.indicator, ChatIndicator::Waiting);
+    assert!(keyboard.waits_on_process);
+    let blog = ws.session("chat-blog").unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let until = blog.sleep_until_ms.expect("the demo's sleeper");
+    assert!(until > now && blog.woke_at_ms.is_none());
+    let scroll = ws.session("chat-ios-scroll").unwrap();
+    assert!(scroll.sleep_until_ms.is_none());
+    assert!(scroll.woke_at_ms.is_some_and(|at| at < now), "its time came");
+    // Nothing else sleeps or waits.
+    assert!(ws.session("chat-deploy").unwrap().sleep_until_ms.is_none());
+    assert!(!ws.session("chat-veil").unwrap().waits_on_process);
+
+    // Sleep, then wake.
+    let later = now + 3_600_000;
+    client.sleep_session("chat-deploy", Some(later)).unwrap();
+    let row = client.workspace().session("chat-deploy").unwrap().clone();
+    assert_eq!(row.sleep_until_ms, Some(later));
+    assert!(row.revision != ws.session("chat-deploy").unwrap().revision);
+    client.sleep_session("chat-deploy", None).unwrap();
+    let row = client.workspace().session("chat-deploy").unwrap().clone();
+    assert!(row.sleep_until_ms.is_none() && row.woke_at_ms.is_none());
+    assert!(client.sleep_session("no-such-chat", Some(later)).is_err());
+
+    // Seeing a woken chat settles it.
+    client.mark_seen("chat-ios-scroll");
+    wait_for("woke settles once seen", Duration::from_secs(5), || {
+        client.workspace().session("chat-ios-scroll").unwrap().woke_at_ms.is_none()
+    });
+
+    // Stop waiting: the host ends the wait, and the turn reads as finished.
+    let stopped = zeron_client::runtime::shared().block_on(client.stop_waiting("chat-ios-keyboard")).unwrap();
+    assert!(stopped);
+    wait_for("the wait ends", Duration::from_secs(5), || {
+        let row = client.workspace().session("chat-ios-keyboard").unwrap().clone();
+        row.indicator != ChatIndicator::Waiting && !row.waits_on_process
+    });
+    let again = zeron_client::runtime::shared().block_on(client.stop_waiting("chat-ios-keyboard")).unwrap();
+    assert!(!again, "nothing left to stop");
+}

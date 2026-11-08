@@ -16,6 +16,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         var tint: UIColor = Palette.secondary
         var accessory: Accessory = .disclosure
         var destructive = false
+        /// Out of reach for now (dimmed, its switch off-limits).
+        var disabled = false
 
         enum Accessory: Hashable {
             case disclosure
@@ -51,7 +53,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             var c = UIListContentConfiguration.subtitleCell()
             c.text = row.title
             c.textProperties.font = Fonts.ui(.sansMedium, 16)
-            c.textProperties.color = row.destructive ? Palette.danger : Palette.text
+            c.textProperties.color = row.destructive ? Palette.danger : row.disabled ? Palette.tertiary : Palette.text
             c.secondaryText = row.subtitle
             c.secondaryTextProperties.font = Fonts.ui(.sans, 13)
             c.secondaryTextProperties.color = Palette.secondary
@@ -73,6 +75,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             case let .toggle(on):
                 let toggle = UISwitch()
                 toggle.isOn = on
+                toggle.isEnabled = !row.disabled
                 toggle.onTintColor = Palette.accent
                 toggle.accessibilityIdentifier = "toggle-\(row.id)"
                 toggle.addAction(UIAction { [weak self, weak toggle] _ in
@@ -241,7 +244,9 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems(math)
         s.appendSections(["Sessions"])
         s.appendItems([
-            Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
+            Row(id: "activity", title: "Activity", subtitle: app.activityOn ? "On — the chats that need you, in one list" : "Off", symbol: "tray.full"),
+            // (Activity keeps one list of its own: grouping stands aside.)
+            Row(id: "groupByProject", title: "Group by Project", subtitle: app.activityOn ? "Not while Activity is on" : "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject), disabled: app.activityOn),
             Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
         ])
         s.appendSections([" "])
@@ -254,6 +259,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
+        case "activity": navigationController?.pushViewController(ActivitySettingsViewController(app: app), animated: true)
         case "providers":
             navigationController?.pushViewController(ProvidersViewController(app: app), animated: true)
         case "cloud":
