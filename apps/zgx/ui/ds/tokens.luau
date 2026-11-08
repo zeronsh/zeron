@@ -63,8 +63,9 @@ function M.setup()
 			},
 			-- The panel's card, frosted (screens/panel): Zeron's panel
 			-- (theme.rs `panel_bg`, its background at 0.4); a theme without
-			-- its own, the focused pane's.
-			panel = { tint = "{zeron.inset.active}" },
+			-- its own, the page's card's (a chat's not focused: macOS's panel
+			-- is level with those, a focused chat alone a step lighter).
+			panel = { tint = "{zeron.inset.bg}" },
 			-- The sidebar's card: frosted, its own wash over the window's glass
 			-- (`tint`, the themes': shipping's sidebar tone, theme.rs
 			-- `wash(0.05)`); opaque, the page's card's fill (`solid`).
