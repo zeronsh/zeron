@@ -58,6 +58,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
 | `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
 | `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
+| `accounts.pin` | run one chat on a saved account of its own, beside the active one (which stays as it is), and decide the account a new chat starts on. Always asked, even for your own plugins. See [Pinning chats](#pinning-chats-to-accounts) |
 | `models.read` | read each harness's models, efforts and options, and a chat's model |
 | `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
 | `messages.send` | send a chat a message, start a chat, answer a chat's question, as you would from the composer. Always asked, even for your own plugins. See [Sending messages](#sending-messages) |
@@ -393,6 +394,8 @@ A plugin can watch how much of your agents' plans you've used, switch which save
 | `zeron.usage_refresh { device? }` | read usage again now: once every 5 minutes per plugin (`paced` otherwise) | `usage.read` |
 | `zeron.accounts { provider?, device? }` | the saved accounts: `{ { provider, account, active, switchable, email?, name?, organization?, plan? } }` | `accounts.read` |
 | `zeron.switch_account { provider, account, when_idle?, device? }` | make a saved account the active one: a promise of `{ status = "switched" }`, or `"waiting"` with `when_idle` | `accounts.switch` |
+| `zeron.pin_account { provider, chat, account?, device? }` | run a chat on a saved account of its own, from its next run, while the active account stays as it is; no `account` takes the pin back: a promise of `{ provider, chat, account? }`, or `already` when nothing changes | `accounts.pin` |
+| `zeron.pins { provider?, device? }` | the chats pinned to an account: `{ { provider, account, since, chat? } }` (`chat` with `sessions.read`) | `accounts.read` |
 | `zeron.models(harness, { device? })` | a harness's models: `{ { id, label, efforts, options = { { id, label, default, choices } } } }` | `models.read` |
 | `zeron.chat_model(chat)` | a chat's `{ provider, model, effort, options }` | `models.read` |
 | `zeron.set_model { chat, model?, effort?, options? }` | a chat's model, effort or options, for its next turn, on the provider it has | `models.set` |
@@ -418,6 +421,9 @@ They're told as Zeron learns of a change, never by polling: when Settings, the c
 | `usage.reset` | `{ provider, account, window, next_reset_at }`: a window reset | `usage.read` |
 | `limit.hit` | `{ provider, account?, window? }`, or `{ provider, blocked_turn = true, chat? }` when a turn was stopped by a limit | `usage.read` |
 | `account.switched` | `{ provider, account, from?, by? }` | `accounts.read` |
+| `account.pinned` | `{ provider, account, from?, by?, chat? }`: a chat now runs on `account` | `accounts.read` |
+| `account.unpinned` | `{ provider, account, by?, reason?, chat? }`: a pin was taken back, or (`reason = "removed"`) its account is gone | `accounts.read` |
+| `run.preparing` | `{ provider, chat? }`, asked of a service right before a chat's first run: what its listener returns is the answer. See [Pinning chats](#pinning-chats-to-accounts) | `accounts.pin` |
 | `account.signed_out`, `login.expired` | `{ provider, account?, chat? }` | `accounts.read` |
 | `model.changed` | `{ chat, provider, model, effort, options, by? }`, or `{ default = true, provider, model, effort, by }` | `models.read` |
 | `models.updated` | `{ provider, models }`: a catalog changed | `models.read` |
@@ -444,6 +450,30 @@ end, { below = 10, provider = "claude-code" })
 ```
 
 `plugins-dev/account-rotate` is this whole: its service switches Claude Code to the next saved account with more left when the active one drops below 10%, once its chats finish, and its window says so in a toast.
+
+### Pinning chats to accounts
+
+Switching moves everything on the device to another account at once. Pinning moves one chat: `zeron.pin_account` makes a chat run on a saved account of its own while the active account stays as it is, so your other chats and your own terminals keep running on it. Zeron holds the pins and delivers the credential; **which account a chat gets is the plugin's to decide.**
+
+- **A pin lasts the chat's life.** From its next run, until a plugin (or the same one) takes it back. Resume and prompt caching assume stable credentials, so a pin changes only when you or a plugin change it. A chat parked on the old account is replaced, and resumed, before its next turn.
+- **What can be pinned.** Each row of `zeron.accounts` says `pinnable` and `mechanism`: Claude Code logins (`"env"`: the saved login's token goes to that chat's process alone) and Muse's kept accounts (`"root"`). Other providers say `pinnable = false` for now, and an API key never can (it bills per token). A pinned Claude Code chat can't use features that need the account's profile (Remote Control). Rows also say `signed_out`; `zeron.usage` rows say `limited_until` while a full window hasn't reset.
+- **The first run.** A service listening for `run.preparing` is asked right before a chat that has no pin runs for the first time, one chat at a time. What its listener returns is the answer: `{ account = "…" }` pins the chat there, anything else leaves it on the active account. It has 3 seconds; a listener that's late, fails or names an account that can't be pinned is passed over (its row says so), and each chat is asked once.
+- **Pins follow accounts.** An account that's removed takes its pins with it (`account.unpinned` with `reason = "removed"`), and its chats run on the active account.
+- **Attributed and stopped like a switch.** Each pin is recorded as the plugin's (`by`, `plugin_status`), and the loop guard counts it.
+
+```lua
+-- service.luau ("service", "accounts.read", "accounts.pin", "sessions.read")
+zeron.on("run.preparing", function(e)
+	for _, a in zeron.accounts({ provider = e.provider }):await() do
+		if a.pinnable and not a.signed_out then
+			return { account = a.account }
+		end
+	end
+end, { provider = "claude-code" })
+```
+
+`plugins-dev/account-pin` is the whole of it: it answers with the saved account that has the fewest chats (counted from `zeron.pins()`), so new chats take turns.
+
 
 ## Sending messages
 

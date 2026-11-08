@@ -18,10 +18,10 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use zeron_doc::SessionCommandPayload;
-use zeron_proto::{AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session, SessionStatus, UserInputAnswer};
+use zeron_proto::{AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session, SessionStatus, UserInputAnswer};
 
 use crate::agent_accounts::AgentAccounts;
-use crate::plugins::agents::{AgentHost, Delivery, NewChat};
+use crate::plugins::agents::{AgentHost, Delivery, NewChat, Pin};
 use crate::registry::HarnessRegistry;
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
@@ -120,6 +120,23 @@ impl AgentHost for EngineAgentHost {
                 Ok(id)
             }
         }
+    }
+
+    fn pin_mechanism(&self, account: &AgentAccount) -> Option<&'static str> {
+        self.accounts.pin_mechanism(account)
+    }
+
+    fn pins(&self) -> Vec<Pin> {
+        self.accounts
+            .pins()
+            .into_iter()
+            .map(|p| Pin { chat: p.chat, harness: p.harness, account: p.account, since: p.since })
+            .collect()
+    }
+
+    fn set_pin(&self, harness: HarnessId, chat: &str, account: Option<&str>) -> Result<(), String> {
+        self.accounts.set_pin(harness, chat, account);
+        Ok(())
     }
 
     fn create_chat(&self, new: &NewChat) -> Result<(), String> {
