@@ -4,7 +4,7 @@
 -- chat not among them; the ones in a state stay while it's folded ("Active
 -- when collapsed"), and a side chat whose chat isn't listed is a row of its
 -- own in its project. A chat's side chats start folded (its chevron opens
--- them, kept per chat), unfolded while one of them is the chat open; and
+-- them, kept per chat), the chat open among them showing however it's folded; and
 -- past the first five of them, "Show N more" and "Show less". On the shell in
 -- ui/shell_fixture.luau.
 
@@ -112,14 +112,38 @@ test("they start folded, the chat's chevron opening them, kept per chat", functi
 	expect(((app:state(FOLDED) :: any) or {})["side_open:a1"]).to_be(nil)
 end)
 
-test("the chat open being a side chat, its chat shows unfolded", function()
+test("the chat open being a side chat shows alone, its chat staying folded", function()
 	local app = open()
 	app:set_state(NEST, true)
 	app:frames(40)
 	expect(shows(app, "Write the changelog")).to_be(false)
+	-- Open past the fold: its row shows, its siblings don't, the fold holds.
 	app:set_state("shell_selected", "s2")
 	app:frames(40)
 	expect(shows(app, "Write the changelog")).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "Show side chats"`)).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "Fold side chats"`)).to_be(false)
+	expect(((app:state(FOLDED) :: any) or {})["side_open:a1"]).to_be(nil)
+end)
+
+test("clicking a side chat shown while folded leaves its chat folded", function()
+	local app = open()
+	app:set_state(NEST, true)
+	app:frames(40)
+	-- Looking into the flake is working, so it shows folded.
+	expect(shows(app, "Look into the flake")).to_be(true)
+	app:click(`{SIDE} >> role:button "Look into the flake"`)
+	app:frames(40)
+	expect(app:state("shell_selected")).to_be("s1")
+	expect(shows(app, "Look into the flake")).to_be(true)
+	expect(shows(app, "Write the changelog")).to_be(false)
+	expect(app:has(`{SIDE} >> role:button "Show side chats"`)).to_be(true)
+	-- Unfolded stays unfolded as well, with a click on one of them.
+	app:click(`{SIDE} >> role:button "Show side chats"`)
+	app:frames(40)
+	app:click(`{SIDE} >> role:button "Write the changelog"`)
+	app:frames(40)
+	expect(shows(app, "Look into the flake")).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "Fold side chats"`)).to_be(true)
 end)
 

@@ -2427,32 +2427,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			expanded:set(e)
 		end)
 	end
-	-- The session open being a side chat nested under another: that one
-	-- unfolds, so its row shows (the one open shows past a fold anyway, but
-	-- among the rest of them).
-	ui.effect(function()
-		local id = selected:get()
-		if not id then
-			return
-		end
-		for _, s in index:peek().everything do
-			for _, c in s.side_chats or {} do
-				if c.id == id then
-					if not folded:peek()[`side_open:{s.id}`] then
-						local f = folds_by[`side:{s.id}`]
-						if f then
-							fold_set(f, true)
-						else
-							local m = table.clone(folded:peek())
-							m[`side_open:{s.id}`] = true
-							folded:set(m)
-						end
-					end
-					return
-				end
-			end
-		end
-	end)
 	-- A section folded or opened from outside (the caller's `folded`: on
 	-- another device, say), or the empty projects': its fold plays as a
 	-- click's would.
