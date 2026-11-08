@@ -55,6 +55,7 @@ local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
 local clock = require("@ds/composer_clock")
+local TextMetrics = require("@self/composer_metrics")
 local EditorMenu = require("@self/editor_menu")
 
 -- What the model's context holds, as its agent reports it: the tokens in
@@ -953,8 +954,16 @@ return ui.component(function(props: Props): Node
 		return if props.keep then ui.state(`composer:{props.keep}:{key}`, initial) else ui.use_state(initial)
 	end
 	local pill_w = kept("pill_w", 0)
-	local line_w = kept("line_w", 0)
-	local wrapped_h = kept("wrapped_h", 0)
+	local metrics = TextMetrics.use {
+		value = value,
+		keep = props.keep,
+		left = TEXT_OPEN_SIDE,
+		width = function(): number
+			-- The surface's content box excludes its two hairlines. Both
+			-- expanded text insets come out of that, never the eased field.
+			return pill_w:get() - HAIRLINES - TEXT_OPEN_SIDE * 2
+		end,
+	}
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
 	local footer_w = kept("footer_w", 0)
@@ -1121,7 +1130,9 @@ return ui.component(function(props: Props): Node
 		local text = value:get()
 		local width = pill_w:get()
 		local tail = trailing_w()
-		local need = line_w:get()
+		local measurement = metrics.result:get()
+		-- While a request is stale, retain its complete previous sample,
+		-- as before, rather than combining axes from different layouts.
 		if width <= 0 then
 			return false
 		end
@@ -1129,10 +1140,13 @@ return ui.component(function(props: Props): Node
 		local want
 		if string.find(text, "\n") then
 			want = true
+		elseif measurement.sample == nil then
+			-- No measured text yet; zero isn't a measured empty draft.
+			want = was_open
 		elseif was_open then
-			want = need > room - HYSTERESIS
+			want = measurement.sample.unwrapped_width > room - HYSTERESIS
 		else
-			want = need > room
+			want = measurement.sample.unwrapped_width > room
 		end
 		was_open = want
 		return want
@@ -1148,7 +1162,8 @@ return ui.component(function(props: Props): Node
 	-- The text box opened out: the wrapped text with its insets, between
 	-- the floor and the cap.
 	local box = ui.computed(function(): number
-		local h = math.max(wrapped_h:get(), LINE)
+		local sample = metrics.result:get().sample
+		local h = if sample then math.max(sample.wrapped_height, sample.line_height) else LINE
 		return math.clamp(h + TEXT_TOP + TEXT_BOTTOM, TEXT_MIN, TEXT_MAX)
 	end)
 	local HEAD_GAP = head_gap()
@@ -1788,36 +1803,8 @@ return ui.component(function(props: Props): Node
 				end
 			end,
 		},
-		-- The measures: the draft on one line, and wrapped as it would be
-		-- opened out (a mark after it, so a last empty line counts).
-		ui.text {
-			on_resize = measure(line_w, "w"),
-			absolute = true,
-			left = 0,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return value:get()
-			end,
-		},
-		ui.text {
-			on_resize = measure(wrapped_h, "h"),
-			absolute = true,
-			left = TEXT_OPEN_SIDE,
-			right = TEXT_OPEN_SIDE,
-			top = 0,
-			opacity = 0,
-			pointer_events = "none",
-			wrap = true,
-			text_size = "$zeron.composer.text",
-			line_height = "$zeron.composer.line",
-			function()
-				return value:get() .. "\u{200B}"
-			end,
-		},
+		metrics.nodes[1],
+		metrics.nodes[2],
 		head,
 		-- The draft.
 		ui.div {
