@@ -7784,7 +7784,7 @@ impl Transcript {
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn, booting) = if let Some(doc_id) =
+        let (sending, queued, elapsed_secs, seed, turn, booting, updating) = if let Some(doc_id) =
             &self.doc_override
         {
             // A subagent doc has no Session row — `indicator_for` would read
@@ -7811,6 +7811,7 @@ impl Transcript {
                 flavour_seed(doc_id),
                 last.created_at,
                 None,
+                false,
             )
         } else {
             let chat_id = self.chat_id.clone()?;
@@ -7834,7 +7835,7 @@ impl Transcript {
                         .into_any_element(),
                 );
             }
-            let (sending, queued, elapsed, turn, booting) = {
+            let (sending, queued, elapsed, turn, booting, updating) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
@@ -7846,7 +7847,10 @@ impl Transcript {
                 // turn begins.
                 if let Some(sent) = state.cloud_setup_turn_started() {
                     let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
-                    (false, false, elapsed, sent, None)
+                    // A woken machine installing a release says so under
+                    // its steps, in place of the working word.
+                    let updating = state.send_waits_on_update(&chat_id, now);
+                    (false, false, elapsed, sent, None, updating)
                 } else {
                     // During the send→turn window the session row's `started_at`
                     // still belongs to the PREVIOUS turn — a timer based on the
@@ -7883,7 +7887,8 @@ impl Transcript {
                     } else {
                         None
                     };
-                    (sending, queued, elapsed, turn, booting)
+                    let updating = sending && state.send_waits_on_update(&chat_id, now);
+                    (sending, queued, elapsed, turn, booting, updating)
                 }
             };
             (
@@ -7893,6 +7898,7 @@ impl Transcript {
                 flavour_seed(&chat_id),
                 turn,
                 booting,
+                updating,
             )
         };
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
@@ -7915,8 +7921,19 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
+        let slow = updating
+            && self
+                .chat_id
+                .as_deref()
+                .is_some_and(|chat| self.state.read(cx).cloud_machine_slow(chat));
         let word = if queued {
             "Queued — will send automatically"
+        } else if slow {
+            // Far slower than a normal wake: said plainly, never as a failure.
+            "Waking the Cloud machine is taking longer than usual"
+        } else if updating {
+            // A longer wake: the machine installs the latest release first.
+            "Updating the Cloud machine"
         } else if let Some(state) = booting {
             // The send waits for the chat's own Cloud machine.
             if state == zeron_proto::CloudState::Provisioning {

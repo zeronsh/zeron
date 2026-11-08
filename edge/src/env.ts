@@ -80,6 +80,8 @@ export interface Env {
   BOAT_API_BASE?: string;
   /** Idle minutes before an unused Cloud session sleeps (default 20). */
   CLOUD_IDLE_MINUTES?: string;
+  /** Seconds before a wake reads `slow` and a stuck resume is kicked (default 45). */
+  CLOUD_WAKE_SLOW_SECONDS?: string;
   /** Credits a user gets the first time they turn Cloud on (default 0). */
   CLOUD_STARTING_CREDITS?: string;
   /** Provider billable seconds per credit from `CLOUD_CREDIT_RATE_FROM` on:

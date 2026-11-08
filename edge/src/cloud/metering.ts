@@ -368,6 +368,10 @@ export type LedgerEvent =
   | "resize"
   /** A sleeping machine was resumed only to keep its disk from expiring. */
   | "refresh"
+  /** A wake's timeline (`detail`: `WakeTiming` JSON, wake.ts). */
+  | "wake_timing"
+  /** A wake taking far longer than normal (`detail`: what it was stuck on). */
+  | "wake_slow"
   /** Its engine found its chat store damaged on a start and rebuilt it. */
   | "store_recovered";
 

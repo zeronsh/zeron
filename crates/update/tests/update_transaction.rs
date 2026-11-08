@@ -84,6 +84,19 @@ fn fake_engine() {
                 migrate(&data);
                 std::process::exit(1);
             }
+            // What the engine does on SIGTERM during its trial: says so, and
+            // drains like any stop.
+            "interrupted" => {
+                migrate(&data);
+                transaction::note_trial_interrupted();
+                std::process::exit(0);
+            }
+            // What the panic hook does during a trial.
+            "panics" => {
+                migrate(&data);
+                transaction::note_trial_panicked("index out of bounds: the len is 0 but the index is 3");
+                std::process::abort();
+            }
             "gives-up" => {
                 migrate(&data);
                 transaction::note_trial_failure(&data, "It couldn't reach anything.");
@@ -384,6 +397,78 @@ mod versioned {
         rig.run_until_settled();
         rig.assert_updated(&id);
         assert_eq!(rig.record().report().state, zeron_update::UpdateState::Updated);
+    }
+
+    /// A wake updates before it answers. A bad release's rollback has to end with
+    /// the old version up and answering, and with that boot not trying it again,
+    /// or a machine would go round for as long as the release stayed out.
+    #[test]
+    fn a_boot_doesnt_try_again_a_release_it_went_back_from() {
+        for (behavior, deadline) in [("exit-1", 60), ("gives-up", 60), ("hang", 2)] {
+            let rig = Rig::new(behavior);
+            let reason = |latest| zeron_update::boot_skip_reason(&rig.data, latest, "1.0.0");
+            assert_eq!(reason("2.0.0"), None, "{behavior}: nothing against it yet");
+            let id = rig.request(Rig::service(), deadline);
+            assert_eq!(reason("2.0.0"), Some(zeron_update::BootSkipReason::InProgress), "{behavior}");
+            rig.run_until_settled();
+            rig.assert_back_on_the_old_version(&id, Phase::RolledBack);
+            assert_eq!(reason("2.0.0"), Some(zeron_update::BootSkipReason::WentBack), "{behavior}");
+            // The next release is a new chance.
+            assert_eq!(reason("2.0.1"), None, "{behavior}");
+        }
+    }
+
+    /// The machine going to sleep (or the service restarting) mid-trial isn't the
+    /// release's fault: back on the old version for now, saying so, and the next
+    /// boot tries the release again instead of leaving it for good.
+    #[test]
+    fn a_trial_stopped_from_outside_goes_back_and_is_tried_again() {
+        let rig = Rig::new("interrupted");
+        let id = rig.request(Rig::service(), 60);
+        rig.run_until_settled();
+        rig.assert_back_on_the_old_version(&id, Phase::RolledBack);
+        let record = rig.record();
+        assert!(record.interrupted);
+        let reason = record.reason.unwrap();
+        assert!(reason.starts_with("Zeron was stopped while it was trying the new version"), "{reason}");
+        assert!(reason.ends_with("will try 2.0.0 again."), "{reason}");
+        assert_eq!(zeron_update::boot_skip_reason(&rig.data, "2.0.0", "1.0.0"), None);
+    }
+
+    /// A trial that crashes says what it said, so a rollback found later can be
+    /// explained without its log.
+    #[test]
+    fn a_trial_that_panics_goes_back_saying_why() {
+        let rig = Rig::new("panics");
+        let id = rig.request(Rig::service(), 60);
+        rig.run_until_settled();
+        rig.assert_back_on_the_old_version(&id, Phase::RolledBack);
+        let record = rig.record();
+        assert!(!record.interrupted);
+        let reason = record.reason.unwrap();
+        assert!(
+            reason.starts_with("The new version crashed while starting (index out of bounds"),
+            "{reason}"
+        );
+        assert_eq!(
+            zeron_update::boot_skip_reason(&rig.data, "2.0.0", "1.0.0"),
+            Some(zeron_update::BootSkipReason::WentBack)
+        );
+    }
+
+    #[test]
+    fn a_trial_something_waits_on_gets_a_shorter_deadline() {
+        let rig = Rig::new("ok");
+        let requested = transaction::request_within(
+            &rig.data,
+            rig.layout(),
+            "1.0.0",
+            "2.0.0",
+            Rig::service(),
+            Duration::from_secs(5 * 60),
+        )
+        .unwrap();
+        assert_eq!(requested.deadline_secs, 5 * 60);
     }
 
     #[test]

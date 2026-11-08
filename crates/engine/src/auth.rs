@@ -41,6 +41,11 @@ const SIGN_IN_TTL: Duration = Duration::from_secs(15 * 60);
 const TOKEN_SLACK: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const REFRESH_RETRY_BASE: Duration = Duration::from_secs(1);
+/// A Cloud runner has nothing else to do until its first token, and a machine
+/// just restored often loses its first outbound connection: try again soon,
+/// and don't let one lost SYN hold a whole `HTTP_TIMEOUT`.
+const RUNNER_RETRY_BASE: Duration = Duration::from_millis(250);
+const RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// DNS can recover without an OS path event. Keep polling even at the cap.
 const REFRESH_RETRY_CAP: Duration = Duration::from_secs(5);
 /// A runner whose key the edge rejected (device deleted/revoked) retries
@@ -460,10 +465,11 @@ impl Auth {
         let (state_tx, _) = watch::channel(initial);
         let (token_tx, _) = watch::channel(0);
         let (retry_tx, _) = watch::channel(0);
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let mut http = reqwest::Client::builder().timeout(HTTP_TIMEOUT);
+        if runner.is_some() {
+            http = http.connect_timeout(RUNNER_CONNECT_TIMEOUT);
+        }
+        let http = http.build().unwrap_or_else(|_| reqwest::Client::new());
         Self {
             inner: Arc::new(AuthInner {
                 config,
@@ -1221,8 +1227,12 @@ impl Auth {
             match &result {
                 Err(err) if organization_id.is_none() => {
                     retry.failures = retry.failures.saturating_add(1);
-                    let backoff =
-                        REFRESH_RETRY_BASE.saturating_mul(1 << (retry.failures - 1).min(8));
+                    let base = if self.inner.runner.is_some() {
+                        RUNNER_RETRY_BASE
+                    } else {
+                        REFRESH_RETRY_BASE
+                    };
+                    let backoff = base.saturating_mul(1 << (retry.failures - 1).min(8));
                     let jitter =
                         Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
                     let delay = if self.runner_rejected() {
@@ -1431,6 +1441,7 @@ impl Auth {
                 })?;
             let status = res.status().as_u16();
             if res.status().is_success() {
+                crate::wake_trace::mark(crate::wake_trace::Stage::Token);
                 break res;
             }
             let body = crate::runner::EdgeErrorBody::read(res).await;

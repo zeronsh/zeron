@@ -135,8 +135,9 @@ final class CoreSessionSource: SessionSource {
             // the send waits on the network first. Saying the host is offline blamed it.
             next.banner = .offline
         } else if c.sendState == .queued {
-            // A Cloud chat's message waits for its machine to start or wake —
-            // the transcript's setup step says so, as on the desktop.
+            // A Cloud chat's message waits for its machine to start, wake or
+            // update first — the transcript's setup step says so (the core
+            // follows the machine's stage), as on the desktop.
             if row?.isCloud != true {
                 next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
             }

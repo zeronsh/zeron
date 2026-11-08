@@ -133,10 +133,14 @@ impl Client {
             )
             .await
         {
-            Ok(sessions) => Ok(CloudSessions {
-                available: true,
-                ..sessions
-            }),
+            Ok(sessions) => {
+                // Any read says which machines are updating (`cloud_stage`).
+                self.inner.note_cloud_sessions(&sessions);
+                Ok(CloudSessions {
+                    available: true,
+                    ..sessions
+                })
+            }
             Err(Failure::Missing(_)) => Ok(CloudSessions::default()),
             Err(Failure::Error(error)) => Err(error),
         }

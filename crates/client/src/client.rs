@@ -89,6 +89,9 @@ pub(crate) struct ClientInner {
     /// `owner/name`): starting a Cloud session needs one, and reading it
     /// again would hold the new chat up.
     pub(crate) cloud_repos: Mutex<HashMap<String, crate::cloud::CloudRepoRef>>,
+    /// What Cloud machines say they are doing (updating), read while a send
+    /// waits on one ([`crate::cloud_stage`]).
+    pub(crate) cloud_stages: Mutex<crate::cloud_stage::CloudStages>,
     /// Terminals on other devices: direct link or relay, switching
     /// mid-session (the desktop engine runs the same hub).
     pub(crate) remote_terminals: zeron_term_link::remote::RemoteTerminals,
@@ -575,6 +578,134 @@ impl ClientInner {
                 core.recompute_composer(self);
             }
         }
+        self.follow_cloud_stages();
+    }
+
+    /// The machine `device_id` (a Cloud session device) said it is installing
+    /// a release before it answers.
+    pub(crate) fn cloud_machine_updating(&self, device_id: &str) -> bool {
+        lock(&self.cloud_stages).updating(device_id)
+    }
+
+    /// The edge says this machine's wake is taking far longer than normal.
+    pub(crate) fn cloud_machine_slow(&self, device_id: &str) -> bool {
+        lock(&self.cloud_stages).slow(device_id)
+    }
+
+    /// When the machine `device_id` rebuilt its chat store from the server
+    /// copy, while its chats still show a note about it.
+    pub(crate) fn cloud_store_restored(&self, device_id: &str, now: i64) -> Option<i64> {
+        lock(&self.cloud_stages).restored(device_id, now)
+    }
+
+    fn restored_dismissed_path(&self) -> std::path::PathBuf {
+        self.config.data_dir.join("cloud-restored-dismissed.json")
+    }
+
+    /// Rebuild notes dismissed in an earlier run.
+    fn load_restored_dismissed(&self) {
+        let Ok(bytes) = std::fs::read(self.restored_dismissed_path()) else {
+            return;
+        };
+        if let Ok(dismissed) = serde_json::from_slice(&bytes) {
+            lock(&self.cloud_stages).load_dismissed(dismissed);
+        }
+    }
+
+    /// The chats on `device_id` stop saying it rebuilt its store.
+    pub(crate) fn dismiss_cloud_store_restored(&self, device_id: &str) {
+        let Some(kept) = lock(&self.cloud_stages).dismiss_restored(device_id) else {
+            return;
+        };
+        if let Ok(json) = serde_json::to_vec(&kept)
+            && let Err(error) = std::fs::write(self.restored_dismissed_path(), json)
+        {
+            tracing::debug!(%error, "dismissed restore note not kept");
+        }
+        let workspace = self.workspace.snapshot();
+        for core in self.cores() {
+            if workspace
+                .session(&core.chat_id)
+                .is_some_and(|row| row.device_id == device_id)
+            {
+                core.schedule_refresh();
+            }
+        }
+    }
+
+    /// A Cloud chat opened: read the session list now and then for what it
+    /// says about the machine (a rebuilt store).
+    pub(crate) fn glance_cloud_sessions(self: &Arc<Self>) {
+        if self.live().is_none() || !lock(&self.cloud_stages).wants_glance(crate::now_ms()) {
+            return;
+        }
+        let client = Client {
+            inner: self.clone(),
+        };
+        crate::runtime::shared().spawn(async move {
+            let read = client.cloud_sessions().await;
+            lock(&client.inner.cloud_stages).read_done(None);
+            if let Err(err) = read {
+                tracing::debug!(error = %err, "Cloud session list not read");
+            }
+        });
+    }
+
+    /// While a send waits on a Cloud machine, re-read the session list now
+    /// and then: the machine says it is updating only there.
+    fn follow_cloud_stages(self: &Arc<Self>) {
+        if self.live().is_none() {
+            return;
+        }
+        let workspace = self.workspace.snapshot();
+        let waits: Vec<crate::cloud_stage::MachineWait> = self
+            .cores()
+            .iter()
+            .filter_map(|core| {
+                let sent_at_ms = core.oldest_pending_send_ms()?;
+                let row = workspace.session(&core.chat_id)?;
+                zeron_proto::is_cloud_device(&row.device_id, "").then(|| {
+                    crate::cloud_stage::MachineWait {
+                        chat_id: core.chat_id.clone(),
+                        device_id: row.device_id.clone(),
+                        sent_at_ms,
+                        booting: !workspace.device(&row.device_id).is_some_and(|d| d.online),
+                    }
+                })
+            })
+            .collect();
+        drop(workspace);
+        if !lock(&self.cloud_stages).wants_read(&waits, crate::now_ms()) {
+            return;
+        }
+        let client = Client {
+            inner: self.clone(),
+        };
+        crate::runtime::shared().spawn(async move {
+            // `cloud_sessions` records what it reads; this only ends the read.
+            let read = client.cloud_sessions().await;
+            lock(&client.inner.cloud_stages).read_done(None);
+            if let Err(err) = read {
+                tracing::debug!(error = %err, "Cloud session list not read");
+            }
+        });
+    }
+
+    /// The session list was read: when a machine started or stopped saying
+    /// it updates, the chats on it show it.
+    pub(crate) fn note_cloud_sessions(&self, sessions: &zeron_proto::CloudSessions) {
+        if !lock(&self.cloud_stages).record(Some(sessions)) {
+            return;
+        }
+        let workspace = self.workspace.snapshot();
+        for core in self.cores() {
+            let on_cloud = workspace
+                .session(&core.chat_id)
+                .is_some_and(|row| zeron_proto::is_cloud_device(&row.device_id, ""));
+            if on_cloud {
+                core.schedule_refresh();
+            }
+        }
     }
 }
 
@@ -658,6 +789,7 @@ impl Client {
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
             cloud_repos: Mutex::new(HashMap::new()),
+            cloud_stages: Mutex::new(Default::default()),
             remote_terminals: Default::default(),
             terminals_wake: Arc::new(tokio::sync::Notify::new()),
             backgrounded_at: Mutex::new(None),
@@ -673,6 +805,7 @@ impl Client {
             }
             _ => Backend::Live(Box::new({
                 catalog::DiskCatalog::new(&inner.config.data_dir).warm_labels();
+                inner.load_restored_dismissed();
                 LiveBackend::new(
                     &inner,
                     store.ok_or_else(|| ClientError::Internal("docs store missing".into()))?,
@@ -1341,6 +1474,15 @@ impl Client {
         core.ensure_room(&self.inner);
         core.touch();
         core.refresh();
+        let on_cloud = self
+            .inner
+            .workspace
+            .snapshot()
+            .session(chat_id)
+            .is_some_and(|row| zeron_proto::is_cloud_device(&row.device_id, ""));
+        if on_cloud {
+            self.inner.glance_cloud_sessions();
+        }
         // Upgrade recovery: older clients could persist an ACKed command
         // without its wake. Opening that chat must re-arm host discovery.
         if let Some(live) = self.inner.live()

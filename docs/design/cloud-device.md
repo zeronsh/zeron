@@ -212,9 +212,17 @@ Linux release from `{edge}/releases/`, writes `~/.zeron/env` (0600) from the per
 `zeron headless` as the exec user with `Restart=always`. Enabled units restart on resume
 (verified on Boat: a resumed sandbox lands on a new machine in ~4 s with the service up).
 
-**WakeWorkflow** — `resume` → poll until ready → `waitForEvent("online", 5 min)` (the
-runner's first token after resume); on timeout it runs one idempotent
-`sudo systemctl restart zeron-cloud` before failing.
+**WakeWorkflow** — one step (`edge/src/cloud/wake.ts`, `fastWake`): `resume`, then at once
+`systemctl start --no-block zeron-cloud` (Boat holds a command until the machine can run it,
+so this races the machine's own start of its enabled units), polling the state every 250 ms,
+then easing off (no Workflow sleep: those cost whole seconds). A resume during a stop is taken
+(it keeps the machine); a refused one falls back to the slow poll. A wake onto another size stops
+the machine first, so that never applies to it. A resume refused for good comes back typed, as
+"A wake refused for want of disk" says. Then
+`waitForEvent("online", 90 s)` (the runner's first token after resume); on timeout it runs one
+idempotent `sudo systemctl restart zeron-cloud` and waits 5 more minutes before failing. None of
+this gates the queued message: the engine drains it as soon as it joins its room, so the
+workflow only decides when the session reads `ready`.
 
 **SleepWorkflow** — `zeron quiesce` → `sudo systemctl stop zeron-cloud` → `stop` → poll until
 stopped. A refused stop is retried (the provider bills nothing while a stop is refused); it is
@@ -389,6 +397,59 @@ stays where it is (seen on 0.2.114), so a machine provisioned earlier keeps its 
 that needs a newer one, until something installs it. `zeron update` works from there: it installs and
 switches `current`, its restart fails (it looks for the user unit), and the next start runs the new
 version.
+
+**A wake updates before it answers** (`crates/engine/src/wake_update.rs`), so a machine that sleeps
+most of the time still answers on the latest release. Before it starts any work, including turns a
+dying machine left to resume, the engine looks for a release (`manifest.json`, within 5 s). The token
+and the rooms go on meanwhile, so with nothing to update the check only costs what it outlasts them
+by. With something newer it installs it (120 s), restarts, and the update trial below takes over,
+which holds work until the new version is proven. A wake on the latest release, including a first
+boot, goes straight on.
+
+The message always gets answered. A check that hangs or fails, a failed or slow download, a refused
+restart and a restart that never comes all lift the hold on the version already running, and the
+background updater tries again once it's idle. It can't loop: a release it went back from or failed
+to install isn't tried again from a boot, and one that merely failed to download waits 6 hours
+(`update-boot-skip.json`). A new version that fails its trial gives way to the old one, which finds
+the rollback, doesn't try again, and answers. One that hangs gives way after 5 minutes, not the 10 an
+update nobody is waiting on gets.
+
+Nothing running is cut off. Nothing starts a turn while work is held, and a terminal someone opened
+ends the attempt. Past the wake, an update arriving mid-turn goes to the background path, which
+waits until no run or terminal is live and, on Cloud, no message is waiting.
+
+A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
+is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's
+waiting word follows it, and the answer's setup steps include "Updated Zeron to X".
+
+### Waking
+
+What a wake is made of, in order, and who owns each part. The target is a send to a running
+agent in under 5 s; today's floor is below.
+
+| Stage | Owner | What keeps it short |
+| --- | --- | --- |
+| Send → nudge → `autoWake` → workflow | us | sender polls its durable job every 100 ms; the rest is a Worker and a DO |
+| Resume accepted, machine `ready` | Boat | "a few seconds"; every resume lands on a new machine and is a reboot (no memory, no processes) |
+| Engine started | us | `zeron-cloud-boot.service` (active through the snapshot, so it starts on any resume) races the exec; the unit no longer waits on `network-online.target` |
+| Binary loads | Boat's lazy disk | `~/.zeron/app` isn't in the base image, so it downloads on every resume; Boat's playbook (`~/.ascii/playbook.json`) fetches what we opened first, first |
+| First token, room joined | us | connect timeout 3 s and 250 ms retries (a restored machine often loses its first connection) |
+| Release check | us | one small request beside the rest of the boot; a newer release is installed first ("Engine updates on Cloud") |
+| Command → agent running | us | grants and git identity primed at boot; for 2 minutes after boot no agent CLI check (its install would hold the run) |
+
+The sleep's stop command brings machines provisioned before these units up to date, since
+nothing re-runs the installer.
+
+**Measuring.** Every wake writes a `wake_timing` ledger entry (detail: JSON, `WakeTiming` in
+`wake.ts`) and a `cloud.wake_timing` log line: when the machine is up, and again once the engine
+reports its side (`POST /runner/wake-timing`, once per wake, at the run's first output).
+`GET /admin/cloud/wakes?orgId&userId` (`ADMIN_TOKEN`) lists one user's. `at` is each stage in ms
+after the wake was requested (`sent` is negative and on the sender's clock); `spans` has the
+totals; `asleepMs` says whether a longer idle window would have caught it. A wake with no `sent`
+had no send behind it (an explicit wake, or a dark machine brought back to recover its turn); a
+refresh writes no timeline. `updateResult` says how its look for a release ended (`current`, `updated`,
+`wentBack`, `installFailed`...), `version` which version answered, and `spans.updateStartedToReleased`
+what an update added.
 
 ### Portability
 
@@ -696,6 +757,8 @@ the bearer's `org_id`.
 | `GET /vault/{orgId}/github/repos?q=` | user | → `{repos: GithubRepo[]}` (the vault calls GitHub) |
 | `POST /runner/enroll` | none | `{orgId, userId, deviceId, code, publicKey}` → `{ok: true}` |
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
+| `POST /runner/wake-timing` | runner | `{sent?, token?, firstOutput?, version?, updateResult?, …}` (`EngineTiming`, `wake.ts`) → `{ok: true}`: its side of the wake, counted once |
+| `POST /runner/wake-stage` | runner | `{stage: "updating" \| null}` → `{ok: true}`: shown as `CloudSession.stage` |
 | `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
 | `GET /vault/{orgId}` | user | → `VaultStatusView` |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |
