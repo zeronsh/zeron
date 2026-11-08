@@ -870,7 +870,7 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_vault_forget(uint64_t ptr, Rus
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_VAULT_PUT_API_KEY
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_VAULT_PUT_API_KEY
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_vault_put_api_key(uint64_t ptr, RustBuffer provider, RustBuffer key
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_vault_put_api_key(uint64_t ptr, RustBuffer provider, RustBuffer key, RustBuffer base_url
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_VAULT_STATUS
@@ -1714,6 +1714,21 @@ RustBuffer uniffi_zeron_mobile_fn_func_relative_time_label(int64_t at_ms, int64_
 RustBuffer uniffi_zeron_mobile_fn_func_workos_authorize_url(RustBuffer state, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_API_KEY_SUFFIX
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_API_KEY_SUFFIX
+RustBuffer uniffi_zeron_mobile_fn_func_api_key_suffix(RustBuffer key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_API_KEY_TAKES_BASE_URL
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_API_KEY_TAKES_BASE_URL
+int8_t uniffi_zeron_mobile_fn_func_api_key_takes_base_url(RustBuffer provider, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_CHECK_API_BASE_URL
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_CHECK_API_BASE_URL
+RustBuffer uniffi_zeron_mobile_fn_func_check_api_base_url(RustBuffer provider, RustBuffer raw, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_AGENT_LOGIN_RULES
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_AGENT_LOGIN_RULES
 RustBuffer uniffi_zeron_mobile_fn_func_agent_login_rules(RustBuffer harness, RustCallStatus *_Nonnull out_status
@@ -2133,6 +2148,24 @@ uint16_t uniffi_zeron_mobile_checksum_func_relative_time_label(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_WORKOS_AUTHORIZE_URL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_WORKOS_AUTHORIZE_URL
 uint16_t uniffi_zeron_mobile_checksum_func_workos_authorize_url(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_API_KEY_SUFFIX
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_API_KEY_SUFFIX
+uint16_t uniffi_zeron_mobile_checksum_func_api_key_suffix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_API_KEY_TAKES_BASE_URL
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_API_KEY_TAKES_BASE_URL
+uint16_t uniffi_zeron_mobile_checksum_func_api_key_takes_base_url(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_CHECK_API_BASE_URL
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_CHECK_API_BASE_URL
+uint16_t uniffi_zeron_mobile_checksum_func_check_api_base_url(void
     
 );
 #endif

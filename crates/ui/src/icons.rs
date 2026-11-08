@@ -112,6 +112,8 @@ icon_assets![
     (CLOUD, "cloud"),
     (TAG, "tag"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
+    // Solar's Lock (Linear): a secret held encrypted (Cloud's API keys).
+    (LOCK, "lock"),
     (KEYBOARD, "keyboard"),
     (ARROW_UP, "arrow-up"),
     // arrow-up mirrored (like the sidebar flip) — the Solar Linear set here

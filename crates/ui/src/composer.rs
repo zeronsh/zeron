@@ -2130,6 +2130,8 @@ pub struct ComposerInput {
     mentions_enabled: bool,
     /// Secret entry (API keys): shown as bullets and never copied or cut.
     masked: bool,
+    /// Code-like values (a base URL) set in the theme's monospace.
+    monospace: bool,
     /// Bumped once per `layout_text` pass — the flip logic uses it to apply at
     /// most one compact↔expanded flip per layout (a flip is only re-evaluated
     /// after the input has been measured in the new mode).
@@ -2243,6 +2245,7 @@ impl ComposerInput {
             ghost: None,
             mentions_enabled: false,
             masked: false,
+            monospace: false,
             layout_epoch: 0,
             display_is_placeholder: true,
             blink_anchor: Instant::now(),
@@ -2305,6 +2308,13 @@ impl ComposerInput {
         self.masked = true;
         self.accessibility_role = Role::PasswordInput;
         self.refresh_projection();
+        self
+    }
+
+    /// Set the text in the theme's monospace: a value read character by
+    /// character, like a base URL beside the URL it previews.
+    pub(crate) fn with_monospace(mut self) -> Self {
+        self.monospace = true;
         self
     }
 
@@ -5639,7 +5649,11 @@ impl Render for ComposerInput {
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
             .text_color(text_color)
-            .font_family(theme.font_sans.clone())
+            .font_family(if self.monospace {
+                theme.font_mono.clone()
+            } else {
+                theme.font_sans.clone()
+            })
             .child({
                 let input = cx.entity();
                 let ascent = self.max_ascent;

@@ -298,7 +298,11 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
             return Row(
                 id: "cloud:\(agent.harness)",
                 title: agent.name,
-                subtitle: busy ? "Finishing sign-in…" : Self.summary(active: cloud.activeAccount(agent).map { [$0.email ?? (($0.kind == "key") ? agent.keyName : nil), $0.plan].compactMap { $0 }.joined(separator: " · ") }, count: count),
+                // A key by its kind, then the gateway it is for or its last
+                // characters; a login by its email and plan.
+                subtitle: busy ? "Finishing sign-in…" : Self.summary(active: cloud.activeAccount(agent).map { a in
+                    (a.kind == "api-key" ? [agent.keyName, a.gateway ?? a.email] : [a.email, a.plan]).compactMap { $0 }.joined(separator: " · ")
+                }, count: count),
                 harness: agent.harness,
                 disclosure: true,
                 busy: busy,

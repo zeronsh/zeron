@@ -26,6 +26,8 @@ final class AgentAccountsViewController: UITableViewController {
         let isKey: Bool
         /// Cloud's vault provider (`claude`, `anthropic-key`, …).
         let cloudProvider: String?
+        /// A key for an LLM gateway: the host its requests go to.
+        var gateway: String? = nil
     }
 
     /// The card's rows, in order: the accounts (or why there are none),
@@ -165,9 +167,11 @@ final class AgentAccountsViewController: UITableViewController {
                                usageNote: a.needsReconnect ? "Sign in again" : usage?.windows.isEmpty == false ? nil : cloud.usageErrors[key],
                                active: a.active, switchable: true, isKey: false, cloudProvider: agent.login)
             }
+            // A key by its last characters ("…abcd"), and the host of the
+            // gateway it is for where a login's meters would be.
             let keys = (cloud.accounts[agent.key] ?? []).map { a in
-                Account(id: "\(agent.key):\(a.slot)", title: agent.keyName, detail: nil, usage: [], usageNote: nil,
-                        active: a.active, switchable: true, isKey: true, cloudProvider: agent.key)
+                Account(id: "\(agent.key):\(a.slot)", title: agent.keyName, detail: a.email, usage: [], usageNote: nil,
+                        active: a.active, switchable: true, isKey: true, cloudProvider: agent.key, gateway: a.gateway)
             }
             return logins + keys
         case .device:
@@ -262,6 +266,7 @@ final class AgentAccountsViewController: UITableViewController {
                 detail: account.detail,
                 usage: account.usage,
                 note: account.usageNote,
+                gateway: account.gateway,
                 state: busy == account.id ? .busy : account.active ? .inUse : account.switchable ? .switchable : .fixed
             ) { [weak self] in self?.activate(account) }
             cell.accessibilityIdentifier = "account-\(account.id)"
@@ -453,21 +458,14 @@ final class AgentAccountsViewController: UITableViewController {
         }
     }
 
+    /// The key sheet: an Anthropic key may be for an LLM gateway or proxy,
+    /// which Claude Code then sends its requests to instead of Anthropic's API.
     private func askForKey() {
         guard case let .cloud(agent) = target else { return }
-        let alert = UIAlertController(title: agent.keyName, message: "Cloud sessions use this key instead of a subscription sign-in.", preferredStyle: .alert)
-        alert.addTextField { field in
-            field.placeholder = agent.key == "anthropic-key" ? "sk-ant-…" : "sk-…"
-            field.isSecureTextEntry = true
-            field.autocorrectionType = .no
-            field.autocapitalizationType = .none
-        }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Save Key", style: .default) { [weak self, weak alert] _ in
-            guard let self, let key = alert?.textFields?.first?.text, !key.isEmpty else { return }
-            self.run("api-key") { _ in try await self.cloud.saveKey(key, for: agent) }
-        })
-        present(alert, animated: true)
+        let cloud = cloud
+        present(APIKeySheetViewController.sheet(agent: agent) { key, baseUrl in
+            try await cloud.saveKey(key, baseUrl: baseUrl, for: agent)
+        }, animated: true)
     }
 
     private func alert(_ title: String, _ message: String) {
@@ -648,7 +646,7 @@ final class AccountCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(icon image: UIImage?, title: String, detail: String?, usage: [UsageWindowInfo], note: String?, state: State, onSwitch: @escaping () -> Void) {
+    func configure(icon image: UIImage?, title: String, detail: String?, usage: [UsageWindowInfo], note: String?, gateway: String? = nil, state: State, onSwitch: @escaping () -> Void) {
         icon.image = image
         titleLabel.text = title
         titleLabel.textColor = state == .fixed ? Palette.tertiary : Palette.text
@@ -658,6 +656,9 @@ final class AccountCell: UITableViewCell {
         meters.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for window in usage.prefix(3) {
             meters.addArrangedSubview(UsageMeter(window: window))
+        }
+        if let gateway {
+            meters.addArrangedSubview(Self.gatewayLine(gateway))
         }
         if let note {
             let label = UILabel()
@@ -717,6 +718,26 @@ final class AccountCell: UITableViewCell {
                 accessory.trailingAnchor.constraint(equalTo: trailing.trailingAnchor),
             ])
         }
+    }
+
+    /// Where a gateway key's requests go, standing where a login's meters
+    /// would (the desktop row's usage column): the host, by the globe.
+    private static func gatewayLine(_ host: String) -> UIView {
+        let globe = UIImageView(image: CloudUI.symbol("globe", 12))
+        globe.tintColor = Palette.secondary
+        globe.setContentHuggingPriority(.required, for: .horizontal)
+        let label = UILabel()
+        label.text = host
+        label.font = Fonts.ui(.sans, 13)
+        label.textColor = Palette.text
+        label.lineBreakMode = .byTruncatingMiddle
+        let line = UIStackView(arrangedSubviews: [globe, label])
+        line.spacing = 6
+        line.alignment = .center
+        line.isAccessibilityElement = true
+        line.accessibilityLabel = "LLM gateway \(host)"
+        line.accessibilityIdentifier = "account-gateway"
+        return line
     }
 }
 

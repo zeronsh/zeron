@@ -1092,6 +1092,7 @@ impl AgentAccounts {
                     switchable: harness != HarnessId::Hermes,
                     saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
                     provider: provider_group(harness, slot.store_key.as_deref()),
+                    gateway: None,
                 });
             }
             // A live login whose credentials we couldn't read has no slot — still
@@ -1116,6 +1117,7 @@ impl AgentAccounts {
                     switchable: false,
                     saved_at: None,
                     provider: provider_group(harness, u.store_key.as_deref()),
+                    gateway: None,
                 });
             }
         }
@@ -3757,6 +3759,7 @@ impl AntigravityLogin {
             switchable: false,
             saved_at: None,
             provider: None,
+            gateway: None,
         }
     }
 }

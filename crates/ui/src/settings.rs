@@ -23,6 +23,7 @@ pub mod appearance;
 pub mod archived;
 pub mod billing;
 pub mod cloud;
+pub mod cloud_key;
 pub mod composer;
 pub mod devices;
 pub mod files;

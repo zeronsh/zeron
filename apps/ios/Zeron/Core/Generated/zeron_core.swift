@@ -1362,9 +1362,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func vaultForget(provider: String, slot: String) async throws  -> [CloudAccountInfo]
     
     /**
-     * Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses.
+     * Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses;
+     * `base_url` (Anthropic only, `None` or empty for Anthropic's own API) is
+     * the LLM gateway or proxy Claude Code sends its requests to with it.
      */
-    func vaultPutApiKey(provider: String, key: String) async throws 
+    func vaultPutApiKey(provider: String, key: String, baseUrl: String?) async throws 
     
     func vaultStatus() async throws  -> VaultInfo
     
@@ -2655,14 +2657,16 @@ open func vaultForget(provider: String, slot: String)async throws  -> [CloudAcco
 }
     
     /**
-     * Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses.
+     * Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses;
+     * `base_url` (Anthropic only, `None` or empty for Anthropic's own API) is
+     * the LLM gateway or proxy Claude Code sends its requests to with it.
      */
-open func vaultPutApiKey(provider: String, key: String)async throws   {
+open func vaultPutApiKey(provider: String, key: String, baseUrl: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_zeron_mobile_fn_method_coreclient_vault_put_api_key(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(key)
+                        self.uniffiCloneHandle(),FfiConverterString.lower(provider),FfiConverterString.lower(key),FfiConverterOptionString.lower(baseUrl)
                 )
             },
             pollFunc: ffi_zeron_mobile_rust_future_poll_void,
@@ -7717,7 +7721,7 @@ public struct CloudAccountInfo: Equatable, Hashable {
     public var slot: String
     public var active: Bool
     /**
-     * `oauth` (a subscription sign-in) or `key`.
+     * `oauth` · `setup-token` (a subscription sign-in) or `api-key`.
      */
     public var kind: String
     public var email: String?
@@ -7725,13 +7729,22 @@ public struct CloudAccountInfo: Equatable, Hashable {
     public var organization: String?
     public var plan: String?
     public var needsReconnect: Bool
+    /**
+     * An API key for an LLM gateway or proxy: the host its requests go to
+     * (`email` is then the key's last characters, `…abcd`).
+     */
+    public var gateway: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(slot: String, active: Bool, 
         /**
-         * `oauth` (a subscription sign-in) or `key`.
-         */kind: String, email: String?, displayName: String?, organization: String?, plan: String?, needsReconnect: Bool) {
+         * `oauth` · `setup-token` (a subscription sign-in) or `api-key`.
+         */kind: String, email: String?, displayName: String?, organization: String?, plan: String?, needsReconnect: Bool, 
+        /**
+         * An API key for an LLM gateway or proxy: the host its requests go to
+         * (`email` is then the key's last characters, `…abcd`).
+         */gateway: String?) {
         self.slot = slot
         self.active = active
         self.kind = kind
@@ -7740,6 +7753,7 @@ public struct CloudAccountInfo: Equatable, Hashable {
         self.organization = organization
         self.plan = plan
         self.needsReconnect = needsReconnect
+        self.gateway = gateway
     }
 
     
@@ -7765,7 +7779,8 @@ public struct FfiConverterTypeCloudAccountInfo: FfiConverterRustBuffer {
                 displayName: FfiConverterOptionString.read(from: &buf), 
                 organization: FfiConverterOptionString.read(from: &buf), 
                 plan: FfiConverterOptionString.read(from: &buf), 
-                needsReconnect: FfiConverterBool.read(from: &buf)
+                needsReconnect: FfiConverterBool.read(from: &buf), 
+                gateway: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -7778,6 +7793,7 @@ public struct FfiConverterTypeCloudAccountInfo: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.organization, into: &buf)
         FfiConverterOptionString.write(value.plan, into: &buf)
         FfiConverterBool.write(value.needsReconnect, into: &buf)
+        FfiConverterOptionString.write(value.gateway, into: &buf)
     }
 }
 
@@ -14546,6 +14562,112 @@ public func FfiConverterTypeWorktreeSpec_lift(_ buf: RustBuffer) throws -> Workt
 public func FfiConverterTypeWorktreeSpec_lower(_ value: WorktreeSpec) -> RustBuffer {
     return FfiConverterTypeWorktreeSpec.lower(value)
 }
+
+
+/**
+ * The base URL field of the phone's API-key sheet, read as it is typed —
+ * the desktop dialog's verdict ([`VaultProvider::check_base_url`]), so a
+ * refusal reads the same on both.
+ */
+
+public enum ApiBaseUrlCheck: Equatable, Hashable {
+    
+    /**
+     * Nothing typed.
+     */
+    case empty
+    /**
+     * Part of `https://` so far: no verdict until there is a host.
+     */
+    case typing
+    /**
+     * Refused, in the engine's words.
+     */
+    case refused(reason: String
+    )
+    /**
+     * The base URL as the vault will keep it, the host the key will be
+     * listed under, and the path Claude Code adds to every request.
+     */
+    case ready(url: String, host: String, path: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ApiBaseUrlCheck: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeApiBaseUrlCheck: FfiConverterRustBuffer {
+    typealias SwiftType = ApiBaseUrlCheck
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ApiBaseUrlCheck {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .empty
+        
+        case 2: return .typing
+        
+        case 3: return .refused(reason: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .ready(url: try FfiConverterString.read(from: &buf), host: try FfiConverterString.read(from: &buf), path: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ApiBaseUrlCheck, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .empty:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .typing:
+            writeInt(&buf, Int32(2))
+        
+        
+        case let .refused(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .ready(url,host,path):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(url, into: &buf)
+            FfiConverterString.write(host, into: &buf)
+            FfiConverterString.write(path, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeApiBaseUrlCheck_lift(_ buf: RustBuffer) throws -> ApiBaseUrlCheck {
+    return try FfiConverterTypeApiBaseUrlCheck.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeApiBaseUrlCheck_lower(_ value: ApiBaseUrlCheck) -> RustBuffer {
+    return FfiConverterTypeApiBaseUrlCheck.lower(value)
+}
+
 
 
 
@@ -21611,6 +21733,41 @@ public func workosAuthorizeUrl(state: String) -> String  {
 })
 }
 /**
+ * The characters a pasted key will be listed by (`…81e5`), once it is
+ * long enough to store.
+ */
+public func apiKeySuffix(key: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_api_key_suffix(
+        FfiConverterString.lower(key),uniffiCallStatus
+    )
+})
+}
+/**
+ * Whether `provider`'s API key may name a base URL (`anthropic-key`).
+ */
+public func apiKeyTakesBaseUrl(provider: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_api_key_takes_base_url(
+        FfiConverterString.lower(provider),uniffiCallStatus
+    )
+})
+}
+/**
+ * The verdict on `raw` as the base URL of `provider`'s API key.
+ */
+public func checkApiBaseUrl(provider: String, raw: String) -> ApiBaseUrlCheck  {
+    return try!  FfiConverterTypeApiBaseUrlCheck_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_check_api_base_url(
+        FfiConverterString.lower(provider),
+        FfiConverterString.lower(raw),uniffiCallStatus
+    )
+})
+}
+/**
  * [`AgentLoginRules`] for `harness` (`claude-code`, `codex`, …).
  */
 public func agentLoginRules(harness: String) -> AgentLoginRules  {
@@ -21803,6 +21960,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_api_key_suffix() != 55282) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_api_key_takes_base_url() != 29134) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_check_api_base_url() != 39185) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_agent_login_rules() != 18451) {
@@ -22084,7 +22250,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_vault_forget() != 1028) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_put_api_key() != 28404) {
+    if (uniffi_zeron_mobile_checksum_method_coreclient_vault_put_api_key() != 52603) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_vault_status() != 51383) {

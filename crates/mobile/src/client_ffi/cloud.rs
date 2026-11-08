@@ -147,28 +147,96 @@ impl From<zeron_proto::VaultStatus> for VaultInfo {
 pub struct CloudAccountInfo {
     pub slot: String,
     pub active: bool,
-    /// `oauth` (a subscription sign-in) or `key`.
+    /// `oauth` · `setup-token` (a subscription sign-in) or `api-key`.
     pub kind: String,
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub organization: Option<String>,
     pub plan: Option<String>,
     pub needs_reconnect: bool,
+    /// An API key for an LLM gateway or proxy: the host its requests go to
+    /// (`email` is then the key's last characters, `…abcd`).
+    pub gateway: Option<String>,
 }
 
 impl From<zeron_proto::VaultAccount> for CloudAccountInfo {
     fn from(a: zeron_proto::VaultAccount) -> Self {
+        // A key's label is its last characters, then the host of the
+        // gateway it is for (`…abcd · llm-gateway.example.com`).
+        let (email, gateway) = match a.email.or(a.account) {
+            Some(label) if a.kind == "api-key" => {
+                let (suffix, gateway) = zeron_proto::api_key_label(&label);
+                (Some(suffix.to_string()), gateway.map(str::to_string))
+            }
+            label => (label, None),
+        };
         Self {
             slot: a.slot,
             active: a.active,
             kind: a.kind,
-            email: a.email.or(a.account),
+            email,
             display_name: a.display_name,
             organization: a.organization,
             plan: a.plan,
             needs_reconnect: a.status == zeron_proto::VaultConnectionStatus::NeedsReconnect,
+            gateway,
         }
     }
+}
+
+/// The base URL field of the phone's API-key sheet, read as it is typed —
+/// the desktop dialog's verdict ([`VaultProvider::check_base_url`]), so a
+/// refusal reads the same on both.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ApiBaseUrlCheck {
+    /// Nothing typed.
+    Empty,
+    /// Part of `https://` so far: no verdict until there is a host.
+    Typing,
+    /// Refused, in the engine's words.
+    Refused { reason: String },
+    /// The base URL as the vault will keep it, the host the key will be
+    /// listed under, and the path Claude Code adds to every request.
+    Ready {
+        url: String,
+        host: String,
+        path: String,
+    },
+}
+
+/// Whether `provider`'s API key may name a base URL (`anthropic-key`).
+#[uniffi::export]
+pub fn api_key_takes_base_url(provider: String) -> bool {
+    VaultProvider::parse(&provider).is_some_and(VaultProvider::takes_base_url)
+}
+
+/// The verdict on `raw` as the base URL of `provider`'s API key.
+#[uniffi::export]
+pub fn check_api_base_url(provider: String, raw: String) -> ApiBaseUrlCheck {
+    let Some(provider) = VaultProvider::parse(&provider) else {
+        return ApiBaseUrlCheck::Refused {
+            reason: format!("Unknown provider {provider}."),
+        };
+    };
+    match provider.check_base_url(&raw) {
+        zeron_proto::BaseUrlCheck::Empty => ApiBaseUrlCheck::Empty,
+        zeron_proto::BaseUrlCheck::Typing => ApiBaseUrlCheck::Typing,
+        zeron_proto::BaseUrlCheck::Refused(why) => ApiBaseUrlCheck::Refused {
+            reason: why.to_string(),
+        },
+        zeron_proto::BaseUrlCheck::Ready(url) => ApiBaseUrlCheck::Ready {
+            host: zeron_proto::base_url_host(&url),
+            path: zeron_proto::ANTHROPIC_MESSAGES_PATH.to_string(),
+            url,
+        },
+    }
+}
+
+/// The characters a pasted key will be listed by (`…81e5`), once it is
+/// long enough to store.
+#[uniffi::export]
+pub fn api_key_suffix(key: String) -> Option<String> {
+    zeron_proto::api_key_suffix(&key)
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -408,11 +476,23 @@ impl CoreClient {
             .map(|list| list.into_iter().map(Into::into).collect())
     }
 
-    /// Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses.
-    pub async fn vault_put_api_key(&self, provider: String, key: String) -> CoreResult<()> {
+    /// Store an API key (`anthropic-key` · `openai-key`) as the one Cloud uses;
+    /// `base_url` (Anthropic only, `None` or empty for Anthropic's own API) is
+    /// the LLM gateway or proxy Claude Code sends its requests to with it.
+    pub async fn vault_put_api_key(
+        &self,
+        provider: String,
+        key: String,
+        base_url: Option<String>,
+    ) -> CoreResult<()> {
         let provider = vault_provider(&provider)?;
         let client = self.client.clone();
-        on_runtime(async move { client.vault_put_api_key(provider, &key).await }).await
+        on_runtime(async move {
+            client
+                .vault_put_api_key(provider, &key, base_url.as_deref())
+                .await
+        })
+        .await
     }
 
     pub async fn billing_status(&self) -> CoreResult<BillingInfo> {
@@ -500,5 +580,69 @@ impl CoreClient {
     /// The auth sheet was dismissed.
     pub fn provider_login_cancel(&self, login_id: String) {
         self.client.provider_login_cancel(&login_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored(kind: &str, account: &str) -> zeron_proto::VaultAccount {
+        serde_json::from_value(serde_json::json!({
+            "slot": "s1",
+            "status": "connected",
+            "active": true,
+            "kind": kind,
+            "account": account,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_gateway_key_is_listed_by_its_last_characters_and_its_host() {
+        let key = CloudAccountInfo::from(stored("api-key", "…81e5 · llm-gateway.example.com"));
+        assert_eq!(key.email.as_deref(), Some("…81e5"));
+        assert_eq!(key.gateway.as_deref(), Some("llm-gateway.example.com"));
+        let direct = CloudAccountInfo::from(stored("api-key", "…81e5"));
+        assert_eq!(
+            (direct.email.as_deref(), direct.gateway),
+            (Some("…81e5"), None)
+        );
+        // Only a key's label is split: a login's stays whole.
+        let login = CloudAccountInfo::from(stored("oauth", "Max · Team"));
+        assert_eq!(
+            (login.email.as_deref(), login.gateway),
+            (Some("Max · Team"), None)
+        );
+    }
+
+    #[test]
+    fn the_sheet_reads_a_base_url_as_the_desktop_dialog_does() {
+        let check = |raw: &str| check_api_base_url("anthropic-key".into(), raw.into());
+        assert_eq!(check(""), ApiBaseUrlCheck::Empty);
+        assert_eq!(check("https:/"), ApiBaseUrlCheck::Typing);
+        assert_eq!(
+            check("https://LLM-Gateway.example.com/"),
+            ApiBaseUrlCheck::Ready {
+                url: "https://LLM-Gateway.example.com".into(),
+                host: "llm-gateway.example.com".into(),
+                path: "/v1/messages".into(),
+            }
+        );
+        let ApiBaseUrlCheck::Refused { reason } = check("http://llm-gateway.example.com") else {
+            panic!("http is refused");
+        };
+        assert!(reason.contains("https://"), "{reason}");
+        assert!(api_key_takes_base_url("anthropic-key".into()));
+        assert!(!api_key_takes_base_url("openai-key".into()));
+        assert!(matches!(
+            check_api_base_url("nope".into(), "https://x.example.com".into()),
+            ApiBaseUrlCheck::Refused { .. }
+        ));
+        assert_eq!(api_key_suffix("sk-ant".into()), None);
+        assert_eq!(
+            api_key_suffix("sk-ant-api03-9f3a".into()).as_deref(),
+            Some("…9f3a")
+        );
     }
 }
