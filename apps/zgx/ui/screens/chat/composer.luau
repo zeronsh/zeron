@@ -870,9 +870,8 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
-	local accounts = shared.model_accounts(function(): string?
-		return device:get()
-	end)
+	-- (The catalog's device, a new chat's project's host included.)
+	local accounts = shared.model_accounts(run_device)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then

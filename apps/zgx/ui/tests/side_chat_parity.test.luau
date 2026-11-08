@@ -266,3 +266,20 @@ test("its device gone, a side chat's composer is disabled", function()
 	local attach = '.side-chat-tab >> role:button "Attach"'
 	expect(app:tree(attach)).to_contain("disabled")
 end)
+
+test("a side chat sent from another computer reads that computer's accounts, not this one's", function()
+	local app = open()
+	app:set_state("private_text_hidden", false)
+	app:set_state("agents.on_device", {
+		[""] = { ["codex"] = { { id = "a1", email = "mine@example.test", plan = "Max", active = true, can_switch = true, windows = {} } } },
+		box = { ["codex"] = { { id = "b1", email = "box@example.test", plan = "Team", active = true, can_switch = true, windows = {} } } },
+	})
+	app:command("side_on_box")
+	app:frames(20)
+	expect(calls(app)).to_contain("watch_device:box")
+	app:click('.side-chat-tab >> role:button "Model"')
+	app:frames(30)
+	local row = app:tree("#model-picker-account")
+	expect(row).to_contain("box@example.test")
+	expect(string.find(row, "mine@example.test", 1, true)).to_be(nil)
+end)
