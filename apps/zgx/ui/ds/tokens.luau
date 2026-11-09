@@ -693,6 +693,29 @@ function M.setup()
 			},
 		},
 	}
+	-- A chip in a message (a file, a chat, a skill or a command mentioned:
+	-- ds/markdown), as Zeron's shipping app paints one (composer/chip.rs
+	-- `paint_chip`): a pill of the text's ink at 9% (white on dark, black
+	-- on light: theme.rs `ink(0.09)`), its icon on a well of its own, a
+	-- point in from the pill's edge, white on light and black on dark, at
+	-- 32% over glass and 16% where the window is solid
+	-- (file_icons.rs `well_bg`); a glyph in the muted ink (a file's icon
+	-- in its own colours).
+	ui.effect(function()
+		local kind = ui.theme.kind()
+		local dark = not (kind == "light" or kind == "high-contrast-light")
+		local glass = material.see_through()
+		local well = if dark then "#000000" else "#ffffff"
+		ui.theme.tokens {
+			zeron = {
+				chip = {
+					bg = if dark then "#ffffff17" else "#00000017",
+					well = well .. (if glass then "52" else "29"),
+					glyph = "{text.secondary}",
+				},
+			},
+		}
+	end)
 	ui.theme.load("ds/themes/zeron-dark.json")
 	ui.theme.load("ds/themes/zeron-light.json")
 	-- The theme chosen for each scheme, else the template's own (its

@@ -392,6 +392,23 @@ local function opens(a: string): boolean
 	return string.match(a, "^https?://") ~= nil or string.match(a, "^mailto:") ~= nil
 end
 
+-- A chip's look, as Zeron's shipping app paints it (composer/chip.rs
+-- `paint_chip`): its pill hugs its name, 2 points above and below, corner
+-- 5; its icon (14) on a well of its own 2 points round it, corner 4
+-- (`zeron.chip.*`). (Across, 3 each side: Zeron's well sits a point in
+-- and its name has some 7 after it, and a span's padding is the same
+-- both sides.)
+local CHIP_PADDING = { 3, 2 }
+local CHIP_RADIUS = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+local function chip_icon(icon: { [string]: any }): { [string]: any }
+	icon.size = 14
+	icon.gap = 4
+	icon.bg = "$zeron.chip.well"
+	icon.radius = 4
+	icon.pad = 2
+	return icon
+end
+
 -- A mention in a prompt (Zeron's `[name](zeron-file:path)`, a chat's
 -- `zeron-chat:`): a chip in the line, as Zeron's sent bubble draws it
 -- (transcript.rs `user_bubble_text`, composer/chip.rs `paint_chip`): its
@@ -415,13 +432,13 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	-- (A hover of its own, which changes nothing: without one, a link's
 	-- pointer draws the focus ring round its words.)
 	span.hover = {}
-	span.bg = "$zeron.composer.chip.bg"
+	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = { 2, 2 }
-	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
 	span.icon = if chat
-		then { src = "assets/icons/ui/side-chat.svg", size = 14, gap = 3, tint = "currentColor" }
-		else { src = `assets/icons/files/{set}/{FileIcon.of(if string.find(file, ".", 1, true) or dir then file else name, dir)}.svg`, size = 14, gap = 3 }
+		then chip_icon { src = "assets/icons/ui/side-chat.svg", tint = "$zeron.chip.glyph" }
+		else chip_icon { src = `assets/icons/files/{set}/{FileIcon.of(if string.find(file, ".", 1, true) or dir then file else name, dir)}.svg` }
 end
 
 -- a command or skill picked in the composer has nothing to open, but reads
@@ -439,11 +456,11 @@ local function invocation_chip(span: { [any]: any }, name: string)
 	-- (A hover of its own, which changes nothing: without one, a link's
 	-- pointer draws the focus ring round its words.)
 	span.hover = {}
-	span.bg = "$zeron.composer.chip.bg"
+	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = { 2, 2 }
-	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
-	span.icon = { src = `assets/icons/ui/{glyph}.svg`, size = 14, gap = 3, tint = "currentColor" }
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
+	span.icon = chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
 end
 
 -- A web address written bare in a run's words (not in code, not a link
