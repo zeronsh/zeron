@@ -49,8 +49,6 @@ export type Props = {
 	-- What an empty scope says.
 	empty: (scope: string, query: string) -> string,
 	choose: (item: any) -> (),
-	-- A press anywhere in it (a row, a tab, its blank room).
-	on_press: ((e: any) -> ())?,
 }
 
 -- `label` with the part that matches `query` in bold (its first match,
@@ -349,7 +347,9 @@ function M.Panel(props: Props): Node
 	end
 	return ui.column {
 		id = "mention-launcher",
-		on_press = props.on_press,
+		-- (A press in it, a row's, a tab's or its blank room's, leaves the
+		-- draft the keys: the list hangs from it.)
+		focus_on_press = false,
 		w_full = true,
 		gap = 0,
 		head,

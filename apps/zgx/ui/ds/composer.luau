@@ -1763,6 +1763,18 @@ return ui.component(function(props: Props): Node
 		return if type(own) == "string" then own else own:get()
 	end
 
+	-- A press on the composer's blank room (the pill's padding, its controls'
+	-- rows between them, under the draft): the draft takes the keys, its
+	-- caret at its end.
+	local function to_draft()
+		local el = field:peek()
+		if el then
+			el:focus()
+			local n = #value:peek()
+			el:set_selection_bytes(n, n)
+		end
+	end
+
 	local surface = ui.div {
 		ref = pill,
 		on_resize = measure(pill_w, "w"),
@@ -1792,7 +1804,10 @@ return ui.component(function(props: Props): Node
 				end
 			end
 			else nil,
-		-- A press anywhere but a control goes to the draft.
+		-- A press anywhere but a control goes to the draft (its caret at
+		-- its end). (Under the pill's controls and draft, which take their
+		-- own; `focus_on_press = false`, so zgx doesn't move focus off it
+		-- to what's under the press after.)
 		ui.div {
 			absolute = true,
 			left = 0,
@@ -1800,12 +1815,8 @@ return ui.component(function(props: Props): Node
 			top = 0,
 			bottom = 0,
 			cursor = "text",
-			on_press = function()
-				local el = field:peek()
-				if el then
-					el:focus()
-				end
-			end,
+			focus_on_press = false,
+			on_press = to_draft,
 		},
 		-- The measures: the draft on one line, and wrapped as it would be
 		-- opened out (a mark after it, so a last empty line counts).
@@ -2230,6 +2241,7 @@ return ui.component(function(props: Props): Node
 		footer = ui.row {
 			id = props.toolbar_id,
 			on_resize = measure(footer_w, "w"),
+			relative = true,
 			h = 24,
 			-- On the tray: a tight step under the pill and above the tray's
 			-- foot (the pill's full control inset read too airy there), and
@@ -2246,10 +2258,24 @@ return ui.component(function(props: Props): Node
 			end :: any,
 			items = "center",
 			gap = "$space.1",
+			-- Its blank room, between and beside its controls: the draft's,
+			-- as the pill's is.
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				focus_on_press = false,
+				on_press = to_draft,
+			},
 			-- Clipped: past every fold, it gives way under the right group
 			-- rather than running beneath it.
 			ui.row {
 				hook = "chat.composer.toolbar.start",
+				-- (Its blank room passes the press on, to the draft's;
+				-- its controls take their own.)
+				pointer_events = "none",
 				gap = "$space.1",
 				items = "center",
 				min_w = 0,
@@ -2259,6 +2285,7 @@ return ui.component(function(props: Props): Node
 			},
 			ui.row {
 				hook = "chat.composer.toolbar.end",
+				pointer_events = "none",
 				on_resize = measure(right_w, "w"),
 				items = "center",
 				shrink = 0,

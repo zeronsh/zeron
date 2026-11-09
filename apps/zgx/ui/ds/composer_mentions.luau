@@ -369,28 +369,8 @@ function M.use(opts: Use)
 		end
 		caret:set(focus)
 	end
-	-- A press inside the list (a row, a tab, its blank room): the field
-	-- keeps the keys. zgx moves focus on a press to what's under it (or to
-	-- nothing), so the blur that press brings isn't the field losing the
-	-- keys: it's given them back once the press is done, its caret where
-	-- it was, and the list stays.
-	local pressing = false
-	local function press_inside()
-		pressing = true
-		ui.after(0, function()
-			pressing = false
-			-- (Its own record says it still has them: the blur was ignored.)
-			local el = opts.field:peek()
-			if el then
-				el:focus()
-			end
-		end)
-	end
 	-- The field's focus and blur (`on_focus`, `on_blur`).
 	local function on_focus(now: boolean)
-		if not now and pressing then
-			return
-		end
 		if focused:peek() ~= now then
 			focused:set(now)
 		end
@@ -522,7 +502,6 @@ function M.use(opts: Use)
 			ui.show(function(): boolean
 				return sections_of(token:get()) ~= nil
 			end, Launcher.Panel {
-				on_press = press_inside,
 				token = token,
 				shown = shown,
 				active = active,
@@ -539,7 +518,9 @@ function M.use(opts: Use)
 				choose = choose,
 			}, ui.column {
 				id = "mention-panel",
-				on_press = press_inside,
+				-- (A press in it leaves the draft the keys: the list hangs
+				-- from it.)
+				focus_on_press = false,
 				w_full = true,
 				p = "$space.1",
 				gap = 0,
