@@ -99,6 +99,12 @@ impl Engine {
     fn new() -> Self {
         let account = crate::auth::endpoint();
         let config = Config::from_env(&account.edge, &account.client, account.port);
+        // (The stream bench's window has its recording and no engine.)
+        #[cfg(feature = "stream-bench")]
+        let config = match crate::chat::stream_bench_asked() {
+            Some(_) => Err("the stream bench (ZERON_STREAM_BENCH) runs without one".to_owned()),
+            None => config,
+        };
         match &config {
             Ok(config) => eprintln!("zeron-zgx: engine: {}", config.describe()),
             Err(why) => eprintln!("zeron-zgx: engine: refused ({why}); nothing that needs it works"),
