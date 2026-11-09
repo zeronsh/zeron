@@ -681,5 +681,23 @@ fn a_tab_carried_near_an_end_of_its_strip_scrolls_it() {
     app.ui.dispatch(InputEvent::PointerUp { x: to, y, button });
     app.ui.input.forget_clicks();
     app.frames(60);
+    // Carried off the strip, down over the page, and held there: the window
+    // keeps all its room (the tab stays its strip's, taking none of it).
+    let shell = app.bounds("#shell");
+    let from = app.bounds("#session-tab-a2");
+    let (x, y) = (from.x + from.width / 2., from.y + from.height / 2.);
+    app.ui.dispatch(InputEvent::PointerMove { x, y });
+    app.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    app.frames(2);
+    for i in 1..=20 {
+        app.ui.dispatch(InputEvent::PointerMove { x: x + i as f32 * 5., y: y + i as f32 * 15. });
+        app.frames(1);
+    }
+    app.frames(20);
+    let held = app.bounds("#shell");
+    assert_eq!(held, shell, "held off the strip, the window's content keeps its room");
+    app.ui.dispatch(InputEvent::PointerUp { x: x + 100., y: y + 300., button });
+    app.ui.input.forget_clicks();
+    app.frames(60);
     assert_eq!(app.error(), None);
 }

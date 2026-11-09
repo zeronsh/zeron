@@ -443,6 +443,9 @@ function M.new(props: Props)
 	-- nothing (the lifted tab is the strip's own).
 	function self.preview(id: string): Node
 		return ui.div {
+			-- (Over the window, never in its flow: zgx sets it so as the drag
+			-- begins, but the opacity changing restyles it from these props.)
+			absolute = true,
 			opacity = function(): number
 				return if phase:get() == "away" then 1 else 0
 			end,
