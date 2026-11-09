@@ -710,6 +710,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		return Markdown {
 			text = words,
+			-- Drawn by zgx's markdown view: its prose in Rust (ds/prose).
+			native = true,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}:{b.id}` else nil,
 			veil = m.streaming == true,
@@ -803,6 +805,7 @@ local function reply(
 		),
 		if m.blocks ~= nil then nil else Markdown {
 			text = text,
+			native = true,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}` else nil,
 			veil = m.streaming == true,
