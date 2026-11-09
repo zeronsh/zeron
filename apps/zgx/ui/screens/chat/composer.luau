@@ -948,15 +948,13 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
-			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			-- ("Jump to latest" of the transcript at its foot, while it
+			-- shows: the trays' pill moves aside. In a split, the focused
+			-- pane's: shared's `at_foot`.)
 			aside = function(): number?
-				return shared.jump_width:get()
+				return shared.pill_width_of("jump", shared.at_foot:get()):get()
 			end,
-			on_pill_width = function(w: number?)
-				if shared.pill_width:peek() ~= w then
-					shared.pill_width:set(w)
-				end
-			end,
+			on_pill_width = shared.pill_teller("waiting", "window"),
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,

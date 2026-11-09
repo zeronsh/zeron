@@ -726,6 +726,10 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 			local w = pill_w:get()
 			report(if any() and not is_open() and w > 0 then w else nil)
 		end)
+		-- (Gone with it: a pill beside it no longer moves aside for it.)
+		ui.on_cleanup(function()
+			report(nil)
+		end)
 	end
 	return top, floating
 end

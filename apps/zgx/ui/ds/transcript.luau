@@ -1128,6 +1128,13 @@ local function Transcript(props: Props): Node
 			props.on_jump_width(if shown then jump_w else nil)
 		end
 	end)
+	-- (Gone with it: a pill beside it no longer moves aside for it.)
+	if props.on_jump_width then
+		local say = props.on_jump_width
+		ui.on_cleanup(function()
+			say(nil)
+		end)
+	end
 	-- Each mounted row, by id: what a place in the window is part of.
 	local rows: { [string]: { outer: Ref, inner: Ref, index: State<number>, m: Message } } = {}
 	-- A find's current match in a message that isn't laid out (the list

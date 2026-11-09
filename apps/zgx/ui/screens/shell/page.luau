@@ -295,6 +295,15 @@ return function(props: Props): Node
 	-- (In a split, the chat page isn't made: the window still watches the
 	-- focused chat, for the composer and the focused pane's transcript.)
 	local chat_store = require("@app/screens/chat/store")
+	-- (The transcript at the window's composer's foot, whose "Jump to
+	-- latest" its pill pairs with: the chat page's, or the focused pane's.
+	-- Its lane is `split-<chat>`: the panes', below.)
+	ui.effect(function()
+		local key = if grouped() then `lane.split-{splits.focused:get()}` else "page"
+		if chat_shared.at_foot:peek() ~= key then
+			chat_shared.at_foot:set(key)
+		end
+	end)
 	ui.effect(function()
 		if grouped() then
 			chat_store.open(splits.focused:get())

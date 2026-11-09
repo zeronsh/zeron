@@ -623,6 +623,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	return ds.Composer {
 		value = draft,
 		snap = if split then snap else nil,
+		-- (Its transcript's "Jump to latest", while it shows: its trays'
+		-- pill moves aside, the two a centred pair. By the lane's name, its
+		-- transcript's: screens/chat/shared's `pill_width_of`.)
+		aside = function(): number?
+			return Shared.pill_width_of("jump", name):get()
+		end,
+		on_pill_width = Shared.pill_teller("waiting", name),
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = remove_carried,
@@ -1087,6 +1094,15 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
+		-- Its "Jump to latest" and the pill of the composer at its foot, a
+		-- centred pair: its own composer's, or, a split's focused pane, the
+		-- window's (screens/chat/shared's `pill_width_of`).
+		beside = if tab.kind == "subagent"
+			then nil
+			else function(): number?
+				return Shared.pill_width_of("waiting", if split and focused_now() then "window" else `lane.{slot}`):get()
+			end,
+		on_jump_width = Shared.pill_teller("jump", `lane.{slot}`),
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,
