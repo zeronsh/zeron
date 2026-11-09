@@ -196,17 +196,7 @@ type Store = (Shared, serde_json::Map<String, Json>);
 struct Gh {
     shared: Option<Shared>,
     prs: serde_json::Map<String, Json>,
-    watches: HashMap<String, PrWatch>,
-}
-
-/// A session's pull request watch: what it's of (`key`, `params`), the
-/// watch (none while it waits to start again, having ended), and how long
-/// it waits when it ends.
-struct PrWatch {
-    key: String,
-    params: Json,
-    watch: Option<Watch>,
-    retry: github::Retry,
+    watches: github::Watches<Watch>,
 }
 
 pub struct Bridge {
@@ -534,6 +524,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         if let Some(b) = weak.upgrade() {
             let (sources, list) = b.sources(true);
             b.publish_records(&sources, &list);
+            b.github_wake(&list);
         }
     });
     *bridge.records_effect.borrow_mut() = Some(effect);
@@ -2538,7 +2529,10 @@ impl Bridge {
                 let mut all = b.gh.borrow_mut();
                 let Some(gh) = all.get_mut(&plugin) else { return };
                 let keep: HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
-                gh.watches.retain(|id, _| keep.contains(id.as_str()));
+                for (session, key, params) in gh.watches.want(&wanted, Instant::now(), MAX_KEPT_PRS) {
+                    let watch = Self::pr_watch(&b, &rpc, &plugin, &session, &key, &params);
+                    gh.watches.started(&session, &key, watch);
+                }
                 // What each session's pull request was last heard as stays
                 // while its row is away (Settings, another page): back, its
                 // badge is there at once, and the new watch brings it up to
@@ -2550,16 +2544,7 @@ impl Bridge {
                 // (Published only as what's kept changed: rows coming into
                 // view as a list scrolls ask this often, and each publish
                 // runs every reader of it.)
-                let trimmed = gh.prs.len() != kept;
-                for (id, params) in &wanted {
-                    let key = github::watch_key(params);
-                    if gh.watches.get(id).is_some_and(|w| w.key == key) {
-                        continue;
-                    }
-                    let watch = Self::pr_watch(&b, &rpc, &plugin, id, &key, params);
-                    gh.watches.insert(id.clone(), PrWatch { key, params: params.clone(), watch: Some(watch), retry: github::Retry::new() });
-                }
-                if !trimmed {
+                if gh.prs.len() == kept {
                     return;
                 }
                 gh.shared.clone().map(|s| (s, json_value(&Json::Object(gh.prs.clone()))))
@@ -2594,21 +2579,43 @@ impl Bridge {
 
     /// A session's pull request watch ended of itself (an error, the
     /// engine gone): started again after its wait, if it's still wanted
-    /// as it was.
+    /// as it was. One whose chat isn't there to watch (its folder isn't a
+    /// checkout on its device, the device is offline) is set aside instead,
+    /// until its chat or device changes (`github_wake`).
     fn github_ended(self: &Rc<Self>, plugin: &str, session: &str, key: &str, why: &str) {
-        let wait = {
+        let ended = {
             let mut all = self.gh.borrow_mut();
-            let Some(w) = all.get_mut(plugin).and_then(|gh| gh.watches.get_mut(session)).filter(|w| w.key == key) else {
-                return;
-            };
-            w.watch = None;
-            w.retry.ended()
+            let Some(gh) = all.get_mut(plugin) else { return };
+            gh.watches.ended(session, key, why, Instant::now())
+        };
+        let wait = match ended {
+            github::Ended::Stale => return,
+            github::Ended::Parked => {
+                return eprintln!("zeron-zgx: plugin {plugin}: {session}'s pull request watch ended ({why}); set aside until its chat or device changes");
+            }
+            github::Ended::Wait(wait) => wait,
         };
         eprintln!("zeron-zgx: plugin {plugin}: {session}'s pull request watch ended ({why}); again in {}s", wait.as_secs());
         let me = Rc::downgrade(self);
         let (plugin, session, key) = (plugin.to_string(), session.to_string(), key.to_string());
         self.tasks.spawn(async move {
             zgx::timer::sleep(wait).await;
+            if let Some(b) = me.upgrade() {
+                b.github_start(&plugin, &session, &key);
+            }
+        });
+    }
+
+    /// Session `session`'s watch of `key` started again, if it's still
+    /// shown as it was, and neither watched nor set aside.
+    fn github_start(self: &Rc<Self>, plugin: &str, session: &str, key: &str) {
+        let due = |b: &Bridge| b.gh.borrow().get(plugin).and_then(|gh| gh.watches.due(session, key));
+        if due(self).is_none() {
+            return;
+        }
+        let me = Rc::downgrade(self);
+        let (plugin, session, key) = (plugin.to_string(), session.to_string(), key.to_string());
+        self.tasks.spawn(async move {
             let Some(rpc) = engine::get().connection(Duration::from_secs(5)).await else {
                 // (No engine yet: waited for again, longer.)
                 if let Some(b) = me.upgrade() {
@@ -2617,20 +2624,46 @@ impl Bridge {
                 return;
             };
             let Some(b) = me.upgrade() else { return };
-            let params = {
-                let all = b.gh.borrow();
-                match all.get(&plugin).and_then(|gh| gh.watches.get(&session)) {
-                    Some(w) if w.key == key && w.watch.is_none() => w.params.clone(),
-                    _ => return,
-                }
-            };
-            let watch = Self::pr_watch(&b, &rpc, &plugin, &session, &key, &params);
             let mut all = b.gh.borrow_mut();
-            match all.get_mut(&plugin).and_then(|gh| gh.watches.get_mut(&session)) {
-                Some(w) if w.key == key && w.watch.is_none() => w.watch = Some(watch),
-                _ => {}
-            }
+            let Some(gh) = all.get_mut(&plugin) else { return };
+            let Some(params) = gh.watches.due(&session, &key) else { return };
+            let watch = Self::pr_watch(&b, &rpc, &plugin, &session, &key, &params);
+            gh.watches.started(&session, &key, watch);
         });
+    }
+
+    /// The session list moved: each set-aside watch whose chat changed
+    /// (its folder, branch or device) or whose device came back online is
+    /// started again. Nothing is read when none is set aside.
+    fn github_wake(self: &Rc<Self>, sessions: &Value) {
+        let mut start = Vec::new();
+        {
+            let mut all = self.gh.borrow_mut();
+            for (plugin, gh) in all.iter_mut() {
+                if !gh.watches.any_parked() {
+                    continue;
+                }
+                let params = |id: &str| -> Option<Json> {
+                    let chats = sessions.field("chats")?.list();
+                    let chat = chats.iter().find(|c| c.field("id").map(text).as_deref() == Some(id))?;
+                    github::watch_params(&value_json(chat))
+                };
+                let online = |device: &str| -> Option<bool> {
+                    let devices = sessions.field("devices")?.list();
+                    let found = devices.iter().find(|d| d.field("id").map(text).as_deref() == Some(device))?;
+                    match found.field("online") {
+                        Some(Value::Bool(online)) => Some(*online),
+                        _ => None,
+                    }
+                };
+                for (session, key, _) in gh.watches.wake(params, online) {
+                    start.push((plugin.clone(), session, key));
+                }
+            }
+        }
+        for (plugin, session, key) in start {
+            self.github_start(&plugin, &session, &key);
+        }
     }
 
     /// A session's pull request, as its watch heard it.
@@ -2638,10 +2671,9 @@ impl Bridge {
         let publish = {
             let mut all = self.gh.borrow_mut();
             let Some(gh) = all.get_mut(plugin) else { return };
-            let Some(w) = gh.watches.get_mut(session) else {
+            if !gh.watches.heard(session) {
                 return;
-            };
-            w.retry.heard();
+            }
             gh.prs.insert(session.to_string(), github::summary(status));
             gh.shared.clone().map(|s| (s, json_value(&Json::Object(gh.prs.clone()))))
         };
