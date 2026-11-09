@@ -78,6 +78,35 @@ local PLUGINS: { [string]: any } = {
 		commands_anything = { "some-tool" },
 		commands_full_control = { "python3", "sh" },
 	},
+	-- Hosts as rated: near by its name, named exactly, and a wildcard.
+	hosts = {
+		id = "hosts",
+		name = "Reacher",
+		version = "0.1.0",
+		hash = "hosts-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "network" },
+		allowed = {},
+		ask = { "network" },
+		network_hosts = { "localhost:8080", "box.example.ts.net", "*.example.org" },
+		network_local = { "localhost:8080" },
+		network_named = { "box.example.ts.net" },
+	},
+	wildcard_hosts = {
+		id = "wildcard_hosts",
+		name = "Wide",
+		version = "0.1.0",
+		hash = "wide-1",
+		status = "pending",
+		author = { kind = "unknown" },
+		permissions = { "network" },
+		allowed = {},
+		ask = { "network" },
+		network_hosts = { "*.example.org" },
+		network_local = {},
+		network_named = {},
+	},
 	unknown_tool = {
 		id = "unknown_tool",
 		name = "Tool",
@@ -183,6 +212,8 @@ ui.command { id = "ping", title = "Show Ping", run = function() show("ping") end
 ui.command { id = "more", title = "Show Notes tool asking more", run = function() show("more") end }
 ui.command { id = "sync", title = "Show Checkout sync, here", run = function() show("sync") end }
 ui.command { id = "mixed", title = "Show Runner", run = function() show("mixed") end }
+ui.command { id = "hosts", title = "Show Reacher", run = function() show("hosts") end }
+ui.command { id = "wildcard_hosts", title = "Show Wide", run = function() show("wildcard_hosts") end }
 ui.command { id = "unknown_tool", title = "Show Tool", run = function() show("unknown_tool") end }
 -- Ping, as installed from GitHub: where it came from, said.
 ui.command {
