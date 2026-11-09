@@ -287,7 +287,8 @@ test("a click on the launcher's blank room keeps it; a click on a row inserts it
 	expect(field_has_keys(app)).to_be(true)
 end)
 
--- Where each row's place (its folder, its project) ends, by row.
+-- Where what's at each row's end (its folder or kind, its project and
+-- when it moved) ends, by row: its last text on the row's right half.
 local function place_ends(app: any): { [string]: number }
 	local out: { [string]: number } = {}
 	local row: string? = nil
@@ -297,17 +298,18 @@ local function place_ends(app: any): { [string]: number }
 			row = option
 		else
 			local x, w = line:match('^%s*@%d+ text "[^"]*" (%-?%d+),%-?%d+ (%d+)x%d+$')
-			-- (The first past its tile's letter: its place, then its time.)
 			-- (On the row's right half: not its name.)
-			if row and not out[row] and x and tonumber(w) and (tonumber(w) :: number) > 12 and (tonumber(x) :: number) > 440 then
-				out[row] = (tonumber(x) :: number) + (tonumber(w) :: number)
+			if row and x and tonumber(w) and (tonumber(w) :: number) > 12 and (tonumber(x) :: number) > 440 then
+				out[row] = math.max(out[row] or 0, (tonumber(x) :: number) + (tonumber(w) :: number))
 			end
 		end
 	end
 	return out
 end
 
-test("every row is one line, where it is ending at the same place on each, and lighting a row moves nothing", function()
+-- (A row with no time has its place against the ↵ slot, not in the middle;
+-- one with a time, its time there: the same edge.)
+test("every row is one line, what's at its end ending at the same place on each, and lighting a row moves nothing", function()
 	local app = chat()
 	app:type(BOX, "@")
 	settle(app)

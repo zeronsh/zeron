@@ -9,7 +9,6 @@
 
 local Icon = require("@self/icon")
 local FileIcon = require("@self/file_icons")
-local FadeText = require("@self/fade_text")
 local Menu = require("@self/menu")
 local Kbd = require("@self/kbd")
 local Tile = require("@self/tile")
@@ -17,19 +16,34 @@ local locale = require("@self/locale")
 
 local M = {}
 
--- The panel's width, how many rows show before it scrolls, how long a
--- row's place may be before it's cut from its start.
-M.WIDTH = 440
+-- How many rows show before it scrolls, how long a row's place may be
+-- before it's cut from its start. Its geometry is the theme's
+-- (`zeron.menu.launcher`, ds/tokens): its width, its least, a tab's height, the
+-- time's column and the ↵ key's slot, the same on every row (what's at a
+-- row's end lines up down the list, and lighting a row moves nothing).
 local ROWS, PLACE = 8, 34
--- The time's column and the ↵ key's slot, the same on every row: what's at
--- a row's end lines up down the list, and lighting a row moves nothing.
-local TIME_W, KEY_W = 34, 22
--- A row's height and its tile's: a menu row's, and its glyph's box.
 local function row_h(): number
 	return (ui.theme.get("zeron.menu.row") :: number?) or 28
 end
-local ROW_ONE = 28
-local HEAD_H, SCOPES_H, FOOT_H, HEADING_H = 36, 32, 32, 24
+
+-- The panel's width in this window: its own, narrowing with a small window
+-- to its least (a margin of the page's gutter each side). A host that
+-- feeds no window size (a headless test) gets its own.
+function M.width(): number
+	local own = (ui.theme.get("zeron.menu.launcher.width") :: number?) or 440
+	local least = (ui.theme.get("zeron.menu.launcher.min_width") :: number?) or 320
+	local margin = (ui.theme.get("space.4") :: number?) or 16
+	local window = (ui :: any).window
+	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	local ok, v = pcall(function(): any
+		return if state ~= nil then state:get() else nil
+	end)
+	local w = if ok and type(v) == "table" and type(v.width) == "number" then v.width else 0
+	if w <= 1 then
+		return own
+	end
+	return math.max(least, math.min(own, w - 2 * margin))
+end
 
 export type Section = { id: string, label: any }
 export type Entry = { item: any, i: number }
@@ -51,32 +65,76 @@ export type Props = {
 	choose: (item: any) -> (),
 }
 
+-- `label`'s text from `from` to `to` as spans, the part in `s`..`e` (what
+-- matched) in bold.
+local function spans(label: string, from: number, to: number, s: number?, e: number?): { Node }
+	local out: { Node } = {}
+	local function add(a: number, b: number, bold: boolean)
+		if a > b then
+			return
+		end
+		table.insert(out, ui.span {
+			string.sub(label, a, b),
+			literal = true,
+			-- (A theme token, which a span takes: zgx's definitions allow a
+			-- span's weight numbers only.)
+			weight = if bold then "$font.weight.semibold" :: any else nil,
+		})
+	end
+	if not s or not e or e < from or s > to then
+		add(from, to, false)
+		return out
+	end
+	add(from, math.max(from, s) - 1, false)
+	add(math.max(from, s), math.min(to, e), true)
+	add(math.min(to, e) + 1, to, false)
+	return out
+end
+
+-- A name's extension (`.png`), kept whole as the rest of a long name is cut:
+-- a file's or an attachment's, not a chat's title.
+local function extension(label: string): number?
+	local at = string.match(label, "^.+()%.[%w_%-]+$")
+	if at and #label - at < 12 then
+		return at
+	end
+	return nil
+end
+
 -- `label` with the part that matches `query` in bold (its first match,
--- whatever its case); all of it plain without one.
-local function title(label: string, query: string): Node
+-- whatever its case). Too long, it's cut with an ellipsis, a file's before
+-- its extension (`Screenshot 2026-…png`), never clipped.
+local function title(label: string, query: string, keep_ext: boolean): Node
 	local s, e = nil, nil
 	if query ~= "" then
 		s, e = string.find(string.lower(label), string.lower(query), 1, true)
 	end
-	if not s or not e then
-		return FadeText { label, literal = true, shrink = 1, min_w = 0, text_size = "$font.size.md", color = "$text.primary" }
+	local look = { text_size = "$font.size.md", color = "$text.primary" }
+	local at = if keep_ext then extension(label) else nil
+	local function rich(from: number, to: number, cut: boolean): Node
+		local r: { [any]: any } = { text_size = look.text_size, color = look.color }
+		if cut then
+			r.shrink = 1
+			r.min_w = 0
+			r.truncate = true
+		else
+			r.shrink = 0
+		end
+		for _, n in spans(label, from, to, s, e) do
+			table.insert(r, n)
+		end
+		return ui.rich(r)
 	end
-	local from, to: number = s :: number, e :: number
-	local rich: { [any]: any } = { shrink = 1, min_w = 0, truncate = true, text_size = "$font.size.md", color = "$text.primary" }
-	if from > 1 then
-		table.insert(rich, ui.span { string.sub(label, 1, from - 1), literal = true })
+	if not at then
+		return rich(1, #label, true)
 	end
-	table.insert(rich, ui.span {
-		string.sub(label, from, to),
-		literal = true,
-		-- (A theme token, which a span takes: zgx's definitions allow a
-		-- span's weight numbers only.)
-		weight = "$font.weight.semibold" :: any,
-	})
-	if to < #label then
-		table.insert(rich, ui.span { string.sub(label, to + 1), literal = true })
-	end
-	return ui.rich(rich)
+	return ui.row {
+		shrink = 1,
+		min_w = 0,
+		items = "baseline",
+		rich(1, at - 1, true),
+		rich(at, #label, false),
+	}
 end
 
 -- Where a row's item is, cut from its start when long (`…/chat/screens`):
@@ -129,42 +187,65 @@ function M.Panel(props: Props): Node
 	local function count_text(n: number): string
 		return locale.s(if n == 1 then "ds.mention_launcher.result" else "ds.mention_launcher.results", { n = n })
 	end
-	-- The top: what's typed, and how many match in the scope chosen.
-	local head = ui.row {
-		h = HEAD_H,
+	-- Each band (the top, the scopes, the list, the keys) is inset from the
+	-- panel's edge as a menu's group is, its lines a row's: every band's text
+	-- starts where the rows' tiles do and ends where their ↵ does, and each
+	-- rule has the inset over it and under it.
+	local function band(child: Node): Node
+		return ui.column { w_full = true, shrink = 0, p = "$space.1", child }
+	end
+	-- The top: the trigger in the tiles' column, what's typed on the names'
+	-- line (or what to type, quiet, while nothing is), how many match in the
+	-- scope chosen at the end, on one baseline.
+	local head = band(ui.row {
+		h = "$zeron.menu.row",
 		w_full = true,
-		shrink = 0,
 		px = "$space.2",
 		gap = "$space.2",
 		items = "center",
 		ui.row {
+			w = "$zeron.menu.glyph.box",
+			shrink = 0,
+			justify = "center",
+			ui.text { trigger, text_size = "$font.size.md", color = "$text.tertiary" },
+		},
+		ui.row {
 			grow = 1,
 			min_w = 0,
-			items = "center",
-			ui.text { trigger, shrink = 0, text_size = "$font.size.md", color = "$text.tertiary" },
-			ui.text { query, min_w = 0, truncate = true, text_size = "$font.size.md", color = "$text.primary" },
+			gap = "$space.2",
+			items = "baseline",
+			ui.row {
+				grow = 1,
+				min_w = 0,
+				ui.show(function(): boolean
+					return query() ~= ""
+				end, ui.text { query, min_w = 0, truncate = true, text_size = "$font.size.md", color = "$text.primary" }, ui.text {
+					locale.t("ds.mention_launcher.placeholder"),
+					min_w = 0,
+					truncate = true,
+					text_size = "$font.size.md",
+					color = "$text.tertiary",
+				}),
+			},
+			ui.text {
+				function(): string
+					return count_text(props.counts()[props.scope:get()] or 0)
+				end,
+				shrink = 0,
+				tabular = true,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			},
 		},
-		ui.text {
-			function(): string
-				return count_text(props.counts()[props.scope:get()] or 0)
-			end,
-			shrink = 0,
-			tabular = true,
-			text_size = "$font.size.xs",
-			color = "$text.tertiary",
-		},
-	}
+	})
 	-- The scopes: All, then each section; the one chosen in the menus'
-	-- selected wash.
+	-- selected wash (the palette's scopes'), a row's corner.
 	local scope_list: { Section } = { { id = "all", label = locale.t("ds.mention_launcher.all") } }
 	for _, s in props.sections do
 		table.insert(scope_list, s)
 	end
 	local scopes: { [any]: any } = {
-		h = SCOPES_H,
 		w_full = true,
-		shrink = 0,
-		px = "$space.1",
 		gap = "$zeron.space.hair",
 		items = "center",
 		role = "tablist",
@@ -179,13 +260,13 @@ function M.Panel(props: Props): Node
 				role = "tab",
 				selected = chosen,
 				label = s.label,
-				h = 24,
+				h = "$zeron.menu.launcher.tab",
 				px = "$space.2",
 				gap = "$zeron.space.tight",
 				items = "center",
 				rounded = Menu.row_radius(),
 				bg = function(): string
-					return if chosen() then "$hover" else "#00000000"
+					return if chosen() then "$zeron.menu.selected" else "#00000000"
 				end,
 				hover = { bg = "$hover" },
 				focus = { outline = 0, border = 0 },
@@ -194,21 +275,25 @@ function M.Panel(props: Props): Node
 					props.scope:set(s.id)
 					props.active:set(1)
 				end,
-				ui.text {
-					s.label,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = function(): string
-						return if chosen() then "$text.primary" else "$text.secondary"
-					end,
-				},
-				ui.text {
-					function(): string
-						return tostring(props.counts()[s.id] or 0)
-					end,
-					tabular = true,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
+				ui.row {
+					gap = "$zeron.space.tight",
+					items = "baseline",
+					ui.text {
+						s.label,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						color = function(): string
+							return if chosen() then "$text.primary" else "$text.secondary"
+						end,
+					},
+					ui.text {
+						function(): string
+							return tostring(props.counts()[s.id] or 0)
+						end,
+						tabular = true,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					},
 				},
 			}
 		)
@@ -226,7 +311,7 @@ function M.Panel(props: Props): Node
 			if all and item.section ~= last then
 				last = item.section
 				-- (By its id: a message can't be held in a state.)
-				table.insert(out, { heading = item.section or "" })
+				table.insert(out, { heading = item.section or "", first = #out == 0 })
 			end
 			table.insert(out, { item = item, i = i })
 		end
@@ -235,6 +320,29 @@ function M.Panel(props: Props): Node
 	local function row(item: any, i: number): Node
 		local function lit(): boolean
 			return props.active:get() == i
+		end
+		-- Where it is and when it last moved: one group at the row's end,
+		-- against the ↵ key's slot; the time in a column of its own where
+		-- there is one (a chat's), so the places over and under line up.
+		local meta: { [any]: any } = { shrink = 100, min_w = 0, gap = "$space.2", items = "baseline", justify = "end" }
+		if item.detail then
+			table.insert(meta, ui.text {
+				place(item.detail),
+				literal = true,
+				shrink = 1,
+				min_w = 0,
+				truncate = true,
+				text_size = "$font.size.sm",
+				color = "$text.tertiary",
+			})
+		end
+		if item.side then
+			table.insert(meta, ui.row {
+				w = "$zeron.menu.launcher.time",
+				shrink = 0,
+				justify = "end",
+				ui.text { item.side, literal = true, tabular = true, text_size = "$font.size.sm", color = "$text.tertiary" },
+			})
 		end
 		return ui.button {
 			id = `mention-{i}`,
@@ -263,30 +371,18 @@ function M.Panel(props: Props): Node
 				props.choose(item)
 			end,
 			tile(item),
-			ui.row { grow = 1, min_w = 0, items = "center", title(item.label, query()) },
-			if item.detail
-				then ui.text {
-					place(item.detail),
-					literal = true,
-					shrink = 1,
-					min_w = 0,
-					truncate = true,
-					text_size = "$font.size.sm",
-					color = "$text.tertiary",
-				}
-				else nil,
-			-- When it last moved (a chat's), in its column; empty for none.
+			-- Its name and where it is, on one baseline.
 			ui.row {
-				w = TIME_W,
-				shrink = 0,
-				justify = "end",
-				if item.side
-					then ui.text { item.side, literal = true, tabular = true, text_size = "$font.size.xs", color = "$text.tertiary" }
-					else nil,
+				grow = 1,
+				min_w = 0,
+				gap = "$space.2",
+				items = "baseline",
+				ui.row { grow = 1, min_w = 0, title(item.label, query(), item.section ~= "chats") },
+				if item.detail or item.side then ui.row(meta) else nil,
 			},
 			-- The ↵ key's slot: kept on every row, the key in it on the lit one.
 			ui.row {
-				w = KEY_W,
+				w = "$zeron.menu.launcher.key",
 				shrink = 0,
 				justify = "end",
 				ui.show(lit, Kbd { keys = "enter", tone = "quiet" }),
@@ -297,30 +393,21 @@ function M.Panel(props: Props): Node
 	-- re-filter with the index it was built at otherwise.)
 	local rows = ui.each(placed, function(entry: any): Node
 		if entry.heading then
-			return Menu.Heading { labels[entry.heading] or "" }
+			return Menu.Heading { labels[entry.heading] or "", first = entry.first }
 		end
 		return row(entry.item, entry.i)
 	end, {
 		key = function(entry: any): string
-			return if entry.heading then `h:{entry.heading}` else `r:{entry.i}:{entry.item.section or ""}:{entry.item.value}`
+			return if entry.heading then `h:{entry.heading}:{entry.first}` else `r:{entry.i}:{entry.item.section or ""}:{entry.item.value}`
 		end,
 		gap = "$zeron.list.gap",
 	})
-	local function body_h(): number
-		local h = 0
-		local n = 0
+	local function list_cap(): number
+		local lines = {}
 		for _, entry in placed:get() do
-			if entry.heading then
-				h += HEADING_H
-			else
-				n += 1
-				if n > ROWS then
-					break
-				end
-				h += row_h() + 2
-			end
+			table.insert(lines, if entry.heading then "heading" else "row")
 		end
-		return h + 2
+		return Menu.list_height(lines, ROWS, row_h())
 	end
 	local function legend(keys: Node, what: string): Node
 		return ui.row {
@@ -331,19 +418,26 @@ function M.Panel(props: Props): Node
 			ui.text { what, text_size = "$font.size.xs", color = "$text.tertiary" },
 		}
 	end
-	local foot = ui.row {
-		h = FOOT_H,
+	local foot = band(ui.row {
+		h = "$zeron.menu.row",
 		w_full = true,
-		shrink = 0,
 		px = "$space.2",
 		gap = "$space.4",
 		items = "center",
 		legend(ui.row { gap = "$zeron.space.hair", Kbd { keys = "up" }, Kbd { keys = "down" } }, locale.s("ds.mention_launcher.navigate")),
 		legend(Kbd { keys = "enter" }, locale.s("ds.mention_launcher.insert")),
 		legend(Kbd { keys = "tab" }, locale.s("ds.mention_launcher.switch_tab")),
-	}
-	local function rule(): Node
-		return ui.div { h = 1, w_full = true, shrink = 0, bg = "$border.subtle", aria_hidden = true }
+	})
+	-- What a scope with nothing in it (or nothing yet) says, a row's line.
+	local function note(words: any, id: string?): Node
+		return ui.row {
+			id = id,
+			h = "$zeron.menu.row",
+			w_full = true,
+			px = "$space.2",
+			items = "center",
+			ui.text { words, text_size = "$font.size.sm", color = "$text.tertiary" },
+		}
 	end
 	return ui.column {
 		id = "mention-launcher",
@@ -353,43 +447,24 @@ function M.Panel(props: Props): Node
 		w_full = true,
 		gap = 0,
 		head,
-		ui.row(scopes),
-		rule(),
-		ui.column {
-			w_full = true,
-			p = "$space.1",
-			gap = 0,
-			ui.show(props.loading, ui.row {
-				h = ROW_ONE,
-				px = "$space.2",
-				items = "center",
-				ui.text { locale.t("ds.mention_launcher.loading"), text_size = "$font.size.sm", color = "$text.tertiary" },
-			}),
-			ui.show(function(): boolean
-				return not props.loading() and #props.shown:get() == 0
-			end, ui.row {
-				id = "mention-empty",
-				h = "$zeron.menu.row",
-				px = "$space.2",
-				items = "center",
-				ui.text {
-					function(): string
-						return props.empty(props.scope:get(), query())
-					end,
-					text_size = "$font.size.sm",
-					color = "$text.tertiary",
-				},
-			}),
-			ui.scroll {
-				w_full = true,
-				h = body_h,
-				overscroll = "contain",
-				role = "listbox",
-				label = locale.t("ds.mention_launcher.results_label"),
-				rows,
+		band(ui.row(scopes)),
+		Menu.Rule(),
+		Menu.List {
+			id = "mention-list",
+			before = {
+				ui.show(props.loading, note(locale.t("ds.mention_launcher.loading"))),
+				ui.show(function(): boolean
+					return not props.loading() and #props.shown:get() == 0
+				end, note(function(): string
+					return props.empty(props.scope:get(), query())
+				end, "mention-empty")),
 			},
+			lines = rows,
+			h = list_cap,
+			role = "listbox",
+			label = locale.t("ds.mention_launcher.results_label"),
 		},
-		rule(),
+		Menu.Rule(),
 		foot,
 	}
 end

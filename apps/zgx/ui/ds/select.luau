@@ -291,7 +291,7 @@ return ui.component(function(props: Props): Node
 				local group = control.text(o.group)
 				if group and group ~= heading then
 					heading = group
-					table.insert(items, Menu.Heading { o.group })
+					table.insert(items, Menu.Heading { o.group, first = #items == 0 })
 				end
 				table.insert(items, row(i, o, rows, now.icons, tall))
 			end

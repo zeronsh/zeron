@@ -491,10 +491,7 @@ function M.use(opts: Use)
 			at_caret = true,
 			autofocus = false,
 			w = function(): number
-				return if sections_of(token:get()) then Launcher.WIDTH else WIDTH
-			end,
-			p = function(): any
-				return if sections_of(token:get()) then 0 else nil
+				return if sections_of(token:get()) then Launcher.width() else WIDTH
 			end,
 			placement = { side = "top", align = "start", offset = 8 },
 			anchor = anchor,
@@ -522,28 +519,32 @@ function M.use(opts: Use)
 				-- from it.)
 				focus_on_press = false,
 				w_full = true,
-				p = "$space.1",
 				gap = 0,
-				Menu.Heading { title },
-				ui.show(loading, ui.column { gap = "$zeron.list.gap", table.unpack(skeleton) }),
-				ui.show(function()
-					return not loading() and #shown:get() == 0
-				end, ui.row {
-					h = ROW,
-					px = "$space.2",
-					items = "center",
-					ui.text { empty, text_size = "$font.size.sm", color = "$text.tertiary" },
-				}),
-				ui.scroll {
-					w_full = true,
+				Menu.List {
+					id = "mention-list",
+					before = {
+						Menu.Heading { title, first = true },
+						ui.show(loading, ui.column { gap = "$zeron.list.gap", table.unpack(skeleton) }),
+						ui.show(function()
+							return not loading() and #shown:get() == 0
+						end, ui.row {
+							id = "mention-empty",
+							h = ROW,
+							px = "$space.2",
+							items = "center",
+							ui.text { empty, text_size = "$font.size.sm", color = "$text.tertiary" },
+						}),
+					},
+					lines = rows,
 					h = function(): number
-						local n = #shown:get()
-						return math.min(n, ROWS) * (ROW + 2) + 2
+						local lines = {}
+						for _ = 1, #shown:get() do
+							table.insert(lines, "row")
+						end
+						return Menu.list_height(lines, ROWS, ROW)
 					end,
-					overscroll = "contain",
 					role = "listbox",
 					label = title,
-					rows,
 				},
 			}),
 		}

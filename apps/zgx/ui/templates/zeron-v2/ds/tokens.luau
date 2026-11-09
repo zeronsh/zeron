@@ -91,6 +91,10 @@ function M.setup()
 				heading = 24,
 				glyph = { box = 18, size = 16 },
 				width = 232,
+				-- The `@` launcher (ds/mention_launcher): its width, the least it
+				-- narrows to in a small window, a scope tab's height, and on each
+				-- row the time's column and the ↵ key's slot (a key cap's width).
+				launcher = { width = 440, min_width = 320, tab = 24, time = 40, key = 18 },
 				blur = 30,
 			},
 			-- An island: controls gathered on glass over the page (the title
