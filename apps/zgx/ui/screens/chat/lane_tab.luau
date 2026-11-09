@@ -1116,6 +1116,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
+		-- (A reply's link to one of its files: a chip.)
+		link_chip = function(target: string): boolean
+			local s = view.session:peek()
+			return FileLinks.chip(target, if s then s.cwd else nil)
+		end,
 		-- (A split's pane, made again at the place taken up: whether
 		-- that was its end.)
 		was_at_end = if split then anchor:peek() == nil else nil,

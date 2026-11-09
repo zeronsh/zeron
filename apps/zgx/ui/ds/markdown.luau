@@ -81,6 +81,9 @@ export type Props = {
 	-- the kind's own (a web link's: Open, the other place, Copy link; any
 	-- other: Open with `open`, Copy link).
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	-- Whether a link is one of the chat's files (a reply's link to it): drawn
+	-- as the chip a prompt's mention is, rather than as a link.
+	link_chip: ((target: string) -> boolean)?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -272,6 +275,7 @@ type Ctx = {
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	link_chip: ((target: string) -> boolean)?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -395,6 +399,12 @@ end
 local function mention_chip(span: { [any]: any }, target: string, name: string)
 	local chat = string.match(target, "^zeron%-chat:") ~= nil
 	local dir = string.sub(target, -1) == "/"
+	-- (Its icon by its file's own name: a reply's link may say it in other
+	-- words, `[the config](src/config.rs:12)`.)
+	local file = string.match(string.match(target, "^[^#]*") or target, "([^/]+)/?$") or name
+	file = string.match(file, "^(.-):%d") or file
+	-- (In the body's ink, whatever a link's is.)
+	span.color = nil
 	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
 	-- (One pill, zgx d6582b32: icon, gap, name and padding on one wash,
 	-- not underlined at rest; its text is the name alone, so a selection
@@ -410,13 +420,19 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
 	span.icon = if chat
 		then { src = "assets/icons/ui/side-chat.svg", size = 14, gap = 3, tint = "currentColor" }
-		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
+		else { src = `assets/icons/files/{set}/{FileIcon.of(if string.find(file, ".", 1, true) or dir then file else name, dir)}.svg`, size = 14, gap = 3 }
 end
 
 -- a command or skill picked in the composer has nothing to open, but reads
 -- as the same pill a mention does, as zeron's sent bubble and mobile draw it
 local function invocation_chip(span: { [any]: any }, name: string)
 	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
+	-- (A skill by its name alone, `frontend-design`, its icon saying it's
+	-- one; a command keeps its `/`.)
+	if string.sub(name, 1, 1) == "$" then
+		name = string.sub(name, 2)
+	end
+	span.color = nil
 	span.underline = false
 	span.underline_offset = nil
 	-- (A hover of its own, which changes nothing: without one, a link's
@@ -539,6 +555,17 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 	local function emit(span: { [any]: any }, text: string)
 		local from, to = pos + 1, pos + #text
 		pos = to
+		-- A chip (its icon before its name) is one piece, one wash: never cut
+		-- by a fade or a find. A match in it washes the whole chip.
+		if span.icon then
+			for i, m in marks do
+				if m[1] <= to and m[2] >= from then
+					span.bg = if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match"
+				end
+			end
+			table.insert(props, ui.span(span))
+			return
+		end
 		-- Cut where a fading chunk starts and ends; its words' colour fading.
 		if #fading > 0 and #marks == 0 and span[1] == text and veil then
 			veil_pieces(fading, from, to, function(s: number, e: number, c: VeilChunk?)
@@ -622,7 +649,11 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
-			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") then
+			if
+				string.match(r.a, "^zeron%-file:")
+				or string.match(r.a, "^zeron%-chat:")
+				or (ctx and ctx.link_chip and not opens(r.a) and ctx.link_chip(r.a))
+			then
 				mention_chip(span, r.a, r.x)
 			end
 			local target = r.a
@@ -1558,8 +1589,8 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.task or props.pictures or props.small
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

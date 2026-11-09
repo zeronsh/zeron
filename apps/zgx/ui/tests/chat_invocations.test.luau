@@ -146,7 +146,9 @@ test("skills sent in a prompt show in its bubble as their names, not as their re
 	expect(app:wait('~"and again"', { timeout_ms = 2000 })).to_be(true)
 	local bubble = app:tree("#transcript")
 	expect(bubble:find("zeron-invoke", 1, true)).to_be(nil)
-	local _, shown = string.gsub(bubble, "%$code%-review", "")
+	-- (A skill's chip by its name alone: no `$`.)
+	expect(bubble:find("$code-review", 1, true)).to_be(nil)
+	local _, shown = string.gsub(bubble, "code%-review", "")
 	expect(shown >= 2).to_be(true)
 end)
 

@@ -300,6 +300,10 @@ local function Session(id: Id?): Node
 							end,
 							open_link = open_link,
 							-- Their context menus (screens/chat/link_menu).
+							link_chip = function(target: string): boolean
+								local s = store.session:peek()
+								return FileLinks.chip(target, if s then s.cwd else nil)
+							end,
 							link_menu = LinkMenu(open_link, function(): any
 								return store.session:peek()
 							end),

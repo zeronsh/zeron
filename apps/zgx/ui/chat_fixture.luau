@@ -1321,6 +1321,41 @@ ui.command {
 		}
 	end,
 }
+-- A turn whose prompt and reply each start a paragraph with a file, a
+-- chat, a skill and a command (chips), then a web link (a link), in a chat
+-- whose folder is /work/atlas.
+local function invoke(kind: string, name: string): string
+	local json = `\{"kind":"{kind}","name":"{name}"\}`
+	return "zeron-invoke:" .. (string.gsub(json, ".", function(c: string): string
+		return string.format("%02x", string.byte(c))
+	end))
+end
+ui.command {
+	id = "chip_turn",
+	title = "A turn with chips",
+	run = function()
+		local s = table.clone(store.session:peek() or {})
+		s.cwd = "/work/atlas"
+		store.session:set(s)
+		local skill, command = invoke("skill", "frontend-design"), invoke("command", "review")
+		store.messages:push {
+			id = "cu1",
+			role = "user",
+			text = `[AGENTS.md](zeron-file:AGENTS.md) first\n\n[Long chat](zeron-chat:s1) then\n\n[$frontend-design]({skill}) and\n\n[/review]({command}) last`,
+			at = "Sep 8, 1:52 PM",
+		}
+		local reply = `[AGENTS.md](AGENTS.md) came through\n\n[Long chat](zeron-chat:s1) too\n\n[$frontend-design]({skill}) as well\n\n[the docs](https://example.com/) stay a link`
+		store.messages:push {
+			id = "ca1",
+			role = "assistant",
+			text = reply,
+			model = "Opus",
+			at = "Sep 8, 1:52 PM",
+			copy = reply,
+			blocks = { { id = "t", kind = "text", text = reply } },
+		}
+	end,
+}
 -- A live turn whose tools include a command of five lines (a shell script
 -- run as one call), a tool named only, and a thought: as the user's turn
 -- had it. `call` is the whole command, as the host gives it.

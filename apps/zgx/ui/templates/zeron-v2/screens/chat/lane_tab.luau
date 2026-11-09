@@ -793,6 +793,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
+		-- (A reply's link to one of its files: a chip.)
+		link_chip = function(target: string): boolean
+			local s = view.session:peek()
+			return FileLinks.chip(target, if s then s.cwd else nil)
+		end,
 	}
 	if tab.kind == "subagent" then
 		return ui.column { id = `lane-{slot}`, class = "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, transcript }
