@@ -1664,7 +1664,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			}
 		end
 		local t = s.time
-		local said = if type(t) == "number" then status.ago(os.time() - t) else t
+		local said = if type(t) == "number" then status.ago(status.since(t)) else t
 		if not said then
 			return nil
 		end

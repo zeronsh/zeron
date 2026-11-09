@@ -188,7 +188,7 @@ end
 function M.when(s: Session): string
 	local t = s.time
 	if type(t) == "number" then
-		return status.ago(math.max(0, os.time() - t))
+		return status.ago(status.since(t))
 	end
 	return t or ""
 end
