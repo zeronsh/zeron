@@ -866,7 +866,7 @@ return {
 	["ds.mention_launcher.results_label"] = "Results",
 	["ds.mention_launcher.navigate"] = "Navigate",
 	["ds.mention_launcher.insert"] = "Insert",
-	["ds.mention_launcher.scope"] = "Scope",
+	["ds.mention_launcher.switch_tab"] = "Switch tab",
 	["ds.mention_launcher.loading"] = "Looking…",
 	["ds.mention_launcher.empty.all"] = "Nothing to mention yet",
 	["ds.mention_launcher.empty.files"] = "No files",

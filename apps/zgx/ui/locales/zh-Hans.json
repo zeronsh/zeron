@@ -1077,7 +1077,7 @@
       "results_label": "结果",
       "navigate": "移动",
       "insert": "插入",
-      "scope": "范围",
+      "switch_tab": "切换标签",
       "loading": "正在查找…",
       "empty": {
         "all": "暂无可提及的内容",

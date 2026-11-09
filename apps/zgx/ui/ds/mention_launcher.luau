@@ -1,6 +1,6 @@
 -- The `@` list as a launcher (ds/composer_mentions draws it for a trigger
 -- given sections): what's typed on top with how many match; the scopes
--- under it (All, then each section), Tab and Shift+Tab going through them;
+-- under it (All, then each section), Tab and Shift+Tab switching tab;
 -- the rows in their sections, each under a small heading in All: a tile
 -- with its icon, its name (the part typed in bold) over a quieter line,
 -- what it is (or when) at its end, and ↵ on the lit one; a legend of the
@@ -39,6 +39,8 @@ export type Props = {
 	-- What an empty scope says.
 	empty: (scope: string, query: string) -> string,
 	choose: (item: any) -> (),
+	-- A press anywhere in it (a row, a tab, its blank room).
+	on_press: (() -> ())?,
 }
 
 -- `label` with the part that matches `query` in bold (its first match,
@@ -297,13 +299,14 @@ function M.Panel(props: Props): Node
 		items = "center",
 		legend(ui.row { gap = "$zeron.space.hair", Kbd { keys = "up" }, Kbd { keys = "down" } }, locale.s("ds.mention_launcher.navigate")),
 		legend(Kbd { keys = "enter" }, locale.s("ds.mention_launcher.insert")),
-		legend(Kbd { keys = "tab" }, locale.s("ds.mention_launcher.scope")),
+		legend(Kbd { keys = "tab" }, locale.s("ds.mention_launcher.switch_tab")),
 	}
 	local function rule(): Node
 		return ui.div { h = 1, w_full = true, shrink = 0, bg = "$border.subtle", aria_hidden = true }
 	end
 	return ui.column {
 		id = "mention-launcher",
+		on_press = props.on_press,
 		w_full = true,
 		gap = 0,
 		head,

@@ -63,7 +63,7 @@ test("`@` opens the launcher: what's typed and how many match, the scopes, the s
 	expect((files :: number) < (chats :: number) and (chats :: number) < (attached :: number)).to_be(true)
 	expect(shown).to_contain("zgx.png")
 	expect(count(app)).never.to_be("")
-	for _, key in { "Navigate", "Insert", "Scope" } do
+	for _, key in { "Navigate", "Insert", "Switch tab" } do
 		expect(tree).to_contain(`text "{key}"`)
 	end
 end)
@@ -225,4 +225,62 @@ test("round trip: an attachment picked in the draft goes as its words, and the s
 	local tree = app:tree("#transcript")
 	expect(tree).to_contain("Look at zgx.png")
 	expect(tree).never.to_contain("(attachment: zgx.png)")
+end)
+
+-- Whether the launcher shows (in the tree and not hidden), and what has the
+-- keys.
+local function open_now(app: any): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find("#mention-popover", 1, true) then
+			return not line:find(" hidden", 1, true)
+		end
+	end
+	return false
+end
+local function field_has_keys(app: any): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(" focused", 1, true) then
+			return line:find('textbox "Message"', 1, true) ~= nil
+		end
+	end
+	return false
+end
+
+test("a tab clicked switches to it and the launcher stays, the draft keeping the keys", function()
+	local app = chat()
+	app:command("drop_pictures")
+	settle(app)
+	app:type(BOX, "look @")
+	settle(app)
+	local wants = { Files = "chat.rs", Chats = "Long chat", Attachments = "zgx.png", All = "# Chats" }
+	for _, tab in { "Files", "Chats", "Attachments", "All" } do
+		app:click(`role:tab "{tab}"`)
+		settle(app)
+		expect(`{tab}: {open_now(app)}`).to_be(`{tab}: true`)
+		expect(rows(app)).to_contain(wants[tab])
+		expect(field_has_keys(app)).to_be(true)
+		expect(app:text(BOX)).to_be("look @")
+	end
+	-- Still typed at: the query narrows the tab shown.
+	app:key("Tab")
+	app:frames(5)
+	app:type(BOX, "")
+	settle(app)
+	expect(open_now(app)).to_be(true)
+end)
+
+test("a click on the launcher's blank room keeps it; a click on a row inserts it", function()
+	local app = chat()
+	app:type(BOX, "@")
+	settle(app)
+	for _, target in { '#mention-launcher >> "Navigate"', '#mention-launcher >> ~"results"', '#mention-launcher >> "Insert"' } do
+		app:click(target)
+		settle(app)
+		expect(`{target}: {open_now(app)}`).to_be(`{target}: true`)
+		expect(field_has_keys(app)).to_be(true)
+	end
+	app:click('role:option "Long chat"')
+	settle(app)
+	expect(app:text(BOX)).to_contain("@Long-chat")
+	expect(field_has_keys(app)).to_be(true)
 end)
