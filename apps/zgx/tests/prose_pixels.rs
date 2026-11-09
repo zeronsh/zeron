@@ -25,6 +25,8 @@ fn ui_dir() -> PathBuf {
 
 /// The window's size, in points, and its scale (a Retina display's).
 const W: f32 = 760.;
+/// The window's height to start with: taller as the reply needs (`fit`),
+/// so all of it is drawn and compared, not only what fits.
 const H: f32 = 900.;
 /// The widths each case is drawn at besides `W`: a narrow pane, a mid one,
 /// a wide window. Each wraps the words at its own places.
@@ -94,8 +96,9 @@ const CASES: &[(&str, &str)] = &[
 /// A renderer's app: the fixture with its text, scheme and key.
 struct Shown {
     app: TestApp,
-    /// The window's width, in points.
+    /// The window's width and height, in points.
     w: f32,
+    h: f32,
     gpu: zgx_gpu::GpuRenderer,
     text: zgx_script::Shared,
 }
@@ -153,7 +156,13 @@ impl Shown {
         app.ui.refresh_text_geometry();
         app.frames(4);
         assert_eq!(app.error(), None, "{renderer}");
-        Shown { app, w, gpu, text: shared.unwrap() }
+        Shown {
+            app,
+            w,
+            h: H,
+            gpu,
+            text: shared.unwrap(),
+        }
     }
 
     fn set(&self, text: &str) {
@@ -165,9 +174,25 @@ impl Shown {
     fn pixels(&mut self) -> Vec<u8> {
         self.app.ui.prepare_frame();
         let _ = self.app.ui.scene.borrow_mut().flush();
-        let all = [zgx::scene::Rect { x: 0., y: 0., width: self.w, height: H }];
+        let all = [zgx::scene::Rect { x: 0., y: 0., width: self.w, height: self.h }];
         self.gpu.render(&self.app.ui.scene.borrow(), &all).expect("drawn");
         self.gpu.readback().expect("read back")
+    }
+
+    /// Where the reply's box ends, in points down the window.
+    fn bottom(&mut self) -> f32 {
+        let r = self.reply();
+        r.y + r.height
+    }
+    /// The window `h` points tall (taller than it was, never shorter).
+    fn fit(&mut self, h: f32) {
+        if h <= self.h {
+            return;
+        }
+        self.h = h;
+        self.app.ui.scene.borrow_mut().resize(self.w, h);
+        self.gpu.resize((self.w * SCALE) as u32, (h * SCALE) as u32);
+        self.app.frames(2);
     }
 
     /// The reply's box's height, in points.
@@ -220,7 +245,7 @@ impl Shown {
         let r = self.reply();
         let at = |(fx, fy): (f32, f32)| (r.x + r.width * fx, r.y + fy);
         // (Away first: a click counts with the last.)
-        driver::click_at(&mut self.app.ui, zgx::scene::Rect { x: 2., y: H - 4., width: 1., height: 1. });
+        driver::click_at(&mut self.app.ui, zgx::scene::Rect { x: 2., y: self.h - 4., width: 1., height: 1. });
         self.app.frames(2);
         match how {
             Select::Drag(from, to) => driver::drag_between(&mut self.app.ui, at(from), at(to)),
@@ -311,12 +336,12 @@ fn diff(a: &[u8], b: &[u8], width: u32) -> Diff {
 
 /// Both pictures and their difference, as PNGs, where `PROSE_PIXELS_OUT`
 /// says.
-fn write_pictures(name: &str, luau: &[u8], native: &[u8], w: f32) {
+fn write_pictures(name: &str, luau: &[u8], native: &[u8], w: f32, h: f32) {
     let Some(dir) = std::env::var_os("PROSE_PIXELS_OUT").map(PathBuf::from) else {
         return;
     };
     std::fs::create_dir_all(&dir).unwrap();
-    let (w, h) = ((w * SCALE) as u32, (H * SCALE) as u32);
+    let (w, h) = ((w * SCALE) as u32, (h * SCALE) as u32);
     let marked: Vec<u8> = luau
         .chunks_exact(4)
         .zip(native.chunks_exact(4))
@@ -339,6 +364,13 @@ fn compare(name: &str, luau: &mut Shown, native: &mut Shown) -> Option<String> {
 /// `compare`; `drawn`: the page's words must show (not words all fading
 /// in from clear, as they land).
 fn compared(name: &str, luau: &mut Shown, native: &mut Shown, drawn: bool) -> Option<String> {
+    // All of both replies drawn: the window as tall as the taller needs.
+    let need = luau.bottom().max(native.bottom()) + 24.;
+    if need > luau.h || need > native.h {
+        let h = (need / 100.).ceil() * 100.;
+        luau.fit(h);
+        native.fit(h);
+    }
     let (a, b) = (luau.pixels(), native.pixels());
     // (Something drawn: the page's words, not its bare card.)
     let first = &a[..4];
@@ -347,11 +379,11 @@ fn compared(name: &str, luau: &mut Shown, native: &mut Shown, drawn: bool) -> Op
     let d = diff(&a, &b, (luau.w * SCALE) as u32);
     if d.pixels == 0 {
         if std::env::var_os("PROSE_PIXELS_ALL").is_some() {
-            write_pictures(name, &a, &b, luau.w);
+            write_pictures(name, &a, &b, luau.w, luau.h);
         }
         return None;
     }
-    write_pictures(name, &a, &b, luau.w);
+    write_pictures(name, &a, &b, luau.w, luau.h);
     Some(format!(
         "{name}: {} pixels apart, most {} a channel, in {:?} (device pixels); heights {} and {}\n\
          --- ds/markdown:\n{}--- markdown_view:\n{}",
@@ -647,4 +679,52 @@ fn a_chip_known_late_is_drawn_as_ds_markdowns() {
     assert!(native.pixels() != before, "the skill's chip drawn");
     assert_eq!(compare("chip-late", &mut luau, &mut native), None);
     assert_eq!(native.app.error(), None);
+}
+
+/// A find over the reply marks its matches as ds/markdown marks them (the
+/// editor's washes, the current one strongly, across runs, links and code,
+/// a chip washed whole, numbered from each top-level block's first), and
+/// brings the block holding the current match into view as it does.
+#[test]
+fn a_finds_marks_and_reveals_are_ds_markdowns() {
+    let text = CASES.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n");
+    let finding = [("pixels.finding", Value::from(true))];
+    let mut failed = Vec::new();
+    for w in [360., W] {
+        let mut luau = Shown::made(w, "luau", "dark", "", &text, &finding);
+        let mut native = Shown::made(w, "native", "dark", "", &text, &finding);
+        for (query, block, k) in [
+            ("the", 1, 2),
+            ("THE", 3, 1),
+            ("the", 0, 0),
+            ("bold link", 6, 1),
+            ("main", 8, 2),
+            ("code", 4, 1),
+            ("https://", 5, 3),
+            ("a", 2, 7),
+            ("plan.md", 8, 1),
+            ("", 0, 0),
+        ] {
+            for shown in [&luau, &native] {
+                (shown.app.host.shared("pixels.at", Value::Nil)).set(Value::List(
+                    vec![Value::from(query), Value::Num(block as f64), Value::Num(k as f64)].into(),
+                ));
+                shown.app.frames(3);
+            }
+            // Where the block last revealed is, laid out.
+            for shown in [&luau, &native] {
+                assert!(shown.app.host.run_command("pixels_where"));
+                shown.app.frames(1);
+            }
+            if let Some(why) = compare(&format!("find-{w}-{query}-{block}-{k}"), &mut luau, &mut native) {
+                failed.push(format!("{query:?} (current {block}:{k}) at {w}: {}", why.lines().next().unwrap()));
+            }
+        }
+        let revealed = |shown: &Shown| shown.app.host.shared("pixels.revealed", Value::from("")).with_untracked(|v| v.to_string());
+        assert!(!revealed(&luau).is_empty(), "revealed some");
+        assert_eq!(revealed(&native), revealed(&luau), "the same blocks revealed, at the same places");
+        assert_eq!(native.app.error(), None);
+        eprintln!("find at {w} pt: every query's marks the same, every pixel; revealed {}", revealed(&luau));
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
