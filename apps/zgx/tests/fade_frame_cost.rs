@@ -128,6 +128,8 @@ fn a_streaming_replys_frames_drawn() {
     // Each chunk frame's instructions (script, update, layout, paint) by the
     // kind of block being written: the last block of what has come.
     let mut by_kind: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    // (And each phase's apart: where a kind's chunk goes.)
+    let mut by_kind_phase: BTreeMap<(String, String), Vec<u64>> = BTreeMap::new();
     let kind_at = |end: usize| -> String {
         let blocks = zgx_script::markdown::parse(&text[..end], &Default::default());
         blocks
@@ -182,6 +184,12 @@ fn a_streaming_replys_frames_drawn() {
                     .map(|(_, n, _)| *n)
                     .sum();
                 by_kind.entry(kind_at(end)).or_default().push(work);
+                for (p, n, _) in phases.iter() {
+                    let p = format!("{p:?}");
+                    if matches!(p.as_str(), "Script" | "Update" | "Layout" | "Paint") {
+                        by_kind_phase.entry((kind_at(end), p)).or_default().push(*n);
+                    }
+                }
                 chunks.add(wall, phases, damaged);
                 text_work.push(last_stats.get());
             } else {
@@ -202,6 +210,23 @@ fn a_streaming_replys_frames_drawn() {
             work.iter().sum::<u64>() as f64 / work.len() as f64 / 1e3,
             work.len()
         );
+    }
+    eprintln!("the same by phase (median instructions):");
+    let mut row = String::new();
+    let mut at = String::new();
+    for ((kind, phase), mut work) in by_kind_phase {
+        if kind != at {
+            if !row.is_empty() {
+                eprintln!("{row}");
+            }
+            row = format!("  {kind:>8}:");
+            at = kind;
+        }
+        work.sort_unstable();
+        row.push_str(&format!("  {phase} {:>7.1}K", work[work.len() / 2] as f64 / 1e3));
+    }
+    if !row.is_empty() {
+        eprintln!("{row}");
     }
     let kept = text_work.iter().filter(|(lines, _)| *lines > 0).count();
     let mut lines: Vec<usize> = text_work.iter().map(|w| w.0).collect();
