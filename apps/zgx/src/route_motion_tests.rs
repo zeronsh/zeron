@@ -9,7 +9,7 @@ use zgx_script::{ScriptHost, Value, testing::TestApp};
 
 // Characterization, not a reproduction of the reported visual glitch.
 // These snapshots observe the scene, not GPU pixels. See
-// docs/composer-characterization.md for the separate visual procedure.
+// docs/composer.md for the separate visual procedure.
 const FIELD: &str = "#chat-composer >> role:textbox";
 const BUILD: &str = "#shell-sidebar >> role:button \"Fix the build\"";
 const DOCS: &str = "#shell-sidebar >> role:button \"Write the docs\"";

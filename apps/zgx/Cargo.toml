@@ -4,8 +4,7 @@
 # patched crates (its `[patch.crates-io]`, mirrored below), and a patch here
 # must not reach gpui's wgpu renderer in the shipping app. It tracks zgx's
 # `main` branch, pinned by commit when Zeron needs one ahead of main.
-# Natural editor metrics currently use a published fork revision because
-# upstream push is unavailable; see docs/composer-editor-api.md.
+# Natural editor metrics use the pinned framework API; see docs/composer.md.
 
 [workspace]
 

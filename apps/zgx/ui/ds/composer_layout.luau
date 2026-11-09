@@ -84,7 +84,6 @@ function M.calculate(p: Input, previous_text_expanded: boolean): Geometry
 		next_text_expanded = expanded
 	end
 	-- Forced modes and an unknown width don't change text hysteresis.
-	-- This preserves the pre-refactor behavior after a question/dictation.
 	local head = if p.cargo or p.asking then math.max(0, p.header_height) else 0
 	local natural_text = if p.sample then math.max(p.sample.wrapped_height, p.sample.line_height) else LINE
 	local natural_box = natural_text + TEXT_TOP + TEXT_BOTTOM

@@ -1075,7 +1075,7 @@ return ui.component(function(props: Props): Node
 		local _ = ui.theme.current:get()
 		return {
 			width = pill_w:get(),
-			-- Retain C2's complete previous sample while a request is stale.
+			-- Retain the last complete sample while a request is stale.
 			sample = metrics.result:get().sample,
 			trailing_width = trailing_seen:get(),
 			control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),

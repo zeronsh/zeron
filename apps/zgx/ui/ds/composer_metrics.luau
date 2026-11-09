@@ -26,20 +26,21 @@ export type Props = {
 }
 
 function M.use(props: Props)
-	-- New namespace: a restored plain-text measurement is not editor geometry.
+	-- Keep measurements under the editor-metrics provider namespace.
 	local measured: State<Sample?> = if props.keep
 		then ui.state(`composer:{props.keep}:editor_text_metrics`, nil :: Sample?)
 		else ui.use_state(nil :: Sample?)
 	local revision = if measured:peek() then (measured:peek() :: Sample).revision else 0
 	local request = ui.computed(function()
-		local text = props.value:get()
+		-- Track edits even when the measured dimensions stay equal.
+		props.value:get()
 		local width = math.max(0, props.width())
-		local theme = ui.theme.current:get()
+		ui.theme.current:get()
 		local el = props.editor:get()
 		-- Reading follows the editor's settled content/IME/style revision.
 		local source = if el and width > 0 then el:text_metrics(width) else nil
 		revision += 1
-		return { text = text, width = width, theme = theme, editor = el, source = source, revision = revision }
+		return { width = width, editor = el, source = source, revision = revision }
 	end)
 	local alive = true
 	local cancel: (() -> ())? = nil
