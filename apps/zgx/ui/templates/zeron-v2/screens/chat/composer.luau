@@ -1331,6 +1331,10 @@ local function Composer(): Node
 					return nil
 				end,
 			}) :: any,
+			-- (Whose draft it shows: a mention list put away is that chat's.)
+			draft_key = function(): any
+				return session_id:get() or ""
+			end,
 		}
 	end
 

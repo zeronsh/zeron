@@ -1096,6 +1096,9 @@ local function Composer(): Node
 			on_mention = completions.on_mention,
 			mention_enabled = completions.enabled,
 			mention_empty = completions.empty,
+			draft_key = function(): any
+				return session_id:get() or ""
+			end,
 		}
 	end
 

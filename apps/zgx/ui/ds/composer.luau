@@ -276,6 +276,9 @@ export type Props = {
 	-- send).
 	on_mention: ((item: any, trigger: string, token: string) -> ())?,
 	mention_empty: { [string]: string }?,
+	-- Whose draft it shows (a composer that moves between chats: the
+	-- chat), so a mention list put away is that draft's alone.
+	draft_key: (() -> any)?,
 }
 
 -- Zeron's geometry. The one line: 47 points inside the hairline, the text
@@ -1077,6 +1080,7 @@ return ui.component(function(props: Props): Node
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
 		on_choose = props.on_mention,
+		key = props.draft_key,
 		in_view = function(): boolean
 			return (pill_w:get() or 0) > 0
 		end,
@@ -1880,6 +1884,12 @@ return ui.component(function(props: Props): Node
 				highlight = mentions.highlight,
 				active_descendant = m.descendant,
 				on_caret = m.on_caret,
+				on_focus = function()
+					m.on_focus(true)
+				end,
+				on_blur = function()
+					m.on_focus(false)
+				end,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
