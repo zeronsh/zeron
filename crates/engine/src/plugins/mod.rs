@@ -59,6 +59,35 @@ use status::{Author, State, Status};
 pub const PLUGINS_DIR: &str = "plugins";
 pub const TEMPLATES_DIR: &str = "templates";
 pub const REMOVED_DIR: &str = ".removed";
+
+/// Forget what plugin `id` kept under `plugins_dir/.storage`: `zeron.store`
+/// (the app's and its service's), its settings, and its database with
+/// SQLite's files beside it. A plugin installed later under the id starts
+/// with none of it.
+pub(crate) fn forget_storage(plugins_dir: &Path, id: &str) {
+    let storage = plugins_dir.join(".storage");
+    for end in ["json", "settings.json", "sqlite3", "sqlite3-wal", "sqlite3-shm"] {
+        let _ = std::fs::remove_file(storage.join(format!("{id}.{end}")));
+    }
+    let _ = std::fs::remove_file(Services::store_path(&storage, id));
+}
+
+/// Take away what removing plugins left in `plugins_dir/.removed` (each is
+/// moved there first, so it's gone from the list at once, then deleted).
+pub(crate) fn sweep_removed(plugins_dir: &Path) {
+    let removed = plugins_dir.join(REMOVED_DIR);
+    let Ok(listed) = std::fs::read_dir(&removed) else { return };
+    for entry in listed.flatten() {
+        let path = entry.path();
+        let gone = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        if let Err(error) = gone {
+            tracing::debug!(path = %path.display(), %error, "plugins: couldn't delete a removed plugin yet");
+        }
+    }
+}
 /// `PluginSend`'s `data`, serialized (checked again where it lands).
 pub const MAX_SEND_BYTES: usize = 64 * 1024;
 /// A service call's `args` from another device, serialized.
@@ -664,6 +693,8 @@ impl Plugins {
         let worker = runtime.spawn(Self::worker(Arc::downgrade(&self.inner), rx));
         let this = self.clone();
         let setup = runtime.spawn(async move {
+            let plugins_dir = this.inner.plugins_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || sweep_removed(&plugins_dir)).await;
             let watcher = this.clone();
             let _ = tokio::task::spawn_blocking(move || watcher.install_watch(tx)).await;
             this.register_key().await;
@@ -1226,6 +1257,22 @@ impl Plugins {
         else {
             return;
         };
+        // A plugin of yours or someone else's whose folder went (deleted by
+        // hand, not removed here): what it kept goes too, so a plugin
+        // installed later under its id doesn't inherit it. (Installs swap a
+        // folder under the scan lock, so a scan never sees one gone.)
+        let dropped: Vec<String> = {
+            let before = lock(&self.inner.entries);
+            before
+                .iter()
+                .filter(|e| !e.item.builtin && !entries.iter().any(|now| now.item.id == e.item.id))
+                .map(|e| e.item.id.clone())
+                .collect()
+        };
+        for id in &dropped {
+            tracing::info!(plugin = %id, "plugins: its folder is gone; forgetting what it kept");
+            forget_storage(&self.inner.plugins_dir, id);
+        }
         *lock(&self.inner.entries) = entries;
         self.inner.scanned.store(true, Ordering::SeqCst);
         self.publish_list();
@@ -1461,10 +1508,36 @@ impl Plugins {
         }
     }
 
+    /// Whether `new` is another live key of the account that signed with
+    /// `old` ([`keys::same_account`]), asked of the edge now (never the
+    /// cache: a key revoked a minute ago mustn't take a plugin over).
+    /// Offline, signed out or slow: no.
+    pub(super) async fn same_account(&self, old: &str, new: &str) -> bool {
+        if old == new {
+            return false;
+        }
+        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+            return false;
+        };
+        let look = |key: &str| {
+            let (directory, account, key) = (directory.clone(), account.clone(), key.to_owned());
+            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, &account)).await.ok().flatten() }
+        };
+        let (Some(old), Some(new)) = (look(old).await, look(new).await) else {
+            return false;
+        };
+        keys::same_account(&old, &new)
+    }
+
+    /// The plugin `id`: Zeron's own when a folder of yours squats its id
+    /// (that folder is listed Broken beside it, and what's kept under the id
+    /// is the built-in's).
     fn entry(&self, id: &str) -> Option<Entry> {
-        lock(&self.inner.entries)
+        let entries = lock(&self.inner.entries);
+        entries
             .iter()
-            .find(|e| e.item.id == id)
+            .find(|e| e.item.id == id && e.item.builtin)
+            .or_else(|| entries.iter().find(|e| e.item.id == id))
             .cloned()
     }
 
@@ -1701,9 +1774,10 @@ impl Plugins {
             }
             methods::REMOVE_PLUGIN => {
                 let p: IdParams = parse_params(params)?;
-                if self.entry(&p.id).is_some_and(|e| e.item.builtin) {
-                    return Err(failed("Built-in plugins can be turned off, but not removed"));
-                }
+                // A folder of yours under a built-in's id is taken away, but
+                // what's kept under the id (its decision, storage) is the
+                // built-in's, and stays.
+                let builtin = self.entry(&p.id).is_some_and(|e| e.item.builtin);
                 // (One plain name, joined so it stays in the plugins folder on
                 // every system: never `C:`, a device name or a trailing dot.)
                 let dir = match zeron_plugin_guard::path::join(&self.inner.plugins_dir, &p.id) {
@@ -1711,26 +1785,31 @@ impl Plugins {
                     _ => return Err(failed(format!("There's no plugin {}", p.id))),
                 };
                 if std::fs::symlink_metadata(&dir).is_err() {
-                    return Err(failed(format!("There's no plugin {}", p.id)));
+                    return Err(failed(if builtin {
+                        "Built-in plugins can be turned off, but not removed".to_string()
+                    } else {
+                        format!("There's no plugin {}", p.id)
+                    }));
                 }
                 let removed = self.inner.plugins_dir.join(REMOVED_DIR);
                 std::fs::create_dir_all(&removed).map_err(|_| failed("Couldn't remove it"))?;
                 std::fs::rename(&dir, removed.join(format!("{}-{}", p.id, now_secs())))
                     .map_err(|_| failed("Couldn't remove it"))?;
+                // Gone from the list now; its files go with it (what can't
+                // be deleted yet goes when the engine next starts).
+                let plugins_dir = self.inner.plugins_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || sweep_removed(&plugins_dir)).await;
+                if builtin {
+                    self.rescan().await;
+                    return RpcReply::value(&serde_json::json!({}));
+                }
                 self.update_state(|state| {
                     state.decisions.remove(&p.id);
                     state.own.remove(&p.id);
                 })?;
-                // What it kept (`zeron.store`, the app's) goes with it.
-                let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.json", p.id)));
-                // And its settings (the app's: what you set on its page).
-                let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.settings.json", p.id)));
-                // Its service's (`zeron.store` in service.luau).
-                let _ = std::fs::remove_file(Services::store_path(&self.inner.plugins_dir.join(".storage"), &p.id));
-                // Its database (`zeron.db`), and SQLite's files beside it.
-                for end in ["sqlite3", "sqlite3-wal", "sqlite3-shm"] {
-                    let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.{end}", p.id)));
-                }
+                // What it kept (`zeron.store`, its settings, its database)
+                // goes with it.
+                forget_storage(&self.inner.plugins_dir, &p.id);
                 install::forget_found(&self.inner.plugins_dir, &p.id);
                 self.rescan().await;
                 RpcReply::value(&serde_json::json!({}))

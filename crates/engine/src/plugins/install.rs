@@ -12,8 +12,10 @@
 //!
 //! Installing never decides for you, except for a plugin signed by your own
 //! key (`mod.rs`): someone else's waits for the consent window, the app's
-//! own. An update must be signed by the key the installed one was; one
-//! asking for more than you allowed waits for you again.
+//! own. An update must be signed by the key the installed one was, or by
+//! another live key the edge verifies to the same account (the author on a
+//! new machine), which asks you again; one asking for more than you allowed
+//! waits for you again.
 //!
 //! Where each came from is kept beside its files in `.source.json` (a dot
 //! file, so never part of what's signed). An update found is kept in
@@ -218,6 +220,8 @@ pub fn not_newer(candidate: &str, installed: &str) -> String {
 /// What was installed over, when it was an update.
 #[derive(Debug, Clone)]
 pub struct Replaced {
+    /// The key the replaced one was signed by.
+    pub key: String,
     pub version: String,
     pub permissions: Vec<String>,
     pub hash: String,
@@ -235,8 +239,9 @@ fn installed(dir: &Path) -> Result<(String, Replaced), String> {
         ));
     };
     Ok((
-        key,
+        key.clone(),
         Replaced {
+            key,
             version: manifest.map(|m| m.version.clone()).unwrap_or_default(),
             permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
             hash: inspected.hash,
@@ -245,14 +250,15 @@ fn installed(dir: &Path) -> Result<(String, Replaced), String> {
 }
 
 /// Install `package` under `plugins_dir`, from `source`. Over an installed
-/// plugin only when the same key signed both; never over anything else.
-/// Returns what it replaced.
-pub fn install(plugins_dir: &Path, package: &Package, source: &Source) -> Result<Option<Replaced>, String> {
+/// plugin only when the same key signed both, or the installed one's key is
+/// `rotated_from` (checked by the caller to be the same account's as the
+/// package's); never over anything else. Returns what it replaced.
+pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_from: Option<&str>) -> Result<Option<Replaced>, String> {
     let id = package.id().to_owned();
     let dir = plugins_dir.join(&id);
     let replaced = if std::fs::symlink_metadata(&dir).is_ok() {
         let (key, replaced) = installed(&dir)?;
-        if key != package.key {
+        if key != package.key && rotated_from != Some(key.as_str()) {
             return Err(format!(
                 "A plugin called {id} is installed already, signed by someone else. Remove it first to install this one."
             ));
@@ -529,16 +535,7 @@ pub async fn from_git(url: &str, git_ref: Option<&str>, path: Option<&str>, scra
     let result = async {
         git(&args, None).await?;
         let commit = git(&["rev-parse", "HEAD"], Some(&clone)).await?;
-        let folder = match path {
-            Some(path) => clone.join(path),
-            None => clone.clone(),
-        };
-        if !folder.join(MANIFEST_FILE).is_file() {
-            return Err(match path {
-                Some(path) => format!("There's no zeron-plugin.json in {path}"),
-                None => "There's no zeron-plugin.json at the top of that repository".into(),
-            });
-        }
+        let folder = plugin_folder(&clone, path)?;
         let raw = tokio::task::spawn_blocking(move || pack_folder(&folder))
             .await
             .map_err(|_| "Couldn't read it".to_string())??;
@@ -547,6 +544,29 @@ pub async fn from_git(url: &str, git_ref: Option<&str>, path: Option<&str>, scra
     .await;
     let _ = std::fs::remove_dir_all(&clone);
     result
+}
+
+/// The plugin's folder at `path` in the repository cloned to `clone`, which
+/// must stay inside it however its links point (a folder linked out of the
+/// clone would pack files from this computer), with its own
+/// `zeron-plugin.json` (not a link).
+fn plugin_folder(clone: &Path, path: Option<&str>) -> Result<PathBuf, String> {
+    let missing = || match path {
+        Some(path) => format!("There's no zeron-plugin.json in {path}"),
+        None => "There's no zeron-plugin.json at the top of that repository".into(),
+    };
+    let root = std::fs::canonicalize(clone).map_err(|_| "Couldn't read that repository".to_string())?;
+    let folder = match path {
+        Some(path) => std::fs::canonicalize(clone.join(path)).map_err(|_| missing())?,
+        None => root.clone(),
+    };
+    if !folder.starts_with(&root) {
+        return Err(format!("{} isn't inside that repository", path.unwrap_or_default()));
+    }
+    if !std::fs::symlink_metadata(folder.join(MANIFEST_FILE)).is_ok_and(|m| m.is_file()) {
+        return Err(missing());
+    }
+    Ok(folder)
 }
 
 /// The package `origin` names, and where it came from (its `Source`,
@@ -650,6 +670,10 @@ pub struct Found {
     /// grows anything: installing it waits for you.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest_diff: Option<Value>,
+    /// Signed by another of its author's keys (a new machine): installing it
+    /// asks you again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_key: bool,
 }
 
 impl Found {
@@ -661,6 +685,9 @@ impl Found {
         }
         if let Some(diff) = &self.digest_diff {
             value["digest_diff"] = diff.clone();
+        }
+        if self.new_key {
+            value["new_key"] = json!(true);
         }
         value
     }
@@ -721,7 +748,9 @@ pub struct Installed<'a> {
 
 /// What a check of `installed` found in `fetched`: nothing new, or an
 /// update (refused when someone else signed it, or it isn't later).
-pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source) -> Option<Found> {
+/// `same_account`: `fetched`'s key, though not the installed one's, is a
+/// live key of the same account (checked by the caller).
+pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, same_account: bool) -> Option<Found> {
     let Installed { id, key, version, permissions, hash, allowed } = *installed;
     if fetched.hash == hash {
         return None;
@@ -729,7 +758,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source) -> 
     let change = grant_change(permissions, &fetched.manifest.permissions);
     let refused = if fetched.id() != id {
         Some(format!("The new version is a different plugin ({})", fetched.id()))
-    } else if fetched.key != key {
+    } else if fetched.key != key && !same_account {
         Some("The new version is signed by someone else, so it won't be installed".to_string())
     } else if !newer(&fetched.manifest.version, version) {
         Some(not_newer(&fetched.manifest.version, version))
@@ -746,6 +775,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source) -> 
         refused,
         source: Some(source),
         digest_diff: diff.grew().then(|| diff.to_value()),
+        new_key: fetched.key != key,
     })
 }
 
@@ -773,7 +803,7 @@ pub(crate) mod tests {
         let package = parse(raw.clone()).unwrap();
         assert_eq!((package.id(), package.key.as_str()), ("focus", key.public().as_str()));
         let source = Source { kind: "file".into(), url: None, path: Some("/x.zeron-plugin".into()), git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 1 };
-        assert!(install(dir.path(), &package, &source).unwrap().is_none());
+        assert!(install(dir.path(), &package, &source, None).unwrap().is_none());
         let installed = scan::inspect(&dir.path().join("focus"), true);
         assert_eq!(installed.sig, SigCheck::Valid(key.public()));
         assert_eq!(installed.hash, package.hash);
@@ -786,12 +816,12 @@ pub(crate) mod tests {
 
         // An update by the same key replaces it; by another key, refused.
         let newer = parse(signed_package(&key, "focus", "1.1.0", &["ui.add", "links.open"], "return 2")).unwrap();
-        let replaced = install(dir.path(), &newer, &source).unwrap().unwrap();
+        let replaced = install(dir.path(), &newer, &source, None).unwrap().unwrap();
         assert_eq!((replaced.version.as_str(), replaced.hash.as_str()), ("1.0.0", package.hash.as_str()));
         assert_eq!(grant_change(&replaced.permissions, &newer.manifest.permissions), GrantChange { added: vec!["links.open".into()], removed: vec![] });
         let (eve, _) = SigningKey::generate().unwrap();
         let theirs = parse(signed_package(&eve, "focus", "9.0.0", &[], "return 3")).unwrap();
-        assert!(install(dir.path(), &theirs, &source).unwrap_err().contains("signed by someone else"));
+        assert!(install(dir.path(), &theirs, &source, None).unwrap_err().contains("signed by someone else"));
         assert_eq!(scan::inspect(&dir.path().join("focus"), true).hash, newer.hash);
 
         // A package carrying its own zeron-plugin.json as a file, refused.
@@ -845,13 +875,36 @@ pub(crate) mod tests {
         let record = crate::plugins::capability::record(&installed.manifest);
         let key_public = key.public();
         let was = Installed { id: "focus", key: &key_public, version: "1.0.0", permissions: &perms, hash: &installed.hash, allowed: &record };
-        assert_eq!(compare(&was, &installed, source.clone()), None);
+        assert_eq!(compare(&was, &installed, source.clone(), false), None);
         let later = parse(signed_package(&key, "focus", "1.1.0", &["github"], "return 2")).unwrap();
-        let found = compare(&was, &later, source.clone()).unwrap();
+        let found = compare(&was, &later, source.clone(), false).unwrap();
         assert_eq!((found.version.as_str(), found.added.clone(), found.removed.clone(), found.refused.clone()), ("1.1.0", vec!["github".to_string()], vec!["ui.add".to_string()], None));
         assert_eq!(found.digest_diff.unwrap()["permissions_added"], json!(["github"]));
         let theirs = parse(signed_package(&eve, "focus", "2.0.0", &[], "return 3")).unwrap();
-        assert!(compare(&was, &theirs, source).unwrap().refused.is_some());
+        assert!(compare(&was, &theirs, source, false).unwrap().refused.is_some());
+    }
+
+    /// R25(d): a git install's `path` was joined to the clone as written,
+    /// so a folder in the repository linked out of it packed this
+    /// computer's files.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_plugin_folder_stays_inside_the_clone() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join(MANIFEST_FILE), b"{}").unwrap();
+        let clone = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(clone.path().join("plugins/focus")).unwrap();
+        std::fs::write(clone.path().join("plugins/focus").join(MANIFEST_FILE), b"{}").unwrap();
+        std::os::unix::fs::symlink(outside.path(), clone.path().join("plugins/out")).unwrap();
+        std::fs::create_dir_all(clone.path().join("plugins/linked")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join(MANIFEST_FILE), clone.path().join("plugins/linked").join(MANIFEST_FILE)).unwrap();
+
+        let inside = plugin_folder(clone.path(), Some("plugins/focus")).unwrap();
+        assert!(inside.ends_with("plugins/focus"));
+        assert!(plugin_folder(clone.path(), Some("plugins/out")).unwrap_err().contains("isn't inside"));
+        assert!(plugin_folder(clone.path(), Some("plugins/linked")).unwrap_err().contains("There's no zeron-plugin.json"));
+        assert!(plugin_folder(clone.path(), Some("plugins/none")).unwrap_err().contains("There's no zeron-plugin.json"));
+        assert!(plugin_folder(clone.path(), None).unwrap_err().contains("at the top"));
     }
 
     /// R23: an update was any package with another hash under the same key,
@@ -865,18 +918,18 @@ pub(crate) mod tests {
         let (key, _) = SigningKey::generate().unwrap();
         let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 };
         let v2 = parse(signed_package(&key, "focus", "2.0.0", &[], "return 2")).unwrap();
-        install(dir.path(), &v2, &source).unwrap();
+        install(dir.path(), &v2, &source, None).unwrap();
         let v1 = parse(signed_package(&key, "focus", "1.0.0", &[], "return 1")).unwrap();
-        assert!(install(dir.path(), &v1, &source).unwrap_err().contains("isn't later"));
+        assert!(install(dir.path(), &v1, &source, None).unwrap_err().contains("isn't later"));
         let same_version = parse(signed_package(&key, "focus", "2.0.0", &[], "return 666")).unwrap();
-        assert!(install(dir.path(), &same_version, &source).unwrap_err().contains("isn't later"));
+        assert!(install(dir.path(), &same_version, &source, None).unwrap_err().contains("isn't later"));
         // The same package again is no change.
-        assert!(install(dir.path(), &v2, &source).is_ok());
+        assert!(install(dir.path(), &v2, &source, None).is_ok());
         let perms = Vec::new();
         let record = crate::plugins::capability::record(&v2.manifest);
         let key_public = key.public();
         let was = Installed { id: "focus", key: &key_public, version: "2.0.0", permissions: &perms, hash: &v2.hash, allowed: &record };
-        assert!(compare(&was, &v1, source).unwrap().refused.unwrap().contains("isn't later"));
+        assert!(compare(&was, &v1, source, false).unwrap().refused.unwrap().contains("isn't later"));
         assert_eq!(scan::inspect(&dir.path().join("focus"), true).hash, v2.hash);
     }
 }

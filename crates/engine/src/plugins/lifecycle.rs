@@ -172,7 +172,15 @@ impl Plugins {
     async fn install_package(&self, package: Package, mut source: Source) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let id = package.id().to_owned();
+        // Signed by another key than the installed one: only its author's
+        // own (a new machine), which asks you again.
+        let mut rotated_from = None;
         if let Some(entry) = self.entry(&id) {
+            if let Some(key) = entry.key().filter(|k| *k != package.key)
+                && self.same_account(key, &package.key).await
+            {
+                rotated_from = Some(key.to_owned());
+            }
             if entry.item.builtin {
                 return Err(failed(super::manifest::RESERVED_ID_ERROR));
             }
@@ -191,8 +199,12 @@ impl Plugins {
         // Held while the folder is swapped: a scan in between would see it
         // gone and forget its decision.
         let scan_guard = self.inner.scan_lock.lock().await;
-        let replaced = blocking(move || install::install(&plugins_dir, &staged, &source)).await?;
+        let replaced = blocking(move || install::install(&plugins_dir, &staged, &source, rotated_from.as_deref())).await?;
         let record = capability::record(&package.manifest);
+        if replaced.is_none() {
+            // New here: nothing a plugin once under this id kept is its.
+            super::forget_storage(&self.inner.plugins_dir, &id);
+        }
         self.update_state(|state| match &replaced {
             None => {
                 state.decisions.remove(&id);
@@ -220,6 +232,17 @@ impl Plugins {
                             reask: false,
                         },
                     );
+                }
+            }
+            // Signed by its author's new key: what you allowed stands
+            // against that key now, and asks you again.
+            Some(old) if old.key != package.key => {
+                if let Some(d) = state.decisions.get_mut(&id)
+                    && d.allowed
+                {
+                    d.author_key = Some(package.key.clone());
+                    d.content_hash = None;
+                    d.reask = true;
                 }
             }
             Some(old) => {
@@ -316,7 +339,12 @@ impl Plugins {
                 allowed: &c.allowed,
             };
             match install::fetch_again(&source, &scratch).await {
-                Ok(Some((fetched, source))) => match install::compare(&installed, &fetched, source) {
+                Ok(Some((fetched, source))) => match install::compare(
+                    &installed,
+                    &fetched,
+                    source,
+                    fetched.key != c.key && self.same_account(&c.key, &fetched.key).await,
+                ) {
                     Some(found) => {
                         let keep = found.refused.is_none().then_some(&fetched);
                         if let Err(error) = install::keep_found(&plugins_dir, &id, &found, keep) {

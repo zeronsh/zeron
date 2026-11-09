@@ -577,7 +577,7 @@ A plugin travels as its folder, signed. The person installs it with Settings →
 Zeron checks the signature over every file before anything is written, so an unsigned or changed plugin is refused.
 - **Signed by the person's own key:** it turns on at once.
 - **Signed by anyone else:** it waits until the person allows it in Zeron. The reply says `waiting`; you can't allow it for them.
-- **An update:** it must be signed by the same key as the installed version. One that asks for a new permission still installs, but waits for the person to allow just that.
+- **An update:** it must be signed by the same key as the installed version, or by another live key of the same account (the author on a new machine; an old key revoked still counts as theirs). One signed by a new key installs but waits for the person to allow it again. One that asks for a new permission still installs, but waits for the person to allow just that.
 - **Removing a plugin** (Settings) takes away its folder, what it stored, its pages and its placements.
 
 To publish a plugin, commit its folder with its signed `zeron-plugin.json` to a repository, or attach the `.zeron-plugin` file to a GitHub release. Zeron re-signs your own plugins as you save them, so what you commit is already signed. The package format (`zeron-plugin:v1`) is the same signed package templates use: the manifest, plus every file as base64.
