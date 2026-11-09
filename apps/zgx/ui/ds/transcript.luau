@@ -882,9 +882,9 @@ local function Transcript(props: Props): Node
 	-- its way back to the latest still out. (The list writes the state only
 	-- as it changes, so it must start right.)
 	local restoring = props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end
-	if not restoring then
-		at_end:set(true)
-	end
+	-- (Away from it, putting itself back: a launch's state, at its end by
+	-- default, would hold it at the end through the window's first resizes.)
+	at_end:set(not restoring)
 	-- Putting itself back where it was (`keep`, after a reload): the list
 	-- can say it's at its end a moment, its rows above not yet measured;
 	-- the way back to the latest stays out meanwhile rather than blinking.
@@ -1183,6 +1183,13 @@ local function Transcript(props: Props): Node
 		if not index or not el then
 			return false
 		end
+		-- Not laid out yet (a launch's first frames): it has no rows to put
+		-- the message among. Held until it is (its `on_resize`), as a place
+		-- still to come back to is.
+		if not el.height or el.height <= 0 then
+			waiting = { id = at.id, dy = at.dy }
+			return true
+		end
 		here = { id = at.id, dy = at.dy, index = index }
 		el:scroll_to_row(index, { align = "start" })
 		local back = { id = at.id, dy = at.dy }
@@ -1324,7 +1331,9 @@ local function Transcript(props: Props): Node
 	-- of size under way.
 	local end_held = at_end:peek()
 	ui.effect(function()
-		if at_end:get() then
+		-- (Not while it puts itself back where it was: the list rests at its
+		-- end a moment first, before the place it goes back to is laid out.)
+		if at_end:get() and not placing:get() then
 			end_held = true
 		end
 	end)
@@ -1844,6 +1853,13 @@ local function Transcript(props: Props): Node
 			-- the window resized): the reading place put back, then taken
 			-- again where it now stands.
 			on_resize = function(size: { w: number, h: number })
+				-- Laid out at last: a place held for it (`go_back` before its
+				-- first layout) is gone back to now.
+				local held = waiting
+				if held and size.h > 0 and messages:index_of("id", held.id) then
+					waiting = nil
+					go_back(held)
+				end
 				local widened = last_w ~= nil and math.abs(size.w - last_w) >= 0.5
 				local changed = widened or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
 				last_w, last_h = size.w, size.h

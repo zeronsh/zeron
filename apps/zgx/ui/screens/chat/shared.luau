@@ -50,6 +50,60 @@ M.pill_width = ui.shared("chat.composer.pill_width", nil :: number?)
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
+-- The same across launches: each chat's place as last read, the chat shown
+-- with its place as it is read, each with when (os.time), the most recent
+-- `KEPT_PLACES` of them. A launch starts from them, so the chat it opens,
+-- and any other gone back to, opens where it was read.
+local KEPT_PLACES = 200
+local saved_places = ui.persist("chat_places", {} :: { [string]: any })
+do
+	local saved = saved_places:peek()
+	if next(M.places:peek()) == nil and type(saved) == "table" and next(saved) ~= nil then
+		local all: { [string]: any } = {}
+		for id, kept in saved do
+			if type(kept) == "table" and type(kept.place) == "table" then
+				all[id] = kept.place
+			end
+		end
+		M.places:set(all)
+	end
+end
+ui.effect(function()
+	local places = M.places:get()
+	local shown = M.shown:get()
+	local reading = M.anchor:get()
+	local before = saved_places:peek()
+	local now = os.time()
+	local all: { [string]: any } = {}
+	local count = 0
+	for id, place in places do
+		if id ~= shown then
+			local was = if type(before) == "table" then before[id] else nil
+			-- (When it was read: kept while its place is as it was.)
+			local at = if type(was) == "table" and was.at and was.place and was.place.id == place.id and was.place.dy == place.dy then was.at else now
+			all[id] = { place = place, at = at }
+			count += 1
+		end
+	end
+	if shown and reading ~= nil then
+		all[shown] = { place = reading, at = now }
+		count += 1
+	end
+	-- The most recent kept.
+	if count > KEPT_PLACES then
+		local order: { { id: string, at: number } } = {}
+		for id, kept in all do
+			table.insert(order, { id = id, at = tonumber(kept.at) or 0 })
+		end
+		table.sort(order, function(a: { id: string, at: number }, b: { id: string, at: number }): boolean
+			return a.at > b.at
+		end)
+		for i = KEPT_PLACES + 1, #order do
+			all[order[i].id] = nil
+		end
+	end
+	saved_places:set(all)
+end)
 -- Every other chat's draft, by key (a session's id; "" a new chat's), and
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
