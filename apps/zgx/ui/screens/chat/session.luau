@@ -19,6 +19,7 @@ local shared = require("@app/screens/chat/shared")
 local prefs = require("@app/screens/settings/prefs")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
@@ -300,10 +301,9 @@ local function Session(id: Id?): Node
 							end,
 							open_link = open_link,
 							-- Their context menus (screens/chat/link_menu).
-							link_chip = function(target: string): boolean
-								local s = store.session:peek()
-								return FileLinks.chip(target, if s then s.cwd else nil)
-							end,
+							link_chip = LinkChips(function(): any
+								return store.session:peek()
+							end),
 							link_menu = LinkMenu(open_link, function(): any
 								return store.session:peek()
 							end),

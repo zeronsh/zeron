@@ -177,9 +177,9 @@ export type Props = {
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
-	-- Whether a link is one of the chat's files: a chip (ds/markdown
-	-- `link_chip`).
-	link_chip: ((target: string) -> boolean)?,
+	-- What a link is drawn as: one of the chat's files or its agent's
+	-- skills, as a chip (ds/markdown `link_chip`).
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
 	-- A find over the conversation (screens/chat/find): its matches marked
 	-- in every message, the current one's message scrolled to and its block
 	-- into view. `current().row` is its message's place in `messages`.

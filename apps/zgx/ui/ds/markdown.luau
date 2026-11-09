@@ -81,9 +81,10 @@ export type Props = {
 	-- the kind's own (a web link's: Open, the other place, Copy link; any
 	-- other: Open with `open`, Copy link).
 	link_menu: ((target: string) -> { Links.Entry }?)?,
-	-- Whether a link is one of the chat's files (a reply's link to it): drawn
-	-- as the chip a prompt's mention is, rather than as a link.
-	link_chip: ((target: string) -> boolean)?,
+	-- What a link is drawn as, rather than as a link: one of the chat's
+	-- files (`file`: the chip a prompt's mention is), or one of its agent's
+	-- skills (`skill`, its name: the chip a picked skill is). Nil: a link.
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -275,7 +276,7 @@ type Ctx = {
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
-	link_chip: ((target: string) -> boolean)?,
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -517,7 +518,7 @@ end
 
 -- A paragraph's runs as one paragraph of spans; `style` sets the
 -- paragraph's own (a heading's size, a quote's ink).
-local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
 	list = autolinked(list)
 	local size, line = size_of(ctx)
 	local props: { [any]: any } = {
@@ -640,8 +641,14 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			span.radius = ui.raw(4.5, "Zeron's inline code corner")
 			span.text_size = inline
 		end
+		-- (What the page says a link is: one of the chat's files, or one of
+		-- its agent's skills.)
+		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
 		if r.a and string.match(r.a, "^zeron%-invoke:") then
 			invocation_chip(span, r.x)
+		elseif chip and chip.skill then
+			-- A skill's chip, by its name (opening nothing, as a picked one).
+			invocation_chip(span, "$" .. chip.skill)
 		elseif r.a then
 			-- (Its ink the accent with "Accent colour throughout", as the
 			-- shipping app's; else the text's own.)
@@ -652,7 +659,7 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			if
 				string.match(r.a, "^zeron%-file:")
 				or string.match(r.a, "^zeron%-chat:")
-				or (ctx and ctx.link_chip and not opens(r.a) and ctx.link_chip(r.a))
+				or (chip and chip.file)
 			then
 				mention_chip(span, r.a, r.x)
 			end
@@ -714,6 +721,37 @@ end
 -- its own scrolling otherwise (zgx's `View::wheel_across` has the rules).
 local TABLE_SHORT = 20
 local TABLE_FLOOR = 144
+
+-- A run of words, its links that the page may draw as chips (a reply's
+-- link to a file of the chat's, to one of its agent's skills: `link_chip`)
+-- built again when what the page says of them changes (the chat's skills
+-- read after it showed), so it's the same as if they'd been known first.
+-- Words with none of those links: built once.
+local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+	local asked = if ctx then ctx.link_chip else nil
+	if not asked then
+		return runs_now(list, style, ctx)
+	end
+	local targets: { string } = {}
+	for _, r in list do
+		if r.a and not opens(r.a) and not string.match(r.a, "^zeron%-") then
+			table.insert(targets, r.a)
+		end
+	end
+	if #targets == 0 then
+		return runs_now(list, style, ctx)
+	end
+	return ui.presence(function(): string
+		local says: { string } = {}
+		for _, target in targets do
+			local chip = asked(target)
+			table.insert(says, if chip == nil then "-" elseif chip.skill then `s:{chip.skill}` else "f")
+		end
+		return table.concat(says, "|")
+	end, function(): Node
+		return runs_now(list, style, ctx)
+	end)
+end
 
 local function cell_text(cell: { MarkdownRun }): string
 	local flat: { string } = {}

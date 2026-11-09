@@ -20,6 +20,7 @@ local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
@@ -793,11 +794,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
-		-- (A reply's link to one of its files: a chip.)
-		link_chip = function(target: string): boolean
-			local s = view.session:peek()
-			return FileLinks.chip(target, if s then s.cwd else nil)
-		end,
+		-- (A reply's link to one of its files or its agent's skills: a chip.)
+		link_chip = LinkChips(function(): any
+			return view.session:peek()
+		end),
 	}
 	if tab.kind == "subagent" then
 		return ui.column { id = `lane-{slot}`, class = "lane-tab subagent-tab", provide = { session = chat }, grow = 1, w_full = true, min_h = 0, transcript }

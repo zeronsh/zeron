@@ -20,6 +20,7 @@ local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
@@ -1116,11 +1117,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		link_menu = LinkMenu(open_link, function(): any
 			return view.session:peek()
 		end),
-		-- (A reply's link to one of its files: a chip.)
-		link_chip = function(target: string): boolean
-			local s = view.session:peek()
-			return FileLinks.chip(target, if s then s.cwd else nil)
-		end,
+		-- (A reply's link to one of its files or its agent's skills: a chip.)
+		link_chip = LinkChips(function(): any
+			return view.session:peek()
+		end),
 		-- (A split's pane, made again at the place taken up: whether
 		-- that was its end.)
 		was_at_end = if split then anchor:peek() == nil else nil,

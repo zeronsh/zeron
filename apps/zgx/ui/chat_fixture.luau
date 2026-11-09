@@ -1336,6 +1336,7 @@ ui.command {
 	run = function()
 		local s = table.clone(store.session:peek() or {})
 		s.cwd = "/work/atlas"
+		s.harness = "claude-code"
 		store.session:set(s)
 		local skill, command = invoke("skill", "frontend-design"), invoke("command", "review")
 		store.messages:push {
@@ -1344,7 +1345,7 @@ ui.command {
 			text = `[AGENTS.md](zeron-file:AGENTS.md) first\n\n[Long chat](zeron-chat:s1) then\n\n[$frontend-design]({skill}) and\n\n[/review]({command}) last`,
 			at = "Sep 8, 1:52 PM",
 		}
-		local reply = `[AGENTS.md](AGENTS.md) came through\n\n[Long chat](zeron-chat:s1) too\n\n[$frontend-design]({skill}) as well\n\n[the docs](https://example.com/) stay a link`
+		local reply = `[AGENTS.md](AGENTS.md) came through\n\n[Long chat](zeron-chat:s1) too\n\n[$frontend-design]({skill}) as well\n\n[the docs](https://example.com/) stay a link\n\n[the review skill](/Users/me/.agents/skills/code-review/SKILL.md) is one\n\n[that skill](/Users/me/.agents/skills/not-listed/SKILL.md) is not\n\n[hosts](/etc/hosts.conf) is outside`
 		store.messages:push {
 			id = "ca1",
 			role = "assistant",
