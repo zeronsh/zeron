@@ -5,8 +5,11 @@
 use zeron_rpc::{RpcError, methods};
 
 /// The first Zeron whose engine takes reviews, allows and plugin files from
-/// your other devices.
-pub const REMOTE_APPROVALS_SINCE: &str = "0.2.140";
+/// your other devices: the 0.2.139 stable (betas run the last stable's
+/// engine, so a 0.2.139 beta app beside a 0.2.138 engine still gets this).
+/// An older engine is known by its refusal's words, not by a version
+/// compared, so no beta suffix can read as new enough.
+pub const REMOTE_APPROVALS_SINCE: &str = "0.2.139";
 
 /// The words for a device whose Zeron is too old for this.
 pub fn too_old() -> String {
