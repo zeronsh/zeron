@@ -198,6 +198,16 @@ fn start(view: &Rc<View>, bench: &Bench) {
             record::CHAT,
             json!({ "id": record::CHAT, "title": "Stream bench", "config": { "harness": "claude-code", "model": "opus" } }),
         );
+        // Its agent's catalog, listed as an engine's would list it: with
+        // none, the composer's model chip stays a loading bar pulsing for
+        // as long as the bench runs, which a session's page never shows.
+        *chats.harnesses.borrow_mut() = vec![json!({ "id": "claude-code", "name": "Claude Code" })];
+        chats
+            .models
+            .borrow_mut()
+            .insert("claude-code".into(), vec![json!({ "id": "opus", "label": "Opus" })]);
+        chats.catalog_state.set(CatalogState::Ready);
+        chats.publish_catalog();
     });
     // The opening tail first, as a watch's first item.
     let opening = frames[0].get("reset").is_some().then(|| frames.remove(0));
