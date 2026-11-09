@@ -254,6 +254,22 @@ stub.open = function(id: string?)
 	end
 	arrive()
 end
+-- Run in the app itself (its Rust host installed, as `zgx inspect` drives
+-- it), the host writes `chat.session` too: it never opened this chat (the
+-- stub above did), so an engine frame (WatchSessions, WatchChats, the engine
+-- unreachable) has it publish none (src/chat.rs `publish_session`), and the
+-- page went back to opening, its transcript gone. The fixture is the engine
+-- here: its chat stays open, as an engine's does through its frames.
+ui.effect(function()
+	if store.session:get() == nil and opened and META[opened] then
+		local id = opened :: string
+		ui.after(0, function()
+			if opened == id and store.session:peek() == nil then
+				store.session:set(META[id])
+			end
+		end)
+	end
+end)
 -- A promise settled at once.
 local function settled(value: any): any
 	return {
