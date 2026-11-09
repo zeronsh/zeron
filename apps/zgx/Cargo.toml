@@ -18,6 +18,11 @@ publish = false
 name = "zeron-zgx"
 path = "src/main.rs"
 
+# The stream bench's standard recording (src/stream_bench_record.rs).
+[[example]]
+name = "stream_bench_record"
+required-features = ["stream-bench"]
+
 [features]
 # Zeron.app's beta (scripts/package-zgx-beta.sh): this interface as the
 # Zeron app itself, with the production edge and sign-in only (nothing of
@@ -28,6 +33,10 @@ beta = []
 # The layout benchmarks that read a probed zgx (docs/zgx-layout-probe.patch;
 # `live_reflow_traced` in src/split_tests.rs says how). Off in every build.
 layout_probe = []
+# The stream bench (src/stream_bench.rs): `ZERON_STREAM_BENCH=<frames>`
+# replays a recorded reply through the chat view's real path, in a window
+# of its own with no engine. Off in every build.
+stream-bench = []
 
 [dependencies]
 zgx = { git = "https://github.com/zeronsh/zgx", rev = "c85c72c65e6292f133ffd0d6a86ba73fab376401" }
