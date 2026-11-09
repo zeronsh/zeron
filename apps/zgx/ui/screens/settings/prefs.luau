@@ -36,6 +36,12 @@ M.escape_stops = ui.persist("settings_escape_stops", false)
 -- open on its home). Off by default.
 M.close_panel_with_last_tab = ui.persist("settings_close_panel_with_last_tab", false)
 M.compact_transcript = ui.persist("settings_compact_transcript", false)
+-- (Told to the host, which lays a reply being written out compact only while
+-- the transcript shows it so: src/chat.rs `compact_shown`.)
+local compact_shown = ui.shared("chat.compact", false)
+ui.effect(function()
+	compact_shown:set(M.compact_transcript:get())
+end)
 -- (The shipping app's `open_web_links_in_zeron`, on by default.)
 M.open_links = ui.persist("settings_open_links", "zeron")
 -- (The design system's own, so every PrivateText follows it.)

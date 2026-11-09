@@ -84,6 +84,9 @@ mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 usvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 resvg = { version = "0.46", default-features = false, features = ["text"] }
 serde_json = "1"
+# Fast hashing for the per-part caches a long reply's every change looks up
+# (src/chat.rs `LIVE_TOOLS`); already in the tree through zgx.
+rustc-hash = "2"
 # Agents' logos: their sites' icon links, resolved (src/agent_logos.rs).
 # A tool's diff as the changes pane draws it (src/tool_details.rs): the
 # shipping app's own line diff.

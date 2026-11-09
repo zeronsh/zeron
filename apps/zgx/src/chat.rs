@@ -128,11 +128,15 @@ struct Entry {
     json: Option<Json>,
     /// `sum_of` its json, once that's gone.
     sum: u64,
+    /// Since its row was last built, only these of its parts changed (each
+    /// by a part patch): the rest are as they were built. None: not known
+    /// (it came whole, or grew a text).
+    patched: Option<std::collections::HashSet<String>>,
 }
 
 impl Entry {
     fn new(json: Json) -> Self {
-        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0 }
+        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0, patched: None }
     }
 
     /// What it is now, to tell it from another copy of it.
@@ -630,6 +634,17 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             lanes.borrow().values().find(|l| l.open_id().as_deref() == Some(id.as_str())).cloned().unwrap_or_else(|| main.clone())
         }
     };
+    // Settings' compact transcript, on or off (`chat.compact`, set by
+    // screens/settings/prefs): a reply being written is laid out compact too
+    // only while it's on, so each of its changes builds what shows. Turned
+    // on, those replies are built again with it. (Kept as long as the
+    // window's runtime: one watch a window.)
+    let compact = host.shared("chat.compact", Value::Bool(false)).signal();
+    let c = chats.clone();
+    std::mem::forget(_cx.ui.runtime.effect(move || {
+        let on = compact.get().truthy();
+        c.compact_shown(on);
+    }));
     let c = chats.clone();
     host.action("chat.catalog", move |_| {
         let c = c.clone();
@@ -1028,6 +1043,29 @@ impl Chats {
                 }
                 me.publish_catalog();
             });
+        }
+    }
+
+    /// Settings' compact transcript turned on or off (`chat.compact`): the
+    /// replies being written are built again, with or without its layout.
+    fn compact_shown(&self, on: bool) {
+        if COMPACT_SHOWN.replace(on) == on {
+            return;
+        }
+        for view in self.views() {
+            let rebuilt = {
+                let mut slot = view.open.borrow_mut();
+                let Some(open) = slot.as_mut() else { continue };
+                let Open { entries, built, .. } = open;
+                let mut any = false;
+                for e in entries.iter().filter(|e| e["status"].as_str() == Some("streaming")) {
+                    any |= built.remove(&e.id).is_some();
+                }
+                any
+            };
+            if rebuilt {
+                view.publish_messages();
+            }
         }
     }
 
@@ -1609,9 +1647,11 @@ impl View {
         let Some(id) = self.open_id() else { return };
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
+        // (`partPatches`: a long reply's changed parts alone, `apply`'s
+        // `parts`; an engine that doesn't know it sends replies whole.)
         let transcript = rpc.watch(
             "WatchDocMessages",
-            json!({ "chatId": id, "openingTail": true }),
+            json!({ "chatId": id, "openingTail": true, "partPatches": true }),
             move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
@@ -1683,7 +1723,7 @@ impl View {
             } else if result.is_err() {
                 open.built.clear();
             } else {
-                for key in ["upsert", "append"] {
+                for key in ["upsert", "append", "parts"] {
                     for item in frame[key].as_array().into_iter().flatten() {
                         let id = if key == "upsert" { &item["entry"]["id"] } else { &item["entry"] };
                         if let Some(id) = id.as_str() {
@@ -1905,8 +1945,12 @@ impl View {
                 let row = match (built.get(&e.id), &e.json) {
                     (Some(row), _) => row.clone(),
                     (None, Some(json)) => {
-                        let row = built_for(json, &context, at < whole_from);
+                        // Changed by part patches alone: its other parts are as
+                        // they were built, and aren't looked at again.
+                        let patched = e.patched.take();
+                        let row = trusting(patched.as_ref(), || built_for(json, &context, at < whole_from));
                         built.insert(e.id.clone(), row.clone());
+                        e.patched = Some(std::collections::HashSet::new());
                         row
                     }
                     (None, None) => Built::default(),
@@ -3182,7 +3226,7 @@ pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: 
     if settled {
         ROW_BUILD.set(Some(RowBuild::default()));
     } else {
-        LIVE_PASS.set(Some(HashMap::new()));
+        LIVE_PASS.set(Some(Default::default()));
     }
     let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
@@ -3259,12 +3303,27 @@ thread_local! {
     /// The calls of replies being written, each as last built, by its id and
     /// whether it was the part being written: its part as it was, and its
     /// value (`tool_live`).
-    static LIVE_TOOLS: RefCell<HashMap<String, [Option<(Json, Option<Value>)>; 2]>> = RefCell::default();
+    static LIVE_TOOLS: RefCell<rustc_hash::FxHashMap<String, [Option<(Json, Option<Value>)>; 2]>> = RefCell::default();
     /// The reply being written as it's built (`built_entry`): each of its
     /// parts' tool by where the part is, as `LIVE_TOOLS` gave it, so the
     /// layouts that show a part (its tools, its blocks, compact) look it up
     /// once.
-    static LIVE_PASS: RefCell<Option<HashMap<(*const Json, bool), Option<Value>>>> = const { RefCell::new(None) };
+    static LIVE_PASS: RefCell<Option<rustc_hash::FxHashMap<(*const Json, bool), Option<Value>>>> = const { RefCell::new(None) };
+    /// While an entry changed by part patches alone is built (`trusting`):
+    /// the parts that changed. Every other part is as `LIVE_TOOLS` last built
+    /// it, its value taken without looking at the part again.
+    static PATCHED: RefCell<Option<rustc_hash::FxHashSet<String>>> = const { RefCell::new(None) };
+    /// Settings' compact transcript is on (`chat.compact`).
+    static COMPACT_SHOWN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `build`, with `patched` (the parts changed since the entry's row was last
+/// built, if only those) trusted to be all that changed.
+pub(crate) fn trusting<T>(patched: Option<&std::collections::HashSet<String>>, build: impl FnOnce() -> T) -> T {
+    PATCHED.set(patched.map(|patched| patched.iter().cloned().collect()));
+    let made = build();
+    PATCHED.set(None);
+    made
 }
 
 /// The most calls `LIVE_TOOLS` keeps before it starts again.
@@ -3410,6 +3469,7 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
             .find(|e| add["entry"].as_str() == Some(&*e.id))
             .ok_or(())?;
         // (A settled entry growing again: its whole copy is the engine's.)
+        entry.patched = None;
         let entry = entry.json.as_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
         let part = entry["parts"]
@@ -3449,6 +3509,30 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
             "reasoning" if streaming => words_changed = true,
             _ => {}
         }
+    }
+    // Parts of an entry replaced or added (`partPatches`): the entry otherwise
+    // as it was, its other parts too (`Entry::patched`).
+    for patch in frame["parts"].as_array().into_iter().flatten() {
+        let entry = entries.iter_mut().find(|e| patch["entry"].as_str() == Some(&*e.id)).ok_or(())?;
+        let at = patch["at"].as_u64().ok_or(())? as usize;
+        let part = &patch["part"];
+        let id = part["id"].as_str().ok_or(())?.to_owned();
+        let json = entry.json.as_mut().ok_or(())?;
+        let parts = json["parts"].as_array_mut().ok_or(())?;
+        if at < parts.len() && parts[at]["id"].as_str() == Some(&id) {
+            parts[at] = part.clone();
+        } else if at == parts.len() {
+            parts.push(part.clone());
+        } else {
+            return Err(());
+        }
+        if patch["len"].as_u64().is_some_and(|len| (len as usize) < parts.len()) {
+            return Err(());
+        }
+        if let Some(patched) = &mut entry.patched {
+            patched.insert(id);
+        }
+        rows = true;
     }
     if frame["count"].as_u64().is_some_and(|n| n as usize != entries.len()) {
         return Err(());
@@ -3644,8 +3728,12 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if let Some(ms) = entry["durationMs"].as_f64() {
                 fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
             }
-            // The same reply laid out for Settings' compact transcript.
-            if let Some(compact) = compact_blocks(entry) {
+            // The same reply laid out for Settings' compact transcript (one
+            // being written, only while that shows: built with each of its
+            // changes, it'd cost each the whole reply again).
+            if (!streaming || COMPACT_SHOWN.get())
+                && let Some(compact) = compact_blocks(entry)
+            {
                 fields.push(("compact", compact));
             }
             Some(Value::record(fields))
@@ -4207,8 +4295,10 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
 /// The tool of a part of a reply being written: as `LIVE_TOOLS` has it if
 /// the part is as it was, else built and kept.
 fn live_tool(id: &str, part: &Json, live: bool) -> Option<Value> {
+    // (A part no patch touched is the one built: not compared again.)
+    let unchanged = PATCHED.with_borrow(|patched| patched.as_ref().is_some_and(|patched| !patched.contains(id)));
     let kept = LIVE_TOOLS.with_borrow(|kept| {
-        kept.get(id)?[usize::from(live)].as_ref().filter(|(was, _)| was == part).map(|(_, built)| built.clone())
+        kept.get(id)?[usize::from(live)].as_ref().filter(|(was, _)| unchanged || was == part).map(|(_, built)| built.clone())
     });
     if let Some(built) = kept {
         return built;
