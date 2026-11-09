@@ -51,6 +51,7 @@ local Mermaid = require("@self/mermaid")
 local MarkdownFind = require("@self/markdown_find")
 local locale = require("@self/locale")
 local look = require("@self/look")
+local MarkdownBlocks = require("@self/markdown_blocks")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
@@ -161,6 +162,12 @@ local function veil_of(key: string, seeding: boolean): Veil
 end
 -- What of `text` is still fading, after what's newly arrived is added.
 local function veil_chunks(v: Veil, text: string): { VeilChunk }
+	-- (A block zgx's markdown view hands this module to draw: its veil the
+	-- view's, which counts its places and keeps what each has shown.)
+	local native: ((text: string) -> { VeilChunk })? = (v :: any).native
+	if native then
+		return native(text)
+	end
 	v.n += 1
 	local id = `{v.block}:{v.n}`
 	local e = v.elems[id]
@@ -1763,6 +1770,44 @@ local function own_list(): State<{ any }>
 	local list = ui.state(`markdown_blocks_{top_lists}`, {} :: { any })
 	list:set({})
 	return list
+end
+
+-- The view's `block` hook (ds/markdown_blocks): a block drawn as `block`
+-- draws it, in the context `Markdown` makes of `props`, at its place in the
+-- veil and with its block's find.
+MarkdownBlocks.hook = function(props: Props): (b: MarkdownBlock, at: any) -> Node
+	local ctx: Ctx = {
+		image = props.image,
+		image_size = props.image_size,
+		open = props.open,
+		link_menu = props.link_menu,
+		link_chip = props.link_chip,
+		attached = props.attached,
+		task = props.task,
+		tasks = {},
+		pictures = props.pictures,
+		group = props.group,
+		small = props.small,
+	}
+	if type(props.text) == "function" then
+		ctx.source = props.text
+	end
+	local ink = props.ink
+	return function(b: MarkdownBlock, at: any): Node
+		local mine = table.clone(ctx)
+		if at.find then
+			mine.find = { q = at.find.q, cur = at.find.cur, n = at.find.n }
+		end
+		-- Its parts fade by the view's veil (`at.veil`: each part's chunks, its
+		-- place counted on from `at`), which keeps what each place has shown
+		-- with the view's own paragraphs.
+		if at.veil then
+			mine.veil = { native = at.veil } :: any
+		else
+			mine.veil = nil
+		end
+		return block(b, ink, mine)
+	end
 end
 
 return function(props: Props): Node
