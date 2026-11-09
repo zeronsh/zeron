@@ -153,6 +153,10 @@ function M.tile(tab: any): Node
 				local p = project_of(tab, picked)
 				return if p then look.of(p).emoji else nil
 			end,
+			project = function(): string?
+				local p = project_of(tab, picked)
+				return if p then p.id else nil
+			end,
 		}
 	end, { w = 20, h = 20, shrink = 0 })
 end

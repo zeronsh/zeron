@@ -110,6 +110,7 @@ end }
 |---|---|---|
 | `#sidebar` | the sidebar's list | `sessions` |
 | `.session-row` | a sidebar row (place inside: `.session-title`) | `session` |
+| `.project-icon` | a project's icon, wherever it shows: the sidebar's group headers and rows, tabs, the composer's project, project pickers, the panel, the palette, archived chats. Replace it (`ui.change`) to draw each project's own | `project` |
 | `#session-header` | a chat's header (title: `#page-title`) | |
 | `.message` | a message (`.message-user`, `.message-assistant`) | `message` |
 | `#chat-composer` | the message box | |
@@ -180,6 +181,7 @@ Records hold only what you were allowed. A field you weren't allowed is absent, 
 |---|---|
 | `session` | `{ id }` + `title, status, project, device, updated, created, branch, worktree` with `sessions.read` |
 | `message` | `{ id }` + `role, text` with `messages.read` |
+| `project` | `{ id }` + `name, device, icon` (`{ emoji?, image?, hue? }`, as its people chose it) with `sessions.read` |
 | `profile` | `{}` + `id, name, username, avatar` with `profile.read`, `email` with `account.email` |
 | `file` | `{ id }` + `path, name` with `files.read` (else an id of your plugin's own) |
 | `panel` | `{ id, session, open_tab }` |

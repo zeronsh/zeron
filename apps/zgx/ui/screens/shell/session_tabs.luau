@@ -224,6 +224,10 @@ local function pane_tile(id: string, place: number): Node
 				local p = now()
 				return if p then look.of(p).emoji else nil
 			end,
+			project = function(): string?
+				local p = now()
+				return if p then p.id else nil
+			end,
 		}
 	end, { w = TILE, h = TILE, shrink = 0, enter = tile_enter, exit = tile_exit })
 end

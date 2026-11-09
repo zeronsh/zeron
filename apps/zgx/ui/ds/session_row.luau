@@ -634,13 +634,14 @@ end
 
 -- A group's tile (18, in a row's slot): `inside` on its hue (or the
 -- chrome's quiet wash), and (`badge`) a dot for its most pressing session
--- while its rows can't be seen.
-function M.tile(inside: Node, badge: (() -> status.Kind?)?, hue: string?, src: string?, emoji: string?): Node
+-- while its rows can't be seen. `project`: a project's id, its tile then
+-- `.project-icon` (ds/tile).
+function M.tile(inside: Node, badge: (() -> status.Kind?)?, hue: string?, src: string?, emoji: string?, project: string?): Node
 	return ui.div {
 		relative = true,
 		w = 18,
 		h = 18,
-		Tile { hue = hue, inside = inside, size = 18, src = src, emoji = emoji },
+		Tile { hue = hue, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 		if badge
 			then ui.presence(badge, function(kind: status.Kind): Node
 				return ui.div { absolute = true, right = -3, top = -3, status.StatusDot { kind = kind, size = 8 } }

@@ -534,6 +534,10 @@ local function submenu(
 							emoji = function(): string?
 								return current().emoji
 							end,
+							-- (A project's choice: its tile `.project-icon`.)
+							project = function(): string?
+								return (current() :: any).project
+							end,
 							size = 18,
 						}
 					end

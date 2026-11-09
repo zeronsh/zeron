@@ -267,6 +267,7 @@ local function info(sid: string): Node
 						return if l then l.emoji else nil
 					end,
 					size = 16,
+					project = id,
 				},
 				label = function(): string
 					local now = project_of(id)

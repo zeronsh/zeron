@@ -348,7 +348,7 @@ function M.Lanes(props: LanesProps): Node
 		if level == "project" then
 			local p = l.project
 			if p then
-				return { key = `{prefix}project:{p.id}`, name = p.name, kind = "project", hue = p.hue or "gray", src = p.src, emoji = p.emoji }
+				return { key = `{prefix}project:{p.id}`, name = p.name, kind = "project", hue = p.hue or "gray", src = p.src, emoji = p.emoji, project = p.id }
 			end
 			return { key = `{prefix}project:none`, name = locale.s("shell.sidebar.chats"), kind = "project", hue = "gray" }
 		end
@@ -798,7 +798,7 @@ function M.Lanes(props: LanesProps): Node
 								string.upper(string.sub(g.name, 1, 1)),
 								text_size = "$font.size.xs",
 								weight = "$font.weight.semibold",
-							}, badge, g.hue or "gray", g.src, g.emoji)
+							}, badge, g.hue or "gray", g.src, g.emoji, g.project)
 						end
 						return SessionRow.tile(Icon { name = if g.here then "laptop" else "remote-server", size = 12 }, badge)
 					end,
@@ -856,7 +856,7 @@ function M.Lanes(props: LanesProps): Node
 					if not p then
 						return ui.div {}
 					end
-					return Tile { label = p.name, hue = p.hue, src = p.src, emoji = p.emoji, size = 16 }
+					return Tile { label = p.name, hue = p.hue, src = p.src, emoji = p.emoji, size = 16, project = p.id }
 				end),
 				-- (Where its group isn't its project, and the view shows project
 				-- icons: as the sidebar's rows.)

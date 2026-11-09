@@ -1296,7 +1296,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				items = "center",
 				ui.show(details.project_icon, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
 					local hue, src, emoji = look(p)
-					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16 }
+					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16, project = p.id }
 				end)() }),
 				title,
 			}
@@ -1613,7 +1613,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (a palette hue's 500, inked in its 50; or `{ bg, ink }`, tokens of its
 	-- own), or the project's own artwork; and, when its sessions can't be
 	-- seen, a badge for the most pressing of them.
-	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?): Node
+	-- (`project`: a project's id, its tile then `.project-icon`.)
+	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?, project: string?): Node
 		local function badge(kind: status.Kind): Node
 			return ui.div {
 				absolute = true,
@@ -1628,7 +1629,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				relative = true,
 				w = 18,
 				h = 18,
-				Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji },
+				Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 				if most then ui.show(hidden, badge(most)) else nil,
 			}
 		end
@@ -1638,7 +1639,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			relative = true,
 			w = 18,
 			h = 18,
-			Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji },
+			Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 			ui.presence(function(): status.Kind?
 				return if hidden() then pressing(listed(sessions)) else nil
 			end, badge),
@@ -1806,7 +1807,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 								live or own,
 								hidden,
 								src,
-								emoji
+								emoji,
+								p.id
 							)
 						end,
 					})
@@ -3831,6 +3833,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 						emoji = function(): string?
 							local p = project_at(i)
 							return if p then p.emoji else nil
+						end,
+						project = function(): string?
+							local p = project_at(i)
+							return if p then p.id else nil
 						end,
 					},
 				}

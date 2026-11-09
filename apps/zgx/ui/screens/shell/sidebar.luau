@@ -624,7 +624,7 @@ local function project_filter(): Node
 						if not seen[first.id] then
 							seen[first.id] = true
 							local l = route.look(first.id) or { hue = route.hue(first.id) }
-							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji })
+							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji, project = first.id })
 						end
 					end
 					return out

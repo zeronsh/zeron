@@ -43,6 +43,9 @@ export type Item = {
 	-- Its tile on a palette hue (a project's: its initial in the hue's 50 on
 	-- its 500), in place of the plain letter tile.
 	hue: string?,
+	-- A project's id, where the item is one: its tile is then
+	-- `.project-icon` (ds/tile).
+	project: string?,
 	-- Its own artwork (a project's favicon), in place of its hue's tile.
 	src: string?,
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
@@ -212,7 +215,7 @@ local function tile(item: Item): Node
 		return Avatar { seed = item.label, size = 18, label = locale.t("ds.provider_card.account") }
 	end
 	if item.hue or item.src or item.emoji then
-		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18 }
+		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18, project = item.project }
 	end
 	if item.icon then
 		return Menu.glyph(item.icon)

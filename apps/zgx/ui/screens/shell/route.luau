@@ -56,7 +56,7 @@ local M = {}
 export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string? }
 export type Project = { id: string, device: string?, path: string?, name: string? }
 export type Session = { id: string, device: string?, cwd: string?, title: string?, project: string? }
-export type Choice = { value: string, label: string, hue: string?, src: string? }
+export type Choice = { value: string, label: string, hue: string?, src: string?, emoji: string?, project: string? }
 
 local ROUTES = {
 	home = "/",
@@ -392,7 +392,7 @@ M.projects = steady(function(): { Choice }
 	local out: { Choice } = {}
 	for _, p in sessions.projects:get() do
 		local l = look.of(p)
-		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji })
+		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id })
 	end
 	return out
 end)
