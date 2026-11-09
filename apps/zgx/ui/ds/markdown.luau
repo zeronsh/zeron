@@ -404,7 +404,7 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	span.padding = { 2, 2 }
 	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
 	span.icon = if chat
-		then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
+		then { src = "assets/icons/ui/side-chat.svg", size = 14, gap = 3, tint = "currentColor" }
 		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
 end
 
