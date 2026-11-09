@@ -151,6 +151,15 @@ function M.use(opts: Use)
 		token:get()
 		active:set(1)
 	end)
+	-- A list closed (Escape, a click away) stays closed for that token alone:
+	-- its trigger deleted, the same one typed again in its place opens it.
+	ui.effect(function()
+		local t = token:get()
+		local gone = dismissed:peek()
+		if gone ~= -1 and (t == nil or t.from ~= gone) then
+			dismissed:set(-1)
+		end
+	end)
 	-- What each token in the draft stands for (a file's name, its path).
 	-- A token that leaves the draft (replaced, deleted, edited) takes its
 	-- path with it.

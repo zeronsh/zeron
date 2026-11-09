@@ -159,3 +159,43 @@ test("every one of Zeron's own runs from the chat page without an error", functi
 		expect(app:state("calls")).never.to_contain("send:")
 	end
 end)
+
+test("a trigger closed, deleted and typed again opens its list again", function()
+	local app = chat()
+	-- (Shown: the popover in the tree and not hidden.)
+	local function shown(): boolean
+		for line in app:tree():gmatch("[^\n]+") do
+			if line:find("mention-popover", 1, true) and not line:find(" hidden", 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	for _, trigger in { "/", "@" } do
+		app:fill("role:textbox", "")
+		settle(app)
+		app:type("role:textbox", trigger)
+		settle(app)
+		expect(shown()).to_be(true)
+		-- (Closed first, as Escape or a click away closes it.)
+		app:key("Escape")
+		settle(app)
+		expect(shown()).to_be(false)
+		app:key("Backspace")
+		settle(app)
+		expect(shown()).to_be(false)
+		app:type("role:textbox", trigger)
+		settle(app)
+		expect(shown()).to_be(true)
+		-- (After words too: a space, then the trigger.)
+		app:fill("role:textbox", "look at ")
+		settle(app)
+		app:type("role:textbox", trigger)
+		settle(app)
+		app:key("Backspace")
+		settle(app)
+		app:type("role:textbox", trigger)
+		settle(app)
+		expect(shown()).to_be(true)
+	end
+end)
