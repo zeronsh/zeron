@@ -7,12 +7,15 @@
 //! `Done` belongs to a run that died mid-stream — boot recovery stamps its doc entry
 //! `aborted` and closes the journal with a synthetic `Done`. A turn the engine's own
 //! shutdown cut off closes normally, so a `{chat_id}.shutdown` marker beside the
-//! journal flags it for the same pick-up on the next boot.
+//! journal flags it for the same pick-up on the next boot. A turn admitted but
+//! not yet journaled (waiting for its agent to start) leaves the previous
+//! turn's `Done` as the last event, so a `{chat_id}.pending` marker flags it
+//! until the run's first event lands.
 //!
 //! Bounded-window compaction is deferred (whole file kept for now, per M2 scope); a torn
 //! trailing line from a crash mid-write is tolerated everywhere.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -48,6 +51,9 @@ struct ChatJournal {
 pub struct RunJournal {
     dir: PathBuf,
     open_files: Mutex<HashMap<String, ChatJournal>>,
+    /// Chats this process marked with [`Self::note_pending_start`]; the next
+    /// append for one clears its marker.
+    pending_starts: Mutex<HashSet<String>>,
 }
 
 impl RunJournal {
@@ -57,6 +63,7 @@ impl RunJournal {
         Ok(Self {
             dir,
             open_files: Mutex::new(HashMap::new()),
+            pending_starts: Mutex::new(HashSet::new()),
         })
     }
 
@@ -80,6 +87,10 @@ impl RunJournal {
 
     fn stop_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.stopped", sanitize_id(chat_id)))
+    }
+
+    fn pending_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.pending", sanitize_id(chat_id)))
     }
 
     /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
@@ -142,6 +153,38 @@ impl RunJournal {
 
     pub fn clear_shutdown_interrupt(&self, chat_id: &str) {
         let _ = std::fs::remove_file(self.shutdown_path(chat_id));
+    }
+
+    /// Mark a user turn admitted before it has journaled anything: until its
+    /// first event, an engine that dies leaves a journal ending in the last
+    /// turn's `Done`, which reads as idle and would strand the send.
+    pub fn note_pending_start(&self, chat_id: &str) {
+        if let Err(err) = std::fs::write(self.pending_path(chat_id), b"") {
+            tracing::warn!(chat = %chat_id, error = %err, "pending-start marker write failed");
+            return;
+        }
+        lock_set(&self.pending_starts).insert(chat_id.to_string());
+    }
+
+    /// Chats marked by [`Self::note_pending_start`] whose run never journaled.
+    pub fn pending_starts(&self) -> Result<Vec<String>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("pending") {
+                continue;
+            }
+            if let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) {
+                marked.push(chat_id.to_string());
+            }
+        }
+        marked.sort();
+        Ok(marked)
+    }
+
+    pub fn clear_pending_start(&self, chat_id: &str) {
+        lock_set(&self.pending_starts).remove(chat_id);
+        let _ = std::fs::remove_file(self.pending_path(chat_id));
     }
 
     /// Mark a chat whose turn the user stopped. Its journal closes only once
@@ -214,6 +257,13 @@ impl RunJournal {
         journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;
+        drop(files);
+        // The run has journaled: the tail now speaks for it. Cleared after the
+        // write, so a crash in between still leaves a marker (boot prefers the
+        // journal's own tail when it has one).
+        if lock_set(&self.pending_starts).remove(chat_id) {
+            let _ = std::fs::remove_file(self.pending_path(chat_id));
+        }
         Ok(seq)
     }
 
@@ -281,6 +331,10 @@ impl RunJournal {
         }
         Ok(())
     }
+}
+
+fn lock_set(set: &Mutex<HashSet<String>>) -> MutexGuard<'_, HashSet<String>> {
+    set.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Parse every valid line; malformed lines (torn tail writes) are skipped.
@@ -579,6 +633,28 @@ mod tests {
             journal.shutdown_interrupts().unwrap(),
             vec![("chat-b".to_string(), 42)]
         );
+    }
+
+    #[test]
+    fn pending_start_markers_survive_until_the_run_journals() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("waiting", &done()).unwrap();
+        journal.append("started", &done()).unwrap();
+        journal.note_pending_start("waiting");
+        journal.note_pending_start("started");
+        journal.note_pending_start("cleared");
+        // The run's first event retires its marker; the waiting run's stays,
+        // even though its journal (the last turn's Done) reads as closed.
+        journal.append("started", &AgentEvent::TextDelta { text: "hi".into() }).unwrap();
+        journal.clear_pending_start("cleared");
+        assert_eq!(journal.pending_starts().unwrap(), vec!["waiting".to_string()]);
+        assert_eq!(journal.stale_sessions().unwrap(), vec!["started".to_string()]);
+        // A new process (engine restart) still sees the marker on disk.
+        let reopened = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(reopened.pending_starts().unwrap(), vec!["waiting".to_string()]);
+        reopened.clear_pending_start("waiting");
+        assert!(reopened.pending_starts().unwrap().is_empty());
     }
 
     #[test]

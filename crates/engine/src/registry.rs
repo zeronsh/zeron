@@ -173,10 +173,15 @@ pub struct HarnessRegistry {
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
     /// Fair per-harness execution gates. Runs and title generation hold a
-    /// shared lease; explicit updates queue an exclusive lease. Background
-    /// updates only acquire an idle gate, never queue ahead of new runs.
+    /// shared lease. Updates only acquire an idle gate and never queue ahead
+    /// of new runs: a long turn or a parked runtime holding background work
+    /// can keep its lease for hours, and every send would hang behind it.
     gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
+    /// Updates holding the exclusive lease: new runs wait for them.
     pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
+    /// Updates waiting for the gate to go idle: parked runtimes retire at
+    /// their turn boundary so the wait ends, but new runs are still admitted.
+    retiring_runtimes: Mutex<std::collections::HashSet<HarnessId>>,
     update_generation: tokio::sync::watch::Sender<u64>,
     /// Optional host/provider environment, followed by the local account
     /// environment. Crew-managed inference normally leaves the former empty.
@@ -279,6 +284,7 @@ impl HarnessRegistry {
             prefs_path: Mutex::new(None),
             gates: Mutex::new(HashMap::new()),
             pending_updates: Mutex::new(std::collections::HashSet::new()),
+            retiring_runtimes: Mutex::new(std::collections::HashSet::new()),
             update_generation,
             run_environment: Mutex::new(None),
             account_environment: Mutex::new(None),
@@ -398,14 +404,15 @@ impl HarnessRegistry {
         }
     }
 
-    /// Exclusive lease held from immediately before update mutation through
-    /// post-install verification.
+    /// Queued exclusive lease. Tokio's writer preference parks every later
+    /// reader behind it, so engine updates use [`Self::idle_update_lease`].
     pub async fn update_lease(&self, id: HarnessId) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.gate(id).write_owned().await
     }
 
-    /// Background updates must not queue a writer: Tokio's writer preference
-    /// would block new runs behind any long-lived execution lease.
+    /// Exclusive lease taken only once no run holds the gate. It never queues
+    /// a writer: Tokio's writer preference would block new runs behind any
+    /// long-lived execution lease.
     pub(crate) async fn idle_update_lease(
         &self,
         id: HarnessId,
@@ -415,15 +422,23 @@ impl HarnessRegistry {
             if let Ok(lease) = gate.clone().try_write_owned() {
                 return lease;
             }
-            // ponytail: warm runtimes can defer this to their existing 30-minute
-            // idle reaper; add retirement-only signaling if faster cleanup is needed.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 
-    /// Mark an accepted update before queueing its writer. Existing persistent
-    /// runtimes use this signal to retire at their next turn boundary instead
-    /// of parking indefinitely while the writer waits.
+    /// Ask parked persistent runtimes to retire at their next turn boundary
+    /// instead of parking until the idle reaper, so an update waiting for
+    /// [`Self::idle_update_lease`] gets the gate sooner. Unlike
+    /// [`Self::begin_update`] this never holds back a new run.
+    pub fn request_runtime_retirement(&self, id: HarnessId) {
+        self.retiring_runtimes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+    }
+
+    /// Mark an update that holds the exclusive lease. New runs wait for
+    /// [`Self::end_update`]; existing runtimes retire at their next boundary.
     pub fn begin_update(&self, id: HarnessId) {
         self.pending_updates
             .lock()
@@ -432,6 +447,10 @@ impl HarnessRegistry {
     }
 
     pub fn end_update(&self, id: HarnessId) {
+        self.retiring_runtimes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
         self.pending_updates
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -445,6 +464,17 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&id)
+    }
+
+    /// A persistent runtime should not park after its turn: an update is
+    /// installing, or waiting for the gate to go idle.
+    pub fn runtime_retirement_requested(&self, id: HarnessId) -> bool {
+        self.update_pending(id)
+            || self
+                .retiring_runtimes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&id)
     }
 
     /// Run a synchronous dispatch-boundary action only if no update has been

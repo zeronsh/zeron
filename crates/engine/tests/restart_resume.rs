@@ -1371,3 +1371,157 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
     }
     core.shutdown().await;
 }
+
+/// A send admitted while its run waits to start (here behind an agent update
+/// holding the gate) is marked until the run journals; the marker clears as
+/// soon as the run's first event lands.
+#[tokio::test]
+async fn a_send_waiting_to_start_is_marked_until_its_run_journals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    run_one_turn_and_shutdown(&dir, &requests, "hs-waiting").await;
+
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(RecordingHarness {
+        requests: requests.clone(),
+        session_id: "hs-waiting".into(),
+        fail_starts: Default::default(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    let journals = dir.join("orgs/dev-org/dev-user/journals");
+    let journal = RunJournal::open(&journals).unwrap();
+    registry.begin_update(HarnessId::Mock);
+    queue_run(&core, "second ask", "/tmp", "msg-user-2");
+    wait_for(
+        || journal.pending_starts().unwrap() == vec![CHAT.to_string()],
+        "the waiting send to be marked",
+    )
+    .await;
+    // Its journal still ends in the first turn's Done: without the marker a
+    // crash now would leave this send looking answered.
+    assert!(journal.stale_sessions().unwrap().is_empty());
+    assert_eq!(requests.lock().unwrap().len(), 1, "the run is still waiting");
+
+    registry.end_update(HarnessId::Mock);
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "the waiting send to run once the update ends",
+    )
+    .await;
+    assert!(journal.pending_starts().unwrap().is_empty());
+    core.shutdown().await;
+}
+
+/// The 2026-11-09 shape: a kill while a send waited to start left the
+/// journal ending in the previous turn's Done, so boot read the chat as idle
+/// and the user's message sat unanswered. A marked send is picked back up,
+/// resuming the conversation; an answered chat with no marker is left alone.
+#[tokio::test]
+async fn a_kill_before_a_send_started_redispatches_it() {
+    for marked in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        {
+            let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+            let doc = SessionDoc::init(CHAT).unwrap();
+            let entry = |id: &str, role, text: &str, at| SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![MessagePart::Text {
+                    id: "t0".into(),
+                    text: text.into(),
+                }],
+                created_at: at,
+                device_id: "dev-crash".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            };
+            doc.push_message(&entry("msg-user-1", MessageRole::User, "first ask", now - 120_000))
+                .unwrap();
+            doc.push_message(&entry(
+                "msg-assistant-1",
+                MessageRole::Assistant,
+                "first answer",
+                now - 110_000,
+            ))
+            .unwrap();
+            doc.push_message(&entry("msg-user-2", MessageRole::User, "second ask", now - 5_000))
+                .unwrap();
+            store
+                .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+                .unwrap();
+            let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+            for event in [
+                AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "mock-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-before".into(),
+                    assistant_message_id: "msg-assistant-1".into(),
+                },
+                AgentEvent::TextDelta {
+                    text: "first answer".into(),
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-before".into()),
+                },
+            ] {
+                journal.append(CHAT, &event).unwrap();
+            }
+            if marked {
+                journal.note_pending_start(CHAT);
+            }
+        }
+
+        let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+        let core = assemble(
+            &dir,
+            RecordingHarness {
+                requests: requests.clone(),
+                session_id: "hs-after".into(),
+                fail_starts: Default::default(),
+            },
+        );
+        if !marked {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                requests.lock().unwrap().is_empty(),
+                "a closed journal without a marker must not be revived"
+            );
+            core.shutdown().await;
+            continue;
+        }
+        wait_for(
+            || complete_assistant_count(&core) == 2,
+            "the stranded send to be picked back up",
+        )
+        .await;
+        let recorded = requests.lock().unwrap().clone();
+        let revived = recorded
+            .iter()
+            .find(|r| r.prompt == "second ask")
+            .expect("the stranded send reached the harness");
+        assert_eq!(revived.resume.as_deref(), Some("hs-before"));
+        let users = entries_now(&core)
+            .into_iter()
+            .filter(|e| e.role == MessageRole::User)
+            .count();
+        assert_eq!(users, 2, "re-dispatch reuses the stranded message id");
+        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+        assert!(journal.pending_starts().unwrap().is_empty());
+        core.shutdown().await;
+    }
+}

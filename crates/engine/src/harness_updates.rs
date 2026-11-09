@@ -1369,8 +1369,12 @@ impl HarnessUpdateCoordinator {
                 },
             );
         }
+        // A requested update hurries parked runtimes along, but never holds
+        // back new runs while it waits: a long turn or a runtime holding
+        // background work can keep its lease indefinitely, and every send
+        // queued behind it would hang with no output (2026-11-09).
         if trigger == UpdateTrigger::Manual {
-            self.inner.registry.begin_update(harness);
+            self.inner.registry.request_runtime_retirement(harness);
         }
         let mut intent = UpdateIntentGuard {
             coordinator: self.clone(),
@@ -1388,18 +1392,10 @@ impl HarnessUpdateCoordinator {
                 intent.finish();
                 return Err("update cancelled".into());
             }
-            lease = async {
-                if trigger == UpdateTrigger::Manual {
-                    self.inner.registry.update_lease(harness).await
-                } else {
-                    self.inner.registry.idle_update_lease(harness).await
-                }
-            } => lease,
+            lease = self.inner.registry.idle_update_lease(harness) => lease,
         };
-        // Only an idle, exclusively leased background update may gate new work.
-        if trigger != UpdateTrigger::Manual {
-            self.inner.registry.begin_update(harness);
-        }
+        // Only an idle, exclusively leased update may gate new work.
+        self.inner.registry.begin_update(harness);
         if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
             drop(lease);
             self.finish_cancelled(harness);
@@ -3458,6 +3454,46 @@ esac
         assert!(matches!(omp.latest, LatestSource::Github { repository: "can1357/oh-my-pi", .. }));
     }
 
+    /// 2026-11-09: a requested update gated new runs before it held the gate.
+    /// A long turn and a parked runtime holding background work never let go,
+    /// so every later send hung with no output until the engine restarted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn requested_update_admits_new_execution_while_waiting_for_idle() {
+        let (temp, coordinator) = automatic_fixture();
+        let registry = coordinator.inner.registry.clone();
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        let running = registry.execution_lease(HarnessId::Grok).await;
+        let applying = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.apply(HarnessId::Grok).await }
+        });
+        wait_for_phase(&coordinator, HarnessId::Grok, HarnessUpdatePhase::WaitingForIdle).await;
+
+        let new_execution = tokio::time::timeout(
+            Duration::from_secs(1), registry.execution_lease(HarnessId::Grok),
+        ).await.expect("a requested update must not strand a new user execution");
+        assert!(!registry.update_pending(HarnessId::Grok));
+        assert_eq!(registry.while_update_clear(HarnessId::Grok, || 42), Some(42));
+        // Parked runtimes are still asked to retire so the wait can end.
+        assert!(registry.runtime_retirement_requested(HarnessId::Grok));
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(std::fs::read_to_string(temp.path().join("version")).unwrap(), "1.0.0\n");
+
+        drop(running);
+        drop(new_execution);
+        let version = tokio::time::timeout(Duration::from_secs(5), applying)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(version, "2.0.0");
+        assert_eq!(std::fs::read_to_string(temp.path().join("version")).unwrap(), "2.0.0\n");
+        assert!(!registry.update_pending(HarnessId::Grok));
+        assert!(!registry.runtime_retirement_requested(HarnessId::Grok));
+        coordinator.shutdown().await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn background_updates_admit_new_execution_and_wait_for_all_persistent_leases() {
@@ -3903,6 +3939,7 @@ esac
             .unwrap();
         assert_eq!(result.unwrap_err(), "update cancelled");
         assert!(!registry.update_pending(HarnessId::ClaudeCode));
+        assert!(!registry.runtime_retirement_requested(HarnessId::ClaudeCode));
         assert_eq!(
             other
                 .status(HarnessId::ClaudeCode)

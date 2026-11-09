@@ -1213,6 +1213,8 @@ impl SessionsEngine {
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
+                    // A parked runtime's journal still ends in its last Done.
+                    self.inner.journal.note_pending_start(chat_id);
                     if bootstrap.is_some() {
                         history_sent.store(true, std::sync::atomic::Ordering::Release);
                     }
@@ -1477,6 +1479,12 @@ impl SessionsEngine {
             },
         );
         drop(runs);
+        if !idle {
+            // Until the run journals its first event (it may first wait for an
+            // agent update or a lease), a dying engine would leave this send
+            // looking answered. Boot recovery re-dispatches a marked turn.
+            self.inner.journal.note_pending_start(chat_id);
+        }
         self.inner.set_run_status(
             chat_id, &run_id,
             if idle {
@@ -1952,6 +1960,17 @@ impl SessionsEngine {
             .into_iter()
             .map(|chat_id| (chat_id, None))
             .collect();
+        // Sends admitted but never journaled: the engine died while the run
+        // waited to start, behind a Done that reads as idle. A stale journal
+        // (the run did journal before dying) speaks for itself instead.
+        let mut unstarted = std::collections::BTreeSet::new();
+        for chat_id in self.inner.journal.pending_starts()? {
+            self.inner.journal.clear_pending_start(&chat_id);
+            if !cut_off.contains_key(&chat_id) {
+                cut_off.insert(chat_id.clone(), None);
+                unstarted.insert(chat_id);
+            }
+        }
         for (chat_id, at) in self.inner.journal.shutdown_interrupts()? {
             if cut_off.contains_key(&chat_id) || self.inner.ended_by_shutdown(&chat_id) {
                 cut_off.entry(chat_id).or_insert(Some(at));
@@ -2024,12 +2043,17 @@ impl SessionsEngine {
                         .or_else(|| entries.last().filter(|e| e.role == MessageRole::User))
                         .is_some_and(|e| now - e.created_at < RESUME_FRESH_MS);
             let crashed = shutdown_at.is_none();
-            let tail = self
-                .inner
-                .journal
-                .events_rev(&chat_id)
-                .map(|events| turn_tail(events.map_while(Result::ok).map(|(_, event)| event), !crashed))
-                .unwrap_or_default();
+            // An unstarted send owns none of the journal: its last Done is the
+            // previous turn's, and nothing reached the provider.
+            let tail = if unstarted.contains(&chat_id) {
+                TurnTail::default()
+            } else {
+                self.inner
+                    .journal
+                    .events_rev(&chat_id)
+                    .map(|events| turn_tail(events.map_while(Result::ok).map(|(_, event)| event), !crashed))
+                    .unwrap_or_default()
+            };
             let request = prompt
                 .as_ref()
                 .and_then(|(_, text)| self.revival_request(&chat_id, text));
@@ -4211,7 +4235,10 @@ async fn drive_run(
                     if idle_since.is_some()
                         && *supervision_rx.borrow() == 0
                         && !resume_state.voice_active.live()
-                        && inner.registry.update_pending(harness_id)
+                        && inner.registry.runtime_retirement_requested(harness_id)
+                        // New sends are still routed here while an update
+                        // waits for idle: never retire under an accepted one.
+                        && !inner.has_pending_steers(&chat_id, &run_id)
                         && !turn.background_live()
                         && !inner.inference_in_flight(&chat_id, &run_id)
                         && (subagents.is_empty()
@@ -5135,7 +5162,7 @@ async fn drive_run(
             if (*status == DoneStatus::Completed || stopped_in_place)
                 && steerable
                 && !interrupted
-                && !inner.registry.update_pending(harness_id)
+                && !inner.registry.runtime_retirement_requested(harness_id)
             {
                 folded.clear();
                 dirty = false;
