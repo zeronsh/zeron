@@ -368,6 +368,12 @@ function M.view(): Node
 					description = ui.t("settings.appearance.glass.description"),
 					control = ds.Switch { value = material.frosted, label = ui.t("settings.appearance.glass.label") },
 				}),
+				-- The accent in more places (ds.look `accented`).
+				row("accented", {
+					label = ui.t("settings.appearance.accented.label"),
+					description = ui.t("settings.appearance.accented.description"),
+					control = ds.Switch { value = ds.look.accented, label = ui.t("settings.appearance.accented.label") },
+				}),
 			},
 		},
 		-- Every move the app makes asks ds/motion: on, they land at once.

@@ -232,7 +232,7 @@ function M.bind(c: Choices)
 		local out = {}
 		for _, p in on_device(c.device:get()) do
 			local l = route.look(p.id) or { hue = route.hue(p.id) }
-			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, plain = not p.git or nil })
+			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id, plain = not p.git or nil })
 		end
 		local chosen = c.project:get()
 		if chosen and chosen ~= M.NO_PROJECT then

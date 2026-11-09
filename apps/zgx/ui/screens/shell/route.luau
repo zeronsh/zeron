@@ -18,9 +18,12 @@
 --   route.projects:get()    the projects a new chat can work in, as
 --                           ds.Composer takes them ({ value, label, hue? })
 --   route.open_session(id)  to that session
+--   route.keep_keys()       the next arrival leaves the keys where they are
+--                           (a tab strip's arrows; `take_keys_kept()`)
 --   route.new_chat(project?, device?) to a new chat (in that project, a
---                           space id; "none" for none; nil, the one chosen
---                           last), on that device if given (a device id):
+--                           space id; "none" for none; nil, the one the
+--                           sidebar's project filter narrows to, else the
+--                           one chosen last), on that device if given (a device id):
 --                           the composer's device picked for it (a project
 --                           not there: its namesake there, else the
 --                           composer's pick there; `placed`)
@@ -55,7 +58,7 @@ local M = {}
 export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string? }
 export type Project = { id: string, device: string?, path: string?, name: string? }
 export type Session = { id: string, device: string?, cwd: string?, title: string?, project: string? }
-export type Choice = { value: string, label: string, hue: string?, src: string? }
+export type Choice = { value: string, label: string, hue: string?, src: string?, emoji: string?, project: string? }
 
 local ROUTES = {
 	home = "/",
@@ -391,7 +394,7 @@ M.projects = steady(function(): { Choice }
 	local out: { Choice } = {}
 	for _, p in sessions.projects:get() do
 		local l = look.of(p)
-		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji })
+		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id })
 	end
 	return out
 end)
@@ -511,6 +514,23 @@ function M.take_project(): { project: string? }?
 	end
 	return pick
 end
+-- An arrival that leaves the keys where they are: a tab strip's arrows
+-- choose a tab and keep the focus on it. `keep_keys()` just before the
+-- move; the composer's arrival takes it (`take_keys_kept()`) and leaves
+-- the keys alone. Unclaimed (a move that changed nothing), it lapses on
+-- the next turn.
+local keys_kept = false
+function M.keep_keys()
+	keys_kept = true
+	ui.after(0, function()
+		keys_kept = false
+	end)
+end
+function M.take_keys_kept(): boolean
+	local kept = keys_kept
+	keys_kept = false
+	return kept
+end
 function M.take_device(): string?
 	local pick = M.device_pick:peek()
 	if pick then
@@ -552,7 +572,19 @@ local function placed(project: string?, device: string): (string?, string)
 	return if named then named.id else nil, device
 end
 
+-- registered by screens/shell/sidebar: it requires this module, so this one
+-- can't require it back to read the project its filter narrows to
+local narrowed_to: () -> string? = function(): string?
+	return nil
+end
+function M.narrowed_project(get: () -> string?)
+	narrowed_to = get
+end
+
 function M.new_chat(project: string?, device: string?)
+	if project == nil and device == nil then
+		project = narrowed_to()
+	end
 	local on: string? = nil
 	-- (None of the project's there: none chosen, so the composer picks.)
 	local unchosen = false

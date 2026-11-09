@@ -738,8 +738,9 @@ test("Escape in a file's editor takes the keyboard to the file's tab (Tab indent
 	end)).to_be(true)
 end)
 
--- A tab dragged along the strip takes another's place as it crosses that
--- one's middle, the strip making room as it goes; let go, it stays there.
+-- A tab dragged along the strip takes another's place as its leading edge
+-- passes that one's middle, the strip making room as it goes; let go, it
+-- stays there.
 test("a tab dragged over another takes its place, and stays when dropped", function()
 	local app = open_panel()
 	open_files(app)

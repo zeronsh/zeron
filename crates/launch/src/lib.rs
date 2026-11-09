@@ -28,8 +28,27 @@ pub const MANAGED_ENV: &str = "ZERON_MANAGED_ENGINE";
 /// executable elsewhere.
 pub const APP_ENV: &str = "ZERON_APP";
 
-/// The engine executable beside the app at `app_exe`, if there is one.
+static FULL_APP_ENGINE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// This app's engine is another release's whole app binary, which runs the
+/// engine as its [`ENGINE_SUBCOMMAND`] (a Windows release has no separate
+/// engine executable): the zgx beta on Windows, which carries stable's. Set
+/// once, before anything asks. Nothing else sets it, so other builds resolve
+/// their engine as ever.
+pub fn set_full_app_engine(binary: PathBuf) {
+    let _ = FULL_APP_ENGINE.set(binary);
+}
+
+fn full_app_engine() -> Option<&'static Path> {
+    FULL_APP_ENGINE.get().map(PathBuf::as_path).filter(|path| path.is_file())
+}
+
+/// The engine executable for the app at `app_exe`, if there is one: beside it,
+/// or the one [`set_full_app_engine`] named.
 pub fn engine_executable(app_exe: &Path) -> Option<PathBuf> {
+    if let Some(engine) = full_app_engine() {
+        return Some(engine.to_path_buf());
+    }
     let dir = app_exe.parent().unwrap_or(Path::new("."));
     ENGINE_EXECUTABLES
         .iter()
@@ -41,6 +60,11 @@ pub fn engine_executable(app_exe: &Path) -> Option<PathBuf> {
 /// the engine executable beside it, else the app binary's
 /// [`ENGINE_SUBCOMMAND`].
 pub fn engine_command(app_exe: &Path) -> Command {
+    if let Some(engine) = full_app_engine() {
+        let mut command = Command::new(engine);
+        command.arg(ENGINE_SUBCOMMAND);
+        return command;
+    }
     match engine_executable(app_exe) {
         Some(engine) => Command::new(engine),
         None => {

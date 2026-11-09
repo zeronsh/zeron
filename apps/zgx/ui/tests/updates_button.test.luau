@@ -46,6 +46,24 @@ test("the button wears three marks at most and says how many", function()
 	expect(app:has("#updates-mark-4")).to_be(false)
 end)
 
+-- A node's box, from the tree's first line: `@n … x,y WxH`.
+local function box(app: any, target: string): { x: number, w: number }
+	local x, w = app:tree(target):match("^%s*@%d+[^\n]- ([%-%d.]+),[%-%d.]+ ([%d.]+)x[%d.]+")
+	return { x = tonumber(x) :: number, w = tonumber(w) :: number }
+end
+
+test("each mark sits in the middle of its own circle", function()
+	local app = open({
+		row("here", "Claude Code", "claude-code", "update"),
+		row("here", "Codex", "codex", "update"),
+		row("metal", "Grok", "grok", "update"),
+	})
+	for at = 1, 3 do
+		local circle, glyph = box(app, `#updates-mark-{at}`), box(app, `#updates-mark-{at}-glyph`)
+		expect(math.abs(glyph.x + glyph.w / 2 - (circle.x + circle.w / 2)) <= 0.5).to_be(true)
+	end
+end)
+
 test("the same thing on two devices is one mark", function()
 	local app = open({
 		row("here", "Claude Code", "claude-code", "update"),

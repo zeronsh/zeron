@@ -726,6 +726,10 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 			local w = pill_w:get()
 			report(if any() and not is_open() and w > 0 then w else nil)
 		end)
+		-- (Gone with it: a pill beside it no longer moves aside for it.)
+		ui.on_cleanup(function()
+			report(nil)
+		end)
 	end
 	return top, floating
 end
@@ -1079,7 +1083,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		return row:get().ended ~= nil
 	end
 	local agent = t.kind == "agent"
-	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "bot" else "action-play"
+	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "side-chat" else "action-play"
 	local opens = agent and props.on_open_task ~= nil
 	local function open()
 		if props.on_open_task then

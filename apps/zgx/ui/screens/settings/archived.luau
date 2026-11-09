@@ -173,7 +173,7 @@ local Row = ui.component(function(props: { now: State<any> }): Node
 			}
 		end
 		local l = route.look(p.id) or { hue = route.hue(p.id) }
-		return Tile { label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, size = 28 }
+		return Tile { label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, size = 28, project = p.id }
 	end)
 	local function lit(): boolean
 		return over:get()

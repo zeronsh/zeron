@@ -177,6 +177,9 @@ export type Props = {
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
+	-- What a link is drawn as: one of the chat's files or its agent's
+	-- skills, as a chip (ds/markdown `link_chip`).
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
 	-- A find over the conversation (screens/chat/find): its matches marked
 	-- in every message, the current one's message scrolled to and its block
 	-- into view. `current().row` is its message's place in `messages`.
@@ -681,6 +684,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
+			link_chip = if view then view.link_chip else nil,
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
 			group = `reply:{m.id}`,
 		}
@@ -760,6 +764,7 @@ local function reply(
 			pictures = if view then view.pictures else nil,
 			open = if view then view.open else nil,
 			link_menu = if view then view.link_menu else nil,
+			link_chip = if view then view.link_chip else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
 			group = `reply:{m.id}`,
 			track = track(m.id),
@@ -1123,6 +1128,13 @@ local function Transcript(props: Props): Node
 			props.on_jump_width(if shown then jump_w else nil)
 		end
 	end)
+	-- (Gone with it: a pill beside it no longer moves aside for it.)
+	if props.on_jump_width then
+		local say = props.on_jump_width
+		ui.on_cleanup(function()
+			say(nil)
+		end)
+	end
 	-- Each mounted row, by id: what a place in the window is part of.
 	local rows: { [string]: { outer: Ref, inner: Ref, index: State<number>, m: Message } } = {}
 	-- A find's current match in a message that isn't laid out (the list
@@ -1795,7 +1807,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for }),
 			},
 		}
 	end

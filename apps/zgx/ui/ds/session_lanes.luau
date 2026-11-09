@@ -107,7 +107,7 @@ local function lane(props: {
 		ui.text {
 			function(): string
 				local at = props.at()
-				return if at then status.ago(os.time() - at) else ""
+				return if at then status.ago(status.since(at)) else ""
 			end,
 			shrink = 0,
 			tabular = true,
@@ -244,7 +244,7 @@ return ui.component(function(props: Props): Node
 			at = function(): number?
 				return now:get().at
 			end,
-			fallback_icon = "bot",
+			fallback_icon = "side-chat",
 			on_click = function()
 				props.on_open_subagent(now:peek())
 			end,

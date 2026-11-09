@@ -98,7 +98,7 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	glob = "folder-with-files",
 	web = "global",
 	todo = "checklist",
-	agent = "bot",
+	agent = "side-chat",
 	thought = "chat-round-line",
 }
 

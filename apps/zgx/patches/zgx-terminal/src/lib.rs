@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 
 pub mod front;
+mod graphics;
 mod keys;
 mod news;
 mod osc;
@@ -26,6 +27,7 @@ mod paint;
 mod palette;
 mod process;
 mod session;
+mod sixel;
 mod view;
 
 pub use alacritty_terminal;
@@ -35,7 +37,7 @@ pub use process::process_name;
 pub use session::{
     ClipboardRequest, GridSize, Listener, Session, SessionEvent, SessionOptions, Term,
 };
-pub use view::{EngineTerminal, is_engine_drawn, reads, terminal_view};
+pub use view::{EngineTerminal, Replay, is_engine_drawn, reads, replay_terminal, terminal_view};
 
 /// A program's progress report (OSC 9;4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

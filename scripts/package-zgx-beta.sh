@@ -2,14 +2,14 @@
 # Zeron.app's beta: the zgx interface (apps/zgx, built with its `beta`
 # feature) as the Zeron app itself — the same bundle id, name, signing,
 # entitlements and `zeron://` scheme as scripts/package-macos.sh's — with
-# the stable release's own engine inside, so a tester keeps Zeron.app's
-# engine, data and device:
+# the engine it's given inside, built from the same commit, so a tester keeps
+# Zeron.app's data and device:
 #
 #   target/package-beta/Zeron.app
 #     Contents/MacOS/zeron           the zgx interface and `zeron`'s command
 #                                    line (crates/cli; the engine's commands
 #                                    run in the helper beside it)
-#     Contents/MacOS/Zeron Engine    the stable release's engine, as signed
+#     Contents/MacOS/Zeron Engine    the engine, signed here
 #     Contents/Resources/ui, plugins-builtin, zeron.icns, licenses
 #   target/package-beta/zeron-<beta>-macos-<arch>.dmg
 #   target/package-beta/zeron-<beta>-macos-<arch>-app.tar.gz  (the updater's)
@@ -18,7 +18,7 @@
 #   BETA_VERSION        `<workspace version>-beta.<n>`; the workspace version
 #                       is the next release's (newer than the stable whose
 #                       engine goes in)
-#   ZGX_BETA_ENGINE     the engine: a stable Zeron.app, its app tarball, or
+#   ZGX_BETA_ENGINE     the engine: a built binary, a Zeron.app, its app tarball, or
 #                       its `Zeron Engine` binary
 #   ZGX_BETA_ZGX_BIN    the interface, built already (with --features beta and
 #                       ZERON_BETA_VERSION); otherwise built here
@@ -50,9 +50,9 @@ ENTITLEMENTS="$ROOT/dist/macos/Zeron.entitlements"
 read -r -a CARGO_EXTRA <<<"${CARGO_FLAGS:-}"
 mkdir -p "$OUT_DIR"
 
-# The engine: the stable release's, from its bundle, tarball or binary.
+# The engine: the binary given, or the one in a bundle or tarball.
 ENGINE_SRC="${ZGX_BETA_ENGINE:-}"
-[[ -n "$ENGINE_SRC" ]] || die "ZGX_BETA_ENGINE: a stable Zeron.app, its app tarball or its Zeron Engine"
+[[ -n "$ENGINE_SRC" ]] || die "ZGX_BETA_ENGINE: a built engine, a Zeron.app, its app tarball or its Zeron Engine"
 ENGINE_BIN="$ENGINE_SRC"
 if [[ "$ENGINE_SRC" == *.tar.gz ]]; then
   UNPACK="$OUT_DIR/.stable"
@@ -63,7 +63,7 @@ fi
 [[ -d "$ENGINE_SRC" ]] && ENGINE_BIN="$ENGINE_SRC/Contents/MacOS/Zeron Engine"
 [[ -x "$ENGINE_BIN" ]] || die "no engine at $ENGINE_BIN"
 ENGINE_VERSION="$("$ENGINE_BIN" --version | sed -n 's/^zeron-engine //p')"
-[[ "$ENGINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$ENGINE_BIN didn't say its version"
+[[ "$ENGINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || die "$ENGINE_BIN didn't say its version"
 # The interface hands `zeron headless`, `zeron login` and the engine's other
 # subcommands to this engine, which must parse them with the same command
 # line (crates/cli). An engine from before that runs the background engine

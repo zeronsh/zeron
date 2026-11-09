@@ -42,6 +42,15 @@ local TABLES: { [string]: string } = {
 | Free | Yours to keep |
 | Team of many | Billed by seat |
 ]],
+	-- A column of prose short of a wrap beside numbers: the table is
+	-- narrower than the reply until its prose column takes what's left.
+	loose = [[
+| Changes | Frames |
+| --- | --- |
+| layout box easing | 3 |
+| sideways wheel and drift latch | 12 |
+| `~~` only | 1 |
+]],
 	-- A cell whose code can't break anywhere.
 	code = [[
 | Setting | Where it's read |
@@ -126,6 +135,7 @@ return ui.column {
 			shown("many"),
 			shown("code"),
 			shown("said"),
+			shown("loose"),
 			ui.show(function(): boolean
 				return only:get() == "all" or only:get() == "data"
 			end, ui.column {

@@ -25,6 +25,8 @@
 //! `ZERON_ZGX_REPLAY=1` shows every page, as if none were finished.
 //! `--inspect` (or `ZGX_INSPECT_SOCKET=1`) serves devtools to `zgx inspect`.
 
+#![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
+
 mod about;
 mod acp_registry;
 mod agents;
@@ -219,6 +221,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
+    // The Windows beta's engine is the stable release's whole `zeron.exe`, in
+    // the beta's folder (scripts/package-windows.ps1).
+    #[cfg(all(windows, feature = "beta"))]
+    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
+        zeron_launch::set_full_app_engine(dir.join("beta").join(about::APP_VERSION).join("engine").join("zeron.exe"));
+    }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
@@ -934,6 +942,11 @@ fn serve_with(
     if inspect {
         zgx_script::inspect::prepare();
     }
+    // A press travels 6 points before it's a drag, so a click that wavers
+    // stays a click (a tab's above all). On macOS only: it gives no setting
+    // (zgx's own is 4); elsewhere zgx follows the system's.
+    #[cfg(target_os = "macos")]
+    cx.ui.input.set_drag_threshold(6.);
     // The platform, which the selection's Copy and Look Up go through, is
     // found as the view mounts.
     let platform = selection_platform(cx, &host);
@@ -1253,8 +1266,8 @@ fn gallery_window() -> WindowOptions {
 
 /// The scripts: this folder's `ui/`, or `ZERON_ZGX_UI` (scripts/smoke.sh's
 /// frozen copy, which other saves under ui/ can't reload mid-run), or, in
-/// an app bundle (the Zeron app: the beta), the copy in its `Contents/Resources/ui`
-/// (with `plugins-builtin` beside it).
+/// an installed Zeron app (the beta), the copy packaged with it (with
+/// `plugins-builtin` beside it).
 fn ui_dir() -> PathBuf {
     match dev::smoke_switch("ZERON_ZGX_UI") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -1262,13 +1275,23 @@ fn ui_dir() -> PathBuf {
     }
 }
 
-/// `Contents/Resources/ui` of the bundle this executable runs from, if any.
+/// The packaged scripts of the install this executable runs from, if any:
+/// `Contents/Resources/ui` of a macOS bundle, `ui` beside it on Linux (the
+/// tarball's, scripts/package-linux.sh), `beta\<version>\ui` beside it on
+/// Windows (scripts/package-windows.ps1).
 fn bundled_ui() -> Option<PathBuf> {
     static BUNDLED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     BUNDLED
         .get_or_init(|| {
             let exe = std::env::current_exe().ok()?;
-            let ui = exe.parent()?.parent()?.join("Resources").join("ui");
+            let dir = exe.parent()?;
+            let ui = if cfg!(target_os = "macos") {
+                dir.parent()?.join("Resources").join("ui")
+            } else if cfg!(windows) {
+                dir.join("beta").join(about::APP_VERSION).join("ui")
+            } else {
+                dir.join("ui")
+            };
             ui.join("app.luau").is_file().then_some(ui)
         })
         .clone()

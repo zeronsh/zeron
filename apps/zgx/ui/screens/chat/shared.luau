@@ -41,12 +41,50 @@ M.shown = ui.shared("chat.transcript.session", nil :: string?)
 -- Where in it the reader was (ds/transcript's `keep`), for a page made
 -- again; nil at the end.
 M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
--- The transcript's "Scroll to end" pill: its width while it shows (the
--- composer's folded trays' pill moves aside for it).
-M.jump_width = ui.shared("chat.transcript.jump_width", nil :: number?)
--- The composer's folded trays' pill: its width while it shows (the two
--- pills, both showing, centre together).
-M.pill_width = ui.shared("chat.composer.pill_width", nil :: number?)
+-- The two pills over a composer, a centred pair: its transcript's "Jump to
+-- latest" (`"jump"`) and the composer's folded trays' pill (`"waiting"`),
+-- each's width while it shows, nil while it doesn't. Every pane has its
+-- own pair, by its key: the chat page's transcript `"page"`, a lane's (a
+-- split's pane, a panel tab) `lane.<slot>`, its composer the same; the
+-- window's composer `"window"`. Each says only its own width; what stands
+-- beside it reads the other's: the window's composer the transcript at its
+-- foot (`at_foot`), a split's focused pane the window's composer, any
+-- other pane its own composer. (One width for the whole window had every
+-- pane's pills reading the one the chat page last said.)
+local pill_widths: { [string]: State<number?> } = {}
+function M.pill_width_of(kind: "jump" | "waiting", key: string): State<number?>
+	local k = `{kind}|{key}`
+	local s = pill_widths[k]
+	if not s then
+		s = ui.shared(`chat.pills.{k}`, nil :: number?)
+		pill_widths[k] = s
+	end
+	return s :: State<number?>
+end
+-- The pill whose width it says, as one said by one pill alone: nil from a
+-- pill made again after another took its key (a chat page made anew, its
+-- old transcript going after) clears only its own.
+local pill_owner: { [string]: any } = {}
+function M.pill_teller(kind: "jump" | "waiting", key: string): (w: number?) -> ()
+	local me = {}
+	local s = M.pill_width_of(kind, key)
+	local k = `{kind}|{key}`
+	return function(w: number?)
+		if w == nil and pill_owner[k] ~= me then
+			return
+		end
+		pill_owner[k] = if w == nil then nil else me
+		if s:peek() ~= w then
+			s:set(w)
+		end
+	end
+end
+-- The transcript at the window's composer's foot (its pair's key): the
+-- chat page's, or in a split the focused pane's (screens/shell/page).
+M.at_foot = ui.shared("chat.pills.at_foot", "page")
+-- (The chat page's pair, by its old names.)
+M.jump_width = M.pill_width_of("jump", "page")
+M.pill_width = M.pill_width_of("waiting", "window")
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
@@ -329,6 +367,17 @@ function M.set_cargo_of(key: string, list: { any })
 end
 
 function M.push_cargo(key: string?, item: any)
+	-- A file or a picture: its number in the draft, the next after any
+	-- there (an `@` mention of it names it by that: ds/attachment_mentions).
+	if item.path and item.mention == nil then
+		local top = 0
+		for _, other in M.peek_cargo(key) do
+			if type(other.mention) == "number" and other.mention > top then
+				top = other.mention
+			end
+		end
+		item.mention = top + 1
+	end
 	if key == nil or here:peek() == key then
 		M.cargo:push(item)
 		return
@@ -566,6 +615,15 @@ function M.mention_chat(id: string, key: string?)
 			title, mark = c.title, c.agent
 		end
 	end
+	if title == nil then
+		for _, list in sessions.now:peek().children or {} do
+			for _, c in list do
+				if c.id == id then
+					title, mark = c.title, c.agent
+				end
+			end
+		end
+	end
 	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
@@ -614,7 +672,7 @@ function M.chat_link(title: string, id: string): string
 end
 
 -- A drag from inside the window that drops here: the files pane's files
--- (their paths). Other drags (a session, a tab, a section) aren't ours.
+-- (their paths, also carried by file tabs). Other drags aren't file context.
 local function workspace_paths(payload: any): { string }?
 	if type(payload) == "table" and type(payload.paths) == "table" and #payload.paths > 0 then
 		return payload.paths

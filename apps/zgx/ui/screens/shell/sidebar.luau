@@ -452,6 +452,20 @@ local function checkout_here(id: string?): string?
 	return id
 end
 
+-- peeked, not tracked: read from a shortcut or a click, never a computed
+route.narrowed_project(function(): string?
+	if not shared.details.project_filter:peek() then
+		return nil
+	end
+	local id = shared.project:peek()
+	for _, p in sessions.now:peek().projects do
+		if p.id == id then
+			return checkout_here(id)
+		end
+	end
+	return nil
+end)
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
@@ -610,7 +624,7 @@ local function project_filter(): Node
 						if not seen[first.id] then
 							seen[first.id] = true
 							local l = route.look(first.id) or { hue = route.hue(first.id) }
-							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji })
+							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji, project = first.id })
 						end
 					end
 					return out
