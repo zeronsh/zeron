@@ -1211,6 +1211,32 @@ async fn missing_binary_is_not_installed() {
 }
 
 #[tokio::test]
+async fn run_rejects_an_unknown_cli_version_before_spawning_the_app_server() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("codex");
+    std::fs::write(
+        &exe,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo unavailable; exit 0; fi\n\
+         echo started > app-server-started\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let h = CodexHarness::new().with_executable(exe);
+    let mut req = request("hello");
+    req.cwd = dir.path().display().to_string();
+    let (controls, _steer, _token) = controls("Yes");
+    let error = h.run(req, controls).await.err().expect("version required");
+    assert!(
+        error
+            .to_string()
+            .contains("Could not read the Codex CLI version"),
+        "{error}"
+    );
+    assert!(!dir.path().join("app-server-started").exists());
+}
+
+#[tokio::test]
 async fn models_discovers_visible_catalog_with_pagination() {
     let models = harness().models().await.expect("models");
     assert_eq!(models.len(), 3);
@@ -2519,7 +2545,8 @@ fn flaky_app_server(dir: &std::path::Path, fail: u32, reason: &str) -> (PathBuf,
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nn=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > '{count}'\n\
+            "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then exec '{fake}' --version; fi\n\
+             n=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > '{count}'\n\
              if [ \"$n\" -le {fail} ]; then echo '{reason}' >&2; exit 1; fi\nexec '{fake}' \"$@\"\n",
             count = count.display(),
             fake = fixture_path().display(),
