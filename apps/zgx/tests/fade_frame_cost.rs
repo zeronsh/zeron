@@ -93,9 +93,16 @@ fn a_streaming_replys_frames_drawn() {
     let app = TestApp::new(|runtime| ScriptHost::new(runtime, ui_dir().join("chat_fixture.luau")));
     app.ui.scene.borrow_mut().resize(900., 700.);
     let mut gpu = zgx_gpu::GpuRenderer::new(900, 700).expect("a GPU");
+    let shown_rects = std::cell::Cell::new(0);
     let mut draw = |app: &TestApp| -> f32 {
         let damage = app.ui.scene.borrow_mut().flush().damage;
         gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+        // (A few frames' rects, to see what a frame repaints.)
+        shown_rects.set(shown_rects.get() + 1);
+        if std::env::var_os("SHOW_DAMAGE").is_some() && (1500..1530).contains(&shown_rects.get()) {
+            let rects: Vec<String> = damage.iter().map(|r| format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.width, r.height)).collect();
+            eprintln!("damage: {}", rects.join(" | "));
+        }
         damage.iter().map(|r| r.width * r.height).sum()
     };
     app.frames(2);
@@ -114,6 +121,9 @@ fn a_streaming_replys_frames_drawn() {
         // A chunk every third frame: 40 a second at 120 frames.
         let lands = n % 3 == 0;
         n += 1;
+        // (Counted from before the chunk is written: its effects run then.)
+        zgx::profile::take();
+        let started = Instant::now();
         if lands {
             end = (end + 24).min(text.len());
             while !text.is_char_boundary(end) {
@@ -127,8 +137,6 @@ fn a_streaming_replys_frames_drawn() {
                 ("part_text", words),
             ]));
         }
-        let started = Instant::now();
-        zgx::profile::take();
         app.frames(1);
         let damaged = draw(&app);
         let wall = started.elapsed();
