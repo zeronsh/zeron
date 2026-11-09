@@ -22,6 +22,9 @@ local look = require("@self/look")
 local FileIcon = require("@self/file_icons")
 local Links = require("@ds/links")
 local Source = require("@self/math_source")
+-- (Loaded for its block hook: ds/markdown sets it as it loads.)
+require("@self/markdown")
+local MarkdownBlocks = require("@self/markdown_blocks")
 
 local M = {}
 
@@ -309,6 +312,14 @@ function M.find(f: Find?): { [string]: any }?
 			end
 			else nil,
 	}
+end
+
+-- The view's `block`: what it doesn't draw itself (code, display math,
+-- mermaid, tables, pictures) drawn by ds/markdown, exactly as it draws
+-- them, from ds/markdown's props for the text (its veil, find, pictures,
+-- links…).
+function M.block(props: { [string]: any }): (b: MarkdownBlock, at: any) -> Node
+	return MarkdownBlocks.hook(props)
 end
 
 -- The names `attached` carries, for the view's `attached`.
