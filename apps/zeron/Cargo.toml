@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["desktop"]
+desktop = ["dep:zeron-ui"]
+
 # Shared by both binaries; the UI is referenced only by `zeron`, so the
-# background engine links without it.
+# background engine builds without it with --no-default-features.
 [lib]
 name = "zeron_app"
 path = "src/lib.rs"
@@ -14,6 +18,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "zeron"
 path = "src/main.rs"
+required-features = ["desktop"]
 
 [[bin]]
 name = "zeron-engine"
@@ -22,7 +27,7 @@ path = "src/bin/zeron-engine.rs"
 [dependencies]
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
-zeron-ui.workspace = true
+zeron-ui = { workspace = true, optional = true }
 zeron-update.workspace = true
 zeron-cli.workspace = true
 zeron-mcp.workspace = true

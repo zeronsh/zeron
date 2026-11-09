@@ -598,6 +598,7 @@ fn agent_name(harness: &HarnessId) -> &str {
         HarnessId::Hermes => "Hermes",
         HarnessId::Fx => "fx",
         HarnessId::Pi => "Pi",
+        HarnessId::Droid => "Factory Droid",
         HarnessId::Opencode => "OpenCode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Muse => "Muse Code",

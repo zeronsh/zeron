@@ -71,7 +71,7 @@ agents and runs their sign-ins, and runs GitHub's device flow. zgx uses
 the staging engine, port 27871 with its data in `~/.zeron-staging`
 (`scripts/staging-app.sh`'s): one already running is used as it is,
 otherwise zgx starts `target/debug/zeron-engine` from this checkout's root
-(`cargo build -p zeron --bin zeron-engine` there first), detached, against
+(`cargo build -p zeron --bin zeron-engine --no-default-features` there first), detached, against
 zgx's edge and sign-in client. Signing in restarts it once, to sync. Never
 the production engine: port 27654 and `~/.comet-native` are refused.
 
