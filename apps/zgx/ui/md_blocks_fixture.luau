@@ -2,7 +2,9 @@
 -- by them (`.md-code.lang-<language>`, `.md-math`, `.md-table`, `.md-image`,
 -- `.md-quote`, `.md-heading`): src/plugins/markdown_tests.rs mounts it with
 -- plugins-dev/md-hello loaded or not. `stream` writes more of the last
--- block, as a reply streaming in does.
+-- block, as a reply streaming in does. `md_blocks.native`: drawn by zgx's
+-- markdown view, as a transcript's replies are (its code blocks growing in
+-- place).
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -43,6 +45,7 @@ local START = table.concat({
 }, "\n")
 
 local text = ui.state("md_blocks_text", START)
+local native = ui.shared("md_blocks.native", false)
 
 ui.command {
 	id = "stream",
@@ -59,6 +62,7 @@ return ui.column {
 	p = "$space.6",
 	Markdown {
 		key = "md-blocks",
+		native = native:peek() == true,
 		text = function(): string
 			return text:get()
 		end,
