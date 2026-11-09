@@ -110,6 +110,9 @@ mod fit_tests;
 // (Unix only: it reads thread CPU time through libc.)
 #[cfg(all(test, unix))]
 mod slide_bench_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod activity_cost_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]

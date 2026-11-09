@@ -1749,28 +1749,9 @@ impl View {
     fn publish_draft(&self) {
         let value = {
             let open = self.open.borrow();
-            match open.as_ref().and_then(|o| o.entries.last()) {
-                Some(e) if e["status"].as_str() == Some("streaming") => {
-                    // The words being written: the reply's last text part
-                    // (its block, `part`), apart from the rest of the reply.
-                    let tail = e["parts"].as_array().and_then(|parts| {
-                        parts.iter().rev().find(|p| p["kind"].as_str() == Some("text"))
-                    });
-                    let id = e["id"].as_str().unwrap_or_default();
-                    let words = match tail {
-                        // (`text`, the tail's words too: the page reads the
-                        // block's, and of `text` only whether any are yet.)
-                        Some(tail) => Value::record([
-                            ("id", Value::from(id)),
-                            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
-                            ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
-                            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
-                        ]),
-                        None => draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default()),
-                    };
-                    with_thought(words, e["parts"].as_array())
-                }
-                _ => draft_value("", ""),
+            match open.as_ref().and_then(|o| o.entries.last()).and_then(|e| e.json.as_ref()) {
+                Some(json) => draft_of(json),
+                None => draft_value("", ""),
             }
         };
         self.draft.set(value);
@@ -3195,16 +3176,19 @@ fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
 }
 
 /// An entry as its row reads it.
-fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
+pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
     // (One still being written is built again with its next change.)
     let settled = entry["status"].as_str() != Some("streaming");
     if settled {
         ROW_BUILD.set(Some(RowBuild::default()));
+    } else {
+        LIVE_PASS.set(Some(HashMap::new()));
     }
     let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
         None => message(entry, model),
     };
+    LIVE_PASS.set(None);
     if let Some(mut build) = ROW_BUILD.take()
         && let Some(row) = &mut row
     {
@@ -3272,7 +3256,19 @@ thread_local! {
     /// The settled row being built (`built_entry`): its tools so far, by the
     /// part each is of, each built once however many of its layouts show it.
     static ROW_BUILD: RefCell<Option<RowBuild>> = const { RefCell::new(None) };
+    /// The calls of replies being written, each as last built, by its id and
+    /// whether it was the part being written: its part as it was, and its
+    /// value (`tool_live`).
+    static LIVE_TOOLS: RefCell<HashMap<String, [Option<(Json, Option<Value>)>; 2]>> = RefCell::default();
+    /// The reply being written as it's built (`built_entry`): each of its
+    /// parts' tool by where the part is, as `LIVE_TOOLS` gave it, so the
+    /// layouts that show a part (its tools, its blocks, compact) look it up
+    /// once.
+    static LIVE_PASS: RefCell<Option<HashMap<(*const Json, bool), Option<Value>>>> = const { RefCell::new(None) };
 }
+
+/// The most calls `LIVE_TOOLS` keeps before it starts again.
+const LIVE_TOOLS_MOST: usize = 8192;
 
 #[derive(Default)]
 struct RowBuild {
@@ -4096,7 +4092,9 @@ fn group_summary(group: &[&Json]) -> String {
     if !calls.is_empty() {
         let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut other, mut failed) =
             (0, 0, 0, 0, 0, 0, 0);
-        let mut edited: Vec<String> = Vec::new();
+        // (Each file once, however often it was edited: a set, so a long
+        // run of edits isn't counted against every one before it.)
+        let mut edited: std::collections::HashSet<String> = std::collections::HashSet::new();
         for p in &calls {
             if p["isError"].as_bool() == Some(true) {
                 failed += 1;
@@ -4105,16 +4103,10 @@ fn group_summary(group: &[&Json]) -> String {
             match call["kind"].as_str().unwrap_or_default() {
                 "exec" => commands += 1,
                 "writeFile" | "editFile" => {
-                    let path = call["path"].as_str().unwrap_or_default().to_owned();
-                    if !edited.contains(&path) {
-                        edited.push(path);
-                    }
+                    edited.insert(call["path"].as_str().unwrap_or_default().to_owned());
                 }
                 "applyPatch" => {
-                    let path = call["path"].as_str().unwrap_or("patch").to_owned();
-                    if !edited.contains(&path) {
-                        edited.push(path);
-                    }
+                    edited.insert(call["path"].as_str().unwrap_or("patch").to_owned());
                 }
                 "readFile" => reads += 1,
                 "search" | "glob" | "webSearch" => searches += 1,
@@ -4180,6 +4172,23 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
     if let Some(built) = ROW_BUILD.with_borrow(|build| build.as_ref()?.tools.get(&at).cloned()) {
         return built;
     }
+    // A reply being written is built again with each change of it (a call
+    // arriving, one finishing), its other calls as they were: each of those
+    // is the very value it was (`LIVE_TOOLS`), so only what changed is built,
+    // and the page, given the same values, has nothing to do for them.
+    let settled = ROW_BUILD.with_borrow(Option::is_some);
+    if !settled && let Some(id) = part["id"].as_str() {
+        if let Some(built) = LIVE_PASS.with_borrow(|pass| pass.as_ref()?.get(&(at, live)).cloned()) {
+            return built;
+        }
+        let built = live_tool(id, part, live);
+        LIVE_PASS.with_borrow_mut(|pass| {
+            if let Some(pass) = pass {
+                pass.insert((at, live), built.clone());
+            }
+        });
+        return built;
+    }
     let mut built = tool_row(part, live);
     ROW_BUILD.with_borrow_mut(|build| {
         if let Some(build) = build {
@@ -4187,6 +4196,30 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
                 share_parts(built, &mut build.seen);
             }
             build.tools.insert(at, built.clone());
+        }
+    });
+    built
+}
+
+/// The tool of a part of a reply being written: as `LIVE_TOOLS` has it if
+/// the part is as it was, else built and kept.
+fn live_tool(id: &str, part: &Json, live: bool) -> Option<Value> {
+    let kept = LIVE_TOOLS.with_borrow(|kept| {
+        kept.get(id)?[usize::from(live)].as_ref().filter(|(was, _)| was == part).map(|(_, built)| built.clone())
+    });
+    if let Some(built) = kept {
+        return built;
+    }
+    let built = tool_row(part, live);
+    LIVE_TOOLS.with_borrow_mut(|kept| {
+        if kept.len() >= LIVE_TOOLS_MOST {
+            kept.clear();
+        }
+        if !kept.contains_key(id) {
+            kept.insert(id.to_owned(), Default::default());
+        }
+        if let Some(slots) = kept.get_mut(id) {
+            slots[usize::from(live)] = Some((part.clone(), built.clone()));
         }
     });
     built
@@ -4621,6 +4654,29 @@ fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Valu
         all.push((key.into(), value));
     }
     Value::record(all)
+}
+
+/// The draft for the transcript's last entry: while it streams, the words
+/// being written (the reply's last text part, its block `part`, apart from
+/// the rest of the reply) and the thought it is at; else none.
+pub(crate) fn draft_of(e: &Json) -> Value {
+    if e["status"].as_str() != Some("streaming") {
+        return draft_value("", "");
+    }
+    let tail = e["parts"].as_array().and_then(|parts| parts.iter().rev().find(|p| p["kind"].as_str() == Some("text")));
+    let id = e["id"].as_str().unwrap_or_default();
+    let words = match tail {
+        // (`text`, the tail's words too: the page reads the block's, and of
+        // `text` only whether any are yet.)
+        Some(tail) => Value::record([
+            ("id", Value::from(id)),
+            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
+            ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
+            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
+        ]),
+        None => draft_value(id, &entry_text(e)),
+    };
+    with_thought(words, e["parts"].as_array())
 }
 
 fn draft_value(id: &str, text: &str) -> Value {
