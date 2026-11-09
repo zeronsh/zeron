@@ -110,6 +110,15 @@ const CASES: &[(&str, &str)] = &[
         "Above the rule.\n\n---\n\nBelow it.\n\n***\n\n- a list after a rule",
     ),
     (
+        "complex",
+        "Some prose, then code:\n\n```rust\nfn main() {\n    // a comment, and a line long enough to scroll sideways past the reply's width at any of them\n    println!(\"hi\");\n}\n```\n\n\
+         A table:\n\n| Item | Price | Note |\n|---|---:|---|\n| seat | $12 | monthly, **billed** |\n| team | $99 | yearly, with `code` |\n\n\
+         Display math:\n\n$$\n\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}\n$$\n\n\
+         - a list with code in it:\n\n  ```\n  nested code\n  ```\n\n- and `inline`\n\n\
+         ![a picture](shot.png)\n![another](two.png)\n\n\
+         ```mermaid\ngraph TD; A-->B\n```\n\nThe end.",
+    ),
+    (
         "mixed",
         "**Bold `code` inside**, *italic `code`*, ~~struck `code`~~ and **[bold link](https://b.c)**.\n\n\
          Second paragraph.\n\nThird, after the second.",
@@ -364,6 +373,7 @@ fn write_pictures(name: &str, luau: &[u8], native: &[u8], w: f32, h: f32) {
         return;
     };
     std::fs::create_dir_all(&dir).unwrap();
+    let name: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect();
     let (w, h) = ((w * SCALE) as u32, (h * SCALE) as u32);
     let marked: Vec<u8> = luau
         .chunks_exact(4)
@@ -728,15 +738,16 @@ fn a_chip_known_late_is_drawn_as_ds_markdowns() {
 fn a_finds_marks_and_reveals_are_ds_markdowns() {
     // (`FIND_CASES=headings`: those cases alone.)
     let only: Option<Vec<String>> = std::env::var("FIND_CASES").ok().map(|v| v.split(',').map(str::to_owned).collect());
-    let text = CASES
+    let chosen: Vec<&str> = CASES
         .iter()
         .filter(|(name, _)| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name)))
         .map(|(_, t)| *t)
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .collect();
     let finding = [("pixels.finding", Value::from(true))];
     let mut failed = Vec::new();
-    for w in [360., W] {
+    // (Four cases a reply: a narrow window's whole reply stays within what
+    // a texture holds.)
+    for (text, w) in chosen.chunks(4).map(|c| c.join("\n\n")).flat_map(|t| [(t.clone(), 360.), (t, W)]) {
         let mut luau = Shown::made(w, "luau", "dark", "", &text, &finding);
         let mut native = Shown::made(w, "native", "dark", "", &text, &finding);
         for (query, block, k) in [
