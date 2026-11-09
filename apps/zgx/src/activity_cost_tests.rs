@@ -49,6 +49,15 @@ fn thread_cpu() -> Duration {
     Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
 }
 
+/// The process's CPU time so far, every thread.
+fn process_cpu() -> Duration {
+    // SAFETY: fills a rusage for this process.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let t = |v: libc::timeval| Duration::new(v.tv_sec as u64, v.tv_usec as u32 * 1000);
+    t(usage.ru_utime) + t(usage.ru_stime)
+}
+
 /// Prose of about `len` bytes, in paragraphs of a few sentences.
 fn prose(seed: &str, len: usize) -> String {
     let mut out = String::new();
@@ -120,6 +129,13 @@ struct Cost {
     frames: usize,
     drawn: usize,
     wanted: usize,
+    /// Spent in the time frames leave over (a window's lists building rows
+    /// ahead): instructions, and calls into scripts.
+    spare: u64,
+    spare_calls: u64,
+    /// The whole process's CPU over the frame (every thread: its spare time,
+    /// the GPU driver's): what the 5% budget is in.
+    process: Duration,
 }
 
 impl Cost {
@@ -134,6 +150,9 @@ impl Cost {
         self.frames += other.frames;
         self.drawn += other.drawn;
         self.wanted += other.wanted;
+        self.spare += other.spare;
+        self.spare_calls += other.spare_calls;
+        self.process += other.process;
     }
     fn phase(&self, phase: Phase) -> u64 {
         let at = PHASES.iter().position(|p| *p == phase).unwrap();
@@ -157,11 +176,19 @@ struct Bench {
     /// on 1/60 s a frame, so what fades and turns by the clock draws the same
     /// frames each run.
     clock: Option<(zgx::clock::VirtualClock, Duration)>,
+    /// `ACTIVITY_PUBLISH_AT_FRAME`: the host publishes as the next frame
+    /// begins (its time already that frame's), not a frame before it; the
+    /// frame then takes no time of its own (`ticked`).
+    at_frame: bool,
+    ticked: bool,
+    /// With time frames leave over, as a window has (`TestApp::with_spare_time`).
+    spare: bool,
 }
 
 impl Bench {
-    fn new() -> Self {
-        Self::made(None, true)
+    /// With spare time, as a window has: the benchmark's.
+    fn windowed() -> Self {
+        Self::made_with(None, true, true)
     }
 
     /// Laid out, not drawn: what's built, without a GPU.
@@ -187,15 +214,26 @@ impl Bench {
 
     /// A frame's time passing on the test's clock (if it has one).
     fn tick(&mut self) {
+        if std::mem::take(&mut self.ticked) {
+            return;
+        }
         if let Some((clock, at)) = &mut self.clock {
             *at += Duration::from_secs_f64(1. / 60.);
             clock.advance(*at, || {});
         }
     }
 
-    fn made(mut clock: Option<(zgx::clock::VirtualClock, Duration)>, draw: bool) -> Self {
+    fn made(clock: Option<(zgx::clock::VirtualClock, Duration)>, draw: bool) -> Self {
+        Self::made_with(clock, draw, false)
+    }
+
+    fn made_with(mut clock: Option<(zgx::clock::VirtualClock, Duration)>, draw: bool, spare: bool) -> Self {
         let fixture = ui().join("chat_fixture.luau");
-        let app = TestApp::new(move |runtime| ScriptHost::new(runtime, fixture));
+        let app = if spare {
+            TestApp::with_spare_time(move |runtime| ScriptHost::new(runtime, fixture))
+        } else {
+            TestApp::new(move |runtime| ScriptHost::new(runtime, fixture))
+        };
         let gpu = draw.then(|| {
             let mut gpu = GpuRenderer::new((W * SCALE) as u32, (H * SCALE) as u32).expect("a GPU");
             gpu.set_scale_factor(SCALE);
@@ -215,13 +253,23 @@ impl Bench {
         let messages = app.host.shared("chat.messages", Value::Nil);
         let draft = app.host.shared("chat.draft", Value::Nil);
         let before = vec![built(&prompt("u0", "Where were we?")), built(&reply("a0", 3000)), built(&prompt("u1", "Make the group cheap."))];
-        let mut bench = Self { app, gpu, messages, draft, before, after: Vec::new(), clock };
+        let at_frame = std::env::var_os("ACTIVITY_PUBLISH_AT_FRAME").is_some();
+        let mut bench = Self { app, gpu, messages, draft, before, after: Vec::new(), clock, at_frame, ticked: false, spare };
         bench.settle(10);
         bench
     }
 
+    /// A publish's time: as the next frame begins, with `at_frame`.
+    fn publishing(&mut self) {
+        if self.at_frame && !self.ticked {
+            self.tick();
+            self.ticked = true;
+        }
+    }
+
     /// The transcript with the turn as `entry` (the host's publish).
     fn publish(&mut self, entry: &Json) -> Duration {
+        self.publishing();
         let start = thread_cpu();
         let row = built(entry);
         let draft = crate::chat::draft_of(entry);
@@ -234,8 +282,26 @@ impl Bench {
         host
     }
 
+    /// The transcript with the turn as `entry`, changed since it was last
+    /// built in the parts `patched` alone (as part patches bring a change).
+    fn publish_patched(&mut self, entry: &Json, patched: &[String]) -> Duration {
+        let patched: std::collections::HashSet<String> = patched.iter().cloned().collect();
+        self.publishing();
+        let start = thread_cpu();
+        let row = crate::chat::trusting(Some(&patched), || built(entry));
+        let draft = crate::chat::draft_of(entry);
+        let host = thread_cpu() - start;
+        let mut list = self.before.clone();
+        list.push(row);
+        list.extend(self.after.iter().cloned());
+        self.messages.set(Value::List(Rc::from(list)));
+        self.draft.set(draft);
+        host
+    }
+
     /// The draft alone (a thought growing: the host's `Change::Words`).
     fn publish_draft(&mut self, entry: &Json) -> Duration {
+        self.publishing();
         let start = thread_cpu();
         let draft = crate::chat::draft_of(entry);
         let host = thread_cpu() - start;
@@ -245,6 +311,24 @@ impl Bench {
 
     /// One frame as a window's: laid out, its damage drawn.
     fn frame(&mut self) -> Cost {
+        // A window's refresh: its spare time first (lists building rows
+        // ahead), then the frame's own work.
+        let (mut spare, mut spare_calls) = (0, 0);
+        let process_from = process_cpu();
+        let debug = std::env::var_os("DEBUG_FRAMES").is_some();
+        if debug {
+            eprintln!("@SPARE");
+        }
+        if self.spare {
+            let _ = profile::take();
+            let calls = self.app.calls();
+            self.app.spend_spare_time();
+            spare_calls = self.app.calls() - calls;
+            spare = profile::take().iter().map(|(_, instructions, _)| instructions).sum();
+        }
+        if debug {
+            eprintln!("@FRAME");
+        }
         let _ = profile::take();
         let calls = self.app.calls();
         let wanted = self.app.clock.wants_frame();
@@ -257,7 +341,8 @@ impl Bench {
             gpu.render(&self.app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
         }
         let cpu = thread_cpu() - start;
-        let mut cost = Cost { cpu, calls: self.app.calls() - calls, frames: 1, drawn: drawn as usize, wanted: wanted as usize, ..Cost::default() };
+        let process = process_cpu() - process_from;
+        let mut cost = Cost { cpu, process, calls: self.app.calls() - calls, frames: 1, drawn: drawn as usize, wanted: wanted as usize, spare, spare_calls, ..Cost::default() };
         for (phase, instructions, time) in profile::take() {
             let at = PHASES.iter().position(|p| *p == phase).unwrap();
             cost.phases[at] = (instructions, time);
@@ -323,7 +408,7 @@ fn row(n: usize, think: usize, open: &str, what: &str, cost: &Cost, per: usize, 
     let per = per.max(1) as f64;
     let k = |phase: Phase| cost.phase(phase) as f64 / per / 1e3;
     println!(
-        "{n:>5} {:>4}K {open:<6} {what:<7} | {:>9.0} {:>8.0} {:>8.0} {:>8.0} {:>7.0} {:>7.0} {:>7.0} | {:>8.0} | {:>7.1} {:>7.1} | {:>6.0} | {:>4.2} {:>4.2} | {nodes:>6}",
+        "{n:>5} {:>4}K {open:<6} {what:<7} | {:>9.0} {:>8.0} {:>8.0} {:>8.0} {:>7.0} {:>7.0} {:>7.0} | {:>8.0} | {:>7.1} {:>7.1} | {:>6.0} | {:>4.2} {:>4.2} | {nodes:>6} | {:>8.0} {:>6.1} | {:>8.0}",
         think / 1024,
         cost.instructions() as f64 / per / 1e3,
         k(Phase::Script),
@@ -339,13 +424,16 @@ fn row(n: usize, think: usize, open: &str, what: &str, cost: &Cost, per: usize, 
         cost.calls as f64 / per,
         cost.drawn as f64 / cost.frames.max(1) as f64,
         cost.wanted as f64 / cost.frames.max(1) as f64,
+        cost.spare as f64 / per / 1e3,
+        cost.spare_calls as f64 / per,
+        (cost.process + cost.host).as_secs_f64() * 1e6 / per,
     );
 }
 
 fn header() {
     println!(
-        "{:>5} {:>5} {:<6} {:<7} | {:>9} {:>8} {:>8} {:>8} {:>7} {:>7} {:>7} | {:>8} | {:>7} {:>7} | {:>6} | {:>4} {:>4} | {:>6}",
-        "calls", "think", "group", "what", "kinstr", "script", "update", "layout", "damage", "paint", "encode", "cpu µs", "host µs", "phs µs", "calls", "drew", "want", "nodes"
+        "{:>5} {:>5} {:<6} {:<7} | {:>9} {:>8} {:>8} {:>8} {:>7} {:>7} {:>7} | {:>8} | {:>7} {:>7} | {:>6} | {:>4} {:>4} | {:>6} | {:>8} {:>6} | {:>8}",
+        "calls", "think", "group", "what", "kinstr", "script", "update", "layout", "damage", "paint", "encode", "cpu µs", "host µs", "phs µs", "calls", "drew", "want", "nodes", "spare k", "sp.cl", "proc µs"
     );
 }
 
@@ -358,7 +446,7 @@ fn scenarios(n: usize, think: usize, open: bool) {
     let samples = if n >= 1000 { 4 } else { 8 };
 
     // A turn at work: open while it works; folded by a press.
-    let mut bench = Bench::new();
+    let mut bench = Bench::windowed();
     let tail = prose("the thought being written", think);
     let mut calls = n;
     let mut entry = turn(calls, 1024, Some(&tail), true);
@@ -392,15 +480,28 @@ fn scenarios(n: usize, think: usize, open: bool) {
     }
     row(n, think, label, "think", &think_cost, samples * 4, bench.nodes());
 
-    // New calls arrive (the thought done, a call after it), each a frame.
+    // New calls arrive (the thought done, a call after it), each a frame:
+    // as the engine sends them to a host that asked for part patches, the
+    // new call alone changed (the rest of the reply as it was built).
+    entry = turn(calls, 1024, Some(&text), true);
+    {
+        // (The tail thought done: calls follow it.)
+        let parts = entry["parts"].as_array_mut().unwrap();
+        let last = parts.pop().unwrap();
+        parts.insert(1, last);
+    }
+    bench.publish(&entry);
+    bench.settle(24);
     let mut call_cost = Cost::default();
     for _ in 0..samples {
         calls += 1;
-        entry = turn(calls, 1024, Some(&text), true);
-        // (The tail thought done: a call is now last.)
-        let last = entry["parts"].as_array_mut().unwrap().pop().unwrap();
-        entry["parts"].as_array_mut().unwrap().insert(1, last);
-        let host = bench.publish(&entry);
+        let new = call(calls, 4);
+        let id = new["id"].as_str().unwrap().to_owned();
+        entry["parts"].as_array_mut().unwrap().push(new);
+        if std::env::var_os("DEBUG_FRAMES").is_some() {
+            eprintln!("@CALL {calls}");
+        }
+        let host = bench.publish_patched(&entry, &[id]);
         let mut cost = bench.frame();
         cost.host = host;
         call_cost.add(&cost);
@@ -408,14 +509,15 @@ fn scenarios(n: usize, think: usize, open: bool) {
     }
     row(n, think, label, "call", &call_cost, samples, bench.nodes());
 
-    // The running call's output grows.
+    // The running call's output grows (that call patched).
     let mut output_cost = Cost::default();
     for k in 0..samples {
         let parts = entry["parts"].as_array_mut().unwrap();
         let last = parts.last_mut().unwrap();
         let had = last["output"].as_str().unwrap_or_default().to_owned();
         last["output"] = json!(format!("{had}more output {k}\n"));
-        let host = bench.publish(&entry);
+        let id = last["id"].as_str().unwrap().to_owned();
+        let host = bench.publish_patched(&entry, &[id]);
         let mut cost = bench.frame();
         cost.host = host;
         output_cost.add(&cost);
@@ -425,7 +527,7 @@ fn scenarios(n: usize, think: usize, open: bool) {
     drop(bench);
 
     // Settled: at rest, then scrolled past.
-    let mut bench = Bench::new();
+    let mut bench = Bench::windowed();
     bench.after = vec![built(&prompt("u2", "And the rest?")), built(&reply("a2", 6000))];
     let entry = turn(n, think, None, false);
     bench.publish(&entry);
@@ -490,7 +592,8 @@ fn activity_pixels() {
     let out = PathBuf::from(std::env::var("ACTIVITY_PIXELS").expect("ACTIVITY_PIXELS=<dir>"));
     std::fs::create_dir_all(&out).unwrap();
     // (Each frame's pixels too, raw, with ACTIVITY_PIXELS_KEEP: 15 MB each.)
-    let keep = std::env::var_os("ACTIVITY_PIXELS_KEEP").is_some();
+    // (Or only those of states named starting so: ACTIVITY_PIXELS_KEEP=live-open.)
+    let keep_only = std::env::var("ACTIVITY_PIXELS_KEEP").ok();
     let mut lines = Vec::new();
     let mut shot = |bench: &mut Bench, name: &str, frames: usize| {
         for f in 0..frames {
@@ -507,7 +610,7 @@ fn activity_pixels() {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             pixels.hash(&mut h);
             lines.push(format!("{name} frame {f} {:016x}", h.finish()));
-            if keep {
+            if keep_only.as_deref().is_some_and(|only| only.is_empty() || only == "1" || name.starts_with(only)) {
                 std::fs::write(out.join(format!("{name}-f{f:03}.rgba")), &pixels).unwrap();
             }
         }
@@ -611,4 +714,59 @@ fn a_reply_built_again_keeps_its_calls_as_they_were() {
     }
     assert_ne!(ptr(tb.last().unwrap()), ptr(tc.last().unwrap()), "the changed call is built again");
     assert_eq!(tc.last().unwrap().field("output"), Some(&Value::from("more output\n")));
+}
+
+/// What one closed call's row costs to build, alone: an open group of calls
+/// (ui/activity_rows_fixture.luau) in a window tall enough to show them all,
+/// a hundred calls joining it at once. Per row: instructions by phase, calls
+/// into scripts, scene nodes.
+///
+///   cargo test --release --bin zeron-zgx activity_row_cost -- --ignored --nocapture
+#[test]
+#[ignore = "a benchmark: run it --release, as the doc above says"]
+fn activity_row_cost() {
+    profiled();
+    let fixture = ui().join("activity_rows_fixture.luau");
+    let app = TestApp::new(move |runtime| ScriptHost::new(runtime, fixture));
+    app.ui.scene.borrow_mut().resize(900., 4000.);
+    let rows = app.host.shared("bench.rows", Value::Num(0.));
+    let shown = app.host.shared("bench.shown", Value::Bool(false));
+    // (One call shown first: the group's header and frame, apart from rows.)
+    rows.set(Value::Num(1.));
+    shown.set(Value::Bool(true));
+    app.frames(60);
+    shown.set(Value::Bool(false));
+    app.frames(60);
+    assert_eq!(app.error(), None);
+    let k = 100;
+    let header = app.ui.scene.borrow().len();
+    let _ = profile::take();
+    shown.set(Value::Bool(true));
+    app.frames(1);
+    let one: u64 = profile::take().iter().map(|p| p.1).sum();
+    let nodes = app.ui.scene.borrow().len();
+    shown.set(Value::Bool(false));
+    app.frames(60);
+    rows.set(Value::Num((k + 1) as f64));
+    app.frames(2);
+    let _ = profile::take();
+    let calls = app.calls();
+    let start = thread_cpu();
+    shown.set(Value::Bool(true));
+    app.frames(1);
+    let cpu = thread_cpu() - start;
+    let calls = app.calls() - calls;
+    let phases = profile::take();
+    let added = app.ui.scene.borrow().len() - nodes;
+    let total = phases.iter().map(|p| p.1).sum::<u64>().saturating_sub(one);
+    let _ = header;
+    let per = |n: u64| n as f64 / k as f64 / 1e3;
+    print!("a row: {:.0}k instr ({:.1} µs cpu), {:.1} calls, {:.1} nodes |", per(total), cpu.as_secs_f64() * 1e6 / k as f64, calls as f64 / k as f64, added as f64 / k as f64);
+    for (phase, instructions, _) in &phases {
+        if *instructions > 0 {
+            print!(" {} {:.0}k", phase.name(), per(*instructions));
+        }
+    }
+    println!();
+    assert_eq!(app.error(), None);
 }
