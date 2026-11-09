@@ -244,7 +244,7 @@ return ui.component(function(props: Props): Node
 			at = function(): number?
 				return now:get().at
 			end,
-			fallback_icon = "bot",
+			fallback_icon = "side-chat",
 			on_click = function()
 				props.on_open_subagent(now:peek())
 			end,

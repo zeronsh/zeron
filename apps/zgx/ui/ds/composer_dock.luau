@@ -1083,7 +1083,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		return row:get().ended ~= nil
 	end
 	local agent = t.kind == "agent"
-	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "bot" else "action-play"
+	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "side-chat" else "action-play"
 	local opens = agent and props.on_open_task ~= nil
 	local function open()
 		if props.on_open_task then

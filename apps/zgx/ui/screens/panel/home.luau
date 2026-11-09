@@ -1200,7 +1200,7 @@ end
 
 -- A subagent row's menu, on a secondary click: open it.
 function M.subagent_menu(open: () -> ()): { any }
-	return { { label = locale.s("common.open"), icon = "bot", on_select = open } }
+	return { { label = locale.s("common.open"), icon = "side-chat", on_select = open } }
 end
 
 -- ---------------------------------------------------------------------------
