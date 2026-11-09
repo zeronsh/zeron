@@ -6,9 +6,9 @@
 --
 -- So far its paragraphs: their words, bold, italic, struck, inline code
 -- (math too: `$x$` is read into code before the view parses, as
--- ds/markdown reads it), links and bare web addresses. Not yet: chips
--- (mentions, invocations, attachments), a find's marks, the streaming
--- veil; nor headings, lists, quotes or the complex kinds.
+-- ds/markdown reads it), links and bare web addresses, chips (mentions,
+-- invocations, attachments, picks), and the streaming veil. Not yet: a
+-- find's marks; nor headings, lists, quotes or the complex kinds.
 --
 --     ui.markdown_view {
 --         Prose.prepared(text),
@@ -19,6 +19,7 @@
 --     }
 
 local look = require("@self/look")
+local FileIcon = require("@self/file_icons")
 local Links = require("@ds/links")
 local Source = require("@self/math_source")
 
@@ -115,6 +116,122 @@ function M.link_menu(
 				else nil)
 		end)(e)
 	end
+end
+
+-- A chip's look, as Zeron's shipping app paints it (composer/chip.rs
+-- `paint_chip`; ds/markdown's): its pill hugs its name, 2 points above and
+-- below, corner 5; its icon (14) on a well of its own 2 points round it,
+-- corner 4 (`zeron.chip.*`), a point in from the pill's start and 2 before
+-- the name; 7 points after the name.
+local CHIP_PADDING = { 1, 7, 2 }
+local CHIP_RADIUS = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+local function chip_icon(icon: { [string]: any }): { [string]: any }
+	icon.size = 14
+	icon.gap = 2
+	icon.bg = "$zeron.chip.well"
+	icon.radius = 4
+	icon.pad = 2
+	return icon
+end
+-- A chip's pill, its name and icon: in the body's ink, not underlined, with
+-- a hover of its own that changes nothing (without one, a link's pointer
+-- draws the focus ring round its words).
+local function pill(name: string, icon: { [string]: any }, link: boolean?): { [any]: any }
+	return {
+		name,
+		underline = false,
+		hover = {},
+		bg = "$zeron.chip.bg",
+		padding = CHIP_PADDING,
+		radius = CHIP_RADIUS,
+		icon = chip_icon(icon),
+		link = link,
+	}
+end
+local function scheme(): string
+	return if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+end
+-- A mention (`[name](zeron-file:path)`, a chat's `zeron-chat:`, a link to
+-- one of the chat's files): its file's icon (a chat's glyph), its name; it
+-- opens as a link does.
+local function mention(target: string, name: string): { [any]: any }
+	local chat = string.match(target, "^zeron%-chat:") ~= nil
+	local dir = string.sub(target, -1) == "/"
+	local file = string.match(string.match(target, "^[^#]*") or target, "([^/]+)/?$") or name
+	file = string.match(file, "^(.-):%d") or file
+	if chat then
+		return pill(name, { src = "assets/icons/ui/side-chat.svg", tint = "$zeron.chip.glyph" }, true)
+	end
+	local of = if string.find(file, ".", 1, true) or dir then file else name
+	return pill(name, { src = `assets/icons/files/{scheme()}/{FileIcon.of(of, dir)}.svg` }, true)
+end
+-- A command or skill picked (`zeron-invoke:`): its glyph, its name (a
+-- skill's without its `$`).
+local function invocation(name: string): { [any]: any }
+	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
+	if string.sub(name, 1, 1) == "$" then
+		name = string.sub(name, 2)
+	end
+	return pill(name, { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" })
+end
+-- An item the message carries, named: its kind's icon (a file's by its
+-- name; a chat's, a picture's, a quote's glyph), its name.
+local function attachment(name: string, item: { kind: string, icon: string? }): { [any]: any }
+	local glyph = if item.kind == "chat" then "side-chat" elseif item.kind == "image" then "gallery" else item.icon
+	if glyph then
+		return pill(name, { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" })
+	end
+	return pill(name, { src = `assets/icons/files/{scheme()}/{FileIcon.of(name, false)}.svg` })
+end
+
+export type ChipOptions = {
+	-- What the page says a link is: one of the chat's files, or one of its
+	-- agent's skills (ds/markdown's `link_chip`). Read as the runs are made:
+	-- a chip known later makes them again.
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	-- What the message carries, by name (ds/markdown's `attached`).
+	attached: { [string]: { kind: string, icon: string? } }?,
+}
+
+-- The view's `chip`: what ds/markdown draws as a chip, drawn as it does —
+-- an item carried, named; a command or skill picked; a picture or file by
+-- its number; a browser pick; a link to a skill; a mention (a file's, a
+-- chat's). Nil for words and links.
+function M.chip(opts: ChipOptions?): (target: string, text: string) -> { [any]: any }?
+	local link_chip = if opts then opts.link_chip else nil
+	local attached = if opts then opts.attached else nil
+	return function(target: string, text: string): { [any]: any }?
+		if string.sub(target, 1, 11) == "attachment:" then
+			local name = string.sub(target, 12)
+			local item = if attached then attached[name] else nil
+			return if item then attachment(name, item) else nil
+		end
+		local chip = if link_chip and not opens(target) then link_chip(target) else nil
+		if string.match(target, "^zeron%-invoke:") then
+			return invocation(text)
+		elseif string.match(target, "^zeron%-image:%d+$") or string.match(target, "^zeron%-attachment:%d+$") then
+			return attachment(text, { kind = if string.match(target, "^zeron%-image:") then "image" else "file" })
+		elseif string.match(target, "^zeron%-annotation:") then
+			return attachment(text, { kind = "file", icon = "cursor" })
+		elseif chip and chip.skill then
+			return invocation("$" .. chip.skill)
+		elseif string.match(target, "^zeron%-file:") or string.match(target, "^zeron%-chat:") or (chip and chip.file) then
+			return mention(target, text)
+		end
+		return nil
+	end
+end
+
+-- The names `attached` carries, for the view's `attached`.
+function M.attached(attached: { [string]: any }?): { [string]: boolean }?
+	if not attached then
+		return nil
+	end
+	local names: { [string]: boolean } = {}
+	for name in attached do
+		names[name] = true
+	end
+	return names
 end
 
 -- The text the view parses: `text`'s with its math read into code

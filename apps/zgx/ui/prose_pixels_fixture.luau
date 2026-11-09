@@ -21,6 +21,18 @@ local scheme = ui.shared("pixels.theme", "dark")
 local veil = ui.shared("pixels.veil", false)
 local seed = ui.shared("pixels.seed", false)
 local veiled = veil:peek() and key:peek() ~= ""
+-- What the page knows of the reply's links and carries, as a transcript's
+-- (`pixels.known`: a skill the chat learns of after the reply shows).
+local known = ui.shared("pixels.known", false)
+local function link_chip(target: string): { file: boolean?, skill: string? }?
+	if target == "src/config.rs:12" then
+		return { file = true }
+	elseif target == "my-skill" and known:get() then
+		return { skill = "my-skill" }
+	end
+	return nil
+end
+local attached = { ["plan.md"] = { kind = "file" }, ["screen"] = { kind = "image" }, ["the thread"] = { kind = "chat" } }
 
 ui.theme.current:set(if scheme:peek() == "light" then "theme-light" else "theme-dark")
 
@@ -48,6 +60,8 @@ if renderer:peek() ~= "luau" then
 			links = "web",
 			autolink = true,
 			veil = if veiled then { key = key:peek(), seed = seed:peek() } else nil,
+			chip = Prose.chip { link_chip = link_chip, attached = attached },
+			attached = Prose.attached(attached),
 			w_full = true,
 			min_w = 0,
 		},
@@ -58,6 +72,8 @@ else
 		key = if key:peek() ~= "" then key:peek() else nil,
 		veil = veiled,
 		veil_seed = seed:peek(),
+		link_chip = link_chip,
+		attached = attached,
 	}
 end
 
