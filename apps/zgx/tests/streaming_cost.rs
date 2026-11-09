@@ -118,6 +118,7 @@ fn a_streaming_reply_costs_a_chunk_what_is_new() {
     let mut frame = Vec::new();
     let mut idle = Vec::new();
     let mut calls = Vec::new();
+    let mut fade_calls = Vec::new();
     for &end in &cuts {
         let start = Instant::now();
         // (As the host sends it: the words twice, the text block's and the reply's.)
@@ -132,10 +133,13 @@ fn a_streaming_reply_costs_a_chunk_what_is_new() {
         app.frames(1);
         frame.push((end, start.elapsed()));
         calls.push((end, Duration::from_micros(app.calls() - called)));
-        // (A frame with nothing new: what drawing the reply costs alone.)
+        // (A frame with nothing new: what drawing the reply costs alone,
+        // its last words still fading in.)
+        let called = app.calls();
         let start = Instant::now();
         app.frames(1);
         idle.push((end, start.elapsed()));
+        fade_calls.push((end, Duration::from_micros(app.calls() - called)));
         if let Some(e) = app.error() {
             panic!("at {end}: {e}\n{}", &text[end.saturating_sub(200)..end]);
         }
@@ -144,4 +148,5 @@ fn a_streaming_reply_costs_a_chunk_what_is_new() {
     table("frame", &frame, BUCKET);
     table("idle frame (nothing new)", &idle, BUCKET);
     table("script calls a chunk (as µs: a count)", &calls, BUCKET);
+    table("script calls a frame of fading alone (as µs: a count)", &fade_calls, BUCKET);
 }
