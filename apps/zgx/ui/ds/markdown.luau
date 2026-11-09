@@ -172,6 +172,11 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 	if text ~= e.text then
 		local p = 0
 		local most = math.min(#text, #e.text)
+		-- (What it had shown, grown at its end, as a stream's words are: found
+		-- whole at once, not a byte at a time through all of it.)
+		if #text >= #e.text and string.find(text, e.text, 1, true) == 1 then
+			p = most
+		end
 		while p < most and string.byte(text, p + 1) == string.byte(e.text, p + 1) do
 			p += 1
 		end
