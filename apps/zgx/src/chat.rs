@@ -999,6 +999,11 @@ impl Chats {
 
     /// The agents that can take a chat, and each one's models.
     async fn load_catalog(self: &Rc<Self>, again: bool) {
+        // (The stream bench's catalog is its recording's: no engine to ask.)
+        #[cfg(feature = "stream-bench")]
+        if stream_bench::asked().is_some() {
+            return;
+        }
         if self.catalog_state.get() == CatalogState::Loading {
             return;
         }
