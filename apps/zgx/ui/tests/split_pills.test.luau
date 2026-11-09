@@ -168,3 +168,49 @@ test("a split begun with the chat page scrolled up: the pill isn't moved aside f
 	expect(math.abs((wx + ww / 2) - (cx + cw / 2)) < 2).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
+
+-- A send from the window's composer in a split: the focused pane's
+-- transcript goes to its end, its prompt in it, as the chat page's does;
+-- the other panes stay where they were read.
+local function ready(id: string): any
+	local c = long_chat(id)
+	c.session = { id = id, state = "ready" }
+	return c
+end
+
+local function send(app: any, words: string)
+	app:type('#shell-page >> role:textbox "Message"', words)
+	app:key("Enter")
+	app:frames(60)
+	app:wait('"never shown, only waited past"', { timeout_ms = 700 })
+	app:frames(30)
+end
+
+test("a split: a send from the window's composer takes the focused pane to its end, the others stay", function()
+	local app = mount("shell_fixture.luau")
+	split(app, { a1 = ready("a1"), a2 = ready("a2") }, { "a1", "a2" })
+	scroll_up(app, "a2")
+	scroll_up(app, "a1")
+	send(app, "Sent from the split")
+	expect(app:wait(jump("a1"), { gone = true, timeout_ms = 2000 })).to_be(true)
+	expect(app:has('#lane-split-a1 >> "Sent from the split"')).to_be(true)
+	expect(app:has('#lane-split-a2 >> "Sent from the split"')).to_be(false)
+	expect(app:has(jump("a2"))).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a split: the other pane focused, a send takes that pane alone to its end", function()
+	local app = mount("shell_fixture.luau")
+	split(app, { a1 = ready("a1"), a2 = ready("a2") }, { "a1", "a2" })
+	scroll_up(app, "a1")
+	scroll_up(app, "a2")
+	app:click("#split-pane-a2")
+	app:frames(30)
+	expect(app:state("fixture_open_chat")).to_be("a2")
+	send(app, "Sent to the second")
+	expect(app:wait(jump("a2"), { gone = true, timeout_ms = 2000 })).to_be(true)
+	expect(app:has('#lane-split-a2 >> "Sent to the second"')).to_be(true)
+	expect(app:has('#lane-split-a1 >> "Sent to the second"')).to_be(false)
+	expect(app:has(jump("a1"))).to_be(true)
+	expect(app:error()).to_be(nil)
+end)

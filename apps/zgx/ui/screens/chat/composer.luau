@@ -467,9 +467,21 @@ local function Composer(): Node
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- The lane of the transcript at its foot (screens/chat/shared's
+	-- `at_foot`), while that's the chat `id`'s: in a split, the focused
+	-- pane's (`split-<chat>`). Nil: the chat page's.
+	local function foot_lane(id: string?): string?
+		local lane = string.match(shared.at_foot:peek(), "^lane%.(.+)$")
+		return if lane and id and lane == `split-{id}` then lane else nil
+	end
 	local asks = Asks.bind {
 		id = function(): string?
 			return session_id:peek()
+		end,
+		-- (A queued message steered in glides in the transcript at its foot.)
+		name = function(): string?
+			local lane = foot_lane(session_id:peek())
+			return if lane then `lane.{lane}` else nil
 		end,
 		session = open,
 		chosen = shared.chosen,
@@ -767,21 +779,29 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			-- (To the transcript at its foot: in a split, the focused pane's,
+			-- which shows its lane's list, the prompt joining it there too.)
+			local lane = foot_lane(id)
+			local lists = { store.messages }
+			if lane then
+				table.insert(lists, lanes.view(lane).messages)
+			end
 			T.send(function()
-				local here = store.messages:index_of("id", mid) ~= nil
-				if not here then
-					store.messages:push {
-						id = mid,
-						role = "user",
-						text = words,
-						attachments = Carried.shown(pack),
-						-- On its way from this moment: the line under it
-						-- says so at once.
-						waiting = "sending",
-					}
+				for _, list in lists do
+					if list:index_of("id", mid) == nil then
+						list:push {
+							id = mid,
+							role = "user",
+							text = words,
+							attachments = Carried.shown(pack),
+							-- On its way from this moment: the line under it
+							-- says so at once.
+							waiting = "sending",
+						}
+					end
 				end
 				deliver(mid)
-			end, mid)
+			end, mid, if lane then `lane.{lane}` else nil)
 			return
 		end
 		local req: store.Request = {

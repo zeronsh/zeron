@@ -114,8 +114,9 @@ export type Bind = {
 	-- A notice, when a queued message's send or steer doesn't go.
 	say: ((tone: string, key: string) -> ())?,
 	-- Its transcript's name (ds/transcript's: a side chat's); none, the
-	-- chat page's.
-	name: string?,
+	-- chat page's. (A function: the one it names as it steers, the window's
+	-- composer's following the pane at its foot.)
+	name: (string | () -> string?)?,
 }
 
 function M.bind(b: Bind): { [string]: any }
@@ -214,7 +215,7 @@ function M.bind(b: Bind): { [string]: any }
 							b.say("danger", "chat.composer.didnt_send")
 						end
 					end)
-				end, item, b.name)
+				end, item, if type(b.name) == "function" then b.name() else b.name)
 			end
 		end,
 		on_queue_remove = function(item: string)

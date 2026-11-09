@@ -199,12 +199,28 @@ files_api.search = function(): any
 end
 local chat_store = store :: any
 for name, f in chat_store do
-	if type(f) == "function" then
+	-- (A sent prompt's id is the store's own: its row is keyed by it.)
+	if type(f) == "function" and name ~= "new_id" then
 		chat_store[name] = function() end
 	end
 end
 -- (Its open chat shown as the host's chats have it, above.)
 chat_store.open = open_store
+-- A message sent, answered as the host would (taken); each kept in
+-- `fixture_sent`, for a test to read.
+local sent = ui.state("fixture_sent", {} :: { any })
+chat_store.send = function(req: any): any
+	local now = table.clone(sent:peek())
+	table.insert(now, req)
+	sent:set(now)
+	return {
+		after = function(_, ok: (any) -> ())
+			ui.after(0, function()
+				ok(nil)
+			end)
+		end,
+	}
+end
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
