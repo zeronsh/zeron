@@ -1257,22 +1257,6 @@ impl Plugins {
         else {
             return;
         };
-        // A plugin of yours or someone else's whose folder went (deleted by
-        // hand, not removed here): what it kept goes too, so a plugin
-        // installed later under its id doesn't inherit it. (Installs swap a
-        // folder under the scan lock, so a scan never sees one gone.)
-        let dropped: Vec<String> = {
-            let before = lock(&self.inner.entries);
-            before
-                .iter()
-                .filter(|e| !e.item.builtin && !entries.iter().any(|now| now.item.id == e.item.id))
-                .map(|e| e.item.id.clone())
-                .collect()
-        };
-        for id in &dropped {
-            tracing::info!(plugin = %id, "plugins: its folder is gone; forgetting what it kept");
-            forget_storage(&self.inner.plugins_dir, id);
-        }
         *lock(&self.inner.entries) = entries;
         self.inner.scanned.store(true, Ordering::SeqCst);
         self.publish_list();

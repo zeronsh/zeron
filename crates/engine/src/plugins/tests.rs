@@ -1470,9 +1470,9 @@ async fn plugins_removing_a_folder_that_squats_a_builtin_keeps_the_builtins() {
     assert!(refused.contains("not removed"), "{refused}");
 }
 
-/// B12 (R29) and B8: what a plugin kept goes when its folder does, however
-/// it went, and a plugin new under an id starts with nothing; removing takes
-/// the folder away rather than leaving it in `.removed`.
+/// B12 (R29) and B8: a plugin new under an id starts with nothing a plugin
+/// once under it kept; a folder gone for a while keeps its storage; removing
+/// takes the folder away rather than leaving it in `.removed`.
 #[tokio::test]
 async fn plugins_storage_and_removed_folders_go_with_the_plugin() {
     let f = fixture();
@@ -1486,17 +1486,17 @@ async fn plugins_storage_and_removed_folders_go_with_the_plugin() {
     call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
     assert!(!storage.join("focus.json").exists(), "a new plugin under the id inherits nothing");
 
-    // Its folder deleted by hand: the next scan forgets what it kept.
-    for end in ["json", "settings.json", "service.json", "sqlite3"] {
-        std::fs::write(storage.join(format!("focus.{end}")), "{}").unwrap();
-    }
-    std::fs::write(storage.join("other.json"), "{}").unwrap();
+    // Its folder gone for a while (a rename by hand, an editor or sync tool
+    // replacing it): what it kept stays, and it's back as it was.
+    std::fs::write(storage.join("focus.json"), "{\"kept\":1}").unwrap();
+    let away = f.data.join("focus-away");
+    std::fs::rename(f.plugins.plugins_dir().join("focus"), &away).unwrap();
+    f.plugins.rescan().await;
+    std::fs::rename(&away, f.plugins.plugins_dir().join("focus")).unwrap();
+    f.plugins.rescan().await;
+    assert_eq!(std::fs::read_to_string(storage.join("focus.json")).unwrap(), "{\"kept\":1}");
     std::fs::remove_dir_all(f.plugins.plugins_dir().join("focus")).unwrap();
     f.plugins.rescan().await;
-    for end in ["json", "settings.json", "service.json", "sqlite3"] {
-        assert!(!storage.join(format!("focus.{end}")).exists(), "focus.{end}");
-    }
-    assert!(storage.join("other.json").is_file(), "nobody else's");
 
     // Removed: nothing left in `.removed`.
     call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
