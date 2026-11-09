@@ -222,6 +222,9 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 	end
 	return going
 end
+-- A link's or inline code's ink (ds/look).
+local accented_ink = look.accented_ink
+
 -- `color` (a token, or as written) at a chunk's fade now: as it is once it's done.
 local function veil_color(v: Veil, color: any, c: VeilChunk): any
 	local shown = if type(color) == "function" then color() else color
@@ -600,7 +603,10 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			-- In code's font (Settings → Appearance; a span takes a family,
 			-- not a token), as code blocks are.
 			span.font = look.code_family()
-			span.bg = "$zeron.code.wash"
+			span.bg = "$zeron.prose.code_wash"
+			-- (Its ink the accent with "Accent colour throughout", as the
+			-- shipping app's; else the text's own.)
+			span.color = accented_ink(span.color)
 			span.padding = { 4, 1 }
 			-- Zeron's inline code corner (markdown/render.rs's 4.5), each
 			-- line's piece of a wrapped span rounded on its own.
@@ -610,6 +616,9 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 		if r.a and string.match(r.a, "^zeron%-invoke:") then
 			invocation_chip(span, r.x)
 		elseif r.a then
+			-- (Its ink the accent with "Accent colour throughout", as the
+			-- shipping app's; else the text's own.)
+			span.color = accented_ink(span.color)
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
@@ -1105,7 +1114,7 @@ local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
 			tabular = true,
 			text_size = size,
 			line_height = line,
-			color = "$text.tertiary",
+			color = "$zeron.prose.marker",
 		}
 	end
 	return ui.row {
@@ -1115,7 +1124,7 @@ local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
 		shrink = 0,
 		items = "center",
 		pl = "$space.1",
-		ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.tertiary" },
+		ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$zeron.prose.marker" },
 	}
 end
 
@@ -1334,7 +1343,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			class = "md-quote",
 			w_full = true,
 			gap = "$space.4",
-			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$border.strong" },
+			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
 			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx) },
 		}
 	elseif b.t == "hr" then

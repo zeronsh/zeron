@@ -1197,6 +1197,11 @@
         "system_on": "On while your computer's Reduce motion is on: moves land at once and fades stay short.",
         "description": "Moves land at once and fades stay short. On whenever your computer's Reduce motion is on."
       },
+      "accented": {
+        "label": "Accent color throughout",
+        "terms": "accent colour color links dots highlights colorful tint",
+        "description": "Links, the working dot, find highlights, @files, list markers, quotes and inline code use your accent color."
+      },
       "glass": {
         "label": "Frosted glass",
         "terms": "glass translucent opaque transparency blur vibrancy material",

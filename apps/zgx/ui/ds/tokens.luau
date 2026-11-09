@@ -670,6 +670,29 @@ function M.setup()
 			},
 		},
 	}
+	-- What "Accent colour throughout" (Settings → Appearance, ds/look
+	-- `accented`) draws in the accent, as the shipping app does; off, each
+	-- is the neutral it was. The conversation's list markers, its quotes'
+	-- rail, its inline code's ink and wash, and its links' ink (each
+	-- neutral here; ds/look points them at `zeron.accented.*`).
+	ui.theme.tokens {
+		zeron = {
+			prose = {
+				marker = "{text.tertiary}",
+				quote_rail = "{border.strong}",
+				code_wash = "{zeron.code.wash}",
+			},
+			accented = {
+				ink = "{accent}",
+				-- A find's matches, and the one it's on (as the editor's
+				-- selection, but lighter, so the two aren't mistaken).
+				find = "alpha({accent}, 0.18)",
+				find_current = "alpha({accent}, 0.45)",
+				rail = "alpha({accent}, 0.6)",
+				code_wash = "alpha({accent}, 0.12)",
+			},
+		},
+	}
 	ui.theme.load("ds/themes/zeron-dark.json")
 	ui.theme.load("ds/themes/zeron-light.json")
 	-- The theme chosen for each scheme, else the template's own (its

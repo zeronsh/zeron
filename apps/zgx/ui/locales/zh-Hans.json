@@ -1197,6 +1197,11 @@
         "system_on": "电脑的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
         "description": "移动立即完成，淡入淡出时间缩短。电脑的“减弱动态效果”开启时始终启用。"
       },
+      "accented": {
+        "label": "全局强调色",
+        "terms": "强调色 颜色 链接 圆点 高亮 accent color",
+        "description": "链接、工作中的圆点、查找高亮、@ 文件、列表标记、引用和行内代码使用强调色。"
+      },
       "glass": {
         "label": "毛玻璃",
         "terms": "玻璃 半透明 不透明 透明 模糊 材质 glass translucent opaque transparency blur vibrancy material",
