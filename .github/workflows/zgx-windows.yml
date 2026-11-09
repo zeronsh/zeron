@@ -1,0 +1,40 @@
+name: zgx Windows
+
+on:
+  pull_request:
+    paths:
+      - 'apps/zgx/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/zgx-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zgx-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regressions:
+    runs-on: windows-2022
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: apps/zgx
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-windows
+          workspaces: apps/zgx -> target
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Build beta and test intro, browser, annotation, terminal and paths
+        run: cargo test --locked --features beta --test intro_handoff --test windows_parity
+      - name: Test the vendored terminal
+        run: cargo test --locked -p zgx-terminal
