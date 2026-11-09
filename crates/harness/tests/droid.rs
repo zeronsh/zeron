@@ -313,6 +313,7 @@ mod fixture {
                 .collect::<Vec<_>>(),
             ["auto", "model-fast"]
         );
+        assert!(first.models[0].reasoning_levels.is_empty());
         assert_eq!(
             first.models[1].reasoning_levels,
             [
@@ -327,6 +328,98 @@ mod fixture {
         let second = harness.model_catalog(false).await.unwrap();
         assert_eq!(second.source, "cache");
         assert_eq!(first.models, second.models);
+    }
+
+    #[tokio::test]
+    async fn auto_model_uses_none_for_new_resumed_and_plan_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        for plan in [false, true] {
+            for resume in [None, Some("droid-fixture-session")] {
+                for effort in [None, Some(ReasoningLevel::High)] {
+                    let mut req = request(dir.path(), "settings");
+                    req.model = Some("auto".into());
+                    req.reasoning = effort;
+                    req.plan = plan;
+                    req.resume = resume.map(str::to_owned);
+                    let events = collect(req, None).await;
+                    assert_eq!(status(&events), DoneStatus::Completed, "{events:?}");
+                    let effective: serde_json::Value =
+                        serde_json::from_str(&text(&events)).unwrap();
+                    assert_eq!(effective["modelId"], "auto");
+                    assert_eq!(effective["specModeModelId"], "auto");
+                    assert_eq!(effective["reasoningEffort"], "none");
+                    assert_eq!(effective["specModeReasoningEffort"], "none");
+                    assert_eq!(
+                        effective["interactionMode"],
+                        if plan { "spec" } else { "auto" }
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_model_reuse_and_model_switches_keep_effective_reasoning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request(dir.path(), "settings");
+        req.model = Some("auto".into());
+        req.reasoning = Some(ReasoningLevel::High);
+        let (controls, sender, _) = controls(None);
+        let mut stream = harness().run(req.clone(), controls).await.unwrap();
+        let mut expected = ("auto", "none", false);
+        for next in [
+            None,
+            Some(("model-fast", Some(ReasoningLevel::High), false)),
+            Some(("auto", Some(ReasoningLevel::High), true)),
+            Some(("auto", None, false)),
+        ] {
+            let events = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut events = Vec::new();
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    let done = matches!(event, AgentEvent::Done { .. });
+                    events.push(event);
+                    if done {
+                        break;
+                    }
+                }
+                events
+            })
+            .await
+            .unwrap();
+            assert_eq!(status(&events), DoneStatus::Completed, "{events:?}");
+            let effective: serde_json::Value = serde_json::from_str(&text(&events)).unwrap();
+            assert_eq!(effective["modelId"], expected.0);
+            assert_eq!(effective["specModeModelId"], expected.0);
+            assert_eq!(effective["reasoningEffort"], expected.1);
+            assert_eq!(effective["specModeReasoningEffort"], expected.1);
+            assert_eq!(
+                effective["interactionMode"],
+                if expected.2 { "spec" } else { "auto" }
+            );
+            let mut steer = SteerMessage::text("settings");
+            if let Some((model, effort, plan)) = next {
+                let mut config = req.clone();
+                config.model = Some(model.into());
+                config.reasoning = effort;
+                config.plan = plan;
+                steer.config = Some(Box::new(config));
+                expected = (model, if model == "auto" { "none" } else { "high" }, plan);
+            }
+            sender.send(steer).await.unwrap();
+        }
+        drop(sender);
+        let events = tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.map(Result::unwrap).collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status(&events), DoneStatus::Completed, "{events:?}");
+        let effective: serde_json::Value = serde_json::from_str(&text(&events)).unwrap();
+        assert_eq!(effective["reasoningEffort"], "none");
+        assert_eq!(effective["specModeReasoningEffort"], "none");
+        assert_eq!(effective["interactionMode"], "auto");
     }
     #[tokio::test]
     async fn tool_permissions_follow_access_but_plans_always_ask() {
@@ -670,6 +763,7 @@ mod fixture {
     async fn configured_steer_waits_for_turn_end_and_verifies_new_settings() {
         for (model, effort, expected) in [
             ("other", Some(ReasoningLevel::High), DoneStatus::Completed),
+            ("auto", Some(ReasoningLevel::High), DoneStatus::Completed),
             ("new-default", None, DoneStatus::Completed),
             ("coerce", Some(ReasoningLevel::High), DoneStatus::Errored),
             ("uncorrelated-settings", None, DoneStatus::Errored),

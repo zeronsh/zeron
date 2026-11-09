@@ -47,6 +47,16 @@ fn models() -> Value {
         {"id":"model-fast","displayName":"Fast model","supportedReasoningEfforts":["off","minimal","low","medium","high","xhigh","max","dynamic"]},
         {"id":"disabled","displayName":"Disabled","disabled":true,"supportedReasoningEfforts":[]}])
 }
+fn normalize_auto_reasoning(settings: &mut Value) {
+    for (model, effort) in [
+        ("modelId", "reasoningEffort"),
+        ("specModeModelId", "specModeReasoningEffort"),
+    ] {
+        if settings[model] == "auto" {
+            settings[effort] = "none".into();
+        }
+    }
+}
 fn tool(id: &str, name: &str, input: Value) {
     notify(json!({"type":"tool_call","toolUse":{"id":id,"name":name,"input":input}}));
 }
@@ -225,6 +235,7 @@ fn main() {
                 if settings["modelId"] == "cap" {
                     settings["availableAutonomyLevels"] = json!(["low"]);
                 }
+                normalize_auto_reasoning(&mut settings);
                 notify(json!({"type":"settings_updated","settings":settings}));
                 reply(
                     id,
@@ -248,6 +259,7 @@ fn main() {
                 if settings["modelId"] == "cap" {
                     settings["availableAutonomyLevels"] = json!(["low"]);
                 }
+                normalize_auto_reasoning(&mut settings);
                 let request_id = if settings["modelId"] == "uncorrelated-settings" {
                     json!(format!("unrelated-{}", id.as_str().unwrap()))
                 } else {
@@ -289,6 +301,7 @@ fn main() {
                     continue;
                 }
                 match next {
+                    "settings" => text(&settings.to_string()),
                     "child-transcript"
                     | "session-ids"
                     | "late-append"

@@ -389,9 +389,17 @@ fn settings(request: &RunRequest) -> Value {
     if let Some(model) = picked_model(request) {
         sent["modelId"] = model.into();
         sent["specModeModelId"] = model.into();
-        if let Some(effort) = request.reasoning {
-            sent["reasoningEffort"] = serde_json::to_value(effort).unwrap();
-            sent["specModeReasoningEffort"] = sent["reasoningEffort"].clone();
+        // Auto accepts only none, even if the composer carries an old effort.
+        let effort = if model == "auto" {
+            Some(json!("none"))
+        } else {
+            request
+                .reasoning
+                .map(|effort| serde_json::to_value(effort).unwrap())
+        };
+        if let Some(effort) = effort {
+            sent["reasoningEffort"] = effort.clone();
+            sent["specModeReasoningEffort"] = effort;
         }
     }
     sent
@@ -966,6 +974,21 @@ mod tests {
     fn request() -> RunRequest {
         serde_json::from_value(json!({"prompt":"hello","model":null,"reasoning":null,"cwd":"/tmp","sandbox":"workspace-write","resume":null})).unwrap()
     }
+    #[test]
+    fn auto_model_uses_none_instead_of_inherited_reasoning() {
+        let mut req = request();
+        req.model = Some("auto".into());
+        for plan in [false, true] {
+            req.plan = plan;
+            for effort in [None, Some(ReasoningLevel::High), Some(ReasoningLevel::Low)] {
+                req.reasoning = effort;
+                let sent = settings(&req);
+                assert_eq!(sent["reasoningEffort"], "none");
+                assert_eq!(sent["specModeReasoningEffort"], "none");
+            }
+        }
+    }
+
     #[test]
     fn settings_are_explicit_and_runtime_capabilities_match() {
         let harness = DroidHarness::new();

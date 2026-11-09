@@ -28,6 +28,7 @@ Initialization and load must finish before a prompt is submitted. Always set
 `interactionMode` (spec/auto), and `toolExecutionMode:"direct_only"`.
 `auto_approve` means Full access for tool permissions, not plan approval.
 Explicit models and efforts apply equally to the spec model.
+Auto always sets both reasoning efforts to `none`, ignoring inherited reasoning.
 Omitted/default selections use the effective normal model and
 effort, then mirror those to spec settings before verification.
 
