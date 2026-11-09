@@ -26,6 +26,9 @@ fn ui_dir() -> PathBuf {
 /// The window's size, in points, and its scale (a Retina display's).
 const W: f32 = 760.;
 const H: f32 = 900.;
+/// The widths each case is drawn at besides `W`: a narrow pane, a mid one,
+/// a wide window. Each wraps the words at its own places.
+const WIDTHS: &[f32] = &[360., 560., 760., 900.];
 const SCALE: f32 = 2.;
 
 /// The schemes each case is drawn in.
@@ -82,6 +85,8 @@ const CASES: &[(&str, &str)] = &[
 /// A renderer's app: the fixture with its text, scheme and key.
 struct Shown {
     app: TestApp,
+    /// The window's width, in points.
+    w: f32,
     gpu: zgx_gpu::GpuRenderer,
     text: zgx_script::Shared,
 }
@@ -109,8 +114,12 @@ fn fonts() -> Vec<FontData> {
 
 impl Shown {
     fn new(renderer: &str, scheme: &str, key: &str, text: &str) -> Self {
+        Self::at(W, renderer, scheme, key, text)
+    }
+    /// In a window `w` points wide.
+    fn at(w: f32, renderer: &str, scheme: &str, key: &str, text: &str) -> Self {
         let mut shared = None;
-        let app = TestApp::new(|runtime| {
+        let app = TestApp::with_desktop(|runtime| {
             let host = ScriptHost::new(runtime, ui_dir().join("prose_pixels_fixture.luau"));
             host.shared("pixels.renderer", Value::from(renderer));
             host.shared("pixels.theme", Value::from(scheme));
@@ -118,8 +127,8 @@ impl Shown {
             shared = Some(host.shared("pixels.text", Value::from(text)));
             host
         });
-        app.ui.scene.borrow_mut().resize(W, H);
-        let mut gpu = zgx_gpu::GpuRenderer::new((W * SCALE) as u32, (H * SCALE) as u32).expect("a GPU");
+        app.ui.scene.borrow_mut().resize(w, H);
+        let mut gpu = zgx_gpu::GpuRenderer::new((w * SCALE) as u32, (H * SCALE) as u32).expect("a GPU");
         gpu.set_scale_factor(SCALE);
         for font in fonts() {
             font.install(&mut gpu.text_system().borrow_mut());
@@ -128,7 +137,7 @@ impl Shown {
         app.ui.refresh_text_geometry();
         app.frames(4);
         assert_eq!(app.error(), None, "{renderer}");
-        Shown { app, gpu, text: shared.unwrap() }
+        Shown { app, w, gpu, text: shared.unwrap() }
     }
 
     fn set(&self, text: &str) {
@@ -140,15 +149,82 @@ impl Shown {
     fn pixels(&mut self) -> Vec<u8> {
         self.app.ui.prepare_frame();
         let _ = self.app.ui.scene.borrow_mut().flush();
-        let all = [zgx::scene::Rect { x: 0., y: 0., width: W, height: H }];
+        let all = [zgx::scene::Rect { x: 0., y: 0., width: self.w, height: H }];
         self.gpu.render(&self.app.ui.scene.borrow(), &all).expect("drawn");
         self.gpu.readback().expect("read back")
     }
 
     /// The reply's box's height, in points.
     fn height(&mut self) -> f32 {
+        self.reply().height
+    }
+    /// The reply's box, in points.
+    fn reply(&mut self) -> zgx::scene::Rect {
+        self.app.ui.prepare_frame();
         let node = self.app.find("reply").expect("the reply");
-        self.app.ui.scene.borrow().bounds(node).height
+        self.app.ui.scene.borrow().bounds(node)
+    }
+
+    /// The accessibility tree a screen reader is given, a node a line: its
+    /// role, name, value and box (to the half point), in order, the window's
+    /// own ids left out.
+    fn accessible(&mut self) -> String {
+        self.app.ui.prepare_frame();
+        let _ = self.app.ui.scene.borrow_mut().flush();
+        let mut tree = zgx_desktop::accessibility::AccessibilityTree::new();
+        let update = tree.update(&self.app.ui.scene.borrow(), &self.app.ui.semantics.borrow(), None, "Zeron", SCALE as f64);
+        let nodes: std::collections::HashMap<_, _> = update.nodes.iter().map(|(id, n)| (*id, n)).collect();
+        let mut out = String::new();
+        let mut stack = vec![(update.tree.as_ref().expect("a whole tree").root, 0)];
+        let half = |v: f64| (v / SCALE as f64 * 2.).round() / 2.;
+        while let Some((id, depth)) = stack.pop() {
+            let Some(node) = nodes.get(&id) else { continue };
+            let b = node.bounds().map(|b| (half(b.x0), half(b.y0), half(b.x1), half(b.y1)));
+            out.push_str(&format!(
+                "{}{:?} {:?} {:?} {:?}\n",
+                "  ".repeat(depth),
+                node.role(),
+                node.label(),
+                node.value(),
+                b
+            ));
+            for child in node.children().iter().rev() {
+                stack.push((*child, depth + 1));
+            }
+        }
+        out
+    }
+
+    /// What a selection made by `how` holds, as Copy puts it on the
+    /// clipboard: its text and its HTML (zgx's rich copy writes
+    /// `selected_text` and `selected_html`).
+    fn select(&mut self, how: Select) -> (String, String) {
+        use zgx::input::{InputEvent, PointerButton};
+        use zgx_script::driver;
+        let r = self.reply();
+        let at = |(fx, fy): (f32, f32)| (r.x + r.width * fx, r.y + fy);
+        // (Away first: a click counts with the last.)
+        driver::click_at(&mut self.app.ui, zgx::scene::Rect { x: 2., y: H - 4., width: 1., height: 1. });
+        self.app.frames(2);
+        match how {
+            Select::Drag(from, to) => driver::drag_between(&mut self.app.ui, at(from), at(to)),
+            Select::Clicks(p, n) => {
+                let (x, y) = at(p);
+                driver::hover_at(&mut self.app.ui, (x, y));
+                let button = PointerButton::Primary;
+                // (With the keys held, as a window's presses come: a press
+                // without them counts as one alone.)
+                let keys = zgx::input::Modifiers::default();
+                for _ in 0..n {
+                    self.app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, keys);
+                    self.app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, keys);
+                }
+                self.app.ui.input.forget_clicks();
+            }
+        }
+        self.app.settle();
+        self.app.frames(2);
+        (self.app.ui.selected_text(), self.app.ui.selected_html())
     }
 
     /// The scene's boxes, a line each: where two draws part, what differs.
@@ -178,6 +254,15 @@ impl Shown {
         }
         out
     }
+}
+
+/// A selection made with the pointer, at points across the reply (a
+/// fraction of its width) and down it (points from its top).
+#[derive(Clone, Copy, Debug)]
+enum Select {
+    Drag((f32, f32), (f32, f32)),
+    /// `n` clicks at a point: 2 a word, 3 a paragraph.
+    Clicks((f32, f32), usize),
 }
 
 /// How two pictures differ: pixels apart, the largest channel's difference,
@@ -210,12 +295,12 @@ fn diff(a: &[u8], b: &[u8], width: u32) -> Diff {
 
 /// Both pictures and their difference, as PNGs, where `PROSE_PIXELS_OUT`
 /// says.
-fn write_pictures(name: &str, luau: &[u8], native: &[u8]) {
+fn write_pictures(name: &str, luau: &[u8], native: &[u8], w: f32) {
     let Some(dir) = std::env::var_os("PROSE_PIXELS_OUT").map(PathBuf::from) else {
         return;
     };
     std::fs::create_dir_all(&dir).unwrap();
-    let (w, h) = ((W * SCALE) as u32, (H * SCALE) as u32);
+    let (w, h) = ((w * SCALE) as u32, (H * SCALE) as u32);
     let marked: Vec<u8> = luau
         .chunks_exact(4)
         .zip(native.chunks_exact(4))
@@ -237,14 +322,15 @@ fn compare(name: &str, luau: &mut Shown, native: &mut Shown) -> Option<String> {
     // (Something drawn: the page's words, not its bare card.)
     let first = &a[..4];
     assert!(a.chunks_exact(4).any(|p| p != first), "{name}: nothing drawn");
-    let d = diff(&a, &b, (W * SCALE) as u32);
+    assert_eq!(luau.w, native.w);
+    let d = diff(&a, &b, (luau.w * SCALE) as u32);
     if d.pixels == 0 {
         if std::env::var_os("PROSE_PIXELS_ALL").is_some() {
-            write_pictures(name, &a, &b);
+            write_pictures(name, &a, &b, luau.w);
         }
         return None;
     }
-    write_pictures(name, &a, &b);
+    write_pictures(name, &a, &b, luau.w);
     Some(format!(
         "{name}: {} pixels apart, most {} a channel, in {:?} (device pixels); heights {} and {}\n\
          --- ds/markdown:\n{}--- markdown_view:\n{}",
@@ -277,14 +363,14 @@ fn a_look_a_step_off_is_pixels_apart() {
 #[test]
 fn paragraphs_at_rest_are_drawn_as_ds_markdown_draws_them() {
     let mut failed = Vec::new();
-    for scheme in SCHEMES {
+    for (scheme, w) in SCHEMES.iter().flat_map(|s| WIDTHS.iter().map(move |w| (s, *w))) {
         for (name, text) in CASES {
-            let mut luau = Shown::new("luau", scheme, "", text);
-            let mut native = Shown::new("native", scheme, "", text);
+            let mut luau = Shown::at(w, "luau", scheme, "", text);
+            let mut native = Shown::at(w, "native", scheme, "", text);
             assert!(luau.height() > 20., "{name}: drawn");
-            match compare(&format!("{name}-{scheme}"), &mut luau, &mut native) {
+            match compare(&format!("{name}-{scheme}-{w}"), &mut luau, &mut native) {
                 Some(why) => failed.push(why),
-                None => eprintln!("{name} ({scheme}): the same, every pixel"),
+                None => eprintln!("{name} ({scheme}, {w} pt): the same, every pixel"),
             }
             assert_eq!(native.app.error(), None, "{name}");
             assert_eq!(luau.app.error(), None, "{name}");
@@ -342,9 +428,11 @@ fn a_link_hovered_clicked_and_its_menu_are_ds_markdowns() {
 fn paragraphs_streaming_in_are_drawn_as_ds_markdown_draws_them_after_every_chunk() {
     let text = CASES.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n");
     let mut failed = Vec::new();
-    for (scheme, small) in SCHEMES.iter().map(|s| (s, false)).chain([(&"dark", true)]) {
-        let mut luau = Shown::new("luau", scheme, "reply:pixels", "");
-        let mut native = Shown::new("native", scheme, "reply:pixels", "");
+    // (Dark and light at the reply's usual width, and a narrow pane.)
+    let runs = SCHEMES.iter().map(|s| (*s, false, W)).chain([("dark", true, W), ("dark", false, 360.)]);
+    for (scheme, small, w) in runs {
+        let mut luau = Shown::at(w, "luau", scheme, "reply:pixels", "");
+        let mut native = Shown::at(w, "native", scheme, "reply:pixels", "");
         let (mut end, mut chunks) = (0, 0);
         while end < text.len() {
             let step = if small { 1 + chunks % 7 } else { 24 };
@@ -355,7 +443,7 @@ fn paragraphs_streaming_in_are_drawn_as_ds_markdown_draws_them_after_every_chunk
             chunks += 1;
             luau.set(&text[..end]);
             native.set(&text[..end]);
-            if let Some(why) = compare(&format!("stream-{scheme}-{small}-{end}"), &mut luau, &mut native) {
+            if let Some(why) = compare(&format!("stream-{scheme}-{small}-{w}-{end}"), &mut luau, &mut native) {
                 let mut from = end.saturating_sub(24);
                 while !text.is_char_boundary(from) {
                     from -= 1;
@@ -370,10 +458,72 @@ fn paragraphs_streaming_in_are_drawn_as_ds_markdown_draws_them_after_every_chunk
         assert_eq!(native.app.error(), None);
         assert_eq!(luau.app.error(), None);
         eprintln!(
-            "streamed ({scheme}, {}): {chunks} chunks of {} bytes, the same every pixel after each",
+            "streamed ({scheme}, {w} pt, {}): {chunks} chunks of {} bytes, the same every pixel after each",
             if small { "1 to 7 bytes a chunk" } else { "24 bytes a chunk" },
             text.len()
         );
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// Selecting with the pointer is as ds/markdown's words select: a drag
+/// across runs, links, code and paragraphs, a word's double click and a
+/// paragraph's triple click hold the same text, copy the same text and
+/// HTML, and are drawn the same, at each width.
+#[test]
+fn selections_and_copies_are_ds_markdowns() {
+    let text = CASES.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n");
+    let ways = [
+        // From the first line into the second paragraph and beyond.
+        Select::Drag((0.02, 6.), (0.6, 160.)),
+        // Within a line, from inside one link to inside a later run.
+        Select::Drag((0.1, 12.), (0.45, 12.)),
+        // Up, against the text's order.
+        Select::Drag((0.7, 300.), (0.2, 40.)),
+        Select::Clicks((0.3, 12.), 2),
+        Select::Clicks((0.5, 12.), 3),
+        Select::Clicks((0.4, 200.), 2),
+        Select::Clicks((0.4, 200.), 3),
+    ];
+    let mut failed = Vec::new();
+    for w in WIDTHS {
+        let mut luau = Shown::at(*w, "luau", "dark", "", &text);
+        let mut native = Shown::at(*w, "native", "dark", "", &text);
+        let mut selected = 0;
+        for (i, how) in ways.iter().enumerate() {
+            let a = luau.select(*how);
+            let b = native.select(*how);
+            selected += usize::from(!a.0.is_empty());
+            if a != b {
+                failed.push(format!("{how:?} at {w} pt:\n  ds/markdown {a:?}\n  markdown_view {b:?}"));
+            }
+            if let Some(why) = compare(&format!("select-{w}-{i}"), &mut luau, &mut native) {
+                failed.push(format!("{how:?} at {w} pt, drawn: {}", why.lines().next().unwrap_or("")));
+            }
+        }
+        assert_eq!(selected, ways.len(), "at {w}: each way selects something");
+        eprintln!("selections at {w} pt: {} ways, the same text, HTML and pixels", ways.len());
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// What a screen reader is given is ds/markdown's: the same nodes, roles,
+/// names, values (a paragraph's text, its links) and boxes.
+#[test]
+fn the_accessibility_tree_is_ds_markdowns() {
+    let mut failed = Vec::new();
+    for (name, text) in CASES {
+        let mut luau = Shown::new("luau", "dark", "", text);
+        let mut native = Shown::new("native", "dark", "", text);
+        let (a, b) = (luau.accessible(), native.accessible());
+        if *name == "links" {
+            assert!(a.contains("Link"), "{name}: {a}");
+        }
+        if a != b {
+            failed.push(format!("{name}:\n--- ds/markdown:\n{a}--- markdown_view:\n{b}"));
+        } else {
+            eprintln!("{name}: the same accessibility tree ({} nodes)", a.lines().count());
+        }
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
