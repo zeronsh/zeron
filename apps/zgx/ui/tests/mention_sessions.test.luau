@@ -226,3 +226,32 @@ test("9. each chat's draft keeps its own: put away in one, another chat's opens,
 	settle(app)
 	expect(shown(app)).to_be(true)
 end)
+
+-- (What row is lit, told by what Enter takes: the tree says nothing of a
+-- row's `selected`.)
+test("the lit row follows the list as it narrows, and the arrows move it", function()
+	local app = chat()
+	local function takes(): string
+		app:key("Enter")
+		settle(app)
+		local got = app:text(BOX)
+		fresh(app, "")
+		return got
+	end
+	app:type(BOX, "/")
+	settle(app)
+	expect(takes()).to_be("/review ")
+	app:type(BOX, "/comp")
+	settle(app)
+	expect(takes()).to_be("/compact ")
+	app:type(BOX, "/")
+	settle(app)
+	app:key("ArrowDown")
+	expect(takes()).to_be("/compact ")
+	app:type(BOX, "/")
+	settle(app)
+	app:key("ArrowDown")
+	app:type(BOX, "rev")
+	settle(app)
+	expect(takes()).to_be("/review ")
+end)
