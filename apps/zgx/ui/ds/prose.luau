@@ -22,8 +22,7 @@ local look = require("@self/look")
 local FileIcon = require("@self/file_icons")
 local Links = require("@ds/links")
 local Source = require("@self/math_source")
--- (Loaded for its block hook: ds/markdown sets it as it loads.)
-require("@self/markdown")
+-- (Its block hook: ds/markdown sets it as it loads.)
 local MarkdownBlocks = require("@self/markdown_blocks")
 
 local M = {}
@@ -334,16 +333,58 @@ function M.attached(attached: { [string]: any }?): { [string]: boolean }?
 	return names
 end
 
--- The text the view parses: `text`'s with its math read into code
--- (ds/math_source, as ds/markdown_find reads it before parsing), followed as
--- it grows: a reply streaming in is read on from where the last read could
--- go on, not from its start.
-function M.prepared(text: () -> string): () -> string
-	local scan = Source.scan()
-	return function(): string
-		Source.feed(scan, text())
-		return Source.since(scan, 0)
+-- A state of a component's own, or (where there is none) the script's under
+-- a name of its own.
+local tops = 0
+local function own_state(): State<string>
+	local ok, made = pcall(function(): State<string>
+		return ui.use_state("")
+	end)
+	if ok then
+		return made
 	end
+	tops += 1
+	local named = ui.state(`prose_prepared_{tops}`, "")
+	named:set("")
+	return named
+end
+
+-- The text the view parses, as a state: `text`'s with its math read into
+-- code (ds/math_source, as ds/markdown_find reads it before parsing),
+-- followed as it grows. A reply streaming in is read on from where the last
+-- read could go on, and the state is appended to (`append`): what's settled
+-- of the read (its pieces up to where it goes on from) is never joined again,
+-- only what's after it, so a chunk costs what's new, not the whole reply. A
+-- read that changes what it gave in place (a `$x$` closing into code) sets
+-- the state whole, as one that starts over does.
+function M.prepared(text: () -> string): State<string>
+	local scan = Source.scan()
+	local out = own_state()
+	-- The pieces of the read the state holds as settled, and what follows
+	-- them in it.
+	local settled, tail = 0, ""
+	ui.effect(function()
+		local over = Source.feed(scan, text())
+		local on = scan.on
+		if over or on < settled then
+			out:set(Source.since(scan, 0))
+			settled, tail = on, Source.since(scan, on)
+			return
+		end
+		-- What the state's settled start is followed by now: the pieces
+		-- settled since, and what's after them.
+		local after = Source.since(scan, on)
+		local now = if on > settled then table.concat(scan.out, "", settled + 1, on) .. after else after
+		if #now >= #tail and string.sub(now, 1, #tail) == tail then
+			if #now > #tail then
+				out:append(string.sub(now, #tail + 1))
+			end
+		else
+			out:set(Source.since(scan, 0))
+		end
+		settled, tail = on, after
+	end)
+	return out
 end
 
 return M

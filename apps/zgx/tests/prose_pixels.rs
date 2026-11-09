@@ -788,3 +788,42 @@ fn a_finds_marks_and_reveals_are_ds_markdowns() {
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
+
+/// Pictures for review, not a check: a find stepping from a query that
+/// reflows the reply (`a`, whose matches cut inline code into pieces) to
+/// one in a block further on, in a scroll the find brings its block into
+/// view in, as a transcript does. `REVEAL_OUT=<dir>` and
+/// `REVEAL_RENDERER=luau|native` say where and which; ds/markdown read the
+/// block's place before the reply reflowed (24 points off here).
+#[test]
+#[ignore = "writes pictures for review"]
+fn reveal_pictures() {
+    let out = PathBuf::from(std::env::var("REVEAL_OUT").expect("REVEAL_OUT"));
+    let renderer = std::env::var("REVEAL_RENDERER").unwrap_or_else(|_| "luau".into());
+    std::fs::create_dir_all(&out).unwrap();
+    let text = ["plain", "emphasis", "code", "math", "links", "long", "chips", "mixed"]
+        .iter()
+        .map(|n| CASES.iter().find(|(name, _)| name == n).unwrap().1)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let more = [("pixels.finding", Value::from(true)), ("pixels.scroll", Value::from(true))];
+    let mut shown = Shown::made(360., &renderer, "dark", "", &text, &more);
+    for (query, block, k) in [("a", 2, 7), ("plan.md", 8, 1)] {
+        (shown.app.host.shared("pixels.at", Value::Nil)).set(Value::List(
+            vec![Value::from(query), Value::Num(block as f64), Value::Num(k as f64)].into(),
+        ));
+        shown.app.frames(6);
+    }
+    let pixels = shown.pixels();
+    let offset = (shown.app.host.states().into_iter())
+        .find(|(name, _)| name.ends_with("pixels_offset"))
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_default();
+    let name = format!("reveal-{renderer}");
+    let file = std::fs::File::create(out.join(format!("{name}.png"))).unwrap();
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), (360. * SCALE) as u32, (H * SCALE) as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+    eprintln!("{name}: scrolled to {offset}");
+}
