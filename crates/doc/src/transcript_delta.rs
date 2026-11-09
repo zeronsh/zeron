@@ -100,6 +100,101 @@ impl TranscriptBaseline {
     }
 }
 
+/// The part of a transcript a reader asked for (`WatchDocMessages {window}`):
+/// the newest `limit` entries, skipping the newest `offset`, and with `after`
+/// only those positioned after that entry. Frames then carry just this slice,
+/// so what a reader pays doesn't grow with the chat. Older hosts ignore the
+/// param and send everything; [`Self::apply`] gives a reader the same slice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptWindow {
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// What a window's reader can't see from the slice itself. Sent as `window`
+/// beside the frame; its presence says the host applied the window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptWindowInfo {
+    /// Entries in the whole transcript.
+    pub total: usize,
+    /// How many entries sit before the slice.
+    pub start: usize,
+    /// The newest unanswered question anywhere in the transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<PendingInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInput {
+    pub request_id: String,
+    pub questions: Vec<zeron_proto::UserInputQuestion>,
+}
+
+impl TranscriptWindow {
+    pub fn tail(limit: usize) -> Self {
+        Self {
+            limit,
+            offset: 0,
+            after: None,
+        }
+    }
+
+    /// Entries after `id`: nothing until `id` lands in the transcript.
+    pub fn after(id: impl Into<String>, limit: usize) -> Self {
+        Self {
+            limit,
+            offset: 0,
+            after: Some(id.into()),
+        }
+    }
+
+    pub fn apply<'a>(
+        &self,
+        entries: &'a [SessionMessageEntry],
+    ) -> (&'a [SessionMessageEntry], TranscriptWindowInfo) {
+        let total = entries.len();
+        let floor = self.after.as_ref().map_or(0, |id| {
+            entries
+                .iter()
+                .rposition(|e| &e.id == id)
+                .map_or(total, |at| at + 1)
+        });
+        let end = total.saturating_sub(self.offset).max(floor);
+        let start = end.saturating_sub(self.limit).max(floor);
+        (
+            &entries[start..end],
+            TranscriptWindowInfo {
+                total,
+                start,
+                pending_input: pending_input(entries),
+            },
+        )
+    }
+}
+
+fn pending_input(entries: &[SessionMessageEntry]) -> Option<PendingInput> {
+    entries.iter().rev().find_map(|entry| {
+        entry.parts.iter().rev().find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } => Some(PendingInput {
+                request_id: request_id.clone(),
+                questions: questions.clone(),
+            }),
+            _ => None,
+        })
+    })
+}
+
 /// One `WatchDocMessages` stream item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -576,6 +671,104 @@ mod context_update_tests {
                 id: "text".into(),
                 text: "🙂".into()
             }
+        );
+    }
+
+    fn window_entries(ids: &[&str]) -> Vec<SessionMessageEntry> {
+        ids.iter()
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "role": "assistant", "createdAt": 1, "deviceId": "d", "parts": [],
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn slice_ids(
+        window: &TranscriptWindow,
+        entries: &[SessionMessageEntry],
+    ) -> (Vec<String>, usize) {
+        let (slice, info) = window.apply(entries);
+        assert_eq!(info.total, entries.len());
+        (slice.iter().map(|e| e.id.clone()).collect(), info.start)
+    }
+
+    #[test]
+    fn a_window_counts_from_the_newest_message() {
+        let entries = window_entries(&["a", "b", "c", "d"]);
+        assert_eq!(
+            slice_ids(&TranscriptWindow::tail(1), &entries),
+            (vec!["d".to_owned()], 3)
+        );
+        let paged = TranscriptWindow {
+            limit: 2,
+            offset: 1,
+            after: None,
+        };
+        assert_eq!(
+            slice_ids(&paged, &entries),
+            (vec!["b".to_owned(), "c".to_owned()], 1)
+        );
+        // Past either end: empty or clamped, never a panic.
+        let past = TranscriptWindow {
+            limit: 2,
+            offset: 9,
+            after: None,
+        };
+        assert_eq!(slice_ids(&past, &entries), (vec![], 0));
+        assert_eq!(slice_ids(&TranscriptWindow::tail(9), &entries).0.len(), 4);
+    }
+
+    #[test]
+    fn replies_start_after_the_message_that_began_the_turn() {
+        let entries = window_entries(&["old", "sent", "reply-1", "reply-2"]);
+        let after = TranscriptWindow::after("sent", 10);
+        assert_eq!(
+            slice_ids(&after, &entries),
+            (vec!["reply-1".to_owned(), "reply-2".to_owned()], 2)
+        );
+        // Newest kept when the turn outruns the limit.
+        assert_eq!(
+            slice_ids(&TranscriptWindow::after("sent", 1), &entries).0,
+            ["reply-2"]
+        );
+        // Sent but not landed yet: nothing is a reply, however old the chat.
+        assert_eq!(
+            slice_ids(&TranscriptWindow::after("later", 10), &entries),
+            (vec![], 4)
+        );
+        // Landed as the newest: no replies yet.
+        assert!(
+            slice_ids(&TranscriptWindow::after("reply-2", 10), &entries)
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_window_finds_a_question_older_than_its_slice() {
+        let mut entries = window_entries(&["asks", "after"]);
+        entries[0].parts.push(MessagePart::Input {
+            id: "p".into(),
+            request_id: "r1".into(),
+            questions: Vec::new(),
+            resolved: false,
+            answers: None,
+        });
+        let (slice, info) = TranscriptWindow::tail(1).apply(&entries);
+        assert_eq!(slice[0].id, "after");
+        assert_eq!(info.pending_input.unwrap().request_id, "r1");
+        let MessagePart::Input { resolved, .. } = &mut entries[0].parts[0] else {
+            unreachable!()
+        };
+        *resolved = true;
+        assert!(
+            TranscriptWindow::tail(1)
+                .apply(&entries)
+                .1
+                .pending_input
+                .is_none()
         );
     }
 }
