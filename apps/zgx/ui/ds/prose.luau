@@ -40,6 +40,23 @@ export type StyleOptions = {
 function M.style(opts: StyleOptions?): { [string]: any }
 	local small = opts ~= nil and opts.small == true
 	local ink = if opts then opts.ink else nil
+	local size = if small then "$zeron.prose.small.size" else "$zeron.prose.size"
+	local line = if small then "$zeron.prose.small.line" else "$zeron.prose.line"
+	-- A heading of a level (ds/markdown's): semibold, three steps of size
+	-- (set small, the prose's), the largest a touch tight; more room above
+	-- than the blocks keep, less below: it belongs to what follows it.
+	local function heading(level: number): { [string]: any }
+		local key = `zeron.prose.h{level}`
+		return {
+			weight = "$font.weight.semibold",
+			text_size = if small then size else `${key}.size`,
+			line_height = if small then line else `${key}.line`,
+			letter_spacing = if level == 1 then -0.3 else nil,
+			color = ink,
+			pt = if level < 3 then "$space.3" else "$space.1",
+			mb = ui.raw(-6, "a heading sits closer to what it heads"),
+		}
+	end
 	return {
 		gap = if small then "$space.3" else "$space.4",
 		paragraph = {
@@ -63,6 +80,35 @@ function M.style(opts: StyleOptions?): { [string]: any }
 			radius = ui.raw(4.5, "Zeron's inline code corner"),
 			text_size = "$zeron.prose.code.inline",
 		},
+		h1 = heading(1),
+		h2 = heading(2),
+		h3 = heading(3),
+		-- A list: items closer than paragraphs, their markers hanging in a
+		-- gutter of their own (a small dot, or the number in figures one
+		-- width), so the items' text lines up on its left edge.
+		list = { w_full = true, gap = "$zeron.space.tight" },
+		item = { w_full = true, items = "start" },
+		item_body = { grow = 1, min_w = 0, gap = "$space.2" },
+		number = {
+			w = 24,
+			shrink = 0,
+			tabular = true,
+			text_size = size,
+			line_height = line,
+			color = "$zeron.prose.marker",
+		},
+		bullet = { w = 24, h = line, shrink = 0, items = "center", pl = "$space.1" },
+		bullet_dot = { w = 5, h = 5, rounded = "$radius.full", bg = "$zeron.prose.marker" },
+		-- A quote: set back by a soft bar, in the secondary ink.
+		quote = { w_full = true, gap = "$space.4" },
+		quote_rail = { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
+		quote_body = { grow = 1, min_w = 0, gap = "$space.3" },
+		quote_ink = "$text.secondary",
+		rule = { w_full = true, h = 1, my = "$space.2", bg = "$border" },
+		-- A heading's pull toward what it heads, where it sits in a box of
+		-- its own (a find's), which its own margin gives it only as the
+		-- column's child.
+		pull = { mb = ui.raw(-6, "a heading sits closer to what it heads") },
 		-- A find's matches, as the editor's find marks them (ds/markdown's).
 		mark = { bg = "$zeron.editor.match" },
 		mark_current = { bg = "$zeron.editor.match_current" },

@@ -87,6 +87,29 @@ const CASES: &[(&str, &str)] = &[
          Chips wrap with the words around them: a long run of words before [the last file](zeron-file:src/a/very/long/path/to/the_last_file.rs) at the end.",
     ),
     (
+        "headings",
+        "# A title that runs long enough to wrap at a narrow width, with `code`\n\nIntro paragraph.\n\n\
+         ## A section\n\nText under it.\n\n### A subsection *in italic*\n\nMore.\n\n#### Fourth level\n\nDeepest.",
+    ),
+    (
+        "lists",
+        "- one\n- two with **bold** and `code`\n- a third item long enough to wrap onto a second line at the reply's width, its text lining up\n\n\
+         1. first\n2. second\n3. third\n\n7. seven\n8. eight\n9. nine\n10. ten\n\n\
+         - outer\n  - inner one\n  - inner two\n    1. deepest\n- back out\n\n\
+         - loose item\n\n  its second paragraph\n\n- next loose item\n\n\
+         - [ ] a task, as text in a reply\n- [x] a done one",
+    ),
+    (
+        "quotes",
+        "> A quote, set back by a soft bar, in the secondary ink; long enough to wrap onto a second line.\n\n\
+         > Two paragraphs\n>\n> in one quote, with [a link](https://q.test/) and **bold**.\n\n\
+         > - a list in a quote\n> - two\n\n> # A heading in a quote\n\n> > nested quote",
+    ),
+    (
+        "rules",
+        "Above the rule.\n\n---\n\nBelow it.\n\n***\n\n- a list after a rule",
+    ),
+    (
         "mixed",
         "**Bold `code` inside**, *italic `code`*, ~~struck `code`~~ and **[bold link](https://b.c)**.\n\n\
          Second paragraph.\n\nThird, after the second.",
@@ -687,7 +710,14 @@ fn a_chip_known_late_is_drawn_as_ds_markdowns() {
 /// brings the block holding the current match into view as it does.
 #[test]
 fn a_finds_marks_and_reveals_are_ds_markdowns() {
-    let text = CASES.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n");
+    // (`FIND_CASES=headings`: those cases alone.)
+    let only: Option<Vec<String>> = std::env::var("FIND_CASES").ok().map(|v| v.split(',').map(str::to_owned).collect());
+    let text = CASES
+        .iter()
+        .filter(|(name, _)| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name)))
+        .map(|(_, t)| *t)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let finding = [("pixels.finding", Value::from(true))];
     let mut failed = Vec::new();
     for w in [360., W] {
@@ -719,6 +749,9 @@ fn a_finds_marks_and_reveals_are_ds_markdowns() {
             if let Some(why) = compare(&format!("find-{w}-{query}-{block}-{k}"), &mut luau, &mut native) {
                 failed.push(format!("{query:?} (current {block}:{k}) at {w}: {}", why.lines().next().unwrap()));
             }
+        }
+        if std::env::var_os("FIND_TREES").is_some() {
+            eprintln!("--- ds/markdown\n{}--- markdown_view\n{}", luau.tree(), native.tree());
         }
         let revealed = |shown: &Shown| shown.app.host.shared("pixels.revealed", Value::from("")).with_untracked(|v| v.to_string());
         assert!(!revealed(&luau).is_empty(), "revealed some");
