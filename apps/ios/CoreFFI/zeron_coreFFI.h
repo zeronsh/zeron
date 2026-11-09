@@ -783,6 +783,11 @@ RustBuffer uniffi_zeron_mobile_fn_method_coreclient_workspace(uint64_t ptr, Rust
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_workspace_revision(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CHECKOUT_CHANGES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CHECKOUT_CHANGES
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_checkout_changes(uint64_t ptr, RustBuffer chat_id, RustBuffer known_checksum
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BILLING_CHECKOUT
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BILLING_CHECKOUT
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_billing_checkout(uint64_t ptr, RustBuffer kind, RustBuffer plan, RustBuffer packs
@@ -2599,6 +2604,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_workspace(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_WORKSPACE_REVISION
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_WORKSPACE_REVISION
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_CHECKOUT_CHANGES
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_CHECKOUT_CHANGES
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_checkout_changes(void
     
 );
 #endif
