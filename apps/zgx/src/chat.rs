@@ -1774,12 +1774,16 @@ impl View {
                     let words = match tail {
                         // (`text`, the tail's words too: the page reads the
                         // block's, and of `text` only whether any are yet.)
-                        Some(tail) => Value::record([
-                            ("id", Value::from(id)),
-                            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
-                            ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
-                            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
-                        ]),
+                        // (One copy of the words, shared by both fields.)
+                        Some(tail) => {
+                            let words = Value::from(tail["text"].as_str().unwrap_or_default());
+                            Value::record([
+                                ("id", Value::from(id)),
+                                ("text", words.clone()),
+                                ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
+                                ("part_text", words),
+                            ])
+                        }
                         None => draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default()),
                     };
                     with_thought(words, e["parts"].as_array())
