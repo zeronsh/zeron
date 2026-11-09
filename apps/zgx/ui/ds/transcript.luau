@@ -586,6 +586,11 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				-- (A long group builds only what's near the view, as a long
+				-- reply does.)
+				window = if view
+					then { key = `{m.id}:{b.id}`, view = view.view, offset = view.offset, at_end = view.at_end, row = view.row }
+					else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
 					return brow:get().tools or {}

@@ -87,7 +87,16 @@ export type Props = {
 	-- a row finds as it's made stays as it is rather than fading in (a chat
 	-- opened mid-thought).
 	thought: Writing?,
+	-- Where it shows (a transcript's list and its scroll): its rows built
+	-- only near the view (`Window`).
+	window: Window?,
 }
+
+-- A transcript's view, for a group windowed in it: `key` names the group
+-- (its runs' heights are kept by it), `view` is the scroll it shows in,
+-- `offset` its scroll; `at_end`, whether the view rests at its end; `row`,
+-- the list's row holding the group (ds/markdown's `window`, the same).
+export type Window = { key: string, view: Ref, offset: State<number>, at_end: State<boolean>?, row: Ref? }
 
 local GLYPH: { [Kind]: Icon.Name } = {
 	exec = "terminal",
@@ -116,6 +125,40 @@ local GUTTER = 48
 local ROW, HEADER = 28, 26
 -- How long the tree takes to open and fold.
 local FOLD = 200
+-- How a row joining the tree arrives.
+local ENTER: any = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" }
+
+-- A windowed tree's rows come in runs of RUN (a long group away from the
+-- view is a box a run, not a row each), each built once within OVERSCAN
+-- of the view, and let go once past KEEP. Never judged yet, the runs
+-- within NEAR_START of the tree's top are built as it's made (where one
+-- opened shows), and the rest judged a tick on, before the frame is drawn.
+-- A thought held unbuilt is guessed at THOUGHT_GUESS (about its four lines
+-- folded).
+local RUN = 16
+local OVERSCAN = 600
+local KEEP = 1800
+local NEAR_START = 1600
+local THOUGHT_GUESS = 120
+-- Each run's height as last laid out, and whether it was built when last
+-- judged, by its group and place: a group made again (its row scrolled
+-- back) holds each run as it was. Plain tables, a key at a time; the
+-- older half goes as they fill.
+local KEPT_MOST = 8192
+local HEIGHTS: { [string]: number } = {}
+local NEAR: { [string]: boolean } = {}
+local kept_count: { [any]: number } = {}
+local function kept_set(t: { [string]: any }, k: string, value: any)
+	if t[k] == nil then
+		local n = (kept_count[t] or 0) + 1
+		if n > KEPT_MOST then
+			table.clear(t)
+			n = 1
+		end
+		kept_count[t] = n
+	end
+	t[k] = value
+end
 
 -- The summary: each kind counted, in the order an agent tends to work.
 -- (Each kind's phrase a message, `{n, plural, …}`: its key.)
@@ -225,6 +268,64 @@ local THOUGHT_ROOM = THOUGHT_BUTTON + 6
 -- taken off the words' height to count their lines.
 local THOUGHT_GAP = 12
 
+-- How many gaps between blocks (`\n`, blank space, `\n`) a thought's words
+-- hold, counted as they grow: words that only gained an end are counted
+-- from the last gap that could still change, not from their start, so a
+-- long thought being written costs each tick its new words alone.
+local GAP = "\n%s*\n"
+-- (How much of the words' start and end is looked at to know they only grew.)
+local EDGE = 64
+local function gap_counter(): (text: string) -> number
+	local seen, seen_len = "", 0
+	-- Gaps wholly before `from` (none of them reaching the end then), and
+	-- where to look on from.
+	local settled, from = 0, 1
+	local head, tail = "", ""
+	local counted = 0
+	return function(text: string): number
+		if text == seen then
+			return counted
+		end
+		if not (seen_len > 0
+			and #text > seen_len
+			and string.sub(text, 1, #head) == head
+			and string.sub(text, seen_len - #tail + 1, seen_len) == tail)
+		then
+			-- (Not grown from what was counted: counted afresh.)
+			settled, from = 0, 1
+		end
+		local n = settled
+		local at = from
+		while true do
+			local s, e = string.find(text, GAP, at)
+			if not s or not e then
+				break
+			end
+			n += 1
+			-- (One that runs to the end may run on as words come.)
+			if e < #text then
+				settled, from = n, e + 1
+			end
+			at = e + 1
+		end
+		-- No gap starts before the blank space the words end in (one there
+		-- would end before it, and is counted): the next look starts there.
+		local q = #text
+		while q >= from do
+			local b = string.byte(text, q)
+			if b ~= 32 and b ~= 9 and b ~= 10 and b ~= 13 and b ~= 11 and b ~= 12 then
+				break
+			end
+			q -= 1
+		end
+		from = math.max(from, q + 1)
+		seen, seen_len, counted = text, #text, n
+		head = string.sub(text, 1, EDGE)
+		tail = string.sub(text, math.max(1, #text - EDGE + 1))
+		return n
+	end
+end
+
 local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writing?, group: string?): Node
 	local id = now().id
 	local line = ui.theme.get("zeron.prose.small.line") :: number
@@ -257,12 +358,9 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 	end
 	-- About how many lines the words run to: their height in lines of the
 	-- prose, less the gaps between their blocks.
+	local gaps = gap_counter()
 	local function lines(): number
-		local gaps = 0
-		for _ in string.gmatch(words(), "\n%s*\n") do
-			gaps += 1
-		end
-		return math.max(1, math.floor(((body.height or 0) - gaps * THOUGHT_GAP) / line + 0.5))
+		return math.max(1, math.floor(((body.height or 0) - gaps(words()) * THOUGHT_GAP) / line + 0.5))
 	end
 	-- The clip: four lines while folded; open, as tall as the words. Not
 	-- measured yet (just mounted: a tool group opening), four lines too, a
@@ -596,17 +694,20 @@ return ui.component(function(props: Props): Node
 	end
 	local opened = ui.computed(open)
 	local tools = ui.computed(props.tools)
-	-- Each tool by its id: a row finds its own at once, not by a walk of
-	-- the group.
-	local by_id = ui.computed(function(): { [string]: Tool }
-		local out: { [string]: Tool } = {}
-		for _, x in tools:get() do
-			out[x.id] = x
-		end
-		return out
-	end)
 	local count = ui.computed(function(): number
 		return #tools:get()
+	end)
+	-- Where the last tool with a branch (any but a thought) is: the trunk
+	-- runs on below every row before it. (Looked for from the end: it is
+	-- the last tool, or a thought or two before it.)
+	local last_branch = ui.computed(function(): number
+		local list = tools:get()
+		for i = #list, 1, -1 do
+			if list[i].kind ~= "thought" then
+				return i
+			end
+		end
+		return 0
 	end)
 	local title = ui.computed(function(): string
 		local given = if props.summary then props.summary() else nil
@@ -617,31 +718,6 @@ return ui.component(function(props: Props): Node
 		end
 		return s
 	end)
-	-- Each tool's place in the list, to know the last (the one in flight
-	-- while the group works).
-	local function last_of(t: Tool): () -> boolean
-		return function(): boolean
-			local list = tools:get()
-			return list[#list] ~= nil and list[#list].id == t.id
-		end
-	end
-	-- Whether the trunk runs on below a tool: one with a branch (any but a
-	-- thought) comes after it. (A thought draws no branch, so the tree ends
-	-- at the last tool call.)
-	local function below_of(t: Tool): () -> boolean
-		return function(): boolean
-			local seen = false
-			for _, x in tools:get() do
-				if seen and x.kind ~= "thought" then
-					return true
-				end
-				if x.id == t.id then
-					seen = true
-				end
-			end
-			return false
-		end
-	end
 	-- The rows exist while the tree is open or folding: folded away, they'd
 	-- be built for nothing as a list scrolls, and a selection across the
 	-- reply would take text no one can see.
@@ -662,6 +738,319 @@ return ui.component(function(props: Props): Node
 			end)
 		end
 	end)
+	-- The rows, in runs of RUN: each run a list of its own, written only
+	-- when one of its tools changes (each tool's table is the very one it
+	-- was until the host builds it again), so a call arriving or finishing
+	-- touches its run alone, not every row. Kept while the rows are made.
+	local runs = ui.use_state({} :: { any })
+	local written: { { at: number, rows: { Tool } } } = {}
+	-- Runs made since the rows were (a call arriving past the last run's
+	-- end): their first row arrives as a row joining a run does.
+	local fresh: { [number]: boolean } = {}
+	local was_mounted = false
+	ui.effect(function()
+		if not mounted:get() then
+			was_mounted = false
+			return
+		end
+		local list = tools:get()
+		local n = #list
+		local count_runs = (n + RUN - 1) // RUN
+		local arriving = was_mounted
+		was_mounted = true
+		ui.batch(function()
+			for k = 1, count_runs do
+				local from, to = (k - 1) * RUN + 1, math.min(k * RUN, n)
+				local old = written[k]
+				local same = old ~= nil and #old.rows == to - from + 1
+				if same then
+					local rows = (old :: any).rows
+					for i = from, to do
+						if rows[i - from + 1] ~= list[i] then
+							same = false
+							break
+						end
+					end
+				end
+				if not same then
+					local item = { at = k, rows = table.move(list, from, to, 1, {}) }
+					if old ~= nil then
+						runs:set_key(k, item)
+					else
+						fresh[k] = arriving or nil
+						runs:push(item)
+					end
+					written[k] = item
+				end
+			end
+			for k = #written, count_runs + 1, -1 do
+				runs:remove(k)
+				written[k] = nil
+				fresh[k] = nil
+			end
+		end)
+	end)
+
+	-- Windowed (`window`: a transcript's group): each run built while its
+	-- reach (the run and OVERSCAN either side) touches the view; away, a
+	-- box of its last height. A group of thousands of calls costs what
+	-- shows of it, as a long reply does (ds/markdown's `window`).
+	local window = props.window
+	-- Each run's judge by its place (registered as it's made): whether its
+	-- box starts past the view's foot (and the overscan), judging it.
+	local judges: { [number]: () -> boolean } = {}
+	-- Each run's box's foot (nil until laid out), and the runs built now.
+	local bottoms: { [number]: () -> number? } = {}
+	local built: { [number]: true } = {}
+	local judged_at = -math.huge
+	local function judge_all()
+		judged_at = ui.now()
+		local w = window :: Window
+		local total = runs:len()
+		-- The runs wholly above the view's reach come first, their boxes in
+		-- order: found by halving, judged only if built (to be let go).
+		local view = w.view:peek()
+		local reach = if view and view.y ~= nil then (view.y :: number) - OVERSCAN else nil
+		local first = 1
+		if reach then
+			local past = total + 1
+			while first < past do
+				local mid = (first + past) // 2
+				local foot = if bottoms[mid] then bottoms[mid]() else nil
+				if foot ~= nil and foot <= reach then
+					first = mid + 1
+				else
+					past = mid
+				end
+			end
+		end
+		if first > 1 then
+			local some: { number } = {}
+			for at in built do
+				if at < first then
+					table.insert(some, at)
+				end
+			end
+			-- (The last: while the group works, it's where rows arrive.)
+			if total < first then
+				table.insert(some, total)
+			end
+			for _, at in some do
+				local j = judges[at]
+				if j then
+					j()
+				end
+			end
+		end
+		for at = first, total do
+			local j = judges[at]
+			if j and j() then
+				local more = false
+				for later in built do
+					if later > at then
+						more = true
+						break
+					end
+				end
+				if not more then
+					break
+				end
+			end
+		end
+	end
+	local looking = false
+	local function look_soon()
+		if looking then
+			return
+		end
+		looking = true
+		ui.after(0, function()
+			looking = false
+			judge_all()
+		end)
+	end
+	if window then
+		ui.effect(function()
+			window.offset:get()
+			if not mounted:get() then
+				return
+			end
+			-- (As ds/markdown's: a pass now, a frame apart at most, while the
+			-- view moves every frame, and one for where it comes to rest.)
+			if ui.now() - judged_at >= 8 then
+				judge_all()
+			end
+			ui.after(0, judge_all)
+		end)
+	end
+
+	-- One run: its rows, each following its tool as it goes on (found by its
+	-- id in the run: an animated list's rows have no row state).
+	local function rows_of(run: any, rows: State<{ Tool }>, play: boolean): Node
+		local at = run.at
+		return ui.each(rows, function(t: Tool)
+			local id = t.id
+			-- Its place in the group, from 1.
+			local function place(): number
+				for j, x in rows:get() do
+					if x.id == id then
+						return (at - 1) * RUN + j
+					end
+				end
+				return 0
+			end
+			local now = ui.computed(function(): Tool
+				for _, x in rows:get() do
+					if x.id == id then
+						return x
+					end
+				end
+				return t
+			end)
+			return row(function(): Tool
+				return now:get()
+			end, function(): boolean
+				return place() < last_branch:get()
+			end, function(): boolean
+				return live() and place() == count:get()
+			end, props.open_subagent, props.thought, props.key)
+		end, {
+			key = function(t: Tool): string
+				return t.id
+			end,
+			enter = ENTER,
+			initial = play,
+			w_full = true,
+		})
+	end
+	local function run_view(run: any, _i: number, rrow: State<any>): Node
+		local at = run.at
+		local rows = ui.computed(function(): { Tool }
+			return rrow:get().rows
+		end)
+		-- (Its first rows arrive only as the run is first made: built again
+		-- as it comes back into view, it's as it was.)
+		local play = fresh[at] == true
+		fresh[at] = nil
+		if not window then
+			return ui.div { w_full = true, rows_of(run, rows, play) }
+		end
+		local w = window :: Window
+		local k = `{w.key}:{at}`
+		-- (By the tools' count, not the runs': runs are made one by one as
+		-- the tree opens, each the last of those made so far.)
+		local function last(): boolean
+			return at == (count:peek() + RUN - 1) // RUN
+		end
+		-- Its height before it has been laid out: a row a tool, a thought
+		-- folded at its four lines.
+		local function guess(): number
+			local h = 0
+			for _, t in rows:peek() do
+				h += if t.kind == "thought" then THOUGHT_GUESS else ROW
+			end
+			return h
+		end
+		-- Built as it was last judged; never judged, built if it's the last
+		-- (where a working group's rows arrive) or among the first (where
+		-- one opened shows), else held at a guess and judged a tick on.
+		local was_near = NEAR[k]
+		local near = ui.use_state(if was_near ~= nil then was_near else last() or (at - 1) * RUN * ROW < NEAR_START)
+		local held = ui.use_state(HEIGHTS[k] or guess())
+		local r = ui.ref()
+		local returning = false
+		judges[at] = function(): boolean
+			local el, view = r:peek(), w.view:peek()
+			if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
+				return false
+			end
+			-- (Not laid out at its height yet: the tree just opening lays its
+			-- runs out first in no room at all, each at its top. Judged as
+			-- its height comes.)
+			if (el.height :: number) <= 0 and #rows:peek() > 0 then
+				return false
+			end
+			local y, top = el.y :: number, view.y :: number
+			-- (Built, it stays so out to KEEP: a reader scrolling back and
+			-- forth over it doesn't build it again each time.)
+			local reach = if near:peek() then KEEP else OVERSCAN
+			local shows = (live() and last())
+				or (y < top + (view.height :: number) + reach and y + (el.height :: number) > top - reach)
+			kept_set(NEAR, k, shows)
+			if near:peek() ~= shows then
+				returning = shows
+				near:set(shows)
+			end
+			built[at] = if shows then true else nil
+			return y >= top + (view.height :: number) + OVERSCAN
+		end
+		bottoms[at] = function(): number?
+			local el = r:peek()
+			if not el or el.y == nil or el.height == nil then
+				return nil
+			end
+			return (el.y :: number) + (el.height :: number)
+		end
+		if near:peek() then
+			built[at] = true
+		end
+		ui.on_cleanup(function()
+			judges[at], bottoms[at], built[at] = nil, nil, nil
+		end)
+		return ui.div {
+			ref = r,
+			w_full = true,
+			on_mount = look_soon,
+			on_resize = function(size: { w: number, h: number })
+				look_soon()
+				local was = held:peek()
+				local back = returning
+				returning = false
+				-- (Held at exactly its height: a fraction off, the list's
+				-- length would be, and its scrollbar a fraction elsewhere.)
+				if HEIGHTS[k] ~= size.h then
+					kept_set(HEIGHTS, k, size.h)
+				end
+				if size.h == was then
+					return
+				end
+				held:set(size.h)
+				if math.abs(size.h - was) < 0.5 or not back or (w.at_end and w.at_end:peek()) then
+					return
+				end
+				-- Above the view's top (it came in from there): the view moves
+				-- with it, so what shows doesn't (unless the list's row is
+				-- wholly above the top: the list keeps what shows then).
+				local el, view = r:peek(), w.view:peek()
+				local row_el = if w.row then w.row:peek() else nil
+				local row_above = row_el ~= nil
+					and view ~= nil
+					and row_el.y ~= nil
+					and row_el.height ~= nil
+					and view.y ~= nil
+					and (row_el.y :: number) + (row_el.height :: number) <= (view.y :: number)
+				if el and view and el.y and view.y and (el.y :: number) < (view.y :: number) and not row_above then
+					w.offset:set(math.max(0, w.offset:peek() + size.h - was))
+				end
+			end,
+			ui.presence(function(): string
+				return if near:get() then "built" else "held"
+			end, function(kind: string): Node
+				if kind == "built" then
+					local first = play
+					play = false
+					return rows_of(run, rows, first)
+				end
+				return ui.div {
+					w_full = true,
+					h = function(): number
+						return held:get()
+					end,
+				}
+			end, { w_full = true }),
+		}
+	end
+
 	return ui.column {
 		w_full = true,
 		ui.show(
@@ -718,27 +1107,12 @@ return ui.component(function(props: Props): Node
 				end, function(): Node
 					return (props.body :: () -> Node)()
 				end, { w_full = true })
-				else ui.show(
-				mounted,
-				ui.each(tools, function(t: Tool)
-					local last = last_of(t)
-					-- (An animated list's rows have no row state: the tool as
-					-- it is now, found by its id.)
-					local now = ui.computed(function(): Tool
-						return by_id:get()[t.id] or t
-					end)
-					return row(function(): Tool
-						return now:get()
-					end, below_of(t), function(): boolean
-						return live() and last()
-					end, props.open_subagent, props.thought, props.key)
-				end, {
-					key = function(t: Tool): string
-						return t.id
+				else ui.show(mounted, ui.each(runs, run_view, {
+					key = function(run: any): string
+						return tostring(run.at)
 					end,
-					enter = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" },
-				})
-			),
+					w_full = true,
+				})),
 		},
 	}
 end)
