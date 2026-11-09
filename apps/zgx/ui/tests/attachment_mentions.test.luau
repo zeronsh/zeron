@@ -184,3 +184,67 @@ test("after a relaunch, read back with its uploads' names, the message shows its
 	expect(tree).to_contain("Look at Image 1 and notes [v2].md")
 	expect(tree).never.to_contain("zeron-")
 end)
+
+-- A file tab and a saved side chat's tab dragged from the panel into the
+-- composer (ui/panel_context_fixture): each is what the draft carries, the
+-- file numbered as anything attached; `@` offers both under Attachments,
+-- and each goes as its mention: the file's link by its number, the chat's
+-- Zeron chat mention. The sent message shows both as chips.
+test("dragged in from the panel, a file and a side chat are mentioned as what's attached", function()
+	local app = mount("panel_context_fixture.luau")
+	app:resize(1400, 900)
+	app:frames(30)
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:command("side_chats")
+	for _, command in { "context.file", "context.side" } do
+		app:command(command)
+		app:frames(30)
+	end
+	local field = "#chat-composer >> role:textbox"
+	app:drag('#panel-strip >> role:tab "notes.md"', field)
+	app:frames(20)
+	app:drag('#panel-strip >> role:tab "Look into the flake"', field)
+	app:frames(20)
+	app:command("context.snapshot")
+	local cargo = app:state("context.snapshot").main
+	expect(cargo[1].mention).to_be(1)
+	-- In @'s Attachments (Tab to it: All, Files, Chats, Attachments).
+	local function pick(query: string)
+		app:type(field, `@{query}`)
+		app:frames(20)
+		for _ = 1, 3 do
+			app:key("Tab")
+		end
+		app:frames(10)
+		expect(app:tree("#mention-launcher")).to_contain(`option "{if query == "notes" then "notes.md" else "Look into the flake"}"`)
+		app:key("Enter")
+		app:frames(20)
+	end
+	app:type(field, "see ")
+	pick("notes")
+	pick("Look")
+	app:key("Enter")
+	app:frames(30)
+	local sent = app:state("fixture_sent")
+	local text = sent[#sent].text
+	expect(text).to_contain(AM.link(1, "notes.md"))
+	expect(text).to_contain("[Look into the flake](zeron-chat:s1)")
+	-- What an agent reads: the file's name.
+	expect(AM.prompt(text)).to_contain("see notes.md")
+	-- The sent message: both chips, no link left as words.
+	expect(app:error()).to_be_nil()
+	-- The sent message, as the chat page draws it (the shell's page here
+	-- draws no transcript): the same words, its file and chat with it.
+	local page = mount("chat_fixture.luau")
+	page:resize(1000, 800)
+	page:command("go_s2")
+	page:frames(30)
+	page:set_state("chat.messages", {
+		{ id = "dragged1", role = "user", text = text, attachments = { { kind = "file", name = "notes.md" }, { kind = "chat", name = "Look into the flake", chat = "s1" } } },
+	})
+	page:frames(30)
+	local tree = page:tree("#dragged1")
+	expect(tree).to_contain("see notes.md Look into the flake")
+	expect(tree).never.to_contain("zeron-")
+	expect(page:error()).to_be_nil()
+end)
