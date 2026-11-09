@@ -39,6 +39,8 @@ if renderer:peek() ~= "luau" then
 			style = style,
 			on_link = Prose.on_link(nil),
 			link_menu = Prose.link_menu(nil, nil),
+			-- (Nothing opens a path here: only web addresses are links.)
+			links = "web",
 			autolink = true,
 			w_full = true,
 			min_w = 0,
