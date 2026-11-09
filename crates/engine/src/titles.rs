@@ -102,6 +102,7 @@ impl TitleGenerator {
             .ok_or_else(|| EngineError::Other("chat has no workspace row".into()))?;
         if let Some(current) = chat.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             // Already named: keep following the agent's title, if that's what it is.
+            self.write_codex_name(chat_id, harness_id, current).await;
             return self.follow_native(chat_id, harness_id, current).await;
         }
 
@@ -158,8 +159,34 @@ impl TitleGenerator {
         }
 
         self.inner.workspace.rename_chat(chat_id, &title)?;
+        self.write_codex_name(chat_id, harness_id, &title).await;
         tracing::info!(chat = %chat_id, title = %title, "chat auto-titled");
         Ok(())
+    }
+
+    /// Also backfill existing Zeron titles when an older engine left the
+    /// Codex thread unnamed. A failed write never prevents the local title.
+    async fn write_codex_name(&self, chat_id: &str, harness: HarnessId, title: &str) {
+        if !native::enabled() || harness != HarnessId::Codex {
+            return;
+        }
+        let Some(stored) = self.inner.workspace.chat_harness_session(chat_id) else {
+            return;
+        };
+        if stored.session_id.is_empty() || stored.harness.is_some_and(|h| h != harness) {
+            return;
+        }
+        let _lease = self.inner.registry.execution_lease(harness).await;
+        let result = match self.inner.registry.resolve(harness) {
+            Ok(driver) => driver.name_session_if_unnamed(&stored.session_id, title).await,
+            Err(err) => {
+                tracing::debug!(chat = %chat_id, error = %err, "Codex title driver unavailable");
+                return;
+            }
+        };
+        if let Err(err) = result {
+            tracing::warn!(chat = %chat_id, error = %err, "Codex session title write failed");
+        }
     }
 
     /// The titles the agent has given this chat's provider session, if the chat

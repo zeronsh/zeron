@@ -43,6 +43,29 @@ if has "$line" '"method":"config/read"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"config\":{\"mcp_servers\":{\"test\":{\"enabled\":true}}}}}"
   read -r line || exit 1
 fi
+if has "$line" '"method":"thread/read"'; then
+  has "$line" '"includeTurns":false' || exit 9
+  if has "$line" '"threadId":"named-thread"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"name\":\"My own title\"}}}"
+    # A second request would incorrectly overwrite the existing name.
+    read -r line && exit 9
+    exit 0
+  fi
+  if has "$line" '"threadId":"missing-thread"'; then
+    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"thread missing\"}}"
+    read -r line && exit 9
+    exit 0
+  fi
+  has "$line" '"threadId":"unnamed-thread"' || exit 9
+  emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"name\":null}}}"
+  read -r line || exit 9
+  has "$line" '"method":"thread/name/set"' || exit 9
+  has "$line" '"threadId":"unnamed-thread"' || exit 9
+  has "$line" '"name":"适配 Codex 会话名称"' || exit 9
+  emit "{\"id\":$(rid "$line"),\"result\":{}}"
+  read -r line && exit 9
+  exit 0
+fi
 thread_line="$line"
 if has "$line" 'crash-on-thread-start'; then
   # The app-server dies under thread/start: the run must report why.
