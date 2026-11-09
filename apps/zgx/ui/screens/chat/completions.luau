@@ -15,9 +15,9 @@
 
 local files = require("@app/screens/files/api")
 local sessions = require("@account/sessions")
-local locale = require("@ds/locale")
 local Carried = require("@app/screens/chat/carried")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local route = require("@app/screens/shell/route")
 local mentions = require("@ds/composer_mentions")
 local prefs = require("@app/screens/settings/prefs")
 local Invocations = require("@app/screens/chat/invocations")
@@ -79,8 +79,15 @@ function M.bind(b: Bind): { [string]: any }
 					section = "chats",
 					value = word(title),
 					label = title,
+					-- (Where it is: its project; and its project's tile, as the
+					-- sidebar draws it. None: the side chat's glyph.)
 					detail = if c.project then names[c.project] else nil,
-					side = if type(c.updated) == "number" then locale.ago_short(os.time() - c.updated) else nil,
+					tile = if c.project and names[c.project]
+						then (function(): any
+							local l: any = route.look(c.project) or { hue = route.hue(c.project) }
+							return { label = names[c.project], hue = l.hue, src = l.src, emoji = l.emoji, project = c.project }
+						end)()
+						else nil,
 					icon = "side-chat",
 					link = ChatLinks.link(title, c.id),
 				})
@@ -101,8 +108,8 @@ function M.bind(b: Bind): { [string]: any }
 					section = "attachments",
 					value = word(name),
 					label = name,
-					detail = item.meta,
-					side = ui.t(`chat.composer.attachment_kind.{what}`):get(),
+					-- (What it is: a picture, a quote…)
+					detail = ui.t(`chat.composer.attachment_kind.{what}`):get(),
 					icon = icon,
 					-- (A file's icon by its name; not a file of the chat's to
 					-- mention: a pick refers to the chip.)
