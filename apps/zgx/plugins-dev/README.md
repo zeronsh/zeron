@@ -30,6 +30,8 @@ A plugin is a folder in `<data>/plugins/<id>/`:
 
 **Signing your own.** Use `zeron plugin new <id>` (or New plugin in Settings → Plugins, or an agent's `create_plugin` tool), or `zeron plugin sign <id>`. Either way, your plugins stay yours as you and your agents edit them.
 
+**Sharing your own.** `zeron plugin export <id>` (or an agent's `export_plugin` tool) signs it again and saves it as one `.zeron-plugin` file in Zeron's `plugin-exports` folder; `--to <path>` saves it elsewhere (agents can't choose). Attach that file to a GitHub release, or send it.
+
 **Installing someone else's.**
 - **The person:** Settings → Plugins → Install… takes a `.zeron-plugin` file or a link. The link can point to a package, a GitHub release that carries one, or a git repository (`owner/repo`, or `…/tree/<branch>/<folder>`).
 - **An agent:** uses `install_plugin`.

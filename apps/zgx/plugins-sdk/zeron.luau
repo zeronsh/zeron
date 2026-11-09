@@ -720,7 +720,7 @@ return function(id: string): any
 	end
 
 	-- A program its manifest names (`"commands": ["gh"]`, "commands"), run
-	-- as you on this Mac, with `args` passed as they are (no shell):
+	-- as you on this device, with `args` passed as they are (no shell):
 	--   zeron.run("gh", { "api", "user" }):after(function(r) … r.stdout … end)
 	-- A promise of { status, stdout, stderr }; `opts`: { cwd, stdin,
 	-- timeout } (seconds, 60 unless said, 300 at most).
