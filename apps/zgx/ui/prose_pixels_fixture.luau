@@ -32,6 +32,41 @@ local function link_chip(target: string): { file: boolean?, skill: string? }?
 	end
 	return nil
 end
+-- A find over the reply (`pixels.finding`): its query and where its
+-- current match is (`pixels.at`: { query, block, k }, one write as a find
+-- bar makes it), each block it reveals logged (`pixels.revealed`: how
+-- many, and, by the `pixels_where` command, where the last one is now).
+local finding = ui.shared("pixels.finding", false)
+local at = ui.shared("pixels.at", { "", 0, 0 })
+local revealed = ui.shared("pixels.revealed", "")
+local last_revealed: Ref? = nil
+ui.command {
+	id = "pixels_where",
+	title = "Where the block last revealed is",
+	run = function()
+		local el = if last_revealed then last_revealed:peek() :: any else nil
+		revealed:set(`{revealed:peek()}{if el then math.floor(el.y) else "-"};`)
+	end,
+}
+local find = if finding:peek()
+	then {
+		key = "pixels",
+		query = function(): string
+			return at:get()[1]
+		end,
+		current = function(): any
+			local c = at:get()
+			if c[2] == 0 then
+				return nil
+			end
+			return { key = "pixels", block = c[2], k = c[3] }
+		end,
+		reveal = function(block: Ref)
+			last_revealed = block
+			revealed:set(`{revealed:peek()}r`)
+		end,
+	}
+	else nil
 local attached = { ["plan.md"] = { kind = "file" }, ["screen"] = { kind = "image" }, ["the thread"] = { kind = "chat" } }
 
 ui.theme.current:set(if scheme:peek() == "light" then "theme-light" else "theme-dark")
@@ -62,6 +97,7 @@ if renderer:peek() ~= "luau" then
 			veil = if veiled then { key = key:peek(), seed = seed:peek() } else nil,
 			chip = Prose.chip { link_chip = link_chip, attached = attached },
 			attached = Prose.attached(attached),
+			find = Prose.find(find),
 			w_full = true,
 			min_w = 0,
 		},
@@ -74,6 +110,7 @@ else
 		veil_seed = seed:peek(),
 		link_chip = link_chip,
 		attached = attached,
+		find = find,
 	}
 end
 

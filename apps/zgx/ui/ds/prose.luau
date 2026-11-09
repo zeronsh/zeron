@@ -63,6 +63,9 @@ function M.style(opts: StyleOptions?): { [string]: any }
 			radius = ui.raw(4.5, "Zeron's inline code corner"),
 			text_size = "$zeron.prose.code.inline",
 		},
+		-- A find's matches, as the editor's find marks them (ds/markdown's).
+		mark = { bg = "$zeron.editor.match" },
+		mark_current = { bg = "$zeron.editor.match_current" },
 		link = {
 			color = look.accented_ink(nil),
 			underline = true,
@@ -220,6 +223,46 @@ function M.chip(opts: ChipOptions?): (target: string, text: string) -> { [any]: 
 		end
 		return nil
 	end
+end
+
+export type FindAt = { key: string, block: number, k: number }
+export type Find = {
+	key: string,
+	query: () -> string,
+	current: () -> FindAt?,
+	reveal: ((block: Ref) -> ())?,
+}
+
+-- The view's `find`, from ds/markdown's (a chat's find over this text, by
+-- its key): the current match where it is in this text, and the block
+-- holding it handed to `reveal` as ds/markdown hands it (a ref to it).
+function M.find(f: Find?): { [string]: any }?
+	if not f then
+		return nil
+	end
+	local reveal = f.reveal
+	return {
+		query = f.query,
+		current = function(): (number?, number?)
+			local c = f.current()
+			if c and c.key == f.key then
+				return c.block, c.k
+			end
+			return nil, nil
+		end,
+		reveal = if reveal
+			then function(block: any)
+				reveal({
+					peek = function()
+						return block
+					end,
+					get = function()
+						return block
+					end,
+				} :: any)
+			end
+			else nil,
+	}
 end
 
 -- The names `attached` carries, for the view's `attached`.
