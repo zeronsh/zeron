@@ -766,6 +766,32 @@ local function Composer(): Node
 		shared.show(key)
 	end)
 
+	-- Arriving on a chat (another session or a new chat shown: a sidebar or
+	-- Activity row, Back or Forward, ⌘N, the palette; a split's pane taking
+	-- the focus; back from Settings): the composer takes the keys. Once
+	-- what brought it here is done (a palette closing
+	-- puts focus back where it was first), so this comes last; a field
+	-- that takes the keys after (a rename) has them. (Kept: a reload, or
+	-- the window opening, isn't an arrival.)
+	local arrived = ui.state("chat_composer_arrived", "?")
+	ui.effect(function()
+		local now = route.current:get()
+		local pane = route.chat:get().session
+		local chat = now.name == "session" or now.name == "home"
+		local at = `{now.name}|{now.session or ""}|{now.project or ""}|{pane or ""}`
+		local was = arrived:peek()
+		if was == at then
+			return
+		end
+		arrived:set(at)
+		if was == "?" or not chat then
+			return
+		end
+		ui.after(0, function()
+			shared.focus:add(1)
+		end)
+	end)
+
 	local function send(text: string)
 		-- Editing a queued message: Send saves it.
 		if editing:peek() then
