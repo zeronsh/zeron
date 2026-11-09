@@ -309,11 +309,14 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 
 -- Which sessions show, as a plugin allowed to change how the sidebar shows
 -- asks (`sidebar.filter`, the plugin system's to grant): nil, all of them;
--- or `{ statuses = { "working", … }, by = "Focus" }`, those in these
--- states ("idle", in none). Written by a plugin, so read with care: what
--- isn't that shape is nil, and a word it doesn't know counts for nothing.
+-- or `{ statuses = { "working", … } }`, those in these states ("idle", in
+-- none). Written by a plugin, so read with care: what isn't that shape is
+-- nil, and a word it doesn't know counts for nothing. Who's narrowing it is
+-- the host's word (`sidebar.filter_by`: the name of the plugin allowed to,
+-- src/plugins), never the plugin's own `by`, which could claim to be Zeron.
 local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
+local filter_by = ui.shared("sidebar.filter_by", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
 local narrow = ui.computed(function(): Narrow?
 	local f = filter:get()
@@ -331,7 +334,8 @@ local narrow = ui.computed(function(): Narrow?
 	if #words == 0 then
 		return nil
 	end
-	local by = if type(f.by) == "string" and f.by ~= "" then string.sub(f.by, 1, 40) else locale.s("shell.sidebar.filter.a_plugin")
+	local named = filter_by:get()
+	local by = if type(named) == "string" and named ~= "" then string.sub(named, 1, 40) else locale.s("shell.sidebar.filter.a_plugin")
 	return { statuses = statuses, words = words, by = by }
 end)
 -- How the notice names each state (shell.sidebar.filter.state.<word>).
@@ -1473,10 +1477,19 @@ local function delete_dialog(): Node
 				if not id then
 					return
 				end
+				-- (Its title now: refused, the window has already left it.)
+				local c = chat(id)
+				local title = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
 				if route.current:peek().session == id then
 					route.new_chat()
 				end
-				sessions.delete(id):after(function() end, function() end)
+				sessions.delete(id):after(function() end, function(err: any)
+					ds.toast.show {
+						title = locale.s("shell.sidebar.session.couldnt_delete", { title = title }),
+						body = if type(err) == "string" and err ~= "" then err else nil,
+						tone = "warning",
+					}
+				end)
 			end,
 		},
 		-- (As its own body line, but following the session.)

@@ -879,6 +879,13 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "session_delete_fails",
+	title = "The host refuses to delete “Tidy the tests”",
+	run = function()
+		refused.a3 = true
+	end,
+}
+ui.command {
 	id = "archive_many",
 	title = "Thirty sessions archived elsewhere",
 	run = function()
@@ -1237,12 +1244,15 @@ ui.command {
 	end,
 }
 -- A plugin narrowing the sidebar (`sidebar.filter`): to working sessions,
--- and to nonsense (a plugin's mistake, read as none).
+-- and to nonsense (a plugin's mistake, read as none). The host names the
+-- plugin allowed to (`sidebar.filter_by`), as src/plugins does.
 local sidebar_filter = ui.shared("sidebar.filter", nil :: any)
+local sidebar_filter_by = ui.shared("sidebar.filter_by", nil :: any)
 ui.command {
 	id = "focus",
 	title = "Focus shows working sessions only",
 	run = function()
+		sidebar_filter_by:set("Focus")
 		sidebar_filter:set({ statuses = { "working", "nonsense" }, by = "Focus" })
 	end,
 }

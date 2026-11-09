@@ -41,6 +41,10 @@ struct Cli {
     /// Open a Zeron conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
+    /// Open with Zeron's own interface, whatever template is in use (as
+    /// holding Alt, or ⌥ on a Mac, as Zeron opens does).
+    #[arg(long)]
+    safe_mode: bool,
     #[cfg(windows)]
     #[arg(long, hide = true)]
     wait_for_exit: Option<u32>,
@@ -197,8 +201,9 @@ pub enum Launch {
     Done(anyhow::Result<()>),
     /// Run this in-process ([`Engines::InProcess`] only); logging is set up.
     Engine(EngineCommand),
-    /// No subcommand: open the window, on a conversation URL if one was given.
-    Window { open_url: Option<String> },
+    /// No subcommand: open the window, on a conversation URL if one was
+    /// given; `safe_mode` with Zeron's own interface (`--safe-mode`).
+    Window { open_url: Option<String>, safe_mode: bool },
     /// Ask the running headed instance for an Appshot (the interface's own).
     #[cfg(target_os = "linux")]
     Appshot,
@@ -298,6 +303,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
         }),
         None => Launch::Window {
             open_url: cli.open_url,
+            safe_mode: cli.safe_mode,
         },
     }
 }

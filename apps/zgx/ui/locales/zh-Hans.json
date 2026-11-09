@@ -2353,6 +2353,7 @@
         "new_session": "新建会话",
         "will_delete": "“{title}”将被永久删除。此操作无法撤销。",
         "delete_title": "删除会话？",
+        "couldnt_delete": "无法删除“{title}”",
         "rename_title": "重命名会话",
         "name": "名称",
         "name_placeholder": "会话名称"

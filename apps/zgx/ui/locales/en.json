@@ -2353,6 +2353,7 @@
         "new_session": "New session",
         "will_delete": "“{title}” will be permanently deleted. This can’t be undone.",
         "delete_title": "Delete session?",
+        "couldnt_delete": "Couldn’t delete “{title}”",
         "rename_title": "Rename session",
         "name": "Name",
         "name_placeholder": "Session name"
