@@ -32,9 +32,10 @@ function M.target_of(project: unknown, session: unknown): Target?
 	return nil
 end
 
--- A path's last part (a file's name).
+-- A path's last part (a file's name), whichever separator it has (a
+-- Windows folder's `\`).
 function M.base_name(path: string): string
-	return string.match(path, "[^/]+$") or path
+	return string.match(path, "[^/\\]+$") or path
 end
 
 return M

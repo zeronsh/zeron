@@ -163,8 +163,12 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "6282d95d2fe169909
 # DirectComposition tree of the window's own. The runtime ships with Windows
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_System_Registry", "Win32_System_Threading"] }
+# (And the terminal bridge's console, src/terminal.rs; Alt held at launch,
+# src/plugins/preview.rs; and the window minimized, src/video_wallpaper.rs.)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "6282d95d2fe16990945f8945add0289336719775", features = ["webview2"] }
+# Background videos (src/video_wallpaper.rs): Media Foundation.
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
@@ -176,6 +180,12 @@ accesskit_consumer = { git = "https://github.com/zeronsh/zgx", rev = "6282d95d2f
 accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx", rev = "6282d95d2fe16990945f8945add0289336719775" }
 accesskit_unix = { git = "https://github.com/zeronsh/zgx", rev = "6282d95d2fe16990945f8945add0289336719775" }
 accesskit_windows = { git = "https://github.com/zeronsh/zgx", rev = "6282d95d2fe16990945f8945add0289336719775" }
+
+# zgx's terminal, with block elements and box drawing drawn to the cell
+# (patches/zgx-terminal/src/paint.rs): zgx's own renderer drew them from the
+# font, gapped, where Ghostty (macOS only) draws them whole.
+[patch."https://github.com/zeronsh/zgx"]
+zgx-terminal = { path = "patches/zgx-terminal" }
 
 # zgx is slow unoptimized (its own setting): optimize dependencies, keep
 # this crate quick to build.

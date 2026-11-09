@@ -64,6 +64,8 @@ mod terminal;
 mod tool_details;
 mod themes;
 mod transparency;
+#[cfg(windows)]
+mod video_wallpaper;
 mod visuals;
 #[cfg(test)]
 mod audit_shots;
@@ -178,6 +180,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // anything below sets a variable; started by one, the launch it
     // replaces waited out first.
     relaunch::remember();
+    // Windows has no HOME, only USERPROFILE: the scripts' `~` (a terminal's
+    // folder, in zgx-script) and the engine's paths read HOME. Set before any
+    // thread starts.
+    #[cfg(windows)]
+    if std::env::var_os("HOME").is_none()
+        && let Some(profile) = std::env::var_os("USERPROFILE")
+    {
+        // SAFETY: still one thread: nothing reads the environment meanwhile.
+        unsafe { std::env::set_var("HOME", profile) };
+    }
     // No type check after each reload unless asked (`ZGX_CHECK=1`): a debug
     // zgx host runs `luau-lsp analyze` over the whole app on every reload,
     // on a thread of its own that a newer reload doesn't stop. With several
@@ -340,6 +352,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     about::install_on_quit();
     // Reload Zeron: the windows closed, a fresh launch in this one's place.
     relaunch::after_quit();
+    // Windows: done, without the main thread's thread-locals dropped on the
+    // way out. zgx-desktop keeps its WebView2 environments in one; released
+    // by ExitProcess, after COM's own teardown, they crash (combase.dll), and
+    // every quit with a web view open was reported as a crash.
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        // SAFETY: this process, ended where it would have been anyway.
+        unsafe { windows_sys::Win32::System::Threading::TerminateProcess(windows_sys::Win32::System::Threading::GetCurrentProcess(), 0) };
+    }
     Ok(())
 }
 
@@ -404,9 +428,15 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
     let epoch: Rc<RefCell<Option<Shared>>> = Rc::default();
 
     let window = cx.window.clone();
+    let active = cx.ui.observe_window_active();
     host.action("interactive", move |_| {
         window.set_pointer_passthrough(false);
-        window.request_focus();
+        // On Windows the intro is an ordinary borderless window: Alt+Tab
+        // must stay with the app the person chose, even if this timer fires
+        // while they are away.
+        if !cfg!(windows) || active.with_untracked(|active| *active) {
+            window.request_focus();
+        }
     });
     // `prepare { x, y, w, h }`: setup's window at that rect (points from the
     // overlay's top left, where the intro draws its screen over it), once,
@@ -446,7 +476,11 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             *epoch_slot.borrow_mut() = Some(host.shared("onboarding.epoch", 0.));
             serve(cx, host, "app.luau", false);
             // Keys stay with the intro until it hands over.
-            overlay.request_focus();
+            // Creating a hidden window does not take focus on Windows.
+            // Asking for it here steals it back after an early Alt+Tab.
+            if !cfg!(windows) {
+                overlay.request_focus();
+            }
         });
         *opened.borrow_mut() = Some(handle);
     });
@@ -1157,7 +1191,9 @@ fn intro_window() -> WindowOptions {
         decorations: false,
         resizable: false,
         covers_display: true,
-        level: WindowLevel::AlwaysOnTop,
+        // A topmost overlay stays over the app selected by Alt+Tab. It
+        // looks stuck, and hides that app while its keyboard has focus.
+        level: if cfg!(windows) { WindowLevel::Normal } else { WindowLevel::AlwaysOnTop },
         shadow: false,
         ..Default::default()
     }

@@ -1277,10 +1277,10 @@
         "terms": "background image picture new thread plugin scene",
         "none": "None",
         "none_description": "A new chat opens on the window itself.",
-        "image_description": "A picture of your own.",
-        "choose_title": "Choose a Background Image",
-        "images": "Images",
-        "unsupported": "That picture can't be shown. Choose a PNG or JPEG.",
+        "image_description": "A picture of your own, a GIF or a video.",
+        "choose_title": "Choose a Background",
+        "images": "Images and videos",
+        "unsupported": "That file can't be shown. Choose a PNG, JPEG, GIF, MP4 or WebM.",
         "couldnt_keep": "Zeron couldn't keep that picture. Try again.",
         "image": {
           "label": "Image",
@@ -2929,6 +2929,7 @@
       "stop": "Stop",
       "annotate": "Annotate",
       "annotate_tooltip": "Annotate an element  {key}",
+      "annotate_failed": "Annotation couldn't start on this page. Reload the page and try again.",
       "open_in_browser": "Open in Browser",
       "find": {
         "no_results": "No results",

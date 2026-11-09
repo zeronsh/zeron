@@ -200,11 +200,20 @@ return [==[
     left: box.left + 'px', top: box.top + 'px', width: box.width + 'px', height: box.height + 'px',
     borderRadius: `${CORNER}px ${box.radius}px ${box.radius}px ${box.radius}px`,
   });
+  const part = (tag, cls = '') => {
+    const node = document.createElement(tag);
+    node.className = cls;
+    return node;
+  };
   const shadowHost = (tag, z, css) => {
     const node = document.createElement(tag);
     node.style.cssText = `position:fixed;inset:0;z-index:${z};pointer-events:none;`;
     const root = node.attachShadow({ mode: 'closed' });
-    root.innerHTML = `<style>${vars()}${css}</style>`;
+    // DOM construction also works on pages requiring TrustedHTML. Never
+    // create a permissive Trusted Types policy or relax the page's CSP.
+    const style = document.createElement('style');
+    style.textContent = vars() + css;
+    root.appendChild(style);
     document.documentElement.appendChild(node);
     return [node, root];
   };
@@ -249,9 +258,10 @@ return [==[
       .hint .keys b{color:var(--text);font-weight:600}
       @media (prefers-reduced-motion:reduce){.box,.hint{transition:none}}
     `);
-    root.innerHTML += `<div class="box"></div><div class="flag"></div>
-      <div class="hint enter"><span class="dot"></span><span class="title"></span><span class="sep"></span>
-      <span class="keys"></span></div>`;
+    root.append(part('div', 'box'), part('div', 'flag'));
+    const hint = part('div', 'hint enter');
+    hint.append(part('span', 'dot'), part('span', 'title'), part('span', 'sep'), part('span', 'keys'));
+    root.appendChild(hint);
     ui = { box: root.querySelector('.box'), flag: root.querySelector('.flag'), hint: root.querySelector('.hint'), title: root.querySelector('.title') };
     root.querySelector('.keys').textContent = word('hint_keys', 'Shift-click to add · Esc to finish');
     count();
@@ -265,7 +275,7 @@ return [==[
   const label = (el, r) => {
     const n = markOf(el);
     const name = el.tagName.toLowerCase();
-    ui.flag.innerHTML = `${n ? '<span class="n"></span>' : ''}<b></b><span class="cls"></span><span class="dim"></span>`;
+    ui.flag.replaceChildren(...(n ? [part('span', 'n')] : []), part('b'), part('span', 'cls'), part('span', 'dim'));
     if (n) ui.flag.querySelector('.n').textContent = String(n);
     ui.flag.querySelector('b').textContent = name;
     ui.flag.querySelector('.cls').textContent = describe(el).slice(name.length);
@@ -279,7 +289,7 @@ return [==[
       ui.box.classList.add('region');
       place(ui.box, box);
       ui.box.style.display = 'block';
-      ui.flag.innerHTML = '<b></b><span class="dim"></span>';
+      ui.flag.replaceChildren(part('b'), part('span', 'dim'));
       ui.flag.querySelector('b').textContent = word('region', 'region');
       ui.flag.querySelector('.dim').textContent = `${Math.round(drag.width)} × ${Math.round(drag.height)}`;
       ui.flag.style.display = 'flex';
@@ -476,6 +486,7 @@ return [==[
       mount();
       count();
       for (const [type, fn] of LISTEN) window.addEventListener(type, fn, true);
+      return true;
     },
     stop() { stop('cancelled'); },
     label(id, n) {

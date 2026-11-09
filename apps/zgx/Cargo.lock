@@ -6501,6 +6501,7 @@ dependencies = [
  "tungstenite",
  "ureq 2.12.1",
  "usvg",
+ "windows",
  "windows-sys 0.61.2",
  "zatex",
  "zeron-cli",
@@ -6808,7 +6809,6 @@ dependencies = [
 [[package]]
 name = "zgx-terminal"
 version = "0.1.10"
-source = "git+https://github.com/zeronsh/zgx?rev=6282d95d2fe16990945f8945add0289336719775#6282d95d2fe16990945f8945add0289336719775"
 dependencies = [
  "base64 0.22.1",
  "flate2",

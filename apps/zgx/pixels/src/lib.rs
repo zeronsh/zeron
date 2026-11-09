@@ -11,6 +11,23 @@ pub fn bgra_to_rgba(pixels: &mut [u8]) {
     }
 }
 
+/// A video frame's blue-green-red-unused rows (`pitch` bytes apart, bottom
+/// row first when `bottom_up`) as `w` by `h` opaque red-green-blue-alpha
+/// pixels, into `out` (`w * h * 4` bytes). False if `src` is too short.
+pub fn bgrx_rows_to_rgba(src: &[u8], pitch: usize, bottom_up: bool, w: usize, h: usize, out: &mut [u8]) -> bool {
+    let row = w * 4;
+    if h == 0 || pitch < row || src.len() < pitch * (h - 1) + row || out.len() < row * h {
+        return false;
+    }
+    for (y, dst) in out.chunks_exact_mut(row).take(h).enumerate() {
+        let at = if bottom_up { h - 1 - y } else { y } * pitch;
+        for (o, i) in dst.chunks_exact_mut(4).zip(src[at..at + row].chunks_exact(4)) {
+            o.copy_from_slice(&[i[2], i[1], i[0], 255]);
+        }
+    }
+    true
+}
+
 /// A fill crates/visual made for `g:circle`: its centre and radius. Only
 /// its own shape counts (the point count `arc_points` gives that radius, the
 /// first at 3 o'clock, every one as far from the centre), so a polygon the

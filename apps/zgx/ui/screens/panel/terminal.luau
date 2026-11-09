@@ -16,6 +16,7 @@ local ds = require("@ds")
 local state = require("@app/screens/panel/state")
 local api = require("@app/screens/panel/terminal_api")
 local files_paths = require("@app/screens/files/paths")
+local short_title = require("@self/terminal_title")
 
 type Tab = state.Tab
 
@@ -39,7 +40,10 @@ function M.title(tab: Tab): string?
 	local ok, title = pcall(function()
 		return t.title
 	end)
-	return if ok and type(title) == "string" and title ~= "" then title else nil
+	if not ok or type(title) ~= "string" or title == "" then
+		return nil
+	end
+	return short_title(title)
 end
 
 function M.closing(tab: Tab, done: (boolean) -> ())

@@ -378,7 +378,7 @@ local Control = ui.component(function(props: { plugin: string, setting: Setting,
 			ui.text {
 				function(): string
 					local p = path()
-					return if p == "" then ui.t("plugins.settings.none"):get() else (string.match(p, "([^/]+)/?$") or p)
+					return if p == "" then ui.t("plugins.settings.none"):get() else (string.match(p, "([^/\\]+)[/\\]?$") or p)
 				end,
 				text_size = "$font.size.sm",
 				color = "$text.secondary",
