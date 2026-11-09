@@ -307,8 +307,9 @@ local function place_ends(app: any): { [string]: number }
 	return out
 end
 
--- (A row with no time has its place against the ↵ slot, not in the middle;
--- one with a time, its time there: the same edge.)
+-- (A row with no time has its place at the row's end, not in the middle;
+-- one with a time, its time there: the same edge. No room is kept for ↵:
+-- on the lit row it lies over that end, which fades out under it.)
 test("every row is one line, what's at its end ending at the same place on each, and lighting a row moves nothing", function()
 	local app = chat()
 	app:type(BOX, "@")
@@ -327,4 +328,8 @@ test("every row is one line, what's at its end ending at the same place on each,
 	for name, ends in before do
 		expect(`{name}: {after[name]}`).to_be(`{name}: {ends}`)
 	end
+	-- ↵ over the lit row's end: it ends where every row's text does.
+	local key = app:tree("#mention-launcher"):match('img "↵" (%-?%d+,%-?%d+ %d+x%d+)')
+	local x, w = (key or ""):match("^(%-?%d+),%-?%d+ (%d+)x")
+	expect(`↵ ends at {(tonumber(x) or 0) + (tonumber(w) or 0)}`).to_be(`↵ ends at {edge}`)
 end)

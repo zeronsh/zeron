@@ -196,7 +196,8 @@ function M.Panel(props: Props): Node
 	end
 	-- The top: the trigger in the tiles' column, what's typed on the names'
 	-- line (or what to type, quiet, while nothing is), how many match in the
-	-- scope chosen at the end, on one baseline.
+	-- scope chosen at the end, each centred on the band's middle (each text
+	-- a line of its own size high, so its box sits on its glyphs).
 	local head = band(ui.row {
 		h = "$zeron.menu.row",
 		w_full = true,
@@ -207,23 +208,32 @@ function M.Panel(props: Props): Node
 			w = "$zeron.menu.glyph.box",
 			shrink = 0,
 			justify = "center",
-			ui.text { trigger, text_size = "$font.size.md", color = "$text.tertiary" },
+			ui.text { trigger, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.tertiary" },
 		},
 		ui.row {
 			grow = 1,
 			min_w = 0,
 			gap = "$space.2",
-			items = "baseline",
+			items = "center",
 			ui.row {
 				grow = 1,
 				min_w = 0,
+				items = "center",
 				ui.show(function(): boolean
 					return query() ~= ""
-				end, ui.text { query, min_w = 0, truncate = true, text_size = "$font.size.md", color = "$text.primary" }, ui.text {
+				end, ui.text {
+					query,
+					min_w = 0,
+					truncate = true,
+					text_size = "$font.size.md",
+					line_height = "$font.line.md",
+					color = "$text.primary",
+				}, ui.text {
 					locale.t("ds.mention_launcher.placeholder"),
 					min_w = 0,
 					truncate = true,
 					text_size = "$font.size.md",
+					line_height = "$font.line.md",
 					color = "$text.tertiary",
 				}),
 			},
@@ -234,6 +244,7 @@ function M.Panel(props: Props): Node
 				shrink = 0,
 				tabular = true,
 				text_size = "$font.size.xs",
+				line_height = "$font.line.xs",
 				color = "$text.tertiary",
 			},
 		},
@@ -277,10 +288,11 @@ function M.Panel(props: Props): Node
 				end,
 				ui.row {
 					gap = "$zeron.space.tight",
-					items = "baseline",
+					items = "center",
 					ui.text {
 						s.label,
 						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
 						weight = "$font.weight.medium",
 						color = function(): string
 							return if chosen() then "$text.primary" else "$text.secondary"
@@ -292,6 +304,7 @@ function M.Panel(props: Props): Node
 						end,
 						tabular = true,
 						text_size = "$font.size.xs",
+						line_height = "$font.line.xs",
 						color = "$text.tertiary",
 					},
 				},
@@ -321,9 +334,22 @@ function M.Panel(props: Props): Node
 		local function lit(): boolean
 			return props.active:get() == i
 		end
-		-- Where it is and when it last moved: one group at the row's end,
-		-- against the ↵ key's slot; the time in a column of its own where
-		-- there is one (a chat's), so the places over and under line up.
+		-- Where it is and when it last moved: one group at the row's end;
+		-- the time in a column of its own where there is one (a chat's), so
+		-- the places over and under line up.
+		-- The lit row's text, cut short of ↵ by a short gap and faded over
+		-- the space scale's 16 before that (`fade_x`, as FadeText fades): its
+		-- content keeps the row's whole width, so nothing in it moves.
+		local line = ui.ref()
+		local function key_room(): number
+			local key = (ui.theme.get("zeron.menu.launcher.key") :: number?) or 18
+			local gap = (ui.theme.get("zeron.space.tight") :: number?) or 6
+			return key + gap
+		end
+		local function full(): number?
+			local w = line.width
+			return if w and w > 0 then w else nil
+		end
 		local meta: { [any]: any } = { shrink = 100, min_w = 0, gap = "$space.2", items = "baseline", justify = "end" }
 		if item.detail then
 			table.insert(meta, ui.text {
@@ -371,21 +397,47 @@ function M.Panel(props: Props): Node
 				props.choose(item)
 			end,
 			tile(item),
-			-- Its name and where it is, on one baseline.
+			-- Its name and where it is, on one baseline, to the row's end; on
+			-- the lit row ↵ over their end, which fades out under it.
 			ui.row {
 				grow = 1,
 				min_w = 0,
-				gap = "$space.2",
-				items = "baseline",
-				ui.row { grow = 1, min_w = 0, title(item.label, query(), item.section ~= "chats") },
-				if item.detail or item.side then ui.row(meta) else nil,
-			},
-			-- The ↵ key's slot: kept on every row, the key in it on the lit one.
-			ui.row {
-				w = "$zeron.menu.launcher.key",
-				shrink = 0,
-				justify = "end",
-				ui.show(lit, Kbd { keys = "enter", tone = "quiet" }),
+				relative = true,
+				ui.row {
+					ref = line,
+					grow = 1,
+					min_w = 0,
+					ui.row {
+						grow = 1,
+						min_w = 0,
+						overflow = "hidden",
+						mr = function(): number
+							return if lit() and full() then key_room() else 0
+						end,
+						fade_x = function(): { number }
+							return { 0, if lit() and full() then ((ui.theme.get("space.4") :: number?) or 16) else 0 }
+						end,
+						ui.row {
+							w = full,
+							shrink = 0,
+							grow = 1,
+							min_w = 0,
+							gap = "$space.2",
+							items = "baseline",
+							ui.row { grow = 1, min_w = 0, title(item.label, query(), item.section ~= "chats") },
+							if item.detail or item.side then ui.row(meta) else nil,
+						},
+					},
+				},
+				ui.row {
+					absolute = true,
+					top = 0,
+					bottom = 0,
+					right = 0,
+					items = "center",
+					pointer_events = "none",
+					ui.show(lit, Kbd { keys = "enter", tone = "quiet" }),
+				},
 			},
 		}
 	end
@@ -415,7 +467,7 @@ function M.Panel(props: Props): Node
 			items = "center",
 			shrink = 0,
 			keys,
-			ui.text { what, text_size = "$font.size.xs", color = "$text.tertiary" },
+			ui.text { what, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
 		}
 	end
 	local foot = band(ui.row {

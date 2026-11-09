@@ -185,3 +185,57 @@ test("a long file name is cut before its extension, never clipped; a narrow wind
 	local x, right = edges(app:tree("#mention-popover"), "#mention-popover")
 	expect(`width {(right :: number) - (x :: number)}`).to_be("width 348")
 end)
+
+-- A printed line's box, by what it says.
+local function find(tree: string, needle: string): (number, number, number, number)
+	for line in tree:gmatch("[^\n]+") do
+		if line:find(needle, 1, true) then
+			return box(line)
+		end
+	end
+	error(`no {needle} in:\n{tree}`)
+end
+
+local function centred(what: string, y: number, h: number, mid: number)
+	local c = y + h / 2
+	expect(`{what} centre {c} on {mid}: {math.abs(c - mid) <= 0.5}`).to_be(`{what} centre {c} on {mid}: true`)
+end
+
+test("the launcher's top, its tabs and its keys are each centred on their band's middle", function()
+	local app = chat()
+	app:type(BOX, "@")
+	settle(app)
+	local tree = app:tree("#mention-launcher")
+	local _, top = find(tree, "#mention-launcher")
+	-- The top band: its inset, then a row's height; its middle half a row in.
+	local inset = 4
+	local row = 28
+	local mid = top + inset + row / 2
+	local _, ay, _, ah = find(tree, 'text "@"')
+	local _, hy, _, hh = find(tree, 'text "Search files, chats, attachments"')
+	local _, cy, _, ch = find(tree, " results")
+	centred("@", ay, ah, mid)
+	centred("hint", hy, hh, mid)
+	centred("count", cy, ch, mid)
+	-- (As much room over the hint as under it, in its row.)
+	local over, under = hy - (top + inset), (top + inset + row) - (hy + hh)
+	expect(`hint over {over}, under {under}`).to_be(`hint over {over}, under {over}`)
+	-- A tab: its count on the pill's middle.
+	local _, ty, _, th = find(tree, 'tab "Files"')
+	local _, ny, _, nh = find(tree, 'text "4"')
+	centred("tab count", ny, nh, ty + th / 2)
+	-- The keys: each word on its cap's middle.
+	local _, ky, _, kh = find(tree, 'img "Tab"')
+	local _, wy, _, wh = find(tree, 'text "Switch tab"')
+	centred("Switch tab", wy, wh, ky + kh / 2)
+	-- (The footer's ↵: the last, under the lit row's.)
+	local ey, eh = 0, 0
+	for line in tree:gmatch("[^\n]+") do
+		if line:find('img "↵"', 1, true) then
+			local _, y, _, h = box(line)
+			ey, eh = y, h
+		end
+	end
+	local _, iy, _, ih = find(tree, 'text "Insert"')
+	centred("Insert", iy, ih, ey + eh / 2)
+end)

@@ -146,7 +146,8 @@ function M.setup()
 				width = 232,
 				-- The `@` launcher (ds/mention_launcher): its width, the least it
 				-- narrows to in a small window, a scope tab's height, and on each
-				-- row the time's column and the ↵ key's slot (a key cap's width).
+				-- row the time's column and the ↵ key's width (a key cap's: the
+				-- lit row's text fades out under it).
 				launcher = { width = 440, min_width = 320, tab = 24, time = 40, key = 18 },
 				-- (Zeron's frost::MENU_BLUR, as its popovers, palette and
 				-- dialogs blur.)
