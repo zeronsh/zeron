@@ -16,6 +16,7 @@ local ds = require("@ds")
 local state = require("@app/screens/panel/state")
 local api = require("@app/screens/panel/terminal_api")
 local files_paths = require("@app/screens/files/paths")
+local short_title = require("@self/terminal_title")
 
 type Tab = state.Tab
 
@@ -42,11 +43,7 @@ function M.title(tab: Tab): string?
 	if not ok or type(title) ~= "string" or title == "" then
 		return nil
 	end
-	-- A Windows console names itself by its program's whole path
-	-- (`C:\WINDOWS\system32\cmd.exe`, `… - npm run dev` while it runs one):
-	-- its name alone, and what it runs, as a shell's title elsewhere is short.
-	local program, running = string.match(title, "^%a:\\.-([^\\]-)%.[Ee][Xx][Ee](.*)$")
-	return if program and program ~= "" then program .. running else title
+	return short_title(title)
 end
 
 function M.closing(tab: Tab, done: (boolean) -> ())

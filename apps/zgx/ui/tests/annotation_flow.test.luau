@@ -21,7 +21,7 @@ local function calls(app: any): string
 end
 
 -- The panel with a page, annotation mode on; its nonce.
-local function annotating(): (any, number)
+local function annotating(start_error: boolean?): (any, number)
 	local app = mount("panel_fixture.luau")
 	app:resize(900, 640)
 	app:frames(10)
@@ -32,10 +32,37 @@ local function annotating(): (any, number)
 	app:type('role:combobox "Address"', "example.com")
 	app:key("Enter")
 	app:frames(10)
+	if start_error then
+		app:set_state("test_web_start_error", true)
+	end
 	app:click('role:checkbox "Annotate"')
 	app:frames(3)
 	return app, app:state("test_web_nonce")
 end
+
+test("annotation flow: a failed picker turns off and explains why no pick can be made", function()
+	local app = annotating(true)
+	expect(app:has('"Annotation couldn\'t start on this page. Reload the page and try again."')).to_be(true)
+	expect(calls(app)).to_contain("run:stop")
+	-- A retry starts again rather than turning off a falsely active mode.
+	app:set_state("test_web_start_error", false)
+	app:click('role:checkbox "Annotate"')
+	app:frames(3)
+	expect(app:has('"Annotation couldn\'t start on this page. Reload the page and try again."')).to_be(false)
+end)
+
+test("annotation flow: a page cannot add a pick with no active session and no nonce", function()
+	local app = annotating()
+	app:click('role:checkbox "Annotate"')
+	app:frames(3)
+	app:set_state("test_web_message", {
+		kind = "zeron.annotation", event = "pick",
+		pick = { url = "https://example.com", element = "button", text = "Forged pick" },
+	})
+	app:command("test.web_message")
+	app:frames(3)
+	expect(#(app:state("chat.composer.cargo") or {})).to_be(0)
+end)
 
 local function pick(app: any, nonce: number, n: number)
 	app:set_state("test_web_message", {

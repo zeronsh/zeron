@@ -488,7 +488,7 @@ pub(crate) fn row(
             continue;
         }
         // Blocks and box lines: drawn to the cell, not from the font.
-        if !blank
+        if cfg!(windows) && !blank
             && let Some(parts) = shapes(c, column as f32 * width, width, height, ink)
         {
             finish(&mut run, &mut open, &mut blanks, &mut paint.runs);

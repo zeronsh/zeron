@@ -207,6 +207,7 @@ local onboarding_radius = ui.shared("onboarding.radius", 0)
 -- a new window for a few frames first: there it's asked for under the
 -- scene, as the way in comes (`prepare`).
 local prepares_hidden = ui.shared("onboarding.prepare_hidden", false):peek() == true
+local windows = ui.shared("platform", ""):peek() == "windows"
 -- When the way in was taken: what the copy's card wall and the window's
 -- reckon their drift from (screens/onboarding/signin), so they drift as one.
 local onboarding_epoch = ui.shared("onboarding.epoch", 0)
@@ -451,7 +452,9 @@ local STAGES: { (to: Rect) -> () } = {
 		replica:set(true)
 	end,
 	function(to)
-		anime.animate("#sheet", { left = to.x, top = to.y, opacity = 1, layerParam0 = -0.5, duration = 0 })
+		-- Keep the replica transparent until the handoff. A layer shader's
+		-- empty content does not hide the screen's outer edge on Windows.
+		anime.animate("#sheet", { left = to.x, top = to.y, opacity = if windows then 0 else 1, layerParam0 = -0.5, duration = 0 })
 	end,
 	function()
 		warm:set(true)
@@ -597,7 +600,7 @@ local function leave()
 			anime.animate("#title, #cta", { opacity = 0, duration = 180, ease = "inQuad" })
 			anime.animate("#scenery, #agents", { opacity = 0, duration = 900, ease = "inQuad" })
 		end
-		anime.animate("#sheet", { layerParam4 = ox, layerParam5 = oy, duration = 0 })
+		anime.animate("#sheet", { opacity = 1, layerParam4 = ox, layerParam5 = oy, duration = 0 })
 		-- Moving at once (it answers the click), easing in to the edge.
 		anime.animate("#sheet", { layerParam0 = { 0, full }, duration = SCREEN_MS, ease = "outQuad" })
 		-- The agents, the words and the way in are in the picture too (it is

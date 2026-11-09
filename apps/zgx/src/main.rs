@@ -377,9 +377,15 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
     let epoch: Rc<RefCell<Option<Shared>>> = Rc::default();
 
     let window = cx.window.clone();
+    let active = cx.ui.observe_window_active();
     host.action("interactive", move |_| {
         window.set_pointer_passthrough(false);
-        window.request_focus();
+        // On Windows the intro is an ordinary borderless window: Alt+Tab
+        // must stay with the app the person chose, even if this timer fires
+        // while they are away.
+        if !cfg!(windows) || active.with_untracked(|active| *active) {
+            window.request_focus();
+        }
     });
     // `prepare { x, y, w, h }`: setup's window at that rect (points from the
     // overlay's top left, where the intro draws its screen over it), once,
@@ -419,7 +425,11 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             *epoch_slot.borrow_mut() = Some(host.shared("onboarding.epoch", 0.));
             serve(cx, host, "app.luau", false);
             // Keys stay with the intro until it hands over.
-            overlay.request_focus();
+            // Creating a hidden window does not take focus on Windows.
+            // Asking for it here steals it back after an early Alt+Tab.
+            if !cfg!(windows) {
+                overlay.request_focus();
+            }
         });
         *opened.borrow_mut() = Some(handle);
     });
@@ -1123,7 +1133,9 @@ fn intro_window() -> WindowOptions {
         decorations: false,
         resizable: false,
         covers_display: true,
-        level: WindowLevel::AlwaysOnTop,
+        // A topmost overlay stays over the app selected by Alt+Tab. It
+        // looks stuck, and hides that app while its keyboard has focus.
+        level: if cfg!(windows) { WindowLevel::Normal } else { WindowLevel::AlwaysOnTop },
         shadow: false,
         ..Default::default()
     }

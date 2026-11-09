@@ -103,6 +103,7 @@ end
 local pages: { [string]: any } = {}
 local page_handlers: { [string]: any } = {}
 local web_nonce = ui.state("test_web_nonce", 0)
+local web_start_error = ui.state("test_web_start_error", false)
 local find_at = 1
 local function fake_web(id: string): any
 	local fields: { [string]: any } = {
@@ -170,7 +171,17 @@ local function fake_web(id: string): any
 		-- A script asked for its answer: the find's (three matches, the
 		-- first current; a step moves it), else nothing.
 		eval = function(_self: any, js: string, reply: ((value: any, err: string?) -> ())?)
-			if string.find(js, "__zeronFind", 1, true) then
+			if string.find(js, "__zeronAnnotator.start", 1, true) then
+				web_note("run:start")
+				web_nonce:set(tonumber(string.match(js, "__zeronAnnotator%.start%((%d+)") or "0") or 0)
+				if reply then
+					if web_start_error:peek() then
+						reply(nil, "The page refused the picker")
+					else
+						reply(true, nil)
+					end
+				end
+			elseif string.find(js, "__zeronFind", 1, true) then
 				local q = string.match(js, "%.find%((%b\"\")") or string.match(js, "%.find%(('[^']*')")
 				local by = string.match(js, "%.step%((%-?%d+)%)")
 				web_note(if q then `find:{string.sub(q, 2, -2)}` elseif by then `step:{by}` else "find:clear")
