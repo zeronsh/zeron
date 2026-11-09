@@ -2,8 +2,9 @@
 -- (Zeron's triggers, crates/ui/src/composer.rs: `@` and `/` after a space
 -- or at a start, `$` not before a digit, none inside code). As one is
 -- typed, a popover opens at the caret with what matches, its first row
--- lit; ↑ and ↓ move, Enter or Tab take the row (with no row, Enter sends
--- the draft), Escape (or a click away from it) puts it away for that token.
+-- lit; ↑ and ↓ move (the list scrolling to keep it in view), Enter or Tab
+-- take the row (with no row, Enter sends the draft), Escape (or a click
+-- away from it) puts it away for that token.
 -- It shows while the caret is in a token, the field has the keys, the
 -- window is at the front and the composer is in view, unless that token's
 -- list was put away; the caret leaving the token, or a trigger typed, ends
@@ -231,10 +232,28 @@ function M.use(opts: Use)
 		local t = token:get()
 		return t ~= nil and away_from() ~= t.from and live()
 	end
-	-- A new token (or a new query) lights the first row again.
+	-- Where the list is scrolled (the launcher's or the list's: one shows).
+	local offset = ui.use_state(0)
+	-- The lit row brought into view, as the keys move it: past the rows
+	-- that show, the list scrolls with it.
+	local function reveal(i: number)
+		local t = token:peek()
+		if sections_of(t) then
+			Launcher.reveal(offset, shown:peek(), scope:peek() == "all", i)
+			return
+		end
+		local lines = {}
+		for _ = 1, #shown:peek() do
+			table.insert(lines, "row")
+		end
+		Menu.reveal(offset, lines, i, ROWS, ROW)
+	end
+	-- A new token (or a new query) lights the first row again, the list at
+	-- its top.
 	ui.effect(function()
 		token:get()
 		active:set(1)
+		offset:set(0)
 	end)
 	-- A list put away stays away for its token alone: the caret out of it
 	-- (moved, the token deleted), or its trigger typed again, and the next
@@ -334,6 +353,7 @@ function M.use(opts: Use)
 			local at = table.find(order, scope:peek()) or 1
 			scope:set(order[(at - 1 + (if e.shift then -1 else 1)) % #order + 1])
 			active:set(1)
+			offset:set(0)
 			return true
 		end
 		if e.key == "ArrowDown" or e.key == "ArrowUp" then
@@ -341,7 +361,9 @@ function M.use(opts: Use)
 				return true
 			end
 			local step = if e.key == "ArrowDown" then 1 else -1
-			active:set((active:peek() - 1 + step) % #list + 1)
+			local i = (active:peek() - 1 + step) % #list + 1
+			active:set(i)
+			reveal(i)
 			return true
 		elseif e.key == "Enter" or e.key == "Tab" then
 			local item = list[active:peek()]
@@ -502,6 +524,7 @@ function M.use(opts: Use)
 				token = token,
 				shown = shown,
 				active = active,
+				offset = offset,
 				scope = scope,
 				sections = ((opts.sections or {}) :: any)["@"] or {},
 				counts = counts,
@@ -543,6 +566,7 @@ function M.use(opts: Use)
 						end
 						return Menu.list_height(lines, ROWS, ROW)
 					end,
+					offset = offset,
 					role = "listbox",
 					label = title,
 				},

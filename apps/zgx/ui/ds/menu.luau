@@ -322,7 +322,8 @@ end
 -- whatever it holds (a line, a full list scrolled, nothing at all).
 -- `before`: lines over the scroll in the same inset (a heading, what an
 -- empty or loading list says). `id` names the list; other props go to the
--- scroll (its role, its label).
+-- scroll (its role, its label, its `offset`: a list whose highlight the
+-- keys move keeps it in view with `M.reveal`).
 function M.List(props: { lines: Node, h: any, before: { Node }?, [any]: any }): Node
 	local scroll: { [any]: any } = { w_full = true, overscroll = "contain" }
 	for k, v in props do
@@ -343,11 +344,23 @@ end
 -- headings among them): a list's scroll's height, whole rows and nothing
 -- under them. `lines` in order, each `"heading"` or `"row"`; `row` a row's
 -- height. (A first heading's as `M.Heading` lays it: no room over it.)
+-- A line's height there: a row's `row`, a heading's the theme's (a first
+-- one's without the room over it).
+local function line_height(line: string, i: number, row: number): number
+	if line == "heading" then
+		local heading = (ui.theme.get("zeron.menu.heading") :: number?) or 24
+		local inset = (ui.theme.get("space.1") :: number?) or 4
+		return if i == 1 then heading - inset else heading
+	end
+	return row
+end
+local function list_gap(): number
+	return (ui.theme.get("zeron.list.gap") :: number?) or 2
+end
+
 function M.list_height(lines: { string }, rows: number, row: number): number
 	local h, n, any = 0, 0, false
-	local heading = (ui.theme.get("zeron.menu.heading") :: number?) or 24
-	local inset = (ui.theme.get("space.1") :: number?) or 4
-	local gap = (ui.theme.get("zeron.list.gap") :: number?) or 2
+	local gap = list_gap()
 	for i, line in lines do
 		if line == "row" then
 			n += 1
@@ -359,13 +372,42 @@ function M.list_height(lines: { string }, rows: number, row: number): number
 			h += gap
 		end
 		any = true
-		if line == "heading" then
-			h += if i == 1 then heading - inset else heading
-		else
-			h += row
-		end
+		h += line_height(line, i, row)
 	end
 	return h
+end
+
+-- Scroll a list (its scroll's `offset`) as little as brings its line `at`
+-- into view whole, with the heading over it if one is (going up, a
+-- section's first row shows under its name). `lines`, `rows` and `row` as
+-- `M.list_height` takes them: the view is the height it gives. A list the
+-- keys move a highlight through calls it as they move it (not as the
+-- pointer does: a row it's over is in view, and the wheel is its own).
+function M.reveal(offset: State<number>, lines: { string }, at: number, rows: number, row: number)
+	if not lines[at] then
+		return
+	end
+	local from = if at > 1 and lines[at - 1] == "heading" then at - 1 else at
+	local gap = list_gap()
+	local y, top = 0, 0
+	for i = 1, at do
+		if i > 1 then
+			y += gap
+		end
+		if i == from then
+			top = y
+		end
+		y += line_height(lines[i], i, row)
+	end
+	local view = M.list_height(lines, rows, row)
+	-- (A heading and its row taller than the view: the row.)
+	top = math.max(top, y - view)
+	local o = offset:peek()
+	if top < o then
+		offset:set(top)
+	elseif y > o + view then
+		offset:set(y - view)
+	end
 end
 
 -- A panel of the menus' glass, its groups and rules edge to edge.
