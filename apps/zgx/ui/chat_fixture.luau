@@ -604,6 +604,30 @@ ui.command {
 		publish(opened, { running = true })
 	end,
 }
+-- A reply as the host sends one: its words a text block, the draft naming
+-- the block being written (`part`, `part_text`: src/chat.rs `publish_draft`).
+-- What tests/streaming_cost.rs streams into.
+ui.command {
+	id = "start_block_reply",
+	title = "A reply in blocks starts",
+	run = function()
+		if not opened then
+			return
+		end
+		store.messages:push {
+			id = "live",
+			role = "assistant",
+			text = "",
+			model = "Opus",
+			streaming = true,
+			started = ui.now() / 1000,
+			tools = {},
+			blocks = { { id = "t", kind = "text", text = "" } },
+		}
+		store.draft:set { id = "live", text = "", part = "t", part_text = "" }
+		publish(opened, { running = true })
+	end,
+}
 ui.command {
 	id = "stream_words",
 	title = "The reply writes a few words",

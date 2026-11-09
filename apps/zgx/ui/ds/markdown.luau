@@ -246,7 +246,9 @@ local function veil_color(v: Veil, color: any, c: VeilChunk): any
 	return function(): any
 		local p = (ui.now() - c.started) * c.boost / c.ms
 		if p >= 1 then
-			return color
+			-- (A colour that is itself a function, a link's or inline
+			-- code's accented ink, is read: a binding gives a colour.)
+			return if type(color) == "function" then color() else color
 		end
 		if v.tick then
 			v.tick:get()
@@ -2052,15 +2054,26 @@ return function(props: Props): Node
 		end)
 		if window then
 			-- The blocks in runs of CHUNK, each run a row of its own.
+			-- (A run whose blocks are all among those the parse kept from the
+			-- last is the very run it was: a reply streaming in makes again
+			-- only its last runs, not one for every 16 blocks it has.)
+			local last_runs: { { at: number, blocks: { MarkdownBlock } } } = {}
 			local runs = ui.computed(function(): { { at: number, blocks: { MarkdownBlock } } }
-				local out = {}
-				for n, b in parsed:get() do
+				local list = parsed:get()
+				local kept_runs = math.min(MarkdownFind.settled(list) // CHUNK, #last_runs)
+				-- (Its ends the same: the last runs were made of this text's.)
+				if kept_runs > 0 and (last_runs[1].blocks[1] ~= list[1] or last_runs[kept_runs].blocks[CHUNK] ~= list[kept_runs * CHUNK]) then
+					kept_runs = 0
+				end
+				local out = table.move(last_runs, 1, kept_runs, 1, {})
+				for n = kept_runs * CHUNK + 1, #list do
 					local at = (n - 1) // CHUNK + 1
 					if not out[at] then
 						out[at] = { at = at, blocks = {} }
 					end
-					table.insert(out[at].blocks, b)
+					table.insert(out[at].blocks, list[n])
 				end
+				last_runs = out
 				return out
 			end)
 			-- As the view scrolls (a tick on, once the scroll has laid out): the
