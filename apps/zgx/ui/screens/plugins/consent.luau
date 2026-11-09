@@ -162,7 +162,7 @@ end
 local function why_unknown(it: any): string | Message
 	local reason = it.author and it.author.reason
 	if it.status == "tampered" then
-		return ui.t("plugins.consent.tampered_why")
+		return if type(it.source) == "table" then ui.t("plugins.consent.tampered_why") else ui.t("plugins.consent.tampered_why_no_source")
 	end
 	local where = words.where(it.source)
 	return reason or (if where then ui.t("plugins.consent.unverified_why_from", { where = where }) else ui.t("plugins.consent.unverified_why"))
@@ -208,7 +208,40 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 		asks = section(if again then ui.t("plugins.consent.asks_again") else ui.t("plugins.consent.asks"), lines)
 	end
 
-	local answers = ui.row {
+	-- Changed since you allowed it: never allowed as it is now. Removed, or
+	-- installed again from where it came from (when that's known), on
+	-- this device; another device's is only turned down from here.
+	local tampered = it.status == "tampered" and not elsewhere
+	local answers = if tampered
+		then ui.row {
+			w_full = true,
+			gap = "$space.2",
+			items = "center",
+			justify = "end",
+			ds.Button {
+				id = "consent-remove",
+				tone = "secondary",
+				size = "md",
+				disabled = busy,
+				on_click = function()
+					ui.invoke("plugins.remove_tampered", { id = it.id, hash = it.hash })
+				end,
+				ui.t("plugins.consent.remove"),
+			},
+			if type(it.source) == "table"
+				then ds.Button {
+					id = "consent-reinstall",
+					tone = "primary",
+					size = "md",
+					disabled = busy,
+					on_click = function()
+						ui.invoke("plugins.reinstall", { id = it.id, hash = it.hash })
+					end,
+					ui.t("plugins.consent.reinstall"),
+				}
+				else nil,
+		}
+		else ui.row {
 		w_full = true,
 		gap = "$space.2",
 		items = "center",
@@ -413,7 +446,8 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 				return consent:get().error ~= nil
 			end, ui.text {
 				function(): string
-					return consent:get().error or ""
+					local error = consent:get().error
+					return if type(error) == "string" then words.failure(error) else ""
 				end,
 				text_size = "$font.size.sm",
 				color = "$zeron.tone.danger.ink",

@@ -171,6 +171,14 @@ ui.actions {
 		note(`decide:{arg.id}:{tostring(arg.allow)}:{arg.hash}`)
 		show(nil)
 	end,
+	["plugins.remove_tampered"] = function(arg: any)
+		note(`remove:{arg.id}:{arg.hash}`)
+		show(nil)
+	end,
+	["plugins.reinstall"] = function(arg: any)
+		note(`reinstall:{arg.id}:{arg.hash}`)
+		shown:set({ busy = false, item = table.clone(PLUGINS[arg.id]), error = "rate_limited: GitHub is turning away requests from this device for now" } :: any)
+	end,
 	["plugins.sign"] = function(arg: any)
 		note(`sign:{arg.id}`)
 		PLUGINS[arg.id].author = { kind = "you" }
@@ -204,6 +212,17 @@ ui.command {
 	run = function()
 		PLUGINS.ping.status = "tampered"
 		PLUGINS.ping.hash = "ping-2"
+		show("ping")
+	end,
+}
+-- The same, installed from GitHub: it can be installed again from there.
+ui.command {
+	id = "tamper_github",
+	title = "Ping from GitHub, edited after it was allowed",
+	run = function()
+		PLUGINS.ping.status = "tampered"
+		PLUGINS.ping.hash = "ping-2"
+		PLUGINS.ping.source = { kind = "git", url = "https://github.com/eve/ping.git" }
 		show("ping")
 	end,
 }

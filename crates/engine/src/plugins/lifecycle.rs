@@ -40,6 +40,10 @@ struct InstallParams {
     git_ref: Option<String>,
     #[serde(default)]
     folder: Option<String>,
+    /// An installed plugin's id: it again, fetched fresh from where it came
+    /// from, in place of what's there (a tampered one's way back).
+    #[serde(default)]
+    reinstall: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +83,9 @@ impl Plugins {
         match method {
             methods::INSTALL_PLUGIN => {
                 let p: InstallParams = parse_params(params)?;
+                if let Some(id) = p.reinstall.filter(|s| !s.trim().is_empty()) {
+                    return self.reinstall(id.trim()).await;
+                }
                 let path = p.path.filter(|s| !s.trim().is_empty());
                 let url = p.url.filter(|s| !s.trim().is_empty());
                 let (package, source) = match (path, url) {
@@ -119,6 +126,14 @@ impl Plugins {
             }
             methods::EXPORT_PLUGIN => {
                 let p: ExportParams = parse_params(params)?;
+                // R29: an agent exports to Zeron's plugin-exports folder
+                // only; a path of its choosing is the person's (`zeron
+                // plugin export --to`, their save dialog).
+                if !zeron_rpc::caller().is_local() && p.to.as_deref().is_some_and(|to| !to.trim().is_empty()) {
+                    return Err(failed(
+                        "Agents export to Zeron's plugin-exports folder: leave out `to` (the reply says where it went)",
+                    ));
+                }
                 self.rescan().await;
                 let entry = self.entry(&p.id).ok_or_else(|| failed(format!("There's no plugin {}", p.id)))?;
                 let name = format!(
@@ -387,7 +402,7 @@ impl Plugins {
             found = install::found(&self.inner.plugins_dir, id, &entry.item.hash);
         }
         let Some(found) = found else {
-            return Err(failed(format!("{} is up to date", entry.item.name)));
+            return Err(failed(install::failure(install::reason::UP_TO_DATE, format!("{} is up to date", entry.item.name))));
         };
         if let Some(refused) = found.refused {
             return Err(failed(refused));
@@ -402,6 +417,61 @@ impl Plugins {
             .or_else(|| Source::load(Path::new(&entry.item.dir)))
             .ok_or_else(|| failed("Where it came from isn't known"))?;
         self.install_package(package, source).await
+    }
+
+    /// Plugin `id` installed again from where it came from: fetched and
+    /// verified first, then put in place of the folder there (kept aside
+    /// until the new one is in, and put back if it can't be). What it
+    /// stored stays; your decision goes, so it asks again.
+    async fn reinstall(&self, id: &str) -> Result<RpcReply, RpcError> {
+        self.rescan().await;
+        let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+        if entry.item.builtin {
+            return Err(failed("Built-in plugins update when Zeron does"));
+        }
+        if entry.item.own {
+            return Err(failed("It's one you're making on this device: there's nowhere else to get it from"));
+        }
+        let dir = PathBuf::from(&entry.item.dir);
+        let source = Source::load(&dir).ok_or_else(|| {
+            failed(install::failure(
+                install::reason::NO_SOURCE,
+                "Where it came from isn't known, so it can't be installed again from there",
+            ))
+        })?;
+        let (package, mut fresh) = install::refetch(&source, &self.scratch()?).await.map_err(failed)?;
+        if package.id() != id {
+            return Err(failed(install::failure(
+                install::reason::DIFFERENT_PLUGIN,
+                format!("What's there now is a different plugin ({})", package.id()),
+            )));
+        }
+        // (A git source keeps the folder in the repository it named.)
+        if fresh.path.is_none() {
+            fresh.path = source.path.clone();
+        }
+        let aside = self.inner.plugins_dir.join(install::INCOMING_DIR).join(format!("{id}-reinstall-{}", crate::new_id()));
+        {
+            let _scan = self.inner.scan_lock.lock().await;
+            std::fs::rename(&dir, &aside).map_err(|_| failed("Couldn't replace the installed one"))?;
+        }
+        self.update_state(|state| {
+            state.decisions.remove(id);
+        })?;
+        install::forget_found(&self.inner.plugins_dir, id);
+        match self.install_package(package, fresh).await {
+            Ok(reply) => {
+                let _ = std::fs::remove_dir_all(&aside);
+                Ok(reply)
+            }
+            Err(error) => {
+                if std::fs::symlink_metadata(&dir).is_err() {
+                    let _ = std::fs::rename(&aside, &dir);
+                }
+                self.rescan().await;
+                Err(error)
+            }
+        }
     }
 
     /// Check for updates a while after starting, then every few hours.

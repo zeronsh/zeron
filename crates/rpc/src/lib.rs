@@ -617,8 +617,10 @@ pub mod methods {
     /// (checked first when none was found yet). Refused when someone else
     /// signed it or it was changed; new permissions wait for you again.
     pub const UPDATE_PLUGIN: &str = "UpdatePlugin";
-    /// `{id, to?}` → `{path}`: a plugin as a `.zeron-plugin` package (an
-    /// own plugin is re-signed first), into the folder or file `to`.
+    /// `{id, to?}` → `{path, bytes}`: a plugin as a `.zeron-plugin` package
+    /// (an own plugin is re-signed first), into the folder or file `to`
+    /// (absolute), else `<data dir>/plugin-exports`. Only this device's own
+    /// app or CLI names `to`: an agent's export goes to plugin-exports.
     pub const EXPORT_PLUGIN: &str = "ExportPlugin";
     /// `{source, title, body, session?}` → `{outcome: "posted" | "off" |
     /// "held" | "paced" | "unavailable"}`: a banner asked for (a plugin's),
@@ -732,12 +734,15 @@ pub fn agent_allowed(method: &str) -> bool {
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
             // Plugins: authoring, installing (lands waiting for the person),
-            // checking for updates, and their tools.
+            // checking for updates, exporting (to Zeron's plugin-exports
+            // folder only: the engine refuses an agent's `to`), and their
+            // tools.
             | methods::LIST_PLUGINS
             | methods::PLUGIN_STATUS
             | methods::NEW_PLUGIN
             | methods::INSTALL_PLUGIN
             | methods::CHECK_PLUGIN_UPDATES
+            | methods::EXPORT_PLUGIN
             | methods::LIST_PLUGIN_TOOLS
             | methods::WATCH_PLUGIN_TOOLS
             | methods::CALL_PLUGIN_TOOL
@@ -1357,7 +1362,6 @@ mod tests {
             methods::OPEN_TERMINAL,
             methods::WRITE_TERMINAL,
             methods::WRITE_WORKSPACE_FILE,
-            methods::EXPORT_PLUGIN,
             // The window's own watch of the theme files.
             methods::WATCH_THEMES,
             methods::READ_TOOL_OUTPUT,
@@ -1369,6 +1373,10 @@ mod tests {
             }
         }
         let asked = agent.call(methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
+        assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // Exporting a plugin reaches the engine as the agent's, which keeps
+        // it to Zeron's plugin-exports folder (R29).
+        let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {

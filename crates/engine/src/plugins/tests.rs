@@ -1234,7 +1234,30 @@ async fn plugins_an_unknown_authors_update_keeps_consent_by_key() {
     assert_eq!(updated["plugin"]["ask"], serde_json::json!(["notifications"]));
     // Changed by hand after that: tampered, as before.
     std::fs::write(f.plugins.plugins_dir().join("zed/init.luau"), "changed()").unwrap();
+    let tampered = item(&f.plugins, "zed").await;
+    assert_eq!(tampered["status"], "tampered");
+    // Never allowed as it is now: removed, or installed again.
+    let refused = call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "zed", "allow": true, "hash": tampered["hash"] }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("changed after you allowed it"), "{refused}");
     assert_eq!(item(&f.plugins, "zed").await["status"], "tampered");
+    // Installed again from where it came from: what was signed, asking again.
+    let storage = f.plugins.plugins_dir().join(".storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(storage.join("zed.json"), "{\"kept\":1}").unwrap();
+    let again = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "reinstall": "zed" })).await.unwrap();
+    assert_eq!((again["plugin"]["status"].as_str(), again["plugin"]["version"].as_str()), (Some("pending"), Some("3")), "{again}");
+    assert_eq!(std::fs::read_to_string(f.plugins.plugins_dir().join("zed/init.luau")).unwrap(), "return 3");
+    assert!(storage.join("zed.json").exists(), "what it stored stays");
+    let incoming = f.plugins.plugins_dir().join(install::INCOMING_DIR);
+    assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 0, "nothing left aside");
+    // Its file gone: says so, and the installed one stays as it is.
+    std::fs::write(f.plugins.plugins_dir().join("zed/init.luau"), "changed()").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let gone = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "reinstall": "zed" })).await.unwrap_err();
+    assert_eq!(install::reason_of(&gone), Some(install::reason::NO_SOURCE), "{gone}");
+    assert_eq!(std::fs::read_to_string(f.plugins.plugins_dir().join("zed/init.luau")).unwrap(), "changed()");
 }
 
 #[tokio::test]

@@ -31,6 +31,7 @@ pub(super) const DESCRIBE_ELEMENTS: &str = "describe_elements";
 pub(super) const PLUGIN_STATUS: &str = "plugin_status";
 pub(super) const INSTALL_PLUGIN: &str = "install_plugin";
 pub(super) const UPDATE_PLUGIN: &str = "update_plugin";
+pub(super) const EXPORT_PLUGIN: &str = "export_plugin";
 
 /// How long a listing waits for the engine's plugin tools before it goes
 /// out with the static tools only.
@@ -214,6 +215,17 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "id": { "type": "string", "description": "The plugin's id, from list_plugins; without one, every installed plugin." },
                     "check": { "type": "boolean", "description": "Kept for older callers: this tool only ever checks." }
                 }
+            }),
+        },
+        ToolDef {
+            name: EXPORT_PLUGIN,
+            description: "Share a Zeron plugin: save it as one signed .zeron-plugin file that anyone can install (install_plugin, or Settings → Plugins), e.g. to attach to a GitHub release. Your own plugin is signed again first, so the file matches its folder as it is now; someone else's keeps their signature. It's saved in Zeron's plugin-exports folder as <id>-<version>.zeron-plugin (an earlier export of that version there is replaced). Returns the file's `path` and its size in `bytes`. To save it somewhere else, the person runs `zeron plugin export <id> --to <path>`.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The plugin's id, from list_plugins." }
+                },
+                "required": ["id"]
             }),
         },
         ToolDef {
@@ -633,6 +645,31 @@ impl Tools {
         Ok(reply)
     }
 
+    /// `export_plugin`: the engine's `ExportPlugin`, always to Zeron's
+    /// plugin-exports folder (R29: a path of an agent's choosing is the
+    /// person's, and the engine refuses it).
+    pub(super) async fn export_plugin(&self, args: Value) -> Result<Value, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            id: Option<String>,
+        }
+        let args: Args = parse(args)?;
+        let Some(id) = args.id.filter(|id| !id.trim().is_empty()) else {
+            return Err("Say which plugin: `id`, from list_plugins.".into());
+        };
+        let mut reply = self
+            .zeron
+            .call_rpc(methods::EXPORT_PLUGIN, json!({ "id": id.trim() }))
+            .await
+            .map_err(plain)?;
+        if let Some(path) = reply["path"].as_str() {
+            reply["next"] = json!(format!(
+                "Attach {path} to a release, or send it: anyone installs it with install_plugin (or Settings → Plugins), and it waits for them to allow it."
+            ));
+        }
+        Ok(reply)
+    }
+
     /// The engine's `DescribeElements`, as the window wrote it.
     pub(super) async fn describe_elements(&self) -> Result<Value, String> {
         self.zeron
@@ -817,6 +854,12 @@ mod tests {
                     "updates": [{ "id": "focus", "name": "Focus", "version": "2.0.0", "added": ["github"], "removed": [] }],
                     "errors": [],
                 })),
+                methods::EXPORT_PLUGIN => match params["id"].as_str() {
+                    Some("nope") => return Err(RpcError::Failed("There's no plugin nope".into())),
+                    id => RpcReply::Value(json!({
+                        "path": format!("/d/plugin-exports/{}-1.0.0.zeron-plugin", id.unwrap_or_default()), "bytes": 2048,
+                    })),
+                },
                 methods::PLUGIN_STATUS => RpcReply::Value(json!({
                     "id": params["id"], "status": "on", "open": true,
                     "placements": [{ "at": ".session-row", "how": "after", "count": 3 }],
@@ -1233,6 +1276,38 @@ mod tests {
             engine.calls.lock().unwrap().iter().all(|(method, _)| method != methods::UPDATE_PLUGIN),
             "the tool never installs an update"
         );
+    }
+
+    #[tokio::test]
+    async fn export_plugin_saves_to_the_exports_folder_only() {
+        let engine = Arc::new(Engine::default());
+        let tools = tools_for(engine.clone(), None);
+        let exported = tools
+            .call(EXPORT_PLUGIN, json!({ "id": "focus", "to": "/Users/x/.ssh/x.zeron-plugin" }))
+            .await
+            .unwrap();
+        assert_eq!(exported["path"], "/d/plugin-exports/focus-1.0.0.zeron-plugin");
+        assert_eq!(exported["bytes"], 2048);
+        assert!(exported["next"].as_str().unwrap().contains("install_plugin"));
+        // R29: an agent never names where it goes (Zeron's plugin-exports folder).
+        assert_eq!(last_call(&engine), (methods::EXPORT_PLUGIN.to_owned(), json!({ "id": "focus" })));
+        // The engine's words come back as they are.
+        assert_eq!(
+            tools.call(EXPORT_PLUGIN, json!({ "id": "nope" })).await.unwrap_err(),
+            "There's no plugin nope"
+        );
+        // Without an id it never reaches the engine.
+        let before = engine.calls.lock().unwrap().len();
+        for args in [json!({}), json!({ "id": " " })] {
+            assert!(tools.call(EXPORT_PLUGIN, args).await.unwrap_err().contains("`id`"));
+        }
+        assert_eq!(engine.calls.lock().unwrap().len(), before);
+        // In the catalog, `id` required and no path to choose.
+        let catalog = super::super::catalog();
+        let def = catalog.iter().find(|d| d.name == EXPORT_PLUGIN).unwrap();
+        assert_eq!(def.input_schema["required"], json!(["id"]));
+        assert!(def.input_schema["properties"].get("to").is_none());
+        assert!(def.description.contains(".zeron-plugin"));
     }
 
     #[tokio::test]

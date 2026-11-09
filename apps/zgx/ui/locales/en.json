@@ -3406,7 +3406,7 @@
       "made_by_you": "Made by you",
       "made_by": "Made by @{username}",
       "unknown_author": "Unknown author",
-      "tampered_why": "It changed after you allowed it. Look again before it runs.",
+      "tampered_why": "It changed after you allowed it, so it won't run. Remove it, or install it again from where it came from.",
       "unknown_why": "Zeron can't tell who made it. Allow it only if you trust where it came from.",
       "nothing": "Nothing to allow",
       "asks_nothing": "It asks for nothing beyond running in its own space.",
@@ -3427,7 +3427,10 @@
       "mine_cancel": "Cancel",
       "mine_sign": "Sign as mine",
       "details": "Details",
-      "details_hide": "Hide details"
+      "details_hide": "Hide details",
+      "remove": "Remove",
+      "reinstall": "Reinstall",
+      "tampered_why_no_source": "It changed after you allowed it, so it won't run. Remove it, then install it again if you still want it."
     },
     "permissions": {
       "screen_recording": {
@@ -3478,6 +3481,33 @@
       "template_failed_body": "That part shows the default interface until it's fixed and saved.",
       "template_broken": "{name} can't run",
       "template_broken_body": "The default interface shows until the template is fixed and saved."
+    },
+    "failure": {
+      "not_a_package": "That file isn't a Zeron plugin.",
+      "unsigned": "It isn't signed, so there's no telling who made it.",
+      "tampered": "Its files were changed after it was signed. Get it again from its author.",
+      "bad_signature": "Its signature doesn't check out. Get it again from its author.",
+      "too_big": "It's too big for a plugin.",
+      "bad_file": "It has a file Zeron won't write.",
+      "git_missing": "Installing from a repository needs git, and it isn't installed here. Install git, then try again, or install from a .zeron-plugin file or a GitHub release.",
+      "git_timeout": "The repository took too long to answer. Try again in a moment.",
+      "repo_unreadable": "Couldn't read that repository. Check that it's public and that the branch is right.",
+      "ref_not_found": "That branch or tag can't be found.",
+      "no_manifest": "There's no zeron-plugin.json there.",
+      "rate_limited": "GitHub is turning away requests from this device for now. Try again later, or sign in with GitHub's command-line tool (gh auth login) so Zeron asks as you.",
+      "github_unreachable": "Couldn't reach GitHub. Check your connection and try again.",
+      "release_not_found": "That release can't be found.",
+      "no_package": "That release has no file Zeron can install.",
+      "download_failed": "Couldn't download it. Check your connection and try again.",
+      "not_a_link": "That link isn't a plugin package or a git repository.",
+      "https_only": "Plugins come from https links.",
+      "other_signer": "A plugin with this name is installed already, signed by someone else. Remove it first to install this one.",
+      "new_signer": "The new version is signed by someone else, so it won't be installed.",
+      "installed_unsigned": "A plugin with this name is installed already, and it isn't signed. Remove it first to install this one.",
+      "not_newer": "That version isn't later than the one installed, so it won't replace it.",
+      "different_plugin": "The new version is a different plugin.",
+      "up_to_date": "It's up to date.",
+      "no_source": "Where it came from isn't known any more, so it can't be installed again from there. Remove it, then install it again."
     }
   },
   "templates": {

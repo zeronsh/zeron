@@ -1625,6 +1625,14 @@ impl Plugins {
                 if entry.item.hash != p.hash {
                     return Err(failed("It changed while you were looking; review it again"));
                 }
+                // Changed since you allowed it: it's removed or installed
+                // again, never allowed as it is now.
+                if p.allow && entry.item.status == Status::Tampered {
+                    return Err(failed(format!(
+                        "{} changed after you allowed it. Remove it, or install it again from where it came from",
+                        entry.item.name
+                    )));
+                }
                 if entry.item.status == Status::Broken {
                     return Err(failed(
                         entry

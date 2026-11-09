@@ -3406,7 +3406,7 @@
       "made_by_you": "由你制作",
       "made_by": "由 @{username} 制作",
       "unknown_author": "作者未知",
-      "tampered_why": "你允许后它发生了更改。请在运行前重新查看。",
+      "tampered_why": "你允许后它发生了更改，因此不会运行。请移除它，或从原来的来源重新安装。",
       "unknown_why": "Zeron 无法确定制作者。仅在信任来源时允许。",
       "nothing": "无需授权",
       "asks_nothing": "除了在自己的空间中运行外，它没有请求其他权限。",
@@ -3427,7 +3427,10 @@
       "mine_cancel": "取消",
       "mine_sign": "签名为我的",
       "details": "详细信息",
-      "details_hide": "隐藏详细信息"
+      "details_hide": "隐藏详细信息",
+      "remove": "移除",
+      "reinstall": "重新安装",
+      "tampered_why_no_source": "你允许后它发生了更改，因此不会运行。请移除它；如果仍需要，再重新安装。"
     },
     "permissions": {
       "screen_recording": {
@@ -3478,6 +3481,33 @@
       "template_failed_body": "修复并保存前，这部分将显示默认界面。",
       "template_broken": "{name}无法运行",
       "template_broken_body": "修复并保存模板前，将显示默认界面。"
+    },
+    "failure": {
+      "not_a_package": "该文件不是 Zeron 插件。",
+      "unsigned": "它没有签名，因此无法得知是谁制作的。",
+      "tampered": "它的文件在签名后被改动过。请从作者那里重新获取。",
+      "bad_signature": "它的签名无法通过验证。请从作者那里重新获取。",
+      "too_big": "它太大了，不能作为插件。",
+      "bad_file": "它包含 Zeron 不会写入的文件。",
+      "git_missing": "从代码仓库安装需要 git，但这里没有安装。请先安装 git 再试，或改用 .zeron-plugin 文件或 GitHub 发布版本安装。",
+      "git_timeout": "代码仓库响应超时。请稍后再试。",
+      "repo_unreadable": "无法读取该代码仓库。请确认它是公开的，并且分支正确。",
+      "ref_not_found": "找不到该分支或标签。",
+      "no_manifest": "那里没有 zeron-plugin.json。",
+      "rate_limited": "GitHub 暂时拒绝了来自此设备的请求。请稍后再试，或使用 GitHub 命令行工具登录（gh auth login），让 Zeron 以你的身份请求。",
+      "github_unreachable": "无法连接 GitHub。请检查网络连接后再试。",
+      "release_not_found": "找不到该发布版本。",
+      "no_package": "该发布版本中没有 Zeron 可以安装的文件。",
+      "download_failed": "下载失败。请检查网络连接后再试。",
+      "not_a_link": "该链接不是插件包，也不是 git 代码仓库。",
+      "https_only": "插件只能来自 https 链接。",
+      "other_signer": "已安装一个同名插件，但由其他人签名。请先移除它，再安装这个。",
+      "new_signer": "新版本由其他人签名，因此不会安装。",
+      "installed_unsigned": "已安装一个同名插件，且它没有签名。请先移除它，再安装这个。",
+      "not_newer": "该版本并不比已安装的版本新，因此不会替换它。",
+      "different_plugin": "新版本是另一个插件。",
+      "up_to_date": "已是最新版本。",
+      "no_source": "已无法确定它的来源，因此无法从原处重新安装。请先移除它，再重新安装。"
     }
   },
   "templates": {

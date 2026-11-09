@@ -268,7 +268,7 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         let Some(item) = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash) else {
             return;
         };
-        if allow && !may_allow(&seen_.borrow(), &key(&on, &item), on.is_some(), Instant::now()) {
+        if allow && (item.status() == "tampered" || !may_allow(&seen_.borrow(), &key(&on, &item), on.is_some(), Instant::now())) {
             return;
         }
         eprintln!("zeron-zgx: plugins: {id} {}", if allow { "allowed" } else { "not allowed (Not now)" });
@@ -300,6 +300,47 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
                     out.set(shown(&b, &id, &on, false, Some(&said(&error, &on))));
                 }
             }
+        });
+    });
+    // A tampered plugin's answers (this device's alone, the one shown, as
+    // it is): removed, or installed again from where it came from, which
+    // asks again from its sheet.
+    let (weak, window, out, ons, ids) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone());
+    host.action("plugins.remove_tampered", move |arg| {
+        let Some(b) = weak.upgrade() else { return };
+        let Some(id) = tampered_shown(&b, &arg, &ons.borrow(), &ids.borrow()) else { return };
+        eprintln!("zeron-zgx: plugins: {id} removed (changed since it was allowed)");
+        out.set(shown(&b, &id, &None, true, None));
+        let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
+        engine::get().spawn(async move {
+            let result = engine::get().call("RemovePlugin", json!({ "id": id })).await;
+            let Some(b) = weak.upgrade() else { return };
+            match result {
+                Ok(_) => {
+                    // Its settings go with it, as Settings → Plugins' Remove.
+                    b.settings.borrow_mut().forget(&id);
+                    window.close();
+                }
+                Err(error) => {
+                    out.set(shown(&b, &id, &None, false, Some(&said(&error, &None))));
+                }
+            }
+        });
+    });
+    let (weak, out, ons, ids) = (Rc::downgrade(bridge), shared.clone(), on.clone(), id.clone());
+    host.action("plugins.reinstall", move |arg| {
+        let Some(b) = weak.upgrade() else { return };
+        let Some(id) = tampered_shown(&b, &arg, &ons.borrow(), &ids.borrow()) else { return };
+        eprintln!("zeron-zgx: plugins: {id} installed again (changed since it was allowed)");
+        out.set(shown(&b, &id, &None, true, None));
+        let (weak, out) = (Rc::downgrade(&b), out.clone());
+        engine::get().spawn(async move {
+            let result = engine::get().call("InstallPlugin", json!({ "reinstall": id })).await;
+            let Some(b) = weak.upgrade() else { return };
+            // The sheet follows it: installed again, it waits for you as
+            // it is now (`follow`).
+            let error = result.err().map(|error| said(&error, &None));
+            out.set(shown(&b, &id, &None, false, error.as_deref()));
         });
     });
     // "It's mine": signed as yours, after which it asks only for what it
@@ -338,6 +379,19 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         });
     });
     host
+}
+
+/// The tampered plugin `arg` names, if it's the one shown, as shown, on
+/// this device.
+fn tampered_shown(bridge: &Bridge, arg: &Value, on: &On, shown_id: &str) -> Option<String> {
+    if on.is_some() {
+        return None;
+    }
+    let id = arg.field("id").map(text).unwrap_or_default();
+    let hash = arg.field("hash").map(text).unwrap_or_default();
+    showable(bridge, &id, &None)
+        .filter(|item| shown_id == id && item.hash() == hash && item.status() == "tampered")
+        .map(|_| id)
 }
 
 /// Whether an Allow of the sheet `key` may be taken `now`: it's the sheet

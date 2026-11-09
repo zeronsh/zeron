@@ -120,7 +120,7 @@ local function failed(title: string | Message): (err: any) -> ()
 		local message = if type(err) == "table" and err.message then tostring(err.message) else nil
 		ds.toast.show {
 			title = title,
-			body = if message == "offline" then ui.t("plugins.page.cant_reach", { device = where }) else message,
+			body = if message == "offline" then ui.t("plugins.page.cant_reach", { device = where }) elseif message then words.failure(message) else nil,
 			tone = "warning",
 		}
 	end
