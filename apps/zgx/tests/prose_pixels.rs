@@ -118,12 +118,19 @@ impl Shown {
     }
     /// In a window `w` points wide.
     fn at(w: f32, renderer: &str, scheme: &str, key: &str, text: &str) -> Self {
+        Self::made(w, renderer, scheme, key, text, &[])
+    }
+    /// With more of the fixture's shared values (`pixels.veil`, say).
+    fn made(w: f32, renderer: &str, scheme: &str, key: &str, text: &str, more: &[(&str, Value)]) -> Self {
         let mut shared = None;
         let app = TestApp::with_desktop(|runtime| {
             let host = ScriptHost::new(runtime, ui_dir().join("prose_pixels_fixture.luau"));
             host.shared("pixels.renderer", Value::from(renderer));
             host.shared("pixels.theme", Value::from(scheme));
             host.shared("pixels.key", Value::from(key));
+            for (name, value) in more {
+                host.shared(name, value.clone());
+            }
             shared = Some(host.shared("pixels.text", Value::from(text)));
             host
         });
@@ -318,10 +325,15 @@ fn write_pictures(name: &str, luau: &[u8], native: &[u8], w: f32) {
 /// The two renderers' pictures now, compared: `None` when they're the same.
 /// (`PROSE_PIXELS_ALL=1` writes the pictures of those that are, too.)
 fn compare(name: &str, luau: &mut Shown, native: &mut Shown) -> Option<String> {
+    compared(name, luau, native, true)
+}
+/// `compare`; `drawn`: the page's words must show (not words all fading
+/// in from clear, as they land).
+fn compared(name: &str, luau: &mut Shown, native: &mut Shown, drawn: bool) -> Option<String> {
     let (a, b) = (luau.pixels(), native.pixels());
     // (Something drawn: the page's words, not its bare card.)
     let first = &a[..4];
-    assert!(a.chunks_exact(4).any(|p| p != first), "{name}: nothing drawn");
+    assert!(!drawn || a.chunks_exact(4).any(|p| p != first), "{name}: nothing drawn");
     assert_eq!(luau.w, native.w);
     let d = diff(&a, &b, (luau.w * SCALE) as u32);
     if d.pixels == 0 {
@@ -526,4 +538,87 @@ fn the_accessibility_tree_is_ds_markdowns() {
         }
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// The streaming veil: a reply's new words fade in as ds/markdown fades
+/// them, chunk by chunk (the same pieces, starts, lengths and boost, which
+/// follow how fast chunks come). The clock is the test's, moved 25 ms a
+/// chunk (40 a second) with a pause now and then, and each chunk drawn as
+/// it lands and again partway into its fade: every pixel the same. Then a
+/// reply opened mid-stream (`seed`): what was there shows at once.
+#[test]
+fn the_veil_fades_words_in_as_ds_markdowns() {
+    let clock = zgx::clock::VirtualClock::new();
+    // (`VEIL_CASES=code,links`: those cases alone; `VEIL_FAILURES=n`: go on
+    // past the first three differences, to see them all.)
+    let only: Option<Vec<String>> = std::env::var("VEIL_CASES").ok().map(|v| v.split(',').map(str::to_owned).collect());
+    let text = CASES
+        .iter()
+        .filter(|(name, _)| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name)))
+        .map(|(_, t)| *t)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let veiled = [("pixels.veil", Value::from(true))];
+    let mut luau = Shown::made(W, "luau", "dark", "reply:veil", "", &veiled);
+    let mut native = Shown::made(W, "native", "dark", "reply:veil", "", &veiled);
+    let mut failed = Vec::new();
+    let (mut end, mut chunks, mut ms) = (0, 0u64, 0u64);
+    let mut fading = 0;
+    let most: usize = std::env::var("VEIL_FAILURES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    while end < text.len() && failed.len() < most {
+        end = (end + 24).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        chunks += 1;
+        // 25 ms a chunk; every ninth after a pause, and a burst of quick ones.
+        ms += match chunks % 9 {
+            0 => 700,
+            1..=3 => 5,
+            _ => 25,
+        };
+        clock.advance(std::time::Duration::from_millis(ms), || {});
+        luau.set(&text[..end]);
+        native.set(&text[..end]);
+        let landed = native.pixels();
+        if let Some(why) = compared(&format!("veil-{end}"), &mut luau, &mut native, false) {
+            failed.push(format!("after {end} bytes, as it lands: {why}"));
+        }
+        // Partway into its fade.
+        ms += 11;
+        clock.advance(std::time::Duration::from_millis(ms), || {});
+        luau.app.frames(1);
+        native.app.frames(1);
+        fading += usize::from(native.pixels() != landed);
+        if let Some(why) = compare(&format!("veil-{end}-later"), &mut luau, &mut native) {
+            failed.push(format!("after {end} bytes, 11 ms on: {why}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    assert!(fading > (chunks as usize) / 2, "fading as it streamed: {fading} of {chunks}");
+    eprintln!("veil: {chunks} chunks, each the same every pixel as it lands and 11 ms on");
+
+    // Opened mid-reply: what's there as it's made shows at once, what
+    // comes after fades.
+    let half = &text[..text.len() / 2];
+    let seeded = [("pixels.veil", Value::from(true)), ("pixels.seed", Value::from(true))];
+    let mut luau = Shown::made(W, "luau", "dark", "reply:seeded", half, &seeded);
+    let mut native = Shown::made(W, "native", "dark", "reply:seeded", half, &seeded);
+    let shown = native.pixels();
+    assert_eq!(compare("seeded", &mut luau, &mut native), None);
+    ms += 500;
+    clock.advance(std::time::Duration::from_millis(ms), || {});
+    native.app.frames(1);
+    assert!(native.pixels() == shown, "seeded: nothing faded in");
+    let more = &text[..text.len() / 2 + 40];
+    luau.set(more);
+    native.set(more);
+    let landed = native.pixels();
+    assert_eq!(compare("seeded-more", &mut luau, &mut native), None);
+    ms += 500;
+    clock.advance(std::time::Duration::from_millis(ms), || {});
+    native.app.frames(1);
+    assert!(native.pixels() != landed, "what came after faded in");
+    assert_eq!(native.app.error(), None);
+    assert_eq!(luau.app.error(), None);
 }

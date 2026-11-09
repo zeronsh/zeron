@@ -3,7 +3,9 @@
 -- ds/prose's style ("native"), in the window's theme (`pixels.theme`, its
 -- dark or light scheme) as a transcript shows it. `pixels.text` is the
 -- reply's text; `pixels.key` names it while it streams in (a chunk at a
--- time, parsed for what's new), "" once it's whole.
+-- time, parsed for what's new), "" once it's whole. `pixels.veil`: its
+-- words fade in as they arrive (with a key), `pixels.seed` what's there as
+-- it's made showing at once.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -16,6 +18,9 @@ local text = ui.shared("pixels.text", "")
 local renderer = ui.shared("pixels.renderer", "luau")
 local key = ui.shared("pixels.key", "")
 local scheme = ui.shared("pixels.theme", "dark")
+local veil = ui.shared("pixels.veil", false)
+local seed = ui.shared("pixels.seed", false)
+local veiled = veil:peek() and key:peek() ~= ""
 
 ui.theme.current:set(if scheme:peek() == "light" then "theme-light" else "theme-dark")
 
@@ -42,6 +47,7 @@ if renderer:peek() ~= "luau" then
 			-- (Nothing opens a path here: only web addresses are links.)
 			links = "web",
 			autolink = true,
+			veil = if veiled then { key = key:peek(), seed = seed:peek() } else nil,
 			w_full = true,
 			min_w = 0,
 		},
@@ -50,6 +56,8 @@ else
 	reply = Markdown {
 		text = words,
 		key = if key:peek() ~= "" then key:peek() else nil,
+		veil = veiled,
+		veil_seed = seed:peek(),
 	}
 end
 
