@@ -125,6 +125,31 @@ do
 	lanes.open_subagent = function(session: string, sub: any)
 		note(`open_subagent:{session}:{sub.ref}`)
 	end
+	-- What a lane opens, noted (`open_lane:<session>:<kind>:<id>`), then
+	-- opened as ever.
+	local open_lane = lanes.open
+	lanes.open = function(session: string, lane: any)
+		note(`open_lane:{session}:{lane.kind}:{lane.id}`)
+		open_lane(session, lane)
+	end
+	-- s2's child chats, as the host lists them: a subagent and a side chat a
+	-- Zeron chat started (through Zeron's tools: `child_kind`), working and
+	-- at rest, and a side chat the person started.
+	ui.command {
+		id = "child_chats",
+		title = "s2 has child chats: two a Zeron chat started, one the person did",
+		run = function()
+			local now = table.clone(sessions.now:peek() :: any)
+			local children = table.clone(now.children or {})
+			children.s2 = {
+				{ id = "k3", parent = "s2", title = "my own side chat", device = "mac", updated = 30, created = 30 },
+				{ id = "k2", parent = "s2", title = "draft the release notes", device = "mac", updated = 20, created = 20, child_kind = "side" },
+				{ id = "k1", parent = "s2", title = "audit the parser", device = "mac", status = "working", updated = 10, created = 10, child_kind = "subagent" },
+			}
+			now.children = children
+			sessions.now:set(now)
+		end,
+	}
 	local published = ui.shared("chat.subagents", {} :: { any })
 	ui.command {
 		id = "subagents_running",

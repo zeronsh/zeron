@@ -482,13 +482,14 @@ local function Composer(): Node
 	}
 	local ask, queue = asks.ask, asks.queue
 	-- What runs behind it: this chat's subagents (the open chat's: its
-	-- transcript is the session shown) and the processes it left running.
+	-- transcript is the session shown), the chats a Zeron chat started
+	-- under it, and the processes it left running.
 	local tasks = ui.computed(function(): { any }
 		local out: { any } = {}
 		local shown = store.session:get()
 		local id = session_id:get()
 		if shown and id and shown.id == id then
-			out = lanes.tasks()
+			out = lanes.tasks(id)
 		end
 		local first_ended = #out + 1
 		for i, t in out do

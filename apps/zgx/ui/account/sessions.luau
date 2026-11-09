@@ -82,6 +82,9 @@ export type Child = {
 	created: number,
 	harness: string?,
 	agent: string?,
+	-- Started by a Zeron chat (through Zeron's tools), as a subagent or a
+	-- side chat: "subagent" | "side"; nil for one the person started.
+	child_kind: string?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.
