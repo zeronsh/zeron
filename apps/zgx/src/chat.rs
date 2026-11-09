@@ -557,6 +557,9 @@ struct Open {
 }
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
+    // (A recorded reply played to this window's chat: src/stream_bench.rs.)
+    #[cfg(feature = "stream-bench")]
+    stream_bench::install(_cx);
     let chats = CHATS.with(Rc::clone);
     chats.catalog.borrow_mut().push(host.shared("chat.catalog", chats.catalog_value()));
     chats.asks_shared.borrow_mut().push(host.shared("chat.asks", chats.asks_value()));
@@ -1601,6 +1604,12 @@ impl View {
     /// new one).
     fn subscribe(self: &Rc<Self>) {
         if self.snapshot.get() {
+            return;
+        }
+        // (The stream bench's chat: its recording in place of the engine's
+        // watch, each frame to `heard_frame` as the watch's would be.)
+        #[cfg(feature = "stream-bench")]
+        if stream_bench::claims(self) {
             return;
         }
         let Some(rpc) = self.rpc.borrow().clone().filter(|r| !r.is_closed()) else {
@@ -4875,6 +4884,13 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "chat_pending_tests.rs"]
 mod pending_tests;
+
+// A recorded reply replayed through this view (feature `stream-bench`).
+#[cfg(feature = "stream-bench")]
+#[path = "stream_bench.rs"]
+mod stream_bench;
+#[cfg(feature = "stream-bench")]
+pub(crate) use stream_bench::{asked as stream_bench_asked, screen as stream_bench_screen};
 
 #[cfg(test)]
 #[path = "chat_stream_tests.rs"]
