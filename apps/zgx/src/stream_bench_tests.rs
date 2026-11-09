@@ -261,7 +261,10 @@ fn stream_bench_profile() {
     let view = made.borrow().clone().unwrap();
     let (w, h) = (1114u32, 685u32);
     app.ui.scene.borrow_mut().resize(w as f32, h as f32);
-    let mut gpu = zgx_gpu::GpuRenderer::new(w, h).expect("a GPU");
+    // `PROBE_SCALE=2`: drawn at a Retina window's backing scale.
+    let scale: u32 = std::env::var("PROBE_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let mut gpu = zgx_gpu::GpuRenderer::new(w * scale, h * scale).expect("a GPU");
+    gpu.set_scale_factor(scale as f32);
     let pump = |app: &TestApp| {
         while let Some(work) = queued.borrow_mut().pop_front() {
             app.executor.borrow_mut().spawn(work);
@@ -291,6 +294,12 @@ fn stream_bench_profile() {
         notes: std::collections::BTreeMap<String, u32>,
         /// Bindings by their node, unfolded.
         bound: std::collections::BTreeMap<u32, (u32, f64)>,
+        /// Bindings' first runs (as their node mounts) and runs again (a
+        /// signal they read was written): (count, µs).
+        first: (u32, f64),
+        again: (u32, f64),
+        /// Runs again by the signal written that caused them.
+        causes: std::collections::BTreeMap<usize, (u32, f64)>,
     }
     impl Ran {
         fn add(&mut self, after: u64) {
@@ -307,6 +316,14 @@ fn stream_bench_profile() {
                         let e = self.bound.entry(node).or_default();
                         e.0 += 1;
                         e.1 += run.micros as f64;
+                        let (slot, us) = (if run.cause.is_none() { &mut self.first } else { &mut self.again }, run.micros as f64);
+                        slot.0 += 1;
+                        slot.1 += us;
+                        if let Some(cause) = run.cause {
+                            let c = self.causes.entry(cause).or_default();
+                            c.0 += 1;
+                            c.1 += us;
+                        }
                     }
                     // (Node ids folded: one name for every row's.)
                     let name: String = name
@@ -344,6 +361,19 @@ fn stream_bench_profile() {
             for (run, (count, micros)) in runs.iter().take(25) {
                 eprintln!("    {:>7.1}/s {:>8.1} µs/s  {run}", *count as f64 / secs, micros / secs);
             }
+            eprintln!(
+                "    bindings: first runs {:.1}/s {:.1} µs/s; runs again {:.1}/s {:.1} µs/s from {} signals",
+                self.first.0 as f64 / secs,
+                self.first.1 / secs,
+                self.again.0 as f64 / secs,
+                self.again.1 / secs,
+                self.causes.len()
+            );
+            let mut causes: Vec<_> = self.causes.iter().collect();
+            causes.sort_by(|a, b| b.1.1.partial_cmp(&a.1.1).unwrap());
+            for (cause, (count, micros)) in causes.iter().take(8) {
+                eprintln!("      signal {cause:#x}: {:.1}/s {:.1} µs/s", *count as f64 / secs, micros / secs);
+            }
             let mut bound: Vec<_> = self.bound.iter().collect();
             bound.sort_by(|a, b| b.1.1.partial_cmp(&a.1.1).unwrap());
             for (node, (count, micros)) in bound.iter().take(12) {
@@ -358,14 +388,18 @@ fn stream_bench_profile() {
             }
         }
     }
+    // Frames on absolute deadlines, a window's 120 a second (a late one
+    // doesn't push the next ones later).
+    let paced = std::cell::Cell::new(std::time::Instant::now());
     let tick = |app: &TestApp, draw: &mut dyn FnMut(&TestApp), ran: &mut Ran| {
-        let t = std::time::Instant::now();
         let before = zgx::trace::frame_index();
         draw(app);
         if tracing {
             ran.add(before);
         }
-        std::thread::sleep(frame.saturating_sub(t.elapsed()));
+        let next = (paced.get() + frame).max(std::time::Instant::now() - frame);
+        paced.set(next);
+        std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
     };
     // The page at rest, the chat open and its reply not begun: from 2 s in
     // (once it has settled) for 4 s.
