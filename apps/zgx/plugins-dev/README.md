@@ -1,6 +1,6 @@
 # Example plugins
 
-Nine plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
+Eleven plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
 
 | Folder | Proves | Asks for | Who signs it |
 |---|---|---|---|

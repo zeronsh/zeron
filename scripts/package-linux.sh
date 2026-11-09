@@ -93,6 +93,10 @@ if [[ -n "$BETA_VERSION" ]]; then
     "$ROOT/apps/zgx/ui/" "$STAGE/ui/"
   rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/plugins-builtin/" "$STAGE/plugins-builtin/"
+  # Each ships the canonical SDK, as scripts/package-zgx-beta.sh.
+  for dir in "$STAGE/plugins-builtin/"*/; do
+    cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
+  done
   cp "$ROOT/apps/zgx/fonts/"*-OFL.txt "$STAGE/licenses/fonts/"
   rm -rf "$OUT_DIR/.stable"
 fi

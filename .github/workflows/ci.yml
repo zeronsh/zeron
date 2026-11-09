@@ -224,9 +224,16 @@ jobs:
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).android || '' }}
 
+  zgx:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).zgx
+    uses: ./.github/workflows/zgx-tests.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
+
   result:
     name: CI result
-    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, voice, windows, macos, frame-source, ios, android]
+    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, voice, windows, macos, frame-source, ios, android, zgx]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

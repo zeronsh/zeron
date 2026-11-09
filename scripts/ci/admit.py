@@ -102,7 +102,7 @@ ADMIT_PREFIX = "admit"
 UNRESERVED_JOBS = ("plan",)  # jobs that run before admission and are not in reservations
 RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d+)\b")
 # The largest reservation plan.py makes: every suite, on main (checked by test_ci_admit.py).
-MAX_RESERVATION = {"linux": 10, "windows": 3, "macos": 3}
+MAX_RESERVATION = {"linux": 11, "windows": 3, "macos": 4}
 # How long an admitted run's not-yet-created jobs stay reserved. Its suites' jobs
 # are created as soon as admit finishes; LATE_JOBS (the `CI result` job, and
 # Android publishing on main) only once the jobs they need are done.
