@@ -1735,6 +1735,23 @@ local function estimate(b: any): number
 	return 24
 end
 
+-- A list state of a text's own: a component's, or, built at a script's top
+-- level (where there is none), the script's under a name of its own, emptied
+-- as it's made (a reload makes the same names again).
+local top_lists = 0
+local function own_list(): State<{ any }>
+	local ok, made = pcall(function(): State<{ any }>
+		return ui.use_state({} :: { any })
+	end)
+	if ok then
+		return made
+	end
+	top_lists += 1
+	local list = ui.state(`markdown_blocks_{top_lists}`, {} :: { any })
+	list:set({})
+	return list
+end
+
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
@@ -1878,6 +1895,12 @@ return function(props: Props): Node
 	-- and whether it's built now. (A run past the foot that isn't built
 	-- needs no judging until the view comes near.)
 	local judges: { [number]: () -> (boolean, boolean) } = {}
+	-- Each run's box's foot (nil until laid out), and the runs built now:
+	-- what lets a pass skip the runs wholly above the view that are held.
+	local bottoms: { [number]: () -> number? } = {}
+	local built: { [number]: true } = {}
+	-- The windowed text's pass over its runs (set once its runs are).
+	local judge_runs: (() -> ())? = nil
 	-- Its runs judged a tick on (once laid out), all at once: as runs mount
 	-- and resize, one timer for the text, not one a run.
 	local looking = false
@@ -1888,8 +1911,12 @@ return function(props: Props): Node
 		looking = true
 		ui.after(0, function()
 			looking = false
-			for _, j in judges do
-				j()
+			if judge_runs then
+				judge_runs()
+			else
+				for _, j in judges do
+					j()
+				end
 			end
 		end)
 	end
@@ -1953,9 +1980,20 @@ return function(props: Props): Node
 				returning = shows
 				near:set(shows)
 			end
+			built[at] = if shows then true else nil
 			return y >= top + (view.height :: number) + OVERSCAN, shows
 		end
 		judges[at] = judge
+		bottoms[at] = function(): number?
+			local el = r:peek()
+			if not el or el.y == nil or el.height == nil then
+				return nil
+			end
+			return (el.y :: number) + (el.height :: number)
+		end
+		if near:peek() then
+			built[at] = true
+		end
 		local look = look_soon
 		return ui.div {
 			ref = r,
@@ -2039,8 +2077,17 @@ return function(props: Props): Node
 	end
 	if type(text) == "function" then
 		-- A text that changes: its blocks as a state, each drawn once and kept
-		-- while its table is the same (all but the one being written).
-		local parsed = ui.computed(function(): { MarkdownBlock }
+		-- while its table is the same (all but the one being written). The
+		-- state is written a block at a time, only where the parse changed:
+		-- a whole list handed back each time (a computed's) is converted
+		-- whole, so a reply streaming in cost each chunk all its blocks. A
+		-- windowed text holds its runs of CHUNK blocks the same way, each run
+		-- a row of its own.
+		local items = own_list()
+		-- What the state holds, as written (blocks, or runs `{ at, blocks }`).
+		local shown: { any } = {}
+		local shown_blocks: { MarkdownBlock } = {}
+		ui.effect(function()
 			if window and find then
 				local c = find.current()
 				opts.first = if c and c.key == window.key then c.block else nil
@@ -2050,32 +2097,55 @@ return function(props: Props): Node
 				ctx.tasks = {}
 				number_tasks(list, ctx.tasks)
 			end
-			return list
+			-- The first block that may differ from those shown: past those
+			-- the parse kept from the last (its very tables), the rest looked at.
+			local from = math.min(MarkdownFind.settled(list), #shown_blocks) + 1
+			if from > 1 and shown_blocks[from - 1] ~= list[from - 1] then
+				from = 1
+			end
+			while from <= #list and shown_blocks[from] == list[from] do
+				from += 1
+			end
+			local wanted: { any } = if window then {} else list
+			local first = from
+			if window then
+				-- (The runs from the one holding the first block changed.)
+				local at = (from - 1) // CHUNK + 1
+				first = at
+				for n = (at - 1) * CHUNK + 1, #list do
+					local r = (n - 1) // CHUNK + 1
+					if not wanted[r] then
+						wanted[r] = { at = r, blocks = {} }
+					end
+					table.insert(wanted[r].blocks, list[n])
+				end
+			end
+			local count = if window then (#list + CHUNK - 1) // CHUNK else #list
+			if first > count and #shown == count then
+				shown_blocks = list
+				return
+			end
+			ui.batch(function()
+				for i = first, count do
+					local item = wanted[i]
+					if i <= #shown then
+						if shown[i] ~= item then
+							items:set_key(i, item)
+						end
+					else
+						items:push(item)
+					end
+					shown[i] = item
+				end
+				for i = #shown, count + 1, -1 do
+					items:remove(i)
+					shown[i] = nil
+				end
+			end)
+			shown_blocks = list
 		end)
 		if window then
-			-- The blocks in runs of CHUNK, each run a row of its own.
-			-- (A run whose blocks are all among those the parse kept from the
-			-- last is the very run it was: a reply streaming in makes again
-			-- only its last runs, not one for every 16 blocks it has.)
-			local last_runs: { { at: number, blocks: { MarkdownBlock } } } = {}
-			local runs = ui.computed(function(): { { at: number, blocks: { MarkdownBlock } } }
-				local list = parsed:get()
-				local kept_runs = math.min(MarkdownFind.settled(list) // CHUNK, #last_runs)
-				-- (Its ends the same: the last runs were made of this text's.)
-				if kept_runs > 0 and (last_runs[1].blocks[1] ~= list[1] or last_runs[kept_runs].blocks[CHUNK] ~= list[kept_runs * CHUNK]) then
-					kept_runs = 0
-				end
-				local out = table.move(last_runs, 1, kept_runs, 1, {})
-				for n = kept_runs * CHUNK + 1, #list do
-					local at = (n - 1) // CHUNK + 1
-					if not out[at] then
-						out[at] = { at = at, blocks = {} }
-					end
-					table.insert(out[at].blocks, list[n])
-				end
-				last_runs = out
-				return out
-			end)
+			local runs = items
 			-- As the view scrolls (a tick on, once the scroll has laid out): the
 			-- runs judged from the top, stopping at the first past the view's
 			-- foot once none further on is built.
@@ -2085,12 +2155,53 @@ return function(props: Props): Node
 			local judged_at = -math.huge
 			local function judge_all()
 				judged_at = ui.now()
-				local count = #runs:peek()
+				local count = runs:len()
 				-- (A find's current match further on: its run is judged,
 				-- so it's built, however far past the view it is.)
 				local c = if find then find.current() else nil
 				local target = if c and c.key == (window :: any).key then (c.block - 1) // CHUNK + 1 else 0
-				for at = 1, count do
+				-- The runs wholly above the view's reach (its top less the
+				-- overscan) come first, their boxes in order: found by
+				-- halving, they're judged only if they can show or are built
+				-- (to be let go). Judged all, a reply streaming in at the
+				-- view's foot judged every run above it with each word.
+				local view = (window :: any).view:peek()
+				local reach = if view and view.y ~= nil then (view.y :: number) - OVERSCAN else nil
+				local first = 1
+				if reach then
+					local past = count + 1
+					while first < past do
+						local mid = (first + past) // 2
+						local foot = if bottoms[mid] then bottoms[mid]() else nil
+						if foot ~= nil and foot <= reach then
+							first = mid + 1
+						else
+							past = mid
+						end
+					end
+				end
+				if first > 1 then
+					local some: { number } = {}
+					for at in built do
+						if at < first then
+							table.insert(some, at)
+						end
+					end
+					-- (The match's run, and the last: written into, it shows.)
+					if target >= 1 and target < first then
+						table.insert(some, target)
+					end
+					if count < first then
+						table.insert(some, count)
+					end
+					for _, at in some do
+						local j = judges[at]
+						if j then
+							j()
+						end
+					end
+				end
+				for at = first, count do
 					local j = judges[at]
 					if j then
 						local below = j()
@@ -2127,11 +2238,12 @@ return function(props: Props): Node
 				end
 				ui.after(0, judge_all)
 			end)
+			judge_runs = judge_all
 			column[1] = ui.each(runs, function(run: any, _i: any, row: State<any>)
 				return windowed(ui.computed(function(): { MarkdownBlock }
 					return row:get().blocks
 				end) :: any, run.at, function(): number
-					return #runs:peek() - run.at
+					return runs:len() - run.at
 				end)
 			end, {
 				key = function(run: any): string
@@ -2139,7 +2251,7 @@ return function(props: Props): Node
 				end,
 			})
 		else
-			column[1] = ui.each(parsed, function(b: MarkdownBlock, i: number)
+			column[1] = ui.each(items, function(b: MarkdownBlock, i: number)
 				return top(b, i)
 			end)
 		end
