@@ -539,6 +539,15 @@ impl WorkspaceSearch {
         if let Some(index) = touch(&mut lock(&self.inner.entries), root, now, warm) {
             return Ok(index);
         }
+        // fff refuses a disk root; the names-only index must too, or a chat
+        // in `/` or `C:\` would walk, and on macOS and Windows watch, the
+        // whole disk.
+        if is_filesystem_root(root) {
+            return Err(unavailable(format_args!(
+                "refusing to index filesystem root {}",
+                root.display()
+            )));
+        }
         // Outside the lock: telling a large plain folder apart walks it.
         let names_only = self.is_home(root) || self.outgrows_live_index(root);
         let mut entries = lock(&self.inner.entries);
@@ -910,6 +919,13 @@ fn release(root: &Path, entry: Entry, reason: &'static str) {
                 );
             }
         });
+}
+
+/// A disk root, as fff tells one (no parent): `/`, `C:\`, `C:`, `\\?\C:\`,
+/// `\\server\share`. The canonical form too, so `C:\Users\..` counts.
+fn is_filesystem_root(root: &Path) -> bool {
+    root.parent().is_none()
+        || std::fs::canonicalize(root).is_ok_and(|canonical| canonical.parent().is_none())
 }
 
 fn unavailable(error: impl std::fmt::Display) -> WorkspaceSearchError {
@@ -1356,6 +1372,53 @@ mod tests {
         ready(&search, &repo);
         ready(&search, &small);
         assert_eq!(search.live(), 2);
+    }
+
+    #[test]
+    fn a_disk_root_gets_no_index_not_even_names_only() {
+        // No watch, and every plain folder past the limit: were the root
+        // let through, it would get a names index.
+        let mut search = WorkspaceSearch::with_clock(Arc::new(Instant::now), false, None);
+        Arc::get_mut(&mut search.inner).unwrap().max_live_files = 0;
+        let (_dir, root) = folder(&[("a.rs", b"")]);
+        let disk = root.ancestors().last().unwrap();
+        assert!(search.warm(disk).is_err());
+        assert!(
+            search
+                .search_names(disk, "a", 20, NameKinds::Files)
+                .is_err()
+        );
+        assert!(search.search_content(disk, "a", 20, 3).is_err());
+        assert_eq!(search.live(), 0);
+        search.warm(&root).unwrap();
+        assert!(is_names_only(&search, &root));
+        search.release_all();
+    }
+
+    #[test]
+    fn tells_disk_roots_by_any_spelling() {
+        #[cfg(windows)]
+        let (roots, folders) = (
+            [
+                r"C:\",
+                "C:",
+                "C:/",
+                r"\\?\C:\",
+                r"\\server\share",
+                r"\\server\share\",
+                r"\\?\UNC\server\share",
+                r"C:\Windows\..",
+            ],
+            [r"C:\Windows", r"\\?\C:\Windows", r"\\server\share\dir"],
+        );
+        #[cfg(not(windows))]
+        let (roots, folders) = (["/", "/usr/.."], ["/usr", "/usr/bin/.."]);
+        for root in roots {
+            assert!(is_filesystem_root(Path::new(root)), "{root}");
+        }
+        for folder in folders {
+            assert!(!is_filesystem_root(Path::new(folder)), "{folder}");
+        }
     }
 
     #[test]

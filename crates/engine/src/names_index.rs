@@ -14,6 +14,7 @@
 //! decides which are binary. A watcher can keep the list current through
 //! [`NamesIndex::update`] (see `workspace_search`).
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -145,12 +146,18 @@ impl NamesIndex {
     /// Bring the `changed` paths (absolute, under `root`) up to date from
     /// disk, as a watcher reports them. A new folder is walked with the
     /// walk's rules; a folder already listed is left alone, since Windows
-    /// reports a folder as changed for every write inside it.
+    /// reports a folder as changed for every write inside it. Removals and
+    /// additions each take one pass over the list, since moving a large
+    /// folder in or out reports thousands of paths.
     pub fn update(&self, root: &Path, changed: &[PathBuf]) -> Update {
         let mut rules = lock(&self.rules);
         let Some(rules) = rules.as_mut() else {
             return Update::Rewalk;
         };
+        let mut gone = HashSet::new();
+        let mut found = Vec::new();
+        // New folders listed by this update.
+        let mut walked = HashSet::new();
         for path in changed {
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
@@ -174,26 +181,26 @@ impl NamesIndex {
             }
             let key = slash_path(relative);
             let Ok(metadata) = std::fs::symlink_metadata(path) else {
-                self.remove(&key);
+                gone.insert(key);
                 continue;
             };
             let is_dir = metadata.is_dir();
-            if is_dir && self.contains_dir(&key) {
+            if is_dir && (self.contains_dir(&key) || under(&key, &walked)) {
                 continue;
             }
             if rules.matched(relative, is_dir).is_ignore() {
                 continue;
             }
             if !is_dir {
-                self.insert(NamePath::new(relative, false, Some(&metadata)));
+                found.push(NamePath::new(relative, false, Some(&metadata)));
                 continue;
             }
-            let mut found = vec![NamePath::new(relative, true, None)];
+            found.push(NamePath::new(relative, true, None));
             self.list_new_folder(root, path, rules, &mut found);
-            for entry in found {
-                self.insert(entry);
-            }
+            walked.insert(key);
         }
+        self.remove(&gone);
+        self.insert(found);
         Update::Done
     }
 
@@ -248,38 +255,60 @@ impl NamesIndex {
             .is_ok_and(|at| entries[at].is_dir)
     }
 
-    /// Add or refresh one path, and the folders above it.
-    fn insert(&self, entry: NamePath) {
-        let mut entries = write(&self.entries);
-        let mut parent = entry.path.rsplit_once('/').map(|(parent, _)| parent);
-        while let Some(dir) = parent {
-            if let Err(at) = entries.binary_search_by(|entry| entry.path.as_str().cmp(dir)) {
-                entries.insert(at, NamePath::new(Path::new(dir), true, None));
+    /// Add or refresh `found` and the folders above them: sorted on their
+    /// own, then merged into the list in one pass. A later report of a path
+    /// wins; new paths past [`MAX_ENTRIES`] are dropped.
+    fn insert(&self, found: Vec<NamePath>) {
+        if found.is_empty() {
+            return;
+        }
+        let mut added: BTreeMap<String, NamePath> = BTreeMap::new();
+        for entry in found {
+            // A folder in `added` has its parents in it too.
+            let mut parent = entry.path.rsplit_once('/').map(|(parent, _)| parent);
+            while let Some(dir) = parent
+                && !added.contains_key(dir)
+            {
+                added.insert(dir.to_owned(), NamePath::new(Path::new(dir), true, None));
+                parent = dir.rsplit_once('/').map(|(parent, _)| parent);
             }
-            parent = dir.rsplit_once('/').map(|(parent, _)| parent);
+            added.insert(entry.path.clone(), entry);
         }
-        match entries.binary_search_by(|found| found.path.cmp(&entry.path)) {
-            Ok(at) => entries[at] = entry,
-            Err(at) if entries.len() < MAX_ENTRIES => entries.insert(at, entry),
-            Err(_) => {}
+        let mut entries = write(&self.entries);
+        let mut old = std::mem::take(&mut *entries).into_iter().peekable();
+        let mut added = added.into_values().peekable();
+        let mut merged = Vec::with_capacity((old.len() + added.len()).min(MAX_ENTRIES));
+        loop {
+            let order = match (old.peek(), added.peek()) {
+                (Some(old), Some(new)) => old.path.cmp(&new.path),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => break,
+            };
+            match order {
+                std::cmp::Ordering::Less => merged.extend(old.next()),
+                std::cmp::Ordering::Equal => {
+                    old.next();
+                    merged.extend(added.next());
+                }
+                std::cmp::Ordering::Greater => {
+                    let new = added.next();
+                    if merged.len() + old.len() < MAX_ENTRIES {
+                        merged.extend(new);
+                    }
+                }
+            }
         }
+        *entries = merged;
     }
 
-    /// Drop a path and, if it was a folder, everything under it.
-    fn remove(&self, key: &str) {
-        let mut entries = write(&self.entries);
-        if let Ok(at) = entries.binary_search_by(|entry| entry.path.as_str().cmp(key)) {
-            entries.remove(at);
+    /// Drop the `gone` paths and, for folders, everything under them, in
+    /// one pass over the list.
+    fn remove(&self, gone: &HashSet<String>) {
+        if gone.is_empty() {
+            return;
         }
-        let under = format!("{key}/");
-        // Paths sharing a prefix sort together.
-        let start = entries.partition_point(|entry| entry.path < under);
-        let end = start
-            + entries[start..]
-                .iter()
-                .take_while(|entry| entry.path.starts_with(&under))
-                .count();
-        entries.drain(start..end);
+        write(&self.entries).retain(|entry| !under(&entry.path, gone));
     }
 
     /// Fuzzy match with fff's matcher (frizbee, smart case): the query's
@@ -365,7 +394,8 @@ impl NamesIndex {
     /// Plain-text content search over the listed files of `root`, with smart
     /// case, the way fff greps without its content index. Reads the most
     /// recently changed files first, on several threads, skips binary,
-    /// oversized and cloud-only files, takes at most `per_file` matching
+    /// oversized and cloud-only files and anything but a regular file (a
+    /// symlink, a pipe), takes at most `per_file` matching
     /// lines from a file, and stops at `limit` lines or once `budget` runs
     /// out (`truncated`).
     pub fn search_content(
@@ -473,7 +503,7 @@ fn grep_file(
     per_file: usize,
 ) -> Vec<ContentMatch> {
     use std::io::Read as _;
-    let Ok(file) = std::fs::File::open(root.join(relative)) else {
+    let Some(file) = open_regular_file(&root.join(relative)) else {
         return Vec::new();
     };
     let mut bytes = Vec::new();
@@ -531,6 +561,27 @@ fn grep_file(
     found
 }
 
+/// `path`, opened only if it is a regular file. A symlink is not followed
+/// (it can lead outside the folder), and opening a named pipe doesn't wait
+/// for a writer. The type is read from the opened handle, so a file swapped
+/// for a link since the walk is caught too.
+fn open_regular_file(path: &Path) -> Option<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).ok()?;
+    file.metadata().ok()?.file_type().is_file().then_some(file)
+}
+
 /// A matching line: its byte span in the file and the matches' spans.
 struct FoundLine {
     number: u64,
@@ -569,6 +620,18 @@ impl FoundLine {
                 .collect(),
         }
     }
+}
+
+/// Whether `path` is one of `folders` or lies under one.
+fn under(path: &str, folders: &HashSet<String>) -> bool {
+    let mut at = Some(path);
+    while let Some(dir) = at {
+        if folders.contains(dir) {
+            return true;
+        }
+        at = dir.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    false
 }
 
 fn file_name(path: &str) -> &str {
@@ -911,6 +974,114 @@ mod tests {
             index.update(&root, &[root.join("p/.gitignore")]),
             Update::Rewalk
         );
+    }
+
+    fn listed(index: &NamesIndex) -> Vec<(String, bool)> {
+        read(&index.entries)
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.is_dir))
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_moved_in_or_out_is_merged_in_one_pass() {
+        let (_dir, root) = folder(&["a/keep.rs", "m/keep.rs", "z.rs"]);
+        let index = NamesIndex::build(&root, false, &AtomicBool::new(false));
+        // Out of order, so the merge can't lean on the walk's order.
+        let mut moved = Vec::new();
+        for folder in ["n", "b", "m/x"] {
+            for file in (0..300).rev() {
+                let path = format!("{folder}/deep/{file:03}.rs");
+                std::fs::create_dir_all(root.join(&path).parent().unwrap()).unwrap();
+                std::fs::write(root.join(&path), b"").unwrap();
+                moved.push(path);
+            }
+        }
+        // Windows reports the folders and every file in them; a folder's
+        // files come both from its listing and on their own.
+        let mut changed: Vec<PathBuf> = ["n", "b", "m/x", "m/x/deep", "m"]
+            .iter()
+            .chain(&["b/deep/007.rs", "b/deep/007.rs"])
+            .map(|path| root.join(path))
+            .collect();
+        changed.extend(moved.iter().map(|path| root.join(path)));
+        assert_eq!(index.update(&root, &changed), Update::Done);
+        let found = listed(&index);
+        let mut expected: Vec<String> = moved.clone();
+        for folder in ["a", "b", "b/deep", "m", "m/x", "m/x/deep", "n", "n/deep"] {
+            expected.push(folder.to_owned());
+        }
+        for file in ["a/keep.rs", "m/keep.rs", "z.rs"] {
+            expected.push(file.to_owned());
+        }
+        expected.sort_unstable();
+        assert_eq!(
+            found
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "sorted, each path once"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(path, is_dir)| path == "m/x/deep" && *is_dir)
+        );
+
+        // Moved out again: the folders go, each with everything under it.
+        for folder in ["n", "b", "m/x"] {
+            std::fs::remove_dir_all(root.join(folder)).unwrap();
+        }
+        assert_eq!(index.update(&root, &changed), Update::Done);
+        assert_eq!(
+            listed(&index),
+            [
+                ("a".to_owned(), true),
+                ("a/keep.rs".to_owned(), false),
+                ("m".to_owned(), true),
+                ("m/keep.rs".to_owned(), false),
+                ("z.rs".to_owned(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn content_search_reads_only_regular_files() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "needle").unwrap();
+        let (_dir, root) = folder(&["src/main.rs"]);
+        std::fs::write(root.join("src/main.rs"), "needle").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            std::os::unix::fs::symlink(&secret, root.join("leak.txt")).unwrap();
+            // Opening a pipe for reading waits for a writer, forever.
+            let pipe =
+                std::ffi::CString::new(root.join("pipe.txt").as_os_str().as_bytes()).unwrap();
+            // SAFETY: a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
+        }
+        // Needs Developer Mode or an elevated process.
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&secret, root.join("leak.txt")).is_err() {
+            eprintln!("skipped: this account can't create symlinks");
+            return;
+        }
+        let index = NamesIndex::build(&root, false, &AtomicBool::new(false));
+        // Listed with a size (a Windows link has none), so only the open
+        // decides.
+        for entry in write(&index.entries).iter_mut() {
+            entry.size = entry.size.max(6);
+        }
+        assert!(listed(&index).iter().any(|(path, _)| path == "leak.txt"));
+        #[cfg(unix)]
+        assert!(listed(&index).iter().any(|(path, _)| path == "pipe.txt"));
+        let found = index.search_content(&root, "needle", 50, 3, std::time::Duration::from_secs(5));
+        let paths: Vec<_> = found.matches.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["src/main.rs"]);
+        assert!(!found.truncated, "nothing held the search up");
     }
 
     #[test]
