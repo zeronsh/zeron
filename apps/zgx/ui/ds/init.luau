@@ -189,6 +189,8 @@ return {
 	Status = status.Status,
 	StatusDot = status.StatusDot,
 	StatusIcon = status.StatusIcon,
+	-- The agent's loader (its mark's tiles turning) and a subagent's.
+	AgentLoader = require("@self/agent_loader"),
 	StatusTag = status.StatusTag,
 	-- Effects.
 	decode = require("@self/decode"),

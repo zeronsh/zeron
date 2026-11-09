@@ -23,6 +23,7 @@ local control = require("@self/control")
 local Icon = require("@self/icon")
 local FadeText = require("@self/fade_text")
 local status = require("@self/status")
+local AgentLoader = require("@self/agent_loader")
 local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
@@ -476,7 +477,9 @@ local function row(
 				left = GLYPH_LEFT,
 				top = (ROW - GLYPH_SIZE) / 2,
 				color = tint,
-				ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
+				-- (Running: the small loader, a tool's as a subagent's; the
+				-- agent's own is the working line's and the summary's.)
+				ui.show(running, AgentLoader { glyph = "subagent", size = GLYPH_SIZE }, Icon {
 					name = function(): Icon.Name
 						return GLYPH[now().kind]
 					end,
@@ -697,7 +700,9 @@ return ui.component(function(props: Props): Node
 				-- While it works, the working loader before the summary, its
 				-- ring over the trunk below; done, the summary alone, on the
 				-- reply's left edge.
-				ui.show(live, status.StatusIcon { kind = "working", size = LOADER }),
+				-- (A tool group's loader as its tools': the small one; the
+				-- agent's mark is the working line's alone.)
+				ui.show(live, AgentLoader { glyph = "subagent", size = LOADER }),
 				FadeText { title, roll = true, grow = 1, text_size = "$font.size.sm" },
 			}
 		),

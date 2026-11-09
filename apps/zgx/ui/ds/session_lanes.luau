@@ -25,6 +25,7 @@ local IconButton = require("@self/icon_button").IconButton
 local Mark = require("@self/mark")
 local control = require("@self/control")
 local status = require("@self/status")
+local AgentLoader = require("@self/agent_loader")
 local locale = require("@self/locale")
 
 export type Child = { id: string, title: string, status: string?, agent: string?, updated: number? }
@@ -56,7 +57,8 @@ local function mark(kind: () -> string?): Node
 		local k = kind()
 		return if k == "working" or k == "running" then "working" elseif k == "done" then "done" else "dot"
 	end, {
-		working = status.StatusIcon { kind = "working", size = 14 },
+		-- (A subagent's or side chat's loader, ds/agent_loader.)
+		working = AgentLoader { glyph = "subagent", size = 14 },
 		done = status.StatusIcon { kind = "done", size = 14 },
 		dot = ui.row { w = 14, h = 14, items = "center", justify = "center", ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.tertiary" } },
 	})

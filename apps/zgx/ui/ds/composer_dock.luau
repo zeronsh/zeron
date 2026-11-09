@@ -41,6 +41,7 @@ local RollText = require("@self/roll_text")
 local glass = require("@self/glass")
 local motion = require("@self/motion")
 local status = require("@self/status")
+local AgentLoader = require("@self/agent_loader")
 local material = require("@self/material")
 local control = require("@self/control")
 local cargo = require("@self/composer_cargo")
@@ -1004,7 +1005,7 @@ local function todo_row(t: Todo, row: State<Todo>, live: () -> boolean): Node
 		end, ui.div { color = "$success", Icon { name = "check-circle", size = 14 } }),
 		ui.show(function()
 			return state() == "doing" and live()
-		end, status.StatusIcon { kind = "working", size = 14 }),
+		end, AgentLoader { glyph = "agent", size = 14 }),
 		ui.show(function()
 			return state() == "doing" and not live()
 		end, step_ring(12, true)),
@@ -1119,7 +1120,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 					local r = row:get()
 					return if not r.ended then "working" elseif r.failed then "failed" else "done"
 				end, {
-					working = status.StatusIcon { kind = "working", size = 14 },
+					working = AgentLoader { glyph = "subagent", size = 14 },
 					done = status.StatusIcon { kind = "done", size = 14 },
 					failed = status.StatusIcon { kind = "failed", size = 14 },
 				})

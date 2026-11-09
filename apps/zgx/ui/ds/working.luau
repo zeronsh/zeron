@@ -11,6 +11,7 @@
 
 local RollText = require("@self/roll_text")
 local status = require("@self/status")
+local AgentLoader = require("@self/agent_loader")
 local locale = require("@self/locale")
 
 export type Props = { since: number | () -> number, seed: number?, sending: (() -> boolean)? }
@@ -70,7 +71,8 @@ return ui.component(function(props: Props): Node
 		items = "center",
 		selectable = false,
 		label = locale.t("ds.working.label"),
-		status.StatusIcon { kind = "working", size = 16 },
+		-- (The agent's loader: its mark's tiles turning, ds/agent_loader.)
+		AgentLoader { glyph = "agent", size = 16 },
 		RollText {
 			function(): string
 				if sending() then
