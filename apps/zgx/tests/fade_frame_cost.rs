@@ -113,6 +113,10 @@ fn a_streaming_replys_frames_drawn() {
     app.frames(5);
     draw(&app);
     let draft = app.host.shared("chat.draft", Value::Nil);
+    // The renderer's notes on what it repainted rather than kept or copied.
+    zgx::trace::set_enabled(true);
+    zgx::trace::set_kept(4);
+    let mut notes: BTreeMap<String, u32> = BTreeMap::new();
     let (mut chunks, mut fades) = (Kind::default(), Kind::default());
     let frame = Duration::from_micros(8_333);
     let mut end = 0;
@@ -141,6 +145,14 @@ fn a_streaming_replys_frames_drawn() {
         let damaged = draw(&app);
         let wall = started.elapsed();
         let phases = zgx::profile::take();
+        if end > 8_000 {
+            for frame in zgx::trace::frames(1) {
+                for note in &frame.notes {
+                    let note: String = note.chars().take(140).collect();
+                    *notes.entry(note).or_default() += 1;
+                }
+            }
+        }
         // (Counted once the reply is long: its first few KB settle.)
         if end > 8_000 {
             if lands {
@@ -154,4 +166,7 @@ fn a_streaming_replys_frames_drawn() {
     assert_eq!(app.error(), None);
     chunks.report("frames a chunk lands on");
     fades.report("frames where only fades move");
+    for (note, count) in &notes {
+        eprintln!("note x{count}: {note}");
+    }
 }
