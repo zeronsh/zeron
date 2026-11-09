@@ -310,7 +310,8 @@ impl DocsStore {
         Ok(bytes)
     }
 
-    /// Save (upsert) the snapshot for `doc_id`.
+    /// Save (upsert) the snapshot for `doc_id`. Its `saved_at` advances on
+    /// every write, including writes in the same millisecond.
     pub fn save_snapshot(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         store_blocking(|| self.save_snapshot_blocking(doc_id, bytes))
     }
@@ -320,7 +321,8 @@ impl DocsStore {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
+             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes,
+                 saved_at = MAX(snapshots.saved_at + 1, excluded.saved_at)",
             params![doc_id, bytes, now_ms()],
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
@@ -352,7 +354,8 @@ impl DocsStore {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
+             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes,
+                 saved_at = MAX(snapshots.saved_at + 1, excluded.saved_at),
                  cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 0",
             params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
         )?;
@@ -384,7 +387,8 @@ impl DocsStore {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
-             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
+             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes,
+                 saved_at = MAX(snapshots.saved_at + 1, excluded.saved_at),
                  cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 1",
             params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
         )?;
@@ -491,7 +495,9 @@ impl DocsStore {
         Ok(())
     }
 
-    /// `saved_at` for every snapshot row, read from the covering index.
+    /// `saved_at` for every snapshot row, read from the covering index. Each
+    /// value strictly advances on writes to that snapshot, even if the clock
+    /// has not advanced.
     pub fn snapshot_saved_at(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
         store_blocking(|| {
             let conn = self.conn();
@@ -846,6 +852,38 @@ mod tests {
             store.load_snapshot("chat-1").unwrap().as_deref(),
             Some(&b"v2-longer-bytes"[..])
         );
+    }
+
+    #[test]
+    fn snapshot_freshness_advances_for_every_write_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert!(store.snapshot_saved_at().unwrap().is_empty());
+        store.save_snapshot("chat", b"initial").unwrap();
+
+        // Hold the stored timestamp ahead of the clock: each overwrite must
+        // still invalidate the index without a timing-dependent sleep.
+        let at = now_ms() + 60_000;
+        store
+            .conn()
+            .execute("UPDATE snapshots SET saved_at = ?1", params![at])
+            .unwrap();
+        store.save_snapshot("chat", b"plain").unwrap();
+        assert_eq!(store.snapshot_saved_at().unwrap()["chat"], at + 1);
+        store
+            .save_snapshot_with_cursor("chat", b"cursor", 41, 2)
+            .unwrap();
+        assert_eq!(store.snapshot_saved_at().unwrap()["chat"], at + 2);
+        store
+            .save_verified_snapshot_with_cursor("chat", b"verified", 42, 2)
+            .unwrap();
+        assert_eq!(store.snapshot_saved_at().unwrap()["chat"], at + 3);
+
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(store.snapshot_saved_at().unwrap()["chat"], at + 3);
+        store.delete_snapshot("chat").unwrap();
+        assert!(store.snapshot_saved_at().unwrap().is_empty());
     }
 
     #[test]
