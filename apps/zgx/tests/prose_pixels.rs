@@ -76,6 +76,15 @@ const CASES: &[(&str, &str)] = &[
          `code that wraps across a line end too, being long` and *italic running on at length past the edge of the column*.",
     ),
     (
+        "chips",
+        "Open [main.rs](zeron-file:src/main.rs) and [the docs folder](zeron-file:docs/) or [the chat](zeron-chat:abc), \
+         run [/review](zeron-invoke:/review) with [$frontend-design](zeron-invoke:$frontend-design), see [shot.png](zeron-image:1) \
+         and [notes.txt](zeron-attachment:2), a pick [Send button](zeron-annotation:x), carried (attachment: plan.md) and \
+         (attachment: screen) and (attachment: the thread) but not (attachment: other.md), \
+         [the config](src/config.rs:12), a **[bold main.rs](zeron-file:src/main.rs)**, [`code.rs`](zeron-file:code.rs) and [a skill](my-skill).\n\n\
+         Chips wrap with the words around them: a long run of words before [the last file](zeron-file:src/a/very/long/path/to/the_last_file.rs) at the end.",
+    ),
+    (
         "mixed",
         "**Bold `code` inside**, *italic `code`*, ~~struck `code`~~ and **[bold link](https://b.c)**.\n\n\
          Second paragraph.\n\nThird, after the second.",
@@ -621,4 +630,21 @@ fn the_veil_fades_words_in_as_ds_markdowns() {
     assert!(native.pixels() != landed, "what came after faded in");
     assert_eq!(native.app.error(), None);
     assert_eq!(luau.app.error(), None);
+}
+
+/// A chip the page learns of after the reply shows (a skill the chat's
+/// agent turns out to have): drawn as one as ds/markdown draws it then.
+#[test]
+fn a_chip_known_late_is_drawn_as_ds_markdowns() {
+    let text = CASES.iter().find(|(name, _)| *name == "chips").unwrap().1;
+    let mut luau = Shown::new("luau", "dark", "", text);
+    let mut native = Shown::new("native", "dark", "", text);
+    let before = native.pixels();
+    for shown in [&luau, &native] {
+        shown.app.host.shared("pixels.known", Value::from(false)).set(Value::from(true));
+        shown.app.frames(2);
+    }
+    assert!(native.pixels() != before, "the skill's chip drawn");
+    assert_eq!(compare("chip-late", &mut luau, &mut native), None);
+    assert_eq!(native.app.error(), None);
 }
