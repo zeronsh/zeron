@@ -8,8 +8,9 @@
 --
 -- The host publishes what to show as `consent`:
 --   { item = PluginItem?, busy = boolean, error = string?,
---     device_name = string? }   (another of your devices it's on: allowed
---                                there alone, and named here)
+--     device_name = string? }   (another of your devices it's on, as that
+--                                device lists it: named here, and allowed
+--                                on that device alone)
 -- (The item's name, version and tools' words come bounded and plain from
 -- the host, src/plugins/consent.rs `bounded`.) It answers
 -- `plugins.decide { id, allow, hash }` (the hash it was shown: a plugin
@@ -223,25 +224,23 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 			end,
 			ui.t("plugins.consent.not_now"),
 		},
-		-- Another device's is allowed on that device alone (its own
-		-- window there): from here, only Not now.
-		if elsewhere
-			then nil
-			else ds.Button {
-				id = "consent-allow",
-				tone = "primary",
-				size = "md",
-				disabled = function(): boolean
-					return busy() or not armed:get()
-				end,
-				on_click = function()
-					if not armed:peek() then
-						return
-					end
-					ui.invoke("plugins.decide", { id = it.id, allow = true, hash = it.hash })
-				end,
-				ui.t("plugins.consent.allow"),
-			},
+		-- (Another device's is allowed there, from here: that device's
+		-- engine takes it, for that device alone.)
+		ds.Button {
+			id = "consent-allow",
+			tone = "primary",
+			size = "md",
+			disabled = function(): boolean
+				return busy() or not armed:get()
+			end,
+			on_click = function()
+				if not armed:peek() then
+					return
+				end
+				ui.invoke("plugins.decide", { id = it.id, allow = true, hash = it.hash })
+			end,
+			if elsewhere then ui.t("plugins.consent.allow_on", { device = elsewhere }) else ui.t("plugins.consent.allow"),
+		},
 	}
 
 	local confirm_claim = ui.column {

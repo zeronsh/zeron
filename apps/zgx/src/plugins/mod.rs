@@ -2958,8 +2958,8 @@ impl Bridge {
         });
         // Someone else's plugin, from a .zeron-plugin file or a link (a
         // package, a GitHub release, a git repository). The engine verifies
-        // it first; anyone else's waits for the consent window. Another
-        // device installs from a link only: a file here isn't there.
+        // it first; anyone else's waits for the consent window. A file here
+        // installed on another device is sent there (remote::send_file).
         host.async_action("plugins.install", {
             let me = me.clone();
             move |arg| {
@@ -2968,7 +2968,10 @@ impl Bridge {
                     let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     let device = remote::device_of(&arg);
                     let params = match (given("path"), given("url")) {
-                        (Some(_), _) if device.is_some() => return Err("Another device installs a plugin from a link".into()),
+                        (Some(path), _) if device.is_some() => {
+                            let upload = remote::send_file(&path, |piece| call_on(&me, device.clone(), "StagePluginPackage", piece)).await?;
+                            remote::install_sent(&path, &upload)
+                        }
                         (Some(path), _) => json!({ "path": path }),
                         (None, Some(url)) => json!({ "url": url }),
                         _ => return Err("Choose a plugin file or paste a link".into()),
