@@ -56,6 +56,29 @@ export type Props = {
 	find: any?,
 }
 
+-- What a prompt carries, by the name its words give each (an `@`
+-- reference: "(attachment: <name>)", ds/markdown `attached`): each chip's
+-- name, and each review comment's place (its chip names how many, its
+-- places in `meta`).
+local function attached_by_name(list: { Attachment }?): { [string]: { kind: string, icon: string? } }?
+	if not list or #list == 0 then
+		return nil
+	end
+	local out: { [string]: { kind: string, icon: string? } } = {}
+	for _, a in list do
+		out[a.name] = { kind = a.kind, icon = a.icon }
+		if a.icon == "chat-round-line" and a.meta then
+			for place in string.gmatch(a.meta, "[^,]+") do
+				local p = string.match(place, "^%s*(.-)%s*$")
+				if p and p ~= "" then
+					out[p] = { kind = "comment", icon = a.icon }
+				end
+			end
+		end
+	end
+	return out
+end
+
 -- The messages opened, by id: every bubble's, outside any of them.
 local OPENED = ui.state("user_message_opened", {} :: { [string]: boolean })
 
@@ -337,7 +360,7 @@ return ui.component(function(props: Props): Node
 					ref = body,
 					w_full = true,
 					shrink = 0,
-					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, find = props.find },
+					Markdown { text = props.text, breaks = true, open = props.open, link_menu = props.link_menu, find = props.find, attached = attached_by_name(props.attachments) },
 				},
 			},
 			-- The way to open it: a plain link under the text, at its left

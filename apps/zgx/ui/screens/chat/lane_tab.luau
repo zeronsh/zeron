@@ -612,6 +612,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				return not unsent()
 			end,
 			run = run_command,
+			-- (`@` lists what the draft carries, and the other chats.)
+			cargo = function(): { any }
+				return carried:get()
+			end,
+			chat = function(): string?
+				return chat
+			end,
 		}
 	return ds.Composer {
 		value = draft,
@@ -672,6 +679,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		mentions = if completions then completions.lists else nil,
 		on_mention = if completions then completions.on_mention else nil,
 		mention_empty = if completions then completions.empty else nil,
+		mention_sections = if completions then completions.sections else nil,
 		notice = notice,
 		on_dismiss_notice = function()
 			notice:set(nil)
@@ -747,7 +755,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			local chips = Shared.take_cargo_of(chat)
 			local pack = Carried.pack(chips, words, words)
 			-- (Each command or skill picked: its canonical reference.)
-			local typed = Invocations.encode(pack.typed)
+			-- (And each reference to what it carries, `@` picked: its name.)
+			local typed = Carried.refs(Invocations.encode(pack.typed), chips)
 			local prompt = Carried.text(typed, pack)
 			-- As the chat page sends: the prompt joins its transcript as the
 			-- transcript's send steps clear of the end (it glides to the top,

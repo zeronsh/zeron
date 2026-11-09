@@ -1357,6 +1357,30 @@ ui.command {
 		}
 	end,
 }
+-- A prompt as the engine gives it back (a reload): its words name a
+-- picture it carries "(attachment: zgx.png)" and one it doesn't
+-- "(attachment: gone.png)"; and one carrying nothing whose words only
+-- look so.
+ui.command {
+	id = "attachment_turn",
+	title = "A prompt naming what it carries",
+	run = function()
+		store.messages:push {
+			id = "au1",
+			role = "user",
+			text = "Look at (attachment: zgx.png) not (attachment: gone.png)",
+			attachments = { { kind = "image", name = "zgx.png", src = "assets/favicons/zgx.png" } },
+			at = "Sep 8, 1:54 PM",
+		}
+		-- (Words that only say so: it carries nothing.)
+		store.messages:push {
+			id = "au2",
+			role = "user",
+			text = "Also Look at (attachment: zgx.png) here",
+			at = "Sep 8, 1:55 PM",
+		}
+	end,
+}
 -- A live turn whose tools include a command of five lines (a shell script
 -- run as one call), a tool named only, and a thought: as the user's turn
 -- had it. `call` is the whole command, as the host gives it.

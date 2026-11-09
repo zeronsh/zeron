@@ -279,6 +279,9 @@ export type Props = {
 	-- Whose draft it shows (a composer that moves between chats: the
 	-- chat), so a mention list put away is that draft's alone.
 	draft_key: (() -> any)?,
+	-- A trigger whose list is a launcher, by trigger: its sections, in order
+	-- (ds/composer_mentions `sections`).
+	mention_sections: { [string]: { { id: string, label: any } } }?,
 }
 
 -- Zeron's geometry. The one line: 47 points inside the hairline, the text
@@ -1085,6 +1088,7 @@ return ui.component(function(props: Props): Node
 		empty = props.mention_empty,
 		on_choose = props.on_mention,
 		key = props.draft_key,
+		sections = props.mention_sections,
 		in_view = function(): boolean
 			return (pill_w:get() or 0) > 0
 		end,

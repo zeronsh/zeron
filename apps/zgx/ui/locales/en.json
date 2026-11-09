@@ -1069,6 +1069,28 @@
       "next_month": "Next month",
       "time": "Time",
       "first_weekday": "1"
+    },
+    "mention_launcher": {
+      "all": "All",
+      "result": "{n} result",
+      "results": "{n} results",
+      "results_label": "Results",
+      "navigate": "Navigate",
+      "insert": "Insert",
+      "scope": "Scope",
+      "loading": "Looking…",
+      "empty": {
+        "all": "Nothing to mention yet",
+        "files": "No files",
+        "chats": "No other chats",
+        "attachments": "Nothing attached to this message"
+      },
+      "none": {
+        "all": "Nothing matches “{q}”",
+        "files": "No files match “{q}”",
+        "chats": "No chats match “{q}”",
+        "attachments": "No attachments match “{q}”"
+      }
     }
   },
   "settings": {
@@ -2809,7 +2831,21 @@
       "edit_unavailable": "That message can't be edited now",
       "couldnt_stop_task": "Couldn't stop that process",
       "commands_or_skills": "commands or skills",
-      "drop_to_mention": "Drop to mention"
+      "drop_to_mention": "Drop to mention",
+      "mention_sections": {
+        "files": "Files",
+        "chats": "Chats",
+        "attachments": "Attachments"
+      },
+      "attachment_kind": {
+        "comment": "Comment",
+        "quote": "Quote",
+        "annotation": "Annotation",
+        "chat": "Chat",
+        "appshot": "Appshot",
+        "image": "Image",
+        "file": "File"
+      }
     }
   },
   "panel": {

@@ -1069,6 +1069,28 @@
       "next_month": "下个月",
       "time": "时间",
       "first_weekday": "2"
+    },
+    "mention_launcher": {
+      "all": "全部",
+      "result": "{n} 个结果",
+      "results": "{n} 个结果",
+      "results_label": "结果",
+      "navigate": "移动",
+      "insert": "插入",
+      "scope": "范围",
+      "loading": "正在查找…",
+      "empty": {
+        "all": "暂无可提及的内容",
+        "files": "没有文件",
+        "chats": "没有其他对话",
+        "attachments": "这条消息没有附件"
+      },
+      "none": {
+        "all": "没有与“{q}”匹配的内容",
+        "files": "没有与“{q}”匹配的文件",
+        "chats": "没有与“{q}”匹配的对话",
+        "attachments": "没有与“{q}”匹配的附件"
+      }
     }
   },
   "settings": {
@@ -2809,7 +2831,21 @@
       "edit_unavailable": "暂时无法编辑该消息",
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
-      "drop_to_mention": "松开以提及"
+      "drop_to_mention": "松开以提及",
+      "mention_sections": {
+        "files": "文件",
+        "chats": "对话",
+        "attachments": "附件"
+      },
+      "attachment_kind": {
+        "comment": "评论",
+        "quote": "引用",
+        "annotation": "标注",
+        "chat": "对话",
+        "appshot": "应用截图",
+        "image": "图片",
+        "file": "文件"
+      }
     }
   },
   "panel": {

@@ -90,6 +90,59 @@ function M.text(words: string, p: Pack): string
 	return with_chats(Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), p.picks), p.comments), p.chats)
 end
 
+-- An attached item's name, as what the message carries says it (its
+-- block's line, its chip on the sent message): what an `@` reference to it
+-- says, "(attachment: <name>)", and the sent message draws as its chip.
+-- Nil for what has none (pasted words go in the words themselves).
+function M.label(item: any): string?
+	if item.kind == "comment" then
+		return Comments.place(item)
+	elseif item.kind == "annotation" and item.quote then
+		return Quote.where({ text = item.quote, who = item.name, from = item.from })
+	elseif item.kind == "annotation" and item.annotation then
+		return Annotation.label(item.annotation.index or item.index or 0)
+	elseif item.kind == "text" then
+		return nil
+	end
+	return if type(item.name) == "string" and item.name ~= "" then item.name else nil
+end
+
+-- What each kind of attached item is, in a word ("Image", "Quote"), and
+-- its icon: an `@` row's.
+function M.kind(item: any): (string, string)
+	if item.kind == "comment" then
+		return "comment", "chat-round-line"
+	elseif item.kind == "annotation" and item.quote then
+		return "quote", "cursor"
+	elseif item.kind == "annotation" then
+		return "annotation", "cursor"
+	elseif item.kind == "chat" then
+		return "chat", "side-chat"
+	elseif item.kind == "appshot" then
+		return "appshot", "gallery"
+	elseif item.kind == "image" then
+		return "image", "gallery"
+	end
+	return "file", "paperclip"
+end
+
+-- The words' references to what the message carries (an `@` pick,
+-- `[name](zeron-attachment:<chip id>)`): each "(attachment: <name>)", the
+-- item's own name (`label`), so the agent can find it in what follows;
+-- one to an item no longer carried, its name alone.
+function M.refs(words: string, chips: { any }): string
+	local function named(label: string, id: string): string
+		for _, item in chips do
+			if item.id == id then
+				return `(attachment: {M.label(item) or label})`
+			end
+		end
+		return label
+	end
+	-- (Two captures: the label, then the chip's id.)
+	return (string.gsub(words, "%[([^%]]*)%]%(zeron%-attachment:([^%)%s]+)%)", named :: any))
+end
+
 -- What a sent message shows of what it carries.
 function M.shown(p: Pack): { any }
 	local out = {}

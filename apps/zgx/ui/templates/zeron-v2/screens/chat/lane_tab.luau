@@ -542,7 +542,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			local chips = Shared.take_cargo_of(chat)
 			local pack = Carried.pack(chips, words, words)
 			-- (Each command or skill picked: its canonical reference.)
-			local typed = Invocations.encode(pack.typed)
+			-- (And each reference to what it carries, `@` picked: its name.)
+			local typed = Carried.refs(Invocations.encode(pack.typed), chips)
 			local prompt = Carried.text(typed, pack)
 			-- As the chat page sends: the prompt joins its transcript as the
 			-- transcript's send steps clear of the end (it glides to the top,

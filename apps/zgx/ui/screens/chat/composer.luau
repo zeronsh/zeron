@@ -617,6 +617,13 @@ local function Composer(): Node
 		run = function(name: string)
 			ZeronCommands.run(name, session_id:peek())
 		end,
+		-- (`@` lists what the draft carries, and the other chats.)
+		cargo = function(): { any }
+			return shared.cargo:get()
+		end,
+		chat = function(): string?
+			return session_id:get()
+		end,
 	}
 
 	-- A queued message being edited in the composer: which, and the draft
@@ -702,7 +709,9 @@ local function Composer(): Node
 		local pack = Carried.pack(carried, typed, text)
 		local attachments = pack.attachments
 		-- (Each command or skill picked: its canonical reference.)
-		local words = Invocations.encode(if pack.typed ~= "" then pack.typed else text)
+		-- (And each reference to what it carries, `@` picked: its name, as
+		-- what follows names it.)
+		local words = Carried.refs(Invocations.encode(if pack.typed ~= "" then pack.typed else text), carried)
 		local text_out = Carried.text(words, pack)
 		local id = session_id:peek()
 		own_notice:set(nil)
@@ -1122,6 +1131,7 @@ local function Composer(): Node
 			on_mention = completions.on_mention,
 			mention_enabled = completions.enabled,
 			mention_empty = completions.empty,
+			mention_sections = completions.sections,
 			draft_key = function(): any
 				return session_id:get() or ""
 			end,

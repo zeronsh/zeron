@@ -85,6 +85,11 @@ export type Props = {
 	-- files (`file`: the chip a prompt's mention is), or one of its agent's
 	-- skills (`skill`, its name: the chip a picked skill is). Nil: a link.
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	-- What the message carries, by name (a sent prompt's: its files,
+	-- pictures, quotes, chats…): an "(attachment: <name>)" in its words
+	-- naming one of them is drawn as that one's chip. (Only a prompt's:
+	-- words that say so of nothing it carries stay words.)
+	attached: { [string]: { kind: string, icon: string? } }?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -277,6 +282,7 @@ type Ctx = {
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	attached: { [string]: { kind: string, icon: string? } }?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -443,6 +449,79 @@ end
 
 -- a command or skill picked in the composer has nothing to open, but reads
 -- as the same pill a mention does, as zeron's sent bubble and mobile draw it
+-- What a prompt carries, named in its words: "(attachment: <name>)", the
+-- words the send writes for an `@` reference (screens/chat/carried
+-- `refs`). Drawn as that one's chip (its kind's icon, its name), where it
+-- carries one by that name.
+local ATTACHED = "%(attachment: ([^%)\n]+)%)"
+local function attached_runs(list: { MarkdownRun }, ctx: Ctx?): { MarkdownRun }
+	local carried = if ctx then ctx.attached else nil
+	if not carried then
+		return list
+	end
+	local out: { MarkdownRun }? = nil
+	for i, r in list do
+		local pieces: { MarkdownRun }? = nil
+		if not r.a and not r.c and not r.img and type(r.x) == "string" and string.find(r.x, "(attachment: ", 1, true) then
+			-- (`at`: where the search goes on; `copied`: the words before it
+			-- already in a piece.)
+			local at, copied = 1, 1
+			while true do
+				local s, e, name = string.find(r.x, ATTACHED, at)
+				if not s or not e then
+					break
+				end
+				if carried[name] then
+					pieces = pieces or {}
+					if s > copied then
+						local before = table.clone(r)
+						before.x = string.sub(r.x, copied, s - 1)
+						table.insert(pieces :: any, before)
+					end
+					local chip = table.clone(r) :: any
+					chip.x = string.sub(r.x, s, e)
+					chip.attached = name
+					table.insert(pieces :: any, chip)
+					copied = e + 1
+				end
+				at = e + 1
+			end
+			if pieces and copied <= #r.x then
+				local rest = table.clone(r)
+				rest.x = string.sub(r.x, copied)
+				table.insert(pieces :: any, rest)
+			end
+		end
+		if pieces and not out then
+			out = table.move(list, 1, i - 1, 1, {})
+		end
+		if out then
+			for _, p in pieces or { r } do
+				table.insert(out :: any, p)
+			end
+		end
+	end
+	return out or list
+end
+
+-- An attached item's chip, named in the words: its kind's icon (a file's
+-- by its name; a chat's, a picture's, a quote's glyph), its name.
+local function attachment_chip(span: { [any]: any }, name: string, item: { kind: string, icon: string? })
+	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+	span.underline = false
+	span.underline_offset = nil
+	span.hover = {}
+	span.color = nil
+	span.bg = "$zeron.chip.bg"
+	span[1] = name
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
+	local glyph = if item.kind == "chat" then "side-chat" elseif item.kind == "image" then "gallery" else item.icon
+	span.icon = if glyph
+		then chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
+		else chip_icon { src = `assets/icons/files/{set}/{FileIcon.of(name, false)}.svg` }
+end
+
 local function invocation_chip(span: { [any]: any }, name: string)
 	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
 	-- (A skill by its name alone, `frontend-design`, its icon saying it's
@@ -536,7 +615,7 @@ end
 -- A paragraph's runs as one paragraph of spans; `style` sets the
 -- paragraph's own (a heading's size, a quote's ink).
 local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
-	list = autolinked(list)
+	list = attached_runs(autolinked(list), ctx)
 	local size, line = size_of(ctx)
 	local props: { [any]: any } = {
 		wrap = true,
@@ -661,7 +740,10 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		-- (What the page says a link is: one of the chat's files, or one of
 		-- its agent's skills.)
 		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
-		if r.a and string.match(r.a, "^zeron%-invoke:") then
+		local named = (r :: any).attached
+		if named and ctx and ctx.attached and ctx.attached[named] then
+			attachment_chip(span, named, ctx.attached[named])
+		elseif r.a and string.match(r.a, "^zeron%-invoke:") then
 			invocation_chip(span, r.x)
 		elseif chip and chip.skill then
 			-- A skill's chip, by its name (opening nothing, as a picked one).
@@ -1644,8 +1726,8 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

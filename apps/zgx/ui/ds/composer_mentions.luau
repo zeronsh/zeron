@@ -29,6 +29,7 @@ local FileIcon = require("@self/file_icons")
 local FadeText = require("@self/fade_text")
 local Menu = require("@self/menu")
 local Skeleton = require("@self/skeleton")
+local Launcher = require("@self/mention_launcher")
 
 local M = {}
 -- Prints the caret and each choice to the host's log (debugging the keys).
@@ -76,7 +77,14 @@ export type Use = {
 	-- Whose draft it is (a composer that moves between chats: the chat): a
 	-- list put away is that draft's alone.
 	key: (() -> any)?,
+	-- A trigger whose list is a launcher (ds/mention_launcher): its
+	-- sections, in their order, each item saying its `section`. All shows
+	-- each section's first few; a section's scope, all of its.
+	sections: { [string]: { Launcher.Section } }?,
 }
+
+-- How many of a section All shows.
+local ALL_EACH = 6
 
 -- Wires the mentions to a draft: returns what the composer needs.
 -- (Called as a component is built: its states are the component's own.)
@@ -117,16 +125,75 @@ function M.use(opts: Use)
 		end
 		return t
 	end)
+	-- A launcher's scope ("all", or a section's id): All as each token
+	-- opens, kept while it's typed at.
+	local scope = ui.use_state("all")
+	local function sections_of(t: Token?): { Launcher.Section }?
+		return if t and opts.sections then opts.sections[t.trigger] else nil
+	end
+	-- What matches, and a launcher's by section, in the sections' order.
+	local matched = ui.computed(function(): { [string]: { Item } }?
+		local t = token:get()
+		local secs = sections_of(t)
+		if not t or not secs then
+			return nil
+		end
+		local by: { [string]: { Item } } = {}
+		for _, item in M.filter(sources()[t.trigger] or {}, t.query) do
+			local id = (item :: any).section or ""
+			by[id] = by[id] or {}
+			table.insert(by[id], item)
+		end
+		return by
+	end)
 	local shown = ui.computed(function(): { Item }
 		local t = token:get()
 		if not t then
 			return {}
+		end
+		local by = matched:get()
+		local secs = sections_of(t)
+		if by and secs then
+			local out: { Item } = {}
+			local only = scope:get()
+			for _, sec in secs do
+				if only == "all" or only == sec.id then
+					for n, item in by[sec.id] or {} do
+						if only == "all" and n > ALL_EACH then
+							break
+						end
+						table.insert(out, item)
+					end
+				end
+			end
+			return out
 		end
 		local items = sources()[t.trigger]
 		if not items then
 			return {}
 		end
 		return M.filter(items, t.query)
+	end)
+	-- How many match in each scope (All: all of them, not just those shown).
+	local function counts(): { [string]: number }
+		local out: { [string]: number } = { all = 0 }
+		for id, list in matched:get() or {} do
+			out[id] = #list
+			out.all += #list
+		end
+		return out
+	end
+	-- A token of its own (another place, another trigger): All again.
+	local scope_for = ""
+	ui.effect(function()
+		local t = token:get()
+		local at = if t then `{t.trigger}{t.from}` else ""
+		if at ~= scope_for then
+			scope_for = at
+			if scope:peek() ~= "all" then
+				scope:set("all")
+			end
+		end
 	end)
 	local function loading(): boolean
 		local t = token:get()
@@ -257,6 +324,18 @@ function M.use(opts: Use)
 			return false
 		end
 		local list = shown:peek()
+		-- A launcher's Tab and Shift+Tab: the next scope, the one before.
+		local secs = sections_of(token:peek())
+		if secs and e.key == "Tab" then
+			local order = { "all" }
+			for _, sec in secs do
+				table.insert(order, sec.id)
+			end
+			local at = table.find(order, scope:peek()) or 1
+			scope:set(order[(at - 1 + (if e.shift then -1 else 1)) % #order + 1])
+			active:set(1)
+			return true
+		end
 		if e.key == "ArrowDown" or e.key == "ArrowUp" then
 			if #list == 0 then
 				return true
@@ -411,10 +490,33 @@ function M.use(opts: Use)
 			end,
 			at_caret = true,
 			autofocus = false,
-			w = WIDTH,
+			w = function(): number
+				return if sections_of(token:get()) then Launcher.WIDTH else WIDTH
+			end,
+			p = function(): any
+				return if sections_of(token:get()) then 0 else nil
+			end,
 			placement = { side = "top", align = "start", offset = 8 },
 			anchor = anchor,
-			ui.column {
+			-- A launcher's trigger (`@`): the launcher; the others, the list.
+			ui.show(function(): boolean
+				return sections_of(token:get()) ~= nil
+			end, Launcher.Panel {
+				token = token,
+				shown = shown,
+				active = active,
+				scope = scope,
+				sections = ((opts.sections or {}) :: any)["@"] or {},
+				counts = counts,
+				loading = loading,
+				empty = function(which: string, q: string): string
+					return locale.s(
+						if q == "" then `ds.mention_launcher.empty.{which}` else `ds.mention_launcher.none.{which}`,
+						{ q = q }
+					)
+				end,
+				choose = choose,
+			}, ui.column {
 				id = "mention-panel",
 				w_full = true,
 				p = "$space.1",
@@ -440,7 +542,7 @@ function M.use(opts: Use)
 					label = title,
 					rows,
 				},
-			},
+			}),
 		}
 	end
 	return {
