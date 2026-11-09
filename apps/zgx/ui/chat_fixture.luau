@@ -167,6 +167,14 @@ ui.command {
 		TAIL_FIRST:set(16)
 	end,
 }
+local SLOW_OPEN = ui.state("fixture_slow_open", false)
+ui.command {
+	id = "slow_open",
+	title = "Chats open as the host opens one it no longer holds",
+	run = function()
+		SLOW_OPEN:set(true)
+	end,
+}
 local pending_history: { any }? = nil
 ui.command {
 	id = "history",
@@ -190,17 +198,36 @@ stub.open = function(id: string?)
 	if not id then
 		return
 	end
-	local whole = TRANSCRIPTS[id] or {}
-	local tail = TAIL_FIRST:peek()
-	if tail > 0 and #whole > tail then
-		pending_history = whole
-		store.messages:set(table.move(whole, #whole - tail + 1, #whole, 1, {}))
-	else
-		pending_history = nil
-		store.messages:set(whole)
+	local function arrive()
+		local whole = TRANSCRIPTS[id] or {}
+		local tail = TAIL_FIRST:peek()
+		if tail > 0 and #whole > tail then
+			pending_history = whole
+			store.messages:set(table.move(whole, #whole - tail + 1, #whole, 1, {}))
+		else
+			pending_history = nil
+			store.messages:set(whole)
+		end
+		store.draft:set { id = "", text = "" }
+		publish(id)
 	end
-	store.draft:set { id = "", text = "" }
-	publish(id)
+	-- `slow_open`: as the host opens a chat it no longer holds, the
+	-- transcript emptied and the session loading at once, the chat a moment
+	-- later.
+	if SLOW_OPEN:peek() then
+		ui.batch(function()
+			store.messages:set({})
+			store.draft:set { id = "", text = "" }
+			publish(id, { state = "loading" })
+		end)
+		ui.after(300, function()
+			if opened == id then
+				arrive()
+			end
+		end)
+		return
+	end
+	arrive()
 end
 -- A promise settled at once.
 local function settled(value: any): any
@@ -917,6 +944,29 @@ do
 	META.s7 = { title = "Tall replies", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
 	TRANSCRIPTS.s7 = tall
 	seed()
+	-- `reply_away`: another turn of s7's, a tall reply, lands (in the chat
+	-- open, or for when it opens next).
+	local added = 0
+	ui.command {
+		id = "reply_away",
+		title = "A reply lands in Tall replies",
+		run = function()
+			added += 1
+			local n = 20 + added
+			local paragraphs = {}
+			for k = 1, 12 do
+				table.insert(paragraphs, `Late reply {n}, paragraph {k}: it came while the chat was away.`)
+			end
+			local text = table.concat(paragraphs, "\n\n")
+			local now = table.clone(TRANSCRIPTS.s7)
+			table.insert(now, { id = `tu{n}`, role = "user", text = `Turn {n}: and then?`, at = "Sep 9, 5:00 PM", copy = `Turn {n}: and then?` })
+			table.insert(now, { id = `ta{n}`, role = "assistant", text = text, model = "Opus", at = "Sep 9, 5:01 PM", copy = text, blocks = { { id = "t", kind = "text", text = text } } })
+			TRANSCRIPTS.s7 = now
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(now)
+			end
+		end,
+	}
 end
 -- The content of the shipping app's compare fixture (a reply's text, a
 -- tool group and a code block, then a settled turn), for side by sides.
