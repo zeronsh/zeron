@@ -94,9 +94,14 @@ fn a_streaming_replys_frames_drawn() {
     app.ui.scene.borrow_mut().resize(900., 700.);
     let mut gpu = zgx_gpu::GpuRenderer::new(900, 700).expect("a GPU");
     let shown_rects = std::cell::Cell::new(0);
+    // What the renderer did with the text it drew last: lines it kept from
+    // the text the node drew before (a paragraph that only grew), and text
+    // nodes it shaped.
+    let last_stats = std::cell::Cell::new((0usize, 0usize));
     let mut draw = |app: &TestApp| -> f32 {
         let damage = app.ui.scene.borrow_mut().flush().damage;
-        gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+        let stats = gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+        last_stats.set((stats.kept_text_lines, stats.shaped_nodes));
         // (A few frames' rects, to see what a frame repaints.)
         shown_rects.set(shown_rects.get() + 1);
         if std::env::var_os("SHOW_DAMAGE").is_some() && (1500..1530).contains(&shown_rects.get()) {
@@ -117,6 +122,19 @@ fn a_streaming_replys_frames_drawn() {
     zgx::trace::set_enabled(true);
     zgx::trace::set_kept(4);
     let mut notes: BTreeMap<String, u32> = BTreeMap::new();
+    // Per chunk frame (counted ones): the lines the renderer kept, and the
+    // text nodes it shaped.
+    let mut text_work: Vec<(usize, usize)> = Vec::new();
+    // Each chunk frame's instructions (script, update, layout, paint) by the
+    // kind of block being written: the last block of what has come.
+    let mut by_kind: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let kind_at = |end: usize| -> String {
+        let blocks = zgx_script::markdown::parse(&text[..end], &Default::default());
+        blocks
+            .last()
+            .and_then(|b| b.field("t").map(|t| t.to_string()))
+            .unwrap_or_default()
+    };
     let (mut chunks, mut fades) = (Kind::default(), Kind::default());
     let frame = Duration::from_micros(8_333);
     let mut end = 0;
@@ -156,7 +174,16 @@ fn a_streaming_replys_frames_drawn() {
         // (Counted once the reply is long: its first few KB settle.)
         if end > 8_000 {
             if lands {
+                let work: u64 = phases
+                    .iter()
+                    .filter(|(p, ..)| {
+                        matches!(format!("{p:?}").as_str(), "Script" | "Update" | "Layout" | "Paint")
+                    })
+                    .map(|(_, n, _)| *n)
+                    .sum();
+                by_kind.entry(kind_at(end)).or_default().push(work);
                 chunks.add(wall, phases, damaged);
+                text_work.push(last_stats.get());
             } else {
                 fades.add(wall, phases, damaged);
             }
@@ -166,6 +193,30 @@ fn a_streaming_replys_frames_drawn() {
     assert_eq!(app.error(), None);
     chunks.report("frames a chunk lands on");
     fades.report("frames where only fades move");
+    eprintln!("chunk frames' script + update + layout + paint instructions by the block being written (median, mean):");
+    for (kind, mut work) in by_kind {
+        work.sort_unstable();
+        eprintln!(
+            "  {kind:>8}: median {:>8.1}K  mean {:>8.1}K  ({} frames)",
+            work[work.len() / 2] as f64 / 1e3,
+            work.iter().sum::<u64>() as f64 / work.len() as f64 / 1e3,
+            work.len()
+        );
+    }
+    let kept = text_work.iter().filter(|(lines, _)| *lines > 0).count();
+    let mut lines: Vec<usize> = text_work.iter().map(|w| w.0).collect();
+    let mut shaped: Vec<usize> = text_work.iter().map(|w| w.1).collect();
+    lines.sort_unstable();
+    shaped.sort_unstable();
+    eprintln!(
+        "chunk frames where the renderer kept a paragraph's lines: {kept} of {} \
+         (kept lines median {}, mean {:.1}; text nodes shaped median {}, mean {:.1})",
+        text_work.len(),
+        lines.get(lines.len() / 2).copied().unwrap_or(0),
+        lines.iter().sum::<usize>() as f64 / lines.len().max(1) as f64,
+        shaped.get(shaped.len() / 2).copied().unwrap_or(0),
+        shaped.iter().sum::<usize>() as f64 / shaped.len().max(1) as f64,
+    );
     for (note, count) in &notes {
         eprintln!("note x{count}: {note}");
     }

@@ -575,10 +575,9 @@ local function autolinked(list: { MarkdownRun }): { MarkdownRun }
 	return out or list
 end
 
--- A paragraph's runs as one paragraph of spans; `style` sets the
--- paragraph's own (a heading's size, a quote's ink).
-local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
-	list = attached_runs(autolinked(list), ctx)
+-- A paragraph's own options; `style` sets those it sets (a heading's size, a
+-- quote's ink).
+local function paragraph_props(style: { [string]: any }?, ctx: Ctx?): { [any]: any }
 	local size, line = size_of(ctx)
 	local props: { [any]: any } = {
 		wrap = true,
@@ -591,6 +590,12 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 			props[k] = v
 		end
 	end
+	return props
+end
+
+-- A paragraph's runs as spans, added to `props` in order.
+local function add_runs(props: { [any]: any }, list: { MarkdownRun }, ctx: Ctx?)
+	list = attached_runs(autolinked(list), ctx)
 	local inline = ui.theme.get("zeron.prose.code.inline")
 	-- A find's matches in the paragraph's words, numbered on from the
 	-- block's count so far; each span cut where one starts or ends.
@@ -769,6 +774,28 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		else
 			emit(span, r.x)
 		end
+	end
+end
+
+-- A paragraph's runs as one paragraph of spans; `style` sets the
+-- paragraph's own (a heading's size, a quote's ink).
+local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+	local props = paragraph_props(style, ctx)
+	add_runs(props, list, ctx)
+	return ui.rich(props)
+end
+
+-- The same paragraph, its runs (and the context they're made in) read from
+-- `runs_of` as they change (a paragraph being written): made again in place
+-- (zgx's `spans`), so the paragraph keeps its node, and its text the lines it
+-- has laid out, as it grows.
+local function runs_made(runs_of: () -> ({ MarkdownRun }, Ctx?), style: { [string]: any }?, ctx: Ctx?): Node
+	local props = paragraph_props(style, ctx)
+	props.spans = function(): { any }
+		local spans: { any } = {}
+		local list, made_in = runs_of()
+		add_runs(spans, list, made_in)
+		return spans
 	end
 	return ui.rich(props)
 end
@@ -1845,6 +1872,69 @@ return function(props: Props): Node
 			end, { w_full = true, min_w = 0 }),
 		})
 	end
+	-- A paragraph that `block` draws as one paragraph of runs: one showing none
+	-- of a reply's pictures. One being written stays that paragraph as it grows,
+	-- made again in place (`kept`). (Its links the page may draw as chips are
+	-- asked as its runs are made, so a chip known later remakes its runs, as
+	-- `runs` builds them again.)
+	local function plain(b: MarkdownBlock): boolean
+		if b.t ~= "p" then
+			return false
+		end
+		if ctx and ctx.pictures then
+			for _, r in (b :: any).s :: { MarkdownRun } do
+				if r.img then
+					return false
+				end
+			end
+		end
+		return true
+	end
+	-- A text being written: each `plain` paragraph's block now, by its key, and
+	-- the version its row reads (`kept`), bumped as the block changes.
+	local latest: { [number]: MarkdownBlock } = {}
+	local feeds: { [number]: State<number> } = {}
+	-- Block `n`, the paragraph `key` of a text being written, in a row that stays
+	-- while it is a `plain` paragraph: its item is `{ kept = key }` throughout,
+	-- and its runs are made again from the block (`latest`) as it changes, the
+	-- paragraph and its laid-out lines kept, rather than the row built again
+	-- each chunk. Drawn as `marked` draws it (`q`, `k`: a find's query and the
+	-- current match's place in it, 0 if elsewhere), or `top` with no find.
+	local function kept(key: number, n: number, q: string?, k: number): Node
+		local version = ui.use_state(0)
+		feeds[key] = version
+		ui.on_cleanup(function()
+			if feeds[key] == version then
+				feeds[key] = nil
+			end
+		end)
+		local finding = find ~= nil and q ~= nil and q ~= ""
+		local last = latest[key]
+		local style = if ink then { color = ink } else nil
+		local node = runs_made(function(): ({ MarkdownRun }, Ctx?)
+			version:get()
+			local b = latest[key] or last
+			last = b
+			-- (Where its fade is kept: the veil counts its paragraphs from here.)
+			veil_at(n)
+			local mine = ctx
+			if finding then
+				-- (Its marks numbered from its first, made again with its runs.)
+				mine = if ctx then table.clone(ctx) else { tasks = {} }
+				;(mine :: Ctx).find = { q = string.lower(q :: string), cur = k, n = 0 }
+			end
+			return (b :: any).s :: { MarkdownRun }, mine
+		end, style, ctx)
+		local reveal = if find then find.reveal else nil
+		if not finding or k == 0 or not reveal then
+			return boxed(node)
+		end
+		local r = ui.ref()
+		ui.after(0, function()
+			reveal(r)
+		end)
+		return boxed(ui.div { ref = r, w_full = true, min_w = 0, node })
+	end
 	-- Windowed (`window`): the blocks in runs of CHUNK, each run built while
 	-- its reach (the run and OVERSCAN either side) touches the view; away, a
 	-- box of its last height. Inside a run each block is drawn once and kept
@@ -1904,7 +1994,8 @@ return function(props: Props): Node
 		local function guess(): number
 			local h = 0
 			for _, b in run:peek() do
-				h += estimate(b) + 16
+				local kept_key = (b :: any).kept
+				h += estimate(if kept_key then latest[kept_key] or b else b) + 16
 			end
 			return h
 		end
@@ -2012,7 +2103,13 @@ return function(props: Props): Node
 							return run:get()
 						end), function(b: MarkdownBlock, i: number)
 							local n = (at - 1) * CHUNK + i
-							return marked(b, n, q, if n == cur_block then cur_k else 0)
+							local k = if n == cur_block then cur_k else 0
+							-- (A paragraph being written: its row kept as it grows.)
+							local kept_key = (b :: any).kept
+							if kept_key then
+								return kept(kept_key, n, q, k)
+							end
+							return marked(b, n, q, k)
 						end),
 					}
 				end
@@ -2048,6 +2145,51 @@ return function(props: Props): Node
 		-- What the state holds, as written (blocks, or runs `{ at, blocks }`).
 		local shown: { any } = {}
 		local shown_blocks: { MarkdownBlock } = {}
+		-- Each block's item as last written, by its place: the block, or for a
+		-- `plain` paragraph being written (parsed with a key, with no find to
+		-- mark it unless windowed) `{ kept = key }`, the same while it stays
+		-- one, its block in `latest` and its row told by `feeds` (`kept`).
+		local places: { { b: MarkdownBlock, item: any } } = {}
+		local made = 0
+		local keeps = opts.key ~= nil and (window ~= nil or find == nil)
+		-- (The kept paragraphs whose blocks changed: their rows told in the
+		-- write's batch.)
+		local grown: { number } = {}
+		local function item_of(n: number, b: MarkdownBlock): any
+			local was = places[n]
+			if was and was.b == b then
+				return was.item
+			end
+			local key = if was then (was.item :: any).kept else nil
+			if keeps and plain(b) then
+				local item = if was and key then was.item else nil
+				if key then
+					table.insert(grown, key)
+				else
+					made += 1
+					key = made
+					item = { kept = key }
+				end
+				latest[key] = b
+				places[n] = { b = b, item = item }
+				return item
+			end
+			if key then
+				latest[key] = nil
+			end
+			places[n] = { b = b, item = b }
+			return b
+		end
+		-- The kept paragraphs' rows told their blocks changed.
+		local function tell()
+			for _, key in grown do
+				local version = feeds[key]
+				if version then
+					version:set(version:peek() + 1)
+				end
+			end
+			table.clear(grown)
+		end
 		ui.effect(function()
 			if window and find then
 				local c = find.current()
@@ -2067,7 +2209,7 @@ return function(props: Props): Node
 			while from <= #list and shown_blocks[from] == list[from] do
 				from += 1
 			end
-			local wanted: { any } = if window then {} else list
+			local wanted: { any } = {}
 			local first = from
 			if window then
 				-- (The runs from the one holding the first block changed.)
@@ -2078,15 +2220,28 @@ return function(props: Props): Node
 					if not wanted[r] then
 						wanted[r] = { at = r, blocks = {} }
 					end
-					table.insert(wanted[r].blocks, list[n])
+					table.insert(wanted[r].blocks, item_of(n, list[n]))
 				end
+			else
+				for n = from, #list do
+					wanted[n] = item_of(n, list[n])
+				end
+			end
+			for n = #list + 1, #places do
+				local key = (places[n].item :: any).kept
+				if key then
+					latest[key] = nil
+				end
+				places[n] = nil
 			end
 			local count = if window then (#list + CHUNK - 1) // CHUNK else #list
 			if first > count and #shown == count then
 				shown_blocks = list
+				ui.batch(tell)
 				return
 			end
 			ui.batch(function()
+				tell()
 				for i = first, count do
 					local item = wanted[i]
 					if i <= #shown then
@@ -2213,6 +2368,11 @@ return function(props: Props): Node
 			})
 		else
 			column[1] = ui.each(items, function(b: MarkdownBlock, i: number)
+				-- (A paragraph being written: its row kept as it grows.)
+				local kept_key = (b :: any).kept
+				if kept_key then
+					return kept(kept_key, i, nil, 0)
+				end
 				return top(b, i)
 			end)
 		end
