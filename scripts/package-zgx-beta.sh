@@ -119,6 +119,11 @@ rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_
   "$ROOT/apps/zgx/ui/" "$APP/Contents/Resources/ui/"
 rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
   "$ROOT/apps/zgx/plugins-builtin/" "$APP/Contents/Resources/plugins-builtin/"
+# Each ships the canonical SDK, whatever copy sits in its folder (examples_tests
+# `sdk_copies_match_canonical` keeps those equal too).
+for dir in "$APP/Contents/Resources/plugins-builtin/"*/; do
+  cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
+done
 
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
