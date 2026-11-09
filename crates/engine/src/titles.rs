@@ -5,7 +5,7 @@
 //! Agent titles first: Claude Code names its own sessions (`ai-title` /
 //! `custom-title` transcript records). When the chat's session has one, the chat
 //! takes it instead of a throwaway titling run, and keeps following it while the
-//! chat's title is one the agent gave. `ZERON_NATIVE_TITLES=0` turns this off.
+//! chat's title is one the agent gave. The `useAgentTitles` preference controls this.
 //! Codex names threads in its client, so threads Zeron runs have no name of
 //! their own: Codex chats are titled with Codex's own prompt and title model
 //! (see [`codex_style`]).
@@ -167,7 +167,7 @@ impl TitleGenerator {
     /// Also backfill existing Zeron titles when an older engine left the
     /// Codex thread unnamed. A failed write never prevents the local title.
     async fn write_codex_name(&self, chat_id: &str, harness: HarnessId, title: &str) {
-        if !native::enabled() || harness != HarnessId::Codex {
+        if !self.inner.registry.title_settings().use_agent_titles || harness != HarnessId::Codex {
             return;
         }
         let Some(stored) = self.inner.workspace.chat_harness_session(chat_id) else {
@@ -196,7 +196,7 @@ impl TitleGenerator {
         chat_id: &str,
         harness_id: HarnessId,
     ) -> Option<native::NativeTitles> {
-        if !native::enabled() || !native::supported(harness_id) {
+        if !self.inner.registry.title_settings().use_agent_titles || !native::supported(harness_id) {
             return None;
         }
         let stored = self.inner.workspace.chat_harness_session(chat_id)?;
@@ -212,7 +212,7 @@ impl TitleGenerator {
     /// A new chat: wait a little for the agent to name its session (it does
     /// so alongside the first reply), so no separate titling run is needed.
     async fn wait_native(&self, chat_id: &str, harness_id: HarnessId) -> Option<String> {
-        if !native::enabled() || !native::supported(harness_id) {
+        if !self.inner.registry.title_settings().use_agent_titles || !native::supported(harness_id) {
             return None;
         }
         let deadline = tokio::time::Instant::now() + NATIVE_WAIT;
@@ -301,10 +301,14 @@ impl TitleGenerator {
                 .await
                 .ok()?
                 .unwrap_or_default();
-                codex_style::model(harness_id, &models).or_else(|| cheapest_model(&models))
+                settings
+                    .use_agent_titles
+                    .then(|| codex_style::model(harness_id, &models))
+                    .flatten()
+                    .or_else(|| cheapest_model(&models))
             }
         };
-        let title_prompt = if native::enabled() && harness_id == HarnessId::Codex {
+        let title_prompt = if settings.use_agent_titles && harness_id == HarnessId::Codex {
             codex_style::prompt(prompt)
         } else {
             format!(
@@ -463,9 +467,7 @@ mod codex_style {
     const MODEL: &str = "gpt-5.6-luna";
 
     pub(super) fn model(harness: HarnessId, models: &[Model]) -> Option<String> {
-        (super::native::enabled()
-            && harness == HarnessId::Codex
-            && models.iter().any(|m| m.id == MODEL))
+        (harness == HarnessId::Codex && models.iter().any(|m| m.id == MODEL))
         .then(|| MODEL.to_owned())
     }
 
@@ -503,13 +505,6 @@ mod native {
         pub latest: Option<String>,
         /// Every name the agent has given the session.
         pub seen: Vec<String>,
-    }
-
-    pub(super) fn enabled() -> bool {
-        !matches!(
-            std::env::var("ZERON_NATIVE_TITLES").as_deref(),
-            Ok("0" | "false" | "off")
-        )
     }
 
     pub(super) fn supported(harness: HarnessId) -> bool {
@@ -786,6 +781,7 @@ mod tests {
             .set_title_settings(crate::registry::TitleSettings {
                 harness: Some(HarnessId::ClaudeCode),
                 model: Some("chosen-title-model".into()),
+                ..Default::default()
             })
             .unwrap();
         let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone());

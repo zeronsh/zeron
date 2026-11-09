@@ -2618,7 +2618,7 @@ async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
 
 #[tokio::test]
 async fn session_naming_writes_only_unnamed_threads_without_starting_a_turn() {
-    for thread in ["unnamed-thread", "named-thread"] {
+    for thread in ["unnamed-thread", "named-thread", "concurrently-named-thread"] {
         harness()
             .name_session_if_unnamed(thread, "适配 Codex 会话名称")
             .await

@@ -118,13 +118,25 @@ struct HarnessPrefsFile {
 }
 
 /// Per-device automatic session title preferences.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TitleSettings {
+    /// Prefer agent session titles and write generated Codex titles back.
+    pub use_agent_titles: bool,
     /// None follows the session harness, using a supported installed fallback.
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+impl Default for TitleSettings {
+    fn default() -> Self {
+        Self {
+            use_agent_titles: true,
+            harness: None,
+            model: None,
+        }
+    }
 }
 
 /// Per-device native subagent preferences (Settings → Providers).
@@ -1688,6 +1700,7 @@ mod title_tests {
         let settings = TitleSettings {
             harness: Some(HarnessId::ClaudeCode),
             model: Some("haiku-test".into()),
+            use_agent_titles: false,
         };
         registry.set_title_settings(settings.clone()).unwrap();
         let reloaded = HarnessRegistry::new();
@@ -1697,7 +1710,8 @@ mod title_tests {
             registry
                 .set_title_settings(TitleSettings {
                     harness: None,
-                    model: Some("orphan".into())
+                    model: Some("orphan".into()),
+                    ..Default::default()
                 })
                 .is_err()
         );
@@ -1705,7 +1719,8 @@ mod title_tests {
             registry
                 .set_title_settings(TitleSettings {
                     harness: Some(HarnessId::Cursor),
-                    model: None
+                    model: None,
+                    ..Default::default()
                 })
                 .is_err()
         );
@@ -1715,6 +1730,20 @@ mod title_tests {
             .unwrap();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.title_settings(), TitleSettings::default());
+    }
+
+    #[test]
+    fn legacy_title_settings_enable_agent_titles_and_keep_the_selected_model() {
+        let settings: TitleSettings = serde_json::from_str(
+            r#"{"harness":"codex","model":"chosen-model"}"#,
+        )
+        .unwrap();
+        assert!(settings.use_agent_titles);
+        assert_eq!(settings.harness, Some(HarnessId::Codex));
+        assert_eq!(settings.model.as_deref(), Some("chosen-model"));
+        let disabled: TitleSettings =
+            serde_json::from_str(r#"{"useAgentTitles":false}"#).unwrap();
+        assert!(!disabled.use_agent_titles);
     }
 
     #[test]

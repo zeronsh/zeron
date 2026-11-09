@@ -2527,6 +2527,7 @@ impl Pickers {
             let settings = TitleSettings {
                 harness: self.effective_harness(cx),
                 model: Some(model_id),
+                ..self.title.clone().unwrap_or_default()
             };
             self.title = Some(settings.clone());
             self.catalog_rev += 1;

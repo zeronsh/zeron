@@ -1117,6 +1117,8 @@
         "terms": "网页 链接 网址 浏览器 标签页 面板 外部 web link url browser tab panel zeron external"
       },
       "thread_naming": {
+        "agent_titles": "使用代理会话标题",
+        "agent_titles_description": "沿用 Claude Code 的会话标题，并将生成的标题同步到 Codex。",
         "label": "对话命名",
         "terms": "标题 重命名 会话 模型 titles rename sessions model",
         "session_agent": "会话智能体",

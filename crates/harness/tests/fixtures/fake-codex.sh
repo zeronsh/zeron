@@ -56,6 +56,18 @@ if has "$line" '"method":"thread/read"'; then
     read -r line && exit 9
     exit 0
   fi
+  naming_thread="$line"
+  emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"name\":null}}}"
+  read -r line || exit 9
+  has "$line" '"method":"thread/read"' || exit 9
+  has "$line" '"includeTurns":false' || exit 9
+  if has "$naming_thread" '"threadId":"concurrently-named-thread"'; then
+    has "$line" '"threadId":"concurrently-named-thread"' || exit 9
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"name\":\"Just renamed\"}}}"
+    read -r line && exit 9
+    exit 0
+  fi
+  has "$naming_thread" '"threadId":"unnamed-thread"' || exit 9
   has "$line" '"threadId":"unnamed-thread"' || exit 9
   emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"name\":null}}}"
   read -r line || exit 9

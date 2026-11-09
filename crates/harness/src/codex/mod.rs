@@ -728,19 +728,23 @@ impl Harness for CodexHarness {
                 .await?;
             client.notify("initialized", None);
             // Metadata only: neither resume the coding runtime nor start a turn.
-            let metadata = client
-                .request(
-                    "thread/read",
-                    json!({
-                        "threadId": session_id, "includeTurns": false,
-                    }),
-                )
-                .await?;
-            if metadata["thread"]["name"]
-                .as_str()
-                .is_some_and(|n| !n.trim().is_empty())
-            {
-                return Ok(());
+            // Recheck immediately before writing in case another client named
+            // the thread since the initial read. The API has no conditional set.
+            for _ in 0..2 {
+                let metadata = client
+                    .request(
+                        "thread/read",
+                        json!({
+                            "threadId": session_id, "includeTurns": false,
+                        }),
+                    )
+                    .await?;
+                if metadata["thread"]["name"]
+                    .as_str()
+                    .is_some_and(|n| !n.trim().is_empty())
+                {
+                    return Ok(());
+                }
             }
             client
                 .request(
