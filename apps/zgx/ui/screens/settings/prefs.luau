@@ -31,6 +31,10 @@ local PrivateText = require("@ds/private_text")
 local M = {}
 
 M.send_with = ui.persist("settings_send_with", "enter")
+-- Settings → Voice: dictation on (the shipping app's `dictation_enabled`, off
+-- by default), and the microphone it hears ("system" for the system's).
+M.dictation = ui.persist("settings_dictation", false)
+M.dictation_input = ui.persist("settings_dictation_input", "system")
 M.escape_stops = ui.persist("settings_escape_stops", false)
 -- Whether closing a panel's last tab closes the panel too (off: it stays
 -- open on its home). Off by default.

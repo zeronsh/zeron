@@ -36,4 +36,4 @@ See the task evidence under `/Users/gaelcado/zeron/evidence/voice/` for actual r
 
 ## ZGX
 
-ZGX exposes this same local motor through its optional official **Dictation** plugin. Model and microphone selection live in the plugin's Settings page. Its SDK, protected editor integration, compatible-model extension points and platform verification procedure are documented in [Writing a Zeron plugin — Local dictation](../../apps/zgx/docs/plugins.md#local-dictation). This is speech-to-draft transcription, independent of Codex Voice.
+ZGX has the same dictation as a feature of the app (`apps/zgx/src/dictation.rs`, `ui/screens/chat/dictation.luau`, Settings → Voice), with the same `zeron-voice` model cache. It runs in the window: the engine has no part in it.

@@ -2181,6 +2181,30 @@
         "never": "从不",
         "days": "{n, plural, other {# 天后}}"
       }
+    },
+    "voice": {
+      "title": "语音",
+      "terms": "语音 听写 麦克风 模型 parakeet speech dictation microphone",
+      "description": "对着输入框说话。转写在本设备上完成,音频不会被保存或发送。",
+      "couldnt": "语音无法完成此操作",
+      "microphone": "麦克风",
+      "system_default": "系统默认",
+      "disconnected": "麦克风已断开",
+      "dictation": {
+        "label": "听写",
+        "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
+        "needs_download": "开启后将下载 {total} MB 的语音模型。",
+        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。"
+      },
+      "shortcut": {
+        "label": "快捷键",
+        "description": "按住说话,松开转写。"
+      },
+      "model": {
+        "label": "语音模型",
+        "description": "Parakeet v3 · {total} MB",
+        "remove": "移除"
+      }
     }
   },
   "common": {
@@ -2386,7 +2410,8 @@
         "shell_find": "查找",
         "shell_close": "关闭",
         "shell_reload": "重新启动 Zeron",
-        "shell_reload_interface": "重新加载界面"
+        "shell_reload_interface": "重新加载界面",
+        "shell_dictate": "按住听写"
       },
       "group": {
         "sessions": "会话",
@@ -2805,6 +2830,14 @@
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
       "drop_to_mention": "松开以提及"
+    },
+    "dictation": {
+      "failed": "听写已停止",
+      "hold": "按住听写",
+      "hold_hint": "说话时请按住麦克风或快捷键。",
+      "no_speech": "未识别到语音。草稿未更改。",
+      "transcribing": "正在转写…",
+      "starting": "正在启动…"
     }
   },
   "panel": {
@@ -3184,10 +3217,6 @@
         },
         "navigate": {
           "title": "打开对话和页面"
-        },
-        "dictation": {
-          "title": "使用本地听写",
-          "detail": "在本设备上录制麦克风音频并接收转写文本。从 Hugging Face 下载经过验证的模型。"
         },
         "compose": {
           "title": "在消息输入框中填写文本",

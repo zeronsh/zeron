@@ -1,8 +1,12 @@
-//! Window-local dictation. No engine RPC, audio files, or transcript logging.
-//! Plugins own an exclusive lease; losing the lease cancels capture and downloads.
+//! Dictation: hold to talk, release to transcribe, the words in the draft
+//! (ui/screens/chat/dictation.luau, Settings → Voice). Everything happens in
+//! this window with `zeron_voice`: no engine, audio files or transcript logs.
+//! The weights stay in `<data>/models`, where the shipping app keeps them too.
 use serde_json::{Value as Json, json};
 use std::{
+    cell::RefCell,
     path::PathBuf,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -10,7 +14,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use zeron_voice::{backend::DictationSession, catalog};
+use zgx_desktop::WindowContext;
+use zgx_script::{ScriptHost, Value};
+
+use crate::plugins::{json_value, off_thread, value_json};
+
+const MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -33,41 +42,50 @@ fn authorize() -> Result<(), String> {
     }
     Ok(())
 }
-static DOWNLOADING: AtomicBool = AtomicBool::new(false);
-struct DownloadGuard;
-impl Drop for DownloadGuard {
-    fn drop(&mut self) {
-        DOWNLOADING.store(false, Ordering::Release);
+
+/// One recording. Dropping it stops capture and throws away its result.
+trait Recording {
+    fn poll(&mut self) -> Option<zeron_voice::Event>;
+    fn finish(&mut self);
+}
+impl Recording for zeron_voice::Session {
+    fn poll(&mut self) -> Option<zeron_voice::Event> {
+        self.poll()
+    }
+    fn finish(&mut self) {
+        self.finish()
     }
 }
-enum DownloadEvent {
+
+/// One download at a time, across windows.
+static DOWNLOADING: AtomicBool = AtomicBool::new(false);
+enum Download {
     Progress(u64),
     Done(Result<(), String>),
 }
-struct Download {
+struct DownloadJob {
     cancel: Arc<AtomicBool>,
-    events: mpsc::Receiver<DownloadEvent>,
+    events: mpsc::Receiver<Download>,
 }
-impl Drop for Download {
+impl Drop for DownloadJob {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Release);
     }
 }
 
-pub struct Service {
-    root: PathBuf,
-    owner: Option<String>,
-    session: Option<Box<dyn DictationSession>>,
-    download: Option<Download>,
+struct Service {
+    /// The model's folder (none: the data folder isn't known).
+    dir: Option<PathBuf>,
+    session: Option<Box<dyn Recording>>,
+    download: Option<DownloadJob>,
     deadline: Option<Instant>,
     state: Json,
     serial: u64,
 }
 impl Service {
-    pub fn new(root: PathBuf) -> Self {
+    fn new(dir: Option<PathBuf>) -> Self {
         Self {
-            root,
-            owner: None,
+            dir,
             session: None,
             download: None,
             deadline: None,
@@ -75,156 +93,123 @@ impl Service {
             serial: 0,
         }
     }
-    pub fn needs_poll(&self) -> bool {
+    fn needs_poll(&self) -> bool {
         self.session.is_some() || self.download.is_some()
     }
-    pub fn owner(&self) -> Option<&str> {
-        self.owner.as_deref()
-    }
-    pub fn target(&mut self, id: &str) {
-        if self.session.is_some() {
-            self.state["target"] = json!(id);
-        }
-    }
-    pub fn snapshot(&self) -> Json {
-        self.state.clone()
-    }
-    fn phase(&mut self, phase: &str) {
-        self.state["phase"] = json!(phase);
-    }
-    pub fn cancel(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            session.cancel();
-        }
+    fn cancel(&mut self) {
+        self.session = None;
         if let Some(job) = &self.download {
             job.cancel.store(true, Ordering::Release);
         }
         self.deadline = None;
         self.state = json!({"phase":"cancelled", "serial":self.serial});
     }
-    /// Called before unloading or replacing a plugin, even at the same id.
-    pub fn release(&mut self) {
-        self.cancel();
-        self.owner = None;
-    }
-    pub fn call(&mut self, owner: &str, args: &Json) -> Result<Json, String> {
-        let op = args["op"].as_str().unwrap_or("");
-        // A different plugin cannot stop, read, or alter another one's lease.
-        let can_claim = matches!(op, "start" | "download" | "remove")
-            && self.session.is_none()
-            && self.download.is_none();
-        if self.owner.as_deref().is_some_and(|id| id != owner) && !can_claim {
-            return Err("Another plugin owns dictation in this window".into());
+    fn stop(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.finish();
+            self.deadline
+                .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+            self.state["phase"] = json!("finalizing");
         }
-        match op {
-            "catalog" => return Ok(json!(catalog::models())),
-            "status" => return Ok(self.snapshot()),
-            "cancel" => self.cancel(),
-            "stop" => {
-                if let Some(s) = &mut self.session {
-                    s.finish();
-                    if self.deadline.is_none() {
-                        self.deadline = Some(Instant::now() + Duration::from_secs(30));
-                    }
-                    self.phase("finalizing");
-                }
-            }
-            "start" | "download" | "remove" | "installed" => {
-                let id = args["model"].as_str().ok_or("Choose a dictation model")?;
-                let model = catalog::model(id).map_err(|e| e.to_string())?;
-                let dir = catalog::directory(&self.root, id).map_err(|e| e.to_string())?;
-                if op == "installed" {
-                    return Ok(json!(
-                        catalog::installed(&self.root, id).map_err(|e| e.to_string())?
-                    ));
-                }
-                if self.session.is_some()
-                    || self.download.is_some()
-                    || zeron_voice::busy()
-                    || DOWNLOADING.load(Ordering::Acquire)
-                {
-                    return Err("Dictation is busy; try again when it finishes".into());
-                }
-                self.owner = Some(owner.into());
-                self.state = json!({"phase":"idle"});
-                if op == "remove" {
-                    catalog::remove(&self.root, id).map_err(|e| e.to_string())?;
-                    self.phase("idle");
-                } else if op == "download" {
-                    if DOWNLOADING
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_err()
-                    {
-                        return Err("Another window is downloading a model".into());
-                    }
-                    let guard = DownloadGuard;
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    let worker_cancel = cancel.clone();
-                    let (tx, events) = mpsc::channel();
-                    let (root, id) = (self.root.clone(), id.to_string());
-                    std::thread::spawn(move || {
-                        let _guard = guard;
-                        let result = catalog::download(&root, &id, &worker_cancel, |n| {
-                            let _ = tx.send(DownloadEvent::Progress(n));
-                        })
-                        .map_err(|e| e.to_string());
-                        let _ = tx.send(DownloadEvent::Done(result));
-                    });
-                    self.download = Some(Download { cancel, events });
-                    self.state =
-                        json!({"phase":"downloading", "bytes":0, "total":model.download_bytes});
-                } else {
-                    if !catalog::installed(&self.root, id).map_err(|e| e.to_string())? {
-                        return Err("Download the dictation model in Settings first".into());
-                    }
-                    authorize()?;
-                    let backend = catalog::backend(model.backend).map_err(|e| e.to_string())?;
-                    let device = args["device"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
-                    self.session = Some(backend.start(dir, device).map_err(|e| e.to_string())?);
-                    self.serial += 1;
-                    self.state = json!({"phase":"starting", "serial":self.serial, "level":0, "hold":args["hold"], "target":args["target"]});
-                }
-            }
-            _ => return Err("Unknown dictation operation".into()),
-        }
-        Ok(self.snapshot())
     }
-    pub fn poll(&mut self) {
+    fn dir(&self) -> Result<PathBuf, String> {
+        self.dir
+            .clone()
+            .ok_or_else(|| "Zeron's data folder isn't known".to_string())
+    }
+    fn idle(&self) -> Result<(), String> {
+        if self.needs_poll() || zeron_voice::busy() || DOWNLOADING.load(Ordering::Acquire) {
+            return Err("Dictation is busy; try again when it finishes".into());
+        }
+        Ok(())
+    }
+    fn status(&self) -> Result<Json, String> {
+        Ok(json!({
+            "installed": zeron_voice::installed(&self.dir()?),
+            "size": zeron_voice::download_size(),
+        }))
+    }
+    fn start(&mut self, args: &Json) -> Result<Json, String> {
+        let dir = self.dir()?;
+        self.idle()?;
+        // (The page says what to do about it: no words for the composer.)
+        if !zeron_voice::installed(&dir) {
+            return Err("no_model".into());
+        }
+        authorize()?;
+        let device = args["device"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let session = zeron_voice::Session::start(dir, device).map_err(|e| e.to_string())?;
+        self.session = Some(Box::new(session));
+        self.serial += 1;
+        self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
+        Ok(self.state.clone())
+    }
+    fn download(&mut self) -> Result<Json, String> {
+        let dir = self.dir()?;
+        self.idle()?;
+        if DOWNLOADING.swap(true, Ordering::AcqRel) {
+            return Err("Another window is downloading the model".into());
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (tell, events) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = zeron_voice::download(&dir, &worker_cancel, |n| {
+                let _ = tell.send(Download::Progress(n));
+            })
+            .map_err(|e| e.to_string());
+            DOWNLOADING.store(false, Ordering::Release);
+            let _ = tell.send(Download::Done(result));
+        });
+        self.download = Some(DownloadJob { cancel, events });
+        self.state =
+            json!({"phase":"downloading", "bytes":0, "total":zeron_voice::download_size()});
+        Ok(self.state.clone())
+    }
+    fn remove(&mut self) -> Result<(), String> {
+        let dir = self.dir()?;
+        self.idle()?;
+        zeron_voice::unload();
+        if dir.exists() {
+            std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        self.state = json!({"phase":"idle"});
+        Ok(())
+    }
+    fn poll(&mut self) {
         let mut done = None;
         if let Some(job) = &self.download {
             while let Ok(event) = job.events.try_recv() {
                 match event {
-                    DownloadEvent::Progress(n) => self.state["bytes"] = json!(n),
-                    DownloadEvent::Done(result) => done = Some(result),
+                    Download::Progress(n) => self.state["bytes"] = json!(n),
+                    Download::Done(result) => done = Some(result),
                 }
             }
         }
         if let Some(result) = done {
             let cancelled = self
                 .download
-                .as_ref()
-                .is_some_and(|j| j.cancel.load(Ordering::Acquire));
-            self.download = None;
+                .take()
+                .is_some_and(|job| job.cancel.load(Ordering::Acquire));
             match result {
-                _ if cancelled => self.phase("cancelled"),
-                Ok(()) => self.phase("ready"),
+                _ if cancelled => self.state["phase"] = json!("cancelled"),
+                Ok(()) => self.state["phase"] = json!("ready"),
                 Err(e) => {
-                    self.phase("failed");
+                    self.state["phase"] = json!("download_failed");
                     self.state["error"] = json!(e);
                 }
             }
         }
         if self.deadline.is_some_and(|end| Instant::now() >= end) {
             self.cancel();
-            self.phase("failed");
+            self.state["phase"] = json!("failed");
             self.state["error"] = json!("Transcription timed out. Your draft is safe.");
         }
-        let mut terminal = false;
+        let mut ended = false;
         if let Some(session) = &mut self.session {
-            self.state["level"] = json!(session.take_level());
             while let Some(event) = session.poll() {
                 match event {
                     zeron_voice::Event::Listening => {
@@ -240,162 +225,32 @@ impl Service {
                     zeron_voice::Event::Final(text) => {
                         self.state["phase"] = json!("final");
                         self.state["text"] = json!(text);
-                        terminal = true;
+                        ended = true;
                     }
                     zeron_voice::Event::Failed(error) => {
                         self.state["phase"] = json!("failed");
                         self.state["error"] = json!(error);
-                        terminal = true;
+                        ended = true;
                     }
                 }
             }
         }
-        if terminal {
+        if ended {
             self.session = None;
             self.deadline = None;
         }
     }
 }
-impl Drop for Service {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        cell::{Cell, RefCell},
-        collections::VecDeque,
-        rc::Rc,
-    };
-    struct Fake {
-        events: Rc<RefCell<VecDeque<zeron_voice::Event>>>,
-        cancelled: Rc<Cell<bool>>,
-        stopped: Rc<Cell<bool>>,
-    }
-    impl DictationSession for Fake {
-        fn poll(&mut self) -> Option<zeron_voice::Event> {
-            self.events.borrow_mut().pop_front()
-        }
-        fn finish(&mut self) {
-            self.stopped.set(true);
-        }
-        fn cancel(&mut self) {
-            self.cancelled.set(true);
-        }
-        fn take_level(&self) -> f32 {
-            0.25
-        }
-    }
-    fn service() -> (
-        Service,
-        Rc<RefCell<VecDeque<zeron_voice::Event>>>,
-        Rc<Cell<bool>>,
-        Rc<Cell<bool>>,
-    ) {
-        let events = Rc::new(RefCell::new(VecDeque::new()));
-        let cancelled = Rc::new(Cell::new(false));
-        let stopped = Rc::new(Cell::new(false));
-        let mut s = Service::new(std::env::temp_dir().join("zeron-dictation-tests-unused"));
-        s.owner = Some("one".into());
-        s.serial = 7;
-        s.state = json!({"phase":"starting", "serial":7});
-        s.session = Some(Box::new(Fake {
-            events: events.clone(),
-            cancelled: cancelled.clone(),
-            stopped: stopped.clone(),
-        }));
-        (s, events, cancelled, stopped)
-    }
-    #[test]
-    fn dictation_isolates_leases_and_cancels_without_publishing_stale_text() {
-        let (mut s, events, cancelled, _) = service();
-        assert!(s.call("two", &json!({"op":"cancel"})).is_err());
-        assert!(s.call("two", &json!({"op":"status"})).is_err());
-        events.borrow_mut().push_back(zeron_voice::Event::Listening);
-        s.poll();
-        assert_eq!(s.snapshot()["phase"], "listening");
-        s.release();
-        assert!(cancelled.get());
-        assert_eq!(s.owner(), None);
-        events
-            .borrow_mut()
-            .push_back(zeron_voice::Event::Final("private".into()));
-        s.poll();
-        assert!(s.snapshot()["text"].is_null());
-    }
-    #[test]
-    fn dictation_stop_waits_for_final_and_timeout_invalidates_results() {
-        let (mut s, events, cancelled, stopped) = service();
-        s.call("one", &json!({"op":"stop"})).unwrap();
-        assert!(stopped.get());
-        assert!(!cancelled.get());
-        events
-            .borrow_mut()
-            .push_back(zeron_voice::Event::Final("hola".into()));
-        s.poll();
-        assert_eq!(s.snapshot()["text"], "hola");
-        assert!(s.session.is_none());
-        let (mut s, events, cancelled, _) = service();
-        s.deadline = Some(Instant::now());
-        events
-            .borrow_mut()
-            .push_back(zeron_voice::Event::Final("too late".into()));
-        s.poll();
-        assert!(cancelled.get());
-        assert_eq!(s.snapshot()["phase"], "failed");
-        assert!(s.snapshot()["text"].is_null());
-    }
-    #[test]
-    fn dictation_native_lease_rejects_ime_and_edits_changed_back() {
-        let mut app = zgx_script::testing::TestApp::new(|r| {
-            zgx_script::ScriptHost::new(
-                r,
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dictation_fixture.luau"),
-            )
-        });
-        app.ui.scene.borrow_mut().resize(960., 700.);
-        app.frames(30);
-        assert_eq!(app.error(), None);
-        app.click("role:textbox \"Message\"");
-        let editor = app.ui.focused_editor().unwrap();
-        let lease = super::EditorLease::new(editor.clone()).unwrap();
-        editor.set_composition("正在", None, &[]);
-        assert!(!lease.valid());
-        assert!(super::EditorLease::new(editor.clone()).is_none());
-        editor.set_composition("", None, &[]);
-        let lease = super::EditorLease::new(editor.clone()).unwrap();
-        editor.paste("x");
-        editor.set_selection(0, 1);
-        editor.paste("");
-        assert_eq!(editor.editor.borrow().text().as_ref(), "");
-        assert!(!lease.valid(), "revision protects against edit-and-revert");
-    }
-
-    #[test]
-    fn dictation_rejects_unknown_models_before_touching_audio_or_disk() {
-        let mut s = Service::new(PathBuf::from("/unused"));
-        for op in ["start", "download", "remove", "installed"] {
-            assert!(
-                s.call("one", &json!({"op":op, "model":"../../other"}))
-                    .is_err()
-            );
-        }
-        assert!(s.owner().is_none());
-    }
-}
-
-/// A native editor lease catches edits changed back before a script effect,
-/// and uncommitted IME composition. It never crosses into a plugin VM.
-pub struct EditorLease {
+/// The draft a recording belongs to, as it was when it began. Catches an edit
+/// changed back before a script's effect runs, and IME composition.
+struct EditorLease {
     editor: zgx::widgets::EditorHandle,
     revision: u64,
     selection: (usize, usize),
 }
 impl EditorLease {
-    pub fn new(editor: zgx::widgets::EditorHandle) -> Option<Self> {
+    fn new(editor: zgx::widgets::EditorHandle) -> Option<Self> {
         if editor.is_read_only() {
             return None;
         }
@@ -413,11 +268,228 @@ impl EditorLease {
             selection,
         })
     }
-    pub fn valid(&self) -> bool {
+    fn valid(&self) -> bool {
         let model = self.editor.editor.borrow();
         !self.editor.is_read_only()
             && model.revision() == self.revision
             && model.preedit().is_none()
             && self.editor.selection() == self.selection
+    }
+}
+
+struct Dictation {
+    service: RefCell<Service>,
+    lease: RefCell<Option<EditorLease>>,
+    shared: zgx_script::Shared,
+    wake: zgx::task::LatestSender<()>,
+}
+impl Dictation {
+    fn publish(&self) {
+        let now = json_value(&self.service.borrow().state);
+        if self.shared.signal().with_untracked(Value::clone) != now {
+            self.shared.set(now);
+        }
+    }
+}
+
+/// `dictation.call { op, … }` and `dictation.guard`, for the window's scripts;
+/// what's happening in the shared `dictation`.
+pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
+    let (wake, mut work) = zgx::task::latest::<()>();
+    let dir = crate::engine::data_dir().map(|d| d.join("models").join(MODEL));
+    let me = Rc::new(Dictation {
+        shared: host.shared("dictation", json_value(&json!({"phase":"idle"}))),
+        service: RefCell::new(Service::new(dir)),
+        lease: RefCell::default(),
+        wake,
+    });
+    let weak = Rc::downgrade(&me);
+    host.async_action("dictation.call", move |asked: Value| {
+        let weak = weak.clone();
+        async move {
+            let me = weak.upgrade().ok_or("The window closed")?;
+            let args = value_json(&asked);
+            let result = match args["op"].as_str() {
+                Some("inputs") => {
+                    let inputs = off_thread(zeron_voice::input_devices)
+                        .await
+                        .ok_or("Could not list microphones")?;
+                    let list: Vec<_> = inputs
+                        .into_iter()
+                        .map(|d| json!({"id":d.id, "name":d.name}))
+                        .collect();
+                    return Ok(json_value(&json!(list)));
+                }
+                Some("status") => me.service.borrow().status()?,
+                Some("start") => me.service.borrow_mut().start(&args)?,
+                Some("download") => me.service.borrow_mut().download()?,
+                Some("remove") => {
+                    me.service.borrow_mut().remove()?;
+                    Json::Null
+                }
+                Some("stop") => {
+                    me.service.borrow_mut().stop();
+                    Json::Null
+                }
+                Some("cancel") => {
+                    me.lease.borrow_mut().take();
+                    me.service.borrow_mut().cancel();
+                    Json::Null
+                }
+                _ => return Err("Unknown dictation operation".to_string()),
+            };
+            me.wake.send(());
+            me.publish();
+            Ok(json_value(&result))
+        }
+    });
+    let weak = Rc::downgrade(&me);
+    let ui = cx.ui.downgrade();
+    host.action("dictation.guard", move |asked: Value| {
+        let Some(me) = weak.upgrade() else { return };
+        let lease = ui
+            .upgrade()
+            .and_then(|ui| ui.focused_editor())
+            .and_then(EditorLease::new);
+        if lease.is_none() {
+            me.service.borrow_mut().cancel();
+        } else if let Some(target) = value_json(&asked)["target"].as_str() {
+            if me.service.borrow().session.is_some() {
+                me.service.borrow_mut().state["target"] = json!(target);
+            }
+        }
+        *me.lease.borrow_mut() = lease;
+        me.publish();
+    });
+    // The window's tasks keep it, so closing the window ends a recording.
+    // No timer while nothing is recording or downloading.
+    cx.tasks.spawn(async move {
+        while work.recv().await.is_some() {
+            while me.service.borrow().needs_poll() {
+                if me.lease.borrow().as_ref().is_some_and(|l| !l.valid()) {
+                    me.lease.borrow_mut().take();
+                    me.service.borrow_mut().cancel();
+                }
+                me.service.borrow_mut().poll();
+                me.publish();
+                zgx::timer::sleep(Duration::from_millis(40)).await;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, collections::VecDeque};
+    use zeron_voice::Event;
+    struct Fake {
+        events: Rc<RefCell<VecDeque<Event>>>,
+        cancelled: Rc<Cell<bool>>,
+        stopped: Rc<Cell<bool>>,
+    }
+    impl Recording for Fake {
+        fn poll(&mut self) -> Option<Event> {
+            self.events.borrow_mut().pop_front()
+        }
+        fn finish(&mut self) {
+            self.stopped.set(true);
+        }
+    }
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            self.cancelled.set(true);
+        }
+    }
+    fn service() -> (
+        Service,
+        Rc<RefCell<VecDeque<Event>>>,
+        Rc<Cell<bool>>,
+        Rc<Cell<bool>>,
+    ) {
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let cancelled = Rc::new(Cell::new(false));
+        let stopped = Rc::new(Cell::new(false));
+        let mut s = Service::new(None);
+        s.serial = 7;
+        s.state = json!({"phase":"starting", "serial":7});
+        s.session = Some(Box::new(Fake {
+            events: events.clone(),
+            cancelled: cancelled.clone(),
+            stopped: stopped.clone(),
+        }));
+        (s, events, cancelled, stopped)
+    }
+    #[test]
+    fn dictation_cancel_stops_capture_and_publishes_no_stale_text() {
+        let (mut s, events, cancelled, _) = service();
+        events.borrow_mut().push_back(Event::Listening);
+        s.poll();
+        assert_eq!(s.state["phase"], "listening");
+        s.cancel();
+        assert!(cancelled.get());
+        events.borrow_mut().push_back(Event::Final("private".into()));
+        s.poll();
+        assert!(s.state["text"].is_null());
+    }
+    #[test]
+    fn dictation_stop_waits_for_final_and_timeout_invalidates_results() {
+        let (mut s, events, cancelled, stopped) = service();
+        s.stop();
+        assert!(stopped.get());
+        assert!(!cancelled.get());
+        assert_eq!(s.state["phase"], "finalizing");
+        events.borrow_mut().push_back(Event::Final("hola".into()));
+        s.poll();
+        assert_eq!(s.state["text"], "hola");
+        assert!(s.session.is_none());
+        let (mut s, events, cancelled, _) = service();
+        s.deadline = Some(Instant::now());
+        events.borrow_mut().push_back(Event::Final("too late".into()));
+        s.poll();
+        assert!(cancelled.get());
+        assert_eq!(s.state["phase"], "failed");
+        assert!(s.state["text"].is_null());
+    }
+    #[test]
+    fn dictation_without_a_data_folder_says_so_and_never_panics() {
+        let mut s = Service::new(None);
+        assert!(s.status().is_err());
+        assert!(s.start(&json!({})).is_err());
+        assert!(s.download().is_err());
+        assert!(s.remove().is_err());
+    }
+    #[test]
+    fn dictation_without_the_model_asks_for_it_before_touching_the_microphone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Service::new(Some(dir.path().join(MODEL)));
+        assert_eq!(s.status().unwrap()["installed"], false);
+        assert_eq!(s.start(&json!({})).unwrap_err(), "no_model");
+        assert!(s.session.is_none());
+    }
+    #[test]
+    fn dictation_lease_rejects_ime_and_edits_changed_back() {
+        let mut app = zgx_script::testing::TestApp::new(|r| {
+            zgx_script::ScriptHost::new(
+                r,
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dictation_fixture.luau"),
+            )
+        });
+        app.ui.scene.borrow_mut().resize(960., 700.);
+        app.frames(30);
+        assert_eq!(app.error(), None);
+        app.click("role:textbox \"Message\"");
+        let editor = app.ui.focused_editor().unwrap();
+        let lease = EditorLease::new(editor.clone()).unwrap();
+        editor.set_composition("正在", None, &[]);
+        assert!(!lease.valid());
+        assert!(EditorLease::new(editor.clone()).is_none());
+        editor.set_composition("", None, &[]);
+        let lease = EditorLease::new(editor.clone()).unwrap();
+        editor.paste("x");
+        editor.set_selection(0, 1);
+        editor.paste("");
+        assert_eq!(editor.editor.borrow().text().as_ref(), "");
+        assert!(!lease.valid(), "revision protects against edit-and-revert");
     }
 }

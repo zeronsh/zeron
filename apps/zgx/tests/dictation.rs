@@ -1,22 +1,72 @@
 //! Dictation uses the native editor, with deterministic transcription events.
-use std::path::PathBuf;
+use serde_json::{Value as Json, json};
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use zgx_script::{ScriptHost, Value, testing::TestApp};
-fn app() -> TestApp {
-    let mut app = TestApp::new(|r| {
-        let host = ScriptHost::new(
-            r,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dictation_fixture.luau"),
-        );
-        host.action("dictation.control", |_| {});
+type Heard = Rc<RefCell<Vec<Json>>>;
+/// `dictation.call` as the host answers it, heard and never opening a microphone.
+fn played(host: &ScriptHost, installed: bool) -> Heard {
+    let heard: Heard = Rc::default();
+    let said = heard.clone();
+    let shared = host.shared("dictation", Value::from_json(r#"{"phase":"idle"}"#).unwrap());
+    let installed = Rc::new(std::cell::Cell::new(installed));
+    host.async_action("dictation.call", move |v: Value| {
+        let args: Json = serde_json::from_str(&v.to_json()).unwrap();
+        said.borrow_mut().push(args.clone());
+        let state = |s: Json| shared.set(Value::from_json(&s.to_string()).unwrap());
+        let answer = match args["op"].as_str() {
+            Some("start") => {
+                let s = json!({"phase":"starting", "serial":1, "target":args["target"], "hold":args["hold"]});
+                state(s.clone());
+                s
+            }
+            Some("stop") => {
+                state(json!({"phase":"finalizing", "serial":1}));
+                Json::Null
+            }
+            Some("cancel") => {
+                state(json!({"phase":"cancelled", "serial":1}));
+                Json::Null
+            }
+            Some("download") => {
+                state(json!({"phase":"downloading", "bytes":201000000, "total":670000000}));
+                Json::Null
+            }
+            Some("remove") => {
+                installed.set(false);
+                Json::Null
+            }
+            Some("status") => json!({"installed":installed.get(), "size":670000000}),
+            Some("inputs") => json!([{"id":"usb", "name":"USB microphone"}]),
+            _ => Json::Null,
+        };
+        async move { Ok(Value::from_json(&answer.to_string()).unwrap()) }
+    });
+    heard
+}
+fn at(fixture: &str, installed: bool) -> (TestApp, Heard) {
+    let fixture = fixture.to_string();
+    let heard: Rc<RefCell<Option<Heard>>> = Rc::default();
+    let keep = heard.clone();
+    let mut app = TestApp::new(move |r| {
+        let host = ScriptHost::new(r, PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui").join(&fixture));
+        *keep.borrow_mut() = Some(played(&host, installed));
         host.action("dictation.guard", |_| {});
         host
     });
     app.ui.scene.borrow_mut().resize(960., 700.);
     app.frames(30);
-    assert_eq!(app.error(), None);
+    assert_eq!(app.error(), None, "{}", app.tree());
+    let heard = heard.borrow().clone().unwrap();
+    (app, heard)
+}
+fn app() -> TestApp {
+    let (mut app, _) = at("dictation_fixture.luau", true);
     app.click("role:textbox \"Message\"");
     app.frames(2);
     app
+}
+fn ops(heard: &Heard, op: &str) -> usize {
+    heard.borrow().iter().filter(|a| a["op"] == op).count()
 }
 fn state(app: &TestApp, key: &str) -> String {
     app.host
@@ -145,4 +195,81 @@ fn dictation_can_finalize_a_queue_send_while_the_agent_is_running() {
     a.frames(3);
     command(&mut a, "final");
     assert_eq!(state(&a, "dictation_sent"), "你好 🌎");
+}
+
+#[test]
+fn dictation_holds_from_the_shortcut_and_a_repeat_starts_nothing() {
+    let (mut a, heard) = at("dictation_fixture.luau", true);
+    a.click("role:textbox \"Message\"");
+    a.frames(2);
+    let mut held = zgx::input::Modifiers::default();
+    if cfg!(target_os = "macos") {
+        held.meta = true;
+    } else {
+        held.control = true;
+    }
+    zgx::input::set_held_modifiers(&a.ui.runtime, held);
+    a.frames(2);
+    assert!(a.host.run_command("shell.dictate"));
+    assert!(a.wait_until(|_| ops(&heard, "start") == 1));
+    assert!(a.host.run_command("shell.dictate"));
+    a.frames(3);
+    assert_eq!(ops(&heard, "start"), 1, "key repeat must not start another session");
+    // Letting go at once is a tap: nothing is transcribed.
+    zgx::input::set_held_modifiers(&a.ui.runtime, zgx::input::Modifiers::default());
+    assert!(a.wait_until(|_| ops(&heard, "cancel") >= 1));
+    assert_eq!(ops(&heard, "stop"), 0);
+    assert_eq!(a.error(), None);
+}
+#[test]
+fn dictation_stops_when_the_microphone_is_released_outside_it() {
+    let (mut a, heard) = at("dictation_fixture.luau", true);
+    a.click("role:textbox \"Message\"");
+    a.frames(2);
+    let b = a.bounds("#dictation-microphone");
+    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+    a.ui.dispatch(zgx::input::InputEvent::PointerDown { x, y, button: zgx::input::PointerButton::Primary });
+    assert!(a.wait_until(|_| ops(&heard, "start") == 1));
+    assert_eq!(heard.borrow().iter().find(|o| o["op"] == "start").unwrap()["target"], "main");
+    a.ui.dispatch(zgx::input::InputEvent::PointerMove { x: 500., y: 50. });
+    a.ui.dispatch(zgx::input::InputEvent::PointerUp { x: 500., y: 50., button: zgx::input::PointerButton::Primary });
+    assert!(a.wait_until(|_| ops(&heard, "cancel") + ops(&heard, "stop") >= 1), "release outside stops capture");
+    assert_eq!(a.error(), None);
+}
+#[test]
+fn voice_page_downloads_on_first_turning_on_and_removes_the_model() {
+    let (mut a, heard) = at("voice_fixture.luau", false);
+    assert!(a.wait_until(|_| ops(&heard, "status") >= 1));
+    a.frames(5);
+    assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
+    assert!(!a.tree().contains("Speech model"), "{}", a.tree());
+    a.click("role:switch \"Dictation\"");
+    assert!(a.wait_until(|_| ops(&heard, "download") == 1));
+    a.frames(5);
+    assert!(a.tree().contains("Downloading · 201 of 670 MB"), "{}", a.tree());
+    // It arrives: on, with the microphone and the model to remove.
+    a.host.shared("dictation", Value::Nil).set(Value::from_json(r#"{"phase":"ready"}"#).unwrap());
+    a.frames(10);
+    assert_eq!(a.error(), None);
+    assert!(a.tree().contains("Speech model"), "{}", a.tree());
+    a.click("role:button \"Remove\"");
+    assert!(a.wait_until(|_| ops(&heard, "remove") == 1));
+    a.frames(10);
+    assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
+    assert!(!a.tree().contains("Speech model"), "{}", a.tree());
+    assert_eq!(a.error(), None);
+}
+#[test]
+fn voice_page_turned_off_mid_download_cancels_it() {
+    let (mut a, heard) = at("voice_fixture.luau", false);
+    assert!(a.wait_until(|_| ops(&heard, "status") >= 1));
+    a.frames(5);
+    a.click("role:switch \"Dictation\"");
+    assert!(a.wait_until(|_| ops(&heard, "download") == 1));
+    a.frames(5);
+    a.click("role:switch \"Dictation\"");
+    assert!(a.wait_until(|_| ops(&heard, "cancel") == 1));
+    a.frames(5);
+    assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
+    assert_eq!(a.error(), None);
 }

@@ -28,7 +28,6 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "notifications",
     "navigate",
     "compose",
-    "dictation",
     "network",
     "clipboard",
     "files",

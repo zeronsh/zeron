@@ -64,6 +64,8 @@ for _, k in
 		{ id = "shell.check_updates", title = "Check for Updates…", key = "", group = "App", menu = "Application", rule = true },
 		{ id = "shell.settings", title = "Settings", key = "cmd+,", group = "App", menu = "Application", reserved = true },
 		{ id = "shell.find", title = "Find", key = "cmd+f", group = "App", menu = "Edit" },
+		-- (Held: screens/chat/dictation makes its command.)
+		{ id = "shell.dictate", title = "Hold to dictate", key = "cmd+d", group = "App", menu = "Edit", elsewhere = true },
 		{ id = "shell.close", title = "Close", key = "cmd+w", group = "App", menu = "File", reserved = true },
 		-- (No key of their own: Settings → Shortcuts can give them one.)
 		{ id = "shell.reload", title = "Reload Zeron", key = "", group = "App", menu = "View" },

@@ -39,7 +39,7 @@ const VERSION: u64 = 1;
 /// granted on install, even to your own plugins; always asked. (A
 /// `ui.replace` module runs as the app's own code, every app grant with it:
 /// zgx's `require` of `@app/…` loads the replacement in the app's VM.)
-pub const OUTSIDE_SANDBOX: &[&str] = &["native", "commands", "service", "devices", "ui.replace", "dictation"];
+pub const OUTSIDE_SANDBOX: &[&str] = &["native", "commands", "service", "devices", "ui.replace"];
 
 /// The hosts of a plugin with "network" that names none: any public one.
 pub const ANY_HOST: &str = "*";
@@ -287,15 +287,6 @@ mod tests {
             raw[k] = v.clone();
         }
         Manifest::from_value(raw).unwrap()
-    }
-
-    #[test]
-    fn dictation_permission_is_recorded_and_never_automatically_granted() {
-        let plugin = manifest(json!({"permissions":["dictation", "compose"]}));
-        let requested = record(&plugin);
-        assert_eq!(requested["permissions"], json!(["compose", "dictation"]));
-        assert_eq!(inside_sandbox(&requested)["permissions"], json!(["compose"]));
-        assert!(diff(&empty(), &requested).grew());
     }
 
     #[test]

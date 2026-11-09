@@ -415,114 +415,16 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		run = run_command,
 	}
-	local function send(text: string)
-		-- Editing a queued message: Send saves it.
-		if editing:peek() then
-			edits.finish("commit")
-			return
-		end
-		-- A draft that is only one of Zeron's own commands runs it.
-		local command = completions.command_of(draft:peek())
-		if command then
-			draft:set("")
-			run_command(command)
-			return
-		end
-		-- (The passages it mentions, each in full.)
-		local said_quotes = quotes:peek()
-		local words = string.match(Quote.expand(text, Quote.kept(text, said_quotes)), "^%s*(.-)%s*$") or ""
-		if words == "" and #carried:peek() == 0 then
-			return
-		end
-		-- (Nowhere it can start, a project gone: the line says why.)
-		local is_unsent = lanes.unsent:peek()[chat] ~= nil
-		if is_unsent and where.blocked:peek() then
-			notice:set({ tone = "danger", text = where.blocked:peek(), dismissable = true })
-			return
-		end
-		ui.batch(function()
-			draft:set("")
-			quotes:set({})
-		end)
-		notice:set(nil)
-		-- What it carries goes with it, as the chat page's does.
-		local chips = Shared.take_cargo_of(chat)
-		local pack = Carried.pack(chips, words, words)
-		-- (Each command or skill picked: its canonical reference.)
-		local typed = Invocations.encode(pack.typed)
-		local prompt = Carried.text(typed, pack)
-		-- As the chat page sends: the prompt joins its transcript as the
-		-- transcript's send steps clear of the end (it glides to the top,
-		-- its reply's room opening under it), then goes to the host with
-		-- that id, so the host's copy is the same row.
-		-- (While a turn runs it's queued instead: it shows in the queue, and
-		-- what's picked waits for the turn it will run in.)
-		local queued = not is_unsent and running:peek()
-		local req: { [string]: any } = if queued then {} else picks()
-		req.attachments = pack.attachments
-		req.appshots = Appshots.of_cargo(chips)
-		local function failed(err: any)
-			ui.batch(function()
-				draft:set(text)
-				quotes:set(said_quotes)
-			end)
-			Shared.restore_cargo_of(chat, chips)
-			local why = if type(err) == "table" and err.message then tostring(err.message) else nil
-			notice:set({
-				tone = "danger",
-				text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
-				dismissable = true,
-			})
-		end
-		if queued then
-			req.session, req.text = chat, prompt
-			store.send(req :: any):after(function() end, failed)
-			return
-		end
-		local mid = store.new_id()
-		req.message_id = mid
-		local sent: any = nil
-		T.send(function()
-			local here = view.messages:index_of("id", mid) ~= nil
-			if not here then
-				-- (On its way from this moment: the line under it says so.)
-				view.messages:push { id = mid, role = "user", text = typed, attachments = Carried.shown(pack), waiting = "sending" }
-			end
-		end, mid, name)
-		-- Its first message makes it (New side chat), then sends.
-		if is_unsent then
-			sent = lanes.send_first(chat, prompt, req, place())
-		else
-			req.session, req.text = chat, prompt
-			sent = store.send(req :: any)
-		end
-		sent:after(function() end, failed)
-	end
-	local dictation_editor = ui.ref()
-	Dictation.bind(dictation_editor, draft, function(): string
+	local dictation = Dictation.bind(draft, function(): string
 		local edit = editing:get()
 		return `{chat}|{name}|{if edit then edit.item else ""}`
 	end, function(): boolean
 		local current = session:get()
 		return asks.question:get() ~= nil or asks.approval:get() ~= nil
 			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
-	end, send, name)
-	local dictation_notice = Dictation.notice_for(name)
-	local shown_notice = ui.computed(function() return notice:get() or dictation_notice:get() end)
+	end, name)
 	return ds.Composer {
-		editor = dictation_editor,
-		dictation_slot = true,
-		dictation_target = name,
-		dictating = Dictation.active_for(name),
-		voice_level = function() return Dictation.state:get().level or 0 end,
-		on_cancel_dictation = Dictation.cancel,
-		on_editor_focus = function() Dictation.focus(dictation_editor) end,
-		on_editor_change = Dictation.changed,
-		on_editor_caret = Dictation.caret,
-		on_editor_blur = Dictation.blur,
-		on_editor_key_up = Dictation.key_up,
-		on_send_press = Dictation.send_press,
-		before_send = function() return Dictation.before_send(name) end,
+		dictation = dictation,
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = function(cid: string)
@@ -575,9 +477,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_mention = completions.on_mention,
 		mention_enabled = completions.enabled,
 		mention_empty = completions.empty,
-		notice = shown_notice,
+		notice = notice,
 		on_dismiss_notice = function()
-			Dictation.notice:set(nil)
 			notice:set(nil)
 		end,
 		harnesses = function(): { any }
@@ -614,7 +515,89 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				add.open()
 			end
 		end,
-		on_send = send,
+		on_send = function(text: string)
+			-- Editing a queued message: Send saves it.
+			if editing:peek() then
+				edits.finish("commit")
+				return
+			end
+			-- A draft that is only one of Zeron's own commands runs it.
+			local command = completions.command_of(draft:peek())
+			if command then
+				draft:set("")
+				run_command(command)
+				return
+			end
+			-- (The passages it mentions, each in full.)
+			local said_quotes = quotes:peek()
+			local words = string.match(Quote.expand(text, Quote.kept(text, said_quotes)), "^%s*(.-)%s*$") or ""
+			if words == "" and #carried:peek() == 0 then
+				return
+			end
+			-- (Nowhere it can start, a project gone: the line says why.)
+			local is_unsent = lanes.unsent:peek()[chat] ~= nil
+			if is_unsent and where.blocked:peek() then
+				notice:set({ tone = "danger", text = where.blocked:peek(), dismissable = true })
+				return
+			end
+			ui.batch(function()
+				draft:set("")
+				quotes:set({})
+			end)
+			notice:set(nil)
+			-- What it carries goes with it, as the chat page's does.
+			local chips = Shared.take_cargo_of(chat)
+			local pack = Carried.pack(chips, words, words)
+			-- (Each command or skill picked: its canonical reference.)
+			local typed = Invocations.encode(pack.typed)
+			local prompt = Carried.text(typed, pack)
+			-- As the chat page sends: the prompt joins its transcript as the
+			-- transcript's send steps clear of the end (it glides to the top,
+			-- its reply's room opening under it), then goes to the host with
+			-- that id, so the host's copy is the same row.
+			-- (While a turn runs it's queued instead: it shows in the queue, and
+			-- what's picked waits for the turn it will run in.)
+			local queued = not is_unsent and running:peek()
+			local req: { [string]: any } = if queued then {} else picks()
+			req.attachments = pack.attachments
+			req.appshots = Appshots.of_cargo(chips)
+			local function failed(err: any)
+				ui.batch(function()
+					draft:set(text)
+					quotes:set(said_quotes)
+				end)
+				Shared.restore_cargo_of(chat, chips)
+				local why = if type(err) == "table" and err.message then tostring(err.message) else nil
+				notice:set({
+					tone = "danger",
+					text = if is_unsent and why then why else locale.s("chat.lane_tab.didnt_send"),
+					dismissable = true,
+				})
+			end
+			if queued then
+				req.session, req.text = chat, prompt
+				store.send(req :: any):after(function() end, failed)
+				return
+			end
+			local mid = store.new_id()
+			req.message_id = mid
+			local sent: any = nil
+			T.send(function()
+				local here = view.messages:index_of("id", mid) ~= nil
+				if not here then
+					-- (On its way from this moment: the line under it says so.)
+					view.messages:push { id = mid, role = "user", text = typed, attachments = Carried.shown(pack), waiting = "sending" }
+				end
+			end, mid, name)
+			-- Its first message makes it (New side chat), then sends.
+			if is_unsent then
+				sent = lanes.send_first(chat, prompt, req, place())
+			else
+				req.session, req.text = chat, prompt
+				sent = store.send(req :: any)
+			end
+			sent:after(function() end, failed)
+		end,
 		on_stop = function()
 			store.interrupt(chat)
 		end,

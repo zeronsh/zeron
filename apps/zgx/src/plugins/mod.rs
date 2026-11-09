@@ -210,9 +210,6 @@ struct PrWatch {
 }
 
 pub struct Bridge {
-    dictation: RefCell<crate::dictation::Service>,
-    dictation_wake: zgx::task::LatestSender<()>,
-    dictation_editor: RefCell<Option<crate::dictation::EditorLease>>,
     host: ScriptHost,
     /// Where each plugin's requests may go, as its manifest names them.
     network: network::Network,
@@ -469,15 +466,11 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
-    let (dictation_wake, mut dictation_work) = zgx::task::latest::<()>();
     let plugin_network = network::Network::default();
     host.fetch_policy(plugin_network.clone());
     // What the app's VM (a template in preview, while it is one) may reach.
     host.guard(preview::guard);
     let bridge = Rc::new(Bridge {
-        dictation_wake,
-        dictation_editor: RefCell::default(),
-        dictation: RefCell::new(crate::dictation::Service::new(engine::data_dir().expect("engine data directory").join("models"))),
         host: host.clone(),
         network: plugin_network,
         windows: cx.windows.clone(),
@@ -534,53 +527,6 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     *bridge.me.borrow_mut() = Rc::downgrade(&bridge);
     BRIDGE.with(|b| *b.borrow_mut() = Rc::downgrade(&bridge));
     bridge.actions();
-    let weak = Rc::downgrade(&bridge);
-    host.action("dictation.guard", {
-        let weak = Rc::downgrade(&bridge);
-        move |asked| {
-            if let Some(b) = weak.upgrade() {
-                let lease = b.ui.upgrade().and_then(|ui| ui.focused_editor()).and_then(crate::dictation::EditorLease::new);
-                let refused = lease.is_none();
-                if let Some(target) = asked.field("target").map(text).filter(|s| s.len() <= 200) {
-                    b.dictation.borrow_mut().target(&target);
-                }
-                *b.dictation_editor.borrow_mut() = lease;
-                if refused { b.dictation.borrow_mut().cancel(); b.publish_dictation(); }
-            }
-        }
-    });
-    host.action("dictation.control", move |asked| {
-        if let Some(b) = weak.upgrade() {
-            let owner = b.dictation.borrow().owner().map(str::to_owned);
-            if let Some(owner) = owner {
-                let args = value_json(&asked);
-                if matches!(args["op"].as_str(), Some("stop" | "cancel")) {
-                    if args["op"] == "cancel" { b.dictation_editor.borrow_mut().take(); }
-                    let _ = b.dictation.borrow_mut().call(&owner, &args);
-                    b.publish_dictation();
-                }
-            }
-        }
-    });
-    let weak = Rc::downgrade(&bridge);
-    cx.tasks.spawn(async move {
-        // No dictation timer while the plugin is off or idle.
-        while dictation_work.recv().await.is_some() {
-            loop {
-                {
-                    let Some(b) = weak.upgrade() else { return };
-                    if !b.dictation.borrow().needs_poll() { break; }
-                    if b.dictation_editor.borrow().as_ref().is_some_and(|lease| !lease.valid()) {
-                        b.dictation_editor.borrow_mut().take();
-                        b.dictation.borrow_mut().cancel();
-                    }
-                    b.dictation.borrow_mut().poll();
-                    b.publish_dictation();
-                }
-                zgx::timer::sleep(Duration::from_millis(40)).await;
-            }
-        }
-    });
 
     // Each plugin's records, as what they're made of changes.
     let weak = Rc::downgrade(&bridge);
@@ -650,8 +596,6 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let keep = RefCell::new(Some(bridge));
     cx.on_closed(move || {
         if let Some(b) = keep.borrow_mut().take() {
-            b.dictation_editor.borrow_mut().take();
-            b.dictation.borrow_mut().release();
             b.watches.borrow_mut().clear();
             if let Some(c) = b.consent.borrow_mut().take() {
                 c.close();
@@ -697,7 +641,7 @@ thread_local! {
 
 /// `work` on a thread of its own, its result once done (none if it panicked):
 /// a look's file work, which reads folders of a thousand files.
-async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+pub(crate) async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     let (tell, mut heard) = zgx::task::latest::<T>();
     std::thread::spawn(move || {
         tell.send(work());
@@ -1357,44 +1301,12 @@ impl Bridge {
         if *self.loaded.borrow() == want {
             return;
         }
-        let dictation_owner = self.dictation.borrow().owner().map(str::to_owned);
-        if let Some(owner) = dictation_owner {
-            self.host.shared(&format!("plugin.{owner}.dictation"), Value::Nil).set(json_value(&json!({"phase":"cancelled"})));
-        }
-        self.dictation_editor.borrow_mut().take();
-        self.dictation.borrow_mut().release();
-        self.publish_dictation();
         *self.loaded.borrow_mut() = want.clone();
         self.host.set_plugins(want);
         self.reload();
     }
 
-    fn publish_dictation(&self) {
-        let (owner, state) = {
-            let d = self.dictation.borrow();
-            (d.owner().map(str::to_owned), d.snapshot())
-        };
-        // Only the host's compositor and the owning plugin see transcript text.
-        let mut app = state.clone();
-        app["owner"] = json!(owner);
-        let app = json_value(&app);
-        let shared = self.host.shared("dictation", Value::Nil);
-        if shared.signal().with_untracked(Value::clone) != app { shared.set(app); }
-        if let Some(id) = owner {
-            let value = json_value(&state);
-            let shared = self.host.shared(&format!("plugin.{id}.dictation"), Value::Nil);
-            if shared.signal().with_untracked(Value::clone) != value { shared.set(value); }
-        }
-    }
-
     fn reload(&self) {
-        let dictation_owner = self.dictation.borrow().owner().map(str::to_owned);
-        if let Some(owner) = dictation_owner {
-            self.host.shared(&format!("plugin.{owner}.dictation"), Value::Nil).set(json_value(&json!({"phase":"cancelled"})));
-        }
-        self.dictation_editor.borrow_mut().take();
-        self.dictation.borrow_mut().release();
-        self.publish_dictation();
         if let Err(error) = self.host.reload() {
             eprintln!("zeron-zgx: the window didn't reload with its plugins: {error}");
             self.blame(&error);
@@ -2066,31 +1978,6 @@ impl Bridge {
             return;
         }
         let host = &self.host;
-        host.async_action(format!("plugin.{id}.dictation"), {
-            let (me, plugin) = (self.me.borrow().clone(), id.to_string());
-            move |asked| {
-                let (me, plugin) = (me.clone(), plugin.clone());
-                async move {
-                    let b = me.upgrade().ok_or("The window closed")?;
-                    let item = b.item(&plugin).filter(|i| i.status() == "on" && i.may("dictation")).ok_or("This plugin wasn't allowed dictation")?;
-                    let args = value_json(&asked);
-                    if args["op"] == "inputs" {
-                        let inputs = off_thread(|| zeron_voice::input_devices().into_iter().map(|d| json!({"id": d.id, "name":d.name})).collect::<Vec<_>>()).await.ok_or("Could not list microphones")?;
-                        return Ok(json_value(&json!(inputs)));
-                    }
-                    if args["op"] == "start" && !item.may("compose") {
-                        return Err("Dictation insertion also requires compose permission".to_string());
-                    }
-                    let result = b.dictation.borrow_mut().call(&plugin, &args)?;
-                    b.dictation_wake.send(());
-                    if args["op"] == "start" {
-                        b.request("dictation_begin", &plugin, json_value(&json!({"serial":result["serial"], "target":args["target"]})));
-                    }
-                    b.publish_dictation();
-                    Ok(json_value(&result))
-                }
-            }
-        });
         let calls_key = format!("plugin.{id}.calls");
         let inbox_key = format!("plugin.{id}.inbox");
         expose_own(host, id);
@@ -2246,16 +2133,6 @@ impl Bridge {
             shared.set(json_value(&Json::Object(values)));
             self.settings_own.borrow_mut().insert(id.to_string(), shared);
         }
-        host.action(format!("plugin.{id}.setting_options"), {
-            let (me, plugin) = (me.clone(), plugin.clone());
-            move |asked| {
-                if let Some(b) = me.upgrade() {
-                    let args = value_json(&asked);
-                    let result = b.settings.borrow_mut().set_options(&plugin, args["id"].as_str().unwrap_or(""), &args["options"]);
-                    if result.is_ok() { b.publish_settings(true, &[plugin.clone()]); }
-                }
-            }
-        });
         host.action(format!("plugin.{id}.setting_status"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |asked| {
@@ -2912,21 +2789,6 @@ impl Bridge {
     fn actions(&self) {
         let host = &self.host;
         let me = Rc::downgrade(&self.me());
-        host.action("plugins.setting_action", {
-            let me = me.clone();
-            move |asked| {
-                if let Some(b) = me.upgrade() {
-                    let args = value_json(&asked);
-                    let plugin = args["plugin"].as_str().unwrap_or("");
-                    let id = args["id"].as_str().unwrap_or("");
-                    if !b.settings.borrow().is_action(plugin, id) { return; }
-                    let shared = b.host.shared(&format!("plugin.{plugin}.setting_events"), Value::Nil);
-                    let previous = value_json(&shared.signal().with_untracked(Value::clone));
-                    let seq = previous["seq"].as_u64().unwrap_or(0) + 1;
-                    shared.set(json_value(&json!({"seq":seq, "id":id})));
-                }
-            }
-        });
         // Which device's plugins Settings → Plugins shows: another's (its
         // id), or this one's (nil). The same one again looks again.
         host.action("plugins.target", {

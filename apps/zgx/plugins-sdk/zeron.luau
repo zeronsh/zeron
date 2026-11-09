@@ -851,18 +851,6 @@ return function(id: string): any
 	-- A status for one of its settings, drawn by Zeron beside its control
 	-- (gone when the plugin is off): `{ badge = "Ready", tone = "success" }`,
 	-- `text` in the setting's description's place; nil clears it.
-    function M.set_options(key: string, options: { any })
-        ui.invoke(`{prefix}.setting_options`, { id = key, options = options })
-    end
-    function M.on_setting_action(fn: (string) -> ())
-        local events = ui.shared(`{prefix}.setting_events`, { seq = 0 })
-        local seen = (events:peek() :: any).seq or 0
-        ui.effect(function()
-            local e: any = events:get()
-            if e.seq and e.seq > seen then seen = e.seq; fn(e.id) end
-        end)
-    end
-
 	function M.set_status(key: string, status: { badge: string?, tone: string?, text: string? }?)
 		ui.invoke(`{prefix}.setting_status`, { id = key, status = if status == nil then ui.null else status })
 	end
@@ -1189,15 +1177,6 @@ return function(id: string): any
 	function M.open_url(url: string)
 		ui.invoke(`{prefix}.open_url`, url)
 	end
-
-	-- Local transcription; requires "dictation" (and "compose" to start).
-    -- ops: catalog, inputs, installed, download, remove, start, stop, cancel, status.
-    function M.dictation(args: any): any
-        return ui.call(`{prefix}.dictation`, args)
-    end
-    function M.dictation_state(): any
-        return ui.shared(`{prefix}.dictation`, { phase = "idle" })
-    end
 
 	function M.compose(text: string)
 		ui.invoke("zeron.compose.insert", text)

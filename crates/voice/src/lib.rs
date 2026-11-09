@@ -12,8 +12,6 @@ use std::{
     },
 };
 
-pub mod backend;
-pub mod catalog;
 mod resample;
 
 pub const MAX_SECONDS: usize = 60;
@@ -503,10 +501,6 @@ impl Session {
     }
     pub fn poll(&mut self) -> Option<Event> {
         self.events.try_recv().ok()
-    }
-    /// Stop capture and invalidate pending native results.
-    pub fn cancel(&mut self) {
-        self.cancel.store(true, Ordering::Release);
     }
     pub fn finish(&mut self) {
         self.stop.store(true, Ordering::Release);

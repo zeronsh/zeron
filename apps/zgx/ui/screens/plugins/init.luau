@@ -186,8 +186,6 @@ local function run(r: any)
 		elseif type(to) == "table" and type(to.settings) == "string" and to.settings ~= "account" then
 			route.settings(to.settings)
 		end
-	elseif r.kind == "dictation_begin" then
-        require("@app/screens/chat/dictation").begin(r.title, r.value.serial, r.value.target)
 	elseif r.kind == "compose" and type(r.value) == "string" then
 		chat.store.insert(string.sub(r.value, 1, 20000))
 	elseif r.kind == "compose_comment" and type(r.value) == "table" and type(r.title) == "string" then
