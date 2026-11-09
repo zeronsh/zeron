@@ -249,7 +249,17 @@ impl TitleGenerator {
         if latest == current || !native.seen.iter().any(|t| t == current) {
             return Ok(());
         }
-        self.inner.workspace.rename_chat(chat_id, &latest)?;
+        // `current` was read before the transcript (and any Codex write-back):
+        // the person may have renamed the chat since, so only replace it if it
+        // still holds that agent title.
+        if !self
+            .inner
+            .workspace
+            .rename_chat_from(chat_id, current, &latest)?
+        {
+            tracing::debug!(chat = %chat_id, "chat renamed meanwhile; keeping its title");
+            return Ok(());
+        }
         tracing::info!(chat = %chat_id, title = %latest, "chat follows its agent's title");
         Ok(())
     }

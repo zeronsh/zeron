@@ -1353,6 +1353,29 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_chat(chat_id, title))?)
     }
 
+    /// Rename only while the chat's title is still `expected`, checked under
+    /// the same lock as the write. `false` when it changed (or no such chat).
+    pub fn rename_chat_from(
+        &self,
+        chat_id: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, EngineError> {
+        let mut inner = lock(&self.inner.reg);
+        let unchanged = inner
+            .chat(chat_id)?
+            .is_some_and(|c| c.title.as_deref().map(str::trim) == Some(expected));
+        if !unchanged || !inner.rename_chat(chat_id, title)? {
+            return Ok(false);
+        }
+        drop(inner);
+        self.inner.bump_changed();
+        if let Some(room) = lock(&self.inner.room).as_ref() {
+            room.nudge();
+        }
+        Ok(true)
+    }
+
     /// Backdate a chat's activity timestamps (epoch ms). Returns false when
     /// the chat doesn't exist.
     pub fn set_chat_activity(
@@ -2158,6 +2181,39 @@ mod tests {
         chat.parent_chat_id = None;
         host.mutate(|doc| doc.upsert_chat(&chat)).unwrap();
         assert!(!host.parent_unknown("claimed"));
+    }
+
+    /// An agent title only replaces the title it was read against: a rename
+    /// that lands in between wins.
+    #[tokio::test]
+    async fn agent_title_follow_skips_a_chat_renamed_meanwhile() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        host.create_chat("c", None, Some("test-device"), None, None)
+            .unwrap();
+        host.rename_chat("c", "Agent title").unwrap();
+
+        assert!(host.rename_chat_from("c", "Agent title", "Newer agent title").unwrap());
+        assert_eq!(host.chat("c").unwrap().unwrap().title.as_deref(), Some("Newer agent title"));
+
+        host.rename_chat("c", "Mine").unwrap();
+        assert!(!host.rename_chat_from("c", "Newer agent title", "Latest agent title").unwrap());
+        assert_eq!(host.chat("c").unwrap().unwrap().title.as_deref(), Some("Mine"));
+        assert!(!host.rename_chat_from("missing", "Mine", "x").unwrap());
     }
 
     #[tokio::test]
