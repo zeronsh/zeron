@@ -888,8 +888,8 @@ local function is_number(text: string): boolean
 	return #unit <= 4
 end
 
-local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
-	local b, ctx = props.b, props.ctx
+-- A table's columns' tracks and alignments, by what its cells hold (above).
+local function table_shape(b: any): ({ string }, { string })
 	local count = #b.head
 	local tracks: { string } = {}
 	local aligns: { string } = {}
@@ -918,42 +918,13 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 	if not any_long then
 		tracks[count] = "minmax(max-content, 1fr)"
 	end
-	local function cell(content: { MarkdownRun }, c: number, head: boolean, last_row: boolean): Node
-		local text: { [string]: any } = {
-			class = "md-text",
-			-- (Not wrapping by a rounding, a short column's track being as wide
-			-- as its words.)
-			wrap = tracks[c] == "auto",
-			text_size = "$zeron.prose.small.size",
-			line_height = "$zeron.prose.small.line",
-		}
-		if head then
-			text.weight = "$font.weight.medium"
-			text.color = "$text.secondary"
-		end
-		return ui.column {
-			class = "md-cell",
-			-- (A column's floor, held by its header: the others' longest words
-			-- still count.)
-			min_w = if head and tracks[c] == "auto" then ui.raw(TABLE_FLOOR, "a long column's least width") else nil,
-			items = aligns[c],
-			pl = if c == 1 then "$space.4" else "$space.3",
-			pr = if c == count then "$space.4" else "$space.3",
-			py = "$space.2",
-			border_sides = { 0, 0, if last_row then 0 else 1, 0 },
-			border_color = if head then "$border" else "$border.subtle",
-			runs(content, text, ctx),
-		}
-	end
-	local cells: { Node } = {}
-	for c, head in b.head do
-		table.insert(cells, cell(head, c, true, #b.rows == 0))
-	end
-	for r, row in b.rows do
-		for c = 1, count do
-			table.insert(cells, cell(row[c] or {}, c, false, r == #b.rows))
-		end
-	end
+	return tracks, aligns
+end
+
+-- A table's frame: its grid (`cols` its tracks, `cells` in it) in a box that
+-- scrolls sideways when it must, with its rail. (In a component: its scroll
+-- and hover are its own.)
+local function table_frame(cols: string | () -> string, cells: any): Node
 	-- (As wide as the view, or what the grid's minimums need if that's more:
 	-- a view lays its content out with no limit, so the width to share has
 	-- to come from here.)
@@ -996,7 +967,7 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 					-- (Its `auto` columns share what's left past their words, as
 					-- CSS's grid stretches them: the rules reach the frame.)
 					justify = "stretch",
-					cols = table.concat(tracks, " "),
+					cols = cols,
 					cells,
 				},
 			},
@@ -1015,6 +986,167 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 			end,
 		},
 	}
+end
+
+local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
+	local b, ctx = props.b, props.ctx
+	local count = #b.head
+	local tracks, aligns = table_shape(b)
+	local function cell(content: { MarkdownRun }, c: number, head: boolean, last_row: boolean): Node
+		local text: { [string]: any } = {
+			class = "md-text",
+			-- (Not wrapping by a rounding, a short column's track being as wide
+			-- as its words.)
+			wrap = tracks[c] == "auto",
+			text_size = "$zeron.prose.small.size",
+			line_height = "$zeron.prose.small.line",
+		}
+		if head then
+			text.weight = "$font.weight.medium"
+			text.color = "$text.secondary"
+		end
+		return ui.column {
+			class = "md-cell",
+			-- (A column's floor, held by its header: the others' longest words
+			-- still count.)
+			min_w = if head and tracks[c] == "auto" then ui.raw(TABLE_FLOOR, "a long column's least width") else nil,
+			items = aligns[c],
+			pl = if c == 1 then "$space.4" else "$space.3",
+			pr = if c == count then "$space.4" else "$space.3",
+			py = "$space.2",
+			border_sides = { 0, 0, if last_row then 0 else 1, 0 },
+			border_color = if head then "$border" else "$border.subtle",
+			runs(content, text, ctx),
+		}
+	end
+	local cells: { Node } = {}
+	for c, head in b.head do
+		table.insert(cells, cell(head, c, true, #b.rows == 0))
+	end
+	for r, row in b.rows do
+		for c = 1, count do
+			table.insert(cells, cell(row[c] or {}, c, false, r == #b.rows))
+		end
+	end
+	return table_frame(table.concat(tracks, " "), cells)
+end)
+
+-- A find's matches in a cell's words, as `add_runs` counts them.
+local function cell_matches(list: { MarkdownRun }, ctx: Ctx?, q: string): number
+	return #MarkdownFind.occurrences(MarkdownFind.words(attached_runs(autolinked(list), ctx)), q)
+end
+
+-- A table being written (`live`: the block as it is now), grown in place: a
+-- row written before keeps its cells, the row being written has its cells'
+-- words made again, and a new row's cells join the grid. Its columns are
+-- sized as `TableBlock` sizes them, again as rows come (the grid laid out
+-- again, its cells as they were). `veil(text, k)`: what of the `k`th cell
+-- (its header's first, then each row's) is still fading in; `find`: the
+-- find marking it, its matches numbered on from `n`.
+local TableLive = ui.component(function(props: {
+	b: any,
+	live: any,
+	ctx: Ctx?,
+	veil: ((text: string, k: number) -> { VeilChunk })?,
+	find: { q: string, cur: number, n: number }?,
+}): Node
+	local live, ctx, find, veil = props.live, props.ctx, props.find, props.veil
+	local count = #props.b.head
+	local shape = ui.computed(function(): any
+		local b = live:get()
+		local tracks, aligns = table_shape(b)
+		return { tracks = tracks, aligns = aligns, rows = #b.rows }
+	end)
+	-- Its cells, a row at a time: each its key, its column and row (0 its
+	-- header), its words, and with a find the matches before it.
+	local cells = ui.computed(function(): { any }
+		local b = live:get()
+		local list: { any } = {}
+		local from = if find then find.n else 0
+		local function add(k: string, content: { MarkdownRun }, c: number, r: number)
+			local item: { [string]: any } = { k = k, c = c, r = r, runs = content }
+			if find then
+				item.from = from
+				from += cell_matches(content, ctx, find.q)
+			end
+			table.insert(list, item)
+		end
+		for c, head in b.head do
+			add(`h{c}`, head, c, 0)
+		end
+		for r, row in b.rows do
+			for c = 1, count do
+				add(`{r}:{c}`, row[c] or {}, c, r)
+			end
+		end
+		return list
+	end)
+	local function cell(item: any, _: number, row: any): Node
+		local c, r = item.c :: number, item.r :: number
+		local head = r == 0
+		-- (Its place among the table's parts, by which it fades.)
+		local k = if head then c else count + (r - 1) * count + c
+		-- Its words, wrapping in a long column: made again (in the cell it
+		-- was) if its column turns long or short, a text's `wrap` being read
+		-- as it's built.
+		local function words(wrap: boolean): Node
+			local text: { [string]: any } = {
+				class = "md-text",
+				wrap = wrap,
+				text_size = "$zeron.prose.small.size",
+				line_height = "$zeron.prose.small.line",
+			}
+			if head then
+				text.weight = "$font.weight.medium"
+				text.color = "$text.secondary"
+			end
+			return runs_made(function(): ({ MarkdownRun }, Ctx?)
+				local now = row:get()
+				local mine: Ctx = if ctx then table.clone(ctx) else { tasks = {} }
+				local fade = veil
+				mine.veil = if fade
+					then { native = function(t: string): { VeilChunk }
+						return fade(t, k)
+					end } :: any
+					else nil
+				mine.find = if find then { q = find.q, cur = find.cur, n = now.from } else nil
+				return now.runs, mine
+			end, text, ctx)
+		end
+		return ui.column {
+			class = "md-cell",
+			min_w = if head
+				then (function(): number?
+					return if shape:get().tracks[c] == "auto" then ui.raw(TABLE_FLOOR, "a long column's least width") else nil
+				end) :: any
+				else nil,
+			items = (function(): string
+				return shape:get().aligns[c]
+			end) :: any,
+			pl = if c == 1 then "$space.4" else "$space.3",
+			pr = if c == count then "$space.4" else "$space.3",
+			py = "$space.2",
+			border_sides = function(): { number }
+				local rows = shape:get().rows
+				local last = if head then rows == 0 else r == rows
+				return { 0, 0, if last then 0 else 1, 0 }
+			end,
+			border_color = if head then "$border" else "$border.subtle",
+			ui.presence(function(): string
+				return if shape:get().tracks[c] == "auto" then "long" else "short"
+			end, function(kind: string): Node
+				return words(kind == "long")
+			end),
+		}
+	end
+	return table_frame(function(): string
+		return table.concat(shape:get().tracks, " ")
+	end, ui.each(cells, cell, {
+		display = "contents",
+		key = function(item: any): string
+			return item.k
+		end,
+	}))
 end)
 
 -- A code block's lines, coloured by the design system's highlighter
@@ -1031,26 +1163,16 @@ local fit = ui.persist("markdown_code_fit", false)
 type CodeFind = { q: string, from: number, cur: number }
 -- (`veil`, `fading`: what of it is still fading in, as it's written.)
 type CodeVeil = { veil: Veil, fading: { VeilChunk } }
-local function code_text(text: string, lang: string, wrap: boolean?, find: CodeFind?, veil: CodeVeil?): Node
-	local props: { [any]: any } = {
-		wrap = wrap,
-		font = "$font.mono",
-		text_size = "$zeron.prose.code.size",
-		line_height = "$zeron.prose.code.line",
-		color = "$text.primary",
-		literal = true,
-		pl = "$space.4",
-		pr = "$space.5",
-		pb = "$space.3",
-	}
+-- A code block's lines as runs into `out`, each `make` of a span's options
+-- (`ui.span`, or the table itself for a `spans` function): each piece cut
+-- where a find's match starts or ends, and where what's `fading` does.
+-- `kept` (a growing block's, kept by it): its lines' runs and spans from the
+-- last time, a line nothing marks or fades in given again as it was.
+type CodeKept = { syntax: Syntax.Kept, spans: { { runs: { any }, spans: { any } } } }
+local function code_spans(out: { any }, text: string, lang: string, find: CodeFind?, fading: { VeilChunk }, make: (any) -> any, kept: CodeKept?)
 	local marks = if find then MarkdownFind.occurrences(text, find.q) else {}
 	local base = if find then find.from else 0
 	local cur = if find then find.cur else 0
-	local fading = if veil then veil.fading else {}
-	if Syntax.highlighter(lang) == nil and #marks == 0 and #fading == 0 then
-		props[1] = text
-		return ui.text(props)
-	end
 	-- Each piece of the text, cut where a match starts or ends; `goes_on` where it
 	-- is a fade's piece after the first of its run (`continues`, as a paragraph's).
 	local pos = 0
@@ -1062,7 +1184,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 			local s, e = math.max(m[1], from), math.min(m[2], to)
 			if s <= e then
 				if s > at then
-					table.insert(props, ui.span {
+					table.insert(out, make {
 						string.sub(t, at - from + 1, s - from),
 						color = color,
 						fade_in = fade,
@@ -1070,7 +1192,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 						continues = goes_on or at > from or nil,
 					})
 				end
-				table.insert(props, ui.span {
+				table.insert(out, make {
 					string.sub(t, s - from + 1, e - from + 1),
 					color = color,
 					fade_in = fade,
@@ -1082,7 +1204,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 			end
 		end
 		if at <= to then
-			table.insert(props, ui.span {
+			table.insert(out, make {
 				string.sub(t, at - from + 1),
 				color = color,
 				fade_in = fade,
@@ -1093,7 +1215,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 	end
 	-- And where what's fading starts or ends, its colour fading.
 	local function piece(t: string, color: string?)
-		if #fading == 0 or not veil then
+		if #fading == 0 then
 			cut(t, color)
 			return
 		end
@@ -1104,17 +1226,116 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 	end
 	if Syntax.highlighter(lang) == nil then
 		piece(text)
-		return ui.rich(props)
+		return
 	end
-	for i, line in Syntax.lines(text, lang) do
+	-- (Whether a match or a fade reaches into bytes `from` to `to`.)
+	local function touched(from: number, to: number): boolean
+		for _, m in marks do
+			if m[1] <= to and m[2] >= from then
+				return true
+			end
+		end
+		for _, c in fading do
+			if c.from + 1 <= to and c.to >= from then
+				return true
+			end
+		end
+		return false
+	end
+	local lines = if kept then Syntax.lines_kept(text, lang, kept.syntax) else Syntax.lines(text, lang)
+	for i, line in lines do
 		if i > 1 then
 			piece("\n")
+		end
+		if kept then
+			local long = 0
+			for _, run in line do
+				long += #run.text
+			end
+			if not touched(pos + 1, pos + long) then
+				-- (Its spans as last time, if its runs are: a line written
+				-- before, coloured as it was.)
+				local was = kept.spans[i]
+				if not (was and was.runs == line) then
+					local made: { any } = {}
+					for _, run in line do
+						if run.text ~= "" then
+							table.insert(made, { run.text, color = run.color, literal = true })
+						end
+					end
+					was = { runs = line, spans = made }
+					kept.spans[i] = was
+				end
+				for _, s in (was :: any).spans do
+					table.insert(out, s)
+				end
+				pos += long
+				continue
+			end
+			kept.spans[i] = nil
 		end
 		for _, run in line do
 			piece(run.text, run.color)
 		end
 	end
+	if kept then
+		for j = #kept.spans, #lines + 1, -1 do
+			kept.spans[j] = nil
+		end
+	end
+end
+
+-- A code block's text's own options, `wrap`ping or not.
+local function code_props(wrap: boolean?): { [any]: any }
+	return {
+		wrap = wrap,
+		font = "$font.mono",
+		text_size = "$zeron.prose.code.size",
+		line_height = "$zeron.prose.code.line",
+		color = "$text.primary",
+		literal = true,
+		pl = "$space.4",
+		pr = "$space.5",
+		pb = "$space.3",
+	}
+end
+
+local function code_text(text: string, lang: string, wrap: boolean?, find: CodeFind?, veil: CodeVeil?): Node
+	local props = code_props(wrap)
+	local fading = if veil then veil.fading else {}
+	if Syntax.highlighter(lang) == nil and #fading == 0 and not (find and #MarkdownFind.occurrences(text, find.q) > 0) then
+		props[1] = text
+		return ui.text(props)
+	end
+	code_spans(props, text, lang, find, fading, ui.span)
 	return ui.rich(props)
+end
+
+-- A code block being written (`shown`: its text as shown now), its
+-- lines made again in place as it grows (zgx's `spans`): a line written
+-- before keeps its runs, coloured again only where what the lines above
+-- leave it changed; `fading_of`: what of the text is still fading in.
+local function code_text_live(shown: () -> string, lang: string, wrap: boolean?, find: CodeFind?, fading_of: ((text: string) -> { VeilChunk })?): Node
+	local props = code_props(wrap)
+	local kept: CodeKept = { syntax = {}, spans = {} }
+	props.spans = function(): { any }
+		local text = shown()
+		local out: { any } = {}
+		code_spans(out, text, lang, find, if fading_of then fading_of(text) else {}, function(span: any): any
+			return span
+		end, kept)
+		return out
+	end
+	if Syntax.highlighter(lang) ~= nil then
+		return ui.rich(props)
+	end
+	-- (Empty, without a highlighter: a line of nothing, as `code_text`'s
+	-- text is, not a paragraph of none; the fence just opened.)
+	local empty = code_props(wrap)
+	empty[1] = ""
+	return ui.show(function(): boolean
+		return shown() ~= ""
+	end, ui.rich(props), ui.text(empty))
 end
 
 -- A code block's text as it's shown: without its trailing newline (a paste into a
@@ -1128,12 +1349,33 @@ end
 -- quiet panel.
 -- (`class` and `provide`: what plugins place it by, and read where they
 -- do; `block` gives them.)
-local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil? }): Node
+-- (`source`: a block being written, its text as it is now, drawn in place
+-- as it grows, `fading_of` what of it is still fading in.)
+local CodeBlock = ui.component(function(props: {
+	lang: string,
+	text: string,
+	class: string?,
+	provide: { [string]: any }?,
+	find: CodeFind?,
+	veil: CodeVeil?,
+	source: (() -> string)?,
+	fading_of: ((text: string) -> { VeilChunk })?,
+}): Node
 	local copied = ui.use_state(false)
 	local stop: (() -> ())? = nil
-	local text = code_shown(props.text)
+	local source = props.source
+	local text = if source then "" else code_shown(props.text)
+	-- (Its text as shown now, worked out once a change for what reads it.)
+	local now = if source
+		then ui.computed(function(): string
+			return code_shown(source())
+		end)
+		else nil
+	local function shown(): string
+		return (now :: any):get()
+	end
 	local function copy()
-		ui.clipboard.write(text)
+		ui.clipboard.write(if source then shown() else text)
 		copied:set(true)
 		if stop then
 			stop()
@@ -1209,14 +1451,20 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 		ui.presence(function(): boolean
 			return fit:get()
 		end, function(fitted: boolean): Node
+			local function lines(wrap: boolean?): Node
+				if source then
+					return code_text_live(shown, props.lang, wrap, props.find, props.fading_of)
+				end
+				return code_text(text, props.lang, wrap, props.find, props.veil)
+			end
 			if fitted then
-				return ui.column { w_full = true, min_w = 0, code_text(text, props.lang, true, props.find, props.veil) }
+				return ui.column { w_full = true, min_w = 0, lines(true) }
 			end
 			return ui.scroll_x {
 				w_full = true,
 				fade_x = { 16, 32 },
 				fade_overflow = true,
-				code_text(text, props.lang, nil, props.find, props.veil),
+				lines(nil),
 			}
 		end, { w_full = true, min_w = 0 }),
 	}
@@ -1823,6 +2071,38 @@ MarkdownBlocks.hook = function(props: Props): (b: MarkdownBlock, at: any) -> Nod
 			mine.veil = { native = at.veil } :: any
 		else
 			mine.veil = nil
+		end
+		-- A code block or a table being written (`at.live`, the block as it is
+		-- now): drawn once and grown in place as it's written.
+		local live = at.live
+		if live and b.t == "code" then
+			local lang = string.gsub(string.lower(b.lang or ""), "[^%w_-]", "-")
+			if b.lang ~= "math" and lang ~= "mermaid" then
+				local f = mine.find
+				local veil = at.veil
+				return ui.div {
+					provide = { code = token.block({ lang = b.lang or "", source = b.text }) },
+					w_full = true,
+					min_w = 0,
+					CodeBlock {
+						lang = b.lang,
+						text = b.text,
+						find = if f then { q = f.q, from = f.n, cur = f.cur } else nil,
+						source = function(): string
+							return live:get().text
+						end,
+						-- (Its one part, the first.)
+						fading_of = if veil
+							then function(text: string): { VeilChunk }
+								return (veil :: any)(text, 1)
+							end
+							else nil,
+						class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
+					},
+				}
+			end
+		elseif live and b.t == "table" then
+			return TableLive { b = b, live = live, ctx = mine, veil = at.veil, find = mine.find }
 		end
 		return block(b, ink, mine)
 	end
