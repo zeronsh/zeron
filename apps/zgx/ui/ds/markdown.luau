@@ -138,10 +138,12 @@ export type Find = {
 -- nothing moves or wraps for it (as Zeron's crates/veil). Each paragraph remembers what
 -- it has shown; what's new is a chunk, fading exactly once, its time following how fast
 -- text is coming. Kept by the reply's key, so a row made again doesn't fade again.
+-- A chunk's fade is its span's `fade_in`: zgx draws it a frame at a time in Rust,
+-- so the frames of a fade run no script and lay nothing out.
 local VEIL_MIN, VEIL_MAX, VEIL_EMA_SEED, VEIL_GAP_MAX = 120, 400, 160, 1000
 type VeilChunk = { from: number, to: number, started: number, ms: number, boost: number }
 type VeilElem = { text: string, chunks: { VeilChunk }, ema: number, last: number? }
-type Veil = { elems: { [string]: VeilElem }, block: number, n: number, seeding: boolean, tick: State<number>?, ticking: any }
+type Veil = { elems: { [string]: VeilElem }, block: number, n: number, seeding: boolean }
 local VEILS: { [string]: Veil } = {}
 local veil_count = 0
 local function veil_of(key: string, seeding: boolean): Veil
@@ -152,7 +154,7 @@ local function veil_of(key: string, seeding: boolean): Veil
 		if veil_count > 400 then
 			VEILS, veil_count = {}, 1
 		end
-		v = { elems = {}, block = 0, n = 0, seeding = seeding, ticking = nil } :: any
+		v = { elems = {}, block = 0, n = 0, seeding = seeding } :: any
 		VEILS[key] = v
 	end
 	return v
@@ -195,39 +197,16 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 		e.text = text
 	end
 	local going: { VeilChunk } = {}
-	local longest = 0
 	for _, c in e.chunks do
 		local left = c.ms - (now - c.started)
 		if left > 0 then
 			table.insert(going, c)
-			longest = math.max(longest, left)
 		end
 	end
 	e.chunks = going
 	-- (A stream backed up, three or more at once: a little faster.)
 	for _, c in going do
 		c.boost = 1 + 0.3 * math.max(#going - 2, 0)
-	end
-	-- A clock for what's fading, its frames what the colours below follow.
-	local tick = v.tick
-	if tick and longest > 0 then
-		if v.ticking then
-			v.ticking:cancel()
-		end
-		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
-		-- By number: a callback holding its own clip would keep both for good.)
-		local clock = (v.clocks or 0) + 1
-		v.clocks = clock
-		v.ticking = anime.animate(tick, {
-			value = tick:peek() + 1,
-			duration = longest,
-			ease = "linear",
-			onComplete = function()
-				if v.clocks == clock then
-					v.ticking = nil
-				end
-			end,
-		})
 	end
 	return going
 end
@@ -244,28 +223,10 @@ end
 -- A link's or inline code's ink (ds/look).
 local accented_ink = look.accented_ink
 
--- `color` (a token, or as written) at a chunk's fade now: as it is once it's done.
-local function veil_color(v: Veil, color: any, c: VeilChunk): any
-	local shown = if type(color) == "function" then color() else color
-	local plain = if type(shown) == "string" and string.sub(shown, 1, 1) == "$" then ui.theme.get(string.sub(shown, 2)) else shown
-	local r, g, b, a = string.match(tostring(plain), "^#(%x%x)(%x%x)(%x%x)(%x?%x?)$")
-	if not r then
-		return color
-	end
-	local most = if a ~= "" then (tonumber(a, 16) :: number) / 255 else 1
-	return function(): any
-		local p = (ui.now() - c.started) * c.boost / c.ms
-		if p >= 1 then
-			-- (A colour that is itself a function, a link's or inline
-			-- code's accented ink, is read: a binding gives a colour.)
-			return if type(color) == "function" then color() else color
-		end
-		if v.tick then
-			v.tick:get()
-		end
-		local alpha = most * (1 - (1 - math.max(p, 0)) ^ 1.6)
-		return string.format("#%s%s%s%02x", r :: string, g :: string, b :: string, math.floor(alpha * 255 + 0.5))
-	end
+-- A chunk's fade, as its span's `fade_in`: from clear as it came to its colour, its
+-- alpha `1 - (1 - p)^1.6`, a little faster while the stream is backed up (`boost`).
+local function veil_fade(c: VeilChunk): { start: number, ms: number, power: number }
+	return { start = c.started, ms = c.ms / c.boost, power = 1.6 }
 end
 -- The bytes `from` to `to` of a text, cut where a fading chunk starts and ends: each
 -- piece handed on with its chunk, nil for what's already shown.
@@ -681,7 +642,7 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 				local piece = table.clone(span)
 				piece[1] = string.sub(text, s - from + 1, e - from + 1)
 				if c then
-					piece.color = veil_color(veil, span.color or props.color, c)
+					piece.fade_in = veil_fade(c)
 				end
 				table.insert(props, ui.span(piece))
 			end)
@@ -1062,7 +1023,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 	end
 	-- Each piece of the text, cut where a match starts or ends.
 	local pos = 0
-	local function cut(t: string, color: any)
+	local function cut(t: string, color: any, fade: { start: number, ms: number, power: number }?)
 		local from, to = pos + 1, pos + #t
 		pos = to
 		local at = from
@@ -1070,11 +1031,12 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 			local s, e = math.max(m[1], from), math.min(m[2], to)
 			if s <= e then
 				if s > at then
-					table.insert(props, ui.span { string.sub(t, at - from + 1, s - from), color = color, literal = true })
+					table.insert(props, ui.span { string.sub(t, at - from + 1, s - from), color = color, fade_in = fade, literal = true })
 				end
 				table.insert(props, ui.span {
 					string.sub(t, s - from + 1, e - from + 1),
 					color = color,
+					fade_in = fade,
 					literal = true,
 					bg = if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match",
 				})
@@ -1082,7 +1044,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 			end
 		end
 		if at <= to then
-			table.insert(props, ui.span { string.sub(t, at - from + 1), color = color, literal = true })
+			table.insert(props, ui.span { string.sub(t, at - from + 1), color = color, fade_in = fade, literal = true })
 		end
 	end
 	-- And where what's fading starts or ends, its colour fading.
@@ -1093,7 +1055,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 		end
 		local from = pos + 1
 		veil_pieces(fading, from, pos + #t, function(s: number, e: number, c: VeilChunk?)
-			cut(string.sub(t, s - from + 1, e - from + 1), if c then veil_color(veil.veil, color or props.color, c) else color)
+			cut(string.sub(t, s - from + 1, e - from + 1), color, if c then veil_fade(c) else nil)
 		end)
 	end
 	if Syntax.highlighter(lang) == nil then
@@ -1786,7 +1748,6 @@ return function(props: Props): Node
 	-- what's there as it's first built stays as it is (a chat opened mid-reply).
 	if props.veil and props.key and not Motion.reduced_now() and not veil_off() then
 		local v = veil_of(props.key, props.veil_seed == true)
-		v.tick = ui.use_state(0)
 		if v.seeding then
 			ui.after(0, function()
 				v.seeding = false
