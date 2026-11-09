@@ -3440,7 +3440,10 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
         }
         match kind.as_str() {
             // Words of the reply being written: the draft; of a finished
-            // one, its row.
+            // one, its row. A text part that had none (written empty, or
+            // blank) has no block in its row yet (`blocks_of`): its first
+            // words make it, as a thought's do.
+            "text" if streaming && was_empty && !more.trim().is_empty() => rows = true,
             "text" if streaming => words_changed = true,
             "text" => rows = true,
             // Thinking shows as a row once it has words; more of them, as
@@ -4818,6 +4821,10 @@ fn base64(bytes: &[u8]) -> String {
 mod pending_tests;
 
 #[cfg(test)]
+#[path = "chat_stream_tests.rs"]
+mod stream_tests;
+
+#[cfg(test)]
 mod tests {
     /// Opening a chat marks it seen only while that changes something any
     /// viewport reads (its last message, its terminal's report, the end of
@@ -5615,6 +5622,26 @@ mod tests {
         assert!(matches!(apply(&mut entries, &mut frame("b", "t", "!", 5)), Ok(Change::Rows)));
         // Out of step (a length that doesn't match): resubscribe.
         assert!(apply(&mut entries, &mut frame("a", "t", "x", 99)).is_err());
+    }
+
+    #[test]
+    fn a_text_part_s_first_words_make_its_block() {
+        let mut entries = Vec::new();
+        let mut reset = json!({ "reset": [
+            { "id": "a", "role": "assistant", "status": "streaming", "parts": [
+                { "kind": "reasoning", "id": "r", "text": "Hmm" },
+                { "kind": "text", "id": "t", "text": "" },
+            ] },
+        ] });
+        apply(&mut entries, &mut reset).unwrap();
+        let frame = |text: &str, len: usize| {
+            json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t", "text": text, "len": len }], "count": 1 })
+        };
+        // Blank still: nothing to show.
+        assert!(matches!(apply(&mut entries, &mut frame("\n", 1)), Ok(Change::Words)));
+        // Its first words: its row (the block it had none of); then the draft's.
+        assert!(matches!(apply(&mut entries, &mut frame("Hi", 3)), Ok(Change::Rows)));
+        assert!(matches!(apply(&mut entries, &mut frame(" there", 9)), Ok(Change::Words)));
     }
 
     #[test]
