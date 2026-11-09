@@ -1273,7 +1273,9 @@ return function(props: Props): Node
 	-- `seam.REACH` each side of the gap's middle: the gap is where a hand goes
 	-- for it, and the card clips what's its own, so this stands beside it.
 	-- (Pressed itself, so it keeps the pointer as it's dragged. Not while
-	-- expanded: it's as wide as it goes. Out of reach while the panel moves.)
+	-- expanded: it's as wide as it goes. While the panel moves a press there
+	-- does nothing, as Zeron's handle; the pointer stays its own all along,
+	-- so a hand resting on it finds it lit once the panel lands.)
 	local panel_edge = ui.div {
 			absolute = true,
 			right = function(): number
@@ -1283,9 +1285,6 @@ return function(props: Props): Node
 			bottom = ui.raw(WINDOW_EDGE, "the window's edge"),
 			w = function(): number
 				return if expanded() then 0 else ui.raw(2 * seam.REACH, "the seam's reach either side")
-			end,
-			pointer_events = function(): string
-				return if stepping:get() then "none" else "auto"
 			end,
 			cursor = "col_resize",
 			label = ui.t("shell.page.resize_files"),
@@ -1326,6 +1325,9 @@ return function(props: Props): Node
 				return true
 			end,
 			on_press = function(e)
+				if stepping:peek() then
+					return
+				end
 				if e.clicks == 2 then
 					if chosen:peek() then
 						chosen:set(false)
@@ -1362,7 +1364,7 @@ return function(props: Props): Node
 				pointer_events = "none",
 				bg = "$border.strong",
 				opacity = seam.lit(function(): boolean
-					return (edge_over:get() or drag_held:get() ~= nil) and not stepping:get()
+					return edge_over:get() or drag_held:get() ~= nil
 				end, edge_drag),
 			},
 	}
