@@ -77,6 +77,16 @@ test("table: short columns keep to one line and the prose beside them takes the 
 	expect(words(app, 4, 1, 3).h).to_be(line)
 end)
 
+test("table: a table narrower than the reply still runs its rules to its frame", function()
+	local app = only("loose")
+	-- Its prose column takes what the words leave, so the numbers, on their
+	-- cells' right edges, end as far in from the frame's right as the first
+	-- words start from its left: the cells, and the rules under them, reach
+	-- the frame.
+	local frame, first, last = box(app, ".md-table"), words(app, 2, 0, 1), words(app, 2, 3, 2)
+	near(frame.x + frame.w - (last.x + last.w), first.x - frame.x)
+end)
+
 test("table: a column of numbers sits on its right edge, whether the source says so or not", function()
 	local app = only("mixed")
 	-- `Size` says `---:`, `Change` too; each number's right edge is its

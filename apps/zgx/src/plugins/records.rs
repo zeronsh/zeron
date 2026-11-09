@@ -7,7 +7,7 @@
 //!
 //! | grant | what it adds |
 //! |---|---|
-//! | `sessions.read` | each session's title, status, project, device, times, its git branch and whether it's in a worktree of its own |
+//! | `sessions.read` | each session's title, status, project, device, times, its git branch and whether it's in a worktree of its own; each project's name, device and chosen icon (`{ emoji?, image?, hue? }`) |
 //! | `messages.read` | each message's role and text, in the open chat |
 //! | `profile.read` | your id, name, username and avatar |
 //! | `account.email` | your email, unless you hide email addresses |
@@ -96,7 +96,9 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
     let mut projects: Vec<(Rc<str>, Value)> = Vec::new();
     for project in &projects_in {
         let Some(id) = text(project.field("id")) else { continue };
-        let mut fields = pick(project, &["name", "device"]);
+        // (Its icon as its people chose it: what a plugin drawing projects'
+        // icons, `.project-icon`, draws from.)
+        let mut fields = pick(project, &["name", "device", "icon"]);
         if files {
             if let Some(path) = text(project.field("path")) {
                 fields.push((Rc::from("path"), Value::Str(path)));
@@ -199,7 +201,7 @@ mod tests {
             sessions: json!({
                 "chats": [{ "id": "s1", "title": "Fix the build", "status": "working", "project": "p1", "device": "d1", "updated": 5, "cwd": "/secret/path/.worktrees/fix", "branch": "fix/build" }],
                 "here": "d1",
-                "projects": [{ "id": "p1", "path": "/secret/path", "name": "Atlas", "device": "d1", "repository": "commit:abc", "created": 7 }],
+                "projects": [{ "id": "p1", "path": "/secret/path", "name": "Atlas", "device": "d1", "repository": "commit:abc", "created": 7, "icon": { "emoji": "🚀", "hue": "teal" } }],
             }),
             messages: json!([{ "id": "m1", "role": "user", "text": "hello", "attachments": [] }]),
             profile: json!({ "id": "u1", "name": "Ada", "username": "ada", "email": "ada@example.com" }),
@@ -236,7 +238,7 @@ mod tests {
             json!({ "title": "Fix the build", "status": "working", "project": "p1", "device": "d1", "updated": 5, "branch": "fix/build", "worktree": true })
         );
         assert!(r["sessions"]["s1"].get("cwd").is_none(), "a path isn't a session's to give");
-        assert_eq!(r["projects"]["p1"], json!({ "name": "Atlas", "device": "d1" }), "a project's name, not its path");
+        assert_eq!(r["projects"]["p1"], json!({ "name": "Atlas", "device": "d1", "icon": { "emoji": "🚀", "hue": "teal" } }), "a project's name and icon, not its path");
         assert!(r.get("messages").is_none());
         // With "files.read", folders: a session's and its project's.
         let r = records(&p(&["sessions.read", "files.read"]), &sources(false));

@@ -81,6 +81,15 @@ export type Props = {
 	-- the kind's own (a web link's: Open, the other place, Copy link; any
 	-- other: Open with `open`, Copy link).
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	-- What a link is drawn as, rather than as a link: one of the chat's
+	-- files (`file`: the chip a prompt's mention is), or one of its agent's
+	-- skills (`skill`, its name: the chip a picked skill is). Nil: a link.
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	-- What the message carries, by name (a sent prompt's: its files,
+	-- pictures, quotes, chats…): an "(attachment: <name>)" in its words
+	-- naming one of them is drawn as that one's chip. (Only a prompt's:
+	-- words that say so of nothing it carries stay words.)
+	attached: { [string]: { kind: string, icon: string? } }?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -222,6 +231,9 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 	end
 	return going
 end
+-- A link's or inline code's ink (ds/look).
+local accented_ink = look.accented_ink
+
 -- `color` (a token, or as written) at a chunk's fade now: as it is once it's done.
 local function veil_color(v: Veil, color: any, c: VeilChunk): any
 	local shown = if type(color) == "function" then color() else color
@@ -269,6 +281,8 @@ type Ctx = {
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	attached: { [string]: { kind: string, icon: string? } }?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -384,6 +398,23 @@ local function opens(a: string): boolean
 	return string.match(a, "^https?://") ~= nil or string.match(a, "^mailto:") ~= nil
 end
 
+-- A chip's look, as Zeron's shipping app paints it (composer/chip.rs
+-- `paint_chip`): its pill hugs its name, 2 points above and below, corner
+-- 5; its icon (14) on a well of its own 2 points round it, corner 4
+-- (`zeron.chip.*`), a point in from the pill's start and 2 before the
+-- name; 7 points after the name (Zeron's room: a no-break space of Geist
+-- is a quarter em, its well and name 6 of them in, 2 after, at 14).
+local CHIP_PADDING = { 1, 7, 2 }
+local CHIP_RADIUS = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+local function chip_icon(icon: { [string]: any }): { [string]: any }
+	icon.size = 14
+	icon.gap = 2
+	icon.bg = "$zeron.chip.well"
+	icon.radius = 4
+	icon.pad = 2
+	return icon
+end
+
 -- A mention in a prompt (Zeron's `[name](zeron-file:path)`, a chat's
 -- `zeron-chat:`): a chip in the line, as Zeron's sent bubble draws it
 -- (transcript.rs `user_bubble_text`, composer/chip.rs `paint_chip`): its
@@ -392,20 +423,123 @@ end
 local function mention_chip(span: { [any]: any }, target: string, name: string)
 	local chat = string.match(target, "^zeron%-chat:") ~= nil
 	local dir = string.sub(target, -1) == "/"
+	-- (Its icon by its file's own name: a reply's link may say it in other
+	-- words, `[the config](src/config.rs:12)`.)
+	local file = string.match(string.match(target, "^[^#]*") or target, "([^/]+)/?$") or name
+	file = string.match(file, "^(.-):%d") or file
+	-- (In the body's ink, whatever a link's is.)
+	span.color = nil
 	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
 	-- (One pill, zgx d6582b32: icon, gap, name and padding on one wash,
 	-- not underlined at rest; its text is the name alone, so a selection
 	-- across it copies the name.)
 	span.underline = false
 	span.underline_offset = nil
-	span.hover = nil
-	span.bg = "$zeron.composer.chip.bg"
+	-- (A hover of its own, which changes nothing: without one, a link's
+	-- pointer draws the focus ring round its words.)
+	span.hover = {}
+	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = { 2, 2 }
-	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
 	span.icon = if chat
-		then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
-		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
+		then chip_icon { src = "assets/icons/ui/side-chat.svg", tint = "$zeron.chip.glyph" }
+		else chip_icon { src = `assets/icons/files/{set}/{FileIcon.of(if string.find(file, ".", 1, true) or dir then file else name, dir)}.svg` }
+end
+
+-- a command or skill picked in the composer has nothing to open, but reads
+-- as the same pill a mention does, as zeron's sent bubble and mobile draw it
+-- What a prompt carries, named in its words: "(attachment: <name>)", the
+-- words the send writes for an `@` reference (screens/chat/carried
+-- `refs`). Drawn as that one's chip (its kind's icon, its name), where it
+-- carries one by that name.
+local ATTACHED = "%(attachment: ([^%)\n]+)%)"
+local function attached_runs(list: { MarkdownRun }, ctx: Ctx?): { MarkdownRun }
+	local carried = if ctx then ctx.attached else nil
+	if not carried then
+		return list
+	end
+	local out: { MarkdownRun }? = nil
+	for i, r in list do
+		local pieces: { MarkdownRun }? = nil
+		if not r.a and not r.c and not r.img and type(r.x) == "string" and string.find(r.x, "(attachment: ", 1, true) then
+			-- (`at`: where the search goes on; `copied`: the words before it
+			-- already in a piece.)
+			local at, copied = 1, 1
+			while true do
+				local s, e, name = string.find(r.x, ATTACHED, at)
+				if not s or not e then
+					break
+				end
+				if carried[name] then
+					pieces = pieces or {}
+					if s > copied then
+						local before = table.clone(r)
+						before.x = string.sub(r.x, copied, s - 1)
+						table.insert(pieces :: any, before)
+					end
+					local chip = table.clone(r) :: any
+					chip.x = string.sub(r.x, s, e)
+					chip.attached = name
+					table.insert(pieces :: any, chip)
+					copied = e + 1
+				end
+				at = e + 1
+			end
+			if pieces and copied <= #r.x then
+				local rest = table.clone(r)
+				rest.x = string.sub(r.x, copied)
+				table.insert(pieces :: any, rest)
+			end
+		end
+		if pieces and not out then
+			out = table.move(list, 1, i - 1, 1, {})
+		end
+		if out then
+			for _, p in pieces or { r } do
+				table.insert(out :: any, p)
+			end
+		end
+	end
+	return out or list
+end
+
+-- An attached item's chip, named in the words: its kind's icon (a file's
+-- by its name; a chat's, a picture's, a quote's glyph), its name.
+local function attachment_chip(span: { [any]: any }, name: string, item: { kind: string, icon: string? })
+	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+	span.underline = false
+	span.underline_offset = nil
+	span.hover = {}
+	span.color = nil
+	span.bg = "$zeron.chip.bg"
+	span[1] = name
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
+	local glyph = if item.kind == "chat" then "side-chat" elseif item.kind == "image" then "gallery" else item.icon
+	span.icon = if glyph
+		then chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
+		else chip_icon { src = `assets/icons/files/{set}/{FileIcon.of(name, false)}.svg` }
+end
+
+local function invocation_chip(span: { [any]: any }, name: string)
+	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
+	-- (A skill by its name alone, `frontend-design`, its icon saying it's
+	-- one; a command keeps its `/`.)
+	if string.sub(name, 1, 1) == "$" then
+		name = string.sub(name, 2)
+	end
+	span.color = nil
+	span.underline = false
+	span.underline_offset = nil
+	-- (A hover of its own, which changes nothing: without one, a link's
+	-- pointer draws the focus ring round its words.)
+	span.hover = {}
+	span.bg = "$zeron.chip.bg"
+	span[1] = name
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
+	span.icon = chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
 end
 
 -- A web address written bare in a run's words (not in code, not a link
@@ -480,8 +614,8 @@ end
 
 -- A paragraph's runs as one paragraph of spans; `style` sets the
 -- paragraph's own (a heading's size, a quote's ink).
-local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
-	list = autolinked(list)
+local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+	list = attached_runs(autolinked(list), ctx)
 	local size, line = size_of(ctx)
 	local props: { [any]: any } = {
 		wrap = true,
@@ -518,6 +652,17 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 	local function emit(span: { [any]: any }, text: string)
 		local from, to = pos + 1, pos + #text
 		pos = to
+		-- A chip (its icon before its name) is one piece, one wash: never cut
+		-- by a fade or a find. A match in it washes the whole chip.
+		if span.icon then
+			for i, m in marks do
+				if m[1] <= to and m[2] >= from then
+					span.bg = if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match"
+				end
+			end
+			table.insert(props, ui.span(span))
+			return
+		end
 		-- Cut where a fading chunk starts and ends; its words' colour fading.
 		if #fading > 0 and #marks == 0 and span[1] == text and veil then
 			veil_pieces(fading, from, to, function(s: number, e: number, c: VeilChunk?)
@@ -582,18 +727,46 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			-- In code's font (Settings → Appearance; a span takes a family,
 			-- not a token), as code blocks are.
 			span.font = look.code_family()
-			span.bg = "$zeron.code.wash"
+			span.bg = "$zeron.prose.code_wash"
+			-- (Its ink the accent with "Accent colour throughout", as the
+			-- shipping app's; else the text's own.)
+			span.color = accented_ink(span.color)
 			span.padding = { 4, 1 }
 			-- Zeron's inline code corner (markdown/render.rs's 4.5), each
 			-- line's piece of a wrapped span rounded on its own.
 			span.radius = ui.raw(4.5, "Zeron's inline code corner")
 			span.text_size = inline
 		end
-		if r.a then
+		-- (What the page says a link is: one of the chat's files, or one of
+		-- its agent's skills.)
+		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
+		local named = (r :: any).attached
+		if named and ctx and ctx.attached and ctx.attached[named] then
+			attachment_chip(span, named, ctx.attached[named])
+		elseif r.a and string.match(r.a, "^zeron%-invoke:") then
+			invocation_chip(span, r.x)
+		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
+			-- What it carries, mentioned by its number (ds/attachment_mentions):
+			-- its chip, a picture's glyph or a file's icon, by its name.
+			attachment_chip(span, r.x, { kind = if string.match(r.a, "^zeron%-image:") then "image" else "file" })
+		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
+			-- A browser pick, mentioned (its token): its chip.
+			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })
+		elseif chip and chip.skill then
+			-- A skill's chip, by its name (opening nothing, as a picked one).
+			invocation_chip(span, "$" .. chip.skill)
+		elseif r.a then
+			-- (Its ink the accent with "Accent colour throughout", as the
+			-- shipping app's; else the text's own.)
+			span.color = accented_ink(span.color)
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
-			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") then
+			if
+				string.match(r.a, "^zeron%-file:")
+				or string.match(r.a, "^zeron%-chat:")
+				or (chip and chip.file)
+			then
 				mention_chip(span, r.a, r.x)
 			end
 			local target = r.a
@@ -654,6 +827,37 @@ end
 -- its own scrolling otherwise (zgx's `View::wheel_across` has the rules).
 local TABLE_SHORT = 20
 local TABLE_FLOOR = 144
+
+-- A run of words, its links that the page may draw as chips (a reply's
+-- link to a file of the chat's, to one of its agent's skills: `link_chip`)
+-- built again when what the page says of them changes (the chat's skills
+-- read after it showed), so it's the same as if they'd been known first.
+-- Words with none of those links: built once.
+local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+	local asked = if ctx then ctx.link_chip else nil
+	if not asked then
+		return runs_now(list, style, ctx)
+	end
+	local targets: { string } = {}
+	for _, r in list do
+		if r.a and not opens(r.a) and not string.match(r.a, "^zeron%-") then
+			table.insert(targets, r.a)
+		end
+	end
+	if #targets == 0 then
+		return runs_now(list, style, ctx)
+	end
+	return ui.presence(function(): string
+		local says: { string } = {}
+		for _, target in targets do
+			local chip = asked(target)
+			table.insert(says, if chip == nil then "-" elseif chip.skill then `s:{chip.skill}` else "f")
+		end
+		return table.concat(says, "|")
+	end, function(): Node
+		return runs_now(list, style, ctx)
+	end)
+end
 
 local function cell_text(cell: { MarkdownRun }): string
 	local flat: { string } = {}
@@ -778,6 +982,9 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 				ui.div {
 					class = "md-table-grid",
 					grid = true,
+					-- (Its `auto` columns share what's left past their words, as
+					-- CSS's grid stretches them: the rules reach the frame.)
+					justify = "stretch",
 					cols = table.concat(tracks, " "),
 					cells,
 				},
@@ -1085,7 +1292,7 @@ local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
 			tabular = true,
 			text_size = size,
 			line_height = line,
-			color = "$text.tertiary",
+			color = "$zeron.prose.marker",
 		}
 	end
 	return ui.row {
@@ -1095,7 +1302,7 @@ local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
 		shrink = 0,
 		items = "center",
 		pl = "$space.1",
-		ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.tertiary" },
+		ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$zeron.prose.marker" },
 	}
 end
 
@@ -1314,7 +1521,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			class = "md-quote",
 			w_full = true,
 			gap = "$space.4",
-			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$border.strong" },
+			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
 			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx) },
 		}
 	elseif b.t == "hr" then
@@ -1529,8 +1736,8 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

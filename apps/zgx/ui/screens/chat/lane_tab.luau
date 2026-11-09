@@ -20,6 +20,7 @@ local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
@@ -86,8 +87,8 @@ function M.title(tab: any): string
 	return locale.s(if tab.kind == "subagent" then "chat.lane_tab.subagent" else "chat.lane_tab.side_chat")
 end
 
-function M.icon(tab: any): string
-	return if tab.kind == "subagent" then "bot" else "side-chat"
+function M.icon(_tab: any): string
+	return "side-chat"
 end
 
 -- A side chat's project: where its composer has it before its first message,
@@ -152,6 +153,10 @@ function M.tile(tab: any): Node
 			emoji = function(): string?
 				local p = project_of(tab, picked)
 				return if p then look.of(p).emoji else nil
+			end,
+			project = function(): string?
+				local p = project_of(tab, picked)
+				return if p then p.id else nil
 			end,
 		}
 	end, { w = 20, h = 20, shrink = 0 })
@@ -607,10 +612,24 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				return not unsent()
 			end,
 			run = run_command,
+			-- (`@` lists what the draft carries, and the other chats.)
+			cargo = function(): { any }
+				return carried:get()
+			end,
+			chat = function(): string?
+				return chat
+			end,
 		}
 	return ds.Composer {
 		value = draft,
 		snap = if split then snap else nil,
+		-- (Its transcript's "Jump to latest", while it shows: its trays'
+		-- pill moves aside, the two a centred pair. By the lane's name, its
+		-- transcript's: screens/chat/shared's `pill_width_of`.)
+		aside = function(): number?
+			return Shared.pill_width_of("jump", name):get()
+		end,
+		on_pill_width = Shared.pill_teller("waiting", name),
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = remove_carried,
@@ -667,6 +686,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		mentions = if completions then completions.lists else nil,
 		on_mention = if completions then completions.on_mention else nil,
 		mention_empty = if completions then completions.empty else nil,
+		mention_sections = if completions then completions.sections else nil,
 		notice = notice,
 		on_dismiss_notice = function()
 			notice:set(nil)
@@ -742,7 +762,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			local chips = Shared.take_cargo_of(chat)
 			local pack = Carried.pack(chips, words, words)
 			-- (Each command or skill picked: its canonical reference.)
-			local typed = Invocations.encode(pack.typed)
+			-- (And each reference to what it carries, `@` picked: its name.)
+			local typed = Carried.settle(Invocations.encode(pack.typed), chips)
 			local prompt = Carried.text(typed, pack)
 			-- As the chat page sends: the prompt joins its transcript as the
 			-- transcript's send steps clear of the end (it glides to the top,
@@ -1073,6 +1094,15 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
+		-- Its "Jump to latest" and the pill of the composer at its foot, a
+		-- centred pair: its own composer's, or, a split's focused pane, the
+		-- window's (screens/chat/shared's `pill_width_of`).
+		beside = if tab.kind == "subagent"
+			then nil
+			else function(): number?
+				return Shared.pill_width_of("waiting", if split and focused_now() then "window" else `lane.{slot}`):get()
+			end,
+		on_jump_width = Shared.pill_teller("jump", `lane.{slot}`),
 		compact = function(): boolean
 			return prefs.compact_transcript:get()
 		end,
@@ -1110,6 +1140,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		link_menu = LinkMenu(open_link, function(): any
+			return view.session:peek()
+		end),
+		-- (A reply's link to one of its files or its agent's skills: a chip.)
+		link_chip = LinkChips(function(): any
 			return view.session:peek()
 		end),
 		-- (A split's pane, made again at the place taken up: whether

@@ -147,4 +147,32 @@ function M.hover(): TweenOptions
 	return { duration = M.ms(M.HOVER_MS), ease = M.HOVER_EASE }
 end
 
+
+-- Tabs (ds/tabs, ds/tab_strip): ds/tabs' chosen wash gliding to the tab
+-- that takes it, and a tab let go settling into its place, on one spring.
+-- A little under critical damping: it lands in about a quarter of a second
+-- with no overshoot to see, and a `ui.spring` sent somewhere new on the way
+-- keeps its speed.
+M.TAB_SPRING = { stiffness = 420, damping = 34 } :: SpringOptions
+-- That spring as an anime ease, for a tab settling.
+function M.tab_ease(): AnimeEase
+	return anime.createSpring { stiffness = M.TAB_SPRING.stiffness, damping = M.TAB_SPRING.damping }
+end
+-- A tab picked up by a drag: this much larger, over this long, as it lifts
+-- and as it's let go.
+M.TAB_LIFT = 1.03
+M.TAB_LIFT_TWEEN = { duration = 120, ease = "out(3)" } :: TweenOptions
+-- The tabs beside one moving, opening or closing slide over on a stiffer
+-- spring, critically damped: quick, and still, with nothing to wobble. (The
+-- tab itself comes and goes at once: a chat alone's tab is replaced on each
+-- navigation, too often for an entrance.) A strip's chosen wash follows its
+-- tab on this one too, so the two never drift apart.
+M.TAB_SLIDE_SPRING = { stiffness = 600, damping = 49 } :: SpringOptions
+function M.tab_slide(): { [string]: any }?
+	return M.layout { spring = anime.createSpring(M.TAB_SLIDE_SPRING) }
+end
+-- A tab carried near an end of its strip scrolls the strip under it, this
+-- far from the edge, at this many points a second, till the end.
+M.TAB_EDGE, M.TAB_EDGE_SPEED = 32, 700
+
 return M

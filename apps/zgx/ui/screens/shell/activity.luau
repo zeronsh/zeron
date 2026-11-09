@@ -31,7 +31,8 @@ local route = require("@app/screens/shell/route")
 
 local M = {}
 
-M.on = ui.persist("shell_sidebar_activity", false)
+-- (The sidebar Zeron opens with; turned off, it lists by project, then device.)
+M.on = ui.persist("shell_sidebar_activity", true)
 M.working_shelf = ui.persist("activity_working_shelf", true)
 M.archive_after = ui.persist("activity_archive_after", 0)
 

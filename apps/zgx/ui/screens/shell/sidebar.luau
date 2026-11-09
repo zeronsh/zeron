@@ -50,11 +50,11 @@ export type Props = {
 -- (the engine's).
 local shared = {
 	compact = ui.persist("shell_sidebar_compact", true),
-	-- (One list, "Sessions", as Zeron's; by project is a view option.)
 	-- How it groups, as levels in order (`{ "project", "device" }`: by
-	-- project, then device; none, one list). Kept as one choice before
-	-- ("project"): read and kept as its levels from now (below).
-	organize = ui.persist("shell_sidebar_organize", {} :: any),
+	-- project, then device; none, one list). By project, then device, until
+	-- changed. Kept as one choice before ("project"): read and kept as its
+	-- levels from now (below).
+	organize = ui.persist("shell_sidebar_organize", { "project", "device" } :: any),
 	-- Both levels as the view menu's rows stand (dragged by their handles):
 	-- Organize is those on, in this order.
 	organize_order = ui.persist("shell_sidebar_organize_order", { "project", "device" }),
@@ -72,8 +72,8 @@ local shared = {
 		project_filter = ui.persist("shell_sidebar_show_project_filter", false),
 		-- The projects with none but archived sessions, folded into one row
 		-- at the projects' end: listed there (closed until it's opened), or
-		-- not at all.
-		empty_projects = ui.persist("shell_sidebar_show_empty_projects", true),
+		-- not at all (until asked for).
+		empty_projects = ui.persist("shell_sidebar_show_empty_projects", false),
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
@@ -452,6 +452,20 @@ local function checkout_here(id: string?): string?
 	return id
 end
 
+-- peeked, not tracked: read from a shortcut or a click, never a computed
+route.narrowed_project(function(): string?
+	if not shared.details.project_filter:peek() then
+		return nil
+	end
+	local id = shared.project:peek()
+	for _, p in sessions.now:peek().projects do
+		if p.id == id then
+			return checkout_here(id)
+		end
+	end
+	return nil
+end)
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
@@ -610,7 +624,7 @@ local function project_filter(): Node
 						if not seen[first.id] then
 							seen[first.id] = true
 							local l = route.look(first.id) or { hue = route.hue(first.id) }
-							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji })
+							table.insert(out, { value = first.id, label = first.name, hue = l.hue, src = l.src, emoji = l.emoji, project = first.id })
 						end
 					end
 					return out

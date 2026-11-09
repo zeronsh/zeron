@@ -125,6 +125,31 @@ do
 	lanes.open_subagent = function(session: string, sub: any)
 		note(`open_subagent:{session}:{sub.ref}`)
 	end
+	-- What a lane opens, noted (`open_lane:<session>:<kind>:<id>`), then
+	-- opened as ever.
+	local open_lane = lanes.open
+	lanes.open = function(session: string, lane: any)
+		note(`open_lane:{session}:{lane.kind}:{lane.id}`)
+		open_lane(session, lane)
+	end
+	-- s2's child chats, as the host lists them: a subagent and a side chat a
+	-- Zeron chat started (through Zeron's tools: `child_kind`), working and
+	-- at rest, and a side chat the person started.
+	ui.command {
+		id = "child_chats",
+		title = "s2 has child chats: two a Zeron chat started, one the person did",
+		run = function()
+			local now = table.clone(sessions.now:peek() :: any)
+			local children = table.clone(now.children or {})
+			children.s2 = {
+				{ id = "k3", parent = "s2", title = "my own side chat", device = "mac", updated = 30, created = 30 },
+				{ id = "k2", parent = "s2", title = "draft the release notes", device = "mac", updated = 20, created = 20, child_kind = "side" },
+				{ id = "k1", parent = "s2", title = "audit the parser", device = "mac", status = "working", updated = 10, created = 10, child_kind = "subagent" },
+			}
+			now.children = children
+			sessions.now:set(now)
+		end,
+	}
 	local published = ui.shared("chat.subagents", {} :: { any })
 	ui.command {
 		id = "subagents_running",
@@ -167,6 +192,14 @@ ui.command {
 		TAIL_FIRST:set(16)
 	end,
 }
+local SLOW_OPEN = ui.state("fixture_slow_open", false)
+ui.command {
+	id = "slow_open",
+	title = "Chats open as the host opens one it no longer holds",
+	run = function()
+		SLOW_OPEN:set(true)
+	end,
+}
 local pending_history: { any }? = nil
 ui.command {
 	id = "history",
@@ -190,17 +223,36 @@ stub.open = function(id: string?)
 	if not id then
 		return
 	end
-	local whole = TRANSCRIPTS[id] or {}
-	local tail = TAIL_FIRST:peek()
-	if tail > 0 and #whole > tail then
-		pending_history = whole
-		store.messages:set(table.move(whole, #whole - tail + 1, #whole, 1, {}))
-	else
-		pending_history = nil
-		store.messages:set(whole)
+	local function arrive()
+		local whole = TRANSCRIPTS[id] or {}
+		local tail = TAIL_FIRST:peek()
+		if tail > 0 and #whole > tail then
+			pending_history = whole
+			store.messages:set(table.move(whole, #whole - tail + 1, #whole, 1, {}))
+		else
+			pending_history = nil
+			store.messages:set(whole)
+		end
+		store.draft:set { id = "", text = "" }
+		publish(id)
 	end
-	store.draft:set { id = "", text = "" }
-	publish(id)
+	-- `slow_open`: as the host opens a chat it no longer holds, the
+	-- transcript emptied and the session loading at once, the chat a moment
+	-- later.
+	if SLOW_OPEN:peek() then
+		ui.batch(function()
+			store.messages:set({})
+			store.draft:set { id = "", text = "" }
+			publish(id, { state = "loading" })
+		end)
+		ui.after(300, function()
+			if opened == id then
+				arrive()
+			end
+		end)
+		return
+	end
+	arrive()
 end
 -- A promise settled at once.
 local function settled(value: any): any
@@ -231,6 +283,10 @@ stub.send = function(req: any)
 	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
+	end
+	-- (And the name each goes up as.)
+	for _, a in req.attachments or {} do
+		note(`attname:{a.name or "-"}`)
 	end
 	-- (An Appshot's: what the host writes after the words.)
 	for _, a in req.appshots or {} do
@@ -917,6 +973,29 @@ do
 	META.s7 = { title = "Tall replies", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
 	TRANSCRIPTS.s7 = tall
 	seed()
+	-- `reply_away`: another turn of s7's, a tall reply, lands (in the chat
+	-- open, or for when it opens next).
+	local added = 0
+	ui.command {
+		id = "reply_away",
+		title = "A reply lands in Tall replies",
+		run = function()
+			added += 1
+			local n = 20 + added
+			local paragraphs = {}
+			for k = 1, 12 do
+				table.insert(paragraphs, `Late reply {n}, paragraph {k}: it came while the chat was away.`)
+			end
+			local text = table.concat(paragraphs, "\n\n")
+			local now = table.clone(TRANSCRIPTS.s7)
+			table.insert(now, { id = `tu{n}`, role = "user", text = `Turn {n}: and then?`, at = "Sep 9, 5:00 PM", copy = `Turn {n}: and then?` })
+			table.insert(now, { id = `ta{n}`, role = "assistant", text = text, model = "Opus", at = "Sep 9, 5:01 PM", copy = text, blocks = { { id = "t", kind = "text", text = text } } })
+			TRANSCRIPTS.s7 = now
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(now)
+			end
+		end,
+	}
 end
 -- The content of the shipping app's compare fixture (a reply's text, a
 -- tool group and a code block, then a settled turn), for side by sides.
@@ -1243,6 +1322,101 @@ ui.command {
 			at = "Sep 8, 1:50 PM",
 			copy = reply,
 			blocks = { { id = "t", kind = "text", text = reply } },
+		}
+	end,
+}
+-- A turn whose prompt and reply each start a paragraph with a file, a
+-- chat, a skill and a command (chips), then a web link (a link), in a chat
+-- whose folder is /work/atlas.
+local function invoke(kind: string, name: string): string
+	local json = `\{"kind":"{kind}","name":"{name}"\}`
+	return "zeron-invoke:" .. (string.gsub(json, ".", function(c: string): string
+		return string.format("%02x", string.byte(c))
+	end))
+end
+ui.command {
+	id = "chip_turn",
+	title = "A turn with chips",
+	run = function()
+		local s = table.clone(store.session:peek() or {})
+		s.cwd = "/work/atlas"
+		s.harness = "claude-code"
+		store.session:set(s)
+		local skill, command = invoke("skill", "frontend-design"), invoke("command", "review")
+		store.messages:push {
+			id = "cu1",
+			role = "user",
+			text = `[AGENTS.md](zeron-file:AGENTS.md) first\n\n[Long chat](zeron-chat:s1) then\n\n[$frontend-design]({skill}) and\n\n[/review]({command}) last`,
+			at = "Sep 8, 1:52 PM",
+		}
+		local reply = `[AGENTS.md](AGENTS.md) came through\n\n[Long chat](zeron-chat:s1) too\n\n[$frontend-design]({skill}) as well\n\n[the docs](https://example.com/) stay a link\n\n[the review skill](/Users/me/.agents/skills/code-review/SKILL.md) is one\n\n[that skill](/Users/me/.agents/skills/not-listed/SKILL.md) is not\n\n[hosts](/etc/hosts.conf) is outside`
+		store.messages:push {
+			id = "ca1",
+			role = "assistant",
+			text = reply,
+			model = "Opus",
+			at = "Sep 8, 1:52 PM",
+			copy = reply,
+			blocks = { { id = "t", kind = "text", text = reply } },
+		}
+	end,
+}
+-- A prompt as the engine gives it back (a reload): its words name a
+-- picture it carries "(attachment: zgx.png)" and one it doesn't
+-- "(attachment: gone.png)"; and one carrying nothing whose words only
+-- look so.
+ui.command {
+	id = "attachment_turn",
+	title = "A prompt naming what it carries",
+	run = function()
+		store.messages:push {
+			id = "au1",
+			role = "user",
+			text = "Look at (attachment: zgx.png) not (attachment: gone.png)",
+			attachments = { { kind = "image", name = "zgx.png", src = "assets/favicons/zgx.png" } },
+			at = "Sep 8, 1:54 PM",
+		}
+		-- (Words that only say so: it carries nothing.)
+		store.messages:push {
+			id = "au2",
+			role = "user",
+			text = "Also Look at (attachment: zgx.png) here",
+			at = "Sep 8, 1:55 PM",
+		}
+	end,
+}
+-- Pictures and files with names that trip a careless reader: a macOS
+-- screenshot's (a narrow no-break space before "PM"), brackets and an
+-- emoji, one that says "(attachment:", a long one, and two the same.
+ui.command {
+	id = "attach_odd",
+	title = "Attach pictures and files with odd names",
+	run = function()
+		require("@app/screens/chat/shared").attach_files({
+			{ name = "Screenshot 2026-11-07 at 1.10.14\u{202F}PM.png", path = "assets/favicons/zgx.png" },
+			{ name = "notes (draft) [v2] \u{1F4DD}.md", path = "README.md" },
+			{ name = "see (attachment: other).txt", path = "README.md" },
+			{ name = string.rep("a-very-long-name-", 8) .. "end.txt", path = "README.md" },
+			{ name = "same.txt", path = "README.md" },
+			{ name = "same.txt", path = "README.md" },
+		})
+	end,
+}
+-- A prompt as the engine gives it back after a relaunch: its words keep the
+-- mentions' links; its attachments are named as uploaded (`{id8}-…`).
+ui.command {
+	id = "mention_turn",
+	title = "A prompt mentioning what it carries, read back",
+	run = function()
+		store.messages:push {
+			id = "mu1",
+			role = "user",
+			text = "Look at [Image 1](zeron-image:1) and [notes \\[v2\\].md](zeron-attachment:2)",
+			attachments = {
+				{ kind = "image", name = "92a7aa9f-Image_1.png", src = "assets/favicons/zgx.png" },
+				{ kind = "file", name = "1b2c3d4e-notes__v2_.md" },
+			},
+			at = "Sep 8, 1:56 PM",
 		}
 	end,
 }

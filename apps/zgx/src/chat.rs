@@ -462,14 +462,15 @@ struct Pending {
 impl Pending {
     fn value(&self) -> Value {
         // (Its passages as chips, as the sent message shows them.)
-        let (words, comments) = split_comments(&self.words);
+        let (words, chats) = split_chats(&self.words);
+        let (words, comments) = split_comments(&words);
         let (words, quotes) = split_quotes(&words);
         let (words, picks) = split_annotations(&words);
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
             ("text", Value::from(words.as_str())),
-            ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
+            ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &chats)),
             ("waiting", Value::from(self.waiting)),
             // (This device's own copy: its pictures are the files it was
             // sent from, here, which the chat's device never had. The
@@ -3053,9 +3054,64 @@ fn annotation_chip(pick: &Pick) -> Value {
     ])
 }
 
+/// The block the composer adds for other chats attached (screens/chat/
+/// carried.luau `with_chats`): its header, then `- [title](zeron-chat:id)`.
+/// The links stay in the prompt (the engine reads each out to the agent);
+/// the sent message shows each as a card, as the composer did.
+const CHATS_HEADER: &str = "Chats attached:";
+
+/// A prompt's words apart from the chats attached to it (each its title and
+/// id): only a whole trailing block of chat links, as the other blocks.
+fn split_chats(words: &str) -> (String, Vec<(String, String)>) {
+    let (head, bullets) = split_block_raw(words, CHATS_HEADER);
+    if bullets.is_empty() {
+        return (words.to_owned(), Vec::new());
+    }
+    let mut chats = Vec::new();
+    for bullet in &bullets {
+        let links = zeron_proto::chat_mentions::chat_mention_links(bullet);
+        // Each line one canonical link and nothing else, or it's words.
+        match links.as_slice() {
+            [link] if link.range == (0..bullet.len()) => chats.push((link.title.clone(), link.chat_id.clone())),
+            _ => return (words.to_owned(), Vec::new()),
+        }
+    }
+    (head, chats)
+}
+
+/// An attached chat's card on the sent message: its title, its id (a press
+/// opens it) and its agent's mark, when this window knows the chat.
+fn chat_chip(title: &str, id: &str) -> Value {
+    let harness = CHATS
+        .try_with(|chats| {
+            chats
+                .chats
+                .try_borrow()
+                .ok()
+                .and_then(|known| known.get(id).and_then(|chat| chat["config"]["harness"].as_str().map(str::to_owned)))
+        })
+        .ok()
+        .flatten();
+    let mut fields = vec![
+        ("kind", Value::from("chat")),
+        ("name", Value::from(title)),
+        ("chat", Value::from(id)),
+    ];
+    if let Some(harness) = harness.filter(|h| !h.is_empty()) {
+        fields.push(("mark", Value::from(mark(&harness).as_str())));
+    }
+    Value::record(fields)
+}
+
 /// The chips a sent prompt carries: its files and pictures, then its
-/// passages, then the elements picked on a page.
-fn carried_value(paths: &[String], quotes: &[(String, String)], picks: &[Pick], comments: &[(String, String)]) -> Value {
+/// passages, then the elements picked on a page, then the chats attached.
+fn carried_value(
+    paths: &[String],
+    quotes: &[(String, String)],
+    picks: &[Pick],
+    comments: &[(String, String)],
+    chats: &[(String, String)],
+) -> Value {
     let Value::List(files) = attachments_value(paths) else { unreachable!() };
     let mut all: Vec<Value> = files.iter().cloned().collect();
     all.extend(quotes.iter().map(|(place, body)| quote_chip(place, body)));
@@ -3063,6 +3119,7 @@ fn carried_value(paths: &[String], quotes: &[(String, String)], picks: &[Pick], 
     if !comments.is_empty() {
         all.push(comments_chip(comments));
     }
+    all.extend(chats.iter().map(|(title, id)| chat_chip(title, id)));
     Value::List(all.into())
 }
 
@@ -3522,6 +3579,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
+            let (words, chats) = split_chats(&words);
             let (words, comments) = split_comments(&words);
             let (words, quotes) = split_quotes(&words);
             let (words, picks) = split_annotations(&words);
@@ -3540,7 +3598,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
                 ("text", Value::from(words.as_str())),
-                ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments), &shots)),
+                ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &chats), &shots)),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
                 ("copy", copy_value(&words)),
                 ("sender", sender),
@@ -5635,6 +5693,42 @@ mod tests {
         assert!(is(m.field("text"), typed));
     }
 
+    /// Chats attached travel in a block after the words (carried.luau
+    /// `with_chats`): the sent message shows each as a card, with its
+    /// agent's mark when the chat is known, and the words without them. A
+    /// chat linked in the words themselves (an @ mention) stays there.
+    #[test]
+    fn attached_chats_are_cards_and_mentioned_ones_stay_in_the_words() {
+        let block = format!("{CHATS_HEADER}\n- [Fix the build](zeron-chat:c1)\n- [Write \\[docs\\]](zeron-chat:c2)");
+        let (words, chats) = split_chats(&format!("look at these\n\n{block}"));
+        assert_eq!(words, "look at these");
+        assert_eq!(
+            chats,
+            vec![("Fix the build".to_owned(), "c1".to_owned()), ("Write [docs]".to_owned(), "c2".to_owned())]
+        );
+        // Only the block: no words of its own.
+        let (words, chats) = split_chats(&block);
+        assert_eq!((words.as_str(), chats.len()), ("", 2));
+        // A chat mentioned in the words is left in them.
+        let mention = "ask [Fix the build](zeron-chat:c1) about it";
+        assert_eq!(split_chats(mention), (mention.to_owned(), Vec::new()));
+        // A block line that isn't one chat link alone: the words, untouched.
+        for odd in [
+            format!("hi\n\n{CHATS_HEADER}\n- see [Fix](zeron-chat:c1)"),
+            format!("hi\n\n{CHATS_HEADER}\n- [site](https://example.com)"),
+        ] {
+            assert_eq!(split_chats(&odd), (odd.clone(), Vec::new()), "{odd}");
+        }
+        // Its card: the title, the id, the agent's mark once the chat is known.
+        let card = chat_chip("Fix the build", "c1");
+        assert!(matches!(card.field("kind"), Some(Value::Str(s)) if s.as_ref() == "chat"));
+        assert!(matches!(card.field("chat"), Some(Value::Str(s)) if s.as_ref() == "c1"));
+        assert!(card.field("mark").is_none(), "an unknown chat has no mark");
+        CHATS.with(|c| c.chats.borrow_mut().insert("c1".into(), json!({ "id": "c1", "config": { "harness": "codex" } })));
+        let card = chat_chip("Fix the build", "c1");
+        assert!(matches!(card.field("mark"), Some(Value::Str(s)) if s.as_ref() == mark("codex")));
+        CHATS.with(|c| c.chats.borrow_mut().remove("c1"));
+    }
     #[test]
     fn a_prompts_attached_passages_show_as_chips_on_the_sent_message() {
         let text = "Why this one?\n\nSelected from this conversation:\n- GPT-5.5, Sep 8, 1:43 PM: Layout dominates.\n  Paint is second.\n- You: the first ask\n\nAttached images (local files — open them to view):\n- /tmp/shot.png";

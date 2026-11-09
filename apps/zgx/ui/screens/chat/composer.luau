@@ -467,9 +467,21 @@ local function Composer(): Node
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- The lane of the transcript at its foot (screens/chat/shared's
+	-- `at_foot`), while that's the chat `id`'s: in a split, the focused
+	-- pane's (`split-<chat>`). Nil: the chat page's.
+	local function foot_lane(id: string?): string?
+		local lane = string.match(shared.at_foot:peek(), "^lane%.(.+)$")
+		return if lane and id and lane == `split-{id}` then lane else nil
+	end
 	local asks = Asks.bind {
 		id = function(): string?
 			return session_id:peek()
+		end,
+		-- (A queued message steered in glides in the transcript at its foot.)
+		name = function(): string?
+			local lane = foot_lane(session_id:peek())
+			return if lane then `lane.{lane}` else nil
 		end,
 		session = open,
 		chosen = shared.chosen,
@@ -482,13 +494,14 @@ local function Composer(): Node
 	}
 	local ask, queue = asks.ask, asks.queue
 	-- What runs behind it: this chat's subagents (the open chat's: its
-	-- transcript is the session shown) and the processes it left running.
+	-- transcript is the session shown), the chats a Zeron chat started
+	-- under it, and the processes it left running.
 	local tasks = ui.computed(function(): { any }
 		local out: { any } = {}
 		local shown = store.session:get()
 		local id = session_id:get()
 		if shown and id and shown.id == id then
-			out = lanes.tasks()
+			out = lanes.tasks(id)
 		end
 		local first_ended = #out + 1
 		for i, t in out do
@@ -616,6 +629,13 @@ local function Composer(): Node
 		run = function(name: string)
 			ZeronCommands.run(name, session_id:peek())
 		end,
+		-- (`@` lists what the draft carries, and the other chats.)
+		cargo = function(): { any }
+			return shared.cargo:get()
+		end,
+		chat = function(): string?
+			return session_id:get()
+		end,
 	}
 
 	-- A queued message being edited in the composer: which, and the draft
@@ -657,6 +677,33 @@ local function Composer(): Node
 		shared.show(key)
 	end)
 
+	-- Arriving on a chat (another session or a new chat shown: a sidebar or
+	-- Activity row, Back or Forward, ⌘N, the palette; a split's pane taking
+	-- the focus; back from Settings): the composer takes the keys. Once
+	-- what brought it here is done (a palette closing
+	-- puts focus back where it was first), so this comes last; a field
+	-- that takes the keys after (a rename) has them. (Kept: a reload, or
+	-- the window opening, isn't an arrival.)
+	local arrived = ui.state("chat_composer_arrived", "?")
+	ui.effect(function()
+		local now = route.current:get()
+		local pane = route.chat:get().session
+		local chat = now.name == "session" or now.name == "home"
+		local at = `{now.name}|{now.session or ""}|{now.project or ""}|{pane or ""}`
+		local was = arrived:peek()
+		if was == at then
+			return
+		end
+		arrived:set(at)
+		-- (A tab strip's arrows keep the keys on the tab they chose.)
+		if route.take_keys_kept() or was == "?" or not chat then
+			return
+		end
+		ui.after(0, function()
+			shared.focus:add(1)
+		end)
+	end)
+
 	local function send(text: string)
 		-- Editing a queued message: Send saves it.
 		if editing:peek() then
@@ -675,7 +722,9 @@ local function Composer(): Node
 		local pack = Carried.pack(carried, typed, text)
 		local attachments = pack.attachments
 		-- (Each command or skill picked: its canonical reference.)
-		local words = Invocations.encode(if pack.typed ~= "" then pack.typed else text)
+		-- (And each reference to what it carries, `@` picked: its name, as
+		-- what follows names it.)
+		local words = Carried.settle(Invocations.encode(if pack.typed ~= "" then pack.typed else text), carried)
 		local text_out = Carried.text(words, pack)
 		local id = session_id:peek()
 		own_notice:set(nil)
@@ -731,21 +780,29 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			-- (To the transcript at its foot: in a split, the focused pane's,
+			-- which shows its lane's list, the prompt joining it there too.)
+			local lane = foot_lane(id)
+			local lists = { store.messages }
+			if lane then
+				table.insert(lists, lanes.view(lane).messages)
+			end
 			T.send(function()
-				local here = store.messages:index_of("id", mid) ~= nil
-				if not here then
-					store.messages:push {
-						id = mid,
-						role = "user",
-						text = words,
-						attachments = Carried.shown(pack),
-						-- On its way from this moment: the line under it
-						-- says so at once.
-						waiting = "sending",
-					}
+				for _, list in lists do
+					if list:index_of("id", mid) == nil then
+						list:push {
+							id = mid,
+							role = "user",
+							text = words,
+							attachments = Carried.shown(pack),
+							-- On its way from this moment: the line under it
+							-- says so at once.
+							waiting = "sending",
+						}
+					end
 				end
 				deliver(mid)
-			end, mid)
+			end, mid, if lane then `lane.{lane}` else nil)
 			return
 		end
 		local req: store.Request = {
@@ -912,15 +969,13 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
-			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			-- ("Jump to latest" of the transcript at its foot, while it
+			-- shows: the trays' pill moves aside. In a split, the focused
+			-- pane's: shared's `at_foot`.)
 			aside = function(): number?
-				return shared.jump_width:get()
+				return shared.pill_width_of("jump", shared.at_foot:get()):get()
 			end,
-			on_pill_width = function(w: number?)
-				if shared.pill_width:peek() ~= w then
-					shared.pill_width:set(w)
-				end
-			end,
+			on_pill_width = shared.pill_teller("waiting", "window"),
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
@@ -1095,6 +1150,10 @@ local function Composer(): Node
 			on_mention = completions.on_mention,
 			mention_enabled = completions.enabled,
 			mention_empty = completions.empty,
+			mention_sections = completions.sections,
+			draft_key = function(): any
+				return session_id:get() or ""
+			end,
 		}
 	end
 

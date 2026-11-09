@@ -74,6 +74,18 @@ M.elapsed = elapsed
 local ago = locale.ago_short
 M.ago = ago
 
+-- Seconds since `t` (a time, `os.time()` seconds), followed: what reads it
+-- in a binding moves on as the clock ticks, so "now" becomes "1m" without
+-- anything else changing. One timer for every reader, sleeping between
+-- ticks. (The clock is never behind the wall's: a test can set it ahead.)
+local clock = ui.state("ds_status_clock", os.time())
+ui.every(30000, function()
+	clock:set(os.time())
+end)
+function M.since(t: number): number
+	return math.max(0, math.max(clock:get(), os.time()) - t)
+end
+
 -- Working: the dashed ring (the glyph's eight dashes, on its 24-unit grid:
 -- radius 10, stroke 2, round ends), drawn along. An unseen lead runs the
 -- ring twice in one eased sweep (slow away, quick round, slow home); the

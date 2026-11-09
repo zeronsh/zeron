@@ -1069,6 +1069,29 @@
       "next_month": "下个月",
       "time": "时间",
       "first_weekday": "2"
+    },
+    "mention_launcher": {
+      "all": "全部",
+      "result": "{n} 个结果",
+      "results": "{n} 个结果",
+      "results_label": "结果",
+      "navigate": "移动",
+      "insert": "插入",
+      "switch_tab": "切换标签",
+      "loading": "正在查找…",
+      "empty": {
+        "all": "暂无可提及的内容",
+        "files": "没有文件",
+        "chats": "没有其他对话",
+        "attachments": "这条消息没有附件"
+      },
+      "none": {
+        "all": "没有与“{q}”匹配的内容",
+        "files": "没有与“{q}”匹配的文件",
+        "chats": "没有与“{q}”匹配的对话",
+        "attachments": "没有与“{q}”匹配的附件"
+      },
+      "placeholder": "搜索文件、对话和附件"
     }
   },
   "settings": {
@@ -1196,6 +1219,11 @@
         "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
         "system_on": "电脑的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
         "description": "移动立即完成，淡入淡出时间缩短。电脑的“减弱动态效果”开启时始终启用。"
+      },
+      "accented": {
+        "label": "全局强调色",
+        "terms": "强调色 颜色 链接 圆点 高亮 accent color",
+        "description": "链接、工作中的圆点、查找高亮、@ 文件、列表标记、引用和行内代码使用强调色。"
       },
       "glass": {
         "label": "毛玻璃",
@@ -2805,7 +2833,21 @@
       "edit_unavailable": "暂时无法编辑该消息",
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
-      "drop_to_mention": "松开以提及"
+      "drop_to_mention": "松开以提及",
+      "mention_sections": {
+        "files": "文件",
+        "chats": "对话",
+        "attachments": "附件"
+      },
+      "attachment_kind": {
+        "comment": "评论",
+        "quote": "引用",
+        "annotation": "标注",
+        "chat": "对话",
+        "appshot": "应用截图",
+        "image": "图片",
+        "file": "文件"
+      }
     }
   },
   "panel": {
