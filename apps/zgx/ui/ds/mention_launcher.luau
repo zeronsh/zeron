@@ -21,6 +21,9 @@ local M = {}
 -- row's place may be before it's cut from its start.
 M.WIDTH = 440
 local ROWS, PLACE = 8, 34
+-- The time's column and the ↵ key's slot, the same on every row: what's at
+-- a row's end lines up down the list, and lighting a row moves nothing.
+local TIME_W, KEY_W = 34, 22
 -- A row's height and its tile's: a menu row's, and its glyph's box.
 local function row_h(): number
 	return (ui.theme.get("zeron.menu.row") :: number?) or 28
@@ -274,7 +277,22 @@ function M.Panel(props: Props): Node
 					color = "$text.tertiary",
 				}
 				else nil,
-			ui.show(lit, Kbd { keys = "enter", tone = "quiet" }),
+			-- When it last moved (a chat's), in its column; empty for none.
+			ui.row {
+				w = TIME_W,
+				shrink = 0,
+				justify = "end",
+				if item.side
+					then ui.text { item.side, literal = true, tabular = true, text_size = "$font.size.xs", color = "$text.tertiary" }
+					else nil,
+			},
+			-- The ↵ key's slot: kept on every row, the key in it on the lit one.
+			ui.row {
+				w = KEY_W,
+				shrink = 0,
+				justify = "end",
+				ui.show(lit, Kbd { keys = "enter", tone = "quiet" }),
+			},
 		}
 	end
 	-- (Keyed by place, as the list's other rows are: a row outlives a

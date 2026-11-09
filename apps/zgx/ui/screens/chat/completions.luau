@@ -17,6 +17,7 @@ local files = require("@app/screens/files/api")
 local sessions = require("@account/sessions")
 local Carried = require("@app/screens/chat/carried")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local locale = require("@ds/locale")
 local route = require("@app/screens/shell/route")
 local mentions = require("@ds/composer_mentions")
 local prefs = require("@app/screens/settings/prefs")
@@ -79,6 +80,8 @@ function M.bind(b: Bind): { [string]: any }
 					section = "chats",
 					value = word(title),
 					label = title,
+					-- (When it last moved: "5m", "3d".)
+					side = if type(c.updated) == "number" then locale.ago_short(os.time() - c.updated) else nil,
 					-- (Where it is: its project; and its project's tile, as the
 					-- sidebar draws it. None: the side chat's glyph.)
 					detail = if c.project then names[c.project] else nil,

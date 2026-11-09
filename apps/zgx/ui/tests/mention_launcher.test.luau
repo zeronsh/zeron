@@ -284,3 +284,43 @@ test("a click on the launcher's blank room keeps it; a click on a row inserts it
 	expect(app:text(BOX)).to_contain("@Long-chat")
 	expect(field_has_keys(app)).to_be(true)
 end)
+
+-- Where each row's place (its folder, its project) ends, by row.
+local function place_ends(app: any): { [string]: number }
+	local out: { [string]: number } = {}
+	local row: string? = nil
+	for line in app:tree("#mention-launcher"):gmatch("[^\n]+") do
+		local option = line:match('option "([^"]+)"')
+		if option then
+			row = option
+		else
+			local x, w = line:match('^%s*@%d+ text "[^"]*" (%-?%d+),%-?%d+ (%d+)x%d+$')
+			-- (The first past its tile's letter: its place, then its time.)
+			-- (On the row's right half: not its name.)
+			if row and not out[row] and x and tonumber(w) and (tonumber(w) :: number) > 12 and (tonumber(x) :: number) > 440 then
+				out[row] = (tonumber(x) :: number) + (tonumber(w) :: number)
+			end
+		end
+	end
+	return out
+end
+
+test("every row is one line, where it is ending at the same place on each, and lighting a row moves nothing", function()
+	local app = chat()
+	app:type(BOX, "@")
+	settle(app)
+	local before = place_ends(app)
+	local edge: number? = nil
+	for name, ends in before do
+		edge = edge or ends
+		expect(`{name} ends at {ends}`).to_be(`{name} ends at {edge}`)
+	end
+	expect(edge ~= nil).to_be(true)
+	app:key("ArrowDown")
+	app:key("ArrowDown")
+	settle(app)
+	local after = place_ends(app)
+	for name, ends in before do
+		expect(`{name}: {after[name]}`).to_be(`{name}: {ends}`)
+	end
+end)
