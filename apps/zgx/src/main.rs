@@ -279,6 +279,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // (`ZERON_STREAM_BENCH=<frames>`: the stream bench's page, whatever
+    // was asked: src/stream_bench.rs.)
+    #[cfg(feature = "stream-bench")]
+    if let Some(entry) = chat::stream_bench_screen() {
+        screen = Screen::Fixture(entry);
+    }
     // (`ZGX_INSPECT_SOCKET=1`: debug builds alone, src/dev.rs.)
     inspect |= dev::inspect_asked();
     if inspect {
