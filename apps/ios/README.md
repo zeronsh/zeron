@@ -163,3 +163,27 @@ archives (device, Release — the Rust core builds in the archive) with
 automatic signing, and uploads a TestFlight build (internal, or external with
 beta review). Secrets: `AC_API_KEY_P8`, `AC_API_KEY_ID`,
 `AC_API_ISSUER_ID`.
+
+### Changes and review comments
+
+The session's stacked-layers panel includes **Changes**, with a file count and
+addition/deletion totals. It opens a virtualized unified working-tree diff:
+collapsible path-only file headers, one compact line-number gutter, syntax
+coloring, and horizontal code scrolling. Pull to refresh; visible Changes screens also refresh every
+five seconds. The host checksum avoids reparsing unchanged patches.
+
+Tap a source line to open a comment sheet with its colored code row above a
+plain text field. Hold a line to start range selection. Subsequent taps expand
+both ends or trim the nearer end when tapping inside the selected range.
+The floating comment action names the range; a separate neutral glass X exits
+selection mode. File section headers stay pinned during scrolling, and
+aggregate addition/deletion counts sit below the screen title.
+
+The comment cites the selected source range (deleted lines cite the original
+file, including its previous name after a rename). **Review** in the top bar lets
+you edit or remove notes, then **Send to Agent** sends them together to the same session
+through the normal command ledger. A busy agent receives them on its queue.
+Unsent notes stay in memory per session until sent, removed, or signed out;
+they survive closing and reopening the viewer, but not restarting the app.
+Binary files and partial snapshots are explicitly marked. Patches are fetched
+from the session's host and are never persisted by this viewer.

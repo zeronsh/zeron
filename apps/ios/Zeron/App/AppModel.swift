@@ -90,6 +90,15 @@ final class AppModel {
     @MainActor lazy var terminals = TerminalStore(app: self)
     /// Cloud for this account (status, GitHub, agent logins, billing).
     @MainActor lazy var cloud = CloudStore(app: self)
+    private var changeReviews: [String: ChangeReviewDraft] = [:]
+
+    func changeReview(for chatId: String) -> ChangeReviewDraft {
+        if let draft = changeReviews[chatId] { return draft }
+        let draft = ChangeReviewDraft()
+        changeReviews[chatId] = draft
+        return draft
+    }
+
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -266,6 +275,7 @@ final class AppModel {
             return true
         } catch {
             NSLog("core start failed: \(error)")
+            changeReviews.removeAll()
             client = nil
             return false
         }
@@ -320,6 +330,7 @@ final class AppModel {
         endDeliveryBackgroundTask()
         lastDeliveryActivity = .distantPast
         client?.shutdown()
+        changeReviews.removeAll()
         client = nil
         Credentials.clearStored()
         AccountProfile.clear()

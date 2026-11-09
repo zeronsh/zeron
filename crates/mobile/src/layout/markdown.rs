@@ -643,7 +643,7 @@ fn prepare_table(
     (PTable { cells, align: align.to_vec(), cols }, width * height)
 }
 
-fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
+pub(crate) fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
     use zeron_syntax::HighlightKind as K;
     match kind {
         K::Comment => ColorRole::SyntaxComment,
