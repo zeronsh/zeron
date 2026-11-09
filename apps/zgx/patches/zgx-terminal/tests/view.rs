@@ -96,6 +96,41 @@ impl Harness {
     }
 }
 
+/// What the rows' canvases draw a point high (underlines, a strike) and
+/// stroke (a curly underline), with their colours: `(colour, stroked)`.
+#[cfg(unix)]
+fn underline_marks(app: &Harness) -> Vec<(zgx::scene::Color, bool)> {
+    use zgx::canvas::{Brush, Draw, Shape};
+    let scene = app.ui.scene.borrow();
+    let mut marks = Vec::new();
+    for item in scene.paint_items() {
+        let NodeKind::Canvas(canvas) = item.kind else {
+            continue;
+        };
+        for draw in canvas.commands() {
+            match draw {
+                Draw::Fill {
+                    path,
+                    brush: Brush::Solid(color),
+                    ..
+                } => {
+                    if let Some(Shape::Rect { rect, .. }) = path.shape()
+                        && (rect.height - 1.).abs() < 0.01
+                    {
+                        marks.push((*color, false));
+                    }
+                }
+                Draw::Stroke {
+                    brush: Brush::Solid(color),
+                    ..
+                } => marks.push((*color, true)),
+                _ => {}
+            }
+        }
+    }
+    marks
+}
+
 fn session(command: &str) -> TerminalOptions {
     TerminalOptions {
         command: Some(command.into()),
@@ -803,4 +838,315 @@ fn a_program_reads_the_clipboard_when_the_app_allows_it() {
         });
         assert_eq!(asked.get(), 1, "the app's reader was asked once");
     }
+}
+
+/// A program's underline styles (SGR 4:2 to 4:5) and underline colour
+/// (SGR 58) are drawn as shapes under their cells, a curly one as a wave;
+/// a plain underline in the text's colour is still the text's own, with no
+/// shapes of its own.
+#[cfg(unix)]
+#[test]
+fn styled_and_coloured_underlines_are_drawn_under_their_cells() {
+    use zgx::scene::Color;
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"printf '\033[4:3m\033[58;2;255;0;0mcurly\033[0m \033[4:2mdouble\033[0m \033[4:4mdotted\033[0m \033[4:5mdashed\033[0m\r\n\033[4mplain\033[0m\r\n'; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    // Drawn by shapes, not their text, the four words are one run of it.
+    let styled = "curly double dotted dashed";
+    app.until("the output", |app| app.shows("plain") && app.shows(styled));
+    let marks = underline_marks(&app);
+    let red = Color(255, 0, 0, 255);
+    assert!(
+        marks.contains(&(red, true)),
+        "the curly underline, a red wave: {marks:?}"
+    );
+    let ink: Vec<_> = marks
+        .iter()
+        .filter(|(color, stroked)| !stroked && *color != red)
+        .collect();
+    // A double underline's two lines, a dotted one's dots and a dashed one's
+    // dashes, all in the text's colour.
+    assert!(
+        ink.len() > 8,
+        "the double, dotted and dashed underlines: {marks:?}"
+    );
+    // The plain one is the text's: underlined in its font, and nothing more.
+    let scene = app.ui.scene.borrow();
+    let plain = scene
+        .paint_items()
+        .find(|item| matches!(item.kind, NodeKind::Text { text, .. } if &**text == "plain"))
+        .expect("the plain line");
+    assert!(
+        plain.font.underline.is_some(),
+        "a plain underline is its text's"
+    );
+    let others = scene
+        .paint_items()
+        .filter(|item| matches!(item.kind, NodeKind::Text { text, .. } if &**text == styled))
+        .filter(|item| item.font.underline.is_some())
+        .count();
+    assert_eq!(others, 0, "a styled underline isn't drawn by its text too");
+    drop(term);
+}
+
+/// Every run is drawn on the grid of cells (`LetterSpacing::cells`, the
+/// cell measured for the font), so a glyph from a fallback font a little
+/// wider or narrower than a cell (a braille spinner on macOS) moves nothing
+/// after it; the spinner stays in the run.
+#[test]
+#[cfg(unix)]
+fn runs_are_drawn_on_the_grid_of_cells() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(r"printf '\342\240\213 Loading 21\342\204\203 done\r\n'; sleep 30"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    let line = "\u{280b} Loading 21\u{2103} done";
+    app.until("the output", |app| app.shows(line));
+    let spacing = {
+        let scene = app.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text { text, .. } if &**text == line => Some(item.font.letter_spacing),
+            _ => None,
+        })
+    };
+    let cell = spacing.and_then(|spacing| spacing.cell());
+    assert!(cell.is_some_and(|cell| cell > 0.), "on a grid: {spacing:?}");
+}
+
+/// A replayed terminal (the gate's bench) draws what it is fed, on the
+/// feeding thread, with no program, pty or task behind it: each feed read
+/// and drawn at once.
+#[test]
+fn a_replayed_terminal_draws_what_it_is_fed() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    // No task runner: nothing reads it but a feed.
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(b"\x1b[1;32mbuilt\x1b[0m in 2s\r\n");
+    app.ui.prepare_frame();
+    assert!(app.shows("built"), "{:?}", app.texts());
+    assert!(app.shows("in 2s"), "{:?}", app.texts());
+    replay.feed(b"\x1b[2J\x1b[Hagain");
+    app.ui.prepare_frame();
+    assert!(
+        app.shows("again") && !app.shows("built"),
+        "{:?}",
+        app.texts()
+    );
+    assert_eq!(term.state().get().pid, 0);
+}
+
+/// The pictures drawn, in paint order: each one's bounds, and whether a
+/// row's canvas was drawn before it.
+#[cfg(unix)]
+fn pictures_drawn(app: &Harness) -> Vec<(zgx::scene::Rect, bool)> {
+    let scene = app.ui.scene.borrow();
+    let mut canvas_before = false;
+    let mut pictures = Vec::new();
+    for item in scene.paint_items() {
+        match item.kind {
+            NodeKind::Canvas(_) => canvas_before = true,
+            NodeKind::Image(_) => pictures.push((scene.transformed_bounds(item.id), canvas_before)),
+            _ => {}
+        }
+    }
+    pictures
+}
+
+/// A picture a program places (the kitty graphics protocol) is drawn over
+/// the cells it covers, stretched to the columns and rows it asked for;
+/// under the text when its z is negative; and it scrolls away with its
+/// lines.
+#[cfg(unix)]
+#[test]
+fn a_placed_picture_is_drawn_over_its_cells_and_scrolls_with_them() {
+    let mut app = Harness::new();
+    // Ten lines down, 2 by 2 red pixels over 3 by 2 cells below "top";
+    // again under the text after "next". Then, asked, four lines (the
+    // screen scrolls, the pictures still on it), and forty.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"i=0; while [ $i -lt 10 ]; do echo; i=$((i+1)); done; printf 'top\r\n\033_Ga=T,f=32,s=2,v=2,c=3,r=2,i=1,q=2;/wAA//8AAP//AAD//wAA/w==\033\\\r\nnext\033_Ga=p,i=1,z=-1,C=1,q=2\033\\\r\n'; read x; printf 'a\nb\nc\nd'; read x; i=0; while [ $i -lt 40 ]; do echo; i=$((i+1)); done; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the pictures", |app| {
+        app.shows("next") && pictures_drawn(app).len() == 2
+    });
+    let bounds = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id))
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    let check = |app: &Harness| {
+        let (top, next) = (bounds(app, "top"), bounds(app, "next"));
+        let line = (next.y - top.y) / 3.;
+        let cell = top.width / 3.;
+        let pictures = pictures_drawn(app);
+        // Under the text: drawn before the rows; over it, after them.
+        let (under, over) = (pictures[0], pictures[1]);
+        assert!(!under.1 && over.1, "{pictures:?}");
+        let over = over.0;
+        assert!(
+            near(over.x, top.x)
+                && near(over.y, top.y + line)
+                && near(over.width, 3. * cell)
+                && near(over.height, 2. * line),
+            "{over:?} for cells {cell} by {line} from {top:?}"
+        );
+        let under = under.0;
+        assert!(
+            near(under.x, top.x + 4. * cell) && near(under.y, next.y),
+            "{under:?}"
+        );
+        top.y
+    };
+    let was = check(&app);
+    // The screen scrolled: they move up with their lines.
+    term.input("\n");
+    app.until("the screen scrolled", |app| app.shows("d"));
+    assert!(check(&app) < was - 1.);
+    // Forty lines later both are in the scrollback, and drawn no more.
+    term.input("\n");
+    app.until("the pictures scrolled away", |app| {
+        !app.shows("next") && pictures_drawn(app).is_empty()
+    });
+}
+
+/// A picture keeps its nodes: scrolling carries it along with the rows,
+/// without one being made again; sending it again changes what they show;
+/// deleting it takes them away. It stays over its line throughout.
+#[test]
+fn a_picture_keeps_its_node_as_it_scrolls_and_is_replaced() {
+    use zgx::scene::NodeId;
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let drawn = |app: &Harness| -> Vec<(NodeId, u64, f32)> {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .filter_map(|item| match item.kind {
+                NodeKind::Image(image) => {
+                    Some((item.id, image.id(), scene.transformed_bounds(item.id).y))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let text_y = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id).y)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text} isn't shown"))
+    };
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    // Ten lines down, below "mark", over a cell of its own. Lines all
+    // different: a scroll moves the rows' slots and their container only
+    // where the rows show it scrolled.
+    let lines = |from: usize, count: usize| -> Vec<u8> {
+        (from..from + count)
+            .flat_map(|n| format!("line {n}\r\n").into_bytes())
+            .collect()
+    };
+    feed(&app, &lines(0, 10));
+    feed(&app, b"mark\r\n");
+    feed(
+        &app,
+        b"\x1b_Ga=T,f=24,s=1,v=1,c=1,r=1,i=7,q=2;/wAA\x1b\\\r\n",
+    );
+    let [(node, shows, first)] = drawn(&app)[..] else {
+        panic!("{:?}", drawn(&app));
+    };
+    let gap = first - text_y(&app, "mark");
+    assert!(gap > 1., "{gap}");
+    // A line a frame, then several at once: the screen scrolls, and its
+    // node goes with its line.
+    let held = |app: &Harness| {
+        let [(now, _, y)] = drawn(app)[..] else {
+            panic!("{:?}", drawn(app));
+        };
+        assert_eq!(now, node, "made again");
+        assert!(
+            (y - text_y(app, "mark") - gap).abs() < 0.01,
+            "{y} not a line below mark, at {}",
+            text_y(app, "mark")
+        );
+        y
+    };
+    for n in 0..6 {
+        feed(&app, &lines(100 + n, 1));
+        held(&app);
+    }
+    feed(&app, &lines(200, 3));
+    let y = held(&app);
+    assert!(
+        y < first - gap,
+        "the screen never scrolled: {y}, from {first}"
+    );
+    // Sent again, it shows the new pixels in the same node.
+    feed(&app, b"\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AP8A\x1b\\");
+    assert_ne!(drawn(&app)[0].1, shows);
+    held(&app);
+    // Deleted, its nodes go.
+    feed(&app, b"\x1b_Ga=d,d=i,i=7,q=2\x1b\\");
+    assert!(drawn(&app).is_empty());
+    term.close();
 }

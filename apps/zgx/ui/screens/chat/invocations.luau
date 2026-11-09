@@ -74,6 +74,38 @@ function M.load(harness: string, target: Target)
 	end)
 end
 
+-- A link to one of the agent's skills: its SKILL.md, wherever the agent
+-- keeps it (`…/skills/<name>/SKILL.md`), whose name is in the list for
+-- `harness` at `target`: that name; nil otherwise. A list not read yet is
+-- read (once): the answer follows it as it lands.
+function M.skill_of(link: string, harness: string?, target: Target?): string?
+	local name = string.match(link, "/skills/([^/]+)/SKILL%.md$")
+	if not name then
+		return nil
+	end
+	local key = M.key(harness, target)
+	if not key or not harness or not target then
+		return nil
+	end
+	local catalog = CATALOGS:get()[key]
+	if catalog == nil then
+		-- (Not while what asked is being built: once it's done.)
+		local h, t = harness, target
+		ui.after(0, function()
+			if CATALOGS:peek()[key] == nil then
+				M.load(h, t)
+			end
+		end)
+		return nil
+	end
+	for _, r in catalog.rows do
+		if r.kind == "skill" and r.name == name then
+			return r.name
+		end
+	end
+	return nil
+end
+
 -- The list kept for `key` (followed), or nil.
 function M.catalog(key: string?): Catalog?
 	if not key then

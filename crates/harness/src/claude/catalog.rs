@@ -2,7 +2,8 @@
 //! `packages/harness/src/claude.ts` (which itself mirrors Claude Code's own
 //! picker via t3code's catalog).
 //!
-//! Runtime initialize discovery appends concrete model ids to this curated list.
+//! Runtime initialize discovery appends concrete model ids to this curated list
+//! and fills ID-only labels for configured models with discovered display names.
 //! Curated rows retain their labels, effort ladders, and option sets because the
 //! CLI can under-report supported modes. The shared initialize probe also supplies
 //! slash commands and is cached by credential and binary context.
@@ -168,6 +169,7 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
         [
             "ANTHROPIC_MODEL",
             "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -203,6 +205,7 @@ fn settings_models_keep_manifest_and_full_ladder() {
         &path,
         serde_json::json!({"model":"gateway/model", "env": {
             "ANTHROPIC_MODEL":"gateway/model", "ANTHROPIC_SMALL_FAST_MODEL":"fast",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL":"gateway/astra",
             "ANTHROPIC_DEFAULT_OPUS_MODEL":"opus", "ANTHROPIC_DEFAULT_SONNET_MODEL":"sonnet",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL":"haiku"
         }})
@@ -211,7 +214,8 @@ fn settings_models_keep_manifest_and_full_ladder() {
     .unwrap();
     let models = models_with_settings(&path);
     assert_eq!(&models[..static_models().len()], static_models());
-    assert_eq!(models.len(), static_models().len() + 5);
+    assert_eq!(models.len(), static_models().len() + 6);
+    assert!(models.iter().any(|model| model.id == "gateway/astra"));
     for model in &models[static_models().len()..] {
         assert_eq!(model.label, model.id);
         assert_eq!(model.reasoning_levels, FULL_LADDER);
@@ -220,11 +224,20 @@ fn settings_models_keep_manifest_and_full_ladder() {
     assert_eq!(models_with_settings(&path), static_models());
 }
 
-/// Overlay only new concrete model IDs; curated metadata remains authoritative.
+/// Append new concrete model IDs and fill ID-only labels on existing rows;
+/// curated metadata remains authoritative.
 pub(super) fn with_discovered_models(
     mut models: Vec<Model>,
     response: &serde_json::Value,
 ) -> Result<Vec<Model>, crate::HarnessError> {
+    fn entry_text<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }
+
     let entries = response
         .get("response")
         .and_then(|v| v.get("models"))
@@ -233,19 +246,28 @@ pub(super) fn with_discovered_models(
         .ok_or_else(|| {
             crate::HarnessError::Protocol("Claude returned an empty model catalog".into())
         })?;
+    // Alias rows can precede the concrete row and carry generic names such as
+    // "Default (recommended)". Prefer concrete names regardless of entry order.
+    let mut concrete_labels = std::collections::HashMap::new();
+    for entry in entries {
+        if let Some(id) = entry_text(entry, "value")
+            && entry_text(entry, "resolvedModel").is_none_or(|resolved| resolved == id)
+            && let Some(label) = entry_text(entry, "displayName")
+        {
+            concrete_labels.entry(id).or_insert(label);
+        }
+    }
     let mut default = None;
     let mut valid = false;
     for entry in entries {
-        let text = |key: &str| {
-            entry
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-        };
+        let text = |key: &str| entry_text(entry, key);
         let Some(id) = text("resolvedModel").or_else(|| text("value")) else {
             continue;
         };
+        let label = concrete_labels
+            .get(id)
+            .copied()
+            .or_else(|| text("displayName"));
         // Bare aliases cannot become persisted selections. Prefer resolvedModel.
         if matches!(
             id.strip_suffix("[1m]").unwrap_or(id),
@@ -262,7 +284,12 @@ pub(super) fn with_discovered_models(
         if text("value") == Some("default") {
             default = Some(id.to_owned());
         }
-        if models.iter().any(|model| model.id == id) {
+        if let Some(model) = models.iter_mut().find(|model| model.id == id) {
+            if model.label == model.id
+                && let Some(label) = label
+            {
+                model.label = label.into();
+            }
             continue;
         }
         let mut ladder = Vec::new();
@@ -290,7 +317,7 @@ pub(super) fn with_discovered_models(
         }
         models.push(Model {
             id: id.into(),
-            label: text("displayName").unwrap_or(id).into(),
+            label: label.unwrap_or(id).into(),
             description: text("description").map(str::to_owned),
             reasoning_levels: ladder,
             options: vec![],
@@ -382,6 +409,110 @@ pub fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovered_names_complete_configured_models_without_replacing_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"model":"gateway/sol", "env": {
+                "ANTHROPIC_DEFAULT_FABLE_MODEL":"gateway/astra",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL":"gateway/sol",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL":"gateway/terra",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL":"gateway/luna"
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let configured = models_with_settings(&path);
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"default", "resolvedModel":"gateway/sol", "displayName":"Default (recommended)", "supportedEffortLevels":["low"]},
+            {"value":"gateway/sol", "displayName":"  GPT Sol  "},
+            {"value":"gateway/sol", "displayName":"Another Sol label"},
+            {"value":"gateway/terra", "displayName":"GPT Terra"},
+            {"value":"gateway/luna", "displayName":"GPT Luna"},
+            {"value":"gateway/astra", "displayName":"GPT Astra"},
+            {"value":"gateway/new", "displayName":"New gateway model"},
+            {"value":"claude-opus-5-5", "displayName":"Opus", "supportedEffortLevels":["low"]}
+        ]}});
+        let models = with_discovered_models(configured.clone(), &response).unwrap();
+        for (id, label) in [
+            ("gateway/sol", "GPT Sol"),
+            ("gateway/terra", "GPT Terra"),
+            ("gateway/luna", "GPT Luna"),
+            ("gateway/astra", "GPT Astra"),
+        ] {
+            let mut expected = configured.iter().find(|m| m.id == id).unwrap().clone();
+            expected.label = label.into();
+            assert_eq!(models.iter().find(|m| m.id == id), Some(&expected));
+            assert_eq!(models.iter().filter(|m| m.id == id).count(), 1);
+        }
+        assert_eq!(models[0].id, "gateway/sol");
+        assert_eq!(
+            models.iter().find(|m| m.id == "gateway/new").unwrap().label,
+            "New gateway model"
+        );
+        for curated in static_models() {
+            assert_eq!(models.iter().find(|m| m.id == curated.id), Some(&curated));
+        }
+    }
+
+    #[test]
+    fn concrete_names_take_priority_over_alias_names_in_either_order() {
+        let alias = serde_json::json!({
+            "value":"default", "resolvedModel":"gateway/sol",
+            "displayName":"Default (recommended)"
+        });
+        let concrete = serde_json::json!({
+            "value":"gateway/sol", "resolvedModel":"gateway/sol",
+            "displayName":"GPT Sol"
+        });
+        for entries in [
+            vec![alias.clone(), concrete.clone()],
+            vec![concrete, alias.clone()],
+        ] {
+            let response = serde_json::json!({"response":{"models":entries}});
+            for configured in [
+                vec![],
+                vec![model("gateway/sol", "gateway/sol", "", FULL_LADDER, vec![])],
+            ] {
+                let models = with_discovered_models(configured, &response).unwrap();
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].id, "gateway/sol");
+                assert_eq!(models[0].label, "GPT Sol");
+            }
+        }
+        // An alias still provides a fallback name when no concrete name exists.
+        let response = serde_json::json!({"response":{"models":[
+            alias,
+            {"value":"gateway/sol", "displayName":"  "}
+        ]}});
+        let models = with_discovered_models(vec![], &response).unwrap();
+        assert_eq!(models[0].label, "Default (recommended)");
+    }
+
+    #[test]
+    fn missing_discovered_names_preserve_the_configured_id_label() {
+        let configured = vec![model(
+            "gateway/model",
+            "gateway/model",
+            "",
+            FULL_LADDER,
+            vec![],
+        )];
+        for entry in [
+            serde_json::json!({"value":"gateway/model"}),
+            serde_json::json!({"value":"gateway/model", "displayName":"  "}),
+            serde_json::json!({"value":"gateway/model", "displayName":null}),
+        ] {
+            let response = serde_json::json!({"response":{"models":[entry]}});
+            assert_eq!(
+                with_discovered_models(configured.clone(), &response).unwrap(),
+                configured
+            );
+        }
+    }
 
     #[test]
     fn effort_maps_special_modes() {

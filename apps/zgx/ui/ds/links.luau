@@ -69,9 +69,11 @@ end
 
 -- A link's click (a span with `href`): the app's opener takes it (true:
 -- its href stays shut), else false, and zgx opens the href outside.
+-- Check the preference before the opener: a plugin can claim a link
+-- before the shell reaches its browser fallback.
 function M.take(url: string): boolean
 	local opener = M.opener
-	if opener and opener(url) then
+	if opener and app_first() and opener(url) then
 		M.last:set(`app:{url}`)
 		return true
 	end

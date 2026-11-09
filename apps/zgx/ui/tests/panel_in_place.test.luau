@@ -358,6 +358,51 @@ test("the app's ⌘W closes the panel's active tab only while the panel has the 
 	expect(tab_titles(app)).to_be("Files")
 end)
 
+test("closing the active tab ignores outside focus but leaves hidden and empty panels alone", function()
+	local app = open_panel()
+	open_files(app)
+	app:click("#outside")
+	app:set_state("test_panel_visible", false)
+	app:command("test.close_active_tab")
+	expect(app:state("test_panel_closed_focused")).to_be("false")
+	expect(tab_titles(app)).to_be("Files")
+	app:set_state("test_panel_visible", true)
+	app:command("test.close_active_tab")
+	expect(eventually(app, function(): boolean
+		return app:state("test_panel_closed_focused") == "true" and app:has("#panel-empty")
+	end)).to_be(true)
+	app:command("test.close_active_tab")
+	expect(app:state("test_panel_closed_focused")).to_be("false")
+end)
+
+test("closing the active tab from outside preserves the unsaved-file confirmation", function()
+	local app = open_panel()
+	open_files(app)
+	pick(app, "code.luau")
+	type_into(app, "code.luau", "x")
+	app:click("#outside")
+	app:command("test.close_active_tab")
+	expect(app:state("test_panel_closed_focused")).to_be("true")
+	expect(app:wait('"Close this tab?"', { timeout_ms = 15000 })).to_be(true)
+	expect(tab_titles(app)).to_be("code.luau")
+end)
+
+test("closing the active tab from outside preserves the busy-terminal confirmation", function()
+	local app = open_panel()
+	app:click("#panel-open-terminal")
+	expect(app:wait("#stub-terminal", { timeout_ms = 15000 })).to_be(true)
+	expect(eventually(app, function(): boolean
+		local s = app:state("panel_sessions")["chat:chat-1"]
+		return s ~= nil and s.tabs[1] ~= nil and s.tabs[1].terminal ~= nil
+	end)).to_be(true)
+	app:set_state("test_term_busy", true)
+	app:click("#outside")
+	app:command("test.close_active_tab")
+	expect(app:state("test_panel_closed_focused")).to_be("true")
+	expect(app:wait('"Close this tab?"', { timeout_ms = 15000 })).to_be(true)
+	expect(tab_titles(app)).to_be("Terminal 1")
+end)
+
 test("closing the last tab closes the panel; one of two doesn't; a busy terminal's asks first", function()
 	local app = open_panel()
 	-- (Settings → General's "Close the panel with its last tab", on.)
@@ -693,8 +738,9 @@ test("Escape in a file's editor takes the keyboard to the file's tab (Tab indent
 	end)).to_be(true)
 end)
 
--- A tab dragged along the strip takes another's place as it crosses that
--- one's middle, the strip making room as it goes; let go, it stays there.
+-- A tab dragged along the strip takes another's place as its leading edge
+-- passes that one's middle, the strip making room as it goes; let go, it
+-- stays there.
 test("a tab dragged over another takes its place, and stays when dropped", function()
 	local app = open_panel()
 	open_files(app)

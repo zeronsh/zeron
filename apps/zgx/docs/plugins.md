@@ -55,6 +55,12 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `native` | run a program of its own (the manifest's `mcp`) |
 | `commands` | run the programs its manifest's `commands` names, as you, on this Mac (`zeron.run`) |
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
+| `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
+| `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
+| `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
+| `models.read` | read each harness's models, efforts and options, and a chat's model |
+| `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
+| `messages.send` | send a chat a message, start a chat, answer a chat's question, as you would from the composer. Always asked, even for your own plugins. See [Sending messages](#sending-messages) |
 
 ## Reaching the network
 
@@ -104,6 +110,7 @@ end }
 |---|---|---|
 | `#sidebar` | the sidebar's list | `sessions` |
 | `.session-row` | a sidebar row (place inside: `.session-title`) | `session` |
+| `.project-icon` | a project's icon, wherever it shows: the sidebar's group headers and rows, tabs, the composer's project, project pickers, the panel, the palette, archived chats. Replace it (`ui.change`) to draw each project's own | `project` |
 | `#session-header` | a chat's header (title: `#page-title`) | |
 | `.message` | a message (`.message-user`, `.message-assistant`) | `message` |
 | `#chat-composer` | the message box | |
@@ -174,6 +181,7 @@ Records hold only what you were allowed. A field you weren't allowed is absent, 
 |---|---|
 | `session` | `{ id }` + `title, status, project, device, updated, created, branch, worktree` with `sessions.read` |
 | `message` | `{ id }` + `role, text` with `messages.read` |
+| `project` | `{ id }` + `name, device, icon` (`{ emoji?, image?, hue? }`, as its people chose it) with `sessions.read` |
 | `profile` | `{}` + `id, name, username, avatar` with `profile.read`, `email` with `account.email` |
 | `file` | `{ id }` + `path, name` with `files.read` (else an id of your plugin's own) |
 | `panel` | `{ id, session, open_tab }` |
@@ -373,7 +381,98 @@ The one exception: when the service stops during a call (it ran out of memory, o
 
 **When it runs.** A service starts on its first call, tool call or timer, and stops after 5 minutes with nothing to do. An update loads the new version beside the old one, which answers until the new one has loaded and finishes the calls it has. Each call or resumed task has 2 seconds of work before it fails (await between parts: waiting costs nothing), and the service has 64 MB. `plugin_status` shows the service on this device: running or not, what it serves, its last log lines (`print`) and why it didn't load.
 
+A service has `zeron.on(event, fn, opts)` and the agent calls of [Your agents](#your-agents-usage-accounts-and-models) too: register listeners at the top level, in the same order each time (they're known by their place, as timers are), and Zeron starts the service to tell it, with no window open.
+
 Zeron's Git plugin (`plugins-builtin/git`) is built this way: its service does every piece of git work on the device a chat's checkout is on (status, what changed through an index of its own via `GIT_INDEX_FILE`, diffs, staging, commits, pushes, branches, history), and its window says each refusal in its own words. `plugins-dev/checkout-status` is the small version, whole: a session row's menu asks the service on that session's device for the checkout's branch and changes, and agents get the same through a tool.
+
+## Your agents: usage, accounts and models
+
+A plugin can watch how much of your agents' plans you've used, switch which saved account a provider uses (as Settings → Providers' switcher does), and choose a chat's model, and hear each of those change. The same calls work in a window and in `service.luau`; each is a promise, and a refusal fails it with `"<reason>: <words>"` (`zeron.reason(err)`).
+
+| call | what | needs |
+|---|---|---|
+| `zeron.usage { provider?, device? }` | each account's usage, as Zeron last read it: `{ { provider, account, active, plan?, fetched_at?, error?, windows = { { label, used, remaining, resets_at? } } } }` (percent; `resets_at` in ms) | `usage.read` |
+| `zeron.usage_refresh { device? }` | read usage again now: once every 5 minutes per plugin (`paced` otherwise) | `usage.read` |
+| `zeron.accounts { provider?, device? }` | the saved accounts: `{ { provider, account, active, switchable, email?, name?, organization?, plan? } }` | `accounts.read` |
+| `zeron.switch_account { provider, account, when_idle?, device? }` | make a saved account the active one: a promise of `{ status = "switched" }`, or `"waiting"` with `when_idle` | `accounts.switch` |
+| `zeron.models(harness, { device? })` | a harness's models: `{ { id, label, efforts, options = { { id, label, default, choices } } } }` | `models.read` |
+| `zeron.chat_model(chat)` | a chat's `{ provider, model, effort, options }` | `models.read` |
+| `zeron.set_model { chat, model?, effort?, options? }` | a chat's model, effort or options, for its next turn, on the provider it has | `models.set` |
+| `zeron.set_default_model { harness, model, effort? }` | what a new chat starts with in this window (a window's call only) | `models.set` |
+| `zeron.on(event, fn, opts?)` | `fn(data, event)` for each event below; returns a function that stops it | the event's |
+
+`provider` and `harness` are a harness's id (`"claude-code"`, `"codex"`, …); `account` is an account's id from `zeron.accounts` or `zeron.usage`.
+
+**What it never gets.** No sign-in, token or password; it can't add or remove an account, or read another plugin's grants. A read never makes Zeron ask a provider again (that can spend a saved login's one-time refresh); only `usage_refresh` does, paced.
+
+**Switching.** A switch happens at once, chats running or not; pass `when_idle = true` to switch once that provider's chats on that device have finished (within 30 minutes). Switching to the account that's active already is refused (`already`). Each change says which plugin made it: in its event (`by = { plugin, name }`), and in `plugin_status` (`agents.actions`).
+
+**Another device.** Name it per call (`device = id`, a session's or project's `device`): that device decides with what it allowed your plugin there (installed, on, the same version by the same author, and the permission), as a service call does. A service acts on its own device; to act on another, call your service there.
+
+### Events
+
+They're told as Zeron learns of a change, never by polling: when Settings, the composer's usage ring or a plugin reads accounts, a provider reports usage, a chat's status or config changes, or a catalog is listed. A window hears them while it's open; a service's `zeron.on` hears them with no window open.
+
+| event | data | needs |
+|---|---|---|
+| `usage.changed` | an account's usage, as `zeron.usage` gives it | `usage.read` |
+| `usage.threshold` | `{ provider, account, window, remaining, below, resets_at }`, once as remaining crosses under `opts.below` (percent), again only after it's back over | `usage.read` |
+| `usage.reset` | `{ provider, account, window, next_reset_at }`: a window reset | `usage.read` |
+| `limit.hit` | `{ provider, account?, window? }`, or `{ provider, blocked_turn = true, chat? }` when a turn was stopped by a limit | `usage.read` |
+| `account.switched` | `{ provider, account, from?, by? }` | `accounts.read` |
+| `account.signed_out`, `login.expired` | `{ provider, account?, chat? }` | `accounts.read` |
+| `model.changed` | `{ chat, provider, model, effort, options, by? }`, or `{ default = true, provider, model, effort, by }` | `models.read` |
+| `models.updated` | `{ provider, models }`: a catalog changed | `models.read` |
+| `turn.started` | `{ chat, by? }` (`by`: the plugin whose message set it off) | `sessions.read` |
+| `turn.finished`, `turn.errored` | `{ chat, outcome, by?, reply? }`: `completed`, `errored`, `interrupted` or `limited`; `reply`, its final words (the last 16 KB), with `messages.read` | `sessions.read` |
+| `chat.awaiting_input`, `chat.input_answered` | `{ chat, by? }`: an agent asked a question or needs approval, and was answered | `sessions.read` |
+
+- **Narrowing.** `opts.provider`, `opts.account`, `opts.window` and `opts.chat` let only matching events through. A threshold watches the active account unless `opts.account` names one.
+- **A threshold starts from what it sees.** The first reading only learns which side of the line each window is on, so read `zeron.usage()` as you start to act on how things stand now.
+- **Only what you were allowed.** A field your plugin wasn't allowed is left out, never blanked: `email` is there with `accounts.read`, `chat` with `sessions.read`, a turn's `provider` with `models.read`.
+- **A handler can't hold Zeron up.** Events are told after the change, never before it. A listener that fails (or takes past its time) stays on and hears the next event; your row in Settings → Plugins and `plugin_status` (`agents.notices`) say the latest failure and how many in a row.
+- **A loop is stopped.** A plugin told of its own change (`by` is it) that answers with another change, and so on 16 times in a row, has that next change refused (`loop`), and your row says so. A message counts as a change: a turn your message set off is told with your `by`, so sending again on its `turn.finished` is counted. What you heard last decides: answering anyone else's change starts the count over. How often you change things never counts, only your changes setting off your own.
+
+```lua
+-- service.luau ("service", "usage.read", "accounts.read", "accounts.switch")
+zeron.on("usage.threshold", function(e)
+	for _, a in zeron.accounts({ provider = e.provider }):await() do
+		if not a.active and a.switchable then
+			zeron.switch_account({ provider = e.provider, account = a.account, when_idle = true }):await()
+			return
+		end
+	end
+end, { below = 10, provider = "claude-code" })
+```
+
+`plugins-dev/account-rotate` is this whole: its service switches Claude Code to the next saved account with more left when the active one drops below 10%, once its chats finish, and its window says so in a toast.
+
+## Sending messages
+
+With `messages.send`, a plugin talks to your agents as you do: it sends a chat a message, starts a chat, and answers a chat's question or approval. The same calls work in a window and in `service.luau`, and each goes the way the composer's would, so a chat behaves exactly as if you'd sent it: queued behind a running turn, steering it, or a turn of its own, wherever the chat runs (its host may be another of your devices).
+
+| call | what | needs |
+|---|---|---|
+| `zeron.send_message { chat, text, attachments?, mode? }` | a message into `chat`: a turn of its own when nothing runs; while a turn runs, queued for its end (`mode = "queue"`, the default) or steering it (`"steer"`). A promise of `{ status = "sent", chat, delivery = "run" \| "queue" \| "steer", id }` | `messages.send`; `attachments` (files' paths on the chat's device) also `files.read` |
+| `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?, cwd? }` | a new chat, sent `prompt` as its first message: on `device` or in `project` (a project's id), with `harness` (else this device's default) and `model` and `effort` from its catalog. A promise of `{ status, chat, id }`: `chat` is the new chat's id | `messages.send` |
+| `zeron.answer { chat, answers, request? }` | the question (or approval) `chat` waits on, answered as you would: `answers = { [question] = label }` (or `{ labels }`, or a list of `{ question, labels }`); `request` names one, else the latest. A promise of `{ status = "answered", chat, request }` | `messages.send` |
+
+- **What it sends is yours.** Your agents read it as your message, and do what it says, so `messages.send` is always asked, even for your own plugins, and the consent sheet says so plainly.
+- **Who sent it is kept.** Each message a plugin sends is recorded as its (`{ plugin, name }`) beside the chat's transcript, synced with the chat, and in `plugin_status` (`agents.actions`). The transcript shows it as any message.
+- **Its turns say so.** The turn your message sets off (or, queued, the next one) is told with your `by`: `turn.started`, `chat.awaiting_input`, `turn.finished`, `turn.errored`.
+- **A loop is stopped**, as with switches: sending on your own message's `turn.finished`, 16 times in a row, has the next send refused (`loop`), and your row in Settings → Plugins says so. A send on something else (your own turn ending, say) starts the count over. How often you send never counts.
+- **Refusals.** `not_allowed` (the permission, or `files.read` for files), `not_found` (no such chat, model, effort or question waiting), `bad_call` (no text; `"steer"` while a chat waits for an answer: answer it, or queue), `loop`.
+
+```lua
+-- service.luau ("service", "sessions.read", "messages.read", "messages.send")
+zeron.on("turn.finished", function(e)
+	if e.outcome == "completed" and e.reply and string.find(e.reply, "%[continue%]%s*$") then
+		zeron.send_message({ chat = e.chat, text = "continue" }):await()
+	end
+end)
+```
+
+`plugins-dev/keep-going` is this whole: its service sends "continue" to a chat whose turn ends with the line `[continue]`, with no window open, and its window says so in a toast.
 
 ## Settings
 

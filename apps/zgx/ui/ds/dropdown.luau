@@ -22,6 +22,7 @@ local Text = require("@self/text")
 local Tile = require("@self/tile")
 local ascii = require("@self/ascii")
 local Menu = require("@self/menu")
+local Skeleton = require("@self/skeleton")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
@@ -42,6 +43,9 @@ export type Item = {
 	-- Its tile on a palette hue (a project's: its initial in the hue's 50 on
 	-- its 500), in place of the plain letter tile.
 	hue: string?,
+	-- A project's id, where the item is one: its tile is then
+	-- `.project-icon` (ds/tile).
+	project: string?,
 	-- Its own artwork (a project's favicon), in place of its hue's tile.
 	src: string?,
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
@@ -57,8 +61,9 @@ export type Item = {
 	disabled: boolean?,
 }
 -- What a caller's own trigger is given: whether the panel is open, and how
--- to open or close it.
-export type Menu = { open: State<boolean>, toggle: () -> () }
+-- to open or close it. A submenu trigger forwards its hover changes so
+-- leaving both the row and its panel can close it.
+export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())? }
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
@@ -126,6 +131,9 @@ export type Props = {
 	-- (`on_choose` hears it: the caller folds it again); `on_escape` takes
 	-- Escape first (true: handled, the panel stays).
 	expanded: (() -> boolean)?,
+	-- What it lists is still on its way: its chosen item's name and its rows
+	-- hold their shape rather than saying there's nothing.
+	loading: (() -> boolean)?,
 	on_expand: (() -> ())?,
 	keep_open: boolean?,
 	on_choose: ((value: string) -> ())?,
@@ -139,6 +147,8 @@ export type Props = {
 	-- The caller's own trigger in place of the chip (a row of another
 	-- panel opening this one beside it, as a submenu).
 	trigger: ((menu: Menu) -> Node)?,
+	-- A side-opening menu whose parent stays reachable by the pointer.
+	submenu: boolean?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -208,7 +218,7 @@ local function tile(item: Item): Node
 		return Avatar { seed = item.label, size = 18, label = locale.t("ds.provider_card.account") }
 	end
 	if item.hue or item.src or item.emoji then
-		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18 }
+		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18, project = item.project }
 	end
 	if item.icon then
 		return Menu.glyph(item.icon)
@@ -536,6 +546,7 @@ return ui.component(function(props: Props): Node
 		return math.min(VIEW, math.max(EMPTY_H, list_h(#items())))
 	end
 	local was_folded: boolean? = nil
+	local back_on_chosen: () -> () = function() end
 	if props.expanded then
 		ui.effect(function()
 			local list = shown:get()
@@ -584,6 +595,18 @@ return ui.component(function(props: Props): Node
 			end
 			was_folded = now
 		end)
+		-- An offset set before the rows are laid out is clamped to the top by the
+		-- list, and said again unchanged it's no news to it: the chosen row is
+		-- out of the window, and the panel's head is blank. So once the rows have
+		-- their height, it's said again, a hair different (well under a point).
+		local hair = false
+		back_on_chosen = function()
+			local i = index_of(value:peek())
+			if folded() and i then
+				hair = not hair
+				offset:set(on_row(i) + (if hair then 0.01 else 0))
+			end
+		end
 		-- Folded, the window stays on the chosen row: whatever else moves it
 		-- (a wheel over it, the list clamping an offset set before it had its
 		-- rows) is put back. Put back a
@@ -754,6 +777,9 @@ return ui.component(function(props: Props): Node
 	else
 		label_node = FadeText { chosen, roll = true, rolls = rolls, color = TRIGGER[tone].label }
 	end
+	if props.loading then
+		label_node = ui.show(props.loading, Skeleton.Bar { w = ui.raw(64, "about a model's name"), h = 10 }, label_node)
+	end
 	-- Opening: the search cleared, on the chosen item, in view. (Open
 	-- already, it stays as it is: asked again, by its shortcut or its
 	-- trigger, it was put back folded, the search and tab lost.)
@@ -815,6 +841,42 @@ return ui.component(function(props: Props): Node
 			show_panel()
 		end
 	end
+	-- A hover-opened submenu stays open across the gap between its row
+	-- and panel. Leaving both starts a short, cancellable closing grace.
+	local over_trigger = false
+	local over_panel = false
+	local cancel_close: (() -> ())? = nil
+	local function stop_close()
+		if cancel_close then
+			cancel_close()
+			cancel_close = nil
+		end
+	end
+	local function hover(inside: boolean, panel: boolean)
+		if panel then
+			over_panel = inside
+		else
+			over_trigger = inside
+		end
+		stop_close()
+		if not over_trigger and not over_panel and open:peek() then
+			cancel_close = ui.after(150, function()
+				cancel_close = nil
+				if not over_trigger and not over_panel then
+					open:set(false)
+				end
+			end)
+		end
+	end
+	if props.submenu then
+		ui.on_cleanup(stop_close)
+		ui.effect(function()
+			if not open:get() then
+				stop_close()
+				over_panel = false
+			end
+		end)
+	end
 	local trigger_ref = ui.ref()
 	-- (Its trigger gone from view, as Settings stand over the page: closed, not left
 	-- with nothing to hang from.)
@@ -824,7 +886,15 @@ return ui.component(function(props: Props): Node
 			open:set(false)
 		end
 	end)
-	local trigger = if props.trigger then props.trigger({ open = open, toggle = toggle }) else ui.button {
+	local trigger = if props.trigger then props.trigger({
+		open = open,
+		toggle = toggle,
+		on_hover = if props.submenu
+			then function(inside: boolean)
+				hover(inside, false)
+			end
+			else nil,
+	}) else ui.button {
 		ref = trigger_ref,
 		label = props.label,
 		h = trigger_props.h,
@@ -855,7 +925,7 @@ return ui.component(function(props: Props): Node
 	-- The menus' glass (frosted: a light tint over the platform's own
 	-- popover material; opaque: a solid panel). No padding of its own: its
 	-- rules run edge to edge; each section insets itself.
-	return ui.popover(Menu.panel {
+	local panel = Menu.panel {
 		-- (Named for tests.)
 		class = "dropdown-panel",
 		open = open,
@@ -1157,7 +1227,19 @@ return ui.component(function(props: Props): Node
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0
+						return #shown:get() == 0 and props.loading ~= nil and props.loading()
+					end, ui.column {
+						w_full = true,
+						gap = "$zeron.list.gap",
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+					})
+				)
+				table.insert(
+					items,
+					ui.show(function()
+						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
 					end, ui.column {
 						w_full = true,
 						-- (Opened out, the list's whole window: its message in
@@ -1247,6 +1329,7 @@ return ui.component(function(props: Props): Node
 								if math.abs(size.h - content_h:peek()) >= 0.5 then
 									content_h:set(size.h)
 								end
+								back_on_chosen()
 							end,
 							table.unpack(items),
 						},
@@ -1411,5 +1494,28 @@ return ui.component(function(props: Props): Node
 				table.unpack(rows),
 			}
 		end,
-	})
+	}
+	if props.submenu then
+		local build = panel.build
+		panel.build = nil
+		panel.anchor = nil
+		panel.trigger = trigger
+		panel.label = props.label
+		panel[1] = ui.presence(function(): boolean
+			return open:get()
+		end, function(visible: boolean): Node
+			if not visible then
+				return ui.div {}
+			end
+			return ui.column {
+				w_full = true,
+				on_hover = function(inside: boolean)
+					hover(inside, true)
+				end,
+				build(),
+			}
+		end)
+		return ui.submenu(panel)
+	end
+	return ui.popover(panel)
 end)

@@ -29,7 +29,10 @@
 -- the Left and Right; tabs drag to reorder; "+" opens the empty page.
 -- ⌘W closes the active tab; ⌃Tab and ⌃⇧Tab step through them.
 --
---   Panel.close_focused_tab()    (the app's ⌘W) with the keyboard in the
+--   Panel.close_active_tab()     (the app's ⌘W) closes the visible panel's
+--                                 active tab, asking first as × does;
+--                                 false if hidden or no tab is active
+--   Panel.close_focused_tab()    with the keyboard in the
 --                                 panel (a file tab's tree or editor, a
 --                                 terminal), closes its active tab, asking
 --                                 first as a click on × does: true; else false
@@ -54,6 +57,7 @@ local ds = require("@ds")
 local control = require("@ds/control")
 local token = require("@ds/token")
 local motion = require("@ds/motion")
+local TabStrip = require("@ds/tab_strip")
 local Icon = require("@ds/icon")
 local FileIcon = require("@ds/file_icons")
 local FadeText = require("@ds/fade_text")
@@ -76,6 +80,7 @@ local state = require("@app/screens/panel/state")
 -- Lanes seen as their tabs come to the front (the panel home's done checks).
 require("@app/screens/panel/lanes_seen")
 local Files = require("@app/screens/files")
+local FilePaths = require("@app/screens/files/paths")
 -- The shell's layout (whether a session's panel is expanded), if it's there
 -- (a fixture mounts the panel alone).
 local shell_view: any = nil
@@ -111,7 +116,15 @@ end
 
 -- A lane's tab (a side chat, a subagent: screens/chat/lane_tab), loaded
 -- the same way; the lanes card opens them through `open_lane_tab`.
-type LaneModule = { Tab: (props: { tab: any }) -> Node, title: (tab: any) -> string, icon: (tab: any) -> string }
+type LaneModule = {
+	Tab: (props: { tab: any }) -> Node,
+	title: (tab: any) -> string,
+	icon: (tab: any) -> string,
+	tile: (tab: any) -> Node,
+	state: (tab: any) -> string?,
+	open_find: (tab: any) -> boolean,
+	open_model: (tab: any) -> boolean,
+}
 local Lanes: LaneModule? = nil
 local lanes_card: any = nil
 do
@@ -186,6 +199,7 @@ local focus_in: string? = nil
 local claimed = false
 local closer: ((id: string) -> ())? = nil
 local shown_key: (() -> string?)? = nil
+local is_shown: (() -> boolean)? = nil
 
 -- Whether the active tab's terminal has the keyboard (a terminal's focus
 -- is its own: its node may not say).
@@ -378,13 +392,42 @@ function M.find_in_browser(): boolean
 	return true
 end
 
-function M.close_focused_tab(): boolean
+-- The app's ⌘F, in a chat's lane with the keyboard: its own find bar, over its
+-- own transcript: true; else false, and the shell goes on to its own Find.
+function M.find_in_lane(): boolean
 	local k = if shown_key then shown_key() else nil
-	local close_tab = closer
-	if not k or not close_tab then
+	if not k or not Lanes or focus_in ~= k then
 		return false
 	end
-	if focus_in ~= k and not terminal_focused(k) then
+	local s = state.of(k)
+	local tab = if s.active then state.find(k, s.active) else nil
+	if not tab or (tab.kind ~= "side_chat" and tab.kind ~= "subagent") then
+		return false
+	end
+	return Lanes.open_find(tab)
+end
+
+-- The app's ⌘/, in a side chat with the keyboard: its own model picker: true;
+-- else false, and the shell opens the chat page's.
+function M.model_in_lane(): boolean
+	local k = if shown_key then shown_key() else nil
+	if not k or not Lanes or focus_in ~= k then
+		return false
+	end
+	local s = state.of(k)
+	local tab = if s.active then state.find(k, s.active) else nil
+	if not tab or tab.kind ~= "side_chat" then
+		return false
+	end
+	return Lanes.open_model(tab)
+end
+
+-- Close the visible panel's active tab regardless of keyboard focus. The
+-- shell keeps the panel mounted while hidden, so its layout supplies visibility.
+function M.close_active_tab(): boolean
+	local k = if shown_key then shown_key() else nil
+	local close_tab = closer
+	if not k or not close_tab or (is_shown and not is_shown()) then
 		return false
 	end
 	local active = state.of(k).active
@@ -395,6 +438,14 @@ function M.close_focused_tab(): boolean
 	return true
 end
 
+function M.close_focused_tab(): boolean
+	local k = if shown_key then shown_key() else nil
+	if not k or (focus_in ~= k and not terminal_focused(k)) then
+		return false
+	end
+	return M.close_active_tab()
+end
+
 -- The strip where Zeron's is: in the window's top row over the panel (its
 -- title strip, 38 with 4 of top pad: crates/ui/src/theme.rs
 -- TITLEBAR_HEIGHT, TITLEBAR_TOP_PAD), its tabs centred in what's under the
@@ -403,22 +454,25 @@ end
 -- over it. What isn't a tab moves the window. The tabs look as the design
 -- system's (ds/tabs, its `pill` look at `sm`): each as wide as its label,
 -- the chosen one on the flat selected wash; a long title fades at
--- LABEL_MAX. (Their end keeps a slot for × and the unsaved dot.)
+-- LABEL_MAX. (Their end keeps a slot for ×, the unsaved dot and a side chat's
+-- state.) As the top bar's tabs (screens/shell/session_tabs): the tile and the
+-- slot each as far in from the tab's ends as from its top and bottom.
 local CHIP_H = 28
-local LABEL_MAX = 140
-local SLOT = 18
+local LABEL_MAX = 160
+local SLOT = 20
+local CHIP_INSET = (CHIP_H - SLOT) / 2
 -- The band of its tabs, at the top of its card: as tall as a code pane's head, its
 -- tabs as far in from the card's sides as from its top.
 local BAND_H = Dock.head()
 local STRIP_EDGE = (BAND_H - CHIP_H) / 2
 local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's side as from its top")
 local STRIP_FADE = 36
-local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 
 -- A prop's value now (`control.value`: a function's answer, a state's,
 -- tracked, or the value itself); a path's file name.
 local read = control.value :: (v: any) -> any
 local base_name = require("@app/screens/files/paths").base_name
+local SessionRow = require("@ds/session_row")
 
 -- A tab's title and whether it has unsaved changes (tracked).
 -- The file tab of session `key` showing `path` (but `except`), if any: no
@@ -609,7 +663,9 @@ local function title_of(tab: Tab): (string, boolean)
 	return ui.t("panel.tab.terminal", { n = tab.n or 1 }):get(), false
 end
 
-export type Props = { project: any?, session: any?, page: any?, on_last_closed: (() -> ())?, [any]: any }
+-- `visible`: whether the shell currently shows the panel (including window fit).
+-- Not given, a standalone panel is visible. Used by the app's ⌘W.
+export type Props = { project: any?, session: any?, page: any?, visible: (() -> boolean)?, on_last_closed: (() -> ())?, [any]: any }
 
 
 M.Panel = ui.component(function(props: Props): Node
@@ -710,8 +766,12 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 	end
 
-	-- Each tab's box, by id (for bringing the active one into view).
+	-- Each tab's box, by id (for bringing the active one into view), and what
+	-- it shows, still (for the tab lifted by a drag, and the drag's preview).
 	local chip_refs: { [string]: any } = {}
+	local chip_faces: { [string]: () -> Node } = {}
+	-- The strip's dragging (below, once its scroll is made).
+	local strip: any
 
 	-- A tab in the strip.
 	local function chip(tab: Tab, _i: number): Node
@@ -719,6 +779,12 @@ M.Panel = ui.component(function(props: Props): Node
 		local hovered = ui.use_state(false)
 		local ref = ui.ref()
 		chip_refs[id] = ref
+		-- (Gone with its tab: neither kept for one closed.)
+		ui.on_cleanup(function()
+			if chip_refs[id] == ref then
+				chip_refs[id], chip_faces[id] = nil, nil
+			end
+		end)
 		local function is_active(): boolean
 			return active() == id
 		end
@@ -763,10 +829,33 @@ M.Panel = ui.component(function(props: Props): Node
 				return FileIcon { name = name, size = 14 }
 			end)
 		end
-		local icon = ds.Tile { size = 20, inside = make_icon() }
-		-- Being dragged: the tab left behind dims, its preview under the
-		-- pointer (the tab itself, chosen, on the menus' glass).
-		local dragging = ui.use_state(false)
+		-- Its tile: a side chat's its project's, as a chat's on the top bar.
+		local function make_tile(): Node
+			if tab.kind == "side_chat" and Lanes then
+				return Lanes.tile(tab)
+			end
+			return ds.Tile { size = SLOT, inside = make_icon() }
+		end
+		chip_faces[id] = function(): Node
+			return ui.row {
+				grow = 1,
+				min_w = 0,
+				h_full = true,
+				pl = ui.raw(CHIP_INSET, "as far in as the tile is from its top"),
+				pr = ui.raw(CHIP_INSET, "the tab's inset"),
+				gap = "$zeron.space.tight",
+				items = "center",
+				make_tile(),
+				FadeText {
+					title,
+					max_w = LABEL_MAX,
+					min_w = 0,
+					grow = 1,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+				},
+			}
+		end
 		local function others(side: string?): { string }
 			local out: { string } = {}
 			local list = tabs()
@@ -785,7 +874,7 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		return ContextMenu {
 			label = ui.t("panel.tab.actions"),
-			ring = "$radius.md",
+			ring = "$radius.lg",
 			shrink = 0,
 			items = function(): { any }
 				local entries: { any } = {
@@ -831,22 +920,18 @@ M.Panel = ui.component(function(props: Props): Node
 				selected = is_active,
 				h = CHIP_H,
 				shrink = 0,
-				pl = ui.raw(4, "as far in as the tile is from its top"),
-				-- (The end slot sits as far in as it is from top and bottom.)
-				pr = ui.raw(2, "the tab's inset"),
+				pl = ui.raw(CHIP_INSET, "as far in as the tile is from its top"),
+				pr = ui.raw(CHIP_INSET, "the tab's inset"),
 				gap = "$zeron.space.tight",
 				items = "center",
 				rounded = "$radius.lg",
 				cursor = "pointer",
-				-- (As ds/tabs' pill: the chosen one on the flat wash; the
-				-- others take the hover wash under the pointer, their ink
-				-- brightening with it.)
-				bg = function(): string
-					if is_active() then
-						return "$zeron.selected.flat.bg"
-					end
-					return if hovered:get() then "$hover" else "#00000000"
-				end,
+				relative = true,
+				-- (As ds/tabs' pill: the chosen one on the flat wash, which
+				-- glides to it, `strip.Highlight`; the others take the hover
+				-- wash under the pointer, `TabStrip.Wash`, their ink
+				-- brightening with it. Pressed, any darkens.)
+				active = { bg = "$pressed" },
 				color = function(): string
 					return if is_active() or hovered:get() then "$text.primary" else "$text.secondary"
 				end,
@@ -864,120 +949,106 @@ M.Panel = ui.component(function(props: Props): Node
 						close(id)
 					end
 				end,
-				-- Reordered by dragging onto another tab: the tab itself under
-				-- the pointer, as it looks chosen, floating on the menus' glass;
-				-- the one left behind faint until it lands.
+				focus = control.ring,
+				on_key = TabStrip.keys(id, function(): { string }
+					return strip.order:peek()
+				end, function(other: string)
+					local k = key:peek()
+					if k then
+						state.activate(k, other)
+					end
+				end, function(other: string): any
+					return chip_refs[other]
+				end),
+				-- Dragged, it lifts and follows the pointer along the strip, the
+				-- others making room (`ds/tab_strip`); let go, it stays where it
+				-- lands.
+				on_press = function(e: any)
+					strip.press(e)
+				end,
 				on_drag = function(): any
-					dragging:set(true)
-					-- (A chat's tab can go out to the page: as a pane, or a tab of its own.)
-					return { panel_tab = id }
+					strip.begin(id)
+					-- Keep the strip's identity while carrying context to a composer.
+					local payload: any = { panel_tab = id }
+					if tab.kind == "files" then
+						local path = Files.tab_file(id) or tab.path
+						if path then
+							local target = FilePaths.target_of(project, session)
+							payload.paths = { path }
+							payload.root = if target then target.root else nil
+						end
+					elseif tab.kind == "side_chat" and tab.chat and lanes_card
+						and lanes_card.unsent:peek()[tab.chat] == nil and lanes_card.forks:peek()[tab.chat] == nil then
+						payload.session = tab.chat
+					end
+					return payload
 				end,
-				-- (The tab as it stands, on the window's colour. Nothing here eases: a
-				-- drag's preview has no clock for it.)
-				drag_preview = function()
-					local r = ref:peek()
-					return ui.div {
-						rounded = "$radius.lg",
-						bg = "$background",
-						shadow = "$shadow.sm",
-						ui.row {
-							w = if r then r.width else nil,
-							h = CHIP_H,
-							pl = ui.raw(4, "as far in as the tile is from its top"),
-							pr = ui.raw(2, "the tab's inset"),
-							gap = "$zeron.space.tight",
-							items = "center",
-							rounded = "$radius.lg",
-							bg = if is_active() then "$zeron.selected.flat.bg" else "#00000000",
-							color = if is_active() then "$text.primary" else "$text.secondary",
-							ds.Tile { size = 20, inside = make_icon() },
-							FadeText {
-								title,
-								max_w = LABEL_MAX,
-								text_size = "$font.size.sm",
-								weight = "$font.weight.medium",
-							},
-						},
-					}
+				drag_preview = function(): Node
+					return strip.preview(id)
 				end,
-				on_drag_end = function()
-					dragging:set(false)
+				on_drag_end = function(payload: any, accepted: boolean)
+					strip.ended(payload, accepted)
 				end,
 				opacity = function(): number
-					return if dragging:get() then 0.4 else 1
+					return strip.opacity(id)
 				end,
-				drop_when = function(payload: any): boolean
-					return type(payload) == "table" and payload.panel_tab ~= nil and payload.panel_tab ~= id
-				end,
-				-- The dragged tab takes this one's place as the pointer crosses
-				-- its middle (from either side), the strip sliding to make room
-				-- (its layout animation): where it shows is where it lands.
-				on_drag_over = function(payload: any, e)
-					local k = key:peek()
-					if not k then
-						return
-					end
-					local from, here = nil, nil
-					for i, t in tabs() do
-						if t.id == payload.panel_tab then
-							from = i
-						elseif t.id == id then
-							here = i
-						end
-					end
-					if not from or not here then
-						return
-					end
-					local past_middle = e.local_x > e.w / 2
-					if (from < here and past_middle) or (from > here and not past_middle) then
-						state.move(k, payload.panel_tab, here)
-					end
-				end,
-				-- (Dropped: it's where it was dragged to already.)
-				on_drop = function(_payload: any) end,
-				-- (Half a point down: on the label's lowercase middle, not
-				-- its line box's.)
-				ui.div { y = 0.5, shrink = 0, icon },
+				TabStrip.Wash(function(): boolean
+					return hovered:get() and not is_active()
+				end),
+				make_tile(),
 				FadeText {
 					title,
 					max_w = LABEL_MAX,
+					min_w = 0,
 					text_size = "$font.size.sm",
 					weight = "$font.weight.medium",
 				},
-				-- Its end: × under the pointer, a dot while unsaved.
+				-- Its end: × under the pointer; else a dot while unsaved, or
+				-- whether a side chat awaits a person or is at work.
 				ui.row {
 					w = SLOT,
 					h = SLOT,
 					shrink = 0,
 					items = "center",
 					justify = "center",
-					ui.show(function(): boolean
-						return hovered:get()
-					end, IconButton {
-						label = ui.t("panel.tab.close"),
-						-- zgx-lint: allow(untracked-get)
-						tooltip = ui.t("panel.tab.close_tooltip", { key = ui.shortcut_text("cmd+w") }):get(),
-						tooltip_side = "bottom",
-						size = "sm",
-						tone = "quiet",
-						w = SLOT,
-						h = SLOT,
-						rounded = "$radius.sm",
-						on_click = function()
-							close(id)
-						end,
-						Icon { name = "close", size = 12 },
-					}),
-					ui.show(function(): boolean
-						return dirty() and not hovered:get()
-					end, ui.div {
-						role = "img",
-						label = ui.t("panel.tab.unsaved"),
-						w = 6,
-						h = 6,
-						rounded = "$radius.full",
-						bg = "$accent",
-					}),
+					ui.presence(function(): string
+						if hovered:get() then
+							return "close"
+						elseif dirty() then
+							return "dirty"
+						end
+						return (if tab.kind == "side_chat" and Lanes then Lanes.state(tab) else nil) or ""
+					end, function(which: string): Node
+						if which == "" then
+							return ui.div {}
+						elseif which == "close" then
+							return IconButton {
+								label = ui.t("panel.tab.close"),
+								-- zgx-lint: allow(untracked-get)
+								tooltip = ui.t("panel.tab.close_tooltip", { key = ui.shortcut_text("cmd+w") }):get(),
+								tooltip_side = "bottom",
+								size = "sm",
+								tone = "quiet",
+								w = SLOT,
+								h = SLOT,
+								rounded = "$radius.sm",
+								on_click = function()
+									close(id)
+								end,
+								Icon { name = "close", size = 12 },
+							}
+						elseif which == "dirty" then
+							return ui.div {
+								role = "img",
+								label = ui.t("panel.tab.unsaved"),
+								w = 6,
+								h = 6,
+								rounded = "$radius.full",
+								bg = "$accent",
+							}
+						end
+						return ui.div { id = `panel-tab-{id}-state`, SessionRow.state(which :: any) }
+					end, { shrink = 0 }),
 				},
 			},
 		}
@@ -1012,6 +1083,50 @@ M.Panel = ui.component(function(props: Props): Node
 	-- (What's in the strip, followed as it grows: a new tab slides in, and
 	-- the end it scrolls to moves with it.)
 	local strip_content = ui.ref()
+	strip = TabStrip.new {
+		key = "panel_tab",
+		items = function(): { string }
+			local out: { string } = {}
+			for _, t in tabs() do
+				table.insert(out, t.id)
+			end
+			return out
+		end,
+		width = function(id: string): number
+			local r = chip_refs[id]
+			return if r then r.width or 0 else 0
+		end,
+		content = strip_content,
+		offset = strip_offset,
+		selected = active,
+		face = function(id: string): Node
+			local f = chip_faces[id]
+			return if f then f() else ui.div {}
+		end,
+		commit = function(id: string, index: number)
+			local k = key:peek()
+			if k then
+				state.move(k, id, index)
+			end
+		end,
+		h = CHIP_H,
+		rounded = "$radius.lg",
+	}
+	-- The tabs in the order the strip shows them: a dragged one where it's held.
+	local shown_tabs = ui.computed(function(): { Tab }
+		local by: { [string]: Tab } = {}
+		for _, t in tab_list:get() do
+			by[t.id] = t
+		end
+		local out: { Tab } = {}
+		for _, id in strip.order:get() do
+			local t = by[id]
+			if t then
+				table.insert(out, t)
+			end
+		end
+		return out
+	end)
 	ui.effect(function()
 		local a = active()
 		local list = tabs()
@@ -1025,6 +1140,11 @@ M.Panel = ui.component(function(props: Props): Node
 			if not r or (r.width or 0) <= 0 then
 				return
 			end
+		end
+		-- (Not while a tab's carried: the strip scrolls under it as it nears an
+		-- end.)
+		if strip.busy() then
+			return
 		end
 		if strip_wanted then
 			local w = strip_wanted
@@ -1101,7 +1221,7 @@ M.Panel = ui.component(function(props: Props): Node
 		pinned_now = needs > room + 0.5
 		return pinned_now
 	end)
-	local strip = ui.row {
+	local strip_row = ui.row(strip.zone {
 		id = "panel-strip",
 		role = "tablist",
 		label = ui.t("panel.strip.label"),
@@ -1117,7 +1237,7 @@ M.Panel = ui.component(function(props: Props): Node
 		-- (The band's room: a scroll sized by nothing else is 320 wide.
 		-- Its empty part still moves the window, as nothing there takes a
 		-- press.)
-		ui.scroll_x {
+		strip.Frame(ui.scroll_x {
 			ref = strip_ref,
 			offset = strip_offset,
 			grow = 1,
@@ -1129,15 +1249,17 @@ M.Panel = ui.component(function(props: Props): Node
 			fade_overflow = true,
 			ui.row {
 				ref = strip_content,
+				relative = true,
 				gap = "$zeron.space.hair",
 				items = "center",
-				ui.each(tab_list, chip, {
+				strip.Highlight(),
+				ui.each(shown_tabs, chip, {
 					key = function(t: Tab): string
 						return t.id
 					end,
 					direction = "row",
 					gap = "$zeron.space.hair",
-					animate = motion.layout(SLIDE),
+					animate = motion.tab_slide(),
 				}),
 				-- (Only with a tab open, as Zeron's: the empty page is what it
 				-- opens. Here, after the last tab, while they all fit; pinned at
@@ -1147,10 +1269,10 @@ M.Panel = ui.component(function(props: Props): Node
 				end, new_tab_button()),
 				ui.row { hook = "panel.strip", items = "center", gap = "$space.1" },
 			},
-		},
+		}),
 		-- "+", pinned at the strip's end while the tabs run past it.
 		ui.show(new_pinned, ui.div { shrink = 0, ml = "$space.1", new_tab_button() }),
-	}
+	})
 
 	-- The empty page: the session's home (screens/panel/home): where it
 	-- runs, its project's actions, what can open here (each with its key,
@@ -1401,7 +1523,7 @@ M.Panel = ui.component(function(props: Props): Node
 
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "on_last_closed" and k ~= "children" then
+		if k ~= "project" and k ~= "session" and k ~= "page" and k ~= "no_project" and k ~= "visible" and k ~= "on_last_closed" and k ~= "children" then
 			box[k] = v
 		end
 	end
@@ -1418,6 +1540,7 @@ M.Panel = ui.component(function(props: Props): Node
 	-- Where the keyboard is (focus and blur reach the panel from what's in
 	-- it), and how a tab closes, for the app's ⌘W.
 	closer = close
+	is_shown = props.visible
 	shown_key = function(): string?
 		return key:peek()
 	end
@@ -1433,7 +1556,7 @@ M.Panel = ui.component(function(props: Props): Node
 	end
 	ui.on_cleanup(function()
 		if closer == close then
-			closer, shown_key, focus_in = nil, nil, nil
+			closer, shown_key, focus_in, is_shown = nil, nil, nil, nil
 		end
 	end)
 	box.on_key = function(e): boolean?
@@ -1492,7 +1615,7 @@ M.Panel = ui.component(function(props: Props): Node
 		bg = "$zeron.inset.bg",
 		border = 1,
 		border_color = "$zeron.inset.edge",
-		ui.column { w_full = true, shrink = 0, hidden = closed, strip },
+		ui.column { w_full = true, shrink = 0, hidden = closed, strip_row },
 		panes,
 	}
 	box[#box + 1] = question

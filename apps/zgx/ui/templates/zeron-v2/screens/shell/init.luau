@@ -132,6 +132,14 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- Check for Updates…: Settings' About & updates, checking now.
+	runs["shell.check_updates"] = function()
+		route.settings("about")
+		local about: any = boundary.load("@app/screens/settings/about")
+		if about and about.check then
+			about.check()
+		end
+	end
 	runs["shell.toggle_sidebar"] = function()
 		fit.toggle_sidebar()
 	end
@@ -141,13 +149,12 @@ return function(): Node
 			fit.toggle_panel()
 		end
 	end
-	-- ⌘W: the panel's active tab, while the panel has the keyboard (as
-	-- × closes it: a file with changes, a busy terminal, ask first). Else
-	-- the window, as Zeron's closes it, and with it the app: what's kept is
-	-- saved as it closes (src/main.rs), the engine and its terminals go on.
+	-- ⌘W closes the visible right panel's active tab first, regardless of
+	-- keyboard focus, through the same unsaved-file / busy-terminal gate as ×.
+	-- Without a tab to close, close the window.
 	runs["shell.close"] = function()
 		local panel: any = boundary.load("@app/screens/panel")
-		if panel and panel.close_focused_tab and (panel.close_focused_tab :: any)() then
+		if panel and panel.close_active_tab and (panel.close_active_tab :: any)() then
 			return
 		end
 		ui.invoke("close")
@@ -308,6 +315,9 @@ return function(): Node
 					run()
 				end,
 			}
+			if k.rule then
+				ui.command { separator = true, menu = k.menu }
+			end
 		end
 	end
 
@@ -533,57 +543,67 @@ return function(): Node
 				end
 				local function device(): (string?, boolean)
 					local c = chat()
-					local now = sessions.now:get()
-					for _, d in now.devices do
+					for _, d in sessions.devices:get() do
 						if c and d.id == c.device then
-							return d.name, d.here or d.id == now.here
+							return d.name, d.here or d.id == sessions.here:get()
 						end
 					end
 					return nil, false
 				end
 				local card = ui.ref()
+				-- (Its place on the card, not the region's root: what leaves is laid
+				-- over what enters, and would take this one's offset on top of its own.)
 				return ui.div {
-					ref = card,
-					absolute = true,
-					left = at.x + at.w + 10,
-					-- (Beside the row's top, kept inside the window.)
-					top = function(): number
-						local h = card.height or 0
-						return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
+					pointer_events = "none",
+					w = function(): number
+						return root.width or 0
 					end,
-					ds.SessionCard {
-						session = id,
-						title = function(): string
-							local c = chat()
-							return if c then c.title else ""
+					h = function(): number
+						return root.height or 0
+					end,
+					ui.div {
+						ref = card,
+						absolute = true,
+						left = at.x + at.w + 10,
+						-- (Beside the row's top, kept inside the window.)
+						top = function(): number
+							local h = card.height or 0
+							return math.max(8, math.min(at.y, (root.height or 0) - h - 8))
 						end,
-						time = function(): number?
-							local c = chat()
-							return if c then c.updated else nil
-						end,
-						device = function(): string?
-							return (device())
-						end,
-						here = function(): boolean
-							local _, here = device()
-							return here
-						end,
-						project = function(): string?
-							local c = chat()
-							if not c or not c.project then
-								return nil
-							end
-							for _, p in sessions.now:get().projects do
-								if p.id == c.project then
-									return p.name
+						ds.SessionCard {
+							session = id,
+							title = function(): string
+								local c = chat()
+								return if c then c.title else ""
+							end,
+							time = function(): number?
+								local c = chat()
+								return if c then c.updated else nil
+							end,
+							device = function(): string?
+								return (device())
+							end,
+							here = function(): boolean
+								local _, here = device()
+								return here
+							end,
+							project = function(): string?
+								local c = chat()
+								if not c or not c.project then
+									return nil
 								end
-							end
-							return nil
-						end,
-						branch = function(): string?
-							local c = chat()
-							return if c then c.branch else nil
-						end,
+								for _, p in sessions.projects:get() do
+									if p.id == c.project then
+										return p.name
+									end
+								end
+								return nil
+							end,
+							branch = function(): string?
+								local c = chat()
+								return if c then c.branch else nil
+							end,
+						},
 					},
 				}
 			end, {

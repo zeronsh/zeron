@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types 'none'">
+<title>Annotation security test</title>
+<style>
+  body { font: 24px system-ui; padding: 60px; }
+  button { font: inherit; padding: 20px; }
+</style>
+<h1>Annotation security test</h1>
+<p>Serve this directory with <code>python -m http.server 18719 --bind 127.0.0.1</code>
+and open this page in Zeron's browser. Enable Annotate, hover the button,
+then click it. It should gain an annotation marker and remain at Clicks: 0.
+Also check Shift-click, dragging a region, and Escape. A normal click after
+leaving annotation mode should increment the counter.</p>
+<button id="target">Clicks: 0</button>
+<script>
+  let clicks = 0;
+  document.getElementById('target').onclick = () => {
+    document.getElementById('target').textContent = 'Clicks: ' + (++clicks);
+  };
+</script>

@@ -37,6 +37,7 @@ use zeron_doc::{
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
+use crate::chat2_checkpoint::{CheckpointPost, chat2_checkpoint_parts, post_chat2_checkpoint};
 use crate::http_error::describe_http_error;
 use crate::project_actions::{
     ProjectActionSetupHandoff, ProjectActionsStore, launch_project_setup_action,
@@ -487,6 +488,17 @@ fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
         body
     };
     format!("{body}{trailer}")
+}
+
+/// What a queue row says: its words, or for files with no words, what a run
+/// of them says. A row needs text on every device (one without is refused and
+/// dropped as read), so files alone must not come to an empty one.
+fn queued_row_text(text: &str, has_files: bool) -> &str {
+    if has_files && text.trim().is_empty() {
+        ATTACHMENT_ONLY_PROMPT
+    } else {
+        text
+    }
 }
 
 fn queue_text_hash(text: &str) -> String {
@@ -1185,6 +1197,13 @@ impl DocHost {
             }
         });
         Ok(())
+    }
+
+    /// Start no new work until [`Self::lift_quiesce`]: a new version trying out
+    /// an update, whose changes may yet be undone. Controls keep working, as
+    /// they do in a quiesce, and what queues meanwhile runs when it's lifted.
+    pub fn hold_work(&self) {
+        self.inner.quiesced.store(true, Ordering::SeqCst);
     }
 
     /// End a quiesce and run everything that queued meanwhile.
@@ -3071,7 +3090,6 @@ impl DocHost {
         if self.inner.edge_disconnected.load(Ordering::Acquire) {
             return;
         }
-        use base64::Engine as _;
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
@@ -3116,30 +3134,14 @@ impl DocHost {
             let Ok(bearer) = edge.bearer().await else {
                 return;
             };
-            let url = format!(
-                "{}/chat2/{}/checkpoint?seqCovered={}",
-                edge.url.trim_end_matches('/'),
-                chat_id,
-                seq_covered
-            );
             let Ok(_permit) = zeron_sync::budget::shared().http(zeron_sync::budget::Priority::Background).await else {
                 return;
             };
             let size = snapshot.len() as u64;
-            match http
-                .post(&url)
-                .timeout(std::time::Duration::from_secs(300))
-                .bearer_auth(&bearer)
-                .header(
-                    "x-chat2-frontier",
-                    base64::engine::general_purpose::STANDARD.encode(&frontier),
-                )
-                .body(snapshot)
-                .send()
-                .await
-            {
-                Ok(res) if res.status().is_success() => {
-                    tracing::info!(chat = %chat_id, seq_covered, reason, "chat2 checkpoint posted");
+            let parts = chat2_checkpoint_parts(snapshot.len());
+            match post_chat2_checkpoint(&http, &edge.url, &chat_id, &bearer, seq_covered, &frontier, snapshot).await {
+                Ok(()) => {
+                    tracing::info!(chat = %chat_id, seq_covered, reason, size, parts, "chat2 checkpoint posted");
                     for batch_id in &covered_rejections {
                         if let Err(err) = publication_store.acknowledge_chat_update(&chat_id,batch_id) {
                             tracing::warn!(%err, "chat2: checkpoint obligation retirement failed; will retry");
@@ -3152,13 +3154,11 @@ impl DocHost {
                         client.note_checkpoint(seq_covered, size);
                     }
                 }
-                Ok(res) => {
-                    tracing::warn!(chat = %chat_id, status = res.status().as_u16(),
-                        "chat2 checkpoint rejected");
+                Err(CheckpointPost::Rejected(status)) => {
+                    tracing::warn!(chat = %chat_id, status, size, parts, "chat2 checkpoint rejected");
                 }
-                Err(err) => {
-                    let err = describe_http_error(err);
-                    tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
+                Err(CheckpointPost::Failed(err)) => {
+                    tracing::warn!(chat = %chat_id, error = %err, size, parts, "chat2 checkpoint POST failed");
                 }
             }
         });
@@ -3591,6 +3591,25 @@ impl DocHost {
     /// over the peer link (retry until they land) while the command is
     /// already durably queued. The send is a local write — attachment bytes
     /// chase it, never gate it (2026-08-19 incident).
+    /// The question (or approval) `chat_id` waits on, latest first: its
+    /// request id, or `None` when nothing waits.
+    pub(crate) fn pending_input(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let entries = handle.doc.read_entries()?;
+        Ok(entries.iter().rev().flat_map(|e| e.parts.iter().rev()).find_map(|part| match part {
+            zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
+            _ => None,
+        }))
+    }
+
+    /// Record who sent message (or queued row) `id` of `chat_id`, beside
+    /// its transcript (`SessionDoc::sent_by`; synced with the chat, shown
+    /// nowhere).
+    pub(crate) fn mark_sent_by(&self, chat_id: &str, id: &str, by: serde_json::Value) -> Result<(), EngineError> {
+        self.open(chat_id)?.doc.mark_sent_by(id, by)?;
+        Ok(())
+    }
+
     pub fn queue_command_with_transfers(
         &self,
         chat_id: &str,
@@ -3674,7 +3693,7 @@ impl DocHost {
         let id = new_id();
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
-            text: text.to_string(),
+            text: queued_row_text(text, !attachments.is_empty()).to_string(),
             attachments,
             hold_for_turn_end,
             issued_by: self.inner.config.device_id.clone(),
@@ -3968,7 +3987,10 @@ impl DocHost {
             }
 
             let replacement = match action {
-                FinishQueueEditAction::Commit => Some(text.unwrap_or_default()),
+                FinishQueueEditAction::Commit => Some(queued_row_text(
+                    text.unwrap_or_default(),
+                    attachments.map_or(!item.attachments.is_empty(), |kept| !kept.is_empty()),
+                )),
                 FinishQueueEditAction::Cancel | FinishQueueEditAction::ReleaseUnchanged => None,
                 FinishQueueEditAction::Discard => Some(""),
             };
@@ -4142,7 +4164,9 @@ impl DocHost {
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
     /// it starts normally as the next turn. Turn-boundary providers retain it
-    /// in their mailbox until ready. Attachment-bearing rows stay untouched.
+    /// in their mailbox until ready. A row's files go with it as the steer's
+    /// attachments (images as images); one whose files from another device
+    /// haven't landed yet stays queued, and the call says why.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -4160,9 +4184,12 @@ impl DocHost {
         else {
             return Ok(false);
         };
-        if !candidate.attachments.is_empty() {
+        // Its files ride the steer, as images where they are. Ones still on
+        // their way from another device can't go yet (the drain waits for
+        // them; a steer says so).
+        if !self.missing_row_attachments(&candidate).is_empty() {
             return Err(EngineError::Other(
-                "messages with attachments cannot be steered mid-turn".into(),
+                "this message's images are still uploading".into(),
             ));
         }
         if candidate.delivery_gate.is_some() {
@@ -4463,7 +4490,13 @@ impl DocHost {
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer_now(
+                    chat_id,
+                    &prompt,
+                    attachments.clone(),
+                    Some(message_id.clone()),
+                    now_ms(),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => return Ok(()),
@@ -5439,9 +5472,15 @@ impl DocHost {
             return;
         };
         for path in attachments.iter_mut() {
-            if let Some(abs) = uploads.resolve_pending(path) {
+            if let Some(abs) = uploads.localize(path) {
                 *prompt = prompt.replace(path.as_str(), &abs);
                 *path = abs;
+            }
+        }
+        // Paths only the prompt names (older clients sent no list).
+        for path in crate::uploads::attachment_lines_in(&prompt.clone()) {
+            if let Some(abs) = uploads.localize(&path) {
+                *prompt = prompt.replace(path.as_str(), &abs);
             }
         }
     }
@@ -5475,8 +5514,8 @@ impl DocHost {
             return prompt.to_string();
         };
         let mut out = prompt.to_string();
-        for r in crate::uploads::pending_refs_in(prompt) {
-            if let Some(abs) = uploads.resolve_pending(&r) {
+        for r in crate::uploads::attachment_lines_in(prompt) {
+            if let Some(abs) = uploads.localize(&r) {
                 out = out.replace(&r, &abs);
             }
         }
@@ -5886,8 +5925,10 @@ impl DocHost {
         {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
+        // A steer is read at once: while a command runs, its turn stops in
+        // place first (the runtime and its background work stay).
         match sessions
-            .steer_at(chat_id, &prompt, message_id.clone(), issued_at)
+            .steer_now(chat_id, &prompt, Vec::new(), message_id.clone(), issued_at)
             .await?
         {
             SteerOutcome::Accepted => {
@@ -6928,3 +6969,4 @@ mod sync_lifecycle_tests;
 
 #[path = "doc_host_delivery.rs"]
 mod remote_delivery;
+

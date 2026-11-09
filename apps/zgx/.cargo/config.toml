@@ -7,4 +7,9 @@ LUAU_CXXFLAGS = "-DNDEBUG"
 # page goes back to the system only when all of it is free, so a page a quarter
 # of the size holds a quarter as much memory for each survivor. (On an M5 Max,
 # the same long session: 259 MB dirty at rest with 64 KiB pages, 188 MB with these.)
-CFLAGS_aarch64_apple_darwin = "-DMI_ARENA_SLICE_SHIFT=14"
+#
+# And no pages of larger blocks (64 KiB to 512 KiB by default, shared in pages of
+# 4 MiB, here 16 KiB to 128 KiB in 1 MiB): what asks for that much is few and of
+# sizes all its own, so one block of 50 KiB left in such a page holds up to a
+# megabyte. Each now has a page of its own, freed with it.
+CFLAGS_aarch64_apple_darwin = "-DMI_ARENA_SLICE_SHIFT=14 -DMI_ENABLE_LARGE_PAGES=0"

@@ -1925,6 +1925,66 @@ fn codex_auth(email: &str, account_id: &str) -> String {
 }
 
 #[tokio::test]
+async fn codex_usage_loads_for_a_login_whose_key_carries_the_user_id() {
+    let server = MockServer::start(move |method, path, _| match (method, path) {
+        ("GET", "/backend-api/wham/usage") => (
+            200,
+            serde_json::json!({
+                "account_id": "acct-team",
+                "plan_type": "plus",
+                "rate_limit": {
+                    "primary_window": { "used_percent": 12, "limit_window_seconds": 18000 },
+                    "secondary_window": { "used_percent": 40, "limit_window_seconds": 604800 },
+                },
+                "rate_limit_reset_credits": { "available_count": 1 },
+            })
+            .to_string(),
+        ),
+        ("GET", "/backend-api/wham/rate-limit-reset-credits") => (
+            200,
+            serde_json::json!({
+                "available_count": 1,
+                "credits": [
+                    { "id": "credit-1", "reset_type": "codex_rate_limits", "status": "available",
+                      "title": "Full reset (Weekly + 5 hr)", "expires_at": "2030-01-04T02:01:00Z" },
+                ]
+            })
+            .to_string(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let id_token = jwt(serde_json::json!({
+        "email": "ada@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct-team",
+            "chatgpt_user_id": "user-ada",
+            "chatgpt_plan_type": "plus",
+        },
+    }));
+    write(
+        &config.codex_home.join("auth.json"),
+        &serde_json::json!({
+            "tokens": { "id_token": id_token, "access_token": "codex-access", "account_id": "acct-team" }
+        })
+        .to_string(),
+    );
+
+    let codex = rows(&accounts.list(true).await.unwrap(), HarnessId::Codex);
+    assert_eq!(codex.len(), 1);
+    let fractions: Vec<f32> = codex[0].usage_windows.iter().map(|w| w.used_fraction).collect();
+    assert_eq!(fractions.len(), 2, "{:?}", codex[0].usage_windows);
+    assert!((fractions[0] - 0.12).abs() < 1e-6);
+    assert!((fractions[1] - 0.40).abs() < 1e-6);
+    assert_eq!(
+        codex[0].codex_reset_credits.as_ref().map(|c| c.available_count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
 async fn codex_banked_resets_list_persist_and_redeem_against_the_mock() {
     // Who the usage endpoint says the token belongs to (a mismatch: another).
     let answers_for = Arc::new(Mutex::new("acct-ada".to_string()));

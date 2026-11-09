@@ -41,9 +41,107 @@ M.shown = ui.shared("chat.transcript.session", nil :: string?)
 -- Where in it the reader was (ds/transcript's `keep`), for a page made
 -- again; nil at the end.
 M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
+-- The two pills over a composer, a centred pair: its transcript's "Jump to
+-- latest" (`"jump"`) and the composer's folded trays' pill (`"waiting"`),
+-- each's width while it shows, nil while it doesn't. Every pane has its
+-- own pair, by its key: the chat page's transcript `"page"`, a lane's (a
+-- split's pane, a panel tab) `lane.<slot>`, its composer the same; the
+-- window's composer `"window"`. Each says only its own width; what stands
+-- beside it reads the other's: the window's composer the transcript at its
+-- foot (`at_foot`), a split's focused pane the window's composer, any
+-- other pane its own composer. (One width for the whole window had every
+-- pane's pills reading the one the chat page last said.)
+local pill_widths: { [string]: State<number?> } = {}
+function M.pill_width_of(kind: "jump" | "waiting", key: string): State<number?>
+	local k = `{kind}|{key}`
+	local s = pill_widths[k]
+	if not s then
+		s = ui.shared(`chat.pills.{k}`, nil :: number?)
+		pill_widths[k] = s
+	end
+	return s :: State<number?>
+end
+-- The pill whose width it says, as one said by one pill alone: nil from a
+-- pill made again after another took its key (a chat page made anew, its
+-- old transcript going after) clears only its own.
+local pill_owner: { [string]: any } = {}
+function M.pill_teller(kind: "jump" | "waiting", key: string): (w: number?) -> ()
+	local me = {}
+	local s = M.pill_width_of(kind, key)
+	local k = `{kind}|{key}`
+	return function(w: number?)
+		if w == nil and pill_owner[k] ~= me then
+			return
+		end
+		pill_owner[k] = if w == nil then nil else me
+		if s:peek() ~= w then
+			s:set(w)
+		end
+	end
+end
+-- The transcript at the window's composer's foot (its pair's key): the
+-- chat page's, or in a split the focused pane's (screens/shell/page).
+M.at_foot = ui.shared("chat.pills.at_foot", "page")
+-- (The chat page's pair, by its old names.)
+M.jump_width = M.pill_width_of("jump", "page")
+M.pill_width = M.pill_width_of("waiting", "window")
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
+-- The same across launches: each chat's place as last read, the chat shown
+-- with its place as it is read, each with when (os.time), the most recent
+-- `KEPT_PLACES` of them. A launch starts from them, so the chat it opens,
+-- and any other gone back to, opens where it was read.
+local KEPT_PLACES = 200
+local saved_places = ui.persist("chat_places", {} :: { [string]: any })
+do
+	local saved = saved_places:peek()
+	if next(M.places:peek()) == nil and type(saved) == "table" and next(saved) ~= nil then
+		local all: { [string]: any } = {}
+		for id, kept in saved do
+			if type(kept) == "table" and type(kept.place) == "table" then
+				all[id] = kept.place
+			end
+		end
+		M.places:set(all)
+	end
+end
+ui.effect(function()
+	local places = M.places:get()
+	local shown = M.shown:get()
+	local reading = M.anchor:get()
+	local before = saved_places:peek()
+	local now = os.time()
+	local all: { [string]: any } = {}
+	local count = 0
+	for id, place in places do
+		if id ~= shown then
+			local was = if type(before) == "table" then before[id] else nil
+			-- (When it was read: kept while its place is as it was.)
+			local at = if type(was) == "table" and was.at and was.place and was.place.id == place.id and was.place.dy == place.dy then was.at else now
+			all[id] = { place = place, at = at }
+			count += 1
+		end
+	end
+	if shown and reading ~= nil then
+		all[shown] = { place = reading, at = now }
+		count += 1
+	end
+	-- The most recent kept.
+	if count > KEPT_PLACES then
+		local order: { { id: string, at: number } } = {}
+		for id, kept in all do
+			table.insert(order, { id = id, at = tonumber(kept.at) or 0 })
+		end
+		table.sort(order, function(a: { id: string, at: number }, b: { id: string, at: number }): boolean
+			return a.at > b.at
+		end)
+		for i = KEPT_PLACES + 1, #order do
+			all[order[i].id] = nil
+		end
+	end
+	saved_places:set(all)
+end)
 -- Every other chat's draft, by key (a session's id; "" a new chat's), and
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
@@ -60,6 +158,53 @@ local function chip_id(kind: string): string
 	made:set(n)
 	return `{kind}{n}`
 end
+
+-- The new-chat page's draft (its words, what it carries, the passages
+-- quoted into it), kept across launches as its settings are
+-- (screens/chat/composer's `chat_new_defaults`); a chat's isn't.
+local saved_new = ui.persist("chat_new_draft", nil :: any)
+do
+	-- A launch (nothing out yet, nothing put away for a new chat): the new
+	-- page's draft as it was left, out as the new chat's (put away under
+	-- "" if a chat shows first, as any move does).
+	local all = kept:peek()
+	local was = saved_new:peek()
+	if type(was) == "table" and all[""] == nil and here:peek() == "" and M.text:peek() == "" and #M.cargo:peek() == 0 then
+		ui.batch(function()
+			M.text:set(if type(was.text) == "string" then was.text else "")
+			M.cargo:set(if type(was.cargo) == "table" then was.cargo else {})
+			M.quotes:set(if type(was.quotes) == "table" then was.quotes else {})
+			-- (Its chips' ids taken: one made from here never repeats one.)
+			local top = made:peek()
+			for _, c in M.cargo:peek() do
+				local n = tonumber(string.match(tostring(c.id or ""), "(%d+)$"))
+				if n and n > top then
+					top = n
+				end
+			end
+			if top ~= made:peek() then
+				made:set(top)
+			end
+		end)
+	end
+end
+ui.effect(function()
+	local now: any = nil
+	if here:get() == "" then
+		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+		if text ~= "" or #cargo > 0 then
+			now = { text = text, cargo = cargo, quotes = quotes }
+		end
+	else
+		local put = kept:get()[""]
+		if put then
+			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
+		end
+	end
+	if now ~= nil or saved_new:peek() ~= nil then
+		saved_new:set(now)
+	end
+end)
 
 -- Whether a file's name is a picture the window can draw. (zgx decodes
 -- no GIF or HEIC yet: those are file chips, so a thumbnail never fails.)
@@ -131,17 +276,21 @@ function M.mention(q: Quote.Quote)
 	M.focus:add(1)
 end
 
-function M.attach_quote(q: Quote.Quote)
+function M.attach_quote(q: Quote.Quote, key: string?)
 	-- The same passage twice (attached again, or its menu and its bar both
 	-- taken) is one chip.
-	for _, item in M.cargo:peek() do
+	for _, item in M.peek_cargo(key) do
 		if item.kind == "annotation" and item.quote and Quote.same({ text = item.quote, who = item.name, from = item.from }, q) then
-			M.focus:add(1)
+			if key == nil then
+				M.focus:add(1)
+			end
 			return
 		end
 	end
-	M.cargo:push(Quote.chip(q, chip_id("quote")))
-	M.focus:add(1)
+	M.push_cargo(key, Quote.chip(q, chip_id("quote")))
+	if key == nil then
+		M.focus:add(1)
+	end
 end
 
 -- An element (or a region) picked on a page in the panel's browser
@@ -182,20 +331,100 @@ function M.note_cargo(id: string, note: string)
 	M.cargo:set(list)
 end
 
--- Files picked or dropped: chips, carried with the message.
-function M.attach_files(files: { any })
+-- Chat `key`'s chips, wherever its draft is, for a chat with a composer of
+-- its own (a side chat's tab). (`key` nil: the chat shown's.)
+function M.peek_cargo(key: string?): { any }
+	if key == nil or here:peek() == key then
+		return M.cargo:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.cargo) == "table" then d.cargo else {}
+end
+
+function M.cargo_of(key: string): { any }
+	if here:get() == key then
+		return M.cargo:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.cargo) == "table" then d.cargo else {}
+end
+
+local function set_cargo(key: string, list: { any })
+	if here:peek() == key then
+		M.cargo:set(list)
+		return
+	end
+	local all = table.clone(kept:peek())
+	local d = table.clone(all[key] or { text = "", cargo = {}, quotes = {} })
+	d.cargo = list
+	all[key] = d
+	kept:set(all)
+end
+
+-- Chat `key`'s chips replaced (a queued message's, shown as it's edited).
+function M.set_cargo_of(key: string, list: { any })
+	set_cargo(key, list)
+end
+
+function M.push_cargo(key: string?, item: any)
+	-- A file or a picture: its number in the draft, the next after any
+	-- there (an `@` mention of it names it by that: ds/attachment_mentions).
+	if item.path and item.mention == nil then
+		local top = 0
+		for _, other in M.peek_cargo(key) do
+			if type(other.mention) == "number" and other.mention > top then
+				top = other.mention
+			end
+		end
+		item.mention = top + 1
+	end
+	if key == nil or here:peek() == key then
+		M.cargo:push(item)
+		return
+	end
+	local list = table.clone(M.peek_cargo(key))
+	table.insert(list, item)
+	set_cargo(key, list)
+end
+
+-- Chat `key`'s chips, taken for sending (none left on its draft).
+function M.take_cargo_of(key: string): { any }
+	local list = M.peek_cargo(key)
+	if #list > 0 then
+		set_cargo(key, {})
+	end
+	return list
+end
+
+-- Chips of a message that didn't go: back on chat `key`'s draft, before any
+-- added since.
+function M.restore_cargo_of(key: string, list: { any })
+	local all = table.clone(list)
+	for _, item in M.peek_cargo(key) do
+		table.insert(all, item)
+	end
+	set_cargo(key, all)
+end
+
+-- Files picked or dropped: chips, carried with the message. (`key`, a chat
+-- with a composer of its own: on that chat's draft, and the keys are its
+-- composer's to take. Else on the chat shown's, the window's composer taking
+-- the keys. So too `add_to_chat` and `mention_chat`.)
+function M.attach_files(files: { any }, key: string?)
 	for _, f in files do
 		local name = f.name or f.path or "file"
 		local picture = is_image(name)
-		M.cargo:push {
+		M.push_cargo(key, {
 			id = chip_id("file"),
 			kind = if picture then "image" else "file",
 			name = name,
 			src = if picture then f.path else nil,
 			path = f.path,
-		}
+		})
 	end
-	M.focus:add(1)
+	if key == nil then
+		M.focus:add(1)
+	end
 end
 
 -- Files of the project (the files pane's, dragged here or its "Add to
@@ -204,9 +433,9 @@ end
 -- path there, not uploaded again; `paths` are the project's own (relative
 -- to `root`, the project's folder there), and a chip says where in it the
 -- file is. One already carried isn't added twice.
-function M.add_to_chat(paths: { string }, root: string?)
+function M.add_to_chat(paths: { string }, root: string?, key: string?)
 	local have: { [string]: boolean } = {}
-	for _, item in M.cargo:peek() do
+	for _, item in M.peek_cargo(key) do
 		if item.path then
 			have[item.path] = true
 		end
@@ -227,7 +456,7 @@ function M.add_to_chat(paths: { string }, root: string?)
 			have[at] = true
 			local name = string.match(rel, "([^/]+)/?$") or rel
 			local picture = here and is_image(name)
-			M.cargo:push {
+			M.push_cargo(key, {
 				id = chip_id("file"),
 				kind = if picture then "image" else "file",
 				name = name,
@@ -237,10 +466,12 @@ function M.add_to_chat(paths: { string }, root: string?)
 				path = at,
 				rel = rel,
 				on_host = true,
-			}
+			})
 		end
 	end
-	M.focus:add(1)
+	if key == nil then
+		M.focus:add(1)
+	end
 end
 
 -- The composer's model picker, opened from elsewhere (the shell's ⌘/):
@@ -261,28 +492,40 @@ end
 -- pill. While any is, the whole chat shows "Drop to attach"; a drop on any
 -- attaches to the composer.
 M.dropping = ui.shared("chat.dropping", {} :: { [string]: boolean })
+-- The same over a chat with a composer of its own (a side chat's tab, in the
+-- panel): each zone its own overlay and its own draft, the chat page none the
+-- wiser.
+M.dropping_own = ui.shared("chat.dropping_own", {} :: { [string]: boolean | string })
 
 -- (`what`: "session" while a sidebar session is carried, its drop a
 -- mention; else files.)
-function M.over(zone: string, inside: boolean, what: string?)
-	local now = M.dropping:peek()
+local function over_in(map: any, zone: string, inside: boolean, what: string?)
+	local now = map:peek()
 	local want = if inside then (what or true) else nil
 	if now[zone] == want then
 		return
 	end
 	local next = table.clone(now)
 	next[zone] = want
-	M.dropping:set(next)
+	map:set(next)
 end
 
--- Whether files are being carried over the chat ("Drop to attach").
-function M.carrying(): boolean
-	for _, what in M.dropping:get() do
+function M.over(zone: string, inside: boolean, what: string?)
+	over_in(M.dropping, zone, inside, what)
+end
+
+local function any_files(map: any): boolean
+	for _, what in map:get() do
 		if what ~= "session" then
 			return true
 		end
 	end
 	return false
+end
+
+-- Whether files are being carried over the chat ("Drop to attach").
+function M.carrying(): boolean
+	return any_files(M.dropping)
 end
 
 -- Whether a sidebar session is being carried over it ("Drop to mention").
@@ -303,10 +546,9 @@ end
 -- while another app's drag is over it), or no word of them for a while. A
 -- sidebar session carried is the window's own drag, whose end is always
 -- heard: kept. True if files were let go of.
-function M.let_go(): boolean
-	local now = M.dropping:peek()
+local function let_go_in(map: any): boolean
 	local next, any = {}, false
-	for zone, what in now do
+	for zone, what in map:peek() do
 		if what == "session" then
 			next[zone] = what
 		else
@@ -314,9 +556,15 @@ function M.let_go(): boolean
 		end
 	end
 	if any then
-		M.dropping:set(next)
+		map:set(next)
 	end
 	return any
+end
+
+function M.let_go(): boolean
+	local page = let_go_in(M.dropping)
+	local own = let_go_in(M.dropping_own)
+	return page or own
 end
 
 -- No word of them for this long (each move from one part of the chat to
@@ -328,7 +576,7 @@ local SETTLE_MS = 300
 local settled = false
 ui.effect(function()
 	settled = false
-	if M.carrying() then
+	if any_files(M.dropping) or any_files(M.dropping_own) then
 		ui.after(SETTLE_MS, function()
 			settled = true
 		end)
@@ -352,11 +600,11 @@ end
 
 -- Another chat mentioned (a sidebar session dropped on the chat): a chip,
 -- sent as Zeron's chat mention (screens/chat/chat_links). Once each.
-function M.mention_chat(id: string)
+function M.mention_chat(id: string, key: string?)
 	if not ChatLinks.valid(id) then
 		return
 	end
-	for _, item in M.cargo:peek() do
+	for _, item in M.peek_cargo(key) do
 		if item.kind == "chat" and item.chat == id then
 			return
 		end
@@ -367,7 +615,16 @@ function M.mention_chat(id: string)
 			title, mark = c.title, c.agent
 		end
 	end
-	M.cargo:push { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark }
+	if title == nil then
+		for _, list in sessions.now:peek().children or {} do
+			for _, c in list do
+				if c.id == id then
+					title, mark = c.title, c.agent
+				end
+			end
+		end
+	end
+	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
 -- A chat as it's listed now, for what says who sent a message: its title (its
@@ -415,7 +672,7 @@ function M.chat_link(title: string, id: string): string
 end
 
 -- A drag from inside the window that drops here: the files pane's files
--- (their paths). Other drags (a session, a tab, a section) aren't ours.
+-- (their paths, also carried by file tabs). Other drags aren't file context.
 local function workspace_paths(payload: any): { string }?
 	if type(payload) == "table" and type(payload.paths) == "table" and #payload.paths > 0 then
 		return payload.paths
@@ -423,26 +680,34 @@ local function workspace_paths(payload: any): { string }?
 	return nil
 end
 
--- The props that make a node a drop zone of the chat, named `zone`: files
--- from outside, and the files pane's, attach as chips.
-function M.drop_zone(zone: string): { [string]: any }
+-- The props that make a node a drop zone, named `zone` in `map`: files from
+-- outside, and the files pane's, attach as chips on chat `key`'s draft (nil:
+-- the chat shown's); a sidebar session is mentioned there. `landed` runs as
+-- anything does.
+local function zone_props(map: any, zone: string, key: string?, landed: (() -> ())?): { [string]: any }
+	local function land()
+		map:set({})
+		if landed then
+			landed()
+		end
+	end
 	return {
 		on_file_hover = function(inside: boolean)
-			M.over(zone, inside)
+			over_in(map, zone, inside)
 		end,
 		on_file_drop = function(files: { any })
-			M.dropping:set({})
-			M.attach_files(files)
+			M.attach_files(files, key)
+			land()
 		end,
 		drop_when = function(payload: any): boolean
 			-- (Files, and a sidebar session: a mention.)
 			return workspace_paths(payload) ~= nil or (type(payload) == "table" and type(payload.session) == "string")
 		end,
 		on_drag_over = function(payload: any)
-			M.over(zone, true, if type(payload) == "table" and type(payload.session) == "string" then "session" else nil)
+			over_in(map, zone, true, if type(payload) == "table" and type(payload.session) == "string" then "session" else nil)
 		end,
 		on_drag_leave = function()
-			M.over(zone, false)
+			over_in(map, zone, false)
 		end,
 		on_hover = function(inside: boolean)
 			if inside then
@@ -450,15 +715,36 @@ function M.drop_zone(zone: string): { [string]: any }
 			end
 		end,
 		on_drop = function(payload: any)
-			M.dropping:set({})
 			local paths = workspace_paths(payload)
 			if paths then
-				M.add_to_chat(paths, payload.root)
+				M.add_to_chat(paths, payload.root, key)
 			elseif type(payload) == "table" and type(payload.session) == "string" then
-				M.mention_chat(payload.session)
+				M.mention_chat(payload.session, key)
 			end
+			land()
 		end,
 	}
+end
+
+-- A drop zone of the chat page, named `zone`: what lands attaches to the
+-- window's composer.
+function M.drop_zone(zone: string): { [string]: any }
+	return zone_props(M.dropping, zone, nil)
+end
+
+-- A drop zone of chat `key`, whose composer is its own (a side chat's tab):
+-- its props, and whether files, and a sidebar session, are over it now, for
+-- its own overlays. `landed` runs as anything lands (its composer takes the
+-- keys).
+function M.own_drop_zone(zone: string, key: string, landed: () -> ()): ({ [string]: any }, () -> boolean, () -> boolean)
+	return zone_props(M.dropping_own, zone, key, landed),
+		function(): boolean
+			local what = M.dropping_own:get()[zone]
+			return what ~= nil and what ~= "session"
+		end,
+		function(): boolean
+			return M.dropping_own:get()[zone] == "session"
+		end
 end
 
 -- A review comment left on a project's file (the files pane's editor or
@@ -510,19 +796,8 @@ function M.attach_comment(c: {
 		plugin = c.plugin,
 		key = c.key,
 	}
-	local session = c.session
-	if session and session ~= here:peek() then
-		-- Another chat's draft, kept: the chip waits in it.
-		local all = table.clone(kept:peek())
-		local draft = table.clone(all[session] or { text = "", cargo = {}, quotes = {} })
-		local cargo = table.clone(draft.cargo or {})
-		table.insert(cargo, item)
-		draft.cargo = cargo
-		all[session] = draft
-		kept:set(all)
-		return id
-	end
-	M.cargo:push(item)
+	-- (Another chat's draft, kept: the chip waits in it.)
+	M.push_cargo(c.session, item)
 	return id
 end
 
@@ -670,7 +945,7 @@ end
 
 -- Which of `sessions`' devices is this one.
 local here_device = ui.computed(function(): string?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.here then
 			return d.id
 		end

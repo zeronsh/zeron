@@ -1,14 +1,15 @@
 //! Release channels: `stable` (everyone) and `beta` (Zeron.app testers).
 //!
-//! The channel a Mac follows is kept in the data dir, `update-channel.json`,
-//! where every updater reads it on each check: the app's own (whichever
-//! interface is installed) and the engine's report. It is a file, not the
-//! environment, so it survives the app replacing itself and an engine never
-//! inherits a channel from whoever started it.
+//! The channel an install follows is kept in the data dir,
+//! `update-channel.json`, where every updater reads it on each check: the
+//! app's own (whichever interface is installed) and the engine's report. It is
+//! a file, not the environment, so it survives the app replacing itself and an
+//! engine never inherits a channel from whoever started it.
 //!
-//! Only macOS app installs follow it. Managed installs (headless daemons, the
-//! Linux desktop), Windows and source builds are always on stable: beta
-//! publishes the macOS app alone.
+//! macOS app installs follow it. On Windows and the Linux desktop only a beta
+//! build does (`InstallKind::follows_channels`), which is how a tester goes
+//! back to Stable. Stable builds there, headless daemons and source builds are
+//! always on stable.
 //!
 //!   stable  `{edge}/releases/manifest.json` (and `latest.txt`), unchanged
 //!   beta    `{edge}/releases/beta/manifest.json`
@@ -145,13 +146,33 @@ pub fn data_dir() -> Option<&'static Path> {
     DATA_DIR.get().map(PathBuf::as_path)
 }
 
-/// The channel this process's updater follows: the record's on a macOS app
-/// install, stable everywhere else.
+/// The channel this process's updater follows: the record's on an install
+/// that follows channels, stable everywhere else.
 pub fn selected() -> Channel {
-    if !matches!(crate::detect_install(), crate::InstallKind::MacApp { .. }) {
+    let install = crate::detect_install();
+    if !install.follows_channels() {
         return Channel::Stable;
     }
-    data_dir().map(|dir| read(dir).channel).unwrap_or_default()
+    let app_version = match &install {
+        crate::InstallKind::MacApp { bundle } => crate::bundle_app_version(bundle),
+        _ => Some(crate::app_version().to_owned()),
+    };
+    choice_for(data_dir().and_then(recorded), app_version.as_deref())
+}
+
+/// What's recorded, when there's a record to read.
+fn recorded(dir: &Path) -> Option<ChannelRecord> {
+    serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
+}
+
+/// A choice someone made stands. With none on record (the app hasn't run since it
+/// was installed, say) an app stays on the channel it was built for: an update
+/// asked from another device must not move a beta app off beta by default.
+fn choice_for(record: Option<ChannelRecord>, app_version: Option<&str>) -> Channel {
+    match record {
+        Some(record) => record.channel,
+        None => app_version.map(Channel::of_version).unwrap_or_default(),
+    }
 }
 
 /// This Mac's macOS version (`sw_vers -productVersion`), once.
@@ -189,11 +210,16 @@ pub fn macos_at_least(system: &str, minimum: &str) -> bool {
     }
 }
 
-/// Why this Mac can't take beta updates, in words for the person: not a
-/// macOS app install, or macOS older than [`BETA_MINIMUM_MACOS`].
+/// Why this install can't take beta updates, in words for the person: it
+/// doesn't follow channels, or it's a Mac on macOS older than
+/// [`BETA_MINIMUM_MACOS`] (the floor is macOS's alone).
 pub fn beta_unavailable() -> Option<String> {
-    if !matches!(crate::detect_install(), crate::InstallKind::MacApp { .. }) {
+    let install = crate::detect_install();
+    if !install.follows_channels() {
         return Some("Beta updates are for the Zeron app on a Mac.".into());
+    }
+    if !matches!(install, crate::InstallKind::MacApp { .. }) {
+        return None;
     }
     match macos_version() {
         Some(version) if macos_at_least(version, BETA_MINIMUM_MACOS) => None,
@@ -219,6 +245,17 @@ mod tests {
     fn beta_reads_its_own_folder() {
         assert_eq!(Channel::Stable.base("https://edge.zeron.sh/releases/"), "https://edge.zeron.sh/releases");
         assert_eq!(Channel::Beta.base("https://edge.zeron.sh/releases"), "https://edge.zeron.sh/releases/beta");
+    }
+
+    #[test]
+    fn a_choice_stands_and_without_one_an_app_stays_on_its_own_channel() {
+        let chose = |channel| Some(ChannelRecord { channel, claimed_by: None });
+        // Someone turned beta off at that Mac: their choice, on a beta build.
+        assert_eq!(choice_for(chose(Channel::Stable), Some("0.2.136-beta.1")), Channel::Stable);
+        assert_eq!(choice_for(chose(Channel::Beta), Some("0.2.136")), Channel::Beta);
+        assert_eq!(choice_for(None, Some("0.2.136-beta.1")), Channel::Beta);
+        assert_eq!(choice_for(None, Some("0.2.136")), Channel::Stable);
+        assert_eq!(choice_for(None, None), Channel::Stable);
     }
 
     #[test]

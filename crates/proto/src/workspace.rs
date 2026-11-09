@@ -41,6 +41,10 @@ pub mod capabilities {
     /// interface asks for it on connect and offers Stable on an engine
     /// without it.
     pub const ZGX_INTERFACE_V1: &str = "zgx-interface-v1";
+    /// The host's `UpdateStatus` says how it's installed and whether another
+    /// device can update it (`install`, `canApplyRemotely`, and why not).
+    /// Older hosts don't say: a client can't tell without trying.
+    pub const UPDATE_ABILITY_V1: &str = "update-ability-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -55,6 +59,7 @@ pub mod capabilities {
         PROVIDER_SWITCH_V1,
         BACKGROUND_TASKS_V1,
         ZGX_INTERFACE_V1,
+        UPDATE_ABILITY_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -148,6 +153,7 @@ mod tests {
                     "provider-switch-v1",
                     "background-tasks-v1",
                     "zgx-interface-v1",
+                    "update-ability-v1",
                     "voice-client-media-v1"
                 ],
             })

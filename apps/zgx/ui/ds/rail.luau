@@ -18,6 +18,10 @@
 --
 -- `ui.div { relative = true, ui.list { offset = at, … }, Rail { offset = at, extent = total, view = seen } }`
 --
+-- `horizontal`: along the view's foot, for a view that scrolls sideways.
+-- `hint`: shown while this holds too, for what can't be seen to scroll until
+-- it's tried (a table a pointer rests on).
+--
 -- It is the scroll view's sibling, not its child, on purpose: a view's edge
 -- `fade` masks everything inside it, the engine's own bar included, so a
 -- faded view's bar would fade with its rows. Over the view, the rail is
@@ -34,6 +38,8 @@ export type Props = {
 	extent: Length,
 	view: Length,
 	track: Length?,
+	horizontal: boolean?,
+	hint: (() -> boolean)?,
 	-- An id for the strip, for tools that look for it.
 	id: string?,
 }
@@ -57,6 +63,7 @@ end
 
 return ui.component(function(props: Props): Node
 	local offset = props.offset
+	local horizontal = props.horizontal == true
 	local hovered = ui.use_state(false)
 	local dragging = ui.use_state(false)
 	-- The view scrolled a moment ago.
@@ -126,14 +133,14 @@ return ui.component(function(props: Props): Node
 		return hovered:get() or dragging:get()
 	end
 	local function shown(): boolean
-		return not span:get().fits and (recent:get() or active())
+		return not span:get().fits and (recent:get() or active() or (props.hint ~= nil and props.hint()))
 	end
 
-	-- Where the pointer is along the track, from its top.
-	local function along(e: { local_y: number }): number
-		return e.local_y - END
+	-- Where the pointer is along the track, from its start.
+	local function along(e: any): number
+		return (if horizontal then e.local_x else e.local_y) - END
 	end
-	local function follow(e: { local_y: number })
+	local function follow(e: any)
 		local top, _, travel, limit = geometry()
 		if top == nil or travel <= 0 then
 			return
@@ -145,15 +152,17 @@ return ui.component(function(props: Props): Node
 	return ui.div {
 		id = props.id,
 		absolute = true,
-		top = 0,
-		h = if props.track
-			then function(): number
+		top = if horizontal then nil else 0,
+		left = if horizontal then 0 else nil,
+		h = if horizontal
+			then HIT
+			elseif props.track then function(): number
 				return read(props.track :: Length)
 			end
 			else nil,
 		bottom = if props.track then nil else 0,
 		right = 0,
-		w = HIT,
+		w = if horizontal then nil else HIT,
 		aria_hidden = true,
 		opacity = ui.tween(
 			ui.computed(function(): number
@@ -190,15 +199,30 @@ return ui.component(function(props: Props): Node
 		end,
 		ui.div {
 			absolute = true,
-			right = SIDE,
-			top = function(): number
-				local top = geometry()
-				return top or END
-			end,
+			right = if horizontal then nil else SIDE,
+			bottom = if horizontal then SIDE else nil,
+			top = if horizontal
+				then nil
+				else function(): number
+					local top = geometry()
+					return top or END
+				end,
+			left = if horizontal
+				then function(): number
+					local top = geometry()
+					return top or END
+				end
+				else nil,
 			w = function(): number
+				if horizontal then
+					return span:get().length
+				end
 				return if active() then THUMB_ACTIVE else THUMB
 			end,
 			h = function(): number
+				if horizontal then
+					return if active() then THUMB_ACTIVE else THUMB
+				end
 				return span:get().length
 			end,
 			rounded = "$radius.full",

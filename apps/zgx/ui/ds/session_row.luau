@@ -188,7 +188,7 @@ end
 function M.when(s: Session): string
 	local t = s.time
 	if type(t) == "number" then
-		return status.ago(math.max(0, os.time() - t))
+		return status.ago(status.since(t))
 	end
 	return t or ""
 end
@@ -609,9 +609,15 @@ function M.Section(props: SectionProps): Node
 		if foldable and props.count
 			then ui.show(function(): boolean
 				return not (open :: () -> boolean)() and not trailing()
-			end, M.hint(function(): string
-				return tostring((props.count :: () -> number)())
-			end))
+			end, ui.row {
+				shrink = 0,
+				-- (With a trail, back on the line of a section's count without
+				-- one: its trail stands a step further out than words do.)
+				pr = if trail then "$space.1" else nil,
+				M.hint(function(): string
+					return tostring((props.count :: () -> number)())
+				end),
+			})
 			else nil,
 	}
 	if trail then
@@ -628,13 +634,14 @@ end
 
 -- A group's tile (18, in a row's slot): `inside` on its hue (or the
 -- chrome's quiet wash), and (`badge`) a dot for its most pressing session
--- while its rows can't be seen.
-function M.tile(inside: Node, badge: (() -> status.Kind?)?, hue: string?, src: string?, emoji: string?): Node
+-- while its rows can't be seen. `project`: a project's id, its tile then
+-- `.project-icon` (ds/tile).
+function M.tile(inside: Node, badge: (() -> status.Kind?)?, hue: string?, src: string?, emoji: string?, project: string?): Node
 	return ui.div {
 		relative = true,
 		w = 18,
 		h = 18,
-		Tile { hue = hue, inside = inside, size = 18, src = src, emoji = emoji },
+		Tile { hue = hue, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 		if badge
 			then ui.presence(badge, function(kind: status.Kind): Node
 				return ui.div { absolute = true, right = -3, top = -3, status.StatusDot { kind = kind, size = 8 } }
@@ -650,10 +657,10 @@ M.URGENCY = {
 	failed = 3,
 	limited = 4,
 	working = 5,
-	connecting = 6,
-	plan = 7,
-	done = 8,
-	waiting = 9,
+	waiting = 6,
+	connecting = 7,
+	plan = 8,
+	done = 9,
 } :: { [string]: number }
 function M.pressing(sessions: { { status: status.Kind? } }): status.Kind?
 	local best: status.Kind? = nil
@@ -809,7 +816,7 @@ function M.Row(props: RowProps): Node
 	local hovered = ui.use_state(false)
 	local function strong(): boolean
 		local s = cur()
-		return (s.status ~= nil and s.status ~= "waiting") or (props.selected ~= nil and props.selected())
+		return s.status ~= nil or (props.selected ~= nil and props.selected())
 	end
 	local harness = props.harness or function(): boolean
 		return true
@@ -1043,6 +1050,7 @@ function M.Fold(props: FoldProps): Node
 	local mounted = ui.use_state(was)
 	local amount = ui.use_state(if was then 1 else 0)
 	local going: any = nil
+	local folds = 0
 	ui.effect(function()
 		local on = props.open()
 		if on == was then
@@ -1056,13 +1064,15 @@ function M.Fold(props: FoldProps): Node
 		if on then
 			mounted:set(true)
 		end
-		local this: any = nil
-		this = anime.animate(amount, motion.params({
+		-- (By number: a callback holding its own clip would keep both for good.)
+		folds += 1
+		local this = folds
+		going = anime.animate(amount, motion.params({
 			value = if on then 1 else 0,
 			duration = if on then M.FOLD.open else M.FOLD.close,
 			ease = M.FOLD.ease,
 			onComplete = function()
-				if going == this then
+				if folds == this then
 					going = nil
 				end
 				if not props.open() then
@@ -1070,7 +1080,6 @@ function M.Fold(props: FoldProps): Node
 				end
 			end,
 		}))
-		going = this
 	end)
 	return ui.show(
 		function(): boolean

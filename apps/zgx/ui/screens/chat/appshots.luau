@@ -126,7 +126,9 @@ function M.land(shot: any)
 		last_session:set(at.session)
 	end
 	chips += 1
-	shared.cargo:push(M.chip(shot, `appshot{chips}-{shot.id}`))
+	-- (Through the draft's own way in: it's numbered there, as a picture
+	-- an `@` can mention.)
+	shared.push_cargo(nil, M.chip(shot, `appshot{chips}-{shot.id}`))
 	shared.focus:add(1)
 end
 

@@ -23,6 +23,7 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+local updates = require("@app/screens/shell/updates")
 local splits = require("@app/screens/shell/split")
 local session_tabs = require("@app/screens/shell/session_tabs")
 local lanes = require("@app/screens/chat/lanes")
@@ -158,6 +159,11 @@ return function(props: Props): Node
 	local panel_open: () -> boolean = function(): boolean
 		return false
 	end
+	-- What the panel takes beside the page's card, its gap included (known
+	-- further down): the wallpaper holds still as it opens and closes.
+	local panel_beside: () -> number = function(): number
+		return 0
+	end
 	-- Where a pane's × stands from its card's right: clear of the title
 	-- bar's panel toggle over the page's top right while the panel is shut
 	-- (10 in and 24 wide; past the window's own buttons and the divider
@@ -166,7 +172,12 @@ return function(props: Props): Node
 		return 8
 	end
 
-	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
+	-- (Where the pointer is, only while a wallpaper reads it: a plugin's.
+	-- Your picture, or none, never does, and its writes on every move
+	-- went nowhere.)
+	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, function(): boolean
+		return home() and string.find(appearance.showing:peek(), "^plugin:") ~= nil
+	end)
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
@@ -241,7 +252,15 @@ return function(props: Props): Node
 			shown = function(): boolean
 				return home() and not on_plugin()
 			end,
-			width = props.width,
+			-- (Laid at the window's width, as a state zgx follows: a resize
+			-- runs no script here.)
+			width = fit.viewport,
+			beside = function(): number
+				return panel_beside()
+			end,
+			picture = function(): any
+				return if appearance.showing:peek() == "image" then appearance.image:peek() else nil
+			end,
 			key = function(): string
 				local showing = appearance.showing:get()
 				if showing == "image" then
@@ -290,6 +309,15 @@ return function(props: Props): Node
 	-- (In a split, the chat page isn't made: the window still watches the
 	-- focused chat, for the composer and the focused pane's transcript.)
 	local chat_store = require("@app/screens/chat/store")
+	-- (The transcript at the window's composer's foot, whose "Jump to
+	-- latest" its pill pairs with: the chat page's, or the focused pane's.
+	-- Its lane is `split-<chat>`: the panes', below.)
+	ui.effect(function()
+		local key = if grouped() then `lane.split-{splits.focused:get()}` else "page"
+		if chat_shared.at_foot:peek() ~= key then
+			chat_shared.at_foot:set(key)
+		end
+	end)
 	ui.effect(function()
 		if grouped() then
 			chat_store.open(splits.focused:get())
@@ -823,6 +851,7 @@ return function(props: Props): Node
 	local base = open_w:peek()
 	local off = ui.use_state(0)
 	local easing: any = nil
+	local steps = 0
 	-- Whose panel shows (the session's, a plugin page's; none on a new
 	-- chat): another one is the route moving, not the person opening or
 	-- closing this one, and the panel lands at once, as it is there.
@@ -895,15 +924,16 @@ return function(props: Props): Node
 			end
 			off:set(showing - to)
 			local params = motion.panel(0)
-			local this: any = nil
+			-- (By number: a callback holding its own clip would keep both for good.)
+			steps += 1
+			local this = steps
 			params.onComplete = function()
-				if easing == this then
+				if steps == this then
 					easing = nil
 					revealing:set(false)
 				end
 			end
-			this = anime.animate(off, params)
-			easing = this
+			easing = anime.animate(off, params)
 		else
 			-- The window resized (or the room it fills while expanded moved):
 			-- where it goes moves at once; a step under way goes on.
@@ -997,6 +1027,9 @@ return function(props: Props): Node
 			if boundary.load("@app/screens/panel")
 				then boundary.screen(boundary.named("shell.boundary.screen.panel"), "@app/screens/panel", function(panel): Node
 					return panel.Panel {
+						visible = function(): boolean
+							return shown:get()
+						end,
 						project = route.project,
 						session = route.session,
 						page = route.page,
@@ -1010,6 +1043,9 @@ return function(props: Props): Node
 	}
 	panel_open = function(): boolean
 		return shown:get()
+	end
+	panel_beside = function(): number
+		return open_w:get() + gap_before:get()
 	end
 	-- (No hairline down its left; its card's edge is that.)
 	-- Its edge, dragged: wider or narrower (the page keeps its least). Over the
@@ -1698,9 +1734,26 @@ return function(props: Props): Node
 			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number
 				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right()
-				return if shown:get() then toggle + EXPAND + 8 else toggle
+				local right = if shown:get() then toggle + EXPAND + 8 else toggle
+				-- (And of what there is to update.)
+				local button = updates.width()
+				return if button > 0 then right + button + 8 else right
 			end,
 		},
+		-- What there is to update, beside the panel toggle (and Expand, with the
+		-- panel open): nothing with nothing to say.
+		ui.show(updates.shown, ui.div {
+			absolute = true,
+			right = function(): number
+				local toggle = 24 + 8 + ds.TitleBar.actions_right()
+				return ui.raw(if shown:get() then toggle + EXPAND + 8 else toggle, "off the panel toggle")
+			end,
+			top = function(): number
+				return ds.TitleBar.middle() - 14
+			end,
+			pointer_events = "auto",
+			updates.Button {},
+		}),
 		-- Expand: the panel over the session's chat, and back, on the top bar beside
 		-- the panel toggle, as far off it as Back is off the sidebar's toggle.
 		ui.show(function(): boolean
@@ -1724,6 +1777,8 @@ return function(props: Props): Node
 					tooltip_side = "bottom",
 					w = EXPAND,
 					h = EXPAND,
+					-- (One of the title bar's: its glyph held under the pointer.)
+					tone = "bar",
 					on_click = function()
 						shell_view.toggle_expanded()
 					end,

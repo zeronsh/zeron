@@ -117,7 +117,7 @@ local function chat_of(id: string?): sessions.Chat?
 	return nil
 end
 local function device_of(id: string?): sessions.Device?
-	for _, d in sessions.now:get().devices do
+	for _, d in sessions.devices:get() do
 		if d.id == id then
 			return d
 		end
@@ -128,7 +128,7 @@ local function project_of(id: string?): sessions.Project?
 	if not id then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -267,6 +267,7 @@ local function info(sid: string): Node
 						return if l then l.emoji else nil
 					end,
 					size = 16,
+					project = id,
 				},
 				label = function(): string
 					local now = project_of(id)
@@ -1199,7 +1200,7 @@ end
 
 -- A subagent row's menu, on a secondary click: open it.
 function M.subagent_menu(open: () -> ()): { any }
-	return { { label = locale.s("common.open"), icon = "bot", on_select = open } }
+	return { { label = locale.s("common.open"), icon = "side-chat", on_select = open } }
 end
 
 -- ---------------------------------------------------------------------------
@@ -1279,9 +1280,10 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: at its top, level with the transcript's first
-	-- message beside it, so a part opening or closing grows it downward and
-	-- nothing above moves. Taller than the panel, it scrolls.
+	-- Where it stands: at its top, across the card (its rows from the
+	-- card's left, their letters at its right, as the shipping app's), so a
+	-- part opening or closing grows it downward and nothing above moves.
+	-- Taller than the panel, it scrolls.
 	local view = ui.ref()
 	return ui.scroll {
 		ref = view,
@@ -1291,7 +1293,6 @@ M.Page = ui.component(function(props: Props): Node
 		w_full = true,
 		grow = 1,
 		min_h = 0,
-		items = "center",
 		overscroll = "contain",
 		-- (Its edges fade where there's more to scroll to, as the sidebar's
 		-- and Settings' lists do.)
@@ -1302,7 +1303,6 @@ M.Page = ui.component(function(props: Props): Node
 		provide = { session = sid, panel_key = passed },
 		ui.column {
 			w_full = true,
-			max_w = 380,
 			px = "$space.4",
 			pb = "$space.6",
 			gap = "$space.5",

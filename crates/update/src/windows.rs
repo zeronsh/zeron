@@ -28,6 +28,15 @@ const VERSION_FILE: &str = "zeron-version";
 /// The installer's uninstall entry (`AppId` in `dist/windows/zeron.iss`, plus
 /// Inno Setup's `_is1` suffix). Settings → Apps reads `DisplayVersion` here.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1";
+/// A beta's own files beside `zeron.exe`, by version: `beta\<version>\ui`,
+/// `plugins-builtin` and `engine\zeron.exe`, the stable release's own
+/// executable. A beta can't update by swapping one file, so it updates from
+/// the package (`zeron-<version>-windows-<arch>.zip`); nothing already there
+/// is replaced, which a running engine would prevent. A stable build never
+/// reads this folder.
+const BETA: &str = "beta";
+/// Where a staged beta package unpacks, beside the staged `zeron.exe`.
+const PACKAGE: &str = "package";
 
 #[derive(serde::Deserialize)]
 struct Config {
@@ -40,7 +49,11 @@ pub(super) fn is_managed(exe: &Path) -> bool {
 }
 
 pub(super) fn release_url() -> anyhow::Result<Option<String>> {
-    let exe = std::env::current_exe()?;
+    // A new version on trial runs from beside the installation.
+    let exe = match std::env::var_os(super::INSTALLED_AT_ENV) {
+        Some(directory) => PathBuf::from(directory).join("zeron.exe"),
+        None => std::env::current_exe()?,
+    };
     if !is_managed(&exe) {
         return Ok(None);
     }
@@ -53,42 +66,41 @@ pub fn artifact(version: &str) -> String {
     format!("zeron-{version}-windows-{}.exe", std::env::consts::ARCH)
 }
 
-/// Download next to the installation, verifying its mandatory checksum.
-/// Each attempt has its own directory, so failed or concurrent downloads cannot
-/// leave a reusable, partially staged executable.
-pub async fn stage(
-    edge_url: &str,
-    manifest: &super::Manifest,
-    directory: &Path,
-) -> anyhow::Result<PathBuf> {
-    ensure!(
-        manifest
-            .version
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
-        "invalid Windows release version"
-    );
-    let file = artifact(&manifest.version);
+/// A beta's update: the portable package.
+fn package(version: &str) -> String {
+    format!("zeron-{version}-windows-{}.zip", std::env::consts::ARCH)
+}
+
+/// `x.y.z`, or a beta's `x.y.z-beta.n`: digits and dots only, since it names
+/// files and folders.
+fn valid_version(version: &str) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let (core, beta) = match version.split_once("-beta.") {
+        Some((core, beta)) => (core, Some(beta)),
+        None => (version, None),
+    };
+    core.split('.').all(digits) && beta.is_none_or(digits)
+}
+
+/// The manifest's mandatory checksum for `file`.
+fn expected_checksum<'a>(manifest: &'a super::Manifest, file: &str) -> anyhow::Result<&'a str> {
     let expected = manifest
         .files
-        .get(&file)
+        .get(file)
         .and_then(|meta| meta.sha256.as_deref())
         .context("Windows updates require a SHA-256 checksum")?;
     ensure!(
         expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
         "invalid SHA-256 checksum"
     );
-    let temporary = tempfile::Builder::new()
-        .prefix(".zeron-update-")
-        .tempdir_in(directory)?;
-    let staged = temporary.path().join("zeron.exe");
-    super::download_release_file(edge_url, manifest, &file, &staged).await?;
-    std::fs::write(temporary.path().join("sha256"), expected)?;
-    std::fs::write(temporary.path().join("version"), &manifest.version)?;
-    verify(&staged)?;
+    Ok(expected)
+}
+
+/// The staged executable must run and be the release the manifest promised.
+async fn verify_staged_version(staged: &Path, version: &str) -> anyhow::Result<()> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        tokio::process::Command::new(&staged)
+        tokio::process::Command::new(staged)
             .arg("--version")
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true)
@@ -98,10 +110,121 @@ pub async fn stage(
     .context("staged executable version check timed out")??;
     ensure!(
         output.status.success()
-            && String::from_utf8_lossy(&output.stdout).trim()
-                == format!("zeron {}", manifest.version),
+            && String::from_utf8_lossy(&output.stdout).trim() == format!("zeron {version}"),
         "staged executable has the wrong version or cannot run"
     );
+    Ok(())
+}
+
+/// Stage a beta from its package: the executable where the single-file path
+/// leaves one (its checksum beside it), the rest in [`PACKAGE`].
+async fn stage_package(
+    edge_url: &str,
+    manifest: &super::Manifest,
+    directory: &Path,
+) -> anyhow::Result<PathBuf> {
+    let file = package(&manifest.version);
+    expected_checksum(manifest, &file)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".zeron-update-")
+        .tempdir_in(directory)?;
+    let archive = temporary.path().join(&file);
+    super::download_release_file(edge_url, manifest, &file, &archive).await?;
+    let unpacked = temporary.path().join(PACKAGE);
+    std::fs::create_dir(&unpacked)?;
+    // Windows' own tar (since Windows 10 1803), by its full path.
+    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let output = tokio::process::Command::new(system.join(r"System32\tar.exe"))
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&unpacked)
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("unpacking the update")?;
+    ensure!(
+        output.status.success(),
+        "unpacking the update failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    std::fs::remove_file(&archive)?;
+    ensure!(
+        unpacked.join(BETA).join(&manifest.version).is_dir(),
+        "the package has no {BETA}\\{}",
+        manifest.version
+    );
+    let staged = temporary.path().join("zeron.exe");
+    std::fs::rename(unpacked.join("zeron.exe"), &staged).context("the package has no zeron.exe")?;
+    std::fs::write(temporary.path().join("sha256"), digest(&staged)?)?;
+    std::fs::write(temporary.path().join("version"), &manifest.version)?;
+    verify_staged_version(&staged, &manifest.version).await?;
+    let _ = temporary.keep();
+    Ok(staged)
+}
+
+/// A staged beta's own folder into place: under its version, so it replaces
+/// nothing in use. (Left behind if the swap then fails; the next try replaces
+/// it, and the next launch removes it.)
+fn install_beta_files(staged: &Path, directory: &Path) -> anyhow::Result<()> {
+    let incoming = staged.with_file_name(PACKAGE).join(BETA);
+    if !incoming.is_dir() {
+        return Ok(());
+    }
+    let installed = directory.join(BETA);
+    std::fs::create_dir_all(&installed)?;
+    for entry in std::fs::read_dir(&incoming)? {
+        let entry = entry?;
+        let target = installed.join(entry.file_name());
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::rename(entry.path(), &target)
+            .with_context(|| format!("moving {} into place", target.display()))?;
+    }
+    Ok(())
+}
+
+/// Remove every beta's folder but `keep`'s, best-effort: an engine that's
+/// still running keeps its own executable until it stops.
+fn remove_beta_files(directory: &Path, keep: Option<&str>) {
+    let installed = directory.join(BETA);
+    let Ok(entries) = std::fs::read_dir(&installed) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if keep.is_none_or(|keep| entry.file_name() != keep) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let _ = std::fs::remove_dir(&installed);
+}
+
+/// Download next to the installation, verifying its mandatory checksum.
+/// Each attempt has its own directory, so failed or concurrent downloads cannot
+/// leave a reusable, partially staged executable.
+pub async fn stage(
+    edge_url: &str,
+    manifest: &super::Manifest,
+    directory: &Path,
+) -> anyhow::Result<PathBuf> {
+    ensure!(
+        valid_version(&manifest.version),
+        "invalid Windows release version"
+    );
+    if manifest.channel == super::Channel::Beta {
+        return stage_package(edge_url, manifest, directory).await;
+    }
+    let file = artifact(&manifest.version);
+    let expected = expected_checksum(manifest, &file)?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".zeron-update-")
+        .tempdir_in(directory)?;
+    let staged = temporary.path().join("zeron.exe");
+    super::download_release_file(edge_url, manifest, &file, &staged).await?;
+    std::fs::write(temporary.path().join("sha256"), expected)?;
+    std::fs::write(temporary.path().join("version"), &manifest.version)?;
+    verify(&staged)?;
+    verify_staged_version(&staged, &manifest.version).await?;
     let _ = temporary.keep();
     Ok(staged)
 }
@@ -112,6 +235,14 @@ fn verify(staged: &Path) -> anyhow::Result<()> {
 }
 
 fn verify_digest(path: &Path, expected: &str) -> anyhow::Result<()> {
+    ensure!(
+        digest(path)?.eq_ignore_ascii_case(expected),
+        "staged update checksum mismatch"
+    );
+    Ok(())
+}
+
+fn digest(path: &Path) -> anyhow::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 65536];
@@ -122,11 +253,7 @@ fn verify_digest(path: &Path, expected: &str) -> anyhow::Result<()> {
         }
         hasher.update(&buffer[..count]);
     }
-    ensure!(
-        format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(expected),
-        "staged update checksum mismatch"
-    );
-    Ok(())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Replace the running executable with the staged update.
@@ -147,7 +274,12 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     );
     verify(staged)?;
     recover_from_backup(&installed)?;
+    install_beta_files(staged, directory)?;
     swap_into_place(staged, &installed)?;
+    // Back on Stable: nothing reads a beta's folder any more.
+    if !staged.with_file_name(PACKAGE).is_dir() {
+        remove_beta_files(directory, None);
+    }
     if let Ok(version) = std::fs::read_to_string(staged.with_file_name("version")) {
         refresh_installer_version(version.trim());
         let _ = std::fs::write(directory.join(VERSION_FILE), version.trim());
@@ -165,9 +297,28 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     let _ = std::fs::remove_file(staged);
     let _ = std::fs::remove_file(staged.with_file_name("sha256"));
     let _ = std::fs::remove_file(staged.with_file_name("version"));
+    let _ = std::fs::remove_dir_all(staged.with_file_name(PACKAGE));
     if let Some(parent) = staged.parent() {
         let _ = std::fs::remove_dir(parent);
     }
+    Ok(())
+}
+
+/// Make a new version that's proved itself the installed one, from the exe it's
+/// running as. A running image can be renamed, so it simply moves into place; the
+/// old one moves aside first and goes on running until it exits.
+pub(super) fn commit_trial(incoming: &Path, directory: &Path, version: &str) -> anyhow::Result<()> {
+    let installed = directory.join("zeron.exe");
+    recover_from_backup(&installed)?;
+    let backup = directory.join(BACKUP);
+    std::fs::rename(&installed, &backup).context("moving the old executable aside")?;
+    if let Err(err) = std::fs::rename(incoming, &installed) {
+        std::fs::rename(&backup, &installed)
+            .context("restoring the previous executable after a failed update")?;
+        return Err(err).context("installing the updated executable");
+    }
+    refresh_installer_version(version);
+    std::fs::write(directory.join(VERSION_FILE), version).context("recording the installed version")?;
     Ok(())
 }
 
@@ -270,6 +421,11 @@ pub fn cleanup_previous_image() {
     };
     if is_managed(&exe) {
         let _ = remove_own_backup();
+        if let Some(directory) = exe.parent() {
+            let own = super::app_version();
+            let beta = super::Channel::of_version(own) == super::Channel::Beta;
+            remove_beta_files(directory, beta.then_some(own));
+        }
     }
 }
 
@@ -376,6 +532,39 @@ mod tests {
         std::fs::write(dir.path().join(CONFIG), "{}").unwrap();
         assert!(is_managed(&exe));
         assert!(!is_managed(&dir.path().join("another.exe")));
+    }
+
+    #[test]
+    fn a_beta_s_version_names_files_and_nothing_else_does() {
+        assert!(valid_version("0.2.137"));
+        assert!(valid_version("0.2.137-beta.1"));
+        for bad in ["", "0.2.", "0.2.137-beta.", "0.2.137-rc.1", r"..\..\evil", "0.2.137-beta.1/x"] {
+            assert!(!valid_version(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_beta_s_files_go_in_by_version_and_old_ones_leave() {
+        let install = tempfile::tempdir().unwrap();
+        let old = install.path().join(BETA).join("0.2.137-beta.1");
+        std::fs::create_dir_all(old.join("ui")).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let staged = stage.path().join("zeron.exe");
+        let incoming = stage.path().join(PACKAGE).join(BETA).join("0.2.137-beta.2");
+        std::fs::create_dir_all(incoming.join("ui")).unwrap();
+        std::fs::write(incoming.join("ui").join("app.luau"), "").unwrap();
+        install_beta_files(&staged, install.path()).unwrap();
+        let new = install.path().join(BETA).join("0.2.137-beta.2");
+        assert!(new.join("ui").join("app.luau").is_file());
+        assert!(old.is_dir(), "the running version's stays until the next launch");
+        remove_beta_files(install.path(), Some("0.2.137-beta.2"));
+        assert!(!old.exists());
+        assert!(new.is_dir());
+        // Stable's update brings no package, and there's nothing to move.
+        let plain = tempfile::tempdir().unwrap();
+        install_beta_files(&plain.path().join("zeron.exe"), install.path()).unwrap();
+        remove_beta_files(install.path(), None);
+        assert!(!install.path().join(BETA).exists());
     }
 
     #[test]

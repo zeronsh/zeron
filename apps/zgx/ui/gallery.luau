@@ -818,6 +818,10 @@ local GROUPS: { Group } = {
 						content = function(scene: string): Node
 							return ds.wallpaper.Picture { src = `assets/cards/{scene}/sky.webp`, w = 576, h = 768 }
 						end,
+						-- (The effects work on the picture's grid.)
+						picture = function(): any
+							return { w = 576, h = 768 }
+						end,
 						effect = effect,
 						shown = new_chat,
 						intensity = intensity,

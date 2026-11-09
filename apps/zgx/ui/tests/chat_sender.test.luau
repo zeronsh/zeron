@@ -1,5 +1,5 @@
 -- A message another chat sent: `Message from [mark] Chat` over its bubble, the
--- chat's title as it's listed now, a click opening it; one no longer listed
+-- chat's title as it's listed now, a click opening it in the panel; one no longer listed
 -- reads as it did when sent, and opens nothing. On ui/chat_fixture.luau.
 
 local CHATS = "account/sessions.luau::sessions"
@@ -35,5 +35,15 @@ test("a message from a listed chat reads its title now and opens it", function()
 	expect(string.find(tree, "Old title", 1, true)).to_be(nil)
 	app:click('role:button "Message from Short chat"')
 	app:frames(40)
-	expect(app:tree("#transcript")).to_contain("Hello there")
+	-- A tab of the panel, beside this chat, which stays.
+	local tabs = 0
+	for _, s in (app:state("panel_sessions") :: any) or {} do
+		for _, tab in s.tabs do
+			if tab.kind == "side_chat" and tab.title == "Short chat" then
+				tabs += 1
+			end
+		end
+	end
+	expect(tabs).to_be(1)
+	expect(app:has('role:button "Message from Short chat"')).to_be(true)
 end)

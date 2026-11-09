@@ -25,6 +25,8 @@
 //! `ZERON_ZGX_REPLAY=1` shows every page, as if none were finished.
 //! `--inspect` (or `ZGX_INSPECT_SOCKET=1`) serves devtools to `zgx inspect`.
 
+#![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
+
 mod about;
 mod acp_registry;
 mod agents;
@@ -104,11 +106,17 @@ mod chip_copy_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
+mod picker_settle_tests;
+#[cfg(test)]
 mod fit_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod slide_bench_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
 mod i18n_tests;
+mod updates;
 #[cfg(test)]
 mod visuals_tests;
 
@@ -138,7 +146,30 @@ enum Screen {
     Fixture(String),
 }
 
+/// Room for open files. An app the Finder starts is given 256, which its pictures,
+/// scripts, sockets and file watches can use up, and then nothing can be opened:
+/// no icon, no lazily loaded screen, no template. (A shell usually gives far more,
+/// so a build started from one never shows it.)
+#[cfg(unix)]
+fn raise_open_files() {
+    // macOS refuses more than this however high the hard limit reads (`OPEN_MAX`).
+    const WANTED: libc::rlim_t = 10_240;
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `limit` is a valid rlimit for each call to read or write.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 || limit.rlim_cur >= WANTED {
+            return;
+        }
+        limit.rlim_cur = WANTED.min(limit.rlim_max);
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            eprintln!("zeron-zgx: couldn't raise the open file limit: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    raise_open_files();
     // A terminal tab's bridge (src/terminal.rs): this binary, run by zgx's
     // terminal, passing a shell's bytes to and from the engine.
     let argv: Vec<String> = std::env::args().collect();
@@ -192,6 +223,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
+    // The Windows beta's engine is the stable release's whole `zeron.exe`, in
+    // the beta's folder (scripts/package-windows.ps1).
+    #[cfg(all(windows, feature = "beta"))]
+    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
+        zeron_launch::set_full_app_engine(dir.join("beta").join(about::APP_VERSION).join("engine").join("zeron.exe"));
+    }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
@@ -391,9 +428,15 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
     let epoch: Rc<RefCell<Option<Shared>>> = Rc::default();
 
     let window = cx.window.clone();
+    let active = cx.ui.observe_window_active();
     host.action("interactive", move |_| {
         window.set_pointer_passthrough(false);
-        window.request_focus();
+        // On Windows the intro is an ordinary borderless window: Alt+Tab
+        // must stay with the app the person chose, even if this timer fires
+        // while they are away.
+        if !cfg!(windows) || active.with_untracked(|active| *active) {
+            window.request_focus();
+        }
     });
     // `prepare { x, y, w, h }`: setup's window at that rect (points from the
     // overlay's top left, where the intro draws its screen over it), once,
@@ -433,7 +476,11 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             *epoch_slot.borrow_mut() = Some(host.shared("onboarding.epoch", 0.));
             serve(cx, host, "app.luau", false);
             // Keys stay with the intro until it hands over.
-            overlay.request_focus();
+            // Creating a hidden window does not take focus on Windows.
+            // Asking for it here steals it back after an early Alt+Tab.
+            if !cfg!(windows) {
+                overlay.request_focus();
+            }
         });
         *opened.borrow_mut() = Some(handle);
     });
@@ -732,6 +779,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
+        // What there is to update, on every device (src/updates.rs).
+        updates::install(&host);
         // Adding a project, removing one (src/projects.rs).
         projects::install(&host);
         // A session's files (src/files.rs): the files pane and editor.
@@ -907,6 +956,11 @@ fn serve_with(
     if inspect {
         zgx_script::inspect::prepare();
     }
+    // A press travels 6 points before it's a drag, so a click that wavers
+    // stays a click (a tab's above all). On macOS only: it gives no setting
+    // (zgx's own is 4); elsewhere zgx follows the system's.
+    #[cfg(target_os = "macos")]
+    cx.ui.input.set_drag_threshold(6.);
     // The platform, which the selection's Copy and Look Up go through, is
     // found as the view mounts.
     let platform = selection_platform(cx, &host);
@@ -1137,10 +1191,25 @@ fn intro_window() -> WindowOptions {
         decorations: false,
         resizable: false,
         covers_display: true,
-        level: WindowLevel::AlwaysOnTop,
+        // A topmost overlay stays over the app selected by Alt+Tab. It
+        // looks stuck, and hides that app while its keyboard has focus.
+        level: if cfg!(windows) { WindowLevel::Normal } else { WindowLevel::AlwaysOnTop },
         shadow: false,
         ..Default::default()
     }
+}
+
+/// The glass under Zeron's window: the under-window blur alone, untinted
+/// (`plain`), which the theme's frost (`glass.tint`, Zeron's `glass` at
+/// 0.80) tints, on every platform. On Windows that's the acrylic accent's
+/// blur of what's behind the window (zgx #1495), gpui's `Blurred`, as the
+/// shipping app's: the frost values are that app's, made for it. The
+/// material's own backdrop there is Mica, which blurs nothing (solid under
+/// the frost); Acrylic, a transient material's, adds the system's tint
+/// under it and goes solid whenever the window isn't active. With
+/// Transparency effects off, plain glass goes solid (zgx #1496).
+fn zeron_glass() -> Glass {
+    Glass::new(GlassMaterial::UnderWindowBackground).plain()
 }
 
 /// Zeron's window: an inset title bar over the colourless under-window
@@ -1152,9 +1221,11 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         height,
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
-        glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
-        // (Windows: the caption buttons keep to the title row at any zoom.)
-        caption_height: Some(32.),
+        glass: Some(zeron_glass()),
+        // (Windows: the caption buttons keep to the title row at any zoom,
+        // the bar's whole 38, as Zeron's: shell.rs
+        // `render_windows_caption_controls`, `Theme::TITLEBAR_HEIGHT`.)
+        caption_height: Some(38.),
         ..Default::default()
     }
 }
@@ -1209,8 +1280,8 @@ fn gallery_window() -> WindowOptions {
 
 /// The scripts: this folder's `ui/`, or `ZERON_ZGX_UI` (scripts/smoke.sh's
 /// frozen copy, which other saves under ui/ can't reload mid-run), or, in
-/// an app bundle (the Zeron app: the beta), the copy in its `Contents/Resources/ui`
-/// (with `plugins-builtin` beside it).
+/// an installed Zeron app (the beta), the copy packaged with it (with
+/// `plugins-builtin` beside it).
 fn ui_dir() -> PathBuf {
     match dev::smoke_switch("ZERON_ZGX_UI") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -1218,13 +1289,23 @@ fn ui_dir() -> PathBuf {
     }
 }
 
-/// `Contents/Resources/ui` of the bundle this executable runs from, if any.
+/// The packaged scripts of the install this executable runs from, if any:
+/// `Contents/Resources/ui` of a macOS bundle, `ui` beside it on Linux (the
+/// tarball's, scripts/package-linux.sh), `beta\<version>\ui` beside it on
+/// Windows (scripts/package-windows.ps1).
 fn bundled_ui() -> Option<PathBuf> {
     static BUNDLED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     BUNDLED
         .get_or_init(|| {
             let exe = std::env::current_exe().ok()?;
-            let ui = exe.parent()?.parent()?.join("Resources").join("ui");
+            let dir = exe.parent()?;
+            let ui = if cfg!(target_os = "macos") {
+                dir.parent()?.join("Resources").join("ui")
+            } else if cfg!(windows) {
+                dir.join("beta").join(about::APP_VERSION).join("ui")
+            } else {
+                dir.join("ui")
+            };
             ui.join("app.luau").is_file().then_some(ui)
         })
         .clone()
@@ -1246,6 +1327,19 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod glass_tests {
+    /// The window's glass is the under-window blur alone on every
+    /// platform: on Windows, the acrylic accent's blur the shipping app's
+    /// frost was made for, not Mica, which blurs nothing.
+    #[test]
+    fn the_window_s_glass_is_plain_everywhere() {
+        let glass = super::zeron_glass();
+        assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
+        assert!(glass.plain);
+    }
 }
 
 #[cfg(test)]

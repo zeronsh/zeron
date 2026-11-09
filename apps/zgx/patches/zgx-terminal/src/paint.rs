@@ -11,7 +11,7 @@ use alacritty_terminal::{
 };
 use std::sync::Arc;
 use zgx::{
-    canvas::{Canvas, CanvasText, Path, TextAnchor, TextBaseline},
+    canvas::{Canvas, CanvasText, LineCap, LineJoin, Path, Stroke, TextAnchor, TextBaseline},
     scene::{Color, Rect},
     text_layout::{FontFamily, FontFeatures, FontStyle, TextUnderline},
 };
@@ -106,7 +106,11 @@ pub(crate) struct Run {
     pub color: Color,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    /// Its cells' underline (`Flags::ALL_UNDERLINES`, none or one): the
+    /// text's own where it is plain (`Flags::UNDERLINE`), and none where it
+    /// is in a style or colour of its own (drawn as shapes, `UnderlineStyle`)
+    /// once the row is built with them (`row_styled`).
+    pub underline: Flags,
     /// Placed alone, centred on its cells: a wide character, or one whose
     /// glyph may come from another font than the grid's.
     pub alone: bool,
@@ -114,12 +118,40 @@ pub(crate) struct Run {
     pub cells: u8,
 }
 
+/// How an underline is drawn where it isn't the text's own (`Run::underline`):
+/// a style a program asked for (SGR 4:2 to 4:5), or any underline in a
+/// colour of its own (SGR 58). It goes in a row's `lines` as a `Fill` whose
+/// height is minus its code (`UnderlineStyle::of`), so a row without one is
+/// the same as ever, its paint no bigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnderlineStyle {
+    Single = 1,
+    Double = 2,
+    Curly = 3,
+    Dotted = 4,
+    Dashed = 5,
+}
+impl UnderlineStyle {
+    /// The style a line in `RowPaint::lines` marks, if it marks one.
+    fn of(line: &Fill) -> Option<Self> {
+        Some(match -line.height {
+            1. => Self::Single,
+            2. => Self::Double,
+            3. => Self::Curly,
+            4. => Self::Dotted,
+            5. => Self::Dashed,
+            _ => return None,
+        })
+    }
+}
+
 /// A row as drawn.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RowPaint {
     pub fills: Vec<Fill>,
     pub runs: Vec<Run>,
-    /// Lines over the text: strikes and the cursor's bars.
+    /// Lines over the text: strikes and the cursor's bars, and underlines
+    /// in a style or colour of their own (`UnderlineStyle`).
     pub lines: Vec<Fill>,
     /// The row's text, for assistive technology.
     pub text: String,
@@ -145,14 +177,13 @@ fn resolve(term: &Term, palette: &Palette, color: VtColor) -> Rgb {
 }
 
 /// Whether a character's glyph may come from a font other than the grid's
-/// (CJK, symbols, emoji, private-use icons): drawn alone at its cell, so its
-/// width can't move the characters after it off the grid.
+/// (CJK, symbols, emoji, private-use icons): drawn alone, centred on its
+/// cells. (A run is on the grid too, `LetterSpacing::cells`: a glyph there a
+/// little wider or narrower than a cell moves nothing after it.) Most text
+/// is out after a compare.
 fn alone(c: char) -> bool {
     let c = c as u32;
-    c >= 0x2e80
-        || (0x2190..0x2500).contains(&c)
-        || (0x25a0..0x2800).contains(&c)
-        || (0xe000..0xf900).contains(&c)
+    c >= 0x2190 && matches!(c, ..0x2500 | 0x25a0..0x2800 | 0x2e80..)
 }
 
 /// A block element (U+2580–U+259F) as the parts of its cell it fills:
@@ -316,6 +347,41 @@ pub(crate) fn row(
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
 ) -> RowPaint {
+    let (paint, styled) = row_built::<false>(term, row, look, metrics, cursor, selection);
+    if styled {
+        return row_styled(term, row, look, metrics, cursor, selection);
+    }
+    paint
+}
+
+/// `row`, for one with an underline in a style or colour of its own: built
+/// again, those underlines drawn as shapes. Out of `row`'s line, as the
+/// building with them is (`row_built::<true>`): a plain row's has none.
+#[cold]
+#[inline(never)]
+fn row_styled(
+    term: &Term,
+    row: usize,
+    look: &Look,
+    metrics: Metrics,
+    cursor: Option<CursorAt>,
+    selection: Option<&SelectionRange>,
+) -> RowPaint {
+    row_built::<true>(term, row, look, metrics, cursor, selection).0
+}
+
+/// The row at viewport `row`, and whether it has an underline in a style or
+/// colour of its own. Without `STYLED` those are left to the text (the row
+/// is built again with it, `row_styled`), so a plain row carries nothing of
+/// them.
+fn row_built<const STYLED: bool>(
+    term: &Term,
+    row: usize,
+    look: &Look,
+    metrics: Metrics,
+    cursor: Option<CursorAt>,
+    selection: Option<&SelectionRange>,
+) -> (RowPaint, bool) {
     let grid = term.grid();
     let line = Line(row as i32 - grid.display_offset() as i32);
     let cells = &grid[line];
@@ -324,6 +390,11 @@ pub(crate) fn row(
     let palette = &look.palette;
     let background = palette.background;
     let mut paint = RowPaint::default();
+    // The underlines its runs start with, and whether one is in a colour of
+    // its own (`CellExtra`, rare: found where a cell's zero-width characters
+    // are read), for a plain row to say whether it has a styled one.
+    let mut underlines = Flags::empty();
+    let mut coloured = false;
     // The open run, its text so far, and how many blanks end it.
     let mut run: Option<Run> = None;
     let mut open = String::new();
@@ -474,12 +545,22 @@ pub(crate) fn row(
         let blank = c == ' ' || c == '\t' || c == '\0' || flags.contains(Flags::HIDDEN);
         let bold = flags.contains(Flags::BOLD);
         let italic = flags.contains(Flags::ITALIC);
-        let underline = flags.intersects(Flags::ALL_UNDERLINES);
-        if blank && !underline {
+        let mut underline = flags & Flags::ALL_UNDERLINES;
+        // In a style or a colour of its own: drawn as shapes under the cells,
+        // not by the text (whose underline is a plain line in its colour).
+        // A plain row's runs say whether it has one (`row`).
+        if STYLED
+            && !underline.is_empty()
+            && (underline.intersects(STYLED_UNDERLINES) || cell.underline_color().is_some())
+        {
+            styled_underline(&mut paint, term, palette, cell, column, width, ink);
+            underline = Flags::empty();
+        }
+        if blank && underline.is_empty() {
             // A blank joins the open run, whatever its colour (which doesn't
             // show), unless that run is underlined.
             match &run {
-                Some(open_run) if !open_run.underline => {
+                Some(open_run) if open_run.underline.is_empty() => {
                     open.push(' ');
                     blanks += 1;
                 }
@@ -488,7 +569,7 @@ pub(crate) fn row(
             continue;
         }
         // Blocks and box lines: drawn to the cell, not from the font.
-        if !blank
+        if cfg!(windows) && !blank
             && let Some(parts) = shapes(c, column as f32 * width, width, height, ink)
         {
             finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
@@ -498,9 +579,11 @@ pub(crate) fn row(
         let wide = flags.contains(Flags::WIDE_CHAR);
         if wide || alone(c) {
             finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
+            underlines |= underline;
             let mut text = String::new();
             text.push(c);
             if let Some(extra) = cell.zerowidth() {
+                coloured |= !underline.is_empty() && cell.underline_color().is_some();
                 text.extend(extra);
             }
             paint.runs.push(Run {
@@ -525,6 +608,7 @@ pub(crate) fn row(
             blanks = 0;
         } else {
             finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
+            underlines |= underline;
             run = Some(Run {
                 column: column as u16,
                 text: Arc::from(""),
@@ -538,13 +622,83 @@ pub(crate) fn row(
         }
         open.push(if blank { ' ' } else { c });
         if let Some(extra) = cell.zerowidth() {
+            coloured |= !underline.is_empty() && cell.underline_color().is_some();
             open.extend(extra);
         }
     }
     finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
-    let trimmed = paint.text.trim_end().len();
-    paint.text.truncate(trimmed);
-    paint
+    // Its white end gone: blank cells' spaces, most of a row, as bytes, then
+    // any other white character before them.
+    let mut end = paint.text.trim_ascii_end().len();
+    while let Some(c) = paint.text[..end]
+        .chars()
+        .next_back()
+        .filter(|c| c.is_whitespace())
+    {
+        end -= c.len_utf8();
+    }
+    paint.text.truncate(end);
+    let styled = !STYLED && (coloured || underlines.intersects(STYLED_UNDERLINES));
+    (paint, styled)
+}
+
+/// The underlines a text can't draw: every one but the plain single line.
+const STYLED_UNDERLINES: Flags = Flags::DOUBLE_UNDERLINE
+    .union(Flags::UNDERCURL)
+    .union(Flags::DOTTED_UNDERLINE)
+    .union(Flags::DASHED_UNDERLINE);
+
+/// `cell`'s underline in a style or colour of its own (column `column`,
+/// cells `width` wide, its text in `ink`), joined to the one before it where
+/// they meet in the same style and colour.
+#[cold]
+#[inline(never)]
+fn styled_underline(
+    paint: &mut RowPaint,
+    term: &Term,
+    palette: &Palette,
+    cell: &Cell,
+    column: usize,
+    width: f32,
+    ink: Color,
+) {
+    let flags = cell.flags;
+    let style = if flags.contains(Flags::UNDERCURL) {
+        UnderlineStyle::Curly
+    } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+        UnderlineStyle::Double
+    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else {
+        UnderlineStyle::Single
+    };
+    let color = cell
+        .underline_color()
+        .map_or(ink, |given| self::color(resolve(term, palette, given)));
+    let span = if flags.contains(Flags::WIDE_CHAR) {
+        2.
+    } else {
+        1.
+    };
+    let x = column as f32 * width;
+    let height = -(style as u8 as f32);
+    if let Some(last) = paint.lines.last_mut()
+        && last.height == height
+        && last.color == color
+        && (last.x + last.width - x).abs() < 0.01
+    {
+        last.width += width * span;
+        return;
+    }
+    paint.lines.push(Fill {
+        x,
+        y: 0.,
+        width: width * span,
+        height,
+        color,
+    });
 }
 
 /// The grid's font: the platform's monospaced one, without ligatures.
@@ -559,10 +713,15 @@ pub(crate) fn font() -> FontStyle {
     }
 }
 
-/// `paint` drawn on a row's canvas.
+/// `paint` drawn on a row's canvas, in `font`: the grid's, on its cells
+/// (`LetterSpacing::cells`, set once with the cell, `view::row_view`).
 pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canvas {
     let mut canvas = Canvas::new();
     for fill in paint.fills.iter().chain(&paint.lines) {
+        if fill.height < 0. {
+            draw_underline(&mut canvas, fill, metrics);
+            continue;
+        }
         canvas.fill(
             Path::rectangle(Rect {
                 x: fill.x,
@@ -579,7 +738,7 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             font.weight = 700;
         }
         font.italic = run.italic;
-        if run.underline {
+        if !run.underline.is_empty() {
             font.underline = Some(TextUnderline::new(None));
         }
         let x = run.column as f32 * metrics.cell_width;
@@ -603,4 +762,101 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
         });
     }
     canvas
+}
+
+/// An underline in a style of its own (`UnderlineStyle`) on a row's canvas:
+/// where the text's own goes (a tenth of the font's size below its
+/// baseline, the baseline 0.8 of the size below the top of the font's box,
+/// centred in the cell), one point thick.
+#[cold]
+#[inline(never)]
+fn draw_underline(canvas: &mut Canvas, underline: &Fill, metrics: Metrics) {
+    let Some(style) = UnderlineStyle::of(underline) else {
+        return;
+    };
+    let (size, height) = (metrics.font_size, metrics.cell_height);
+    let thick = 1.;
+    let baseline = (height - size).max(0.) / 2. + size * 0.8;
+    // Inside the cell with the room its style needs below it (a double's
+    // second line, a wave's trough), on a whole point: a single line where
+    // the text's own would be.
+    let room = match style {
+        UnderlineStyle::Double => thick * 3.,
+        UnderlineStyle::Curly => thick * 3.5,
+        _ => thick,
+    };
+    let y = (baseline + size * 0.1).min(height - room).max(0.).round();
+    let (x, width) = (underline.x, underline.width);
+    let rect = |canvas: &mut Canvas, x: f32, y: f32, width: f32| {
+        canvas.fill(
+            Path::rectangle(Rect {
+                x,
+                y,
+                width,
+                height: thick,
+            }),
+            underline.color,
+        );
+    };
+    match style {
+        UnderlineStyle::Single => rect(canvas, x, y, width),
+        UnderlineStyle::Double => {
+            rect(canvas, x, y, width);
+            rect(canvas, x, y + thick * 2., width);
+        }
+        // Squares a point apart, and dashes, on the grid's own beat, so an
+        // underline across runs or rows goes on without a break in step.
+        UnderlineStyle::Dotted => {
+            let step = thick * 2.;
+            let mut at = (x / step).ceil() * step;
+            while at + thick <= x + width + 0.01 {
+                rect(canvas, at, y, thick);
+                at += step;
+            }
+        }
+        UnderlineStyle::Dashed => {
+            let dash = (size * 0.25).round().max(2.);
+            let step = dash + (dash * 0.66).round().max(1.);
+            let mut at = (x / step).floor() * step;
+            while at < x + width {
+                let (from, to) = (at.max(x), (at + dash).min(x + width));
+                if to > from {
+                    rect(canvas, from, y, to - from);
+                }
+                at += step;
+            }
+        }
+        // A wave a cell long, from the cell's start, so neighbouring cells'
+        // waves join.
+        UnderlineStyle::Curly => {
+            let period = metrics.cell_width.max(2.);
+            let amplitude = thick * 1.25;
+            let middle = y + amplitude;
+            let steps = ((width / period) * 8.).ceil().max(1.) as usize;
+            let mut path = Path::builder();
+            for step in 0..=steps {
+                let px = x + width * step as f32 / steps as f32;
+                let phase = (px / period) * std::f32::consts::TAU;
+                let py = middle - amplitude * phase.sin();
+                if step == 0 {
+                    path.move_to(px, py);
+                } else {
+                    path.line_to(px, py);
+                }
+            }
+            let Ok(path) = path.build() else {
+                return;
+            };
+            canvas.stroke(
+                path,
+                underline.color,
+                Stroke {
+                    width: thick,
+                    cap: LineCap::Butt,
+                    join: LineJoin::Round,
+                    ..Stroke::default()
+                },
+            );
+        }
+    }
 }

@@ -9,7 +9,9 @@
 -- A query never spans two parts (a paragraph and the next), and case is
 -- ignored.
 
-local prepare = require("@self/math_source").prepare
+-- (By its path: a test reads this module directly.)
+local Source = require("./math_source")
+local prepare = Source.prepare
 
 local M = {}
 
@@ -61,13 +63,186 @@ local function together(list: { MarkdownBlock }): { MarkdownBlock }
 	end
 	return out or list
 end
+M.together = together
+
+-- Whether two parsed blocks are the same throughout.
+local function alike(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in a do
+		if not alike(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+-- A text that grows under a key (a reply streaming in), parsed for what's
+-- new alone. Its math is read on from where the last read could go on
+-- (ds/math_source `feed`). Its settled start (`head`: up to a line after a
+-- blank one that nothing later can join, ds/math_source's `cut`) keeps the
+-- blocks it was parsed into, and only what follows it (the block being
+-- written, about) goes to ui.markdown under the key. (Its math read makes
+-- that part's text change in place, not only grow, as a `$x$` closes: so
+-- ui.markdown parses again what's past the cut alone, not the whole.) The
+-- head's pictures are put together as it grows, a run at its end waiting
+-- for what follows.
+type Stream = {
+	scan: Source.Scan,
+	breaks: boolean,
+	-- the pieces of the read the head is made of, and its blocks
+	cut: number,
+	head: { MarkdownBlock },
+	-- a cut tried and found to parse otherwise in two (not tried again)
+	tried: number,
+	-- the head's blocks with pictures together, as far as `grouped`, and the
+	-- pictures at its end
+	together: { MarkdownBlock },
+	carry: { MarkdownBlock },
+	grouped: number,
+}
+local streams: { [string]: Stream } = {}
+-- How many of a list's first blocks are the very tables the last parse
+-- under its key began with (ds/markdown keeps what it drew of them).
+local settled_of: { [any]: number } = setmetatable({}, { __mode = "k" }) :: any
+local stream_count = 0
+
+local function stream_of(key: string, breaks: boolean): Stream
+	local s = streams[key]
+	if s and s.breaks == breaks then
+		return s
+	end
+	if not s then
+		-- (A text's while it streams; forgotten in a lump now and then.)
+		stream_count += 1
+		if stream_count > 64 then
+			streams, stream_count = {}, 1
+		end
+	end
+	local made: Stream = {
+		scan = Source.scan(),
+		breaks = breaks,
+		cut = 0,
+		head = {},
+		tried = 0,
+		together = {},
+		carry = {},
+		grouped = 0,
+	}
+	streams[key] = made
+	return made
+end
+
+local function streamed(text: string, o: MarkdownOptions): { MarkdownBlock }
+	local s = stream_of(o.key :: string, o.breaks == true)
+	local sc = s.scan
+	local over = Source.feed(sc, text)
+	if over or sc.cut < s.cut then
+		s.cut, s.head, s.tried, s.together, s.carry, s.grouped = 0, {}, 0, {}, {}, 0
+	end
+	-- (What the last parse began with, before the head gains this one's.)
+	local settled = #s.together
+	-- (A find's current block, which a lazy parse parses first, counted from
+	-- the head's end.)
+	local first = (o :: any).first
+	local opts: MarkdownOptions = o
+	if first ~= nil and #s.head > 0 then
+		opts = table.clone(o) :: any
+		;(opts :: any).first = if first > #s.head then first - #s.head else nil
+	end
+	local blocks = ui.markdown(Source.since(sc, s.cut), opts)
+	-- Cut further on: what's between the cuts joins the head, if parsed in
+	-- two it's what it is parsed whole (pending ones, a long text landing
+	-- whole and parsed over frames, wait until they're parsed).
+	if sc.cut > s.cut and sc.cut ~= s.tried then
+		local pending = false
+		for _, b in blocks do
+			if b.t == "pending" then
+				pending = true
+				break
+			end
+		end
+		if not pending then
+			s.tried = sc.cut
+			local rest = ui.markdown(Source.since(sc, sc.cut), { key = o.key, breaks = o.breaks })
+			local k = #blocks - #rest
+			local fits = k >= 0
+			if fits then
+				for j = 1, #rest do
+					if not alike(blocks[k + j], rest[j]) then
+						fits = false
+						break
+					end
+				end
+			end
+			if fits then
+				table.move(blocks, 1, k, #s.head + 1, s.head)
+				s.cut = sc.cut
+				blocks = rest
+			else
+				-- (The key's parse goes on from the head's end again.)
+				blocks = ui.markdown(Source.since(sc, s.cut), opts)
+			end
+		end
+	end
+	-- The head's pictures together, the blocks it gained alone.
+	local head, grouped, carry = s.head, s.together, s.carry
+	for j = s.grouped + 1, #head do
+		local b = head[j]
+		if b.t == "img" then
+			table.insert(carry, b)
+		else
+			if #carry > 0 then
+				for _, g in together(table.clone(carry)) do
+					table.insert(grouped, g)
+				end
+				table.clear(carry)
+			end
+			table.insert(grouped, b)
+		end
+	end
+	s.grouped = #head
+	if #grouped == 0 and #carry == 0 then
+		return together(blocks)
+	end
+	local joined: { MarkdownBlock } = blocks
+	if #carry > 0 then
+		joined = table.clone(carry)
+		table.move(blocks, 1, #blocks, #carry + 1, joined)
+	end
+	local tail = together(joined)
+	local out = table.create(#grouped + #tail) :: { MarkdownBlock }
+	table.move(grouped, 1, #grouped, 1, out)
+	table.move(tail, 1, #tail, #grouped + 1, out)
+	settled_of[out] = settled
+	return out
+end
+
+-- How many of `list`'s first blocks (a parse under a key) are the very
+-- tables the last parse under that key began with: 0 when unknown.
+function M.settled(list: { MarkdownBlock }): number
+	return settled_of[list] or 0
+end
 
 -- A text's top-level blocks, as ds/markdown draws them (it parses with
 -- this): its math read first (ds/math_source), pictures together one block.
 -- `opts`: ui.markdown's (`breaks`: a line break is a break, as a prompt's
--- are), or `breaks` alone.
+-- are; `key`: a text that grows, parsed for what's new alone), or `breaks`
+-- alone.
 function M.parse(text: string, opts: (boolean | MarkdownOptions)?): { MarkdownBlock }
 	local o: MarkdownOptions = if type(opts) == "table" then opts else { breaks = opts == true }
+	if o.key then
+		return streamed(text, o)
+	end
 	return together(ui.markdown(prepare(text), o))
 end
 
@@ -126,9 +301,12 @@ function M.parts(b: MarkdownBlock, out: { string }?): { string }
 			M.parts(child, list)
 		end
 	elseif b.t == "table" then
-		for c, head in b.head do
+		-- (Row by row, as ds/markdown builds them.)
+		for _, head in b.head do
 			table.insert(list, M.words(head))
-			for _, row in b.rows do
+		end
+		for _, row in b.rows do
+			for c in b.head do
 				table.insert(list, M.words(row[c] or {}))
 			end
 		end

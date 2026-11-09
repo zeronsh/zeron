@@ -80,7 +80,7 @@ ui.effect(function()
 	if not id then
 		return
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			arriving:set(nil)
 			route.new_chat(id)
@@ -849,10 +849,10 @@ end
 -- Your devices, this Mac first (never Cloud's machines: they're its
 -- sessions'); then Cloud, while it's on.
 local function devices(): { Item }
-	local now = sessions.now:get()
 	local out: { Item } = {}
-	for _, d in sessions.computers(now.devices) do
-		local here = d.here or d.id == now.here
+	local here_id = sessions.here:get()
+	for _, d in sessions.computers(sessions.devices:get()) do
+		local here = d.here or d.id == here_id
 		local item = {
 			id = `device:{d.id}`,
 			label = d.name,
