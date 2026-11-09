@@ -37,7 +37,7 @@ end
 -- bar makes it), each block it reveals logged (`pixels.revealed`: how
 -- many, and, by the `pixels_where` command, where the last one is now).
 local finding = ui.shared("pixels.finding", false)
-local at = ui.shared("pixels.at", { "", 0, 0 })
+local at = ui.shared("pixels.at", { "", 0, 0 } :: { any })
 local revealed = ui.shared("pixels.revealed", "")
 local last_revealed: Ref? = nil
 ui.command {
@@ -48,18 +48,18 @@ ui.command {
 		revealed:set(`{revealed:peek()}{if el then math.floor(el.y) else "-"};`)
 	end,
 }
-local find = if finding:peek()
+local find: Prose.Find? = if finding:peek()
 	then {
 		key = "pixels",
 		query = function(): string
-			return at:get()[1]
+			return tostring(at:get()[1])
 		end,
-		current = function(): any
+		current = function(): Prose.FindAt?
 			local c = at:get()
 			if c[2] == 0 then
 				return nil
 			end
-			return { key = "pixels", block = c[2], k = c[3] }
+			return { key = "pixels", block = c[2] :: number, k = c[3] :: number }
 		end,
 		reveal = function(block: Ref)
 			last_revealed = block
