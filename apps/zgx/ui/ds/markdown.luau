@@ -982,6 +982,9 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 				ui.div {
 					class = "md-table-grid",
 					grid = true,
+					-- (Its `auto` columns share what's left past their words, as
+					-- CSS's grid stretches them: the rules reach the frame.)
+					justify = "stretch",
 					cols = table.concat(tracks, " "),
 					cells,
 				},
