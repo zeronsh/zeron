@@ -40,6 +40,23 @@ local finding = ui.shared("pixels.finding", false)
 local at = ui.shared("pixels.at", { "", 0, 0 } :: { any })
 local revealed = ui.shared("pixels.revealed", "")
 local last_revealed: Ref? = nil
+-- `pixels.scroll`: the reply in a scroll, its find's block brought into view
+-- as a transcript brings it (ds/transcript's `reveal`).
+local scrolled = ui.shared("pixels.scroll", false)
+local offset = ui.state("pixels_offset", 0)
+local view = ui.ref()
+local function bring(block: Ref)
+	local el, v = block:peek() :: any, view:peek() :: any
+	if not el or not v or el.y == nil or v.y == nil or el.height == nil or v.height == nil then
+		return
+	end
+	local top, h = v.y :: number, v.height :: number
+	local y, bh = el.y :: number, el.height :: number
+	if y >= top + 8 and y + math.min(bh, 120) <= top + h - 8 then
+		return
+	end
+	offset:set(math.max(0, offset:peek() + (y - top) - h / 3))
+end
 ui.command {
 	id = "pixels_where",
 	title = "Where the block last revealed is",
@@ -64,6 +81,9 @@ local find: Prose.Find? = if finding:peek()
 		reveal = function(block: Ref)
 			last_revealed = block
 			revealed:set(`{revealed:peek()}r`)
+			if scrolled:peek() then
+				bring(block)
+			end
 		end,
 	}
 	else nil
@@ -133,5 +153,13 @@ return ui.column {
 	-- size, fonts), as the main window wears it.
 	theme = look.window_theme(),
 	selectable = true,
-	ui.column { id = "reply", w_full = true, min_w = 0, reply },
+	if scrolled:peek()
+		then ui.scroll {
+			ref = view,
+			offset = offset,
+			w_full = true,
+			h_full = true,
+			ui.column { id = "reply", w_full = true, min_w = 0, reply },
+		}
+		else ui.column { id = "reply", w_full = true, min_w = 0, reply },
 }
