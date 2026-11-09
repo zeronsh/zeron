@@ -658,6 +658,22 @@ fn the_veil_fades_words_in_as_ds_markdowns() {
             failed.push(format!("after {end} bytes, 11 ms on: {why}"));
         }
     }
+    // Once every fade has ended, a reply streamed in is drawn as the same
+    // reply drawn whole: a span the veil cut into pieces draws as the span
+    // (a chip padded and washed once, a link underlined as one).
+    ms += 1000;
+    clock.advance(std::time::Duration::from_millis(ms), || {});
+    for shown in [&luau, &native] {
+        shown.app.frames(2);
+    }
+    let mut fresh_luau = Shown::new("luau", "dark", "", &text);
+    let mut fresh_native = Shown::new("native", "dark", "", &text);
+    if let Some(why) = compare("veil-faded-luau", &mut fresh_luau, &mut luau) {
+        failed.push(format!("ds/markdown streamed, faded, against it drawn whole: {why}"));
+    }
+    if let Some(why) = compare("veil-faded-native", &mut fresh_native, &mut native) {
+        failed.push(format!("markdown_view streamed, faded, against it drawn whole: {why}"));
+    }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
     assert!(fading > (chunks as usize) / 2, "fading as it streamed: {fading} of {chunks}");
     eprintln!("veil: {chunks} chunks, each the same every pixel as it lands and 11 ms on");
