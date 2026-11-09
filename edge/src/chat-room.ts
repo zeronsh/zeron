@@ -17,6 +17,7 @@
  * auto-response pair; alarms retry accepted rows' host wakes and back up to R2.
  */
 import { createBlobStore, type BlobStore } from "./blobs";
+import { readCapped } from "./read-capped";
 import {
   appendRow,
   CHECKPOINT_BLOB,
@@ -163,8 +164,10 @@ export class ChatRoom implements DurableObject {
         await this.markBackupDirty();
         return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
       }
-      const body = new Uint8Array(await request.arrayBuffer());
-      if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
+      // (Refused before it's read: an engine from before parts re-posted a
+      // long chat's whole snapshot, 35 MB and more, every few seconds.)
+      const body = await readCapped(request, MAX_CHECKPOINT_BYTES);
+      if (!body) return json({ error: "too_large" }, 413);
       const outcome = commitCheckpoint(sql, this.blobs, seqCovered, frontier, body, Date.now());
       if (!outcome.ok) return json({ error: outcome.error }, 409);
       await this.markBackupDirty();
@@ -185,11 +188,9 @@ export class ChatRoom implements DurableObject {
       // again), which `/checkpoint?staged=<size>` then commits.
       const offset = Number(url.searchParams.get("offset") ?? "");
       if (!Number.isSafeInteger(offset) || offset < 0) return json({ error: "bad_offset" }, 400);
-      const declared = Number(request.headers.get("content-length") ?? "0");
-      if (declared > MAX_CHECKPOINT_PART_BYTES) return json({ error: "too_large" }, 413);
-      const body = new Uint8Array(await request.arrayBuffer());
+      const body = await readCapped(request, MAX_CHECKPOINT_PART_BYTES);
+      if (!body) return json({ error: "too_large" }, 413);
       if (body.byteLength === 0) return json({ error: "empty" }, 400);
-      if (body.byteLength > MAX_CHECKPOINT_PART_BYTES) return json({ error: "too_large" }, 413);
       if (offset === 0) this.blobs.delete(STAGED_CHECKPOINT_BLOB);
       const staged = this.blobs.size(STAGED_CHECKPOINT_BLOB) ?? 0;
       if (offset !== staged) return json({ error: "offset", staged }, 409);
