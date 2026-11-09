@@ -18,6 +18,8 @@
 --   route.projects:get()    the projects a new chat can work in, as
 --                           ds.Composer takes them ({ value, label, hue? })
 --   route.open_session(id)  to that session
+--   route.keep_keys()       the next arrival leaves the keys where they are
+--                           (a tab strip's arrows; `take_keys_kept()`)
 --   route.new_chat(project?, device?) to a new chat (in that project, a
 --                           space id; "none" for none; nil, the one the
 --                           sidebar's project filter narrows to, else the
@@ -511,6 +513,23 @@ function M.take_project(): { project: string? }?
 		M.project_pick:set(nil)
 	end
 	return pick
+end
+-- An arrival that leaves the keys where they are: a tab strip's arrows
+-- choose a tab and keep the focus on it. `keep_keys()` just before the
+-- move; the composer's arrival takes it (`take_keys_kept()`) and leaves
+-- the keys alone. Unclaimed (a move that changed nothing), it lapses on
+-- the next turn.
+local keys_kept = false
+function M.keep_keys()
+	keys_kept = true
+	ui.after(0, function()
+		keys_kept = false
+	end)
+end
+function M.take_keys_kept(): boolean
+	local kept = keys_kept
+	keys_kept = false
+	return kept
 end
 function M.take_device(): string?
 	local pick = M.device_pick:peek()

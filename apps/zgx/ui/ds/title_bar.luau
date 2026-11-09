@@ -290,10 +290,18 @@ end
 -- controls held their padding in from the edge (zgx reports the buttons
 -- shorter in a zoomed window than it draws them: zgx-asks/
 -- windows-caption-buttons). Read tracked unless `tracked` is false.
+-- On macOS the traffic lights decide it: zgx's inset bar centres them in its
+-- 40-point strip, so 20 down, not old Zeron's 21 (which left every control a
+-- point under them). Their own middle where they're reported; 20 in full
+-- screen, so nothing moves going in.
+local LIGHTS_LINE = 20
 local function middle(tracked: boolean?): number
 	local side, buttons = window_buttons(tracked)
 	if side == "right" and buttons.height < H then
 		return math.max(buttons.y + buttons.height / 2, island.thickness() / 2)
+	end
+	if on_macos() then
+		return if side == "left" then buttons.y + buttons.height / 2 else LIGHTS_LINE
 	end
 	return MIDDLE
 end
@@ -302,6 +310,11 @@ end
 -- a quiet glyph, a wash under the pointer; when it can't (nothing to go
 -- back or forward to), muted and still. Its tooltip hangs below it: above
 -- is the window's edge.
+-- Back and Forward's glyphs, at the bar glyphs' optical size: the arrow
+-- runs 14 of its source's 24 units, so drawn 16 across it was 9 points
+-- beside the sidebar toggle's 13; 21 across it is 12, in the glyphs'
+-- stroke (ds/sidebar_icon's), so the three weigh alike.
+local ARROW = 21
 local function control(label: Label, glyph: Node, enabled: (() -> boolean)?, on_click: (() -> ())?): Node
 	local function able(): boolean
 		return enabled == nil or enabled()
@@ -451,9 +464,9 @@ local TitleBar = ui.component(function(props: Props): Node
 				end
 			),
 			ui.div { w = GROUP_GAP, shrink = 0 },
-			control(locale.t("common.back"), Icon { name = "arrow-left", size = 16 }, props.can_back, props.on_back),
+			control(locale.t("common.back"), Icon { name = "arrow-left", size = ARROW, glyph_stroke = true }, props.can_back, props.on_back),
 			ui.div { w = CONTROL_GAP, shrink = 0 },
-			control(locale.t("ds.title_bar.forward"), Icon { name = "arrow-right", size = 16 }, props.can_forward, props.on_forward),
+			control(locale.t("ds.title_bar.forward"), Icon { name = "arrow-right", size = ARROW, glyph_stroke = true }, props.can_forward, props.on_forward),
 		}
 	)
 	if props.actions then

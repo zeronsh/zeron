@@ -784,7 +784,8 @@ local function Composer(): Node
 			return
 		end
 		arrived:set(at)
-		if was == "?" or not chat then
+		-- (A tab strip's arrows keep the keys on the tab they chose.)
+		if route.take_keys_kept() or was == "?" or not chat then
 			return
 		end
 		ui.after(0, function()

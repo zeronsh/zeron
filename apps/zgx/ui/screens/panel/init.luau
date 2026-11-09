@@ -57,6 +57,7 @@ local ds = require("@ds")
 local control = require("@ds/control")
 local token = require("@ds/token")
 local motion = require("@ds/motion")
+local TabStrip = require("@ds/tab_strip")
 local Icon = require("@ds/icon")
 local FileIcon = require("@ds/file_icons")
 local FadeText = require("@ds/fade_text")
@@ -466,7 +467,6 @@ local BAND_H = Dock.head()
 local STRIP_EDGE = (BAND_H - CHIP_H) / 2
 local STRIP_START = ui.raw(STRIP_EDGE, "a strip's tabs as far in from the card's side as from its top")
 local STRIP_FADE = 36
-local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 
 -- A prop's value now (`control.value`: a function's answer, a state's,
 -- tracked, or the value itself); a path's file name.
@@ -766,8 +766,12 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 	end
 
-	-- Each tab's box, by id (for bringing the active one into view).
+	-- Each tab's box, by id (for bringing the active one into view), and what
+	-- it shows, still (for the tab lifted by a drag, and the drag's preview).
 	local chip_refs: { [string]: any } = {}
+	local chip_faces: { [string]: () -> Node } = {}
+	-- The strip's dragging (below, once its scroll is made).
+	local strip: any
 
 	-- A tab in the strip.
 	local function chip(tab: Tab, _i: number): Node
@@ -775,6 +779,12 @@ M.Panel = ui.component(function(props: Props): Node
 		local hovered = ui.use_state(false)
 		local ref = ui.ref()
 		chip_refs[id] = ref
+		-- (Gone with its tab: neither kept for one closed.)
+		ui.on_cleanup(function()
+			if chip_refs[id] == ref then
+				chip_refs[id], chip_faces[id] = nil, nil
+			end
+		end)
 		local function is_active(): boolean
 			return active() == id
 		end
@@ -826,9 +836,26 @@ M.Panel = ui.component(function(props: Props): Node
 			end
 			return ds.Tile { size = SLOT, inside = make_icon() }
 		end
-		-- Being dragged: the tab left behind dims, its preview under the
-		-- pointer (the tab itself, chosen, on the menus' glass).
-		local dragging = ui.use_state(false)
+		chip_faces[id] = function(): Node
+			return ui.row {
+				grow = 1,
+				min_w = 0,
+				h_full = true,
+				pl = ui.raw(CHIP_INSET, "as far in as the tile is from its top"),
+				pr = ui.raw(CHIP_INSET, "the tab's inset"),
+				gap = "$zeron.space.tight",
+				items = "center",
+				make_tile(),
+				FadeText {
+					title,
+					max_w = LABEL_MAX,
+					min_w = 0,
+					grow = 1,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+				},
+			}
+		end
 		local function others(side: string?): { string }
 			local out: { string } = {}
 			local list = tabs()
@@ -899,15 +926,12 @@ M.Panel = ui.component(function(props: Props): Node
 				items = "center",
 				rounded = "$radius.lg",
 				cursor = "pointer",
-				-- (As ds/tabs' pill: the chosen one on the flat wash; the
-				-- others take the hover wash under the pointer, their ink
-				-- brightening with it.)
-				bg = function(): string
-					if is_active() then
-						return "$zeron.selected.flat.bg"
-					end
-					return if hovered:get() then "$hover" else "#00000000"
-				end,
+				relative = true,
+				-- (As ds/tabs' pill: the chosen one on the flat wash, which
+				-- glides to it, `strip.Highlight`; the others take the hover
+				-- wash under the pointer, `TabStrip.Wash`, their ink
+				-- brightening with it. Pressed, any darkens.)
+				active = { bg = "$pressed" },
 				color = function(): string
 					return if is_active() or hovered:get() then "$text.primary" else "$text.secondary"
 				end,
@@ -925,11 +949,25 @@ M.Panel = ui.component(function(props: Props): Node
 						close(id)
 					end
 				end,
-				-- Reordered by dragging onto another tab: the tab itself under
-				-- the pointer, as it looks chosen, floating on the menus' glass;
-				-- the one left behind faint until it lands.
+				focus = control.ring,
+				on_key = TabStrip.keys(id, function(): { string }
+					return strip.order:peek()
+				end, function(other: string)
+					local k = key:peek()
+					if k then
+						state.activate(k, other)
+					end
+				end, function(other: string): any
+					return chip_refs[other]
+				end),
+				-- Dragged, it lifts and follows the pointer along the strip, the
+				-- others making room (`ds/tab_strip`); let go, it stays where it
+				-- lands.
+				on_press = function(e: any)
+					strip.press(e)
+				end,
 				on_drag = function(): any
-					dragging:set(true)
+					strip.begin(id)
 					-- Keep the strip's identity while carrying context to a composer.
 					local payload: any = { panel_tab = id }
 					if tab.kind == "files" then
@@ -945,71 +983,18 @@ M.Panel = ui.component(function(props: Props): Node
 					end
 					return payload
 				end,
-				-- (The tab as it stands, on the window's colour. Nothing here eases: a
-				-- drag's preview has no clock for it.)
-				drag_preview = function()
-					local r = ref:peek()
-					return ui.div {
-						rounded = "$radius.lg",
-						bg = "$background",
-						shadow = "$shadow.sm",
-						ui.row {
-							w = if r then r.width else nil,
-							h = CHIP_H,
-							pl = ui.raw(CHIP_INSET, "as far in as the tile is from its top"),
-							pr = ui.raw(CHIP_INSET, "the tab's inset"),
-							gap = "$zeron.space.tight",
-							items = "center",
-							rounded = "$radius.lg",
-							bg = if is_active() then "$zeron.selected.flat.bg" else "#00000000",
-							color = if is_active() then "$text.primary" else "$text.secondary",
-							make_tile(),
-							FadeText {
-								title,
-								max_w = LABEL_MAX,
-								min_w = 0,
-								grow = 1,
-								text_size = "$font.size.sm",
-								weight = "$font.weight.medium",
-							},
-						},
-					}
+				drag_preview = function(): Node
+					return strip.preview(id)
 				end,
-				on_drag_end = function()
-					dragging:set(false)
+				on_drag_end = function(payload: any, accepted: boolean)
+					strip.ended(payload, accepted)
 				end,
 				opacity = function(): number
-					return if dragging:get() then 0.4 else 1
+					return strip.opacity(id)
 				end,
-				drop_when = function(payload: any): boolean
-					return type(payload) == "table" and payload.panel_tab ~= nil and payload.panel_tab ~= id
-				end,
-				-- The dragged tab takes this one's place as the pointer crosses
-				-- its middle (from either side), the strip sliding to make room
-				-- (its layout animation): where it shows is where it lands.
-				on_drag_over = function(payload: any, e)
-					local k = key:peek()
-					if not k then
-						return
-					end
-					local from, here = nil, nil
-					for i, t in tabs() do
-						if t.id == payload.panel_tab then
-							from = i
-						elseif t.id == id then
-							here = i
-						end
-					end
-					if not from or not here then
-						return
-					end
-					local past_middle = e.local_x > e.w / 2
-					if (from < here and past_middle) or (from > here and not past_middle) then
-						state.move(k, payload.panel_tab, here)
-					end
-				end,
-				-- (Dropped: it's where it was dragged to already.)
-				on_drop = function(_payload: any) end,
+				TabStrip.Wash(function(): boolean
+					return hovered:get() and not is_active()
+				end),
 				make_tile(),
 				FadeText {
 					title,
@@ -1098,6 +1083,50 @@ M.Panel = ui.component(function(props: Props): Node
 	-- (What's in the strip, followed as it grows: a new tab slides in, and
 	-- the end it scrolls to moves with it.)
 	local strip_content = ui.ref()
+	strip = TabStrip.new {
+		key = "panel_tab",
+		items = function(): { string }
+			local out: { string } = {}
+			for _, t in tabs() do
+				table.insert(out, t.id)
+			end
+			return out
+		end,
+		width = function(id: string): number
+			local r = chip_refs[id]
+			return if r then r.width or 0 else 0
+		end,
+		content = strip_content,
+		offset = strip_offset,
+		selected = active,
+		face = function(id: string): Node
+			local f = chip_faces[id]
+			return if f then f() else ui.div {}
+		end,
+		commit = function(id: string, index: number)
+			local k = key:peek()
+			if k then
+				state.move(k, id, index)
+			end
+		end,
+		h = CHIP_H,
+		rounded = "$radius.lg",
+	}
+	-- The tabs in the order the strip shows them: a dragged one where it's held.
+	local shown_tabs = ui.computed(function(): { Tab }
+		local by: { [string]: Tab } = {}
+		for _, t in tab_list:get() do
+			by[t.id] = t
+		end
+		local out: { Tab } = {}
+		for _, id in strip.order:get() do
+			local t = by[id]
+			if t then
+				table.insert(out, t)
+			end
+		end
+		return out
+	end)
 	ui.effect(function()
 		local a = active()
 		local list = tabs()
@@ -1111,6 +1140,11 @@ M.Panel = ui.component(function(props: Props): Node
 			if not r or (r.width or 0) <= 0 then
 				return
 			end
+		end
+		-- (Not while a tab's carried: the strip scrolls under it as it nears an
+		-- end.)
+		if strip.busy() then
+			return
 		end
 		if strip_wanted then
 			local w = strip_wanted
@@ -1187,7 +1221,7 @@ M.Panel = ui.component(function(props: Props): Node
 		pinned_now = needs > room + 0.5
 		return pinned_now
 	end)
-	local strip = ui.row {
+	local strip_row = ui.row(strip.zone {
 		id = "panel-strip",
 		role = "tablist",
 		label = ui.t("panel.strip.label"),
@@ -1203,7 +1237,7 @@ M.Panel = ui.component(function(props: Props): Node
 		-- (The band's room: a scroll sized by nothing else is 320 wide.
 		-- Its empty part still moves the window, as nothing there takes a
 		-- press.)
-		ui.scroll_x {
+		strip.Frame(ui.scroll_x {
 			ref = strip_ref,
 			offset = strip_offset,
 			grow = 1,
@@ -1215,15 +1249,17 @@ M.Panel = ui.component(function(props: Props): Node
 			fade_overflow = true,
 			ui.row {
 				ref = strip_content,
+				relative = true,
 				gap = "$zeron.space.hair",
 				items = "center",
-				ui.each(tab_list, chip, {
+				strip.Highlight(),
+				ui.each(shown_tabs, chip, {
 					key = function(t: Tab): string
 						return t.id
 					end,
 					direction = "row",
 					gap = "$zeron.space.hair",
-					animate = motion.layout(SLIDE),
+					animate = motion.tab_slide(),
 				}),
 				-- (Only with a tab open, as Zeron's: the empty page is what it
 				-- opens. Here, after the last tab, while they all fit; pinned at
@@ -1233,10 +1269,10 @@ M.Panel = ui.component(function(props: Props): Node
 				end, new_tab_button()),
 				ui.row { hook = "panel.strip", items = "center", gap = "$space.1" },
 			},
-		},
+		}),
 		-- "+", pinned at the strip's end while the tabs run past it.
 		ui.show(new_pinned, ui.div { shrink = 0, ml = "$space.1", new_tab_button() }),
-	}
+	})
 
 	-- The empty page: the session's home (screens/panel/home): where it
 	-- runs, its project's actions, what can open here (each with its key,
@@ -1579,7 +1615,7 @@ M.Panel = ui.component(function(props: Props): Node
 		bg = "$zeron.inset.bg",
 		border = 1,
 		border_color = "$zeron.inset.edge",
-		ui.column { w_full = true, shrink = 0, hidden = closed, strip },
+		ui.column { w_full = true, shrink = 0, hidden = closed, strip_row },
 		panes,
 	}
 	box[#box + 1] = question

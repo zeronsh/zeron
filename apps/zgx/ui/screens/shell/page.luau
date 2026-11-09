@@ -158,6 +158,11 @@ return function(props: Props): Node
 	local panel_open: () -> boolean = function(): boolean
 		return false
 	end
+	-- What the panel takes beside the page's card, its gap included (known
+	-- further down): the wallpaper holds still as it opens and closes.
+	local panel_beside: () -> number = function(): number
+		return 0
+	end
 	-- Where a pane's × stands from its card's right: clear of the title
 	-- bar's panel toggle over the page's top right while the panel is shut
 	-- (10 in and 24 wide; past the window's own buttons and the divider
@@ -246,7 +251,15 @@ return function(props: Props): Node
 			shown = function(): boolean
 				return home() and not on_plugin()
 			end,
-			width = props.width,
+			-- (Laid at the window's width, as a state zgx follows: a resize
+			-- runs no script here.)
+			width = fit.viewport,
+			beside = function(): number
+				return panel_beside()
+			end,
+			picture = function(): any
+				return if appearance.showing:peek() == "image" then appearance.image:peek() else nil
+			end,
 			key = function(): string
 				local showing = appearance.showing:get()
 				if showing == "image" then
@@ -1029,6 +1042,9 @@ return function(props: Props): Node
 	}
 	panel_open = function(): boolean
 		return shown:get()
+	end
+	panel_beside = function(): number
+		return open_w:get() + gap_before:get()
 	end
 	-- (No hairline down its left; its card's edge is that.)
 	-- Its edge, dragged: wider or narrower (the page keeps its least). Over the
