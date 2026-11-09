@@ -46,6 +46,37 @@ test("the button wears three marks at most and says how many", function()
 	expect(app:has("#updates-mark-4")).to_be(false)
 end)
 
+-- A node's box, from the tree's first line: `@n … x,y WxH`.
+local function box(app: any, target: string): { x: number, w: number }
+	local x, w = app:tree(target):match("^%s*@%d+[^\n]- ([%-%d.]+),[%-%d.]+ ([%d.]+)x[%d.]+")
+	return { x = tonumber(x) :: number, w = tonumber(w) :: number }
+end
+
+test("a mark behind sits in the middle of what shows of its circle", function()
+	local app = open({
+		row("here", "Claude Code", "claude-code", "update"),
+		row("here", "Codex", "codex", "update"),
+		row("metal", "Grok", "grok", "update"),
+	})
+	local first = box(app, "#updates-mark-1")
+	local step = box(app, "#updates-mark-2").x - first.x
+	-- (The tile 20 across, 15 along, a 2.5 gap cut round the one in front.)
+	local tile, gap, side = first.w, 2.5, 11
+	for at = 2, 3 do
+		local circle, glyph = box(app, `#updates-mark-{at}`), box(app, `#updates-mark-{at}-glyph`)
+		-- What shows: from the cut round the one in front to its own edge.
+		local from, to = circle.x + tile + gap - step, circle.x + tile
+		local centre = glyph.x + glyph.w / 2
+		expect(math.abs(centre - (from + to) / 2) <= 0.5).to_be(true)
+		-- The mark clears both, by the same room.
+		expect(centre - side / 2 >= from).to_be(true)
+		expect(centre + side / 2 <= to).to_be(true)
+	end
+	-- The one in front: its mark in its middle.
+	local glyph = box(app, "#updates-mark-1-glyph")
+	expect(math.abs(glyph.x + glyph.w / 2 - (first.x + first.w / 2)) <= 0.5).to_be(true)
+end)
+
 test("the same thing on two devices is one mark", function()
 	local app = open({
 		row("here", "Claude Code", "claude-code", "update"),
