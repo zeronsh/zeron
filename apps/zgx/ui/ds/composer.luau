@@ -529,7 +529,14 @@ local function submenu(
 				bg = function()
 					return if menu.open:get() then "$hover" else "#00000000"
 				end,
-				on_click = menu.toggle,
+				-- A press opens it, as hovering does; one already open stays
+				-- open (a hover opened it just before), as a system menu's row.
+				on_click = function()
+					close_siblings()
+					if not menu.open:peek() then
+						menu.toggle()
+					end
+				end,
 				on_hover = function(inside: boolean)
 					if menu.on_hover then
 						menu.on_hover(inside)
