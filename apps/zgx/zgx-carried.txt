@@ -1,0 +1,5 @@
+# zgx commits Zeron carries on top of zgx main while their zgx PR is in review
+# (2 days at most; apps/zgx/README.md, "The zgx pin"). One per line:
+#   <full sha> #<zgx PR> <YYYY-MM-DD carried since> [note]
+# scripts/zgx-bump.sh replays them onto zgx main and drops the ones zgx main
+# already has, whose PR merged, or that no longer apply.

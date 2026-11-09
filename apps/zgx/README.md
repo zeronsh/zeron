@@ -96,8 +96,54 @@ root one). zgx
 builds against patched crates (winit, wgpu-hal, accesskit), and a git
 dependency does not carry a patch, so `Cargo.toml` repeats zgx's. Patching
 those in the root workspace would also change gpui's wgpu renderer. It
-tracks zgx's `main` branch: `cargo update -p zgx` moves `Cargo.lock` to the
-latest commit.
+pins one zgx commit (below).
+
+## The zgx pin
+
+**Zeron pins zgx `main`.** Every zeronsh/zgx line in `Cargo.toml` (13 here,
+14 on `beta`) names the same rev, and `Cargo.lock` follows. The one
+exception: zgx main plus a few *carried* commits, for at most 2 days, while
+their zgx pull request is in review. A fix Zeron needs goes to zgx main
+first; the pin never collects work of its own.
+
+**Bump it in one command**, from the repo root:
+
+```sh
+scripts/zgx-bump.sh main        # zgx main HEAD, plus the carried commits
+scripts/zgx-bump.sh <sha>       # a zgx commit
+```
+
+It moves every pin line and the lock, then runs the checks that matter,
+first at the old pin (the baseline) and then at the new one:
+`cargo metadata --locked` for macOS arm64, Windows x64 and Linux x64/arm64;
+`zgx test ui` with a zgx CLI built at each pin (not `~/.cargo/bin/zgx`);
+`cargo test --bin zeron-zgx`; and `zeron_v2_is_in_step` (re-blessed when
+only `.base.json` moves). A check fails only on a test the old pin passed.
+`--skip ui,unit` leaves checks out, `--plan-only` only says what the pin
+would be, `--help` has the rest. The first run builds a CLI per pin (about
+10 minutes each, cached in `~/.cache/zgx-bump`).
+
+**To carry a commit,** add a line to `zgx-carried.txt`:
+
+```
+<full sha> #<zgx PR> <YYYY-MM-DD, today> [note]
+```
+
+and run `scripts/zgx-bump.sh --push main`: the commits are replayed onto zgx
+main (the same commits give the same sha) and the result is pushed to
+zeronsh/zgx as the tag `zeron-pin/<sha12>`, so cargo can fetch it. The script
+drops a line once zgx main has the commit, its PR merged, or it no longer
+applies, and says so.
+
+**Each night** (`.github/workflows/zgx-nightly-pin.yml`, also run by hand
+from Actions) a Linux job resolves zgx main + the carried commits against the
+working branch (`zeron/zgx`, or the `ZGX_PIN_BASE` variable). When the
+branch already has that pin, or the open pin pull request already has its
+results, it stops. Otherwise one macOS runner runs `scripts/zgx-bump.sh`
+and one pull request, "zgx: pin <sha> (zgx main <date>)", is opened or
+updated with the results table and the carried commits with their age. A
+carried commit older than 2 days makes the pull request say so at the top.
+Pushing a carried pin needs the `ZGX_PIN_TOKEN` secret.
 
 ## Layout
 

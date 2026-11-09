@@ -1,0 +1,239 @@
+name: zgx nightly pin
+
+# Keeps apps/zgx's zgx pin on zgx main (apps/zgx/README.md, "The zgx pin").
+# Each night: zgx main HEAD, plus the commits in apps/zgx/zgx-carried.txt
+# replayed on top, becomes the new pin on the working branch; the checks
+# that matter after a bump run against it and against the old pin
+# (scripts/zgx-bump.sh, which also runs by hand: `scripts/zgx-bump.sh main`);
+# ONE pull request, "zgx: pin <sha> (zgx main <date>)", is opened or updated
+# with the results.
+#
+# Frugal with runners: a small Linux job resolves the pin first and stops
+# when the working branch already pins it, or when the open pull request
+# already has results for this pin on this working branch. Only then does
+# one macOS runner build and test (the old pin's results are the baseline).
+# The pull request job is a short Linux job of its own, so the build never
+# holds a write token.
+#
+# Secrets (optional):
+#   ZGX_PIN_TOKEN  a token that can push tags to zeronsh/zgx (a pin with
+#                  carried commits is pushed as zeron-pin/<sha12>, so cargo can
+#                  fetch it) and open pull requests here. Without it, carried
+#                  commits can't be pinned, and the pull request is opened
+#                  with GITHUB_TOKEN, which starts no CI on it (run CI there
+#                  by hand or push to the branch).
+# Variables (optional):
+#   ZGX_PIN_BASE   the working branch the pull request targets (zeron/zgx)
+
+on:
+  schedule:
+    - cron: '47 10 * * *'  # 03:47 in Denver, well after ci.yml's nightly
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: zgx rev to pin (main = zgx main HEAD)
+        type: string
+        default: main
+      base:
+        description: Working branch the pull request targets (default vars.ZGX_PIN_BASE or zeron/zgx)
+        type: string
+        default: ''
+      dry-run:
+        description: Run the checks, open no pull request (results in the run summary)
+        type: boolean
+        default: false
+      force:
+        description: Run the checks even when the open pull request already has this pin's results
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zgx-nightly-pin
+  cancel-in-progress: false
+
+env:
+  BASE: ${{ inputs.base || vars.ZGX_PIN_BASE || 'zeron/zgx' }}
+  REV: ${{ inputs.rev || 'main' }}
+  BRANCH: zgx/nightly-pin
+
+jobs:
+  plan:
+    if: github.repository == 'zeronsh/zeron'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      base-sha: ${{ steps.decide.outputs.base_sha }}
+      zgx: ${{ steps.plan.outputs.base }}
+      pin: ${{ steps.plan.outputs.pin }}
+    steps:
+      # The tool from this workflow's own commit; the pin from the working branch.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: tool
+          sparse-checkout: scripts/zgx-bump.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: zeron
+          ref: ${{ env.BASE }}
+          sparse-checkout: apps/zgx
+      - name: Resolve the pin (zgx main + carried commits)
+        id: plan
+        working-directory: zeron
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZGX_PIN_TOKEN: ${{ secrets.ZGX_PIN_TOKEN }}
+        run: |
+          push=()
+          if [ -n "$ZGX_PIN_TOKEN" ]; then
+            push=(--push)
+            export ZGX_PUSH_URL="https://x-access-token:${ZGX_PIN_TOKEN}@github.com/zeronsh/zgx"
+          fi
+          ../tool/scripts/zgx-bump.sh --plan-only "${push[@]}" --report "$RUNNER_TEMP/plan.md" --out-env "$RUNNER_TEMP/plan.env" "$REV"
+          cat "$RUNNER_TEMP/plan.md" >>"$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/plan.env" >>"$GITHUB_OUTPUT"
+          if grep -q '^carried=[1-9]' "$RUNNER_TEMP/plan.env" && [ -z "$ZGX_PIN_TOKEN" ]; then
+            echo "::error::carried commits need ZGX_PIN_TOKEN to push the pin to zeronsh/zgx (or empty apps/zgx/zgx-carried.txt)"
+            exit 1
+          fi
+      - name: Anything to do?
+        id: decide
+        working-directory: zeron
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGED: ${{ steps.plan.outputs.changed }}
+          PIN: ${{ steps.plan.outputs.pin }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          base_sha="$(git rev-parse HEAD)"
+          echo "base_sha=$base_sha" >>"$GITHUB_OUTPUT"
+          open="$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --base "$BASE" --state open --json number,body -q '.[0]')"
+          if [ "$CHANGED" != 1 ]; then
+            echo "$BASE already pins ${PIN:0:12}: nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+          elif [ "$FORCE" != true ] && [ -n "$open" ] && jq -e --arg m "<!-- zgx-bump pin=$PIN base=$base_sha -->" '.body | contains($m)' <<<"$open" >/dev/null; then
+            echo "Pull request #$(jq -r .number <<<"$open") already has this pin's results on this $BASE: nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "run=true" >>"$GITHUB_OUTPUT"
+          fi
+
+  check:
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      ZGX_BUMP_WORK: ${{ github.workspace }}/.zgx-bump
+    outputs:
+      status: ${{ steps.bump.outputs.status }}
+      title: ${{ steps.bump.outputs.title }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: tool
+          sparse-checkout: scripts/zgx-bump.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: zeron
+          ref: ${{ needs.plan.outputs.base-sha }}
+      - name: Rust toolchain (rust-toolchain.toml)
+        working-directory: zeron
+        run: rustup show active-toolchain || rustup toolchain install
+      # zgx's terminals are Ghostty's, built with Zig 0.16 (zgx-ghostty-sys).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('zeron/apps/zgx/Cargo.lock') }}
+          restore-keys: zgx-ghostty-
+      # The zgx CLIs (one per pin) and their build directory.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            .zgx-bump/cli
+            .zgx-bump/cli-target
+          key: zgx-bump-cli-${{ needs.plan.outputs.pin }}
+          restore-keys: zgx-bump-cli-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-nightly-pin
+          workspaces: zeron/apps/zgx -> target
+      - name: Bump and check (old pin first, as the baseline)
+        id: bump
+        working-directory: zeron
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZGX: ${{ needs.plan.outputs.zgx }}
+        run: |
+          rc=0
+          ../tool/scripts/zgx-bump.sh --report "$RUNNER_TEMP/report.md" --out-env "$GITHUB_OUTPUT" "$ZGX" || rc=$?
+          [ -f "$RUNNER_TEMP/report.md" ] && cat "$RUNNER_TEMP/report.md" >>"$GITHUB_STEP_SUMMARY"
+          # 1 = a check regressed: the pull request still opens, and says so.
+          [ "$rc" -le 1 ] || exit "$rc"
+          echo "status=$([ "$rc" = 0 ] && echo ok || echo regressed)" >>"$GITHUB_OUTPUT"
+          git diff --binary >"$RUNNER_TEMP/bump.patch"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: zgx-pin
+          path: |
+            ${{ runner.temp }}/report.md
+            ${{ runner.temp }}/bump.patch
+            ${{ github.workspace }}/.zgx-bump/logs
+          if-no-files-found: warn
+
+  pull-request:
+    needs: [plan, check]
+    if: inputs.dry-run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.plan.outputs.base-sha }}
+          token: ${{ secrets.ZGX_PIN_TOKEN || github.token }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zgx-pin
+          path: ${{ runner.temp }}/zgx-pin
+      - name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ secrets.ZGX_PIN_TOKEN || github.token }}
+          TITLE: ${{ needs.check.outputs.title }}
+          STATUS: ${{ needs.check.outputs.status }}
+          PIN: ${{ needs.plan.outputs.pin }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
+        run: |
+          dir="$RUNNER_TEMP/zgx-pin"
+          git apply --index "$dir/bump.patch"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "$TITLE" -m "scripts/zgx-bump.sh; checks in the pull request."
+          git push -f origin "HEAD:refs/heads/$BRANCH"
+          {
+            [ "$STATUS" = ok ] || printf '> [!CAUTION]\n> **A check regressed against the old pin.** See the table.\n\n'
+            sed '1{/^## /d;}' "$dir/report.md"
+            echo
+            echo "Opened by the nightly zgx pin (.github/workflows/zgx-nightly-pin.yml); \`scripts/zgx-bump.sh main\` does the same by hand."
+            echo
+            echo "<!-- zgx-bump pin=$PIN base=$BASE_SHA -->"
+          } >"$RUNNER_TEMP/body.md"
+          n="$(gh pr list --head "$BRANCH" --base "$BASE" --state open --json number -q '.[0].number')"
+          if [ -n "$n" ]; then
+            gh pr edit "$n" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          fi
