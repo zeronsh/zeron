@@ -179,6 +179,8 @@ export type Props = {
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
+	-- The width a double click on its edge puts back (the theme's own else).
+	default_width: number?,
 	-- Told its column's width as it shows (its card and `before`), each
 	-- frame as it folds or comes back (what stands beside it follows its
 	-- edge by it).
@@ -5127,7 +5129,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 			end,
 			on_press = function(e)
 				if e.clicks == 2 then
-					wide:set(WIDE)
+					wide:set(props.default_width or WIDE)
 					if props.on_reset then
 						props.on_reset()
 					end

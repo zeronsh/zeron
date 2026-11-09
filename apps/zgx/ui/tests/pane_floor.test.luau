@@ -155,7 +155,7 @@ test("a chat alone goes as it always has: the sidebar stays, or hides for room a
 	local app = split(1100)
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(true)
-	expect(panel_w(app)).to_be(413)
+	expect(panel_w(app)).to_be(405)
 	toggle(app)
 	app:resize(880, 800)
 	app:frames(30)
@@ -185,7 +185,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	app:frames(30)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
-	expect(panel_w(app)).to_be(363)
+	expect(panel_w(app)).to_be(360)
 	expect(sidebar_shows(app)).to_be(true)
 end)
 
@@ -193,7 +193,7 @@ test("panes stacked are as wide as the page: one across, as a chat alone", funct
 	local app = split(1100, { kind = "col", children = { leaf("a1"), leaf("a2") } })
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(true)
-	expect(panel_w(app)).to_be(413)
+	expect(panel_w(app)).to_be(405)
 end)
 
 test("the window narrowed: the panel gives its width, then the sidebar hides, then the panes narrow; widened, the sidebar's back", function()

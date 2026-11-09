@@ -16,6 +16,8 @@ const FILES_PANEL_MIN: f32 = 0.0;
 const CHAT_PANEL_MIN: f32 = 300.0;
 // What the sidebar's column has past its limit: the window's edge before its card.
 const SIDEBAR_EDGE: f32 = 5.0;
+/// The sidebar's default width (screens/shell/fit_policy `SIDEBAR_DEFAULT`).
+const SIDEBAR_DEFAULT: f32 = 272.;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HorizontalPanelFit {
@@ -102,7 +104,7 @@ fn a_resize_walk_shows_the_columns_zerons_policy_shows() {
     app.frames(20);
     app.click("#titlebar >> role:button \"Panel\"");
     app.frames(60);
-    let sidebar_width = 256.0;
+    let sidebar_width = SIDEBAR_DEFAULT;
     let mut faults = Vec::new();
     let mut last: Option<(bool, bool, bool)> = None;
     let mut drops = Vec::new();
@@ -511,7 +513,7 @@ fn the_sidebar_toggled_splits_the_chat_and_the_panel_again_easing() {
             drag(&mut app, "\"Resize files\"", -80.);
             app.frames(40);
         }
-        for (folding, card) in [(true, 0.), (false, 256.)] {
+        for (folding, card) in [(true, 0.), (false, SIDEBAR_DEFAULT)] {
             let chat = |app: &mut TestApp| app.bounds("#shell-page-room").width;
             let mut chats = vec![chat(&mut app)];
             let mut panels = vec![app.bounds("#shell-files").width];
@@ -642,22 +644,22 @@ fn double_clicking_a_seam_puts_it_back() {
     }
     let sidebar = |app: &mut TestApp| app.bounds("#shell-sidebar").width - SIDEBAR_EDGE;
     let panel = |app: &mut TestApp| app.bounds("#shell-files").width;
-    let share = share_of(1500., 256.);
+    let share = share_of(1500., SIDEBAR_DEFAULT);
     // (The panel's width chosen first: the sidebar's reset forgets it too.)
     drag(&mut app, "\"Resize files\"", 100.);
     app.frames(30);
     assert!(panel(&mut app) < share - 60., "dragged to {}", panel(&mut app));
     drag(&mut app, "\"Resize sidebar\"", 90.);
     app.frames(30);
-    assert!((sidebar(&mut app) - 346.).abs() < 0.5, "dragged to {}", sidebar(&mut app));
+    assert!((sidebar(&mut app) - (SIDEBAR_DEFAULT + 90.)).abs() < 0.5, "dragged to {}", sidebar(&mut app));
     // (Near the reach's end, in the sidebar's side.)
     let b = app.bounds("\"Resize sidebar\"");
     double_click(&mut app, (b.x + 1., b.y + b.height / 2.));
     app.frames(3);
     let mid = sidebar(&mut app);
-    assert!(mid > 256.5 && mid < 345.5, "it eases back: {mid} on the way");
+    assert!(mid > SIDEBAR_DEFAULT + 0.5 && mid < SIDEBAR_DEFAULT + 89.5, "it eases back: {mid} on the way");
     app.frames(60);
-    assert!((sidebar(&mut app) - 256.).abs() < 0.5, "back to its default: {}", sidebar(&mut app));
+    assert!((sidebar(&mut app) - SIDEBAR_DEFAULT).abs() < 0.5, "back to its default: {}", sidebar(&mut app));
     assert!((panel(&mut app) - share).abs() < 0.5, "the panel back to its share {share}: {}", panel(&mut app));
     drag(&mut app, "\"Resize files\"", -150.);
     app.frames(30);
@@ -673,7 +675,7 @@ fn double_clicking_a_seam_puts_it_back() {
     // (Forgotten: the window resized, it keeps to its share.)
     app.ui.scene.borrow_mut().resize(1400., 800.);
     app.frames(30);
-    assert!((panel(&mut app) - share_of(1400., 256.)).abs() < 0.5, "it keeps to its share: {}", panel(&mut app));
+    assert!((panel(&mut app) - share_of(1400., SIDEBAR_DEFAULT)).abs() < 0.5, "it keeps to its share: {}", panel(&mut app));
 }
 
 /// The light in a seam's gap, `label`'s: its opacity. (Inside the seam, or,

@@ -59,7 +59,7 @@ local shared = {
 	-- Organize is those on, in this order.
 	organize_order = ui.persist("shell_sidebar_organize_order", { "project", "device" }),
 	sort = ui.persist("shell_sidebar_sort", "updated"),
-	width = ui.persist("shell_sidebar_width", 256),
+	width = ui.persist("shell_sidebar_width", fit.SIDEBAR_DEFAULT),
 	details = {
 		branch = ui.persist("shell_sidebar_show_branch", true),
 		pr = ui.persist("shell_sidebar_show_pr", true),
@@ -1564,6 +1564,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		details = shared.details,
 		places = shared.places :: any,
 		width = shared.width,
+		default_width = fit.SIDEBAR_DEFAULT,
 		shown = if props.island then nil else view.sidebar_shown,
 		before = if props.island then nil else 5,
 		-- (Its edge double-clicked: the chat and the panel split again, as

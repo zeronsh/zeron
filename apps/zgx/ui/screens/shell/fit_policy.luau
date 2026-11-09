@@ -6,8 +6,9 @@
 
 local M = {}
 
--- Zeron's widths (crates/ui settings.rs), in points.
-M.SIDEBAR_MIN, M.SIDEBAR_MAX, M.SIDEBAR_DEFAULT = 242, 400, 256
+-- Zeron's widths (crates/ui settings.rs), in points. (The sidebar's default
+-- a step wider than Zeron's 256: Gaël's.)
+M.SIDEBAR_MIN, M.SIDEBAR_MAX, M.SIDEBAR_DEFAULT = 242, 400, 272
 M.FILES_PANEL_MIN, M.FILES_PANEL_DEFAULT, M.FILES_PANEL_MAX = 220, 286, 440
 M.RIGHT_PANE_MIN, M.RIGHT_PANE_DEFAULT = 360, 520
 M.CHAT_PANEL_MIN = 300
