@@ -281,6 +281,9 @@ struct Inner {
     /// Rung as the port is recorded: what a run revived on boot, while the
     /// engine is still being assembled, waits on ([`SessionsEngine::ipc_port_ready`]).
     ipc_ready: tokio::sync::Notify,
+    /// Set when this engine will serve no port at all
+    /// ([`SessionsEngine::set_no_ipc_port`]): that wait ends at once.
+    ipc_none: std::sync::atomic::AtomicBool,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
@@ -360,6 +363,7 @@ impl SessionsEngine {
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
                 ipc_ready: tokio::sync::Notify::new(),
+                ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
                 journal,
                 registry,
@@ -397,11 +401,21 @@ impl SessionsEngine {
         self.inner.ipc_ready.notify_waiters();
     }
 
-    /// Until the IPC port is recorded, or `limit` passes. Boot recovery
-    /// revives cut-off turns while the engine is still being assembled, before
-    /// it serves its port: dispatched then, a revived run went out with no
-    /// Zeron tools (its agent read them as gone, and a parent woken by its
-    /// children's reports couldn't answer them).
+    /// Record that this engine serves no IPC port (it lost the bind): a run
+    /// revived on boot goes on at once without Zeron tools, rather than
+    /// waiting out [`Self::ipc_port_ready`]'s limit for a port never coming.
+    pub fn set_no_ipc_port(&self) {
+        self.inner
+            .ipc_none
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.ipc_ready.notify_waiters();
+    }
+
+    /// Until the IPC port is recorded (or none is said to be coming), or
+    /// `limit` passes. Boot recovery revives cut-off turns while the engine is
+    /// still being assembled, before it serves its port: dispatched then, a
+    /// revived run went out with no Zeron tools (its agent read them as gone,
+    /// and a parent woken by its children's reports couldn't answer them).
     async fn ipc_port_ready(&self, limit: std::time::Duration) {
         let deadline = tokio::time::Instant::now() + limit;
         loop {
@@ -413,7 +427,12 @@ impl SessionsEngine {
                 .inner
                 .ipc_port
                 .load(std::sync::atomic::Ordering::Acquire);
-            if port != 0 {
+            if port != 0
+                || self
+                    .inner
+                    .ipc_none
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
                 return;
             }
             if tokio::time::timeout_at(deadline, rung).await.is_err() {
@@ -6952,6 +6971,38 @@ mod tests {
         assert_eq!(start.elapsed(), Duration::from_secs(3));
 
         // Recorded already: no wait at all.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    /// An engine that knows it serves no port says so, and the wait for one
+    /// ends then rather than at its limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_the_port_ends_when_none_is_coming() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let limit = Duration::from_secs(10);
+
+        // Said midway: the wait ends then.
+        let start = Instant::now();
+        let waiting = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.ipc_port_ready(limit).await }
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!waiting.is_finished(), "not said yet: still waiting");
+        sessions.set_no_ipc_port();
+        waiting.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(2));
+
+        // Said already: no wait at all.
         let start = Instant::now();
         sessions.ipc_port_ready(limit).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
