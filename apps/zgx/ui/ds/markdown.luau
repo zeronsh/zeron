@@ -398,7 +398,9 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	-- across it copies the name.)
 	span.underline = false
 	span.underline_offset = nil
-	span.hover = nil
+	-- (A hover of its own, which changes nothing: without one, a link's
+	-- pointer draws the focus ring round its words.)
+	span.hover = {}
 	span.bg = "$zeron.composer.chip.bg"
 	span[1] = name
 	span.padding = { 2, 2 }
@@ -414,7 +416,9 @@ local function invocation_chip(span: { [any]: any }, name: string)
 	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
 	span.underline = false
 	span.underline_offset = nil
-	span.hover = nil
+	-- (A hover of its own, which changes nothing: without one, a link's
+	-- pointer draws the focus ring round its words.)
+	span.hover = {}
 	span.bg = "$zeron.composer.chip.bg"
 	span[1] = name
 	span.padding = { 2, 2 }
