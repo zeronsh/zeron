@@ -454,9 +454,11 @@ pub mod methods {
     pub const DECIDE_PLUGIN: &str = "DecidePlugin";
     /// `{id, hash}` → `{review}`: a one-time capability for one decision
     /// about plugin `id` as shown (`hash`) — `DecidePlugin {allow: true}` or
-    /// `SignPlugin {id}` — good for a few minutes. Minted for the consent
-    /// window's own host only: full-token local IPC, never an agent, never
-    /// another device.
+    /// `SignPlugin {id}` — good for a few minutes, and only to whoever asked
+    /// for it. Minted for a consent window's own host only: this device's
+    /// (full-token local IPC), or another of the account's devices' over the
+    /// verified device link (`targetDeviceId`: its sheet shows this device's
+    /// plugin). Never an agent. A peer's review allows; it never signs.
     pub const REVIEW_PLUGIN: &str = "ReviewPlugin";
     /// `{id, off}` → `PluginItem` (an allowed plugin only).
     pub const SET_PLUGIN_OFF: &str = "SetPluginOff";
@@ -608,7 +610,15 @@ pub mod methods {
     /// installed, verified first; it waits for you in the app (`waiting`)
     /// unless it's signed by your own key. Over an installed one only when
     /// the same key signed both (an update).
+    ///
+    /// From another of your devices (`targetDeviceId`), a file there comes
+    /// as `{upload, name?}`: what `StagePluginPackage` took, and its name.
     pub const INSTALL_PLUGIN: &str = "InstallPlugin";
+    /// `{upload?, data}` → `{upload, bytes}`: a piece (base64, at most
+    /// 384 KiB) of a `.zeron-plugin` file on its way to this device from
+    /// another of yours, added to `upload` (none: a new one). Then
+    /// `InstallPlugin {upload}`. Good only to whoever sent it, for minutes.
+    pub const STAGE_PLUGIN_PACKAGE: &str = "StagePluginPackage";
     /// `{id?}` → `{updates: [{id, name, version, added, removed,
     /// refused?}], errors: [{id, name, error}]}`: each installed plugin's
     /// source checked for a new version (listed on its item as `update`).
@@ -636,7 +646,6 @@ pub fn local_only(method: &str) -> bool {
         methods::ACCESS_TOKEN
             | methods::STEP_UP
             | methods::DELETE_ACCOUNT
-            | methods::REVIEW_PLUGIN
             | methods::REVIEW_TEMPLATE
             // Plugins: authoring, tools and the window's channel stay this
             // device's. Your other devices may list, review, allow, turn
@@ -683,18 +692,34 @@ pub fn local_only(method: &str) -> bool {
 }
 
 /// Methods a peer device may not have answered here even though they're
-/// relay-forwardable: allowing a plugin is this device's person's decision,
-/// made in this device's consent window; and a file path names a file on
-/// the caller's device, never this one. Declining, turning off, removing,
-/// and installing from a link (which lands waiting here) stay open to your
-/// other devices (Settings → Plugins' device switcher).
+/// relay-forwardable: a file path names a file on the caller's device,
+/// never this one (it sends the file itself: `StagePluginPackage`).
+///
+/// Your other devices manage this device's plugins (Settings → Plugins'
+/// device switcher): list, install (from a link or a file sent here),
+/// review, allow, decline, turn off, update and remove. Allowing still
+/// needs a review minted for exactly what that device's consent window
+/// showed, good only to that device (`plugins/reviews.rs`); an agent's
+/// token can't mint one anywhere, and its engine forwards a mint or an
+/// allow only for its own app (engine `rpc.rs`).
 pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
     if local_only(method) {
         return true;
     }
     match method {
-        methods::DECIDE_PLUGIN => params.get("allow").is_none_or(|allow| allow != &serde_json::Value::Bool(false)),
         methods::INSTALL_PLUGIN => params.get("path").is_some_and(|path| !path.is_null()),
+        _ => false,
+    }
+}
+
+/// Methods only this device's own app may send on to another device: what
+/// a consent window does (a review, an allow) and sending it a file. Never
+/// an agent's, whose engine refuses to carry them.
+pub fn app_forward_only(method: &str, params: &serde_json::Value) -> bool {
+    match method {
+        methods::REVIEW_PLUGIN | methods::STAGE_PLUGIN_PACKAGE => true,
+        methods::DECIDE_PLUGIN => params.get("allow").is_none_or(|allow| allow != &serde_json::Value::Bool(false)),
+        methods::INSTALL_PLUGIN => params.get("upload").is_some_and(|upload| !upload.is_null()),
         _ => false,
     }
 }
@@ -1005,6 +1030,8 @@ mod tests {
             methods::SET_PLUGIN_OFF,
             methods::REMOVE_PLUGIN,
             methods::INSTALL_PLUGIN,
+            methods::STAGE_PLUGIN_PACKAGE,
+            methods::REVIEW_PLUGIN,
             methods::CHECK_PLUGIN_UPDATES,
             methods::UPDATE_PLUGIN,
             methods::PLUGIN_STATUS,
@@ -1338,6 +1365,7 @@ mod tests {
         for method in [
             methods::DECIDE_PLUGIN,
             methods::REVIEW_PLUGIN,
+            methods::STAGE_PLUGIN_PACKAGE,
             methods::SIGN_PLUGIN,
             methods::PLUGIN_SIGNING_KEY,
             methods::DECIDE_TEMPLATE,
@@ -1384,17 +1412,42 @@ mod tests {
         }
     }
 
+    /// Your other devices review, allow and install plugins here (the
+    /// review decides who may allow, `plugins/reviews.rs`); a path on their
+    /// disk, signing with this device's key, templates' consent and
+    /// credentials stay this device's.
     #[test]
-    fn peers_may_decline_but_never_allow() {
+    fn peers_may_review_allow_and_install_but_not_sign_or_name_a_path() {
         let hash = "ab".repeat(32);
-        assert!(peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": true, "hash": hash})));
-        assert!(peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": "yes"})));
+        assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})));
         assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": false})));
+        assert!(!peer_refused(methods::REVIEW_PLUGIN, &serde_json::json!({"id": "x", "hash": hash})));
+        assert!(!peer_refused(methods::STAGE_PLUGIN_PACKAGE, &serde_json::json!({"data": ""})));
+        assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"upload": "u"})));
         assert!(peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"path": "/x"})));
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"url": "https://x", "path": null})));
-        assert!(peer_refused(methods::REVIEW_PLUGIN, &serde_json::json!({})));
+        assert!(peer_refused(methods::REVIEW_TEMPLATE, &serde_json::json!({})));
         assert!(peer_refused(methods::SIGN_PLUGIN, &serde_json::json!({})));
         assert!(peer_refused(methods::DELETE_ACCOUNT, &serde_json::json!({})));
+    }
+
+    /// What a consent window sends another device is never an agent's: no
+    /// agent token reaches these here, and its engine won't carry them.
+    #[test]
+    fn approvals_and_files_go_to_another_device_only_from_the_app() {
+        for (method, params) in [
+            (methods::REVIEW_PLUGIN, serde_json::json!({})),
+            (methods::STAGE_PLUGIN_PACKAGE, serde_json::json!({})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"allow": true})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"allow": "yes"})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"upload": "u"})),
+        ] {
+            assert!(app_forward_only(method, &params), "{method} {params}");
+            assert!(!agent_allowed(method) || method == methods::INSTALL_PLUGIN, "{method}");
+        }
+        assert!(!app_forward_only(methods::DECIDE_PLUGIN, &serde_json::json!({"allow": false})));
+        assert!(!app_forward_only(methods::INSTALL_PLUGIN, &serde_json::json!({"url": "https://x"})));
+        assert!(!app_forward_only(methods::LIST_PLUGINS, &serde_json::json!({})));
     }
 
     #[tokio::test]

@@ -40,6 +40,19 @@ struct InstallParams {
     git_ref: Option<String>,
     #[serde(default)]
     folder: Option<String>,
+    /// A file sent from another of your devices (`StagePluginPackage`), and
+    /// its name there (what its source says).
+    #[serde(default)]
+    upload: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StageParams {
+    #[serde(default)]
+    upload: Option<String>,
+    data: String,
 }
 
 #[derive(Deserialize)]
@@ -63,8 +76,19 @@ struct ExportParams {
 pub fn handles(method: &str) -> bool {
     matches!(
         method,
-        methods::INSTALL_PLUGIN | methods::CHECK_PLUGIN_UPDATES | methods::UPDATE_PLUGIN | methods::EXPORT_PLUGIN
+        methods::INSTALL_PLUGIN
+            | methods::STAGE_PLUGIN_PACKAGE
+            | methods::CHECK_PLUGIN_UPDATES
+            | methods::UPDATE_PLUGIN
+            | methods::EXPORT_PLUGIN
     )
+}
+
+/// Who may send a plugin file here: this device's app, or another of your
+/// devices as the edge verified the link (an agent installs by `path`).
+fn uploads_origin() -> Result<super::reviews::Origin, RpcError> {
+    super::reviews::Origin::of(&zeron_rpc::caller())
+        .ok_or_else(|| failed("Only Zeron on one of your devices can send a plugin file here"))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, RpcError> {
@@ -81,6 +105,28 @@ impl Plugins {
                 let p: InstallParams = parse_params(params)?;
                 let path = p.path.filter(|s| !s.trim().is_empty());
                 let url = p.url.filter(|s| !s.trim().is_empty());
+                if let Some(upload) = p.upload.filter(|s| !s.trim().is_empty()) {
+                    if path.is_some() || url.is_some() {
+                        return Err(failed("Give a package file (`path`), a link (`url`) or a file sent here (`upload`)"));
+                    }
+                    let origin = uploads_origin()?;
+                    let raw = lock(&self.inner.uploads).take(&origin, upload.trim())?;
+                    let package = blocking(move || install::parse(raw)).await?;
+                    let name = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(|n| {
+                        // Only the file's name: its folder is the other device's.
+                        n.rsplit(['/', '\\']).next().unwrap_or(n).chars().take(200).collect::<String>()
+                    });
+                    let source = Source {
+                        kind: "file".into(),
+                        url: None,
+                        path: name,
+                        git_ref: None,
+                        commit: None,
+                        version: String::new(),
+                        installed_at: 0,
+                    };
+                    return self.install_package(package, source).await;
+                }
                 let (package, source) = match (path, url) {
                     (Some(path), None) => {
                         let path = PathBuf::from(path.trim());
@@ -108,6 +154,12 @@ impl Plugins {
                     _ => return Err(failed("Give a package file (`path`) or a link (`url`)")),
                 };
                 self.install_package(package, source).await
+            }
+            methods::STAGE_PLUGIN_PACKAGE => {
+                let p: StageParams = parse_params(params)?;
+                let origin = uploads_origin()?;
+                let (upload, bytes) = lock(&self.inner.uploads).stage(origin, p.upload.as_deref(), &p.data)?;
+                RpcReply::value(&json!({ "upload": upload, "bytes": bytes }))
             }
             methods::CHECK_PLUGIN_UPDATES => {
                 let p: CheckParams = parse_params(params)?;
