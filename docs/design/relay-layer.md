@@ -249,37 +249,28 @@ LWW field the registry already syncs, and every client reads it as `>= 2`, so 3 
 
 The host may set 3 when all of these hold:
 
-- the client flag is on and the DO answered `relay: 1`;
-- every relevant device seen in the last 14 days advertises `chat-relay-v1` in its
-  device row's `capabilities`. Relevant means every non-Cloud device on the account,
-  the chat's host, and the host of its parent chat. Other Cloud machines never open
-  this chat, so they don't count;
-- no client without the layer has joined the account's registry room in the last 14 days;
+- the engine runs the layer and the DO answered `relay: 1`;
 - the chat's snapshot is known to be under 24 MiB: the larger of what was loaded and what the
   last save wrote. A chat opened from disk is known from its load; one with neither waits. A checkpoint has to be able to bring any reader up
   to date, and the room takes at most 32 MiB. A chat that grows past 24 MiB goes back to stored
   rows while there's still room for its heal.
 
-"Seen" uses live registry presence as well as the stored `last_seen_at`, which only moves at
-boot and shutdown.
+**Other devices don't hold a chat back.** A client without the layer may be on the account, offline
+or active. It's invisible to it either way: it reads `roomGen` as `>= 2`, and when it opens a chat
+the room tells the host, and the host stores for as long as it's there (see
+[Downgrade](#downgrade-and-the-one-rule-that-makes-it-safe)). That reader sees what it always has, a
+checkpoint and rows. So storage is paid per chat, only while an old client has that chat open, and
+it ends by itself as old versions go away.
 
-**Phones write no device row**, so rows alone can't hold a chat back for them. The registry room
-is the one place every client joins, and a client with the layer says so in its `hello`. The room
-remembers each client that doesn't (`legacy_clients`: one write per client, then hourly at most) and
-tells relay-capable clients the list on join and when it changes. A host that hasn't heard the list
-yet doesn't flip anything.
+Rejected: holding a whole account on stored rows while any device without the layer had been seen in
+14 days. One old app kept every chat storing, and a rollout had to wait out the window. Also rejected:
+having the room number relayed frames as rows for old readers, with nothing stored. The room can't
+read a frame's dependencies, so it can't promise an old reader a row it can apply, and a shipped
+reader that gets one it can't redials and re-downloads the checkpoint in a loop (see
+[The room's memory of relaying](#the-rooms-memory-of-relaying)).
 
-Turn the edge flag on at least 14 days before any engine flag, or the list starts empty and a phone
-that's been away flips nothing back until it returns.
-
-**Abandoned devices can't block forever:** past 14 days unseen, a device stops
-counting. If it comes back it's caught by the old-peer signal below, and its device
-row updates on boot, which moves chats back to 2 as each one's host next evaluates it (there's no
-sweep across chats that aren't open).
-
-The capability is better than comparing `version`: it says exactly what's needed,
-it's off on builds that have the flag off, and it can't be fooled by a version
-string. `version` stays for display and for the rollout dashboards.
+`chat-relay-v1` in a device row says the host reads the queue, which is what a sender checks before
+using it.
 
 The host re-evaluates on join and every 10 s while the chat is open. Other devices just
 follow `roomGen`. A viewer with a stale value still
@@ -289,13 +280,14 @@ re-publishes queue rows while it's storing.
 ## Downgrade, and the one rule that makes it safe
 
 A host switches to stored mode when `roomGen` falls below 3, the DO stops offering
-relay, or an old reader appears. **It always switches in this order:**
+relay, or an old reader appears, in which case it stores for 10 minutes after last hearing of one and
+then relays again, with `roomGen` still 3. **It always switches in this order:**
 
 1. Set the mode to stored, so new commits go to rows.
 2. Post a checkpoint exported after that point, at the current floor so it prunes nothing.
    It covers everything relayed so far.
 3. Keep retrying until the checkpoint lands.
-4. Only then, if the reason was a device that can't follow, write `roomGen: 2`.
+4. Only then, if the reason was a chat too big to relay, write `roomGen: 2`.
 
 Reversing steps 1 and 2 would be a bug: commits in the gap would be in neither the
 checkpoint nor the rows, and rows after them would park on every old reader. A host owes
@@ -322,7 +314,7 @@ of the host's announces with `legacyPeer` while such a reader is connected.
 |---|---|
 | Edge flag off, or client flag off | Nothing changes. Byte-identical. |
 | Flag on, chat at generation 2 | Nothing changes. New clients add `relay: 1`, and the host stores as before. |
-| Flip to 3 with no old devices seen in 14 days | No old client is around to see it. |
+| Flip to 3 with an old client on the account | It reads `roomGen` as `>= 2`. If it opens the chat, the host stores while it's there. |
 | Old client comes back to a generation 3 chat | Its `hello` or `GET /rows` makes the DO send `legacyPeer`, and wakes a host that isn't in the room (from `hello` only: an old HTTP read carries no host hint). The registry also tells every host, so chats move back as they're opened. The host posts a current checkpoint and stores while the old reader stays, plus 10 minutes. The DO then closes the old socket so it rejoins and reads the checkpoint. |
 | Same, but the host is offline | It sees the last checkpoint, frozen, and stays quiet: the room holds back the queue so no row can park. It catches up when the host returns. This matches the product decision. |
 | Old client sends a message | `push` is stored and relayed, and the wake goes out. The host imports it. This always worked and still does. |
@@ -434,14 +426,12 @@ Still needed, in this order:
 
 ## Rollout
 
-1. Ship the code with flags off.
-2. Turn on the edge flag on staging, then production. Stored chats behave as before; the registry
-   starts remembering clients without the layer. Leave it for 14 days.
-3. Turn on the engine flag for the owner's devices. For Cloud, `CLOUD_RELAY_LAYER=1` on the edge passes
-   it to every machine provisioned after (existing machines keep the environment they were made with).
-4. Ship the capability to desktop and mobile, turned on by default in a release. Chats flip as
-   old versions age out of the 14-day window.
-5. Only after the fleet has settled, consider removing old rows and backups for
+1. Ship the code. Every engine and app runs the layer, and with the edge switch off a room offers it to
+   nobody, so everything stays on stored rows exactly as before.
+2. Set `CHAT_RELAY_LAYER` to the owner's user id on staging, then production. Their chats move to
+   generation 3 as their hosts open them.
+3. Add testers' ids, then `1` for everyone.
+4. Only after the fleet has settled, consider removing old rows and backups for
    device-hosted chats.
 
 ## Rollback
@@ -449,13 +439,13 @@ Still needed, in this order:
 The order matters. A host on generation 3 has relayed ops nothing else stores, and a host on a build
 that can't heal will never store them.
 
-1. Turn the edge flag off. Each host, as it opens a chat, sees the room no longer offers the layer,
+1. Turn the edge switch off, or take the user off its list. Each host, as it opens a chat, sees the room no longer offers the layer,
    stores a heal, and moves the chat back. Queued rows go into `rows` when that heal lands.
 2. Wait. A chat only heals when its host opens it, and there's no sweep, so give it as long as devices
    take to come back. `GET /chat2/{id}/stats` shows `relayDirty` and `relayQueue` for a chat.
-3. Only then turn the engine flag off, if you want it off. A build from this PR on with the flag off
-   still owes a heal for a chat it hosts on generation 3, and moves it back after. That's the only thing
-   the flag-off path does, and an account that never ran the layer has no such chat.
+3. `ZERON_RELAY_LAYER=0` turns the layer off in one engine, as a kill switch. A build from this PR on with it
+   off still owes a heal for a chat it hosts on generation 3, and moves it back after. That's the only thing
+   the off path does, and an account that never ran the layer has no such chat.
 4. **Never go below this PR's edge code while a room may hold a queue or a chat may be unhealed.** Older
    edge code can't read the queue, and those senders have retired their outboxes. Keep it deployed for at
    least 14 days after step 1.
@@ -467,7 +457,8 @@ that can't heal will never store them.
 
 ## What's built
 
-Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine. Both default off.
+Behind `CHAT_RELAY_LAYER` on the edge: `1` for everyone, or a comma-separated list of user ids. It
+defaults off. Engines and apps run the layer by default and follow what the room answers.
 
 **Built and tested:**
 
@@ -483,8 +474,6 @@ Behind `CHAT_RELAY_LAYER=1` on the edge and `ZERON_RELAY_LAYER=1` in the engine.
 
 **Not built:**
 
-- Android. `crates/client` has the layer and iOS runs it ([relay-mobile.md](relay-mobile.md)). Android has
-  yet to turn it on, and a phone without it seen in the last 14 days holds its account's chats on generation 2.
 - Sidebar churn.
 - Removing old rows, or backups for device-hosted chats. The nightly backup still runs for a room whose
   rows change, which a generation 3 room's mostly don't.

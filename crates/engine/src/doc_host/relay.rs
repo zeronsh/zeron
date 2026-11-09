@@ -1,6 +1,8 @@
-//! The engine's side of the relay layer (docs/design/relay-layer.md), behind
-//! `ZERON_RELAY_LAYER=1`. Off, nothing here runs: no chat handle carries relay
-//! state, no capability is advertised and no stream service is registered.
+//! The engine's side of the relay layer (docs/design/relay-layer.md). On unless
+//! `ZERON_RELAY_LAYER` says otherwise: the edge decides who relays, and a room that
+//! doesn't offer it leaves everything on stored rows. Off, nothing here runs: no chat
+//! handle carries relay state, no capability is advertised and no stream service is
+//! registered.
 //!
 //! The safety rule lives in [`DocHost::refresh_relay_mode`]: a host that stops
 //! relaying sets its mode first and posts a checkpoint exported after that, so
@@ -12,7 +14,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use zeron_proto::relay_gen::{RELAY_ROOM_GEN, STORED_ROOM_GEN, relay_allowed};
+use zeron_proto::relay_gen::{RELAY_ROOM_GEN, STORED_ROOM_GEN};
 use zeron_sync::chat_relay::{RelayEvent, RelayHandle, RelayPolicy};
 
 use super::{ChatDocHandle, DocHost, lock};
@@ -21,7 +23,7 @@ use super::{ChatDocHandle, DocHost, lock};
 pub(super) const HEAL_REASON: &str = "relay-heal";
 
 const MAINTENANCE_TICK: Duration = Duration::from_secs(1);
-/// How often a host re-checks who's on the account and the chat's generation.
+/// How often a host re-checks the room's answer and the chat's generation.
 const MODE_REFRESH: Duration = Duration::from_secs(10);
 /// How long a host keeps storing after it last heard of an old reader.
 const LEGACY_HOLD: Duration = Duration::from_secs(600);
@@ -43,16 +45,11 @@ const LINGER_AFTER_PEER: Duration = Duration::from_secs(15);
 /// The gap is the room to grow while the heal lands.
 const RELAY_SNAPSHOT_LIMIT: usize = 24 * 1024 * 1024;
 
-/// The engine-wide flag.
+/// The engine-wide kill switch: on unless `ZERON_RELAY_LAYER` is set to something
+/// other than 1.
 pub fn relay_layer_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        let on = std::env::var("ZERON_RELAY_LAYER").as_deref() == Ok("1");
-        if on {
-            zeron_sync::registry::announce_relay_layer();
-        }
-        on
-    })
+    *ENABLED.get_or_init(|| std::env::var("ZERON_RELAY_LAYER").map_or(true, |flag| flag == "1"))
 }
 
 #[derive(Default)]
@@ -356,7 +353,7 @@ impl DocHost {
                     event = events.recv() => {
                         let Some(handle) = weak.upgrade() else { return };
                         if matches!(event, Ok(RelayEvent::LegacyPeer)) {
-                            *lock(&state.legacy_until) = Some(Instant::now() + LEGACY_HOLD);
+                            *lock(&state.legacy_until) = Some(Instant::now() + legacy_hold());
                             host.refresh_relay_mode(&handle, &state);
                             last_refresh = Some(Instant::now());
                         }
@@ -442,31 +439,20 @@ impl DocHost {
         let offered = state.room_offered.load(Ordering::Acquire);
         let is_host = workspace.is_host(chat_id);
         let mut generation = chat.room_gen.unwrap_or(1);
-        let parent_host = chat
-            .parent_chat_id
-            .as_deref()
-            .and_then(|parent| workspace.chat(parent).ok().flatten())
-            .map(|parent| parent.device_id);
         // A chat close to the room's checkpoint limit can't keep the promise that a
         // checkpoint can always bring a reader up to date.
         let size = handle_size(handle);
         let small_enough = size.is_none_or(|bytes| bytes <= relay_snapshot_limit());
-        let allowed = small_enough
-            && workspace.read_devices_seen().is_ok_and(|devices| {
-                relay_allowed(&devices, &chat.device_id, parent_host.as_deref(), chrono::Utc::now())
-            });
-        // The registry's list of clients without the layer has been heard.
-        let legacy_known = zeron_sync::registry::legacy_clients().is_some();
 
-        // Moving on: only a room that has just said yes, and only once every
-        // device can follow.
+        // Moving on: only a room that has just said yes. Clients without the layer
+        // don't hold this back: `generation >= 2` is all they read, and when one
+        // opens this chat the room says so and this host stores while it's there.
         // Not before this chat's size is known, either from what was loaded or from a
         // save: until its first save, a chat opened from rows reads as empty.
         if is_host
             && generation == STORED_ROOM_GEN
-            && allowed
+            && small_enough
             && size.is_some()
-            && legacy_known
             && answer == Some(true)
         {
             match workspace.set_chat_room_gen(chat_id, RELAY_ROOM_GEN) {
@@ -479,9 +465,9 @@ impl DocHost {
         }
 
         let holding_for_legacy = lock(&state.legacy_until).is_some_and(|until| Instant::now() < until);
-        let relaying = decide_relaying(is_host, offered, generation, allowed, holding_for_legacy);
+        let relaying = decide_relaying(is_host, offered, generation, small_enough, holding_for_legacy);
         state.hosting.store(is_host, Ordering::Release);
-        tracing::debug!(chat = %chat_id, is_host, ?answer, offered, generation, allowed, holding_for_legacy, relaying, "chat relay: mode");
+        tracing::debug!(chat = %chat_id, is_host, ?answer, offered, generation, small_enough, holding_for_legacy, relaying, "chat relay: mode");
         // Mode first, checkpoint second. Reversed, a commit between the two would
         // be in neither the checkpoint nor the rows, and every old reader would
         // park all that followed it. Owed even when this process never relayed:
@@ -507,7 +493,7 @@ impl DocHost {
         // leaves the chat on 3, and the next start owes the same checkpoint.
         if is_host
             && generation >= RELAY_ROOM_GEN
-            && !allowed
+            && !small_enough
             && state.healed.load(Ordering::Acquire)
         {
             match workspace.set_chat_room_gen(chat_id, STORED_ROOM_GEN) {
@@ -674,6 +660,14 @@ pub(super) fn posts_checkpoint(reason: &str, room_gen: u32, is_host: bool) -> bo
 
 /// [`RELAY_SNAPSHOT_LIMIT`]. A debug build takes `ZERON_RELAY_SNAPSHOT_LIMIT`, so the
 /// two-engine smoke can make a chat too big to relay without making it huge.
+fn legacy_hold() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(secs) = std::env::var("ZERON_RELAY_LEGACY_HOLD_SECS").ok().and_then(|v| v.parse().ok()) {
+        return Duration::from_secs(secs);
+    }
+    LEGACY_HOLD
+}
+
 fn relay_snapshot_limit() -> usize {
     #[cfg(debug_assertions)]
     if let Some(limit) = std::env::var("ZERON_RELAY_SNAPSHOT_LIMIT").ok().and_then(|v| v.parse().ok()) {
@@ -702,10 +696,10 @@ fn decide_relaying(
     is_host: bool,
     room_offers: bool,
     generation: u32,
-    every_device_follows: bool,
+    small_enough: bool,
     holding_for_legacy: bool,
 ) -> bool {
-    is_host && room_offers && generation >= RELAY_ROOM_GEN && every_device_follows && !holding_for_legacy
+    is_host && room_offers && generation >= RELAY_ROOM_GEN && small_enough && !holding_for_legacy
 }
 
 #[cfg(test)]
@@ -1052,7 +1046,7 @@ mod tests {
         assert!(!decide_relaying(false, true, RELAY_ROOM_GEN, true, false), "not the host");
         assert!(!decide_relaying(true, false, RELAY_ROOM_GEN, true, false), "the room doesn't offer it");
         assert!(!decide_relaying(true, true, STORED_ROOM_GEN, true, false), "the chat is on stored rows");
-        assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, false, false), "a device can't follow");
+        assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, false, false), "too big to checkpoint");
         assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, true, true), "an old reader is here");
     }
 }

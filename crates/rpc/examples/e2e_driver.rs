@@ -179,7 +179,8 @@ fn room_stats(chat_id: &str) -> serde_json::Value {
 
 /// Relay layer on in both engines (docs/design/relay-layer.md): the chat moves to
 /// generation 3, a turn stores nothing, and, with `ZERON_E2E_RESTART_B` set, device B
-/// coming back on a build without the layer still gets everything it missed.
+/// coming back on a build without the layer gets everything it missed: the chat stays
+/// on 3 and the host stores for B only while it's here.
 async fn relay_layer(
     a: &RpcClient,
     b: &RpcClient,
@@ -236,11 +237,41 @@ async fn relay_layer(
     };
     wait_for_replies(&old_b, chat_id, 3, "B, without the layer, catching up").await;
     pass("B came back without the layer and got the relayed turn");
-    wait_for_generation(&old_b, chat_id, 2, "chat back on generation 2").await;
-    pass("host moved the chat back to generation 2");
+    if chat_generation(a, chat_id).await != Some(3) {
+        fail("an old client on the account moved the chat off generation 3");
+    }
+    pass("the chat stays on generation 3 with an old client here");
+    let while_here = room_stats(chat_id);
     queue_run(&old_b, chat_id, "from the old client").await;
     wait_for_replies(&old_b, chat_id, 4, "fourth reply on B").await;
     pass("B, without the layer, can still send and follow a turn");
+    wait_for_replies(a, chat_id, 4, "fourth reply on A").await;
+    let stored = room_stats(chat_id);
+    if stored["headSeq"] == while_here["headSeq"] && stored["checkpointSeq"] == while_here["checkpointSeq"] {
+        fail(&format!("nothing was stored for the old client: {stored}"));
+    }
+    pass("the host stored for the old client while it was here");
+
+    // It leaves: once its hold is over, turns store nothing again.
+    drop(old_b);
+    let stop = std::process::Command::new("bash").arg(&restart).arg("stop").status();
+    if !stop.is_ok_and(|status| status.success()) {
+        fail("couldn't stop the old B");
+    }
+    let settle: u64 = std::env::var("ZERON_E2E_OLD_GONE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+    tokio::time::sleep(Duration::from_secs(settle)).await;
+    let before = room_stats(chat_id);
+    queue_run(a, chat_id, "the old client has gone").await;
+    wait_for_replies(a, chat_id, 5, "fifth reply on A").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after = room_stats(chat_id);
+    if after["headSeq"] != before["headSeq"] {
+        fail(&format!("a turn stored rows after the old client left: before {before}, after {after}"));
+    }
+    if chat_generation(a, chat_id).await != Some(3) {
+        fail("the chat left generation 3");
+    }
+    pass("the old client left, and turns store nothing again");
 }
 
 /// Text a snapshot can't compress much: its size is what it says.

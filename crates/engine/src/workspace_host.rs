@@ -743,35 +743,6 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_devices())?)
     }
 
-    /// Device rows with presence applied: a stored `last_seen_at` only moves at
-    /// boot and shutdown, so an app running for weeks looks long gone without it.
-    pub fn read_devices_seen(&self) -> Result<Vec<Device>, EngineError> {
-        let mut devices = self.read_devices()?;
-        let live = self.watch_devices().borrow().clone();
-        for device in &mut devices {
-            if let Some(seen) = live.iter().find(|d| d.id == device.id).and_then(|d| d.last_seen_at)
-                && device.last_seen_at.is_none_or(|at| at < seen)
-            {
-                device.last_seen_at = Some(seen);
-            }
-        }
-        // A client on a build without the layer that writes no device row, such
-        // as a shipped phone. The registry room saw it, whatever the rows say.
-        for client in zeron_sync::registry::legacy_clients().unwrap_or_default() {
-            devices.push(Device {
-                id: client.device,
-                name: String::new(),
-                platform: String::new(),
-                last_seen_at: chrono::DateTime::from_timestamp_millis(client.seen_at),
-                created_at: None,
-                version: None,
-                cursor_sdk_version: None,
-                capabilities: Vec::new(),
-            });
-        }
-        Ok(devices)
-    }
-
     pub fn read_sessions(&self) -> Result<Vec<Session>, EngineError> {
         Ok(self.read(|doc| doc.read_sessions())?)
     }
@@ -1968,9 +1939,6 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
             u.query_pairs_mut()
                 .append_pair("since", &since.to_string())
                 .append_pair("beat", "1");
-            if zeron_sync::registry::relay_capable() {
-                u.query_pairs_mut().append_pair("relay", "1");
-            }
             let mut req = client.get(u);
             if let Some(token) = token {
                 req = req.bearer_auth(token);

@@ -414,6 +414,38 @@ describe("old clients in the room", () => {
   });
 });
 
+describe("who the rooms offer the layer to", () => {
+  const withFlag = (name: string, flag: string) =>
+    runInDurableObject(room(name), instance => {
+      const target = instance as unknown as { env: Record<string, unknown> };
+      target.env = { ...target.env, CHAT_RELAY_LAYER: flag };
+    });
+
+  it("a list offers it to the rooms of the users on it, and to nobody else", async () => {
+    const mine = crypto.randomUUID();
+    await withFlag(mine, `someone-else, ${user}`);
+    const listed = await connect(mine, "host", { relay: true });
+    expect(listed.state.header.relay).toBe(1);
+    listed.socket.close();
+
+    const theirs = crypto.randomUUID();
+    await withFlag(theirs, "someone-else");
+    const unlisted = await connect(theirs, "host", { relay: true });
+    expect(unlisted.state.header.relay).toBeUndefined();
+    unlisted.socket.close();
+  });
+
+  it("taking a user off the list sends their live sockets back to stored rows", async () => {
+    const name = crypto.randomUUID();
+    await withFlag(name, user);
+    const host = await connect(name, "host", { relay: true });
+    const closed = new Promise<number>(resolve => host.socket.addEventListener("close", e => resolve(e.code)));
+    await withFlag(name, "someone-else");
+    host.sendFrame(FRAME.relay, {}, bytes(1));
+    expect(await closed).toBe(1012);
+  });
+});
+
 describe("nobody is left waiting on a host that isn't there", () => {
   const wakeFor = (name: string) =>
     runInDurableObject(room(name), (_instance, state) => pendingChatWake(state.storage.sql)?.host_device);

@@ -33,13 +33,9 @@ export interface Env {
    * that derives the seq from the rows: older code reads the stored copy,
    * and a stale one would stamp new rows below cursors clients already hold. */
   REGISTRY_ROOM_WRITE_THROUGH?: string;
-  /** "1": ChatRoom offers the relay layer to clients that ask for it
-   * (docs/design/relay-layer.md). Off, its behaviour doesn't change at all. */
+  /** Who the chat rooms offer the relay layer to (docs/design/relay-layer.md): "1" for
+   * everyone, or a comma-separated list of user ids. Empty, nothing changes at all. */
   CHAT_RELAY_LAYER?: string;
-  /** "1": Cloud machines provisioned from now on run the relay layer in their
-   * engine (`ZERON_RELAY_LAYER`). Turn on `CHAT_RELAY_LAYER` first; see the
-   * rollout in docs/design/relay-layer.md. */
-  CLOUD_RELAY_LAYER?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;

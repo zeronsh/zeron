@@ -582,8 +582,12 @@ export class ChatRoom implements DurableObject {
 
   // ── relay layer (docs/design/relay-layer.md) ─────────────────────────────
 
+  /** `CHAT_RELAY_LAYER`: "1" for everyone, or the user ids whose rooms offer it. */
   private relayEnabled(): boolean {
-    return this.env.CHAT_RELAY_LAYER === "1";
+    const flag = this.env.CHAT_RELAY_LAYER ?? "";
+    if (flag === "" || flag === "1") return flag === "1";
+    const owner = getMeta(this.ctx.storage.sql, "owner");
+    return !!owner && flag.split(",").some((id) => id.trim() === owner);
   }
 
   /** The room's SQL, with the queue table in place. */

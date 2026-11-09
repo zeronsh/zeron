@@ -63,8 +63,6 @@ interface SocketState {
   /** Cloud runner socket: its verified device id. Rows are filtered and
    * pushes ownership-checked for it. */
   runner?: string;
-  /** This client runs the relay layer, and the layer is on. */
-  relay?: boolean;
   /** The runner's account (logical Cloud device; JWT `cld`). */
   runnerAccount?: string;
 }
@@ -110,12 +108,6 @@ interface PushLogEntry {
 
 const TOKEN_RE = /^[0-9a-fA-F]{32,512}$/;
 const PUSH_LOG_MAX = 30;
-/** Clients seen without the relay layer (docs/design/relay-layer.md): a shipped
- * phone writes no device row, so this room is how a chat's host learns of it.
- * Older than this they've aged out, like any device. */
-const LEGACY_CLIENT_WINDOW_MS = 14 * DAY_MS;
-/** A client seen again only rewrites its row this often. */
-const LEGACY_CLIENT_WRITE_MS = 60 * 60 * 1000;
 
 export class RegistryRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
@@ -152,49 +144,6 @@ export class RegistryRoom implements DurableObject {
     // pong is runtime-answered and proves nothing about this DO's health.
     // Clients judge liveness by probe frames (crates/sync/src/registry.rs).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
-  }
-
-  // ── clients without the relay layer ───────────────────────────────────────
-
-  private relayEnabled(): boolean {
-    return this.env.CHAT_RELAY_LAYER === "1";
-  }
-
-  private legacyClients(): Array<{ device: string; seenAt: number }> {
-    const sql = this.ctx.storage.sql;
-    sql.exec("CREATE TABLE IF NOT EXISTS legacy_clients (device TEXT PRIMARY KEY, seen_at INTEGER NOT NULL)");
-    const horizon = Date.now() - LEGACY_CLIENT_WINDOW_MS;
-    return [...sql.exec("SELECT device, seen_at FROM legacy_clients WHERE seen_at >= ?", horizon)].map(row => ({
-      device: row.device as string,
-      seenAt: row.seen_at as number
-    }));
-  }
-
-  /** Remember what this client can do. Writes only when that changes, or hourly. */
-  private noteClient(device: string, relay: boolean): void {
-    if (!this.relayEnabled() || device === "") return;
-    const sql = this.ctx.storage.sql;
-    const known = this.legacyClients().find(client => client.device === device);
-    let changed = false;
-    if (relay) {
-      if (known) {
-        sql.exec("DELETE FROM legacy_clients WHERE device = ?", device);
-        changed = true;
-      }
-    } else if (!known || Date.now() - known.seenAt >= LEGACY_CLIENT_WRITE_MS) {
-      sql.exec(
-        "INSERT INTO legacy_clients (device, seen_at) VALUES (?, ?) ON CONFLICT(device) DO UPDATE SET seen_at = excluded.seen_at",
-        device,
-        Date.now()
-      );
-      changed = !known;
-    }
-    if (!changed) return;
-    const devices = this.legacyClients();
-    for (const socket of this.ctx.getWebSockets()) {
-      const peer = socket.deserializeAttachment() as SocketState | null;
-      if (peer?.ready && peer.relay) send(socket, { t: "legacy", devices });
-    }
   }
 
   // ── meta helpers ──────────────────────────────────────────────────────────
@@ -433,8 +382,6 @@ export class RegistryRoom implements DurableObject {
       const sinceNum = sinceRaw === null ? NaN : Number(sinceRaw);
       const cursor = Number.isInteger(sinceNum) && sinceNum >= 0 ? sinceNum : null;
       const device = runner ?? url.searchParams.get("device") ?? "";
-      const relayReader = this.relayEnabled() && url.searchParams.get("relay") === "1";
-      if (url.searchParams.get("beat") === "1") this.noteClient(device, relayReader);
       if (device !== "" && url.searchParams.get("beat") === "1") {
         const at = Date.now();
         this.presence.set(device, at);
@@ -452,8 +399,7 @@ export class RegistryRoom implements DurableObject {
         full,
         gcFloor,
         rows: this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), runner, runnerAccount),
-        presence: Object.fromEntries(this.presence),
-        ...(relayReader ? { legacyDevices: this.legacyClients() } : {})
+        presence: Object.fromEntries(this.presence)
       });
     }
 
@@ -581,10 +527,7 @@ export class RegistryRoom implements DurableObject {
       state.device = frame.device;
     }
     state.ready = true;
-    const relay = this.relayEnabled() && frame.relay === 1;
-    if (relay) state.relay = true;
     ws.serializeAttachment(state);
-    this.noteClient(state.device, relay);
     const seq = this.seq();
     const gcFloor = this.gcFloor();
     // A cursor from before the tombstone-GC horizon may have missed purged
@@ -599,8 +542,7 @@ export class RegistryRoom implements DurableObject {
       full,
       gcFloor,
       rows,
-      presence: Object.fromEntries(this.presence),
-      ...(relay ? { legacyDevices: this.legacyClients() } : {})
+      presence: Object.fromEntries(this.presence)
     });
   }
 

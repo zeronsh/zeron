@@ -263,11 +263,6 @@ impl LiveBackend {
     /// Spawn the registry join/event loop, the presence beat, and the
     /// registry saver.
     pub(crate) fn start(&self, inner: &Arc<ClientInner>) {
-        // Before the registry's first hello: the room remembers a client that
-        // says nothing as one that can't follow relayed chats.
-        if inner.config.relay_layer {
-            zeron_sync::registry::announce_relay_layer();
-        }
         // Signaling first: pairing with a host can then start the moment a
         // terminal wants it. It dials the edge too, so it waits on the platform's
         // first path report like every other connect.

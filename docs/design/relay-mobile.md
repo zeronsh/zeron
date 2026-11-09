@@ -62,9 +62,8 @@ val config = CoreConfig(
 iOS does this in `AppModel.runsRelayLayer`, with a debug-only `-no-relay-layer` argument for playing an old
 phone. Add the same switch as a debug intent extra: it's the cheapest way to test the old-client path.
 
-Shipping it on is safe before any edge flag: the room's answer decides everything, and a room without the
-flag ignores the field. **Don't gate it on a remote flag**: the room has to hear `relay: 1` from this phone's
-build for the 14 days before any engine flips, or it lists the phone as old.
+Shipping it on is safe before any edge switch: the room's answer decides everything, and a room without the
+switch ignores the field.
 
 ### 2. Keep the lifecycle calls accurate
 
@@ -271,9 +270,8 @@ These cost real time on iOS, or would have.
 - **A simulator doesn't suspend a backgrounded app when you'd expect.** It kept receiving frames 12 s after another app
   took the front, which proves nothing. Freeze the process instead (`kill -STOP`, then `-CONT`), and cut its sockets at the
   forwarder. On Android, `adb shell am set-inactive` and Doze are closer to the real thing, and the same doubt applies.
-- **Playing an old phone pins the account for 14 days.** The room's list keeps a device that's been seen without the layer,
-  so after one such run every chat stays on stored rows, and a "link never came up" follows from that. Only that same device
-  saying `relay: 1` clears it, so a reinstall with a new device id doesn't. Between runs, wipe the rig's edge storage.
+- **Playing an old phone makes its host store.** While it has a chat open, and for 10 minutes after, that chat's turns are
+  stored rows, not relay frames. Don't read that as relaying having failed.
 - **A second space at the same path is the first one.** `createChat` then fails with "no such space". `relay_rig` makes
   a folder per chat for this reason.
 - **Signaling going down takes the direct links with it.** `ViewerPeers`' signaling loop clears its peers when its socket
@@ -287,7 +285,7 @@ These cost real time on iOS, or would have.
   usually ends the wait first.
 - **A shipped build can't say why a chat is empty.** On a chat that was only ever relayed, with its host away, it shows a blank
   transcript until the host returns and heals. Its transcript fills by itself then, and nothing's lost, but that binary can't
-  change. Turning the edge flag on 14 days ahead keeps this rare. It applies to shipped Android builds too.
+  change. It applies to shipped Android builds too, and a current build on a device that never opened the chat sees the same empty chat.
 
 ## Test status
 

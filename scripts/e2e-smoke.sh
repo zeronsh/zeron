@@ -13,7 +13,10 @@
 #        ZERON_E2E_RELAY_A=1 / ZERON_E2E_RELAY_B=1 turn the relay layer on in that
 #        engine (docs/design/relay-layer.md), and on the edge if this script starts it.
 #        With both on, the driver also proves generation 3. ZERON_E2E_OLD_RETURNS=1
-#        then brings B back without the layer, as an old client would.
+#        then brings B back without the layer, as an old client would;
+#        ZERON_E2E_OLD_BIN=<zeron> makes that a real shipped build.
+#        ZERON_E2E_EDGE_OFF=1 leaves the edge's switch off, which every new engine
+#        must follow exactly as it does today.
 
 set -euo pipefail
 
@@ -86,7 +89,7 @@ else
   # and Linux, without depending on the Linux-only `setsid` utility.
   set -m
   EDGE_VARS="--var AUTH_MODE:dev"
-  if [[ -n "${ZERON_E2E_RELAY_A:-}${ZERON_E2E_RELAY_B:-}" ]]; then
+  if [[ -n "${ZERON_E2E_RELAY_A:-}${ZERON_E2E_RELAY_B:-}" && -z "${ZERON_E2E_EDGE_OFF:-}" ]]; then
     EDGE_VARS="$EDGE_VARS --var CHAT_RELAY_LAYER:1"
   fi
   bash -c "cd '$ROOT/edge' && exec npx wrangler dev --port '$EDGE_PORT' $EDGE_VARS" \
@@ -115,7 +118,8 @@ mkdir -p "$A_DIR" "$B_DIR"
 start_engine() { # start_engine <data_dir> <ipc_port> <name> <log> <relay layer>
   ZERON_DATA_DIR="$1" ZERON_IPC_PORT="$2" ZERON_DEVICE_NAME="$3" \
     ZERON_EDGE_URL="$EDGE_URL" ZERON_EDGE_TOKEN="$TOKEN" ZERON_ORG_ID="$ORG" \
-    ZERON_HARNESS=mock RUST_LOG=info ZERON_RELAY_LAYER="$5" ZERON_RELAY_SNAPSHOT_LIMIT=65536 \
+    ZERON_HARNESS=mock RUST_LOG=info,zeron_engine::doc_host::relay=debug ZERON_RELAY_LAYER="$5" ZERON_RELAY_SNAPSHOT_LIMIT=65536 \
+    ZERON_RELAY_LEGACY_HOLD_SECS="${ZERON_E2E_LEGACY_HOLD_SECS:-}" \
     "$ZERON" headless >>"$4" 2>&1 &
 }
 
@@ -126,7 +130,7 @@ wait_for "engine A ipc :$A_PORT" 60 bash -c "exec 3<>/dev/tcp/127.0.0.1/$A_PORT"
 wait_for "engine B ipc :$B_PORT" 60 bash -c "exec 3<>/dev/tcp/127.0.0.1/$B_PORT"
 echo "engines: A pid=$A_PID ipc=:$A_PORT  B pid=$B_PID ipc=:$B_PORT"
 
-if [[ "${ZERON_E2E_RELAY_A:-}" == "1" && "${ZERON_E2E_RELAY_B:-}" == "1" ]]; then
+if [[ "${ZERON_E2E_RELAY_A:-}" == "1" && "${ZERON_E2E_RELAY_B:-}" == "1" && -z "${ZERON_E2E_EDGE_OFF:-}" ]]; then
   export ZERON_E2E_RELAY=1 ZERON_E2E_EDGE_URL="$EDGE_URL" ZERON_E2E_TOKEN="$TOKEN"
   echo "$A_PID" > "$LOG_DIR/a.pid"
   export ZERON_E2E_RESTART_A="$LOG_DIR/restart-a.sh"
@@ -149,7 +153,7 @@ else
   ZERON_DATA_DIR='$B_DIR' ZERON_IPC_PORT='$B_PORT' ZERON_DEVICE_NAME=e2e-device-b \\
     ZERON_EDGE_URL='$EDGE_URL' ZERON_EDGE_TOKEN='$TOKEN' ZERON_ORG_ID='$ORG' \\
     ZERON_HARNESS=mock RUST_LOG=info ZERON_RELAY_LAYER= \\
-    '$ZERON' headless >>'$LOG_DIR/engine-b.log' 2>&1 &
+    '${ZERON_E2E_OLD_BIN:-$ZERON}' headless >>'$LOG_DIR/engine-b.log' 2>&1 &
   echo \$! > '$LOG_DIR/b.pid'
 fi
 RESTART
