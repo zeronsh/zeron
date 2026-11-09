@@ -14,7 +14,9 @@
       "hours": "{n}时",
       "days": "{n}天",
       "weeks": "{n}周",
-      "hours_minutes": "{h}小时{m}分"
+      "hours_minutes": "{h}小时{m}分",
+      "minutes_seconds": "{m}分{s}秒",
+      "hours_minutes_seconds": "{h}小时{m}分{s}秒"
     },
     "ago": {
       "minutes": "{n, plural, other {# 分钟前}}",
@@ -45,7 +47,9 @@
       "done": "已完成",
       "done_long": "已完成",
       "failed": "失败",
-      "limited": "受限"
+      "limited": "受限",
+      "woke": "已唤醒",
+      "woke_long": "已从休眠中唤醒"
     },
     "file_tree": {
       "status": {
@@ -488,13 +492,18 @@
         "keep_active": "折叠时显示活跃会话",
         "devices_first": "设备优先",
         "projects_first": "项目优先",
-        "empty_projects": "空项目"
+        "empty_projects": "空项目",
+        "activity": "动态",
+        "activity_settings": "动态设置…"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
       "show_less": "显示更少",
       "empty_projects_word": "空项目",
-      "empty_projects": "{n, plural, other {# 个空项目}}"
+      "empty_projects": "{n, plural, other {# 个空项目}}",
+      "activity": "动态",
+      "working": "进行中",
+      "asleep": "已休眠"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -801,6 +810,12 @@
     "composer_dock": {
       "fold": "折叠{title}",
       "open": "打开{title}",
+      "open_all": "显示待处理内容",
+      "waiting": "待处理内容",
+      "subagents": "子智能体",
+      "alerts": "提醒",
+      "dismiss_alert": "关闭{title}",
+      "fold_all": "收起待处理内容",
       "rest": "另外 {n} 项：{names}",
       "send_now": "立即发送",
       "steer": "引导",
@@ -826,6 +841,13 @@
       "more_running": "另外 {n} 项",
       "stop_all": "全部停止",
       "running": "运行中",
+      "finished": "已完成",
+      "agents": "{n, plural, other {# 个子智能体}}",
+      "processes": "{n, plural, other {# 个进程}}",
+      "open_agent": "打开 {name}",
+      "n_finished": "{n} 个已完成",
+      "show_finished": "显示 {n} 个已完成",
+      "hide_finished": "隐藏 {n} 个已完成",
       "queued_messages": "队列中的消息",
       "queued": "已加入队列"
     },
@@ -1039,6 +1061,14 @@
       "cut": "剪切",
       "paste": "粘贴",
       "label": "文本"
+    },
+    "date_picker": {
+      "label": "日期",
+      "month_year": "{year}年{m}月",
+      "previous_month": "上个月",
+      "next_month": "下个月",
+      "time": "时间",
+      "first_weekday": "2"
     }
   },
   "settings": {
@@ -2122,6 +2152,35 @@
       "yesterday": "昨天",
       "empty_title": "还没有历史记录",
       "off": "“保留历史记录”已关闭，访问的页面不会被保留。"
+    },
+    "activity": {
+      "title": "动态",
+      "terms": "动态 收件箱 侧边栏 进行中 休眠 稍后 归档 自动归档 闲置",
+      "description": "把需要你处理的会话放在一个列表里，最新的在最上面。进行中、休眠和已归档的会话收起在列表末尾。",
+      "view": {
+        "label": "动态侧边栏",
+        "description": "以动态方式显示侧边栏，而不是按项目或设备分组。也可以在侧边栏的 … 菜单中开启。",
+        "terms": "收件箱 视图 侧边栏 模式"
+      },
+      "list_section": "动态",
+      "working": {
+        "label": "将进行中的会话收进“进行中”",
+        "description": "代理运行时，或在等待会唤醒它的后台任务时，会话移入“进行中”；完成或需要你时，回到列表顶部。",
+        "terms": "运行 代理 分组"
+      },
+      "sleep": {
+        "label": "休眠",
+        "description": "右键点击会话并选择“休眠”，它会在所有设备上进入“已休眠”直到你选的时间。如果它向你提问、需要批准或失败，会提前唤醒并回到顶部。",
+        "terms": "稍后 提醒 唤醒"
+      },
+      "archive_section": "归档",
+      "archive_after": {
+        "label": "归档闲置会话",
+        "description": "在这段时间内没有新动态的会话会移入“已归档”。已置顶、进行中、休眠以及等待你处理的会话不受影响。",
+        "terms": "自动 归档 闲置 旧 清理",
+        "never": "从不",
+        "days": "{n, plural, other {# 天后}}"
+      }
     }
   },
   "common": {
@@ -2322,6 +2381,7 @@
         "shell_previous_session": "上一个会话",
         "session_n": "会话 {i}",
         "shell_palette": "搜索",
+        "shell_check_updates": "检查更新…",
         "shell_settings": "设置",
         "shell_find": "查找",
         "shell_close": "关闭",
@@ -2429,6 +2489,72 @@
       "on_device": "在 {device} 上",
       "from_github": "来自 GitHub",
       "add_cloud_project": "添加项目"
+    },
+    "updates": {
+      "available": "有可用更新",
+      "button": "{n, plural, other {# 个更新}}",
+      "check_again": "再次检查",
+      "copied": "已复制。请在 {device} 上运行",
+      "copy_command": "复制命令",
+      "downloading": "正在下载…",
+      "failed": "更新失败",
+      "failed_named": "无法更新 {name}",
+      "installing": "正在安装…",
+      "manual": "需要手动更新",
+      "not_applied": "Zeron 未更新",
+      "not_applied_body": "它以相同版本重新启动了。你可以通过更新按钮重试。",
+      "offline": "离线",
+      "on_that_device": "请在该设备上更新",
+      "plan_agents": "智能体会等正在运行的任务完成",
+      "plan_chats": "{n, plural, other {将停止 # 个运行中的聊天。重新启动后会继续}}",
+      "plan_here": "为此设备下载 Zeron，然后请你重新启动",
+      "preparing": "正在准备…",
+      "ready": "{version} 已就绪。重新启动以完成",
+      "restart": "重新启动",
+      "retry": "重试更新",
+      "stops_chats": "{n, plural, other {将停止 # 个运行中的聊天，之后会继续}}",
+      "this_device": "此设备",
+      "title": "更新",
+      "update": "更新",
+      "update_all": "全部更新",
+      "update_anyway": "仍然更新",
+      "update_there": "{versions} · 请在该设备上更新",
+      "updated": "已更新",
+      "updated_to": "已更新到 {version}",
+      "verifying": "正在验证…",
+      "version": "版本 {version} 可用",
+      "view_steps": "查看步骤",
+      "waiting": "正在等待当前运行结束",
+      "all_title": "全部更新？",
+      "all_count": "{n, plural, other {# 项更新}}",
+      "all_count_devices": "{devices} 台设备上的 {n, plural, other {# 项更新}}",
+      "not_included": "不包括",
+      "skip": "跳过",
+      "skip_all": "全部跳过",
+      "skipped": "{n, plural, other {已跳过 # 项更新}}",
+      "skipped_body": "有更新的版本时会再次显示",
+      "undo": "撤销",
+      "skip_hint": "有新版本之前不再显示"
+    },
+    "activity": {
+      "wake": "唤醒",
+      "sleep": {
+        "title": "休眠",
+        "choice": "{name} · {when}",
+        "in_hour": "1 小时后",
+        "in_hours": "3 小时后",
+        "evening": "今晚",
+        "tomorrow": "明天",
+        "next_week": "下周",
+        "custom": "自定义…",
+        "custom_title": "休眠至",
+        "failed": "无法让此会话休眠",
+        "needs_update": "此会话所在设备上的 Zeron 需要更新才能使用休眠。",
+        "until_when": "{date}（{day}）{time}"
+      },
+      "stop_waiting": "停止等待",
+      "stop_waiting_failed": "无法停止等待",
+      "wake_failed": "无法唤醒此会话"
     }
   },
   "onboarding": {
@@ -3052,6 +3178,30 @@
         "notifications": {
           "title": "向你发送通知",
           "detail": "与其他通知一样，可在“设置”→“通知”中管理。"
+        },
+        "usage_read": {
+          "title": "查看你的智能体套餐用量",
+          "detail": "每个账户的用量、套餐和重置时间，但不包括账户是谁。"
+        },
+        "accounts_read": {
+          "title": "查看你的智能体已保存的账户",
+          "detail": "哪个账户正在使用，以及每个账户的邮箱和名称。绝不包括密码或登录凭据。"
+        },
+        "accounts_switch": {
+          "title": "切换智能体使用的账户",
+          "detail": "它可以把另一个已保存的账户设为当前账户。它不能登录或删除账户。"
+        },
+        "models_read": {
+          "title": "查看你的智能体模型",
+          "detail": "每个智能体提供的模型、推理强度和选项，以及对话正在使用的模型。"
+        },
+        "models_set": {
+          "title": "更改对话使用的模型",
+          "detail": "对话下一轮的模型、推理强度和选项，以及新对话的默认设置。"
+        },
+        "messages_send": {
+          "title": "以你的身份向智能体发送消息",
+          "detail": "它可以向任何对话发送消息、开始新对话并回答它们的问题，就像你亲自输入一样。你的智能体会照它说的去做。"
         },
         "links_open": {
           "title": "打开链接",

@@ -8,6 +8,8 @@
 -- "name:detail" each). `ui.command`s change the data as the edge would on
 -- its own, or make the next change fail:
 --   settings_stub.sign_in          signed in as Ada, in org_1 (else signed out)
+--   settings_stub.restoring        the engine hasn't answered yet
+--   settings_stub.signed_out       the engine says signed out
 --   settings_stub.open_account     a way in to `settings/account` (a link)
 --   settings_stub.member_joins     someone accepts an invitation
 --   settings_stub.refuse_next      the next change is refused ("refused")
@@ -504,6 +506,22 @@ auths.sign_out = function(done: (() -> ())?)
 	end
 end
 
+-- The launch before the engine has answered, and the engine saying signed out.
+ui.command {
+	id = "settings_stub.restoring",
+	title = "The engine hasn't answered yet",
+	run = function()
+		auth.account:set({ state = "restoring", env = "staging" } :: any)
+	end,
+}
+ui.command {
+	id = "settings_stub.signed_out",
+	title = "The engine says signed out",
+	run = function()
+		auth.account:set({ state = "signed_out", env = "staging" } :: any)
+	end,
+}
+
 ui.command {
 	id = "settings_stub.member_joins",
 	title = "A member joins",
@@ -560,6 +578,8 @@ ui.command {
 			window = t["zeron.window"],
 			sans = t["font.sans"],
 			mono = t["font.mono"],
+			secondary = t["text.secondary"],
+			tertiary = t["text.tertiary"],
 		})
 	end,
 }

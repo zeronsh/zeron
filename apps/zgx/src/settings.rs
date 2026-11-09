@@ -520,8 +520,22 @@ fn write_settings_at(path: &std::path::Path, changes: serde_json::Map<String, Js
 }
 
 /// A chime, through the system's player, from a file of its own that goes
-/// once it has played.
-fn play(data: &[u8]) {
+/// once it has played; on Windows, which has neither afplay nor paplay,
+/// `PlaySound` straight from memory. It returns once the sound has played.
+pub fn play(data: &[u8]) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
+        // SAFETY: with SND_MEMORY the first argument is the WAV's bytes,
+        // which `data` keeps alive for the whole (synchronous) play.
+        unsafe { PlaySoundW(data.as_ptr().cast(), std::ptr::null_mut(), SND_MEMORY | SND_SYNC | SND_NODEFAULT) };
+    }
+    #[cfg(not(windows))]
+    play_file(data);
+}
+
+#[cfg(not(windows))]
+fn play_file(data: &[u8]) {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("zeron-zgx-sound-{}-{id}.wav", std::process::id()));

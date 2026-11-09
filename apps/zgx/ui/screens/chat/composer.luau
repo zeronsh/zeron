@@ -5,7 +5,8 @@
 -- is made once and follows where the shell is: the draft and what it
 -- carries are each chat's own (screens/chat/shared), its model, effort
 -- and access the session's (changed there, they change the session) or,
--- on a new chat, those the last new chat used.
+-- on a new chat, the new chat's own: those last chosen there, never a
+-- chat's.
 --
 -- In a session it sends to that session (queued while a turn runs, which
 -- Stop ends), and shows what the agent asks (an approval, a question) in
@@ -18,25 +19,23 @@
 local ds = require("@ds")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
-local Quote = require("@ds/quote")
-local Comments = require("@app/screens/chat/comments")
-local Annotation = require("@ds/annotation")
 local prefs = require("@app/screens/settings/prefs")
 local store = require("@app/screens/chat/store")
+local lanes = require("@app/screens/chat/lanes")
 local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
-local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
-local mentions = require("@ds/composer_mentions")
 local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
+local Carried = require("@app/screens/chat/carried")
+local Completions = require("@app/screens/chat/completions")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -48,18 +47,34 @@ local DOCK: SpringOptions = { stiffness = 730, damping = 54 }
 -- column's).
 local FOOT = require("@app/screens/chat/dock").GAP
 
--- What a new chat starts with: what the last one used.
+-- What a new chat starts with: what was last chosen on the new-chat page
+-- (its settings, its own: a chat shown or made never changes them), kept
+-- across launches. Each is put back as it was, none included, as the page
+-- is come back to.
 local defaults = ui.persist("chat_new_defaults", {
 	model = nil :: string?,
 	effort = nil :: string?,
 	fast = false,
+	options = nil :: { [string]: string }?,
 	access = "full" :: string?,
 	plan = false,
 	checkout = "worktree" :: string?,
 	device = nil :: string?,
+	-- Where (nil: none picked yet; screens/chat/where picks one).
+	project = nil :: string?,
+	branch = nil :: string?,
 })
+-- A new chat's own value of each choice where its default is none: what
+-- the composer shows then.
+local NONE: { [string]: any } = { fast = false, options = {}, plan = false }
+
+-- The last default a plugin chose that was taken (its time, ms): one is
+-- taken once, across restarts, never again over a pick made since.
+local plugin_default_seen = ui.persist("chat_new_defaults_plugin", 0)
 
 local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
+-- Where a new chat is made, kept with them.
+local WHERE = { "checkout", "device", "project", "branch" }
 -- Those a session takes only with a message sent (shared.picks keeps them
 -- meanwhile); the rest change it as they're picked.
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
@@ -156,18 +171,26 @@ local function Composer(): Node
 		ui.batch(function()
 			if id == nil then
 				if was:peek() ~= nil then
+					-- Its own settings, each as it was left (none too: never
+					-- what the chat just shown had).
 					local d = defaults:peek()
 					for _, k in FIELDS do
 						local v = (d :: any)[k]
-						if v ~= nil and not equal(locals[k]:peek(), v) then
+						if v == nil then
+							v = NONE[k]
+						end
+						if not equal(locals[k]:peek(), v) then
 							locals[k]:set(v)
 						end
 					end
 					checkout:set(d.checkout)
+					branch:set(d.branch)
 					-- (A device asked of this new chat, a device's "+" in the
-					-- sidebar, over the one last used.)
+					-- sidebar, over the one last used; a project asked of it,
+					-- a project's "+", over the one last picked here.)
 					device:set(route.take_device() or d.device)
-					project:set(route.current:peek().project)
+					local asked = route.take_project()
+					project:set(if asked then asked.project elseif d.project ~= nil then d.project else route.current:peek().project)
 				end
 			elseif s then
 				-- (Its own pick, unsent, over what the session runs with.)
@@ -179,6 +202,11 @@ local function Composer(): Node
 					end
 					if v ~= nil and not equal(locals[k]:peek(), v) then
 						locals[k]:set(v)
+					elseif v == nil and (k == "model" or k == "effort") and locals[k]:peek() ~= nil then
+						-- A session that names none runs its agent's own: never
+						-- the last chat's model (another agent's, maybe one
+						-- this device doesn't have), sent along as a pick.
+						locals[k]:set(nil)
 					end
 					applied[k] = if v ~= nil then v else locals[k]:peek()
 				end
@@ -194,19 +222,45 @@ local function Composer(): Node
 			was:set(id)
 		end
 	end)
-	-- A new chat's project follows the route's: as the route comes home, or
-	-- its project changes there. (Kept, so a reload, the route as it was,
-	-- leaves a project picked in the composer alone.)
-	local route_was = ui.state("chat_composer_route", "")
+	-- What a new chat starts with, as a plugin allowed "models.set" chose it
+	-- (screens/plugins publishes it once the engine allowed it): kept as a
+	-- pick made here would be, and shown at once on a new chat.
+	local plugin_default = ui.shared("plugins.new_chat_model", nil :: any)
 	ui.effect(function()
-		local now = route.current:get()
-		local key = `{now.name}:{now.project or ""}`
-		if route_was:peek() == key then
+		local asked = plugin_default:get()
+		if type(asked) ~= "table" or type(asked.model) ~= "string" then
 			return
 		end
-		route_was:set(key)
-		if now.name == "home" and project:peek() ~= now.project then
-			project:set(now.project)
+		local seq = tonumber(asked.seq) or 0
+		if seq <= plugin_default_seen:peek() then
+			return
+		end
+		plugin_default_seen:set(seq)
+		local d = table.clone(defaults:peek()) :: any
+		d.model = asked.model
+		d.effort = asked.effort
+		defaults:set(d)
+		if session_id:peek() == nil then
+			ui.batch(function()
+				locals.model:set(asked.model)
+				if asked.effort ~= nil then
+					locals.effort:set(asked.effort)
+				end
+			end)
+		end
+	end)
+	-- A project asked of a new chat already showing (a project's "+", the
+	-- palette's New chat in…): picked. (One asked on the way here is the
+	-- arrival's, above; a project picked here is otherwise the page's own,
+	-- whatever the route last asked for.)
+	ui.effect(function()
+		local pick = route.project_pick:get()
+		if pick == nil or session_id:peek() ~= nil or was:peek() ~= nil then
+			return
+		end
+		local asked = route.take_project()
+		if asked and project:peek() ~= asked.project then
+			project:set(asked.project)
 		end
 	end)
 	-- A device asked of a new chat already showing (a device's "+" in the
@@ -236,20 +290,32 @@ local function Composer(): Node
 		for _, k in FIELDS do
 			picked[k] = locals[k]:get()
 		end
-		local where: { [string]: any } = { checkout = checkout:get(), device = device:get() }
+		local where: { [string]: any } = {
+			checkout = checkout:get(),
+			device = device:get(),
+			project = project:get(),
+			branch = branch:get(),
+		}
 		local id = session_id:peek()
 		if id == nil then
+			-- (Only once the page's own are out: never the chat left's, on
+			-- their way out.)
+			if was:peek() ~= nil then
+				return
+			end
 			local d = table.clone(defaults:peek()) :: any
 			local changed = false
-			for k, v in picked do
+			for _, k in FIELDS do
+				local v = picked[k]
 				if not equal(d[k], v) then
 					d[k] = v
 					changed = true
 				end
 			end
-			for k, v in where do
-				if d[k] ~= v then
-					d[k] = v
+			-- (By name: a choice of none is a nil a table's loop skips.)
+			for _, k in WHERE do
+				if d[k] ~= where[k] then
+					d[k] = where[k]
 					changed = true
 				end
 			end
@@ -317,12 +383,23 @@ local function Composer(): Node
 	-- the model picker lists that device's agents and models, as the
 	-- shipping app's does. (nil: this one, or not known yet.)
 	local catalog_device = ui.state("chat_catalog_device", nil :: string?)
-	ui.effect(function()
+	local function run_device(): string?
 		local d = device:get()
 		if d == nil and session_id:get() == nil then
 			local p = route.project:get()
 			d = if p then p.device else nil
 		end
+		return d
+	end
+	-- Whether the catalog shown is `d`'s (one of this device's says none).
+	local function shows_catalog_of(d: string?): boolean
+		local shown = (store.catalog:get() :: any).device
+		return shown == d or (shown == nil and (d == nil or d == sessions.now:get().here))
+	end
+	-- (Asked once per device: the host keeps a look current itself, a late
+	-- answer to an older one changing nothing, src/chat.rs `reload_remote`.)
+	ui.effect(function()
+		local d = run_device()
 		if d ~= catalog_device:peek() then
 			catalog_device:set(d)
 			store.catalog_on(d)
@@ -330,10 +407,21 @@ local function Composer(): Node
 	end)
 	-- A new chat moved onto Cloud runs only the agents Cloud has accounts
 	-- for: a model it doesn't run gives way to Cloud's first, as the
-	-- shipping app drops one on the switch.
+	-- shipping app drops one on the switch. So does one the last new chat
+	-- used that its device doesn't offer (once all its agents have said: a
+	-- model still on its way isn't dropped), so a chat isn't made on a
+	-- device for an agent it doesn't have.
 	ui.effect(function()
 		local cat = store.catalog:get()
-		if session_id:get() ~= nil or device:get() ~= Where.CLOUD or (cat :: any).device ~= Where.CLOUD then
+		if session_id:get() ~= nil then
+			return
+		end
+		local d = run_device()
+		if d == Where.CLOUD then
+			if (cat :: any).device ~= Where.CLOUD then
+				return
+			end
+		elseif (cat :: any).complete ~= true or not shows_catalog_of(d) then
 			return
 		end
 		local picked = model:peek()
@@ -376,6 +464,9 @@ local function Composer(): Node
 	-- What the agent asks, and which of a question's options are chosen
 	-- (fresh for each question); its queue, todos and tasks. (The same as
 	-- a split pane's composer shows them: screens/chat/asks.)
+	-- A line above it: one of its own (a send that failed), else the
+	-- session's.
+	local own_notice = ui.state("chat_own_notice", nil :: any)
 	local asks = Asks.bind {
 		id = function(): string?
 			return session_id:peek()
@@ -385,11 +476,34 @@ local function Composer(): Node
 		-- (The request the options were picked for: kept, so a reload keeps
 		-- them.)
 		asked = ui.state("chat_asked_by", nil :: any),
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
 	}
 	local ask, queue = asks.ask, asks.queue
-	-- A line above it: one of its own (a send that failed), else the
-	-- session's.
-	local own_notice = ui.state("chat_own_notice", nil :: any)
+	-- What runs behind it: this chat's subagents (the open chat's: its
+	-- transcript is the session shown) and the processes it left running.
+	local tasks = ui.computed(function(): { any }
+		local out: { any } = {}
+		local shown = store.session:get()
+		local id = session_id:get()
+		if shown and id and shown.id == id then
+			out = lanes.tasks()
+		end
+		local first_ended = #out + 1
+		for i, t in out do
+			if t.ended then
+				first_ended = i
+				break
+			end
+		end
+		-- (Processes after the subagents that run, before those that ended.)
+		for _, t in asks.tasks:get() do
+			table.insert(out, first_ended, t)
+			first_ended += 1
+		end
+		return out
+	end)
 	-- Its own goes as the chat changes (kept: a reload isn't a change).
 	local notice_for = ui.state("chat_notice_for", "?")
 	ui.effect(function()
@@ -420,17 +534,16 @@ local function Composer(): Node
 			return s.notice
 		end
 		-- The connection: this device's, then the chat's host.
-		local now = sessions.now:get()
 		local host_unreachable, host = false, nil
-		if s and s.device and s.device ~= now.here then
-			for _, d in now.devices or {} do
+		if s and s.device and s.device ~= sessions.here:get() then
+			for _, d in sessions.devices:get() or {} do
 				if d.id == s.device then
 					host_unreachable, host = d.online == false, d.name
 				end
 			end
 		end
 		return LinkNotice.of {
-			connection = now.connection,
+			connection = sessions.connection:get(),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -447,55 +560,17 @@ local function Composer(): Node
 		end
 	end)
 	-- A new chat with no model yet: the catalog's first. (Never a session's:
-	-- its model is its own.)
+	-- its model is its own.) Whenever that's so: the catalog come, or the
+	-- new page come back to with none chosen there, so what shows is what a
+	-- reload shows too.
 	ui.effect(function()
 		local c = store.catalog:get()
-		if session_id:peek() == nil and c.state == "ready" and model:peek() == nil and #c.models > 0 then
+		if session_id:get() == nil and c.state == "ready" and model:get() == nil and #c.models > 0 then
 			model:set(c.models[1].value)
 			effort:set(c.models[1].effort)
 		end
 	end)
 
-	-- What a sent message shows of what it carries.
-	local function shown_attachments(list: { any }, quotes: { Quote.Quote }?, picks: { { [string]: any } }?, comments: { Comments.Comment }?): { any }
-		local out = {}
-		for _, a in list do
-			table.insert(out, {
-				kind = if a.kind == "image" then "image" else "file",
-				name = a.name,
-				src = if a.kind == "image" then a.path else nil,
-			})
-		end
-		-- And each passage it carries, as a chip (as the host's copy shows
-		-- them: chat.rs `split_quotes`).
-		for _, q in quotes or {} do
-			table.insert(out, { kind = "file", icon = "cursor", name = Quote.where(q), meta = Quote.excerpt(q.text) })
-		end
-		-- And each element picked on a page (chat.rs `split_annotations`).
-		for _, chip in Annotation.shown(picks or {}) do
-			table.insert(out, chip)
-		end
-		-- And its review comments, one chip (chat.rs `comments_chip`).
-		local said = comments or {}
-		if #said > 0 then
-			local places: { string } = {}
-			for _, c in said do
-				table.insert(places, Comments.place(c))
-			end
-			table.insert(out, {
-				kind = "file",
-				icon = "chat-round-line",
-				name = ui.t("chat.composer.comments", { n = #said }):get(),
-				meta = table.concat(places, ", "),
-			})
-		end
-		return out
-	end
-
-	-- What `@` offers: the files of where it works (the session's folder,
-	-- or a new chat's project), searched as the mention is typed. (`/` and
-	-- `$` offer nothing yet.)
-	local mention_sources = ui.state("chat_mentions", { ["/"] = {}, ["$"] = {} } :: any)
 	-- The agent the chat runs (its model's): whose completion settings the
 	-- composer follows.
 	local function agent(): string?
@@ -525,127 +600,47 @@ local function Composer(): Node
 		local target: Invocations.Target = { space = p.id :: string, device = p.device :: string? }
 		return target
 	end
-	local function invocation_key(): string?
-		return Invocations.key(agent(), invocation_target())
-	end
-	local mention_lists = ui.computed(function(): any
-		local given = table.clone(mention_sources:get())
-		-- `/` the agent's commands, `$` its skills (nil while they come).
-		local catalog = Invocations.catalog(invocation_key())
-		given["/"] = Invocations.items(catalog, "command")
-		given["$"] = Invocations.items(catalog, "skill")
-		-- No agent to ask: Zeron's own alone. Its list still coming: nil.
-		if agent() == nil then
-			given["/"] = {}
-		elseif given["/"] == nil then
-			return given
-		end
-		local slash = table.clone(given["/"] or {})
-		local taken: { [string]: boolean } = {}
-		for _, c in slash do
-			taken[c.value] = true
-		end
-		if not prefs.completion(agent()).separate then
-			for _, skill in given["$"] or {} do
-				table.insert(slash, skill)
-			end
-		end
-		-- Then Zeron's own (named clear of the agent's).
-		for _, row in ZeronCommands.rows(taken, session_id:get() ~= nil) do
-			table.insert(slash, row)
-		end
-		given["/"] = slash
-		return given
-	end)
-	-- A `/` or `$` opening afresh reads the agent's list again (the last
-	-- one showing meanwhile), as does another agent or place while it's
-	-- open. Kept, so a reload with it open reads nothing.
-	local invocations_open = ui.state("chat_invocations_open", nil :: string?)
-	ui.effect(function()
-		local text = shared.text:get()
-		local t = mentions.token(text, #text)
-		local wanted = t ~= nil and (t.trigger == "/" or (t.trigger == "$" and prefs.completion(agent()).dollar))
-		local key = if wanted then invocation_key() else nil
-		if key == invocations_open:peek() then
-			return
-		end
-		invocations_open:set(key)
-		local harness, target = agent(), invocation_target()
-		if key and harness and target then
-			Invocations.load(harness, target)
-		end
-	end)
-	-- What was last searched for: kept, so a reload doesn't search again.
-	local searched = ui.state("chat_mention_searched", nil :: string?)
-	ui.effect(function()
-		local text = shared.text:get()
-		local t = mentions.token(text, #text)
-		if not t or t.trigger ~= "@" then
-			return
-		end
-		local id = session_id:peek()
-		local p = route.project:peek()
-		local target: any = if id then { chat = id } elseif p then { space = p.id, device = p.device } else nil
-		if not target then
-			return
-		end
-		local key = `{id or (p and p.id) or ""}:{t.query}`
-		if key == searched:peek() then
-			return
-		end
-		-- (The run before's timer went as this one began: an effect's run
-		-- owns what it makes. Written once it searches, so a run that
-		-- stopped it before then doesn't count it as searched.)
-		ui.after(120, function()
-			searched:set(key)
-			files.search(target, t.query):after(function(found: any)
-				if searched:peek() ~= key then
-					return
-				end
-				local items = {}
-				for _, f in found or {} do
-					local name = string.match(f.path, "([^/]+)/?$") or f.path
-					local folder = string.match(f.path, "^(.*)/[^/]+/?$")
-					table.insert(items, {
-						value = f.path,
-						label = name,
-						detail = folder,
-						file = not f.dir,
-						dir = f.dir,
-						-- Sent as Zeron's file mention (screens/chat/shared).
-						link = shared.file_link(f.path, f.dir),
-					})
-				end
-				mention_sources:set { ["@"] = items, ["/"] = {}, ["$"] = {} }
-			end, function()
-				mention_sources:set { ["@"] = {}, ["/"] = {}, ["$"] = {} }
-			end)
-		end)
-	end)
+	local completions = Completions.bind {
+		key = "chat",
+		text = shared.text,
+		agent = agent,
+		target = invocation_target,
+		files = function(): any
+			local id = session_id:peek()
+			local p = route.project:peek()
+			return if id then { chat = id } elseif p then { space = p.id, device = p.device } else nil
+		end,
+		in_chat = function(): boolean
+			return session_id:get() ~= nil
+		end,
+		run = function(name: string)
+			ZeronCommands.run(name, session_id:peek())
+		end,
+	}
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string }?)
-	local function end_edit(action: string)
-		local e = editing:peek()
-		local id = session_id:peek()
-		if not e or not id then
-			return
-		end
-		local words = shared.text:peek()
-		ui.batch(function()
-			editing:set(nil)
-			shared.text:set(e.aside)
-		end)
-		store.queue_finish(id, e.item, action, if action == "commit" then words else nil):after(function() end, function(err: any)
-			local why = err and err.message
-			own_notice:set {
-				tone = "danger",
-				key = if why == "conflict" then "chat.composer.edit_conflict" else "chat.composer.edit_not_saved",
-				dismissable = true,
-			}
-		end)
-	end
+	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local edits = Asks.queue_edits {
+		id = function(): string?
+			return session_id:peek()
+		end,
+		text = shared.text,
+		editing = editing,
+		focus = function()
+			shared.focus:add(1)
+		end,
+		say = function(tone: string, key: string)
+			own_notice:set { tone = tone, key = key, dismissable = true }
+		end,
+		cargo = function(): { any }
+			return shared.cargo:peek()
+		end,
+		set_cargo = function(list: { any })
+			shared.cargo:set(list)
+		end,
+	}
+	local end_edit = edits.finish
 	-- Moving to another chat: an edit under way is left as it was (its
 	-- displaced draft back in place), then the draft shown is put away
 	-- under the chat left and the next chat's own comes out (shared.show),
@@ -670,48 +665,18 @@ local function Composer(): Node
 		end
 		-- A draft that is only one of Zeron's own commands runs it (its
 		-- token goes; anything carried stays).
-		local zeron = ZeronCommands.of_text(shared.text:peek(), (mention_lists:peek() or {})["/"] or {})
+		local zeron = completions.command_of(shared.text:peek())
 		if zeron then
 			shared.text:set("")
 			ZeronCommands.run(zeron, session_id:peek())
 			return
 		end
 		local typed, carried = shared.take()
-		local attachments = {}
-		-- Passages attached from the conversation: a block after the words
-		-- (Quote.with_quotes), each with who said it and when.
-		local quotes: { Quote.Quote } = {}
-		-- Elements picked on a page in the panel's browser: each a token
-		-- after the words (Annotation.with_annotations), which the engine
-		-- expands for the agent.
-		local picks: { { [string]: any } } = {}
-		-- Review comments left on files: a block after the words
-		-- (screens/chat/comments), each its file and line.
-		local comments: { Comments.Comment } = {}
-		for _, item in carried do
-			if item.kind == "comment" then
-				table.insert(comments, { file = item.file, line = item.line, body = item.body, to = item.to, side = item.side, snippet = item.snippet })
-			elseif item.path then
-				-- (A project's file: on the session's computer already.)
-				-- (An Appshot goes as its picture; what it shows of the app, below.)
-				table.insert(attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = item.name, rel = item.rel, on_host = item.on_host })
-			elseif item.kind == "annotation" and item.quote then
-				table.insert(quotes, { text = item.quote, who = item.name, from = item.from })
-			elseif item.kind == "annotation" and item.annotation then
-				table.insert(picks, item)
-			elseif item.kind == "text" and item.text then
-				-- A pasted text carried as a chip: its words go in the text.
-				typed = typed .. "\n\n" .. item.text
-			elseif item.kind == "chat" and item.chat then
-				-- Another chat mentioned (a session dropped from the sidebar):
-				-- its link in the words, the engine's to read out to the agent.
-				local link = shared.chat_link(item.name, item.chat)
-				typed = if typed ~= "" then `{typed} {link}` elseif text ~= "" then `{text} {link}` else link
-			end
-		end
+		local pack = Carried.pack(carried, typed, text)
+		local attachments = pack.attachments
 		-- (Each command or skill picked: its canonical reference.)
-		local words = Invocations.encode(if typed ~= "" then typed else text)
-		local text_out = Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, quotes), picks), comments)
+		local words = Invocations.encode(if pack.typed ~= "" then pack.typed else text)
+		local text_out = Carried.text(words, pack)
 		local id = session_id:peek()
 		own_notice:set(nil)
 		if id then
@@ -752,6 +717,8 @@ local function Composer(): Node
 					if shared.text:peek() == "" then
 						shared.text:set(text_out)
 					end
+					-- Its files too, before any added since.
+					shared.restore_cargo_of(id, carried)
 				end)
 			end
 			if running:peek() then
@@ -771,7 +738,7 @@ local function Composer(): Node
 						id = mid,
 						role = "user",
 						text = words,
-						attachments = shown_attachments(attachments, quotes, picks, comments),
+						attachments = Carried.shown(pack),
 						-- On its way from this moment: the line under it
 						-- says so at once.
 						waiting = "sending",
@@ -912,14 +879,21 @@ local function Composer(): Node
 			return nil
 		end
 		local path: string?, project: string? = nil, nil
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			if p.id == s.project then
 				path, project = p.path, p.name
 			end
 		end
 		local lb = live_branch:get()
 		local name = if lb.key:sub(1, #s.id + 1) == `{s.id}|` then lb.name else (s :: any).branch
+		local on: string? = nil
+		for _, d in sessions.devices:get() do
+			if d.id == (s :: any).device then
+				on = d.name
+			end
+		end
 		return {
+			device = on,
 			name = name,
 			worktree = path ~= nil and s.cwd ~= nil and s.cwd ~= path,
 			project = project,
@@ -938,6 +912,15 @@ local function Composer(): Node
 			open_model = shared.open_model,
 			model_open = model_open,
 			tray = TRAY,
+			-- ("Scroll to end", while it shows: the trays' pill moves aside.)
+			aside = function(): number?
+				return shared.jump_width:get()
+			end,
+			on_pill_width = function(w: number?)
+				if shared.pill_width:peek() ~= w then
+					shared.pill_width:set(w)
+				end
+			end,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
@@ -953,6 +936,35 @@ local function Composer(): Node
 			-- The catalog, followed in place as it comes and changes.
 			harnesses = function(): { ds.Harness }
 				return store.catalog:get().harnesses
+			end,
+			models_loading = function(): boolean
+				return store.catalog:get().complete ~= true
+			end,
+			-- The session's model named by the host (its catalog's name, else
+			-- its id), for the chip while the catalog shown doesn't list it.
+			-- (Not a pick of another: that one's in the catalog. A session
+			-- naming none: its agent's own default, by name.)
+			model_label = function(): string?
+				local s = open()
+				if s and s.model == model:get() then
+					return s.model_label
+				end
+				return nil
+			end,
+			-- A session naming no model runs its agent's own: the catalog's
+			-- first of that agent (the host's `model_label` names it too),
+			-- shown with its mark and reasoning, never sent as a pick.
+			default_model = function(): string?
+				local s = open()
+				if not s or s.model ~= nil or s.harness == nil then
+					return nil
+				end
+				for _, m in store.catalog:get().models do
+					if m.harness == s.harness then
+						return m.value
+					end
+				end
+				return nil
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
@@ -1034,33 +1046,20 @@ local function Composer(): Node
 				return running:get()
 			end,
 			on_queue_send = asks.on_queue_send,
-			on_queue_edit = function(item: string)
-				local id = session_id:peek()
-				if not id or editing:peek() then
-					return
-				end
-				store.queue_edit(id, item):after(function(got: any)
-					editing:set { item = item, aside = shared.text:peek() }
-					shared.text:set(if got then got.text else "")
-					shared.focus:add(1)
-				end, function(err: any)
-					own_notice:set {
-						tone = "warning",
-						key = if err and err.message == "locked" then "chat.composer.edit_locked" else "chat.composer.edit_unavailable",
-						dismissable = true,
-					}
-				end)
-			end,
-			on_queue_save = function()
-				end_edit("commit")
-			end,
-			on_queue_cancel = function()
-				end_edit("cancel")
-			end,
+			on_queue_edit = edits.on_queue_edit,
+			on_queue_save = edits.on_queue_save,
+			on_queue_cancel = edits.on_queue_cancel,
 			on_queue_remove = asks.on_queue_remove,
 			on_queue_reorder = asks.on_queue_reorder,
 			todos = asks.todos,
-			tasks = asks.tasks,
+			tasks = tasks,
+			-- A subagent's row opens it, a tab of the session's panel.
+			on_open_task = function(ref: string)
+				local id = session_id:peek()
+				if id then
+					lanes.open_task(id, ref)
+				end
+			end,
 			-- Stop on a background process: its host stops it, and its row
 			-- goes as the session stops listing it (production's tray).
 			on_stop_task = function(task: string)
@@ -1092,35 +1091,10 @@ local function Composer(): Node
 				return id ~= nil and s ~= nil and s.id == id and (s.state == "missing" or s.state == "offline")
 			end,
 			focus = shared.focus,
-			mentions = mention_lists,
-			-- A command, skill or file picked: what its token stands for; one of
-			-- Zeron's own runs (its token gone).
-			on_mention = function(item: any, trigger: string, token: string)
-				if item.zeron then
-					ZeronCommands.run(item.zeron, session_id:peek())
-				elseif trigger == "@" then
-					Invocations.remember(item, trigger, token)
-				else
-					Invocations.remember(item, trigger)
-				end
-			end,
-			-- The agent's completion settings: `$` opens the skills only
-			-- while "Use $ for skills" is on (else it's ordinary text).
-			mention_enabled = function(trigger: string): boolean
-				if trigger == "$" then
-					return prefs.completion(agent()).dollar
-				end
-				return true
-			end,
-			-- With "Separate / commands" off, `/` lists the skills too.
-			mention_empty = setmetatable({}, {
-				__index = function(_, trigger: string): string?
-					if trigger == "/" and not prefs.completion(agent()).separate then
-						return ui.t("chat.composer.commands_or_skills"):get()
-					end
-					return nil
-				end,
-			}) :: any,
+			mentions = completions.lists,
+			on_mention = completions.on_mention,
+			mention_enabled = completions.enabled,
+			mention_empty = completions.empty,
 		}
 	end
 

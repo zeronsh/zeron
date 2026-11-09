@@ -18,7 +18,7 @@ use zeron_doc::WorkspaceState;
 use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
-    Device, Session, SidebarPreferences, Space,
+    Device, Session, SidebarPreferences, SleepState, Space, WaitingKind,
 };
 
 use crate::catalog;
@@ -103,6 +103,17 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
+    /// Asleep until then (ms; the Activity view's Asleep), as
+    /// [`Chat::sleep_state`] reads it at derive time. `None` when awake or
+    /// woken.
+    pub sleep_until_ms: Option<i64>,
+    /// Woke from sleep then (ms: its time came, or it asked for the person)
+    /// and not seen since. `None` otherwise.
+    pub woke_at_ms: Option<i64>,
+    /// Waiting ([`ChatIndicator::Waiting`]) on a background process its
+    /// agent said it waits on: one the person may stop waiting on
+    /// (`StopWaiting`). A background agent's wait isn't theirs to end.
+    pub waits_on_process: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -436,6 +447,9 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
     row.room_gen.hash(&mut h);
+    row.sleep_until_ms.hash(&mut h);
+    row.woke_at_ms.hash(&mut h);
+    row.waits_on_process.hash(&mut h);
     h.finish()
 }
 
@@ -454,6 +468,14 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let send_state = cx.send_states.get(&chat.id).copied();
     let host_indicator = zeron_proto::view::native_display_status(chat, session, cx.now);
     let indicator = display_status(chat, session, cx.now);
+    let (sleep_until_ms, woke_at_ms) = match chat.sleep_state(cx.now) {
+        SleepState::Awake => (None, None),
+        SleepState::Asleep { until } => (Some(until.timestamp_millis()), None),
+        SleepState::Woke { at } => (None, Some(at.timestamp_millis())),
+    };
+    let waits_on_process = indicator == ChatIndicator::Waiting
+        && zeron_proto::view::waiting(session, cx.now)
+            .is_some_and(|w| w.on.iter().any(|on| on.kind == WaitingKind::Process));
     let working_since_ms = match host_indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
@@ -537,6 +559,9 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
         room_gen: chat.room_gen.unwrap_or(1),
+        sleep_until_ms,
+        woke_at_ms,
+        waits_on_process,
     };
     row.revision = hash_row(&row);
     // Unchanged rows keep their Arc across snapshots (pointer-equal diffing).

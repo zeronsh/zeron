@@ -102,11 +102,17 @@ mod chip_copy_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
+mod picker_settle_tests;
+#[cfg(test)]
 mod fit_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod slide_bench_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
 mod i18n_tests;
+mod updates;
 #[cfg(test)]
 mod visuals_tests;
 
@@ -136,7 +142,30 @@ enum Screen {
     Fixture(String),
 }
 
+/// Room for open files. An app the Finder starts is given 256, which its pictures,
+/// scripts, sockets and file watches can use up, and then nothing can be opened:
+/// no icon, no lazily loaded screen, no template. (A shell usually gives far more,
+/// so a build started from one never shows it.)
+#[cfg(unix)]
+fn raise_open_files() {
+    // macOS refuses more than this however high the hard limit reads (`OPEN_MAX`).
+    const WANTED: libc::rlim_t = 10_240;
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: `limit` is a valid rlimit for each call to read or write.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 || limit.rlim_cur >= WANTED {
+            return;
+        }
+        limit.rlim_cur = WANTED.min(limit.rlim_max);
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            eprintln!("zeron-zgx: couldn't raise the open file limit: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    raise_open_files();
     // A terminal tab's bridge (src/terminal.rs): this binary, run by zgx's
     // terminal, passing a shell's bytes to and from the engine.
     let argv: Vec<String> = std::env::args().collect();
@@ -728,6 +757,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
+        // What there is to update, on every device (src/updates.rs).
+        updates::install(&host);
         // Adding a project, removing one (src/projects.rs).
         projects::install(&host);
         // A session's files (src/files.rs): the files pane and editor.
@@ -1141,6 +1172,19 @@ fn intro_window() -> WindowOptions {
     }
 }
 
+/// The glass under Zeron's window: the under-window blur alone, untinted
+/// (`plain`), which the theme's frost (`glass.tint`, Zeron's `glass` at
+/// 0.80) tints, on every platform. On Windows that's the acrylic accent's
+/// blur of what's behind the window (zgx #1495), gpui's `Blurred`, as the
+/// shipping app's: the frost values are that app's, made for it. The
+/// material's own backdrop there is Mica, which blurs nothing (solid under
+/// the frost); Acrylic, a transient material's, adds the system's tint
+/// under it and goes solid whenever the window isn't active. With
+/// Transparency effects off, plain glass goes solid (zgx #1496).
+fn zeron_glass() -> Glass {
+    Glass::new(GlassMaterial::UnderWindowBackground).plain()
+}
+
 /// Zeron's window: an inset title bar over the colourless under-window
 /// blur, which the theme's `background` tints (the shipping app's glass).
 fn zeron_window(width: f64, height: f64) -> WindowOptions {
@@ -1150,9 +1194,11 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         height,
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
-        glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
-        // (Windows: the caption buttons keep to the title row at any zoom.)
-        caption_height: Some(32.),
+        glass: Some(zeron_glass()),
+        // (Windows: the caption buttons keep to the title row at any zoom,
+        // the bar's whole 38, as Zeron's: shell.rs
+        // `render_windows_caption_controls`, `Theme::TITLEBAR_HEIGHT`.)
+        caption_height: Some(38.),
         ..Default::default()
     }
 }
@@ -1244,6 +1290,19 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod glass_tests {
+    /// The window's glass is the under-window blur alone on every
+    /// platform: on Windows, the acrylic accent's blur the shipping app's
+    /// frost was made for, not Mica, which blurs nothing.
+    #[test]
+    fn the_window_s_glass_is_plain_everywhere() {
+        let glass = super::zeron_glass();
+        assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
+        assert!(glass.plain);
+    }
 }
 
 #[cfg(test)]

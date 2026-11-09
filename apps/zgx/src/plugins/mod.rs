@@ -2111,6 +2111,62 @@ impl Bridge {
                 }
             }
         });
+        // Its agents' usage, accounts and models (`zeron.usage`,
+        // `zeron.switch_account`, `zeron.set_model`, `zeron.on`, …): the
+        // engine checks what this device, or the device named, allowed it
+        // (plugins/agents there). A refusal fails the promise as "<reason>:
+        // <words>". A default for new chats the engine allowed is this
+        // window's to keep: the composer takes it (`plugins.new_chat_model`).
+        host.async_action(format!("plugin.{id}.agents"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let asked = value_json(&asked);
+                    let op = asked["op"].as_str().unwrap_or_default().to_owned();
+                    let mut params = json!({ "plugin": plugin, "op": op, "args": asked["args"] });
+                    let device = asked["device"].as_str().filter(|d| !d.is_empty()).map(str::to_owned);
+                    if let Some(device) = &device {
+                        params["device"] = json!(device);
+                    }
+                    if op == "listen" {
+                        // (An empty list may come as an empty table: none.)
+                        params["listeners"] = if asked["listeners"].is_array() { asked["listeners"].clone() } else { json!([]) };
+                    }
+                    let reply = call("PluginAgents", params).await.map_err(|e| {
+                        if e.contains("unknown method") {
+                            "old_engine: This device's Zeron is from before plugins could read usage".to_string()
+                        } else {
+                            e
+                        }
+                    })?;
+                    if reply["ok"].as_bool() != Some(true) {
+                        return Err(format!(
+                            "{}: {}",
+                            reply["reason"].as_str().unwrap_or("failed"),
+                            reply["message"].as_str().unwrap_or("Zeron didn't answer")
+                        ));
+                    }
+                    let value = &reply["value"];
+                    if op == "set_default_model"
+                        && device.is_none()
+                        && let (Some(b), Some(harness), Some(model)) =
+                            (me.upgrade(), value["provider"].as_str(), value["model"].as_str())
+                    {
+                        let at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_millis() as i64);
+                        b.host.shared("plugins.new_chat_model", Value::Nil).set(json_value(&json!({
+                            "model": format!("{harness}/{model}"),
+                            "effort": value["effort"],
+                            "seq": at,
+                            "by": plugin,
+                        })));
+                    }
+                    Ok(json_value(value))
+                }
+            }
+        });
         host.action(format!("plugin.{id}.menus"), {
             let (me, plugin) = (me.clone(), plugin.clone());
             move |list| {

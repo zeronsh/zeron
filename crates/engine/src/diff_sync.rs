@@ -15,9 +15,10 @@
 //! is captured by the command host and is never rewritten from this watcher;
 //! otherwise one checkout change would relabel every chat sharing that folder.
 //!
-//! Archived chats are ignored: they get no entry, no watcher, and no captures
-//! (an entry whose every chat was archived is dropped on the next reconcile;
-//! unarchiving re-adds it).
+//! Only chats with an open viewer (plus a short linger after closing) are
+//! tracked: a transcript, a file tree, or another device's Changes pane. Closed
+//! chats get no watcher, capture, or repair scan, regardless of archive state.
+//! Opening a chat starts a fresh capture.
 //!
 //! Fast recursive watches on the process-wide [`FsWatchHub`] (one watcher thread
 //! for every checkout; debounced [`WATCH_DEBOUNCE`]) are backed by a slow
@@ -73,10 +74,13 @@ pub const MAX_DIFF_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Slow repair pass: re-reconcile + re-sync every checkout.
 const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
-/// How long an archived chat stays tracked after its last viewer leaves —
+/// How long a chat stays tracked after its last viewer leaves —
 /// flicking between chats must not tear down and rebuild (full capture) its
 /// checkout every time.
 const INTEREST_LINGER: Duration = Duration::from_secs(30);
+/// How long one checkout's capture keeps the others waiting. A slow or stuck
+/// checkout must not stop the diffs of every other chat that's open.
+const CAPTURE_GATE_HOLD: Duration = Duration::from_secs(10);
 /// Max subdirectories a checkout may have before we skip its live recursive
 /// watch (one OS watch per dir; past this the watcher thread's own bookkeeping
 /// costs more than instant diffs are worth). A normal source tree is well
@@ -146,6 +150,8 @@ struct CheckoutEntry {
     /// A kick arrived while orphaned and was skipped — a chat-less checkout
     /// is not worth a capture. Reconcile re-kicks if chats come back.
     skipped_while_orphaned: AtomicBool,
+    /// Cancels queued and in-flight captures when the last viewer leaves.
+    cancel: CancellationToken,
     /// Kick channel into the entry's debounce/sync task.
     kick_tx: mpsc::UnboundedSender<()>,
     /// Keeps the recursive fs watches alive on the shared [`FsWatchHub`];
@@ -180,6 +186,8 @@ struct DiffSyncInner {
     /// `add_entry` it — the second insert silently replaces the first entry,
     /// discarding its checksum state and kicking a redundant full capture.
     reconcile_gate: tokio::sync::Mutex<()>,
+    /// At most one background checkout scan, including during viewer linger.
+    capture_gate: tokio::sync::Mutex<()>,
     /// cwd → resolved checkout identity. See [`resolve_identity`].
     identities: Mutex<HashMap<String, CheckoutIdentity>>,
     /// How long an entry may sit chat-less before reconcile removes it.
@@ -194,9 +202,9 @@ struct DiffSyncInner {
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// chat_id → viewer interest; see [`CheckoutDiffSync::retain_chat`].
     interest: Mutex<HashMap<String, Interest>>,
-    /// How long released interest keeps an archived chat tracked.
+    /// How long released interest keeps a chat tracked.
     interest_linger: Duration,
-    /// Wakes the supervisor to reconcile when an archived chat's interest
+    /// Wakes the supervisor to reconcile when a chat's interest
     /// starts or lapses.
     interest_changed: Arc<Notify>,
     /// Serializes discards, whether or not their checkout has an entry: an
@@ -236,11 +244,8 @@ impl Drop for ChatInterest {
             }
             state.released_at = Some(Instant::now());
         }
-        // Only an archived chat's entry depends on interest; reconcile once the
-        // linger runs out so its checkout is released.
-        if is_archived_here(&inner, &self.chat_id)
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        // Reconcile once the linger runs out so the checkout is released.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let notify = inner.interest_changed.clone();
             let linger = inner.interest_linger;
             runtime.spawn(async move {
@@ -249,15 +254,6 @@ impl Drop for ChatInterest {
             });
         }
     }
-}
-
-fn is_archived_here(inner: &DiffSyncInner, chat_id: &str) -> bool {
-    inner
-        .workspace
-        .watch_chats()
-        .borrow()
-        .iter()
-        .any(|chat| chat.id == chat_id && chat.archived && chat.device_id == inner.device_id)
 }
 
 /// Chats with live or lingering interest; prunes lapsed records.
@@ -316,7 +312,7 @@ impl CheckoutDiffSync {
     }
 
     /// [`CheckoutDiffSync::start_with_orphan_grace`] plus an explicit interest
-    /// linger — test hook for archived-chat interest release.
+    /// linger — test hook for chat interest release.
     #[doc(hidden)]
     pub fn start_with_timings(
         repos: Repos,
@@ -339,6 +335,7 @@ impl CheckoutDiffSync {
                 http: reqwest::Client::new(),
                 entries: Mutex::new(HashMap::new()),
                 reconcile_gate: tokio::sync::Mutex::new(()),
+                capture_gate: tokio::sync::Mutex::new(()),
                 identities: Mutex::new(HashMap::new()),
                 orphan_grace,
                 diffs_tx,
@@ -415,12 +412,11 @@ impl CheckoutDiffSync {
         tracked
     }
 
-    /// Keep `chat_id` tracked while the returned guard lives — even when the
-    /// chat is archived. Archived chats otherwise cost nothing (no entry,
-    /// watch, capture or sidecar), but an archived chat someone has open must
-    /// still show its checkout's live diff, accept a discard, and get its
-    /// `checkoutId` stamped. The engine holds one guard per open transcript
-    /// stream; released interest lingers [`INTEREST_LINGER`].
+    /// Keep `chat_id` tracked while the returned guard lives, whether archived
+    /// or not. The engine holds one guard per open transcript, Git-status or
+    /// chat-naming diff stream. Released interest lingers [`INTEREST_LINGER`] to
+    /// avoid rebuilding watchers and rescanning when someone briefly switches
+    /// chats.
     pub fn retain_chat(&self, chat_id: &str) -> ChatInterest {
         let first = {
             let mut interest = lock(&self.inner.interest);
@@ -432,14 +428,35 @@ impl CheckoutDiffSync {
                 .is_none_or(|at| at.elapsed() >= self.inner.interest_linger);
             state.holders == 1 && lapsed
         };
-        // Non-archived chats are tracked anyway — no reconcile needed.
-        if first && is_archived_here(&self.inner, chat_id) {
+        if first {
             self.inner.interest_changed.notify_one();
         }
         ChatInterest {
             inner: Arc::downgrade(&self.inner),
             chat_id: chat_id.to_string(),
         }
+    }
+
+    /// Keep the checkout at `root` tracked for a viewer with no chat of its own
+    /// (a project's file tree). Checkouts are tracked through their chats, so
+    /// this holds those here at the moment; a checkout without one has nothing
+    /// to scan for, as ever.
+    pub(crate) fn retain_checkout(&self, root: &Path) -> Vec<ChatInterest> {
+        let Ok(root) = std::fs::canonicalize(root) else {
+            return Vec::new();
+        };
+        let chats = self.inner.workspace.watch_chats().borrow().clone();
+        chats
+            .iter()
+            .filter(|chat| chat.device_id == self.inner.device_id && !chat.archived)
+            .filter(|chat| {
+                chat.cwd
+                    .as_deref()
+                    .and_then(|cwd| std::fs::canonicalize(cwd).ok())
+                    .is_some_and(|cwd| cwd.starts_with(&root))
+            })
+            .map(|chat| self.retain_chat(&chat.id))
+            .collect()
     }
 
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
@@ -593,17 +610,16 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     let mut groups: HashMap<String, (CheckoutIdentity, Vec<Chat>)> = HashMap::new();
     // Dedupe resolution within this pass — many chats share one checkout.
     let mut resolved: HashMap<String, Option<CheckoutIdentity>> = HashMap::new();
-    // This device's archived chats nobody has open: never grouped (no entry,
-    // watcher, capture or sidecar), and an entry left holding only these is
-    // dropped below. An archived chat with a viewer is grouped like any other.
+    // Filter before resolving identities: unopened chats must not spawn Git,
+    // including on the repair tick. A closed checkout is removed after linger.
     let interested = interested_chats(inner);
-    let mut archived: HashSet<String> = HashSet::new();
+    let mut inactive: HashSet<String> = HashSet::new();
     for chat in chats {
         if chat.device_id != inner.device_id {
             continue;
         }
-        if chat.archived && !interested.contains(&chat.id) {
-            archived.insert(chat.id);
+        if !interested.contains(&chat.id) {
+            inactive.insert(chat.id);
             continue;
         }
         let Some(cwd) = chat.cwd.clone() else {
@@ -649,8 +665,8 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     // Close entries whose checkout has had no chats for a full grace period;
     // drop their published diff. A single pass that misses a checkout only
     // *marks* it — teardown is expensive to undo (re-add kicks a capture), so
-    // absence must be sustained before we act on it. Archiving is not a flap:
-    // an entry whose every chat is now an archived row goes immediately.
+    // absence must be sustained before we act on it. Released interest has
+    // already lingered: an entry with only inactive chats goes immediately.
     let removed: Vec<String> = {
         let now = std::time::Instant::now();
         let mut entries = lock(&inner.entries);
@@ -663,11 +679,11 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                 }
                 continue;
             }
-            let archived_away = {
+            let inactive_away = {
                 let held = lock(&entry.chats);
-                !held.is_empty() && held.iter().all(|chat| archived.contains(&chat.id))
+                !held.is_empty() && held.iter().all(|chat| inactive.contains(&chat.id))
             };
-            if archived_away {
+            if inactive_away {
                 removed.push(id.clone());
                 continue;
             }
@@ -681,7 +697,9 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             }
         }
         for id in &removed {
-            entries.remove(id); // dropping the entry drops watchers + ends its task
+            if let Some(entry) = entries.remove(id) {
+                entry.cancel.cancel(); // stop Git even if a capture holds the entry alive
+            }
         }
         removed
     };
@@ -782,6 +800,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         checksum: Mutex::new(None),
         orphaned_since: Mutex::new(None),
         skipped_while_orphaned: AtomicBool::new(false),
+        cancel: inner.cancel.child_token(),
         kick_tx: kick_tx.clone(),
         watchers: Mutex::new(Vec::new()),
     });
@@ -790,7 +809,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         Arc::downgrade(inner),
         Arc::downgrade(&entry),
         kick_rx,
-        inner.cancel.clone(),
+        entry.cancel.clone(),
     ));
     let _ = kick_tx.send(()); // initial snapshot — must not wait for watchers
 
@@ -852,10 +871,18 @@ async fn entry_task(
     mut kick_rx: mpsc::UnboundedReceiver<()>,
     cancel: CancellationToken,
 ) {
-    while kick_rx.recv().await.is_some() {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            kick = kick_rx.recv() => if kick.is_none() { return },
+        }
         // Trailing debounce: wait for the burst to settle.
         loop {
-            match tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()).await {
+            let kick = tokio::select! {
+                _ = cancel.cancelled() => return,
+                kick = tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()) => kick,
+            };
+            match kick {
                 Ok(Some(())) => continue,
                 Ok(None) => return, // entry closed mid-burst
                 Err(_) => break,
@@ -884,8 +911,32 @@ async fn entry_task(
 // Snapshot + publish
 // ---------------------------------------------------------------------------
 
+/// Run `capture` once the gate is free, letting it go after `hold`: the capture
+/// goes on, and the next checkout's starts beside it.
+async fn gated<T>(
+    gate: &tokio::sync::Mutex<()>,
+    hold: Duration,
+    capture: impl Future<Output = T>,
+) -> T {
+    let held = gate.lock().await;
+    let mut capture = std::pin::pin!(capture);
+    tokio::select! {
+        out = &mut capture => out,
+        _ = tokio::time::sleep(hold) => {
+            drop(held);
+            capture.await
+        }
+    }
+}
+
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
-    let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
+    let snapshot = gated(
+        &inner.capture_gate,
+        CAPTURE_GATE_HOLD,
+        capture_diff(&inner.repos, &entry.identity.root),
+    )
+    .await;
+    let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(err) => {
             tracing::debug!(checkout = %entry.identity.root.display(), error = %err,
@@ -1026,7 +1077,7 @@ async fn diff_sync_task(
                 // sync itself writes them) and must never fan out into git.
                 reconcile(&inner, chats, false).await;
             }
-            // An archived chat gained its first viewer or its interest lapsed.
+            // A chat gained its first viewer or its interest lapsed.
             _ = interest_changed.notified() => {
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow().clone();
@@ -1094,6 +1145,8 @@ async fn capture_git_in<S: AsRef<OsStr>>(
     let mut child = cmd
         .spawn()
         .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
+    // Dropping this (cancelled capture, early return) kills the real git too.
+    let _tree = crate::git_tree::GitTree::adopt(&child);
     let mut stdout = child
         .stdout
         .take()
@@ -1120,6 +1173,11 @@ async fn capture_git_in<S: AsRef<OsStr>>(
         }
         out.extend_from_slice(&buf[..n]);
     }
+    // Close our read end before waiting. On Windows `git` is a launcher and
+    // start_kill only ends the launcher; the real git keeps writing, blocks on
+    // the full pipe, and holds stderr open, so wait_with_output below never
+    // returns and the git is orphaned. A closed pipe makes it exit.
+    drop(stdout);
     let output = child
         .wait_with_output()
         .await
@@ -1773,8 +1831,15 @@ async fn run_git_for_path_batch(
         command.arg(path_argument(path));
     }
     command.stdin(std::process::Stdio::null());
-    let output = command
-        .output()
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|error| EngineError::Other(format!("git spawn failed: {error}")))?;
+    let _tree = crate::git_tree::GitTree::adopt(&child);
+    let output = child
+        .wait_with_output()
         .await
         .map_err(|error| EngineError::Other(format!("git spawn failed: {error}")))?;
     if output.status.success() {
@@ -2103,6 +2168,49 @@ mod watch_budget_tests {
         CheckoutIdentity, MAX_WATCH_DIRS, exceeds_watch_budget, has_non_utf8_status_path,
         is_checkout_change, path_batches, watch_targets,
     };
+
+    /// Captures take turns, but a stuck one can't keep the rest of the open
+    /// chats from their diffs.
+    #[tokio::test]
+    async fn the_capture_gate_takes_turns_and_lets_go_of_a_stuck_capture() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let first = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                super::gated(&gate, Duration::from_secs(600), async {
+                    released.await.unwrap();
+                })
+                .await;
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            super::gated(&gate, Duration::from_secs(600), async {}),
+        )
+        .await
+        .expect_err("the gate is taken");
+        release.send(()).unwrap();
+        first.await.unwrap();
+        super::gated(&gate, Duration::from_secs(600), async {}).await;
+
+        let stuck = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                super::gated(&gate, Duration::from_millis(50), std::future::pending::<()>()).await;
+            }
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            super::gated(&gate, Duration::from_secs(600), async {}),
+        )
+        .await
+        .expect("the next capture runs beside the stuck one");
+        stuck.abort();
+    }
 
     /// End to end through a real watcher: opening a file under a watched
     /// checkout raises access events on Linux, and before the filter each one

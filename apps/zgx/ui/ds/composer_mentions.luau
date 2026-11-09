@@ -2,7 +2,8 @@
 -- (Zeron's triggers, crates/ui/src/composer.rs: `@` and `/` after a space
 -- or at a start, `$` not before a digit, none inside code). As one is
 -- typed, a popover opens at the caret with what matches, its first row
--- lit; ↑ and ↓ move, Enter or Tab take the row, Escape puts the popover
+-- lit; ↑ and ↓ move, Enter or Tab take the row (with no row, Enter sends
+-- the draft), Escape puts the popover
 -- away until the token is typed at again. A row chosen lands in the draft
 -- as its token and a space: a file by its name alone (as Zeron's chips name
 -- it), the shortest end of its path that tells it from another of that
@@ -150,6 +151,15 @@ function M.use(opts: Use)
 		token:get()
 		active:set(1)
 	end)
+	-- A list closed (Escape, a click away) stays closed for that token alone:
+	-- its trigger deleted, the same one typed again in its place opens it.
+	ui.effect(function()
+		local t = token:get()
+		local gone = dismissed:peek()
+		if gone ~= -1 and (t == nil or t.from ~= gone) then
+			dismissed:set(-1)
+		end
+	end)
 	-- What each token in the draft stands for (a file's name, its path).
 	-- A token that leaves the draft (replaced, deleted, edited) takes its
 	-- path with it.
@@ -223,8 +233,13 @@ function M.use(opts: Use)
 			local item = list[active:peek()]
 			if item then
 				choose(item)
+				return true
 			end
-			return true
+			-- Nothing lit (no row matches, or the list is still loading):
+			-- Enter is the composer's again, so it sends, as Zeron's does
+			-- (composer.rs `enter_outcome`). A last word like `/tmp`,
+			-- `$HOME` or `@someone` once ate it, and nothing went.
+			return e.key == "Tab"
 		elseif e.key == "Escape" then
 			local t = token:peek()
 			if t then

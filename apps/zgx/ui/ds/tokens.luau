@@ -14,12 +14,18 @@ function M.setup()
 	-- panel tint and row wash, in every theme and template, rather than
 	-- zgx's (a saturated highlight). Their rows and panel keep zgx's shape.
 	-- The app's own editors draw ds/editor_menu.
-	ui.theme.tokens {
-		menu = {
-			bg = "{zeron.menu.tint}",
-			hover = "{hover}",
-		},
-	}
+	-- (Their glass as the menus' own, ds/glass `menu`: the tint where a
+	-- popup's glass shows through, solid where it can't, or opaque.)
+	local material = require("@self/material")
+	ui.effect(function()
+		local through = material.menus_see_through()
+		ui.theme.tokens {
+			menu = {
+				bg = if through then "{zeron.menu.tint}" else "{zeron.menu.solid}",
+				hover = "{hover}",
+			},
+		}
+	end)
 	ui.theme.tokens {
 		zeron = {
 			-- Half-steps of the spacing scale (space.1 to 8: 4, 8, 12, 16, 24,
@@ -55,6 +61,15 @@ function M.setup()
 				drop = "alpha({accent}, 0.14)",
 				drop_edge = "alpha({accent}, 0.7)",
 			},
+			-- The panel's card, frosted (screens/panel): Zeron's panel
+			-- (theme.rs `panel_bg`, its background at 0.4); a theme without
+			-- its own, the page's card's (a chat's not focused: macOS's panel
+			-- is level with those, a focused chat alone a step lighter).
+			panel = { tint = "{zeron.inset.bg}" },
+			-- The sidebar's card: frosted, its own wash over the window's glass
+			-- (`tint`, the themes': shipping's sidebar tone, theme.rs
+			-- `wash(0.05)`); opaque, the page's card's fill (`solid`).
+			sidebar = { tint = "{zeron.inset.bg}", solid = "{zeron.inset.bg}" },
 			-- Between the items of any list (a menu's rows, a sidebar's pages):
 			-- enough that one row's wash (hover, selected) never touches the
 			-- next's, no more.
@@ -69,6 +84,21 @@ function M.setup()
 				glyph = { sm = 14, md = 16, lg = 16 },
 				radius = "{radius.lg}",
 			},
+			-- A title bar control's wash (ds/icon_button's `bar`: its glyph
+			-- held, this alone coming), under the pointer and pressed: the
+			-- shared washes, which Zeron's themes make its titlebar's firmer
+			-- (zeron-dark/light.json, shipping's `element_hover`/`_active`).
+			-- `ink`: its glyph, held through them; Zeron's themes make it
+			-- solid (the secondary as it reads on the strip), so the wash under
+			-- it never shows through.
+			bar = { hover = "{hover}", pressed = "{pressed}", ink = "{text.secondary}" },
+			-- A panel's tab in its strip (Zeron's surface_chrome.rs
+			-- `tab_chip`): as wide as every other (`TAB_CHIP_WIDTH`), its icon's
+			-- slot and its title 3 apart, its title's size (11.5, a step under
+			-- the small text's), the chosen one on a wash and the others on a
+			-- fainter one under the pointer (`tab_frame`'s 0.10 and `tab`'s
+			-- 0.06 in Zeron's themes, zeron-dark/light.json).
+			tab = { w = 112, gap = 3, size = 11.5, selected = "{zeron.selected.flat.bg}", hover = "{hover}" },
 			-- The lines of a tree (a group's sessions off its header, as
 			-- Zeron's transcript draws its tools): the text's own ink, faint
 			-- (Zeron's hairline at 12%), so it reads in both themes.
@@ -114,7 +144,9 @@ function M.setup()
 				heading = 24,
 				glyph = { box = 18, size = 16 },
 				width = 232,
-				blur = 30,
+				-- (Zeron's frost::MENU_BLUR, as its popovers, palette and
+				-- dialogs blur.)
+				blur = 16,
 			},
 			-- An island: controls gathered on glass over the page (the title
 			-- bar's at the window's top left as the sidebar goes, the sidebar's
@@ -202,6 +234,16 @@ function M.setup()
 					row = 32,
 					-- A tray's body never grows past this; past it, it scrolls.
 					body = 216,
+				},
+				-- The deck: the trays as the composer's own top (ds/composer_dock).
+				-- Its header's inset from the frame, and its tabs' height: capsules
+				-- concentric with the frame (26 less its edge and 10 is 15, a 30
+				-- capsule's), the header as tall as the pill's own line. The thumb
+				-- under the open tab: the menus' selected wash, as ⌘K's scopes.
+				deck = {
+					inset = 10,
+					tab = 30,
+					thumb = "{zeron.menu.selected}",
 				},
 				-- A question's option (ds/composer_ask): its row, its corner, the
 				-- number cap at its start; chosen, a ring (never a fill).
@@ -433,6 +475,11 @@ function M.setup()
 				edge_focus = "alpha({accent}, 0.7)",
 				edge_error = "alpha({danger}, 0.7)",
 				placeholder = "{text.tertiary}",
+				-- Frosted, its fill (Zeron's `input_glass_bg`); a theme
+				-- without its own, the well's.
+				glass = "{zeron.field.bg}",
+				-- Under the pointer: it lifts, as Zeron's (settings/widgets.rs).
+				glass_hover = "{zeron.field.hover}",
 				-- Its type at each size, and a multi-line field's line.
 				line = 20,
 			},
@@ -495,6 +542,14 @@ function M.setup()
 				row = 52,
 				control = 240,
 				card = "{surface.base}",
+				-- Frosted, a card's fill (Zeron's settings `block_fill`); a
+				-- theme without its own, the card's.
+				tint = "{zeron.settings.card}",
+				-- Frosted, a quieter card under a line (a pull request's note:
+				-- Zeron's `ink(0.035)`) and a comment's card (`render_comment_card`,
+				-- `ink(0.05)`); a theme without its own, the card's.
+				note = "{zeron.settings.card}",
+				comment = "{zeron.settings.card}",
 				edge = "{border.subtle}",
 				rule = "{border.subtle}",
 			},

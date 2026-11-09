@@ -115,7 +115,9 @@ pub struct Space {
     pub device_id: String,
     /// Absolute folder path on the owning device.
     pub path: String,
-    /// User rename; absent ⇒ display = basename(path).
+    /// User rename; absent ⇒ display = basename(path). As read from the
+    /// registry, its repository's: the same on every copy with a shared
+    /// `repository_id` (any but `local:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Owner-stamped: is `path` inside a git work tree?
@@ -142,7 +144,8 @@ pub struct Space {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<String>,
     /// The picture its people chose for it (LWW, from any device); absent ⇒
-    /// its default tile (its repository's artwork, else its initial).
+    /// its default tile (its repository's artwork, else its initial). Shared
+    /// by a repository's copies like `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<SpaceIcon>,
     pub created_at: DateTime<Utc>,
@@ -330,6 +333,40 @@ pub struct Chat {
         deserialize_with = "lenient_child_kind"
     )]
     pub child_kind: Option<ChildKind>,
+    /// Put to sleep by the person until a time (the Activity sidebar's
+    /// Asleep): synced, so every device shows it asleep, and the engine that
+    /// hosts the chat wakes it early the moment it starts asking for the
+    /// person or fails (an ask already open when it was put to sleep is no
+    /// such moment). Read it through [`Chat::sleep_state`]. Missing on older
+    /// peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep: Option<ChatSleep>,
+}
+
+/// A chat put to sleep ([`Chat::sleep`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSleep {
+    /// When it wakes on its own.
+    pub until: DateTime<Utc>,
+    /// When it was put to sleep.
+    pub at: DateTime<Utc>,
+    /// Woken early (it asked for the person, or failed): when. Its time
+    /// passing needs no write; [`Chat::sleep_state`] reads that from `until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woke_at: Option<DateTime<Utc>>,
+}
+
+/// Where a chat stands with its sleep at a moment ([`Chat::sleep_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepState {
+    /// Never put to sleep, or woken and seen since.
+    Awake,
+    /// Asleep until then.
+    Asleep { until: DateTime<Utc> },
+    /// Woke then (its time came, or it asked for the person), and nobody
+    /// has looked at it since.
+    Woke { at: DateTime<Utc> },
 }
 
 /// A child chat's relation to its parent ([`Chat::child_kind`]).
@@ -386,10 +423,60 @@ impl Chat {
 impl Chat {
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
+        self.seen_marks().unseen()
+    }
+
+    /// What its display status reads from the chat itself.
+    pub fn seen_marks(&self) -> SeenMarks {
+        SeenMarks {
+            last_message_at: self.last_message_at,
+            last_seen_at: self.last_seen_at,
+        }
+    }
+
+    /// Its sleep at `now` ([`ChatSleep::state`]). Pure.
+    pub fn sleep_state(&self, now: DateTime<Utc>) -> SleepState {
+        self.sleep
+            .as_ref()
+            .map_or(SleepState::Awake, |sleep| sleep.state(self.last_seen_at, now))
+    }
+}
+
+/// What a chat's display status reads from the chat itself: when it last
+/// said something, and when it was last seen. A viewport that holds chats
+/// as raw rows reads these two and derives the status as every other does
+/// ([`crate::view::display_status_from`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeenMarks {
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl SeenMarks {
+    /// It said something since it was last seen.
+    pub fn unseen(&self) -> bool {
         match (self.last_message_at, self.last_seen_at) {
             (Some(msg), Some(seen)) => msg > seen,
             (Some(_), None) => true,
             (None, _) => false,
+        }
+    }
+}
+
+impl ChatSleep {
+    /// Where its chat stands at `now`, last seen at `last_seen_at`: asleep
+    /// until its time unless woken early; once woken, "woke" until the chat
+    /// is seen after it woke. Pure.
+    pub fn state(&self, last_seen_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> SleepState {
+        let woke = match self.woke_at {
+            Some(at) => at,
+            None if self.until > now => return SleepState::Asleep { until: self.until },
+            None => self.until,
+        };
+        if last_seen_at.is_some_and(|seen| seen >= woke) {
+            SleepState::Awake
+        } else {
+            SleepState::Woke { at: woke }
         }
     }
 }
@@ -401,6 +488,10 @@ impl Chat {
 pub enum ChatIndicator {
     Working,
     AwaitingInput,
+    /// Its turn ended, and the agent waits on background work it started (a
+    /// background agent, or a command it said it waits on) that will wake it
+    /// when it ends: not finished, not working, nothing for the person yet.
+    Waiting,
     Errored,
     /// Finished running (or errored out) but not seen yet on any device.
     Completed,
@@ -410,11 +501,11 @@ pub enum ChatIndicator {
 /// Derive display status from fresh evidence. Use `view::display_status` at
 /// presentation boundaries; it handles stale activity without inventing success.
 pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
-    chat_indicator_inner(chat, live, true)
+    indicator_from(chat.seen_marks(), live, true)
 }
 
-pub(crate) fn chat_indicator_inner(
-    chat: &Chat,
+pub(crate) fn indicator_from(
+    chat: SeenMarks,
     live: Option<&Session>,
     terminal_activity: bool,
 ) -> ChatIndicator {
@@ -434,6 +525,9 @@ pub(crate) fn chat_indicator_inner(
     }) {
         Some(SessionStatus::Working) => ChatIndicator::Working,
         Some(SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,
+        Some(SessionStatus::Idle) if live.is_some_and(|s| s.waiting.is_some()) => {
+            ChatIndicator::Waiting
+        }
         _ if live.is_some_and(|s| s.status == SessionStatus::Errored) && chat.unseen()
             || terminal_unseen
                 && terminal.is_some_and(|a| a.report.state == crate::ProgramState::Error) =>
@@ -510,6 +604,49 @@ pub struct Session {
     /// through `view::background_tasks`. Missing on older peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// Set while the turn has ended and the agent waits on background work
+    /// that wakes it when it ends (`status` stays `Idle`; the completion it
+    /// would mark is held back until the wait is over). Only the hosting
+    /// engine writes it, heartbeating the row while it holds; read it
+    /// through `view::waiting`, which drops a stale one. Missing on older
+    /// peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<SessionWaiting>,
+}
+
+/// What a chat's agent waits on after its turn ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWaiting {
+    /// When the turn ended into the wait.
+    pub since: DateTime<Utc>,
+    /// The work it waits on, oldest first (empty for a moment after the
+    /// last of it ended, while the wake turn starts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<WaitingOn>,
+}
+
+/// One piece of work a waiting agent will be woken by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingOn {
+    /// The runtime's id for it (a background process's `BackgroundTask::id`).
+    pub id: String,
+    pub kind: WaitingKind,
+    /// What it is, as the person would read it: a command, or an agent's task.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WaitingKind {
+    /// A background agent: it always reports back.
+    Agent,
+    /// A background process the agent said it waits on.
+    Process,
+    /// A kind from a newer peer.
+    #[serde(other)]
+    Other,
 }
 
 /// One background process of a chat's agent, as its runtime reports it.

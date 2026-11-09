@@ -39,7 +39,20 @@ const VERSION: u64 = 1;
 /// granted on install, even to your own plugins; always asked. (A
 /// `ui.replace` module runs as the app's own code, every app grant with it:
 /// zgx's `require` of `@app/…` loads the replacement in the app's VM.)
-pub const OUTSIDE_SANDBOX: &[&str] = &["native", "commands", "service", "devices", "ui.replace"];
+/// The agent controls (switching an account, setting a model) are here
+/// too: not code, but changes to what your agents run as, so each plugin
+/// is allowed them by the person, never by being yours.
+pub const OUTSIDE_SANDBOX: &[&str] = &[
+    "native",
+    "commands",
+    "service",
+    "devices",
+    "ui.replace",
+    "accounts.switch",
+    "models.set",
+    // Sending messages as you, to your agents: what they then do is theirs.
+    "messages.send",
+];
 
 /// The hosts of a plugin with "network" that names none: any public one.
 pub const ANY_HOST: &str = "*";

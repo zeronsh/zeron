@@ -14,12 +14,18 @@ function M.setup()
 	-- panel tint and row wash, in every theme and template, rather than
 	-- zgx's (a saturated highlight). Their rows and panel keep zgx's shape.
 	-- The app's own editors draw ds/editor_menu.
-	ui.theme.tokens {
-		menu = {
-			bg = "{zeron.menu.tint}",
-			hover = "{hover}",
-		},
-	}
+	-- (Their glass as the menus' own, ds/glass `menu`: the tint where a
+	-- popup's glass shows through, solid where it can't, or opaque.)
+	local material = require("@self/material")
+	ui.effect(function()
+		local through = material.menus_see_through()
+		ui.theme.tokens {
+			menu = {
+				bg = if through then "{zeron.menu.tint}" else "{zeron.menu.solid}",
+				hover = "{hover}",
+			},
+		}
+	end)
 	ui.theme.tokens {
 		zeron = {
 			-- Half-steps of the spacing scale (space.1 to 8: 4, 8, 12, 16, 24,
@@ -173,6 +179,16 @@ function M.setup()
 					row = 32,
 					-- A tray's body never grows past this; past it, it scrolls.
 					body = 216,
+				},
+				-- The deck: the trays as the composer's own top (ds/composer_dock).
+				-- Its header's inset from the frame, and its tabs' height: capsules
+				-- concentric with the frame (26 less its edge and 10 is 15, a 30
+				-- capsule's), the header as tall as the pill's own line. The thumb
+				-- under the open tab: the menus' selected wash, as ⌘K's scopes.
+				deck = {
+					inset = 10,
+					tab = 30,
+					thumb = "{zeron.menu.selected}",
 				},
 				-- A question's option (ds/composer_ask): its row, its corner, the
 				-- number cap at its start; chosen, a ring (never a fill).

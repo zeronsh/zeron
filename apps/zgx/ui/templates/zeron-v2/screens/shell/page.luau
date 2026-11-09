@@ -81,7 +81,12 @@ return function(props: Props): Node
 		end)
 	end, { w_full = true, h_full = true })
 
-	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
+	-- (Where the pointer is, only while a wallpaper reads it: a plugin's.
+	-- Your picture, or none, never does, and its writes on every move
+	-- went nowhere.)
+	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, function(): boolean
+		return home() and string.find(appearance.showing:peek(), "^plugin:") ~= nil
+	end)
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
@@ -534,6 +539,7 @@ return function(props: Props): Node
 	local base = open_w:peek()
 	local off = ui.use_state(0)
 	local easing: any = nil
+	local steps = 0
 	-- Whose panel shows (the session's, a plugin page's; none on a new
 	-- chat): another one is the route moving, not the person opening or
 	-- closing this one, and the panel lands at once, as it is there.
@@ -606,15 +612,16 @@ return function(props: Props): Node
 			end
 			off:set(showing - to)
 			local params = motion.column(off:peek(), 0)
-			local this: any = nil
+			-- (By number: a callback holding its own clip would keep both for good.)
+			steps += 1
+			local this = steps
 			params.onComplete = function()
-				if easing == this then
+				if steps == this then
 					easing = nil
 					revealing:set(false)
 				end
 			end
-			this = anime.animate(off, params)
-			easing = this
+			easing = anime.animate(off, params)
 		else
 			-- The window resized (or the room it fills while expanded moved):
 			-- where it goes moves at once; a step under way goes on.
@@ -701,6 +708,9 @@ return function(props: Props): Node
 			if boundary.load("@app/screens/panel")
 				then boundary.screen(boundary.named("shell.boundary.screen.panel"), "@app/screens/panel", function(panel): Node
 					return panel.Panel {
+						visible = function(): boolean
+							return shown:get()
+						end,
 						project = route.project,
 						session = route.session,
 						page = route.page,

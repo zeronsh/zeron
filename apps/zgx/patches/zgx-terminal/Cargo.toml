@@ -1,4 +1,4 @@
-# zgx-terminal at zgx 21f8fa2, vendored for Zeron's Windows build: block
+# zgx-terminal at zgx bf4a3de0, vendored for Zeron's Windows build: block
 # elements and box drawing drawn to the cell (src/paint.rs), as Ghostty draws
 # them on macOS. Its zgx and alacritty are the same git revision as the app's.
 [package]
@@ -13,10 +13,10 @@ categories = ["gui", "command-line-interface"]
 description = "Terminal sessions for zgx: a shell on a pseudoterminal (openpty, ConPTY) and its screen, kept by alacritty_terminal."
 
 [dependencies]
-zgx = { git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f190c2ba6e939aa8ce688e5d09", default-features = false }
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "bf4a3de0504edd0c769d5d8c19c8c2a6c39c400d", default-features = false }
 # The screen model: the VT parser, grid, scrollback, selection and modes,
 # and the pseudoterminals (openpty on Unix, ConPTY on Windows).
-alacritty_terminal = { package = "zgx-alacritty-terminal", git = "https://github.com/zeronsh/zgx", rev = "21f8fa29fd8af4f190c2ba6e939aa8ce688e5d09", default-features = false }
+alacritty_terminal = { package = "zgx-alacritty-terminal", git = "https://github.com/zeronsh/zgx", rev = "bf4a3de0504edd0c769d5d8c19c8c2a6c39c400d", default-features = false }
 # The session's I/O thread sleeps in it until the shell writes or the app does.
 polling = "3"
 

@@ -23,7 +23,8 @@
 --   never wrap (a long one scrolls sideways, fading at the edge it runs
 --   past).
 -- - A table sits in a hairline frame, its header quieter than its cells,
---   its columns as wide as their widest cell; wide, it scrolls sideways.
+--   fitted to the reply's width with its prose wrapping; only what can't fit
+--   scrolls sideways (`table_block`).
 -- - A quote is set back by a soft bar, in the secondary ink.
 --
 -- The text is selectable through whatever holds it (a transcript puts
@@ -41,6 +42,7 @@ local Syntax = require("@self/syntax")
 -- path, and the opener the shell sets must be the one markdown reads.)
 local Motion = require("@self/motion")
 local Links = require("@ds/links")
+local Rail = require("@self/rail")
 local FileIcon = require("@self/file_icons")
 -- LaTeX math: `$$…$$` and `$…$` read before markdown is (ds/math).
 local Math = require("@self/math")
@@ -203,7 +205,20 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 		if v.ticking then
 			v.ticking:cancel()
 		end
-		v.ticking = anime.animate(tick, { value = tick:peek() + 1, duration = longest, ease = "linear" })
+		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
+		-- By number: a callback holding its own clip would keep both for good.)
+		local clock = (v.clocks or 0) + 1
+		v.clocks = clock
+		v.ticking = anime.animate(tick, {
+			value = tick:peek() + 1,
+			duration = longest,
+			ease = "linear",
+			onComplete = function()
+				if v.clocks == clock then
+					v.ticking = nil
+				end
+			end,
+		})
 	end
 	return going
 end
@@ -621,6 +636,168 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 	end
 	return ui.rich(props)
 end
+
+-- A table: as wide as the reply, with each column sized by what it holds, as
+-- a CSS grid's `auto` tracks share room: each starts at the least it can be,
+-- and what's left goes evenly to those that still want more. So short
+-- columns are whole first and a long one takes the rest, its prose wrapping.
+--
+-- - A short column (`TABLE_SHORT`) never wraps: a label broken in two reads
+--   worse than the prose beside it being a line longer.
+-- - A long one is never narrower than `TABLE_FLOOR`, or than its longest
+--   word: past that, a word a line helps nobody, and the table scrolls.
+-- - Numbers sit on their right edge, as the source says (`---:`) or, as
+--   replies rarely say, when every cell in a column is one.
+--
+-- It scrolls only when those minimums can't fit (many columns, code that
+-- can't break). `wheel_across`: a mouse wheel moves it then; the page keeps
+-- its own scrolling otherwise (zgx's `View::wheel_across` has the rules).
+local TABLE_SHORT = 20
+local TABLE_FLOOR = 144
+
+local function cell_text(cell: { MarkdownRun }): string
+	local flat: { string } = {}
+	for _, run in cell do
+		table.insert(flat, run.x)
+	end
+	return table.concat(flat)
+end
+
+-- A number, with a sign or currency before it and a short unit after it.
+local function is_number(text: string): boolean
+	local body = string.match(text, "^%s*[~≈<>+%-−$€£]*([%d.,]*%d[%d.,]*)%s*[%a%%/°]*%s*$")
+	if not body then
+		return false
+	end
+	local unit = string.match(text, "([%a%%/°]*)%s*$") :: string
+	return #unit <= 4
+end
+
+local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
+	local b, ctx = props.b, props.ctx
+	local count = #b.head
+	local tracks: { string } = {}
+	local aligns: { string } = {}
+	local any_long = false
+	for c, head in b.head do
+		local longest = #cell_text(head)
+		local numbers, filled = true, 0
+		for _, row in b.rows do
+			local text = cell_text(row[c] or {})
+			longest = math.max(longest, #text)
+			if text ~= "" then
+				filled += 1
+				numbers = numbers and is_number(text)
+			end
+		end
+		local said = if b.align then b.align[c] else nil
+		aligns[c] = if said and said ~= "" then said elseif numbers and filled > 0 then "end" else "start"
+		if longest <= TABLE_SHORT or (numbers and filled > 0) then
+			tracks[c] = "max-content"
+		else
+			tracks[c] = "auto"
+			any_long = true
+		end
+	end
+	-- All short: the last takes what's left, so the hairlines reach the edge.
+	if not any_long then
+		tracks[count] = "minmax(max-content, 1fr)"
+	end
+	local function cell(content: { MarkdownRun }, c: number, head: boolean, last_row: boolean): Node
+		local text: { [string]: any } = {
+			class = "md-text",
+			-- (Not wrapping by a rounding, a short column's track being as wide
+			-- as its words.)
+			wrap = tracks[c] == "auto",
+			text_size = "$zeron.prose.small.size",
+			line_height = "$zeron.prose.small.line",
+		}
+		if head then
+			text.weight = "$font.weight.medium"
+			text.color = "$text.secondary"
+		end
+		return ui.column {
+			class = "md-cell",
+			-- (A column's floor, held by its header: the others' longest words
+			-- still count.)
+			min_w = if head and tracks[c] == "auto" then ui.raw(TABLE_FLOOR, "a long column's least width") else nil,
+			items = aligns[c],
+			pl = if c == 1 then "$space.4" else "$space.3",
+			pr = if c == count then "$space.4" else "$space.3",
+			py = "$space.2",
+			border_sides = { 0, 0, if last_row then 0 else 1, 0 },
+			border_color = if head then "$border" else "$border.subtle",
+			runs(content, text, ctx),
+		}
+	end
+	local cells: { Node } = {}
+	for c, head in b.head do
+		table.insert(cells, cell(head, c, true, #b.rows == 0))
+	end
+	for r, row in b.rows do
+		for c = 1, count do
+			table.insert(cells, cell(row[c] or {}, c, false, r == #b.rows))
+		end
+	end
+	-- (As wide as the view, or what the grid's minimums need if that's more:
+	-- a view lays its content out with no limit, so the width to share has
+	-- to come from here.)
+	local box, content = ui.ref(), ui.ref()
+	local offset = ui.use_state(0)
+	local over = ui.use_state(false)
+	return ui.column {
+		relative = true,
+		w_full = true,
+		on_hover = function(inside: boolean)
+			over:set(inside)
+		end,
+		ui.scroll_x {
+			class = "md-table",
+			ref = box,
+			offset = offset,
+			w_full = true,
+			wheel_across = true,
+			rounded = "$radius.xl",
+			border = 1,
+			border_color = "$border",
+			-- Each edge fades as far as there's more past it, up to its width:
+			-- nothing at rest on a table that fits.
+			fade_x = function(): { number }
+				local at = offset:get()
+				local more = (content.width or 0) - math.max(0, (box.width or 0) - 2) - at
+				return { math.clamp(at, 0, 24), math.clamp(more, 0, 40) }
+			end,
+			ui.div {
+				ref = content,
+				grid = true,
+				cols = function(): string
+					-- (Inside its border. Before it's been laid out, its widest.)
+					local width = box.width
+					return if width and width > 2 then `minmax(min-content, {width - 2})` else "max-content"
+				end,
+				ui.div {
+					class = "md-table-grid",
+					grid = true,
+					cols = table.concat(tracks, " "),
+					cells,
+				},
+			},
+		},
+		Rail {
+			horizontal = true,
+			offset = offset,
+			extent = function(): number
+				return content.width or 0
+			end,
+			view = function(): number
+				return math.max(0, (box.width or 0) - 2)
+			end,
+			hint = function(): boolean
+				return over:get()
+			end,
+		},
+	}
+end)
 
 -- A code block's lines, coloured by the design system's highlighter
 -- (`ds/syntax`, as Files colours a file) when its fence names a language it
@@ -1143,49 +1320,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
 	elseif b.t == "table" then
-		-- Column by column, so each is as wide as its widest cell; cells keep
-		-- to one line (one height a row), and the last column takes what's
-		-- left of the frame.
-		local box = ui.ref()
-		local cell = {
-			wrap = false,
-			h = 36,
-			px = "$space.4",
-			text_size = "$zeron.prose.small.size",
-			line_height = 36,
-		}
-		local cols: { Node } = {}
-		for c, head in b.head do
-			local head_style = table.clone(cell) :: { [string]: any }
-			head_style.weight = "$font.weight.medium"
-			head_style.color = "$text.secondary"
-			head_style.border_sides = { 0, 0, 1, 0 }
-			head_style.border_color = "$border"
-			local cells: { Node } = { runs(head, head_style, ctx) }
-			for r, row in b.rows do
-				local style = table.clone(cell) :: { [string]: any }
-				style.border_sides = { 0, 0, if r < #b.rows then 1 else 0, 0 }
-				style.border_color = "$border.subtle"
-				table.insert(cells, runs(row[c] or {}, style, ctx))
-			end
-			table.insert(cols, ui.column { shrink = 0, grow = if c == #b.head then 1 else 0, cells })
-		end
-		return ui.scroll_x {
-			class = "md-table",
-			ref = box,
-			w_full = true,
-			rounded = "$radius.xl",
-			border = 1,
-			border_color = "$border",
-			fade_x = { 16, 32 },
-			fade_overflow = true,
-			ui.row {
-				min_w = function(): number
-					return math.max(0, (box.width or 0) - 2)
-				end,
-				cols,
-			},
-		}
+		return TableBlock { b = b, ctx = ctx }
 	elseif (b.t == "img" or b.t == "pics") and ctx and ctx.pictures then
 		-- A reply's pictures (ds/reply_picture): one alone, or several that
 		-- follow one another together on a tray. One it won't draw (a URL, a
@@ -1371,7 +1506,17 @@ local function estimate(b: any): number
 		end
 		return math.max(h, 22)
 	elseif t == "table" then
-		return (#(b.rows or {}) + 1) * 36
+		-- (A line for each 64 characters its longest cell runs to, about
+		-- what a share of the reply's width holds.)
+		local h = 37
+		for _, row in b.rows or {} do
+			local longest = 0
+			for _, cell in row do
+				longest = math.max(longest, #cell_text(cell))
+			end
+			h += 17 + 20 * math.max(1, math.ceil(longest / 64))
+		end
+		return h
 	elseif t == "img" then
 		-- (A picture held at its placeholder's height: the column at 16:10.)
 		return 412

@@ -479,6 +479,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         super.viewDidAppear(animated)
         hasAppeared = true
         landed = true
+        app.openChatIds.insert(chatId)
         if !isCompanion { (splitViewController as? SplitRootController)?.sessionDidAppear(chatId) }
         list.settleEdgeEffect()
         #if DEBUG
@@ -521,6 +522,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     /// frozen (no new updates) until you left and came back.
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        app.openChatIds.remove(chatId)
         // Carried to the other shell (iPhone Duo folding or unfolding): it
         // left one stack for another and stays live. UIKit may report the
         // move late or not at all, so ask where the page is, not how it left.

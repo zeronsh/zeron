@@ -86,6 +86,21 @@ test("a command picked lands as its token and is sent as its reference; one type
 	expect(calls).to_contain("send:s2:[/review](zeron-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577227d) the branch, then /compact by hand")
 end)
 
+test("a draft whose last word is a trigger nothing matches still sends on Enter", function()
+	for _, words in { "look in /tmp", "echo $HOME", "ping @nobody", "/nocommand" } do
+		local app = chat()
+		app:type("role:textbox", words)
+		settle(app)
+		-- (Its list shows, with nothing in it.)
+		expect(app:has("#mention-popover")).to_be(true)
+		expect(app:has("role:option")).to_be(false)
+		app:key("Enter")
+		settle(app)
+		expect(app:text("role:textbox")).to_be("")
+		expect(app:state("calls")).to_contain(`send:s2:{words}`)
+	end
+end)
+
 test("Zeron's own commands end the `/` list, named clear of the agent's, and only a chat's in a chat", function()
 	local app = chat()
 	app:type("role:textbox", "/")
@@ -142,5 +157,45 @@ test("every one of Zeron's own runs from the chat page without an error", functi
 		settle(app)
 		expect(app:error()).to_be_nil()
 		expect(app:state("calls")).never.to_contain("send:")
+	end
+end)
+
+test("a trigger closed, deleted and typed again opens its list again", function()
+	local app = chat()
+	-- (Shown: the popover in the tree and not hidden.)
+	local function shown(): boolean
+		for line in app:tree():gmatch("[^\n]+") do
+			if line:find("mention-popover", 1, true) and not line:find(" hidden", 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	for _, trigger in { "/", "@" } do
+		app:fill("role:textbox", "")
+		settle(app)
+		app:type("role:textbox", trigger)
+		settle(app)
+		expect(shown()).to_be(true)
+		-- (Closed first, as Escape or a click away closes it.)
+		app:key("Escape")
+		settle(app)
+		expect(shown()).to_be(false)
+		app:key("Backspace")
+		settle(app)
+		expect(shown()).to_be(false)
+		app:type("role:textbox", trigger)
+		settle(app)
+		expect(shown()).to_be(true)
+		-- (After words too: a space, then the trigger.)
+		app:fill("role:textbox", "look at ")
+		settle(app)
+		app:type("role:textbox", trigger)
+		settle(app)
+		app:key("Backspace")
+		settle(app)
+		app:type("role:textbox", trigger)
+		settle(app)
+		expect(shown()).to_be(true)
 	end
 end)

@@ -12,7 +12,7 @@ use zeron_app::{edge_url_from_env, paths, workos_client_id_from_env};
 use zeron_cli::{Engines, Launch};
 
 fn main() -> anyhow::Result<()> {
-    match zeron_cli::run(env!("CARGO_PKG_VERSION"), Engines::InProcess) {
+    match zeron_cli::run(zeron_update::current_version(), Engines::InProcess) {
         Launch::Done(result) => result,
         Launch::Engine(command) => zeron_app::run_engine_command(command),
         #[cfg(target_os = "linux")]

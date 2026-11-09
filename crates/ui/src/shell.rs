@@ -8934,7 +8934,9 @@ impl Shell {
             Some("Queued")
         } else {
             match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
+                zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::Waiting => {
+                    Some("Working")
+                }
                 zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
                 zeron_proto::ChatIndicator::Errored => Some("Failed"),
                 zeron_proto::ChatIndicator::Completed => Some("Done"),
@@ -14683,6 +14685,7 @@ mod tests {
             room_gen: None,
             parent_chat_id: None,
             child_kind: None,
+            sleep: None,
         }
     }
 
@@ -15005,6 +15008,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            waiting: None,
         }
     }
 
@@ -17823,6 +17827,7 @@ mod exit_regressions {
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
+                        sleep: None,
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });
