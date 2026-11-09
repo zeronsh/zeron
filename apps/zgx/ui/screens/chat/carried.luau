@@ -9,6 +9,7 @@ local Quote = require("@ds/quote")
 local Comments = require("@app/screens/chat/comments")
 local Annotation = require("@ds/annotation")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local AttachmentMentions = require("@ds/attachment_mentions")
 
 local M = {}
 
@@ -63,7 +64,15 @@ function M.pack(chips: { any }, typed: string, text: string): Pack
 		elseif item.path then
 			-- (A project's file: on the session's computer already.)
 			-- (An Appshot goes as its picture; what it shows of the app, below.)
-			table.insert(p.attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = item.name, rel = item.rel, on_host = item.on_host })
+			-- (A picture goes up as `Image N` (its number in the draft), as
+			-- the shipping app stages one: a mention of it names it so.)
+			local picture = item.kind == "image" or item.kind == "appshot"
+			local name = item.name
+			if picture and type(item.mention) == "number" then
+				local ext = string.match(item.path, "(%.[%w]+)$") or ""
+				name = AttachmentMentions.image_label(item.mention) .. ext
+			end
+			table.insert(p.attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = name, rel = item.rel, on_host = item.on_host })
 		elseif item.kind == "annotation" and item.quote then
 			table.insert(p.quotes, { text = item.quote, who = item.name, from = item.from })
 		elseif item.kind == "annotation" and item.annotation then
@@ -86,8 +95,15 @@ end
 
 -- The prompt: `words`, with the blocks and tokens of what it carries.
 function M.text(words: string, p: Pack): string
+	-- (A pick mentioned in the words is there already: not again after.)
+	local picks: { any } = {}
+	for _, item in p.picks do
+		if not string.find(words, Annotation.token(item.annotation or item), 1, true) then
+			table.insert(picks, item)
+		end
+	end
 	-- (The chats' block last: the host takes it off first, src/chat.rs.)
-	return with_chats(Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), p.picks), p.comments), p.chats)
+	return with_chats(Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), picks), p.comments), p.chats)
 end
 
 -- An attached item's name, as what the message carries says it (its
@@ -126,21 +142,33 @@ function M.kind(item: any): (string, string)
 	return "file", "paperclip"
 end
 
--- The words' references to what the message carries (an `@` pick,
--- `[name](zeron-attachment:<chip id>)`): each "(attachment: <name>)", the
--- item's own name (`label`), so the agent can find it in what follows;
--- one to an item no longer carried, its name alone.
-function M.refs(words: string, chips: { any }): string
-	local function named(label: string, id: string): string
-		for _, item in chips do
-			if item.id == id then
-				return `(attachment: {M.label(item) or label})`
-			end
-		end
-		return label
+-- The canonical link an `@` reference to `item` puts in the words: a
+-- picture's or a file's by its number in the draft (ds/attachment_mentions),
+-- an attached chat's Zeron chat mention, a browser pick's token. Each the
+-- engine gives an agent as its plain label. Nil for what has no such link
+-- (a quote, a review comment, pasted words).
+function M.mention(item: any): string?
+	if item.kind == "chat" and item.chat then
+		return ChatLinks.link(item.name, item.chat)
+	elseif item.kind == "annotation" and item.annotation then
+		return Annotation.token(item.annotation)
+	elseif item.path and type(item.mention) == "number" then
+		local picture = item.kind == "image" or item.kind == "appshot"
+		return AttachmentMentions.link(item.mention, if picture then nil else item.name)
 	end
-	-- (Two captures: the label, then the chip's id.)
-	return (string.gsub(words, "%[([^%]]*)%]%(zeron%-attachment:([^%)%s]+)%)", named :: any))
+	return nil
+end
+
+-- The words as they go: a mention of an attachment no longer attached
+-- leaves as its plain label (proto `demote_unattached_mentions`).
+function M.settle(words: string, chips: { any }): string
+	local numbers: { number } = {}
+	for _, item in chips do
+		if item.path and type(item.mention) == "number" then
+			table.insert(numbers, item.mention)
+		end
+	end
+	return AttachmentMentions.demote_unattached(words, numbers)
 end
 
 -- What a sent message shows of what it carries.

@@ -105,19 +105,25 @@ function M.bind(b: Bind): { [string]: any }
 		local carried: { any } = if b.cargo then b.cargo() else {}
 		for _, item in carried do
 			local name = Carried.label(item)
-			if name and item.id then
+			-- (What has a link of its own to go as: a picture or a file by
+			-- its number, an attached chat, a browser pick. Not a quote or a
+			-- review comment.)
+			local link = Carried.mention(item)
+			if name and link then
 				local what, icon = Carried.kind(item)
+				local picture = what == "image" or what == "appshot"
 				table.insert(out, {
 					section = "attachments",
-					value = word(name),
+					-- (Its token in the draft: a picture's its number's.)
+					value = if picture and type(item.mention) == "number" then `Image-{item.mention}` else word(name),
 					label = name,
-					-- (What it is: a picture, a quote…)
+					-- (What it is: a picture, a file…)
 					detail = ui.t(`chat.composer.attachment_kind.{what}`):get(),
 					icon = icon,
 					-- (A file's icon by its name; not a file of the chat's to
-					-- mention: a pick refers to the chip.)
+					-- mention: a pick refers to what's attached.)
 					file_icon = if what == "file" then name else nil,
-					link = `[{string.gsub(name, "[%[%]]", "")}](zeron-attachment:{item.id})`,
+					link = link,
 				})
 			end
 		end

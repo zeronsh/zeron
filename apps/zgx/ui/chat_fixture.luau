@@ -284,6 +284,10 @@ stub.send = function(req: any)
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end
+	-- (And the name each goes up as.)
+	for _, a in req.attachments or {} do
+		note(`attname:{a.name or "-"}`)
+	end
 	-- (An Appshot's: what the host writes after the words.)
 	for _, a in req.appshots or {} do
 		note(`appshot:{a.app}|{a.title or "-"}|{a.path}|{if a.text then "text" else "-"}`)
@@ -1378,6 +1382,41 @@ ui.command {
 			role = "user",
 			text = "Also Look at (attachment: zgx.png) here",
 			at = "Sep 8, 1:55 PM",
+		}
+	end,
+}
+-- Pictures and files with names that trip a careless reader: a macOS
+-- screenshot's (a narrow no-break space before "PM"), brackets and an
+-- emoji, one that says "(attachment:", a long one, and two the same.
+ui.command {
+	id = "attach_odd",
+	title = "Attach pictures and files with odd names",
+	run = function()
+		require("@app/screens/chat/shared").attach_files({
+			{ name = "Screenshot 2026-11-07 at 1.10.14\u{202F}PM.png", path = "assets/favicons/zgx.png" },
+			{ name = "notes (draft) [v2] \u{1F4DD}.md", path = "README.md" },
+			{ name = "see (attachment: other).txt", path = "README.md" },
+			{ name = string.rep("a-very-long-name-", 8) .. "end.txt", path = "README.md" },
+			{ name = "same.txt", path = "README.md" },
+			{ name = "same.txt", path = "README.md" },
+		})
+	end,
+}
+-- A prompt as the engine gives it back after a relaunch: its words keep the
+-- mentions' links; its attachments are named as uploaded (`{id8}-…`).
+ui.command {
+	id = "mention_turn",
+	title = "A prompt mentioning what it carries, read back",
+	run = function()
+		store.messages:push {
+			id = "mu1",
+			role = "user",
+			text = "Look at [Image 1](zeron-image:1) and [notes \\[v2\\].md](zeron-attachment:2)",
+			attachments = {
+				{ kind = "image", name = "92a7aa9f-Image_1.png", src = "assets/favicons/zgx.png" },
+				{ kind = "file", name = "1b2c3d4e-notes__v2_.md" },
+			},
+			at = "Sep 8, 1:56 PM",
 		}
 	end,
 }

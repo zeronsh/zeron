@@ -723,7 +723,7 @@ local function Composer(): Node
 		-- (Each command or skill picked: its canonical reference.)
 		-- (And each reference to what it carries, `@` picked: its name, as
 		-- what follows names it.)
-		local words = Carried.refs(Invocations.encode(if pack.typed ~= "" then pack.typed else text), carried)
+		local words = Carried.settle(Invocations.encode(if pack.typed ~= "" then pack.typed else text), carried)
 		local text_out = Carried.text(words, pack)
 		local id = session_id:peek()
 		own_notice:set(nil)

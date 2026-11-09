@@ -367,6 +367,17 @@ function M.set_cargo_of(key: string, list: { any })
 end
 
 function M.push_cargo(key: string?, item: any)
+	-- A file or a picture: its number in the draft, the next after any
+	-- there (an `@` mention of it names it by that: ds/attachment_mentions).
+	if item.path and item.mention == nil then
+		local top = 0
+		for _, other in M.peek_cargo(key) do
+			if type(other.mention) == "number" and other.mention > top then
+				top = other.mention
+			end
+		end
+		item.mention = top + 1
+	end
 	if key == nil or here:peek() == key then
 		M.cargo:push(item)
 		return

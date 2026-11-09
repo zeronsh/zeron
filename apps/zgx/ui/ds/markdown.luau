@@ -745,6 +745,13 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 			attachment_chip(span, named, ctx.attached[named])
 		elseif r.a and string.match(r.a, "^zeron%-invoke:") then
 			invocation_chip(span, r.x)
+		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
+			-- What it carries, mentioned by its number (ds/attachment_mentions):
+			-- its chip, a picture's glyph or a file's icon, by its name.
+			attachment_chip(span, r.x, { kind = if string.match(r.a, "^zeron%-image:") then "image" else "file" })
+		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
+			-- A browser pick, mentioned (its token): its chip.
+			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })
 		elseif chip and chip.skill then
 			-- A skill's chip, by its name (opening nothing, as a picked one).
 			invocation_chip(span, "$" .. chip.skill)
