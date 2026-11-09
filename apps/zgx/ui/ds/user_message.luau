@@ -18,6 +18,7 @@
 -- `UserMessage { id = "…", text = "…" }`.
 
 local Icon = require("@self/icon")
+local Mark = require("@self/mark")
 local Lightbox = require("@self/lightbox")
 local ReplyPicture = require("@self/reply_picture")
 local Markdown = require("@self/markdown")
@@ -28,7 +29,9 @@ local locale = require("@self/locale")
 -- its name and what it is).
 -- (`appshot`: a picture that is an Appshot, the app it shows and its
 -- window's title: the card says so under it.)
-export type Attachment = { kind: "image" | "file", name: string, src: string?, meta: string?, icon: string?, appshot: { app: string, title: string?, bundle: string? }? }
+-- (`chat`: another chat attached, its id and its agent's mark: a card that
+-- opens it, as the composer showed it, not a mention in the words.)
+export type Attachment = { kind: "image" | "file" | "chat", name: string, src: string?, meta: string?, icon: string?, chat: string?, mark: string?, appshot: { app: string, title: string?, bundle: string? }? }
 -- (`open`: what opens a link in it that isn't the web's, as a file mention.)
 -- (`pictures`: where its pictures' paths show from: a chat on another
 -- device reads them from there, screens/chat/reply_images'
@@ -141,9 +144,22 @@ end
 -- Bubbles without an id: lightbox groups of their own.
 local unnamed = 0
 
--- A file: its glyph on a small tile, its name over what it is.
-local function chip(a: Attachment): Node
+-- A file: its glyph on a small tile, its name over what it is. A chat
+-- attached: its agent's mark on the tile (the side chat's glyph if it has
+-- none), its title, and a press opens it (`open`, as its link would).
+local function chip(a: Attachment, open: ((target: string) -> ())?): Node
+	local chat = a.kind == "chat" and a.chat or nil
+	local glyph = if a.kind == "chat"
+		then (if a.mark then Mark { name = a.mark, size = 18, bare = true } else Icon { name = "side-chat", size = 18 })
+		else Icon { name = (a.icon or "document") :: any, size = 18 }
 	return ui.row {
+		role = if chat and open then "button" else nil,
+		cursor = if chat and open then "pointer" else nil,
+		on_press = if chat and open
+			then function()
+				(open :: (string) -> ())(`zeron-chat:{chat}`)
+			end
+			else nil,
 		h = 56,
 		max_w = 260,
 		pl = "$space.3",
@@ -162,7 +178,7 @@ local function chip(a: Attachment): Node
 			rounded = "$radius.lg",
 			bg = "$hover",
 			color = "$text.secondary",
-			Icon { name = (a.icon or "document") :: any, size = 18 },
+			glyph,
 		},
 		ui.column {
 			min_w = 0,
@@ -281,7 +297,7 @@ return ui.component(function(props: Props): Node
 				table.insert(attachments, thumb(a, from, group, images, shown, pictures))
 			end
 		else
-			table.insert(attachments, chip(a))
+			table.insert(attachments, chip(a, props.open))
 		end
 	end
 	return ui.column {

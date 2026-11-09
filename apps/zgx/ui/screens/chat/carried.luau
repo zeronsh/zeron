@@ -1,7 +1,7 @@
 -- What a message goes with, from the chips on its draft (screens/chat/shared's
 -- cargo), for whichever composer sends it: the chat page's, a side chat's.
 --
---   local p = Carried.pack(chips, typed, text)   sorted, chat links in `p.typed`
+--   local p = Carried.pack(chips, typed, text)   sorted: words, attachments, chats
 --   Carried.text(words, p)                       the words with what goes in them
 --   Carried.shown(p)                             its chips on the sent prompt
 
@@ -26,12 +26,37 @@ export type Pack = {
 	-- Review comments left on files: a block after the words
 	-- (screens/chat/comments), each its file and line.
 	comments: { Comments.Comment },
+	-- Other chats attached (a session dropped from the sidebar): a block
+	-- after the words (`with_chats`), each its link, which the engine reads
+	-- out to the agent; the sent message shows each as a card, as the
+	-- composer did (src/chat.rs `split_chats`).
+	chats: { { name: string, chat: string, mark: string? } },
 }
+
+-- The block attached chats go in after the words (src/chat.rs
+-- `CHATS_HEADER`): its header, then `- [title](zeron-chat:id)`.
+M.CHATS_HEADER = "Chats attached:"
+
+-- `words` with `chats`' block after them.
+local function with_chats(words: string, chats: { { name: string, chat: string, mark: string? } }): string
+	local lines: { string } = {}
+	for _, c in chats do
+		local link = ChatLinks.link(c.name, c.chat)
+		if link then
+			table.insert(lines, `- {link}`)
+		end
+	end
+	if #lines == 0 then
+		return words
+	end
+	local block = `{M.CHATS_HEADER}\n{table.concat(lines, "\n")}`
+	return if string.find(words, "%S") then `{words}\n\n{block}` else block
+end
 
 -- `typed`: the words taken from the draft. `text`: what the composer sent, if
 -- that's nothing.
 function M.pack(chips: { any }, typed: string, text: string): Pack
-	local p: Pack = { typed = typed, attachments = {}, quotes = {}, picks = {}, comments = {} }
+	local p: Pack = { typed = typed, attachments = {}, quotes = {}, picks = {}, comments = {}, chats = {} }
 	for _, item in chips do
 		if item.kind == "comment" then
 			table.insert(p.comments, { file = item.file, line = item.line, body = item.body, to = item.to, side = item.side, snippet = item.snippet })
@@ -47,10 +72,13 @@ function M.pack(chips: { any }, typed: string, text: string): Pack
 			-- A pasted text carried as a chip: its words go in the text.
 			p.typed = p.typed .. "\n\n" .. item.text
 		elseif item.kind == "chat" and item.chat then
-			-- Another chat mentioned (a session dropped from the sidebar):
-			-- its link in the words, the engine's to read out to the agent.
-			local link = ChatLinks.link(item.name, item.chat) or ""
-			p.typed = if p.typed ~= "" then `{p.typed} {link}` elseif text ~= "" then `{text} {link}` else link
+			-- Another chat attached (a session dropped from the sidebar):
+			-- in a block after the words, as an attachment (a chat mentioned
+			-- with @ in the words stays a link in them).
+			table.insert(p.chats, { name = item.name, chat = item.chat, mark = item.mark })
+			if p.typed == "" and text ~= "" then
+				p.typed = text
+			end
 		end
 	end
 	return p
@@ -58,7 +86,8 @@ end
 
 -- The prompt: `words`, with the blocks and tokens of what it carries.
 function M.text(words: string, p: Pack): string
-	return Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), p.picks), p.comments)
+	-- (The chats' block last: the host takes it off first, src/chat.rs.)
+	return with_chats(Comments.with_comments(Annotation.with_annotations(Quote.with_quotes(words, p.quotes), p.picks), p.comments), p.chats)
 end
 
 -- What a sent message shows of what it carries.
@@ -79,6 +108,11 @@ function M.shown(p: Pack): { any }
 	-- And each element picked on a page (chat.rs `split_annotations`).
 	for _, chip in Annotation.shown(p.picks) do
 		table.insert(out, chip)
+	end
+	-- And each chat attached, a card with its agent's mark (chat.rs
+	-- `chat_chip`).
+	for _, c in p.chats do
+		table.insert(out, { kind = "chat", name = c.name, chat = c.chat, mark = c.mark })
 	end
 	-- And its review comments, one chip (chat.rs `comments_chip`).
 	if #p.comments > 0 then
