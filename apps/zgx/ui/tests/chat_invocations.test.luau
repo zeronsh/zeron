@@ -88,13 +88,30 @@ end)
 
 test("narrowing the list lights the row now at its top, and the arrows move the light", function()
 	local app = chat()
+	-- The lit row, by what Enter takes (the tree says nothing of a row's
+	-- `selected`); then the draft put back, and the light moved back to
+	-- that row, so the test goes on from where it was.
 	local function lit(): string?
-		for line in app:tree("#mention-popover"):gmatch("[^\n]+") do
-			if line:find(" selected", 1, true) then
-				return line:match('option "([^"]+)"')
+		local draft = app:text("role:textbox")
+		app:key("Enter")
+		settle(app)
+		local taken = app:text("role:textbox"):match("^(%S+) $")
+		app:fill("role:textbox", draft)
+		settle(app)
+		if taken then
+			local rows: { string } = {}
+			for line in app:tree("#mention-popover"):gmatch("[^\n]+") do
+				local label = line:match('option "([^"]+)"')
+				if label then
+					table.insert(rows, label)
+				end
 			end
+			for _ = 2, table.find(rows, taken) or 1 do
+				app:key("ArrowDown")
+			end
+			settle(app)
 		end
-		return nil
+		return taken
 	end
 	app:type("role:textbox", "/")
 	settle(app)
