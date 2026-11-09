@@ -233,6 +233,9 @@ impl DeferredEngine {
                         // on the port, then reads both.)
                         runtime.core().sessions.set_ipc_token_file(ipc_token_file);
                         runtime.core().sessions.set_ipc_port(port);
+                    } else {
+                        // None is coming: a revived run needn't wait for one.
+                        runtime.core().sessions.set_no_ipc_port();
                     }
                     on_ready(&runtime);
                     *runtime_slot.lock().await = Some(runtime);
