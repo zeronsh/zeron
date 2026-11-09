@@ -1122,3 +1122,49 @@ fn a_plugin_breaking_a_rule_fails_alone_and_says_why() {
     }
     assert_eq!(l.failed_plugins.why("fine"), None);
 }
+
+/// B10 (R26): a plugin removed is forgotten whole, what zgx holds of it this
+/// run included: put back before Zeron quits, it starts from its `initial`
+/// (it once came back with the values it had, and a write still waiting
+/// put its folder back).
+#[test]
+fn a_plugin_removed_and_put_back_starts_from_its_initial_state() {
+    let init = r#"
+local n = ui.persist("n", 0)
+n:set(n:peek() + 1)
+"#;
+    let root = dir("forget-state");
+    let id = format!("zz-forget-{}", std::process::id());
+    let item = plugin(&root, &id, init, &[], &[], &[]);
+    let p = item.plugin().expect("loads");
+    let state = root.join("state");
+    let entry = root.join("app/app.luau");
+    write(&root, "app/app.luau", APP);
+    let host_state = state.clone();
+    let a = TestApp::new(move |runtime| {
+        let host = ScriptHost::new(runtime, &entry).storage(host_state);
+        expose_surface(&host);
+        host.set_plugins(vec![p]);
+        host
+    });
+    a.frames(2);
+    assert_eq!(a.error(), None);
+    a.host.save();
+    let saved = || -> Option<String> {
+        let dir = std::fs::read_dir(&state).ok()?.flatten().find(|e| e.file_name().to_string_lossy().contains(&id))?;
+        std::fs::read_to_string(dir.path().join("n.json")).ok()
+    };
+    assert_eq!(saved().as_deref().map(str::trim), Some("1"));
+    // Removed: unloaded, and forgotten as the bridge forgets it.
+    a.host.set_plugins(vec![]);
+    a.host.reload().unwrap();
+    a.frames(2);
+    super::forget_state(&a.host, &id);
+    assert_eq!(saved(), None, "its folder");
+    // Put back: from 0 again, so 1, not 2.
+    a.host.set_plugins(vec![item.plugin().unwrap()]);
+    a.host.reload().unwrap();
+    a.frames(2);
+    a.host.save();
+    assert_eq!(saved().as_deref().map(str::trim), Some("1"), "starts from its initial");
+}
