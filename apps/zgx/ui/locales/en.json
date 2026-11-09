@@ -1090,7 +1090,8 @@
         "files": "No files match “{q}”",
         "chats": "No chats match “{q}”",
         "attachments": "No attachments match “{q}”"
-      }
+      },
+      "placeholder": "Search files, chats, attachments"
     }
   },
   "settings": {

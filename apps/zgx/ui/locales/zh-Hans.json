@@ -1090,7 +1090,8 @@
         "files": "没有与“{q}”匹配的文件",
         "chats": "没有与“{q}”匹配的对话",
         "attachments": "没有与“{q}”匹配的附件"
-      }
+      },
+      "placeholder": "搜索文件、对话和附件"
     }
   },
   "settings": {

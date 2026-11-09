@@ -876,6 +876,7 @@ return {
 	["ds.mention_launcher.none.files"] = "No files match “{q}”",
 	["ds.mention_launcher.none.chats"] = "No chats match “{q}”",
 	["ds.mention_launcher.none.attachments"] = "No attachments match “{q}”",
+	["ds.mention_launcher.placeholder"] = "Search files, chats, attachments",
 	["common.loading"] = "Loading…",
 	["common.something_went_wrong"] = "Something went wrong.",
 	["common.open"] = "Open",

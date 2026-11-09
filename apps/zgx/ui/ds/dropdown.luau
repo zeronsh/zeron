@@ -61,8 +61,9 @@ export type Item = {
 	disabled: boolean?,
 }
 -- What a caller's own trigger is given: whether the panel is open, and how
--- to open or close it.
-export type Menu = { open: State<boolean>, toggle: () -> () }
+-- to open or close it. A submenu trigger forwards its hover changes so
+-- leaving both the row and its panel can close it.
+export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())? }
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
@@ -146,6 +147,8 @@ export type Props = {
 	-- The caller's own trigger in place of the chip (a row of another
 	-- panel opening this one beside it, as a submenu).
 	trigger: ((menu: Menu) -> Node)?,
+	-- A side-opening menu whose parent stays reachable by the pointer.
+	submenu: boolean?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -838,6 +841,42 @@ return ui.component(function(props: Props): Node
 			show_panel()
 		end
 	end
+	-- A hover-opened submenu stays open across the gap between its row
+	-- and panel. Leaving both starts a short, cancellable closing grace.
+	local over_trigger = false
+	local over_panel = false
+	local cancel_close: (() -> ())? = nil
+	local function stop_close()
+		if cancel_close then
+			cancel_close()
+			cancel_close = nil
+		end
+	end
+	local function hover(inside: boolean, panel: boolean)
+		if panel then
+			over_panel = inside
+		else
+			over_trigger = inside
+		end
+		stop_close()
+		if not over_trigger and not over_panel and open:peek() then
+			cancel_close = ui.after(150, function()
+				cancel_close = nil
+				if not over_trigger and not over_panel then
+					open:set(false)
+				end
+			end)
+		end
+	end
+	if props.submenu then
+		ui.on_cleanup(stop_close)
+		ui.effect(function()
+			if not open:get() then
+				stop_close()
+				over_panel = false
+			end
+		end)
+	end
 	local trigger_ref = ui.ref()
 	-- (Its trigger gone from view, as Settings stand over the page: closed, not left
 	-- with nothing to hang from.)
@@ -847,7 +886,15 @@ return ui.component(function(props: Props): Node
 			open:set(false)
 		end
 	end)
-	local trigger = if props.trigger then props.trigger({ open = open, toggle = toggle }) else ui.button {
+	local trigger = if props.trigger then props.trigger({
+		open = open,
+		toggle = toggle,
+		on_hover = if props.submenu
+			then function(inside: boolean)
+				hover(inside, false)
+			end
+			else nil,
+	}) else ui.button {
 		ref = trigger_ref,
 		label = props.label,
 		h = trigger_props.h,
@@ -878,7 +925,7 @@ return ui.component(function(props: Props): Node
 	-- The menus' glass (frosted: a light tint over the platform's own
 	-- popover material; opaque: a solid panel). No padding of its own: its
 	-- rules run edge to edge; each section insets itself.
-	return ui.popover(Menu.panel {
+	local panel = Menu.panel {
 		-- (Named for tests.)
 		class = "dropdown-panel",
 		open = open,
@@ -1447,5 +1494,28 @@ return ui.component(function(props: Props): Node
 				table.unpack(rows),
 			}
 		end,
-	})
+	}
+	if props.submenu then
+		local build = panel.build
+		panel.build = nil
+		panel.anchor = nil
+		panel.trigger = trigger
+		panel.label = props.label
+		panel[1] = ui.presence(function(): boolean
+			return open:get()
+		end, function(visible: boolean): Node
+			if not visible then
+				return ui.div {}
+			end
+			return ui.column {
+				w_full = true,
+				on_hover = function(inside: boolean)
+					hover(inside, true)
+				end,
+				build(),
+			}
+		end)
+		return ui.submenu(panel)
+	end
+	return ui.popover(panel)
 end)
