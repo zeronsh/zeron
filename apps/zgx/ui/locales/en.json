@@ -1494,7 +1494,7 @@
     },
     "providers": {
       "title": "Providers",
-      "terms": "harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "terms": "harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse omp oh my pi install enable disable accounts sign in login",
       "agent_settings": "Agent settings",
       "agents": {
         "label": "Your agents",
