@@ -154,3 +154,88 @@ fn a_recorded_stream_reaches_the_transcript_through_the_host() {
     );
     assert_eq!(app.error(), None);
 }
+
+/// The standard recording (reply(80), 24-byte appends, 40 a second) replayed
+/// through the host's chat path into the bench's page, headless, at a
+/// window's pace (120 frames a second, each drawn offscreen by zgx's
+/// renderer): the main thread's CPU over the stream, and, run under
+/// `sample`, where it goes. A probe, not a check:
+///
+///     cargo test --release --features stream-bench --bin zeron-zgx -- --ignored --nocapture stream_bench_profile
+#[test]
+#[ignore = "a probe: release, --ignored --nocapture"]
+fn stream_bench_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("frames.jsonl");
+    let frames = record::standard(1_700_000_000_000);
+    let lines: Vec<String> = frames.iter().map(|f| f.to_string()).collect();
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let queued: Queued = Rc::default();
+    let q = queued.clone();
+    let every = Duration::from_millis(25);
+    set(Bench::new(
+        path,
+        every,
+        Duration::from_millis(1500),
+        Rc::new(move |work| q.borrow_mut().push_back(work)),
+    ));
+    let made: Rc<RefCell<Option<Rc<View>>>> = Rc::default();
+    let slot = made.clone();
+    let app = TestApp::new(|runtime| {
+        let host = ScriptHost::new(
+            runtime,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/stream_bench_fixture.luau"),
+        );
+        *slot.borrow_mut() = Some(window_view(&host));
+        host
+    });
+    let view = made.borrow().clone().unwrap();
+    let (w, h) = (1114u32, 685u32);
+    app.ui.scene.borrow_mut().resize(w as f32, h as f32);
+    let mut gpu = zgx_gpu::GpuRenderer::new(w, h).expect("a GPU");
+    let pump = |app: &TestApp| {
+        while let Some(work) = queued.borrow_mut().pop_front() {
+            app.executor.borrow_mut().spawn(work);
+        }
+    };
+    let frame = Duration::from_micros(8_333);
+    let mut draw = |app: &TestApp| {
+        pump(app);
+        app.frames(1);
+        let damage = app.ui.scene.borrow_mut().flush().damage;
+        gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+    };
+    // (Its id alone: the whole draft as JSON would cost more than the page.)
+    let streaming = |view: &View| {
+        view.draft
+            .with_untracked(|d| d.field("id").map(text))
+            .as_deref()
+            == Some(record::REPLY)
+    };
+    // Until the reply starts.
+    let begun = std::time::Instant::now();
+    while !streaming(&view) && begun.elapsed() < Duration::from_secs(10) {
+        let t = std::time::Instant::now();
+        draw(&app);
+        std::thread::sleep(frame.saturating_sub(t.elapsed()));
+    }
+    assert!(streaming(&view), "the reply never started");
+    let cpu = Cpu::now();
+    let started = std::time::Instant::now();
+    let mut n = 0u32;
+    while streaming(&view) {
+        let t = std::time::Instant::now();
+        draw(&app);
+        n += 1;
+        std::thread::sleep(frame.saturating_sub(t.elapsed()));
+    }
+    let took = started.elapsed();
+    let spent = cpu.since();
+    eprintln!(
+        "stream_bench_profile: {n} frames over {:.2} s ({:.1}/s): {}",
+        took.as_secs_f64(),
+        n as f64 / took.as_secs_f64(),
+        spent.describe(took)
+    );
+    assert_eq!(app.error(), None);
+}
