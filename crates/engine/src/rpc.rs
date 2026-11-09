@@ -2605,6 +2605,61 @@ fn doc_messages_stream(
     .boxed()
 }
 
+/// A slice of the transcript as frames, for a reader that isn't showing the
+/// chat (an agent reading or waiting on it): a `reset` of the slice, then
+/// deltas of the slice, each with its `window` facts.
+async fn windowed_doc_messages_stream(
+    host: crate::doc_host::DocHost,
+    chat_id: String,
+    window: zeron_doc::TranscriptWindow,
+) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    // Opening a whale and building its mirror mustn't stall the RPC task.
+    let (rx, doc) = tokio::task::spawn_blocking(move || {
+        let handle = host.open(&chat_id)?;
+        Ok::<_, crate::EngineError>((handle.watch_messages(), handle.doc_arc()))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?;
+    Ok(futures::stream::unfold(
+        (rx, doc, window, None, None, None),
+        |(mut rx, doc, window, mut prev, mut prev_info, mut prev_usage)| async move {
+            loop {
+                let prev_slice: Option<&Vec<zeron_doc::SessionMessageEntry>> = prev.as_ref();
+                if prev_slice.is_some() {
+                    rx.changed().await.ok()?;
+                }
+                let current = rx.borrow_and_update().clone();
+                let (slice, info) = window.apply(&current.entries);
+                let frame = match prev.as_ref() {
+                    None => TranscriptFrame::reset(slice),
+                    Some(prev) => diff_transcript(prev, slice),
+                };
+                let usage = doc.context_usage();
+                let unchanged = frame.is_empty_delta()
+                    && prev_info.as_ref() == Some(&info)
+                    && prev_usage == Some(usage);
+                prev = Some(slice.to_vec());
+                if unchanged {
+                    continue;
+                }
+                let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
+                    frame,
+                    context_usage: usage,
+                    replay_baseline: None,
+                })
+                .ok()?;
+                value["window"] = serde_json::to_value(&info).ok()?;
+                prev_info = Some(info);
+                prev_usage = Some(usage);
+                return Some((value, (rx, doc, window, prev, prev_info, prev_usage)));
+            }
+        },
+    )
+    .boxed())
+}
+
 /// First paint reads only the local tail; full history is deferred until the
 /// next stream poll. No network dependency or persisted truncation.
 async fn opening_doc_messages_stream(
@@ -3327,7 +3382,18 @@ impl RpcService for EngineRpc {
                     .get("openingTail")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let window = params
+                    .get("window")
+                    .filter(|v| !v.is_null())
+                    .map(|v| serde_json::from_value::<zeron_doc::TranscriptWindow>(v.clone()))
+                    .transpose()
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let p: ChatParams = parse_params(params)?;
+                if let Some(window) = window {
+                    return windowed_doc_messages_stream(self.doc_host.clone(), p.chat_id, window)
+                        .await
+                        .map(RpcReply::Stream);
+                }
                 // An open transcript keeps its chat's checkout diff live (and
                 // discardable) even when the chat is archived; the guard lives
                 // exactly as long as the stream.

@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zeron_doc::SessionCommandPayload;
+use zeron_doc::{SessionCommandPayload, TranscriptWindow};
 use zeron_proto::{
     AccessMode, Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
 mod plugins;
 mod themes;
@@ -608,12 +608,35 @@ struct DeviceArgs {
     device: Option<String>,
 }
 
-/// Messages already in the transcript before a send. Replies are matched by
-/// id, not by time: `createdAt` is stamped on the host's clock, which can run
-/// behind the caller's when the chat lives on another device.
+/// Where a turn's replies start: the message that began it, whose id the
+/// sender chose. Replies are matched by position after it, not by time
+/// (`createdAt` is stamped on the host's clock, which can run behind the
+/// caller's when the chat lives on another device), and knowing it takes no
+/// read of the transcript, so nothing about the transcript can hold up a send.
 #[derive(Clone, Default)]
 struct TurnStart {
-    message_ids: Vec<String>,
+    after_message: Option<String>,
+}
+
+impl TurnStart {
+    fn window(&self) -> TranscriptWindow {
+        match &self.after_message {
+            Some(id) => TranscriptWindow::after(id.clone(), REPLIES_WINDOW),
+            None => TranscriptWindow::tail(REPLIES_WINDOW),
+        }
+    }
+}
+
+/// The most entries a wait reports as a turn's replies.
+const REPLIES_WINDOW: usize = 500;
+/// How long a finished turn's wait keeps trying a transcript it can't read.
+const FOLLOW_GRACE: Duration = Duration::from_secs(30);
+
+/// What [`Tools::deliver`] did: the tool's receipt, and the id the message
+/// will have in the transcript.
+struct Delivered {
+    receipt: Value,
+    message_id: String,
 }
 
 #[derive(Clone)]
@@ -769,10 +792,6 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "lastMessagePreview": chat.last_message_preview,
         "createdAt": chat.created_at,
     })
-}
-
-fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
-    messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
 
 // ---- dispatch ----------------------------------------------------------------
@@ -1044,20 +1063,26 @@ impl Tools {
 
     async fn get_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let (spaces, sessions, entries) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.transcript_on(&chat.id, Some(&chat.device_id))
-        )?;
-        let rendered = render_entries(&entries, RenderOptions::default());
+        let (spaces, sessions) = tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
         let mut summary = summarize_chat(&chat, &spaces, &sessions);
-        summary["messageCount"] = json!(rendered.len());
-        summary["pendingInput"] = if summary["statusStale"] == true {
-            Value::Null
-        } else {
-            last_pending_input(&rendered).unwrap_or(Value::Null)
-        };
-        summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
+        // The chat's facts don't depend on reaching its host.
+        match self
+            .zeron
+            .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+            .await
+        {
+            Ok(view) => {
+                let rendered = render_entries(&view.entries, RenderOptions::default());
+                summary["messageCount"] = json!(view.info.total);
+                summary["pendingInput"] = if summary["statusStale"] == true {
+                    Value::Null
+                } else {
+                    json!(view.info.pending_input)
+                };
+                summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
+            }
+            Err(error) => summary["transcriptError"] = json!(format!("{error:#}")),
+        }
         Ok(summary)
     }
 
@@ -1346,14 +1371,15 @@ impl Tools {
                 room_gen: None,
                 sleep: None,
             };
-            let sent = self
+            let delivered = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
                 .await?;
-            result["sent"] = sent;
+            result["sent"] = delivered.receipt;
             let pending = Arc::new(PendingTurn {
                 baseline: None,
-                // A new chat has no earlier messages.
-                start: TurnStart::default(),
+                start: TurnStart {
+                    after_message: Some(delivered.message_id),
+                },
             });
             self.pending_turns
                 .lock()
@@ -1370,31 +1396,37 @@ impl Tools {
 
     async fn read_chat(&self, args: ReadChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let entries = self
+        let limit = args.limit.unwrap_or(40).clamp(1, 500);
+        let view = self
             .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
+            .transcript_window(
+                &chat.id,
+                Some(&chat.device_id),
+                TranscriptWindow {
+                    limit,
+                    offset: args.offset,
+                    after: None,
+                },
+            )
             .await?;
         let rendered = render_entries(
-            &entries,
+            &view.entries,
             RenderOptions {
                 include_reasoning: args.include_reasoning,
                 include_tools: args.include_tools.unwrap_or(true),
             },
         );
-        let total = rendered.len();
-        let limit = args.limit.unwrap_or(40).clamp(1, 500);
-        let end = total.saturating_sub(args.offset);
-        let start = end.saturating_sub(limit);
-        let window = &rendered[start..end];
+        let total = view.info.total;
+        let start = view.info.start;
         Ok(json!({
             "chatId": chat.id,
             "title": chat.title,
             "total": total,
-            "returned": window.len(),
+            "returned": rendered.len(),
             "olderRemaining": start,
-            "newerSkipped": total - end,
-            "pendingInput": last_pending_input(&rendered),
-            "messages": window,
+            "newerSkipped": total - start - view.entries.len(),
+            "pendingInput": view.info.pending_input,
+            "messages": rendered,
         }))
     }
 
@@ -1410,44 +1442,52 @@ impl Tools {
                 short(&chat.id)
             );
         }
-        let (spaces, sessions, harnesses) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.harnesses_on(Some(&chat.device_id))
-        )?;
+        let (spaces, sessions) = tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
+        // Only a chat with no harness of its own needs its host's catalog:
+        // the others are delivered through the doc, host reachable or not.
+        let harnesses = if chat.config.is_some() {
+            Vec::new()
+        } else {
+            self.zeron.harnesses_on(Some(&chat.device_id)).await?
+        };
         let space = chat
             .space_id
             .as_deref()
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
         let mode = args.mode.as_deref().unwrap_or("auto");
-        let message_ids = self
-            .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
-            .await?
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
         let body = self.attribute(&chat, text).await;
         let mut result = json!({
             "chatId": chat.id,
             "title": chat.title,
         });
-        result["sent"] = self
+        let delivered = self
             .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
             .await?;
+        result["sent"] = delivered.receipt;
         let pending = Arc::new(PendingTurn {
             baseline,
-            start: TurnStart { message_ids },
+            start: TurnStart {
+                after_message: Some(delivered.message_id),
+            },
         });
         self.pending_turns
             .lock()
             .await
             .insert(chat.id.clone(), pending.clone());
         if args.wait {
+            // The message is on its way: not being able to watch the turn
+            // must not read as not having sent it.
             result["turn"] = self
                 .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
-                .await?;
+                .await
+                .unwrap_or_else(|error| {
+                    json!({
+                        "outcome": "unknown",
+                        "followError": format!("{error:#}"),
+                        "replies": [],
+                    })
+                });
         }
         Ok(result)
     }
@@ -1582,22 +1622,16 @@ impl Tools {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let request_id = match args.request_id {
             Some(id) => id,
-            None => {
-                let entries = self
-                    .zeron
-                    .transcript_on(&chat.id, Some(&chat.device_id))
-                    .await?;
-                let rendered = render_entries(&entries, RenderOptions::default());
-                last_pending_input(&rendered)
-                    .and_then(|p| {
-                        p.get("requestId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("chat {} has no pending question", short(&chat.id))
-                    })?
-            }
+            None => self
+                .zeron
+                .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+                .await?
+                .info
+                .pending_input
+                .map(|p| p.request_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("chat {} has no pending question", short(&chat.id))
+                })?,
         };
         if args.answers.is_empty() {
             anyhow::bail!("answers is empty");
@@ -1658,7 +1692,7 @@ impl Tools {
         session: Option<&Session>,
         text: String,
         mode: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<Delivered> {
         let harness = chat
             .config
             .as_ref()
@@ -1680,7 +1714,8 @@ impl Tools {
             "run" | "steer" | "queue" => mode,
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
-        let id = match chosen {
+        let new_message_id = uuid::Uuid::new_v4().to_string();
+        let (id, message_id) = match chosen {
             "run" => {
                 let config = chat.config.clone();
                 let cwd = chat
@@ -1712,34 +1747,45 @@ impl Tools {
                     env: Default::default(),
                     extra_mcp: Vec::new(),
                 };
-                self.zeron
+                let id = self
+                    .zeron
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Run {
                             request,
-                            message_id: uuid::Uuid::new_v4().to_string(),
+                            message_id: new_message_id.clone(),
                         },
                     )
-                    .await?
+                    .await?;
+                (id, new_message_id)
             }
             "steer" => {
-                self.zeron
+                let id = self
+                    .zeron
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Steer {
                             prompt: text,
-                            message_id: Some(uuid::Uuid::new_v4().to_string()),
+                            message_id: Some(new_message_id.clone()),
                         },
                     )
-                    .await?
+                    .await?;
+                (id, new_message_id)
             }
-            _ => self.zeron.queue_message(&chat.id, &text).await?,
+            // A held message keeps its row's id when it's sent.
+            _ => {
+                let id = self.zeron.queue_message(&chat.id, &text).await?;
+                (id.clone(), id)
+            }
         };
-        Ok(json!({
-            "delivery": chosen,
-            "id": id,
-            "chatStatusAtSend": status,
-        }))
+        Ok(Delivered {
+            receipt: json!({
+                "delivery": chosen,
+                "id": id,
+                "chatStatusAtSend": status,
+            }),
+            message_id,
+        })
     }
 
     async fn await_pending_turn(
@@ -1785,36 +1831,68 @@ impl Tools {
             .zeron
             .wait_for_turn(chat, baseline, expect_turn, timeout)
             .await?;
-        // Registry session updates can arrive before the separate transcript doc.
-        // Keep the same deadline while waiting for a response to this send.
-        let mut rendered = Vec::new();
-        let mut replies = Vec::new();
+        // Registry session updates can arrive before the separate transcript
+        // doc: follow it until the reply lands, inside the same deadline.
+        let mut pending_input = None;
+        let mut replies: Vec<RenderedMessage> = Vec::new();
+        let mut follow = None;
+        let mut transcript_error: Option<String> = None;
+        let mut failing_since: Option<Instant> = None;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                if outcome == TurnOutcome::Completed && expect_turn {
+                if outcome == TurnOutcome::Completed && expect_turn && transcript_error.is_none() {
                     outcome = TurnOutcome::TimedOut;
                 }
                 break;
             }
-            let entries = match tokio::time::timeout(
-                remaining,
-                self.zeron.transcript_on(&chat.id, Some(&chat.device_id)),
-            )
-            .await
-            {
-                Ok(entries) => entries?,
-                Err(_) => {
-                    outcome = TurnOutcome::TimedOut;
-                    break;
+            let next = tokio::time::timeout(remaining, async {
+                if follow.is_none() {
+                    follow = Some(
+                        self.zeron
+                            .follow_transcript(&chat.id, Some(&chat.device_id), start.window())
+                            .await?,
+                    );
                 }
+                match follow.as_mut() {
+                    Some(follow) => follow.next().await,
+                    None => Ok(()),
+                }
+            })
+            .await;
+            match next {
+                Err(_) => continue, // Out of time: the top of the loop settles it.
+                Ok(Err(error)) => {
+                    // A stream that ends after reading fine is a lifecycle
+                    // boundary (the same contract as the UI's): attach again.
+                    if follow.take().is_some_and(|f: TranscriptFollow| f.opened()) {
+                        tokio::time::sleep(Duration::from_millis(300).min(remaining)).await;
+                        continue;
+                    }
+                    // Not the send's failure. Say so if it doesn't come back.
+                    transcript_error = Some(format!("{error:#}"));
+                    let since = *failing_since.get_or_insert_with(Instant::now);
+                    if !expect_turn
+                        || outcome != TurnOutcome::Completed
+                        || since.elapsed() >= FOLLOW_GRACE
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(300).min(remaining)).await;
+                    continue;
+                }
+                Ok(Ok(())) => {
+                    transcript_error = None;
+                    failing_since = None;
+                }
+            }
+            let Some(view) = follow.as_ref().map(|f| f.view()) else {
+                continue;
             };
-            rendered = render_entries(&entries, RenderOptions::default());
-            replies = rendered
-                .iter()
+            pending_input = view.info.pending_input.map(|p| json!(p));
+            replies = render_entries(&view.entries, RenderOptions::default())
+                .into_iter()
                 .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
-                .filter(|m| !start.message_ids.contains(&m.id))
-                .cloned()
                 .collect();
             if !expect_turn
                 || outcome != TurnOutcome::Completed
@@ -1824,14 +1902,13 @@ impl Tools {
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100).min(remaining)).await;
         }
         let now = chrono::Utc::now();
         let status = zeron_proto::view::display_status(chat, session.as_ref(), now);
         let stale = session
             .as_ref()
             .is_some_and(|s| zeron_proto::view::session_stale(s, now));
-        Ok(json!({
+        let mut turn = json!({
             "outcome": outcome,
             "status": status,
             "sessionStatus": session.as_ref().map(|s| s.status),
@@ -1839,9 +1916,13 @@ impl Tools {
             "statusStale": stale,
             "terminalActivity": session.as_ref().and_then(|s| s.terminal_activity.as_ref()),
             "timedOut": outcome == TurnOutcome::TimedOut,
-            "pendingInput": if stale { None } else { last_pending_input(&rendered) },
+            "pendingInput": if stale { None } else { pending_input },
             "replies": replies,
-        }))
+        });
+        if let Some(error) = transcript_error {
+            turn["transcriptError"] = json!(error);
+        }
+        Ok(turn)
     }
 }
 
@@ -2357,7 +2438,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(sent["delivery"], "steer");
+        assert_eq!(sent.receipt["delivery"], "steer");
         let writes = world.writes.lock().unwrap();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, methods::QUEUE_COMMAND);
@@ -3118,6 +3199,10 @@ mod tests {
         sent: Mutex<Option<(i64, Instant, String)>>,
         reply_delay: Duration,
         never_reply: bool,
+        /// The id the send gave its message, as the host stores it.
+        message_id: Mutex<Option<String>>,
+        /// The transcript stream ends at once, like a link that drops.
+        no_transcript: bool,
         /// Host clock offset: a remote engine stamps createdAt on its own clock.
         host_skew_millis: i64,
     }
@@ -3143,6 +3228,8 @@ mod tests {
                     Ok(stream(rows))
                 }
                 methods::QUEUE_COMMAND => {
+                    *self.message_id.lock().unwrap() =
+                        params["command"]["messageId"].as_str().map(str::to_owned);
                     let reply = self.world.handle(method, params.clone()).await?;
                     *self.sent.lock().unwrap() = Some((
                         now_millis(),
@@ -3179,6 +3266,15 @@ mod tests {
                             "deviceId":"dev-remote", "status":"complete", "parts":[{"kind":"text", "id":"t", "text":"old reply"}]
                         }));
                     }
+                    if let Some(message_id) = self.message_id.lock().unwrap().clone() {
+                        messages.as_array_mut().unwrap().push(json!({
+                            "id":message_id, "role":"user", "createdAt":0, "deviceId":"dev-local",
+                            "parts":[{"kind":"text", "id":"t", "text":"go"}]
+                        }));
+                    }
+                    if self.no_transcript {
+                        return Ok(RpcReply::Stream(futures::stream::empty().boxed()));
+                    }
                     if let Some((timestamp, started, _)) = sent
                         && started.elapsed() >= self.reply_delay
                         && !self.never_reply
@@ -3206,6 +3302,8 @@ mod tests {
                 sent: Mutex::new(None),
                 reply_delay: Duration::from_millis(450),
                 never_reply: false,
+                message_id: Mutex::new(None),
+                no_transcript: false,
                 host_skew_millis: 0,
             });
             let tools = Tools::new(Arc::new(Zeron::with_client(
@@ -3245,6 +3343,8 @@ mod tests {
                 sent: Mutex::new(None),
                 reply_delay: Duration::from_millis(450),
                 never_reply: false,
+                message_id: Mutex::new(None),
+                no_transcript: false,
                 host_skew_millis: 0,
             });
             let tools = Tools::new(Arc::new(Zeron::with_client(
@@ -3281,6 +3381,74 @@ mod tests {
         }
     }
 
+    /// The bug this guards against: a transcript that can't be read (a long
+    /// chat over a bad link) must neither stop a send nor make it look failed.
+    #[tokio::test]
+    async fn an_unreadable_transcript_never_makes_a_send_fail() {
+        let service = Arc::new(DelayedTurn {
+            world: World {
+                beta_remote: true,
+                ..Default::default()
+            },
+            sent: Mutex::new(None),
+            reply_delay: Duration::ZERO,
+            never_reply: false,
+            message_id: Mutex::new(None),
+            no_transcript: true,
+            host_skew_millis: 0,
+        });
+        let tools = Tools::new(Arc::new(Zeron::with_client(
+            memory_client(service.clone()),
+            Origin::default(),
+        )));
+        let sent = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .expect("delivery reads nothing");
+        assert_eq!(sent["sent"]["delivery"], "run");
+        assert!(service.sent.lock().unwrap().is_some());
+
+        let waited = tools
+            .call(
+                "send_message",
+                json!({"chat":"Beta", "text":"go", "wait":true, "timeout_secs":1}),
+            )
+            .await
+            .expect("a wait that can't follow the turn doesn't undo the send");
+        assert_eq!(waited["sent"]["delivery"], "run", "{waited}");
+        assert!(
+            waited["turn"]["transcriptError"]
+                .as_str()
+                .is_some_and(|e| e.contains("stream ended")),
+            "{waited}"
+        );
+        assert_eq!(waited["turn"]["replies"], json!([]));
+
+        // The chat's facts still come back, with why the rest didn't.
+        let chat = tools
+            .call("get_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(chat["transcriptError"].is_string(), "{chat}");
+        assert_eq!(chat["id"], "chat-beta-2");
+    }
+
+    /// A host from before windows ignores the param and sends everything: the
+    /// reader takes the same slice, so an old host and a new one read alike.
+    #[tokio::test]
+    async fn an_older_host_sending_everything_reads_the_same_as_a_window() {
+        let world = Arc::new(World::default());
+        let tools = tools(world, Origin::default());
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta", "limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(read["total"], 2);
+        assert_eq!(read["returned"], 1);
+        assert_eq!(read["olderRemaining"], 1);
+        assert_eq!(read["messages"][0]["id"], "a1");
+    }
+
     /// A remote host stamps replies on its own clock. One running behind the
     /// caller must not hide the reply to this send.
     #[tokio::test]
@@ -3294,6 +3462,8 @@ mod tests {
                 sent: Mutex::new(None),
                 reply_delay: Duration::from_millis(100),
                 never_reply: false,
+                message_id: Mutex::new(None),
+                no_transcript: false,
                 host_skew_millis: -30_000,
             });
             let tools = Tools::new(Arc::new(Zeron::with_client(
@@ -3326,6 +3496,8 @@ mod tests {
                 ..Default::default()
             },
             sent: Mutex::new(None),
+            message_id: Mutex::new(None),
+            no_transcript: false,
             reply_delay: Duration::ZERO,
             never_reply: true,
             host_skew_millis: 0,
@@ -3357,6 +3529,8 @@ mod tests {
                     sent: Mutex::new(None),
                     reply_delay: Duration::from_millis(450),
                     never_reply: false,
+                    message_id: Mutex::new(None),
+                    no_transcript: false,
                     host_skew_millis,
                 });
                 let tools = Tools::new(Arc::new(Zeron::with_client(
