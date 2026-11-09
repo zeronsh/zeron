@@ -1763,6 +1763,20 @@ end
 -- level (where there is none), the script's under a name of its own, emptied
 -- as it's made (a reload makes the same names again).
 local top_lists = 0
+-- A number state of a text's own (as `own_list`).
+local function own_number(): State<number>
+	local ok, made = pcall(function(): State<number>
+		return ui.use_state(0)
+	end)
+	if ok then
+		return made
+	end
+	top_lists += 1
+	local n = ui.state(`markdown_version_{top_lists}`, 0)
+	n:set(0)
+	return n
+end
+
 local function own_list(): State<{ any }>
 	local ok, made = pcall(function(): State<{ any }>
 		return ui.use_state({} :: { any })
@@ -1818,6 +1832,185 @@ end
 -- prose in Rust, in ds/prose's look, the rest (code, tables, math, mermaid,
 -- pictures) by `block` here, through the view's hook. Each top-level block
 -- in a box `track` is told of; a find marks and reveals as `find` says.
+-- A reply drawn by zgx's markdown view held in runs (`window`): the view
+-- builds a run while it's near what shows, as judged here as `windowed`
+-- judges it (its box within OVERSCAN of the view's, the last run while the
+-- text is written, the run holding a find's current match), and holds it
+-- away at the height it last had. A run coming back in at another height
+-- above the view moves the view with it, so what shows doesn't.
+local function native_window(props: Props): { [string]: any }?
+	local w = props.window
+	if not w then
+		return nil
+	end
+	local find = props.find
+	local version = own_number()
+	-- Each run's box (as it mounted), whether it's built, whether it's just
+	-- come back in (to be made up for as its height comes), and the count.
+	local boxes: { [number]: any } = {}
+	local near: { [number]: boolean } = {}
+	local returning: { [number]: boolean } = {}
+	local count = 0
+	local function key(at: number): string
+		return `{w.key}:{at}`
+	end
+	-- Judged now: whether run `at` changed, and whether its box starts past
+	-- the view's foot and the overscan.
+	local function judge(at: number): (boolean, boolean)
+		local el, view = boxes[at], w.view:peek()
+		if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
+			return false, false
+		end
+		local y, top = el.y :: number, view.y :: number
+		local c = if find then find.current() else nil
+		local holds = c ~= nil and c.key == w.key and (c.block - 1) // CHUNK + 1 == at
+		local live = w.live
+		local shows = (live ~= nil and live() and at == count)
+			or holds
+			or (y < top + (view.height :: number) + OVERSCAN and y + (el.height :: number) > top - OVERSCAN)
+		if NEAR.get(key(at)) ~= shows then
+			NEAR.set(key(at), shows)
+		end
+		local below = y >= top + (view.height :: number) + OVERSCAN
+		if near[at] ~= shows then
+			returning[at] = shows
+			near[at] = shows
+			return true, below
+		end
+		return false, below
+	end
+	-- A run's box's foot, if laid out.
+	local function foot(at: number): number?
+		local el = boxes[at]
+		if not el or el.y == nil or el.height == nil then
+			return nil
+		end
+		return (el.y :: number) + (el.height :: number)
+	end
+	local judged_at = -math.huge
+	-- The runs judged from the first that reaches the view (found by halving:
+	-- those wholly above it are judged only if built, to be let go), up to the
+	-- first past its foot once none further on is built; and the find's run.
+	-- Judged all, a reply streaming in at the view's foot judged every run
+	-- above it with each word.
+	local function judge_all()
+		judged_at = ui.now()
+		local changed = false
+		local function judged(at: number): boolean
+			local did, below = judge(at)
+			changed = changed or did
+			return below
+		end
+		local view = w.view:peek()
+		local reach = if view and view.y ~= nil then (view.y :: number) - OVERSCAN else nil
+		local first = 1
+		if reach then
+			local past = count + 1
+			while first < past do
+				local mid = (first + past) // 2
+				local f = foot(mid)
+				if f ~= nil and f <= reach then
+					first = mid + 1
+				else
+					past = mid
+				end
+			end
+		end
+		for at = 1, first - 1 do
+			if near[at] then
+				judged(at)
+			end
+		end
+		local c = if find then find.current() else nil
+		local target = if c and c.key == w.key then (c.block - 1) // CHUNK + 1 else 0
+		if target >= 1 and target < first then
+			judged(target)
+		end
+		for at = first, count do
+			if judged(at) and at >= target then
+				local more = false
+				for later = at + 1, count do
+					if near[later] then
+						more = true
+						break
+					end
+				end
+				if not more then
+					break
+				end
+			end
+		end
+		if changed then
+			version:set(version:peek() + 1)
+		end
+	end
+	local looking = false
+	local function look_soon()
+		if looking then
+			return
+		end
+		looking = true
+		ui.after(0, function()
+			looking = false
+			judge_all()
+		end)
+	end
+	ui.effect(function()
+		w.offset:get()
+		if find then
+			find.current()
+		end
+		if ui.now() - judged_at >= 8 then
+			judge_all()
+		end
+		ui.after(0, judge_all)
+	end)
+	return {
+		key = w.key,
+		near = function(at: number, last: boolean): boolean
+			version:get()
+			if last then
+				count = at
+			end
+			local was = near[at]
+			if was == nil then
+				local kept = NEAR.get(key(at))
+				was = if kept ~= nil then kept else last
+				near[at] = was
+			end
+			-- (While the text is written its last run is always built: where
+			-- the words arrive, and the end the view holds to.)
+			if last and w.live and w.live() then
+				return true
+			end
+			return was
+		end,
+		mounted = function(at: number, el: any)
+			boxes[at] = el
+			look_soon()
+		end,
+		resized = function(at: number, height: number, was: number)
+			look_soon()
+			local back = returning[at]
+			returning[at] = nil
+			if not back or (w.at_end and w.at_end:peek()) then
+				return
+			end
+			local el, view = boxes[at], w.view:peek()
+			local row = if w.row then w.row:peek() else nil
+			local row_above = row ~= nil
+				and view ~= nil
+				and row.y ~= nil
+				and row.height ~= nil
+				and view.y ~= nil
+				and (row.y :: number) + (row.height :: number) <= (view.y :: number)
+			if el and view and el.y and view.y and (el.y :: number) < (view.y :: number) and not row_above then
+				w.offset:set(math.max(0, w.offset:peek() + height - was))
+			end
+		end,
+	}
+end
+
 local function native_reply(props: Props): Node
 	local Prose = require("@self/prose")
 	local text = props.text :: () -> string
@@ -1841,6 +2034,7 @@ local function native_reply(props: Props): Node
 			attached = Prose.attached(props.attached),
 			find = Prose.find(props.find),
 			pictures = props.pictures ~= nil,
+			window = native_window(props),
 			block = MarkdownBlocks.hook(props),
 			track = if track
 				then function(block: any): () -> ()
