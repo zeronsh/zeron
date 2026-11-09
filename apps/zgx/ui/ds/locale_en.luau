@@ -376,6 +376,8 @@ return {
 	["ds.sidebar.view.compact"] = "Compact",
 	["ds.sidebar.view.create_section"] = "Create section",
 	["ds.sidebar.view.keep_active"] = "Active when collapsed",
+	["ds.sidebar.view.unreachable"] = "Unreachable chats",
+	["ds.sidebar.unreachable"] = "{device} is offline — this chat can't run until it reconnects",
 	["ds.sidebar.view.devices_first"] = "Devices first",
 	["ds.sidebar.view.projects_first"] = "Projects first",
 	["ds.sidebar.view.empty_projects"] = "Empty projects",

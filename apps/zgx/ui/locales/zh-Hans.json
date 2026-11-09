@@ -446,6 +446,7 @@
         "label": "拉取请求 {n}，{state, select, open {打开} merged {已合并} closed {已关闭} other {草稿}}"
       },
       "subagents_running": "{n, plural, other {# 个子智能体运行中}}",
+      "unreachable": "{device} 已离线——重新连接前此会话无法运行",
       "session_name": "会话名称",
       "archive": "归档",
       "unarchive": "取消归档",
@@ -490,6 +491,7 @@
         "compact": "紧凑",
         "create_section": "创建分区",
         "keep_active": "折叠时显示活跃会话",
+        "unreachable": "无法连接的会话",
         "devices_first": "设备优先",
         "projects_first": "项目优先",
         "empty_projects": "空项目",
