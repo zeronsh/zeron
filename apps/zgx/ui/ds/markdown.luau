@@ -125,6 +125,10 @@ export type Props = {
 	small: boolean?,
 	-- Its words' ink, where not the primary (a thought's, in the secondary).
 	ink: string?,
+	-- Drawn by zgx's markdown view (a reply's text that grows): its prose
+	-- in Rust (ds/prose), the rest by this module through the view's hook.
+	-- In place of `window`: the view builds each block once and keeps it.
+	native: boolean?,
 }
 export type FindAt = { key: string, block: number, k: number }
 export type Find = {
@@ -1828,8 +1832,57 @@ MarkdownBlocks.hook = function(props: Props): (b: MarkdownBlock, at: any) -> Nod
 	end
 end
 
+-- A reply drawn by zgx's markdown view (`native`, a text that grows): its
+-- prose in Rust, in ds/prose's look, the rest (code, tables, math, mermaid,
+-- pictures) by `block` here, through the view's hook. Each top-level block
+-- in a box `track` is told of; a find marks and reveals as `find` says.
+local function native_reply(props: Props): Node
+	local Prose = require("@self/prose")
+	local text = props.text :: () -> string
+	local open, track = props.open, props.track
+	return ui.column {
+		w_full = true,
+		min_w = 0,
+		ui.markdown_view {
+			Prose.prepared(text),
+			style = Prose.style { small = props.small, ink = props.ink },
+			on_link = Prose.on_link(open),
+			link_menu = Prose.link_menu(open, props.link_menu),
+			-- (Nothing opens a path without `open`: only the web's are links.)
+			links = if open then nil else "web",
+			autolink = true,
+			breaks = props.breaks,
+			veil = if props.veil and props.key and not Motion.reduced_now()
+				then { key = props.key, seed = props.veil_seed == true }
+				else nil,
+			chip = Prose.chip { link_chip = props.link_chip, attached = props.attached },
+			attached = Prose.attached(props.attached),
+			find = Prose.find(props.find),
+			pictures = props.pictures ~= nil,
+			block = MarkdownBlocks.hook(props),
+			track = if track
+				then function(block: any): () -> ()
+					return track({
+						peek = function()
+							return block
+						end,
+						get = function()
+							return block
+						end,
+					} :: any)
+				end
+				else nil,
+			w_full = true,
+			min_w = 0,
+		},
+	}
+end
+
 return function(props: Props): Node
 	local text = props.text
+	if props.native and type(text) == "function" then
+		return native_reply(props)
+	end
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
 	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
 		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
