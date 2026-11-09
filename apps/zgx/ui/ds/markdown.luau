@@ -646,13 +646,18 @@ local function add_runs(props: { [any]: any }, list: { MarkdownRun }, ctx: Ctx?)
 			table.insert(props, ui.span(span))
 			return
 		end
-		-- Cut where a fading chunk starts and ends; its words' colour fading.
+		-- Cut where a fading chunk starts and ends; its words' colour fading. Each
+		-- piece after the first goes on the span (`continues`): a chip cut is padded
+		-- and washed as the chip whole, a link underlined as one.
 		if #fading > 0 and #marks == 0 and span[1] == text and veil then
 			veil_pieces(fading, from, to, function(s: number, e: number, c: VeilChunk?)
 				local piece = table.clone(span)
 				piece[1] = string.sub(text, s - from + 1, e - from + 1)
 				if c then
 					piece.fade_in = veil_fade(c)
+				end
+				if s > from then
+					piece.continues = true
 				end
 				table.insert(props, ui.span(piece))
 			end)
@@ -1053,9 +1058,10 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 		props[1] = text
 		return ui.text(props)
 	end
-	-- Each piece of the text, cut where a match starts or ends.
+	-- Each piece of the text, cut where a match starts or ends; `goes_on` where it
+	-- is a fade's piece after the first of its run (`continues`, as a paragraph's).
 	local pos = 0
-	local function cut(t: string, color: any, fade: { start: number, ms: number, power: number }?)
+	local function cut(t: string, color: any, fade: { start: number, ms: number, power: number }?, goes_on: boolean?)
 		local from, to = pos + 1, pos + #t
 		pos = to
 		local at = from
@@ -1063,7 +1069,13 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 			local s, e = math.max(m[1], from), math.min(m[2], to)
 			if s <= e then
 				if s > at then
-					table.insert(props, ui.span { string.sub(t, at - from + 1, s - from), color = color, fade_in = fade, literal = true })
+					table.insert(props, ui.span {
+						string.sub(t, at - from + 1, s - from),
+						color = color,
+						fade_in = fade,
+						literal = true,
+						continues = goes_on or at > from or nil,
+					})
 				end
 				table.insert(props, ui.span {
 					string.sub(t, s - from + 1, e - from + 1),
@@ -1071,12 +1083,19 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 					fade_in = fade,
 					literal = true,
 					bg = if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match",
+					continues = goes_on or s > from or nil,
 				})
 				at = e + 1
 			end
 		end
 		if at <= to then
-			table.insert(props, ui.span { string.sub(t, at - from + 1), color = color, fade_in = fade, literal = true })
+			table.insert(props, ui.span {
+				string.sub(t, at - from + 1),
+				color = color,
+				fade_in = fade,
+				literal = true,
+				continues = goes_on or at > from or nil,
+			})
 		end
 	end
 	-- And where what's fading starts or ends, its colour fading.
@@ -1087,7 +1106,7 @@ local function code_text(text: string, lang: string, wrap: boolean?, find: CodeF
 		end
 		local from = pos + 1
 		veil_pieces(fading, from, pos + #t, function(s: number, e: number, c: VeilChunk?)
-			cut(string.sub(t, s - from + 1, e - from + 1), color, if c then veil_fade(c) else nil)
+			cut(string.sub(t, s - from + 1, e - from + 1), color, if c then veil_fade(c) else nil, s > from)
 		end)
 	end
 	if Syntax.highlighter(lang) == nil then
