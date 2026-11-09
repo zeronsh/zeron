@@ -327,4 +327,43 @@ function M.lines(text: string, language: string?): { { Run } }
 	return out
 end
 
+-- What `lines` keeps of a text that grows (a code block being written), a
+-- line at a time: its text, what the line before left it, its runs and
+-- what it leaves.
+export type Kept = { { line: string, state: any, runs: { Run }, leaves: any } }
+
+-- `lines`, for a text that grows: a line as it was, after a line that left
+-- the same as before, is its runs as before (the same table), not lexed
+-- again; a line whose text or start changed (a block comment opening above
+-- it) is lexed again, and so on down while what each leaves differs.
+-- `kept`: a table of the text's own, empty at first, that it keeps.
+function M.lines_kept(text: string, language: string?, kept: Kept): { { Run } }
+	local id = canonical(language)
+	local h = if id then highlighters[id] else nil
+	if not h then
+		return M.lines(text, language)
+	end
+	local out: { { Run } } = {}
+	local state: any = 0
+	local i = 0
+	for line in string.gmatch(if string.sub(text, -1) == "\n" then text else text .. "\n", "(.-)\r?\n") do
+		i += 1
+		local was = kept[i]
+		if was and was.line == line and was.state == state then
+			table.insert(out, was.runs)
+			state = was.leaves
+		else
+			local spans, leaves = h(line, state)
+			local made = runs(line, spans)
+			kept[i] = { line = line, state = state, runs = made, leaves = leaves }
+			table.insert(out, made)
+			state = leaves
+		end
+	end
+	for j = #kept, i + 1, -1 do
+		kept[j] = nil
+	end
+	return out
+end
+
 return M

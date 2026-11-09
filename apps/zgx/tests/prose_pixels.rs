@@ -119,11 +119,34 @@ const CASES: &[(&str, &str)] = &[
          ```mermaid\ngraph TD; A-->B\n```\n\nThe end.",
     ),
     (
+        // Code and tables that grow in place as they're written: a block
+        // comment opening above lines already coloured, a tab, a fence with
+        // no language; a table whose columns change as rows come (a number
+        // column, a short one turning long), math in its cells and a fence.
+        "grows",
+        "```rust\nlet a = 1; /* a block comment\n   opened above */ let b = \"s\";\nfn f() -> u32 { 2 } // the end\n```\n\n\
+         ```\nno language here\n\twith a tab, and a line long enough to scroll sideways past the reply's width at any width\n```\n\n\
+         | Name | Count | Formula |\n|---|---|---|\n| a | 1 | $x^2$ |\n| bb | 22 | `code` and $\\sum_k k$ |\n\
+         | a longer name that runs past twenty | three | [a link](https://t.test/) |\n| | 4 | |\n\n\
+         ```math\na^2 + b^2 = c^2\n```\n\n\
+         ```python\ndef f(x):\n    \"\"\"a docstring\n    over lines\"\"\"\n    return x  # done\n```",
+    ),
+    (
         "mixed",
         "**Bold `code` inside**, *italic `code`*, ~~struck `code`~~ and **[bold link](https://b.c)**.\n\n\
          Second paragraph.\n\nThird, after the second.",
     ),
 ];
+
+/// The cases, one reply: all but `grows`, which has tests of its own (all of
+/// them at 360 points is past the tallest picture a GPU draws).
+fn joined() -> String {
+    CASES.iter().filter(|(name, _)| *name != "grows").map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n")
+}
+/// The cases a code block or table grows in: `complex` and `grows`.
+fn growing() -> String {
+    ["complex", "grows"].iter().map(|n| CASES.iter().find(|(name, _)| name == n).unwrap().1).collect::<Vec<_>>().join("\n\n")
+}
 
 /// A renderer's app: the fixture with its text, scheme and key.
 struct Shown {
@@ -512,7 +535,99 @@ fn a_link_hovered_clicked_and_its_menu_are_ds_markdowns() {
 /// brings), then pieces of 1 to 7, its markers left open as it goes.
 #[test]
 fn paragraphs_streaming_in_are_drawn_as_ds_markdown_draws_them_after_every_chunk() {
-    let text = CASES.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n");
+    let failed = streamed(&joined());
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// Code blocks and tables written a chunk at a time, grown in place (a
+/// line, a row, a cell at a time): drawn as ds/markdown draws them, built
+/// again whole, after every chunk.
+#[test]
+fn code_and_tables_growing_in_place_are_drawn_as_ds_markdown_draws_them_after_every_chunk() {
+    let failed = streamed(&growing());
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// A code block and a table grow in place: a line or a row written before
+/// keeps its node as more comes (the block isn't built again), and with a
+/// find open, its marks in what's written so far are ds/markdown's after
+/// every chunk.
+#[test]
+fn code_and_tables_keep_their_nodes_as_they_grow_and_a_find_marks_them() {
+    let text = CASES.iter().find(|(name, _)| *name == "grows").unwrap().1;
+    // (The node drawing words that start so: a code block's lines, a cell.)
+    let node = |shown: &Shown, starts: &str| {
+        shown.app.ui.prepare_frame();
+        let scene = shown.app.ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        while let Some(node) = stack.pop() {
+            if let zgx::scene::NodeKind::RichText { text } = scene.kind(node)
+                && text.text().starts_with(starts)
+            {
+                return Some(node);
+            }
+            stack.extend(scene.children(node).iter().copied());
+        }
+        None
+    };
+    let mut native = Shown::at(W, "native", "dark", "reply:kept", "");
+    let mut kept: Vec<(&str, zgx::scene::NodeId)> = Vec::new();
+    let mut end = 0;
+    while end < text.len() {
+        end = (end + 5).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        native.set(&text[..end]);
+        for (starts, was) in &kept {
+            assert_eq!(node(&native, starts), Some(*was), "after {end} bytes, {starts:?} is the node it was");
+        }
+        // (A cell from when its column is as it stays: one turning long has
+        // its words made again, wrapping, in the cell they were.)
+        for starts in ["let a = 1;", "no language", "22", "a longer name that runs", "def f(x):"] {
+            if !kept.iter().any(|(s, _)| *s == starts)
+                && let Some(found) = node(&native, starts)
+            {
+                kept.push((starts, found));
+            }
+        }
+    }
+    assert_eq!(kept.len(), 5, "each found: {kept:?}");
+    assert_eq!(native.app.error(), None);
+
+    // Streamed with a find open: its marks in each chunk's code and cells.
+    let finding = [("pixels.finding", Value::from(true))];
+    let mut failed = Vec::new();
+    for (query, block, k) in [("a", 1, 3), ("e", 3, 2)] {
+        let mut luau = Shown::made(W, "luau", "dark", "reply:find", "", &finding);
+        let mut native = Shown::made(W, "native", "dark", "reply:find", "", &finding);
+        for shown in [&luau, &native] {
+            (shown.app.host.shared("pixels.at", Value::Nil)).set(Value::List(
+                vec![Value::from(query), Value::Num(block as f64), Value::Num(k as f64)].into(),
+            ));
+            shown.app.frames(2);
+        }
+        let mut end = 0;
+        while end < text.len() && failed.len() < 3 {
+            end = (end + 9).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            luau.set(&text[..end]);
+            native.set(&text[..end]);
+            if let Some(why) = compare(&format!("find-stream-{query}-{end}"), &mut luau, &mut native) {
+                failed.push(format!("{query:?}, after {end} bytes: {}", why.lines().next().unwrap()));
+            }
+        }
+        assert_eq!(native.app.error(), None);
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// `text` streamed in (dark and light at the reply's usual width, a chunk
+/// of 1 to 7 bytes at a time, and a narrow pane), compared after each
+/// chunk: what differed.
+fn streamed(text: &str) -> Vec<String> {
     let mut failed = Vec::new();
     // (Dark and light at the reply's usual width, and a narrow pane.)
     let runs = SCHEMES.iter().map(|s| (*s, false, W)).chain([("dark", true, W), ("dark", false, 360.)]);
@@ -549,7 +664,7 @@ fn paragraphs_streaming_in_are_drawn_as_ds_markdown_draws_them_after_every_chunk
             text.len()
         );
     }
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    failed
 }
 
 /// Selecting with the pointer is as ds/markdown's words select: a drag
@@ -558,7 +673,6 @@ fn paragraphs_streaming_in_are_drawn_as_ds_markdown_draws_them_after_every_chunk
 /// HTML, and are drawn the same, at each width.
 #[test]
 fn selections_and_copies_are_ds_markdowns() {
-    let text = CASES.iter().map(|(_, t)| *t).collect::<Vec<_>>().join("\n\n");
     let ways = [
         // From the first line into the second paragraph and beyond.
         Select::Drag((0.02, 6.), (0.6, 160.)),
@@ -571,6 +685,23 @@ fn selections_and_copies_are_ds_markdowns() {
         Select::Clicks((0.4, 200.), 2),
         Select::Clicks((0.4, 200.), 3),
     ];
+    let mut failed = selected(&joined(), &ways);
+    // Through code blocks and tables grown in place: across a block's lines
+    // and a table's cells, a word and a line in each.
+    let ways = [
+        Select::Drag((0.1, 60.), (0.5, 420.)),
+        Select::Drag((0.05, 70.), (0.6, 110.)),
+        Select::Clicks((0.12, 70.), 2),
+        Select::Clicks((0.12, 70.), 3),
+        Select::Clicks((0.15, 470.), 2),
+        Select::Clicks((0.15, 470.), 3),
+    ];
+    failed.extend(selected(CASES.iter().find(|(name, _)| *name == "grows").unwrap().1, &ways));
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// `text` selected each of `ways` at each width: what differed.
+fn selected(text: &str, ways: &[Select]) -> Vec<String> {
     let mut failed = Vec::new();
     for w in WIDTHS {
         let mut luau = Shown::at(*w, "luau", "dark", "", &text);
@@ -590,7 +721,7 @@ fn selections_and_copies_are_ds_markdowns() {
         assert_eq!(selected, ways.len(), "at {w}: each way selects something");
         eprintln!("selections at {w} pt: {} ways, the same text, HTML and pixels", ways.len());
     }
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    failed
 }
 
 /// What a screen reader is given is ds/markdown's: the same nodes, roles,

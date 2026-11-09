@@ -24,9 +24,14 @@ fn md_hello(status: &str) -> Item {
 
 /// The reply, with `items` loaded (those that are on).
 fn reply(items: Vec<Item>) -> TestApp {
+    reply_in(items, false)
+}
+/// `reply`, drawn by zgx's markdown view (`native`) or ds/markdown's own.
+fn reply_in(items: Vec<Item>, native: bool) -> TestApp {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/md_blocks_fixture.luau");
     let app = TestApp::new(move |runtime| {
         let host = ScriptHost::new(runtime, path);
+        host.shared("md_blocks.native", zgx_script::Value::from(native));
         expose_surface(&host);
         let mut plugins = Vec::new();
         for item in &items {
@@ -67,13 +72,20 @@ fn a_plugin_replaces_each_block_of_its_language_and_reads_its_source() {
 
 #[test]
 fn a_block_streaming_in_is_drawn_again_as_it_grows() {
-    let mut app = reply(vec![md_hello("on")]);
-    app.host.run_command("stream");
-    app.frames(20);
-    let tree = app.tree();
-    assert!(tree.contains("\"second block, streaming\""), "{tree}");
-    assert!(tree.contains("\"first block\""), "the block before it is as it was: {tree}");
-    assert_eq!(count(&tree, "text \"Hello\""), 2, "{tree}");
+    // (As ds/markdown draws it, and as zgx's markdown view does, where a
+    // code block grows in place: one a plugin replaces is built again.)
+    for native in [false, true] {
+        let mut app = reply_in(vec![md_hello("on")], native);
+        assert_eq!(app.error(), None, "native: {native}");
+        app.host.run_command("stream");
+        app.frames(20);
+        let tree = app.tree();
+        assert!(tree.contains("\"second block, streaming\""), "native: {native}: {tree}");
+        assert!(tree.contains("\"first block\""), "the block before it is as it was: {tree}");
+        assert_eq!(count(&tree, "text \"Hello\""), 2, "native: {native}: {tree}");
+        // (The Lua block a code block still, grown in place or not.)
+        assert_eq!(count(&tree, "button \"Copy code\""), 1, "native: {native}: {tree}");
+    }
 }
 
 #[test]
