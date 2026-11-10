@@ -128,25 +128,11 @@ local FOLD = 200
 -- How a row joining the tree arrives.
 local ENTER: any = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" }
 
--- A windowed tree's rows come in runs of RUN (a long group away from the
--- view is a box a run, not a row each), each built once within OVERSCAN
--- of the view, and let go once past KEEP. Never judged yet, the runs
--- within NEAR_START of the tree's top are built as it's made (where one
--- opened shows), and the rest judged a tick on, before the frame is drawn.
--- A thought held unbuilt is guessed at THOUGHT_GUESS (about its four lines
--- folded).
-local RUN = 16
-local OVERSCAN = 600
-local KEEP = 1800
-local NEAR_START = 1600
-local THOUGHT_GUESS = 120
--- Each run's height as last laid out, and whether it was built when last
--- judged, by its group and place: a group made again (its row scrolled
--- back) holds each run as it was. Plain tables, a key at a time; the
--- older half goes as they fill.
+-- Each row's height as last laid out, by its group and its tool: a group
+-- made again (its row scrolled back) holds each row as it was. A plain
+-- table, a key at a time; it starts again as it fills.
 local KEPT_MOST = 8192
-local HEIGHTS: { [string]: number } = {}
-local NEAR: { [string]: boolean } = {}
+local MEASURED: { [string]: number } = {}
 local kept_count: { [any]: number } = {}
 local function kept_set(t: { [string]: any }, k: string, value: any)
 	if t[k] == nil then
@@ -326,7 +312,13 @@ local function gap_counter(): (text: string) -> number
 	end
 end
 
-local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writing?, group: string?): Node
+local function thought_row(
+	now: () -> Tool,
+	below: () -> boolean,
+	writing: Writing?,
+	group: string?,
+	resized: ((size: { w: number, h: number }) -> ())?
+): Node
 	local id = now().id
 	local line = ui.theme.get("zeron.prose.small.line") :: number
 	local folded_h = THOUGHT_LINES * line
@@ -392,6 +384,7 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 		w_full = true,
 		relative = true,
 		class = "thought",
+		on_resize = resized,
 		-- No branch: the trunk alone, past the words to a tool below, when
 		-- one follows; nothing when the thought ends the group.
 		ui.canvas {
@@ -474,23 +467,35 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 	}
 end
 
+-- (A tool that may come to have a result opens: whether it has one isn't
+-- known as its row is made.)
+local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, write = true, search = true, glob = true, web = true }
+-- Kinds whose row counts lines added and removed (an edit's).
+local COUNTS: { [string]: boolean } = { edit = true, write = true }
+
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
--- one; `running`: it is the one in flight, its glyph the working loader.)
+-- one; `running`: it is the one in flight, its glyph the working loader;
+-- `resized`: told the row's size as it's laid out.)
+-- A row is built often (each comes into view, a long group's thousands), so
+-- what can't change once a tool has started is read once as it's made (its
+-- kind, its verb, its glyph); only what a tool's result changes follows it.
 local function row(
 	now: () -> Tool,
 	below: () -> boolean,
 	running: () -> boolean,
 	open_subagent: ((sub: any) -> ())?,
 	writing: Writing?,
-	group: string?
+	group: string?,
+	resized: ((size: { w: number, h: number }) -> ())?
 ): Node
-	if now().kind == "thought" then
-		return thought_row(now, below, writing, group)
+	local t = now()
+	if t.kind == "thought" then
+		return thought_row(now, below, writing, group, resized)
 	end
 	local function tint(): string
 		return if now().failed then "$danger" else "$text.secondary"
 	end
-	local id = now().id
+	local id = t.id
 	local function has_call(): boolean
 		return now().call ~= nil
 	end
@@ -510,13 +515,24 @@ local function row(
 	local function lane(): any
 		return if open_subagent then (now() :: any).subagent else nil
 	end
-	-- (A tool that may come to have a result opens: whether it has one
-	-- isn't known as its row is made.)
-	local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, write = true, search = true, glob = true, web = true }
-	local opens = has_call() or lane() ~= nil or OPENS[now().kind] == true
+	local opens = t.call ~= nil or lane() ~= nil or OPENS[t.kind] == true
+	-- (Only a subagent's spawn says more than its line: one that may open
+	-- its lane follows it.)
+	local label: string | () -> string = if t.target then `{t.verb} {line_of(t)}` else t.verb
+	if open_subagent and t.kind == "agent" then
+		label = function(): string
+			local sub = lane()
+			if sub then
+				return locale.s("ds.activity.open_subagent", { title = sub.title or locale.s("ds.activity.subagent") })
+			end
+			local n = now()
+			return if n.target then `{n.verb} {line_of(n)}` else n.verb
+		end
+	end
 	return ui.column {
 		w_full = true,
 		relative = true,
+		on_resize = resized,
 		-- The branch, and the trunk on down past an opened call.
 		ui.canvas {
 			absolute = true,
@@ -545,14 +561,7 @@ local function row(
 			focusable = opens,
 			focus = if opens then control.ring else { border = 0 },
 			selectable = false,
-			label = function(): string
-				local t = now()
-				local sub = lane()
-				if sub then
-					return locale.s("ds.activity.open_subagent", { title = sub.title or locale.s("ds.activity.subagent") })
-				end
-				return if t.target then `{t.verb} {line_of(t)}` else t.verb
-			end,
+			label = label,
 			-- (A tool's call comes with it: whether it opens is known as its
 			-- row is made.)
 			expanded = if opens then showing else nil,
@@ -575,9 +584,7 @@ local function row(
 				top = (ROW - GLYPH_SIZE) / 2,
 				color = tint,
 				ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
-					name = function(): Icon.Name
-						return GLYPH[now().kind]
-					end,
+					name = GLYPH[t.kind],
 					size = GLYPH_SIZE,
 				}),
 			},
@@ -588,15 +595,26 @@ local function row(
 				gap = "$space.1",
 				items = "center",
 				ui.text {
-					function(): string
-						return now().verb
-					end,
+					t.verb,
 					literal = true,
 					shrink = 0,
 					text_size = "$font.size.sm",
 					color = "$text.secondary",
 				},
-				ui.show(
+				-- (Its line as the tool goes on: a command's input may still
+				-- be arriving as it starts.)
+				if t.target
+					then FadeText {
+						function(): string
+							return line_of(now())
+						end,
+						literal = true,
+						shrink = 1,
+						font = "$font.mono",
+						text_size = "$font.size.sm",
+						color = "$text.primary",
+					}
+					else ui.show(
 					function(): boolean
 						return now().target ~= nil
 					end,
@@ -612,7 +630,8 @@ local function row(
 					}
 				),
 				-- An edit's lines, added and removed, in their hues.
-				ui.show(
+				if COUNTS[t.kind] or t.added ~= nil
+					then ui.show(
 					function(): boolean
 						return now().added ~= nil
 					end,
@@ -626,8 +645,10 @@ local function row(
 						text_size = "$font.size.xs",
 						color = "$success",
 					}
-				),
-				ui.show(
+				)
+					else nil,
+				if COUNTS[t.kind] or t.removed ~= nil
+					then ui.show(
 					function(): boolean
 						local r = now().removed
 						return r ~= nil and r > 0
@@ -642,12 +663,15 @@ local function row(
 						text_size = "$font.size.xs",
 						color = "$danger",
 					}
-				),
+				)
+					else nil,
 			},
 		},
-		ui.show(
-			showing,
-			ui.column {
+		-- What it opens to, made only once it's opened.
+		ui.presence(function(): string?
+			return if showing() then "open" else nil
+		end, function(): Node
+			return ui.column {
 				w_full = true,
 				ui.show(has_call, call_block(now)),
 				ui.show(
@@ -659,7 +683,7 @@ local function row(
 					}
 				),
 			}
-		),
+		end, { w_full = true }),
 	}
 end
 
@@ -738,317 +762,96 @@ return ui.component(function(props: Props): Node
 			end)
 		end
 	end)
-	-- The rows, in runs of RUN: each run a list of its own, written only
-	-- when one of its tools changes (each tool's table is the very one it
-	-- was until the host builds it again), so a call arriving or finishing
-	-- touches its run alone, not every row. Kept while the rows are made.
-	local runs = ui.use_state({} :: { any })
-	local written: { { at: number, rows: { Tool } } } = {}
-	-- Runs made since the rows were (a call arriving past the last run's
-	-- end): their first row arrives as a row joining a run does.
-	local fresh: { [number]: boolean } = {}
+	-- The rows: a list virtualized by the view around it (the transcript's),
+	-- each call a row of its own, built only as the view shows it, the rows
+	-- about to come into it built ahead in the time frames leave over
+	-- (zgx's `ahead`), so a scroll or the tree opening builds what shows
+	-- alone. A row follows its tool in place (its item as a state), and
+	-- holds its height in `heights`: a call's line is ROW, one opened or a
+	-- thought its own, as it was last laid out.
+	local own_key = key or tostring(own)
+	local heights = ui.use_state({} :: { number })
+	local listed: { string } = {}
+	-- Calls arriving while the rows are made: each plays `ENTER` as it is
+	-- first built, as a row joining a `ui.each` does.
+	local arriving: { [string]: boolean } = {}
 	local was_mounted = false
+	-- A row's height as it is first laid out: a call's line, ROW, or as it
+	-- was last laid out if opened; a thought, as it was if it's short or
+	-- opened, else its four lines folded before it knows it's long (its
+	-- button's room comes a frame on, as the words are measured).
+	local line = ui.theme.get("zeron.prose.small.line") :: number
+	local first_folded = THOUGHT_LINES * line + (ROW - line)
+	local function height_of(t: Tool): number
+		local h = MEASURED[`{own_key}:{t.id}`]
+		local open = CALLS_OPEN:peek()[t.id] == true
+		if t.kind ~= "thought" then
+			return if open and h then h else ROW
+		end
+		if h and (open or h <= first_folded) then
+			return h
+		end
+		return first_folded
+	end
 	ui.effect(function()
-		if not mounted:get() then
-			was_mounted = false
-			return
-		end
 		local list = tools:get()
+		local m = mounted:get()
 		local n = #list
-		local count_runs = (n + RUN - 1) // RUN
-		local arriving = was_mounted
-		was_mounted = true
+		-- (Rows that were there before: the same calls in the same places,
+		-- looked at at the ends; anything else is written whole.)
+		local same = #listed <= n
+			and (#listed == 0 or (list[1].id == listed[1] and list[#listed].id == listed[#listed]))
 		ui.batch(function()
-			for k = 1, count_runs do
-				local from, to = (k - 1) * RUN + 1, math.min(k * RUN, n)
-				local old = written[k]
-				local same = old ~= nil and #old.rows == to - from + 1
-				if same then
-					local rows = (old :: any).rows
-					for i = from, to do
-						if rows[i - from + 1] ~= list[i] then
-							same = false
-							break
-						end
-					end
-				end
-				if not same then
-					local item = { at = k, rows = table.move(list, from, to, 1, {}) }
-					if old ~= nil then
-						runs:set_key(k, item)
-					else
-						fresh[k] = arriving or nil
-						runs:push(item)
-					end
-					written[k] = item
-				end
+			if not same then
+				heights:set({})
+				table.clear(listed)
 			end
-			for k = #written, count_runs + 1, -1 do
-				runs:remove(k)
-				written[k] = nil
-				fresh[k] = nil
+			for i = #listed + 1, n do
+				local t = list[i]
+				listed[i] = t.id
+				if m and was_mounted then
+					arriving[t.id] = true
+				end
+				heights:push(height_of(t))
 			end
 		end)
+		was_mounted = m
 	end)
-
-	-- Windowed (`window`: a transcript's group): each run built while its
-	-- reach (the run and OVERSCAN either side) touches the view; away, a
-	-- box of its last height. A group of thousands of calls costs what
-	-- shows of it, as a long reply does (ds/markdown's `window`).
-	local window = props.window
-	-- Each run's judge by its place (registered as it's made): whether its
-	-- box starts past the view's foot (and the overscan), judging it.
-	local judges: { [number]: () -> boolean } = {}
-	-- Each run's box's foot (nil until laid out), and the runs built now.
-	local bottoms: { [number]: () -> number? } = {}
-	local built: { [number]: true } = {}
-	local judged_at = -math.huge
-	local function judge_all()
-		judged_at = ui.now()
-		local w = window :: Window
-		local total = runs:len()
-		-- The runs wholly above the view's reach come first, their boxes in
-		-- order: found by halving, judged only if built (to be let go).
-		local view = w.view:peek()
-		local reach = if view and view.y ~= nil then (view.y :: number) - OVERSCAN else nil
-		local first = 1
-		if reach then
-			local past = total + 1
-			while first < past do
-				local mid = (first + past) // 2
-				local foot = if bottoms[mid] then bottoms[mid]() else nil
-				if foot ~= nil and foot <= reach then
-					first = mid + 1
-				else
-					past = mid
-				end
+	local function row_view(t: Tool, index: State<number>, item: State<Tool>): Node
+		local id = t.id
+		local function place(): number
+			return index:get()
+		end
+		-- Its height, as laid out, for the rows after it.
+		local function resized(size: { w: number, h: number })
+			local k = `{own_key}:{id}`
+			if MEASURED[k] ~= size.h then
+				kept_set(MEASURED, k, size.h)
+			end
+			local i = index:peek()
+			local held = heights:peek()[i]
+			if held ~= nil and held ~= size.h then
+				heights:set_key(i, size.h)
 			end
 		end
-		if first > 1 then
-			local some: { number } = {}
-			for at in built do
-				if at < first then
-					table.insert(some, at)
-				end
-			end
-			-- (The last: while the group works, it's where rows arrive.)
-			if total < first then
-				table.insert(some, total)
-			end
-			for _, at in some do
-				local j = judges[at]
-				if j then
-					j()
-				end
-			end
-		end
-		for at = first, total do
-			local j = judges[at]
-			if j and j() then
-				local more = false
-				for later in built do
-					if later > at then
-						more = true
-						break
-					end
-				end
-				if not more then
-					break
-				end
-			end
-		end
-	end
-	local looking = false
-	local function look_soon()
-		if looking then
-			return
-		end
-		looking = true
-		ui.after(0, function()
-			looking = false
-			judge_all()
-		end)
-	end
-	if window then
-		ui.effect(function()
-			window.offset:get()
-			if not mounted:get() then
-				return
-			end
-			-- (As ds/markdown's: a pass now, a frame apart at most, while the
-			-- view moves every frame, and one for where it comes to rest.)
-			if ui.now() - judged_at >= 8 then
-				judge_all()
-			end
-			ui.after(0, judge_all)
-		end)
-	end
-
-	-- One run: its rows, each following its tool as it goes on (found by its
-	-- id in the run: an animated list's rows have no row state).
-	local function rows_of(run: any, rows: State<{ Tool }>, play: boolean): Node
-		local at = run.at
-		return ui.each(rows, function(t: Tool)
-			local id = t.id
-			-- Its place in the group, from 1.
-			local function place(): number
-				for j, x in rows:get() do
-					if x.id == id then
-						return (at - 1) * RUN + j
-					end
-				end
-				return 0
-			end
-			local now = ui.computed(function(): Tool
-				for _, x in rows:get() do
-					if x.id == id then
-						return x
-					end
-				end
-				return t
-			end)
+		local function made(): Node
 			return row(function(): Tool
-				return now:get()
+				return item:get()
 			end, function(): boolean
 				return place() < last_branch:get()
 			end, function(): boolean
 				return live() and place() == count:get()
-			end, props.open_subagent, props.thought, props.key)
-		end, {
-			key = function(t: Tool): string
-				return t.id
-			end,
-			enter = ENTER,
-			initial = play,
-			w_full = true,
-		})
-	end
-	local function run_view(run: any, _i: number, rrow: State<any>): Node
-		local at = run.at
-		local rows = ui.computed(function(): { Tool }
-			return rrow:get().rows
-		end)
-		-- (Its first rows arrive only as the run is first made: built again
-		-- as it comes back into view, it's as it was.)
-		local play = fresh[at] == true
-		fresh[at] = nil
-		if not window then
-			return ui.div { w_full = true, rows_of(run, rows, play) }
+			end, props.open_subagent, props.thought, props.key, resized)
 		end
-		local w = window :: Window
-		local k = `{w.key}:{at}`
-		-- (By the tools' count, not the runs': runs are made one by one as
-		-- the tree opens, each the last of those made so far.)
-		local function last(): boolean
-			return at == (count:peek() + RUN - 1) // RUN
+		-- (A call arriving joins as a row joining a `ui.each` does; the rest
+		-- are made as they come into view, as they were.)
+		if arriving[id] then
+			arriving[id] = nil
+			return ui.presence(function(): string
+				return "row"
+			end, made, { enter = ENTER, initial = true, w_full = true })
 		end
-		-- Its height before it has been laid out: a row a tool, a thought
-		-- folded at its four lines.
-		local function guess(): number
-			local h = 0
-			for _, t in rows:peek() do
-				h += if t.kind == "thought" then THOUGHT_GUESS else ROW
-			end
-			return h
-		end
-		-- Built as it was last judged; never judged, built if it's the last
-		-- (where a working group's rows arrive) or among the first (where
-		-- one opened shows), else held at a guess and judged a tick on.
-		local was_near = NEAR[k]
-		local near = ui.use_state(if was_near ~= nil then was_near else last() or (at - 1) * RUN * ROW < NEAR_START)
-		local held = ui.use_state(HEIGHTS[k] or guess())
-		local r = ui.ref()
-		local returning = false
-		judges[at] = function(): boolean
-			local el, view = r:peek(), w.view:peek()
-			if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
-				return false
-			end
-			-- (Not laid out at its height yet: the tree just opening lays its
-			-- runs out first in no room at all, each at its top. Judged as
-			-- its height comes.)
-			if (el.height :: number) <= 0 and #rows:peek() > 0 then
-				return false
-			end
-			local y, top = el.y :: number, view.y :: number
-			-- (Built, it stays so out to KEEP: a reader scrolling back and
-			-- forth over it doesn't build it again each time.)
-			local reach = if near:peek() then KEEP else OVERSCAN
-			local shows = (live() and last())
-				or (y < top + (view.height :: number) + reach and y + (el.height :: number) > top - reach)
-			kept_set(NEAR, k, shows)
-			if near:peek() ~= shows then
-				returning = shows
-				near:set(shows)
-			end
-			built[at] = if shows then true else nil
-			return y >= top + (view.height :: number) + OVERSCAN
-		end
-		bottoms[at] = function(): number?
-			local el = r:peek()
-			if not el or el.y == nil or el.height == nil then
-				return nil
-			end
-			return (el.y :: number) + (el.height :: number)
-		end
-		if near:peek() then
-			built[at] = true
-		end
-		ui.on_cleanup(function()
-			judges[at], bottoms[at], built[at] = nil, nil, nil
-		end)
-		return ui.div {
-			ref = r,
-			w_full = true,
-			on_mount = look_soon,
-			on_resize = function(size: { w: number, h: number })
-				look_soon()
-				local was = held:peek()
-				local back = returning
-				returning = false
-				-- (Held at exactly its height: a fraction off, the list's
-				-- length would be, and its scrollbar a fraction elsewhere.)
-				if HEIGHTS[k] ~= size.h then
-					kept_set(HEIGHTS, k, size.h)
-				end
-				if size.h == was then
-					return
-				end
-				held:set(size.h)
-				if math.abs(size.h - was) < 0.5 or not back or (w.at_end and w.at_end:peek()) then
-					return
-				end
-				-- Above the view's top (it came in from there): the view moves
-				-- with it, so what shows doesn't (unless the list's row is
-				-- wholly above the top: the list keeps what shows then).
-				local el, view = r:peek(), w.view:peek()
-				local row_el = if w.row then w.row:peek() else nil
-				local row_above = row_el ~= nil
-					and view ~= nil
-					and row_el.y ~= nil
-					and row_el.height ~= nil
-					and view.y ~= nil
-					and (row_el.y :: number) + (row_el.height :: number) <= (view.y :: number)
-				if el and view and el.y and view.y and (el.y :: number) < (view.y :: number) and not row_above then
-					w.offset:set(math.max(0, w.offset:peek() + size.h - was))
-				end
-			end,
-			ui.presence(function(): string
-				return if near:get() then "built" else "held"
-			end, function(kind: string): Node
-				if kind == "built" then
-					local first = play
-					play = false
-					return rows_of(run, rows, first)
-				end
-				return ui.div {
-					w_full = true,
-					h = function(): number
-						return held:get()
-					end,
-				}
-			end, { w_full = true }),
-		}
+		return made()
 	end
 
 	return ui.column {
@@ -1107,12 +910,17 @@ return ui.component(function(props: Props): Node
 				end, function(): Node
 					return (props.body :: () -> Node)()
 				end, { w_full = true })
-				else ui.show(mounted, ui.each(runs, run_view, {
-					key = function(run: any): string
-						return tostring(run.at)
-					end,
+				else ui.show(
+				mounted,
+				ui.list {
 					w_full = true,
-				})),
+					virtualize = "ancestor",
+					data = tools,
+					key = "id",
+					heights = heights,
+					row = row_view,
+				}
+			),
 		},
 	}
 end)
