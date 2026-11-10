@@ -1,7 +1,7 @@
 -- Where the main window is: a new chat (`home`), a session
 -- (`session/:id`) or a page of settings (`settings/:page`), in one
 -- `ui.router` with the history behind and ahead (the title bar's arrows,
--- the mouse's buttons and a trackpad's swipe over the page, ⌘[ and ⌘]).
+-- ⌘[ and ⌘]; a trackpad's swipe doesn't step it).
 -- The other screens read where it is from here and move it from here:
 --
 --   route.make()            the router made (the shell, as it's built)

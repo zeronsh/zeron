@@ -228,15 +228,8 @@ return function(props: Props): Node
 	pane.pointer_events = function(): any
 		return if grouped() then "none" else "auto"
 	end
-	-- A trackpad's swipe between pages (the mouse's back and forward too):
-	-- the history, as the router's own view takes it.
-	pane.on_navigate = function(e)
-		if e.direction == "back" then
-			route.back()
-		else
-			route.forward()
-		end
-	end
+	-- No `on_navigate`: a trackpad's swipe over the page scrolls and never
+	-- steps the history (that's the title bar's arrows, ⌘[ and ⌘]).
 	-- Whether it shows, for what stands over it (screens/shell/art).
 	ui.effect(function()
 		local on = home() and not on_plugin() and appearance.showing:get() ~= "none"
