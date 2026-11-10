@@ -87,6 +87,109 @@ fn dump_row(bench: &mut Bench) {
     walk(&scene, row, 0, &line);
 }
 
+thread_local! {
+    /// Whether frames show their damage now (`DEBUG_DAMAGE`: the scroll's).
+    static DAMAGE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Each damage rect (logical points) and the nodes it is: those whose box
+/// matches it, else the deepest one holding it, with what's above.
+fn show_damage(scene: &zgx::scene::Scene, damage: &[zgx::scene::Rect]) {
+    let kind = |id| {
+        let k = format!("{:?}", scene.kind(id));
+        k.chars().take(40).collect::<String>()
+    };
+    let line = |id: zgx::scene::NodeId| {
+        let b = scene.bounds(id);
+        format!("#{} {} {:.1},{:.1} {:.1}x{:.1}", id.number(), kind(id), b.x, b.y, b.width, b.height)
+    };
+    let mut all = Vec::new();
+    let mut stack = vec![(scene.root(), 0usize)];
+    while let Some((id, depth)) = stack.pop() {
+        all.push((id, depth));
+        stack.extend(scene.children(id).iter().map(|c| (*c, depth + 1)));
+    }
+    thread_local!(static ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if !ONCE.replace(true) {
+        // Once: every box that fades its edges or blurs what's behind it.
+        for (id, depth) in &all {
+            let s = format!("{:?}", scene.style(*id));
+            let fades = !s.contains("fade_edges: [0.0, 0.0]");
+            let blur = s.find("backdrop").map(|at| s[at..].chars().take(120).collect::<String>());
+            let shadow = s.find("blur").map(|at| s[at..].chars().take(60).collect::<String>());
+            if fades || blur.as_deref().is_some_and(|b| !b.contains("None") && !b.contains("0.0,")) {
+                let f = s.find("fade_edges").map(|at| s[at..].chars().take(160).collect::<String>()).unwrap_or_default();
+                eprintln!("DAMAGE special d{depth} {} | {f} | {blur:?} | {shadow:?}", line(*id));
+            }
+        }
+    }
+    if std::env::var_os("DEBUG_DAMAGE_AT").is_some() {
+        for (rect, radius) in scene.backdrop_filters() {
+            eprintln!("DAMAGE backdrop filter {:.1},{:.1} {:.1}x{:.1} radius {radius}", rect.x, rect.y, rect.width, rect.height);
+        }
+        // What's over the composer's band: every box from y 660 to 731,
+        // not inside the transcript's rows (x 278..962), with its effects.
+        for (id, depth) in &all {
+            let b = scene.bounds(*id);
+            if b.y >= 640. && b.y < 731. && b.height > 0. && b.height < 120. && !(b.x >= 277. && b.x + b.width <= 963.5 && b.width > 600.) {
+                let effects = scene.effects(*id);
+                eprintln!("DAMAGE at d{depth} {} effects {:?} kind {}", line(*id), effects, format!("{:?}", scene.kind(*id)).chars().take(400).collect::<String>());
+            }
+        }
+    }
+    for r in damage {
+        eprintln!("DAMAGE   rect {:.1},{:.1} {:.1}x{:.1} = {:.0} px (device)", r.x, r.y, r.width, r.height, r.width * r.height * SCALE * SCALE);
+        let near = |a: f32, b: f32| (a - b).abs() <= 2.;
+        let matching: Vec<_> = all
+            .iter()
+            .filter(|(id, _)| {
+                let b = scene.bounds(*id);
+                near(b.x, r.x) && near(b.y, r.y) && near(b.width, r.width) && near(b.height, r.height)
+            })
+            .collect();
+        for (id, _) in matching.iter().take(4) {
+            eprintln!("DAMAGE     is {}", line(*id));
+        }
+        // Boxes sharing an edge with it (what bounds it), outside rows.
+        if r.width * r.height > 2000. {
+            for (id, depth) in all.iter().filter(|(id, _)| {
+                let b = scene.bounds(*id);
+                b.width >= 200. && b.height < 400. && (near(b.y, r.y) || near(b.y + b.height, r.y + r.height))
+            }).take(16) {
+                let p = scene.parent(*id).map(|p| line(p)).unwrap_or_default();
+                eprintln!("DAMAGE     edge d{depth} {} < {p} kind {}", line(*id), format!("{:?}", scene.kind(*id)).chars().take(700).collect::<String>());
+            }
+        }
+        // The deepest holding it, and up from there.
+        let holds = |id| {
+            let b = scene.bounds(id);
+            b.width * b.height > 0. && b.x <= r.x + 0.5 && b.y <= r.y + 0.5 && b.x + b.width >= r.x + r.width - 0.5 && b.y + b.height >= r.y + r.height - 0.5
+        };
+        if let Some((deepest, _)) = all.iter().filter(|(id, _)| holds(*id)).max_by_key(|(_, d)| *d) {
+            eprintln!("DAMAGE     in {}", line(*deepest));
+            let mut at = scene.parent(*deepest);
+            for _ in 0..5 {
+                let Some(id) = at else { break };
+                eprintln!("DAMAGE       < {}", line(id));
+                at = scene.parent(id);
+            }
+        }
+        // What paints inside it: the leaves within, by kind.
+        let mut inside: std::collections::BTreeMap<String, usize> = Default::default();
+        for (id, _) in &all {
+            if !scene.children(*id).is_empty() {
+                continue;
+            }
+            let b = scene.bounds(*id);
+            if b.width * b.height > 0. && b.x < r.x + r.width && b.x + b.width > r.x && b.y < r.y + r.height && b.y + b.height > r.y {
+                let k = kind(*id);
+                *inside.entry(k.split(|c: char| c == '(' || c == '{' || c == ' ').next().unwrap_or("").to_owned()).or_default() += 1;
+            }
+        }
+        eprintln!("DAMAGE     leaves within: {inside:?}");
+    }
+}
+
 /// The process's CPU time so far, every thread.
 fn process_cpu() -> Duration {
     // SAFETY: fills a rusage for this process.
@@ -275,6 +378,11 @@ impl Bench {
         let gpu = draw.then(|| {
             let mut gpu = GpuRenderer::new((W * SCALE) as u32, (H * SCALE) as u32).expect("a GPU");
             gpu.set_scale_factor(SCALE);
+            // (`DEBUG_SCROLL_COPY`: copying scrolls as a window does; offscreen
+            // on macOS the renderer repaints them instead.)
+            if std::env::var_os("DEBUG_SCROLL_COPY").is_some() {
+                gpu.debug_allow_scroll_copies();
+            }
             for font in crate::fonts() {
                 font.expect("the app's fonts").install(&mut gpu.text_system().borrow_mut());
             }
@@ -376,7 +484,11 @@ impl Bench {
         let report = self.app.ui.scene.borrow_mut().flush();
         let drawn = !report.damage.is_empty();
         if drawn && let Some(gpu) = &mut self.gpu {
-            gpu.render(&self.app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
+            let stats = gpu.render(&self.app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
+            if std::env::var_os("DEBUG_DAMAGE").is_some() && DAMAGE_SHOWN.get() {
+                eprintln!("DAMAGE frame: {} rects, {} px repainted, {} scroll copies, {} layer repaints, {} backdrop copies", report.damage.len(), stats.damaged_pixels, stats.scroll_copies, stats.layer_repaints, stats.backdrop_copies);
+                show_damage(&self.app.ui.scene.borrow(), &report.damage);
+            }
         }
         let cpu = thread_cpu() - start;
         let process = process_cpu() - process_from;
@@ -667,9 +779,31 @@ fn scenarios(n: usize, think: usize, open: bool) {
     row(n, think, label, "rest", &rest, 60, bench.nodes());
     // From there on down past the turn, a wheel's step a frame.
     let mut scroll = Cost::default();
+    // (`DEBUG_DAMAGE`: each scroll frame's damage, `DEBUG_SCROLL_STEP` points a step.)
+    let step: f32 = std::env::var("DEBUG_SCROLL_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(120.);
+    DAMAGE_SHOWN.set(true);
+    let noting = std::env::var_os("DEBUG_DAMAGE").is_some();
+    if noting {
+        zgx::trace::set_enabled(true);
+    }
     for _ in 0..60 {
-        bench.app.scroll("transcript", 120.);
+        bench.app.scroll("transcript", step);
         scroll.add(&bench.frame());
+    }
+    DAMAGE_SHOWN.set(false);
+    if noting {
+        // The renderer's notes on the scroll's frames: what copied, what
+        // repainted and why.
+        let mut notes: std::collections::BTreeMap<String, usize> = Default::default();
+        for frame in zgx::trace::frames(120) {
+            for note in &frame.notes {
+                *notes.entry(note.to_string()).or_default() += 1;
+            }
+        }
+        for (note, n) in notes {
+            eprintln!("DAMAGE note x{n}: {note}");
+        }
+        zgx::trace::set_enabled(false);
     }
     row(n, think, label, "scroll", &scroll, 60, bench.nodes());
     eprintln!("  ({n} calls, {}K, {label}: {:.1}s)", think / 1024, started.elapsed().as_secs_f64());
@@ -885,4 +1019,31 @@ fn activity_row_cost() {
     }
     println!();
     assert_eq!(app.error(), None);
+    // (`DEBUG_ROW_TREE`: one row's nodes, kinds and boxes.)
+    if std::env::var_os("DEBUG_ROW_TREE").is_some() {
+        let scene = app.ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        let mut verb = None;
+        while let Some(id) = stack.pop() {
+            if format!("{:?}", scene.kind(id)).starts_with("Text { text: \"Edited\"") {
+                verb = Some(id);
+                break;
+            }
+            stack.extend(scene.children(id).iter().copied());
+        }
+        // The verb's line, its button, the row.
+        let mut row = verb.expect("an edit's row");
+        for _ in 0..3 {
+            row = scene.parent(row).unwrap();
+        }
+        fn walk(scene: &zgx::scene::Scene, id: zgx::scene::NodeId, depth: usize) {
+            let b = scene.bounds(id);
+            let k = format!("{:?}", scene.kind(id));
+            eprintln!("ROW {:indent$}#{} {} {:.0},{:.0} {:.0}x{:.0}", "", id.number(), k.chars().take(60).collect::<String>(), b.x, b.y, b.width, b.height, indent = depth * 2);
+            for c in scene.children(id) {
+                walk(scene, *c, depth + 1);
+            }
+        }
+        walk(&scene, row, 0);
+    }
 }
