@@ -49,6 +49,44 @@ fn thread_cpu() -> Duration {
     Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
 }
 
+/// One call row's scene (kinds and boxes, no text) and every node above it to
+/// the root, for zgx's layout work to reproduce alone (`DEBUG_TREE=1`).
+fn dump_row(bench: &mut Bench) {
+    let Some(button) = bench.app.find("role:button ~\"package part8 --\"") else {
+        eprintln!("TREE no row in view");
+        return;
+    };
+    let scene = bench.app.ui.scene.borrow();
+    let kind = |id| {
+        let k = format!("{:?}", scene.kind(id));
+        k.split(|c: char| c == '(' || c == '{' || c == ' ').next().unwrap_or("").to_owned()
+    };
+    let line = |id, depth: usize| {
+        let b = scene.bounds(id);
+        format!("{:indent$}#{} {} {:.0},{:.0} {:.0}x{:.0} ({} children)", "", id.number(), kind(id), b.x, b.y, b.width, b.height, scene.children(id).len(), indent = depth * 2)
+    };
+    // The row's own root: the button's parent.
+    let row = scene.parent(button).unwrap_or(button);
+    let mut up = Vec::new();
+    let mut at = scene.parent(row);
+    while let Some(id) = at {
+        up.push(id);
+        at = scene.parent(id);
+    }
+    eprintln!("TREE above the row, from the root:");
+    for (depth, id) in up.iter().rev().enumerate() {
+        eprintln!("TREE {}", line(*id, depth));
+    }
+    eprintln!("TREE the row:");
+    fn walk(scene: &zgx::scene::Scene, id: zgx::scene::NodeId, depth: usize, line: &dyn Fn(zgx::scene::NodeId, usize) -> String) {
+        eprintln!("TREE {}", line(id, depth));
+        for child in scene.children(id) {
+            walk(scene, *child, depth + 1, line);
+        }
+    }
+    walk(&scene, row, 0, &line);
+}
+
 /// The process's CPU time so far, every thread.
 fn process_cpu() -> Duration {
     // SAFETY: fills a rusage for this process.
@@ -459,6 +497,9 @@ fn scenarios(n: usize, think: usize, open: bool) {
     }
     bench.settle(30);
     let ticks = bench.frames(60);
+    if std::env::var_os("DEBUG_TREE").is_some() && open {
+        dump_row(&mut bench);
+    }
     row(n, think, label, "ticks", &ticks, 60, bench.nodes());
 
     // The thought being written grows, a chunk a frame.
@@ -513,19 +554,48 @@ fn scenarios(n: usize, think: usize, open: bool) {
         call_cost.add(&cost);
         if tracing {
             // (A few frames into the arrival's animations.)
-            bench.frames(3);
-            for frame in zgx::trace::frames(4) {
+            bench.frames(6);
+            for frame in zgx::trace::frames(7) {
                 let mut runs = frame.runs.clone();
                 runs.sort_by(|a, b| b.micros.total_cmp(&a.micros));
                 eprintln!("TRACE frame {} | measured {} nodes ({:.0} µs) | runs {}", frame.index, frame.layout.measured, frame.layout.micros, frame.runs.len());
                 for run in runs.iter().take(12) {
                     eprintln!("TRACE   run {:>7.1} µs {}", run.micros, run.name.as_deref().unwrap_or("?"));
                 }
-                let tree = bench.app.tree();
+                // Each measured node by its number: its kind, box and the
+                // three nodes above it (as `dump_row` numbers them).
+                let mut root = bench.app.find("transcript").expect("the transcript");
+                let scene = bench.app.ui.scene.borrow();
+                while let Some(up) = scene.parent(root) {
+                    root = up;
+                }
+                let mut by_number = std::collections::HashMap::new();
+                let mut stack = vec![root];
+                while let Some(id) = stack.pop() {
+                    by_number.insert(id.number(), id);
+                    stack.extend(scene.children(id).iter().copied());
+                }
+                let kind = |id| {
+                    let k = format!("{:?}", scene.kind(id));
+                    k.split(|c: char| c == '(' || c == '{' || c == ' ').next().unwrap_or("").to_owned()
+                };
                 for m in &frame.layout.top {
-                    let tag = format!("@{} ", m.node);
-                    let what = tree.lines().find(|l| l.contains(&tag)).unwrap_or("(not in the tree's text)").trim();
-                    eprintln!("TRACE   measured {:.1} µs (own {:.1}) {}", m.micros, m.self_micros, &what[..what.len().min(100)]);
+                    let Some(&id) = by_number.get(&m.node) else {
+                        eprintln!("TRACE   measured #{} {:.1} µs (own {:.1}) (gone)", m.node, m.micros, m.self_micros);
+                        continue;
+                    };
+                    let b = scene.bounds(id);
+                    let mut up = String::new();
+                    let mut at = scene.parent(id);
+                    for _ in 0..3 {
+                        let Some(p) = at else { break };
+                        up.push_str(&format!(" < #{} {}", p.number(), kind(p)));
+                        at = scene.parent(p);
+                    }
+                    eprintln!(
+                        "TRACE   measured #{} {} {:.0},{:.0} {:.0}x{:.0} ({} children) {:.1} µs (own {:.1}){up}",
+                        m.node, kind(id), b.x, b.y, b.width, b.height, scene.children(id).len(), m.micros, m.self_micros
+                    );
                 }
             }
             zgx::trace::set_enabled(false);
