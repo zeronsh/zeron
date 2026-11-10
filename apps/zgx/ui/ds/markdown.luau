@@ -829,6 +829,8 @@ end
 -- its own scrolling otherwise (zgx's `View::wheel_across` has the rules).
 local TABLE_SHORT = 20
 local TABLE_FLOOR = 144
+-- The most characters a long column counts for when the room is shared.
+local TABLE_SHARE = 40
 
 -- A run of words, its links that the page may draw as chips (a reply's
 -- link to a file of the chat's, to one of its agent's skills: `link_chip`)
@@ -885,6 +887,7 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 	local tracks: { string } = {}
 	local aligns: { string } = {}
 	local any_long = false
+	local long: { boolean } = {}
 	for c, head in b.head do
 		local longest = #cell_text(head)
 		local numbers, filled = true, 0
@@ -901,7 +904,12 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 		if longest <= TABLE_SHORT or (numbers and filled > 0) then
 			tracks[c] = "max-content"
 		else
-			tracks[c] = "auto"
+			-- A share of the view by what the column says (up to
+			-- `TABLE_SHARE` characters' worth), never less than its
+			-- words need: `auto` tracks let a wide column's wrapped
+			-- text size the grid past the view.
+			tracks[c] = `minmax(min-content, {math.clamp(longest, TABLE_SHORT, TABLE_SHARE)}fr)`
+			long[c] = true
 			any_long = true
 		end
 	end
@@ -914,7 +922,7 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 			class = "md-text",
 			-- (Not wrapping by a rounding, a short column's track being as wide
 			-- as its words.)
-			wrap = tracks[c] == "auto",
+			wrap = long[c] == true,
 			text_size = "$zeron.prose.small.size",
 			line_height = "$zeron.prose.small.line",
 		}
@@ -926,7 +934,7 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 			class = "md-cell",
 			-- (A column's floor, held by its header: the others' longest words
 			-- still count.)
-			min_w = if head and tracks[c] == "auto" then ui.raw(TABLE_FLOOR, "a long column's least width") else nil,
+			min_w = if head and long[c] then ui.raw(TABLE_FLOOR, "a long column's least width") else nil,
 			items = aligns[c],
 			pl = if c == 1 then "$space.4" else "$space.3",
 			pr = if c == count then "$space.4" else "$space.3",

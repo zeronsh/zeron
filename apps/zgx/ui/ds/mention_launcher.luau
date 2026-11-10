@@ -48,12 +48,49 @@ end
 export type Section = { id: string, label: any }
 export type Entry = { item: any, i: number }
 
+-- The list's lines: the rows, and in All (`all`) a heading over each
+-- section's, by its id (a message can't be held in a state).
+local function arrange(items: { any }, all: boolean): { any }
+	local out = {}
+	local last: string? = nil
+	for i, item in items do
+		if all and item.section ~= last then
+			last = item.section
+			table.insert(out, { heading = item.section or "", first = #out == 0 })
+		end
+		table.insert(out, { item = item, i = i })
+	end
+	return out
+end
+-- Their shapes, as ds/menu's `list_height` takes them.
+local function shape(entries: { any }): { string }
+	local lines = {}
+	for _, entry in entries do
+		table.insert(lines, if entry.heading then "heading" else "row")
+	end
+	return lines
+end
+
+-- Brings row `i` of `items` into the list's view (its `offset`), as the
+-- keys light it (ds/menu `reveal`).
+function M.reveal(offset: State<number>, items: { any }, all: boolean, i: number)
+	local entries = arrange(items, all)
+	for n, entry in entries do
+		if entry.i == i then
+			Menu.reveal(offset, shape(entries), n, ROWS, row_h())
+			return
+		end
+	end
+end
+
 export type Props = {
 	-- The token at the caret (its trigger and query).
 	token: any,
 	-- The rows in their order (a section's together, sections in order).
 	shown: any,
 	active: State<number>,
+	-- Where its list is scrolled (`M.reveal` keeps the lit row in it).
+	offset: State<number>?,
 	-- "all", or a section's id.
 	scope: State<string>,
 	sections: { Section },
@@ -317,18 +354,7 @@ function M.Panel(props: Props): Node
 		labels[s.id] = s.label
 	end
 	local placed = ui.computed(function(): { any }
-		local out = {}
-		local all = props.scope:get() == "all"
-		local last: string? = nil
-		for i, item in props.shown:get() do
-			if all and item.section ~= last then
-				last = item.section
-				-- (By its id: a message can't be held in a state.)
-				table.insert(out, { heading = item.section or "", first = #out == 0 })
-			end
-			table.insert(out, { item = item, i = i })
-		end
-		return out
+		return arrange(props.shown:get(), props.scope:get() == "all")
 	end)
 	local function row(item: any, i: number): Node
 		local function lit(): boolean
@@ -455,11 +481,7 @@ function M.Panel(props: Props): Node
 		gap = "$zeron.list.gap",
 	})
 	local function list_cap(): number
-		local lines = {}
-		for _, entry in placed:get() do
-			table.insert(lines, if entry.heading then "heading" else "row")
-		end
-		return Menu.list_height(lines, ROWS, row_h())
+		return Menu.list_height(shape(placed:get()), ROWS, row_h())
 	end
 	local function legend(keys: Node, what: string): Node
 		return ui.row {
@@ -513,6 +535,7 @@ function M.Panel(props: Props): Node
 			},
 			lines = rows,
 			h = list_cap,
+			offset = props.offset,
 			role = "listbox",
 			label = locale.t("ds.mention_launcher.results_label"),
 		},
