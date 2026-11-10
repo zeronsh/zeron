@@ -77,6 +77,40 @@ export type Session = {
 	pr: { number: number, state: string?, title: string? }?,
 }
 
+-- A row's trailing items (the subagents pill, the unreachable glyph, the
+-- fold chevron or its empty slot, the corner), closer than its title and
+-- badges stand: 4 apart. One not shown leaves no gap.
+function M.trailing(...: Node?): Node
+	local parts: ContainerProps = { shrink = 0, gap = "$space.1", items = "center" }
+	for i = 1, select("#", ...) do
+		local node = select(i, ...)
+		if node then
+			table.insert(parts, node)
+		end
+	end
+	return ui.row(parts)
+end
+
+-- A session row's line: `M.line` with a 4-point inset at its end (the
+-- selection's ring is 4 clear of the corner, not 8).
+function M.row_line(text: Node, ...: Node?): Node
+	local parts: ContainerProps = {
+		w_full = true,
+		h = M.SLOT,
+		pr = "$space.1",
+		gap = "$space.2",
+		items = "center",
+		text,
+	}
+	for i = 1, select("#", ...) do
+		local node = select(i, ...)
+		if node then
+			table.insert(parts, node)
+		end
+	end
+	return ui.row(parts)
+end
+
 function M.line(text: Node, ...: Node?): Node
 	local parts: ContainerProps = {
 		w_full = true,
@@ -232,10 +266,18 @@ export type CornerProps = {
 
 -- The corner as a row wears it: its state (or time) at rest; under the
 -- pointer, its action, its glyph on the state's own centre; ⌘ held alone,
--- its jump's keys in its place (as Zeron's). The two share one box as wide
--- as the wider (what's at rest stays, unseen, so its width holds): ⌘1 fits
--- where a time stood and nothing moves, and a wider Ctrl+1 widens the
--- corner, the badges before it giving way, never drawn over.
+-- its jump's keys in its place (as Zeron's). At rest it is one width for
+-- every row (`corner_width`, the widest of a time and the archive button),
+-- its content to the right, so what sits before it (the pill, the fold
+-- chevron) keeps its column as a time ticks, a state comes or the pointer
+-- arrives. The jump keys, wider than that (Ctrl+1), widen the corner while
+-- they show, the items before it moving left, never drawn over.
+local CORNER_MIN = 26
+function M.corner_width(): number
+	-- ("104w", 26 points at the small size; the archive button, 22.)
+	return math.max(CORNER_MIN, 22)
+end
+
 function M.Corner(props: CornerProps): Node
 	local hovered = props.hovered
 	local jump = props.jump or function(): number?
@@ -245,7 +287,7 @@ function M.Corner(props: CornerProps): Node
 	return ui.overlay {
 		shrink = 0,
 		relative = true,
-		min_w = 16,
+		min_w = M.corner_width(),
 		h = 16,
 		items = "end",
 		justify = "center",

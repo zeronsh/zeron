@@ -1396,30 +1396,34 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			words = ui.column {
 				w_full = true,
 				gap = "$zeron.space.hair",
-				line(
+				SessionRow.row_line(
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
-					subagents_pill(function(): number
-						return cur().subagents or 0
-					end),
-					-- Its state (or time) at rest; under the pointer, archive (on
-					-- the shelf, unarchive); ⌘ held alone, its jump's keys.
-					SessionRow.Corner {
-						cur = cur,
-						hovered = hovered,
-						jump = jump,
-						action = if shelved
-							then corner("ds.sidebar.unarchive", "inbox", function()
-								if props.on_unarchive then
-									props.on_unarchive(s.id)
-								end
-							end)
-							else corner("ds.sidebar.archive", "archive-minimalistic", function()
-								if props.on_archive then
-									props.on_archive(s.id)
-								end
-							end),
-					}
+					-- (The pill and the corner, 4 apart, the corner of one width.)
+					SessionRow.trailing(
+						subagents_pill(function(): number
+							return cur().subagents or 0
+						end),
+						-- Its state (or time) at rest; under the pointer, archive (on
+						-- the shelf, unarchive); ⌘ held alone, its jump's keys.
+						SessionRow.Corner {
+							cur = cur,
+							hovered = hovered,
+							jump = jump,
+							action = if shelved
+								then corner("ds.sidebar.unarchive", "inbox", function()
+									if props.on_unarchive then
+										props.on_unarchive(s.id)
+									end
+								end)
+								else corner("ds.sidebar.archive", "archive-minimalistic", function()
+									if props.on_archive then
+										props.on_archive(s.id)
+									end
+								end),
+						}
+
+					)
 				),
 				-- Pulled up under the title: the line's own inset is the row's.
 				ui.div { mt = ui.raw(-8, "up a row's inset, under the title"), second },
