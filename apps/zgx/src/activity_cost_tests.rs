@@ -1009,13 +1009,26 @@ fn activity_goal() {
             .filter(|(_, p)| p.0 > 0)
             .map(|(name, p)| format!(" {}={:.2}M/s", name.name(), p.0 as f64 / 1e6 / seconds))
             .collect();
+        // (A frame drawn: one with damage. Per such frame, as instructions
+        // compare across call counts and machines; paint here includes the
+        // headless renderer's deferred draw, `flush_pending`, a window's
+        // presented frame doesn't make.)
+        let drawn = cost.drawn.max(1) as f64;
+        let per: String = PHASES
+            .iter()
+            .zip(cost.phases.iter())
+            .filter(|(_, p)| p.0 > 0)
+            .map(|(name, p)| format!(" {}={:.0}k", name.name(), p.0 as f64 / 1e3 / drawn))
+            .collect();
         println!(
-            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames drawn, host {:.1} ms; spare {:.1}M/s;{names}",
+            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames run, {} drawn, host {:.1} ms; spare {:.1}M/s;{names}; a frame drawn: spare={:.0}k{per}",
             cost.process.as_secs_f64() / seconds * 100.,
             cost.process.as_secs_f64() * 1e3,
             cost.cpu.as_secs_f64() / seconds * 100.,
+            cost.drawn,
             cost.host.as_secs_f64() * 1e3,
             cost.spare as f64 / 1e6 / seconds,
+            cost.spare as f64 / 1e3 / drawn,
         );
     };
     // (`ACTIVITY_GOAL_ONLY=scroll`: the scroll alone.)
@@ -1110,13 +1123,26 @@ fn activity_goal_thinking() {
             .filter(|(_, p)| p.0 > 0)
             .map(|(name, p)| format!(" {}={:.2}M/s", name.name(), p.0 as f64 / 1e6 / seconds))
             .collect();
+        // (A frame drawn: one with damage. Per such frame, as instructions
+        // compare across call counts and machines; paint here includes the
+        // headless renderer's deferred draw, `flush_pending`, a window's
+        // presented frame doesn't make.)
+        let drawn = cost.drawn.max(1) as f64;
+        let per: String = PHASES
+            .iter()
+            .zip(cost.phases.iter())
+            .filter(|(_, p)| p.0 > 0)
+            .map(|(name, p)| format!(" {}={:.0}k", name.name(), p.0 as f64 / 1e3 / drawn))
+            .collect();
         println!(
-            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames drawn, host {:.1} ms; spare {:.1}M/s;{names}",
+            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames run, {} drawn, host {:.1} ms; spare {:.1}M/s;{names}; a frame drawn: spare={:.0}k{per}",
             cost.process.as_secs_f64() / seconds * 100.,
             cost.process.as_secs_f64() * 1e3,
             cost.cpu.as_secs_f64() / seconds * 100.,
+            cost.drawn,
             cost.host.as_secs_f64() * 1e3,
             cost.spare as f64 / 1e6 / seconds,
+            cost.spare as f64 / 1e3 / drawn,
         );
     };
     let only = std::env::var("ACTIVITY_GOAL_ONLY").ok();
