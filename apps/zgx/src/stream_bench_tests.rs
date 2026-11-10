@@ -281,6 +281,13 @@ fn stream_bench_profile() {
     let scale: u32 = std::env::var("PROBE_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let mut gpu = zgx_gpu::GpuRenderer::new(w * scale, h * scale).expect("a GPU");
     gpu.set_scale_factor(scale as f32);
+    // `PROBE_NATIVE_TEXT=1`: the renderer's text services on the page, as a
+    // window installs them (zgx-desktop), rather than the headless estimates.
+    let native_text = std::env::var_os("PROBE_NATIVE_TEXT").is_some_and(|v| v == "1");
+    if native_text {
+        gpu.install_text(&mut app.ui.scene.borrow_mut());
+        app.ui.refresh_text_geometry();
+    }
     let pump = |app: &TestApp| {
         while let Some(work) = queued.borrow_mut().pop_front() {
             app.executor.borrow_mut().spawn(work);
@@ -295,14 +302,15 @@ fn stream_bench_profile() {
     // clock was asked for (an animation running) as they began.
     let on_demand = std::env::var_os("PROBE_ON_DEMAND").is_some_and(|v| v == "1");
     eprintln!(
-        "stream_bench_profile: {} drawing, veil {}",
+        "stream_bench_profile: {} drawing, {} text, veil {}",
         if on_demand { "on-demand" } else { "forced 120/s" },
+        if native_text { "native" } else { "estimated" },
         if std::env::var_os("PROBE_VEIL_OFF").is_some_and(|v| v == "1") { "off" } else { "on" }
     );
     let drawn = Cell::new(0u32);
     let wanted = Cell::new(0u32);
     // The last frame drawn: what the renderer did, its damage's rects and area.
-    let last: RefCell<Option<(zgx_gpu::GpuStats, usize, f64)>> = RefCell::default();
+    let last: RefCell<Option<(zgx_gpu::GpuStats, usize, f64, Vec<zgx::scene::Rect>)>> = RefCell::default();
     let mut draw = |app: &TestApp| {
         pump(app);
         if app.clock.wants_frame() {
@@ -313,7 +321,7 @@ fn stream_bench_profile() {
         if !on_demand || !damage.is_empty() {
             let stats = gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
             let area: f64 = damage.iter().map(|r| f64::from(r.width) * f64::from(r.height)).sum();
-            *last.borrow_mut() = Some((stats, damage.len(), area));
+            *last.borrow_mut() = Some((stats, damage.len(), area, damage.clone()));
             drawn.set(drawn.get() + 1);
         }
     };
@@ -502,7 +510,11 @@ fn stream_bench_profile() {
     // And what the renderer did on them, by kind: (instances, draw calls,
     // damaged pixels, damage rects, damage area in points, patched items,
     // layer repaints, backdrop copies, render passes).
-    let mut gpu_kinds = [[0f64; 9]; 2];
+    let mut gpu_kinds = [[0f64; 11]; 2];
+    // `PROBE_DAMAGE=n`: the damage of the first n fade-only frames drawn
+    // after 3 s of streaming.
+    let dump: u32 = std::env::var("PROBE_DAMAGE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut dumped = 0u32;
     zgx::profile::take();
     let mut drawn_last = drawn.get();
     while streaming(&view) {
@@ -518,7 +530,11 @@ fn stream_bench_profile() {
             had = now;
             if drawn.get() != drawn_last {
                 drawn_kinds[k] += 1;
-                if let Some((g, rects, area)) = last.borrow_mut().take() {
+                if let Some((g, rects, area, damage)) = last.borrow_mut().take() {
+                    if k == 1 && dumped < dump && started.elapsed() > Duration::from_secs(3) {
+                        dumped += 1;
+                        eprintln!("  fade-only damage {dumped}: {} passes ({} blur, {} effect, {} layer repaints, {} backdrop copies), {} draws: {:?}", g.render_passes, g.blur_passes, g.effect_passes, g.layer_repaints, g.backdrop_copies, g.draw_calls, damage.iter().map(|r| (r.x as i32, r.y as i32, r.width as i32, r.height as i32)).collect::<Vec<_>>());
+                    }
                     let row = [
                         g.instances as f64,
                         g.draw_calls as f64,
@@ -529,6 +545,8 @@ fn stream_bench_profile() {
                         g.layer_repaints as f64,
                         g.backdrop_copies as f64,
                         g.render_passes as f64,
+                        g.blur_passes as f64,
+                        g.effect_passes as f64,
                     ];
                     for (sum, v) in gpu_kinds[k].iter_mut().zip(row) {
                         *sum += v;
@@ -586,8 +604,8 @@ fn stream_bench_profile() {
         for (name, (sums, count)) in ["drawn chunk frames", "drawn fade-only frames"].iter().zip(gpu_kinds.iter().zip(drawn_kinds)) {
             let c = f64::from(count.max(1));
             eprintln!(
-                "  {name}, renderer a frame: {:.0} instances, {:.1} draw calls, {:.0}K px damaged, {:.1} rects of {:.0} pt², {:.1} patched, {:.2} layer repaints, {:.2} backdrop copies, {:.1} passes",
-                sums[0] / c, sums[1] / c, sums[2] / c / 1e3, sums[3] / c, sums[4] / c, sums[5] / c, sums[6] / c, sums[7] / c, sums[8] / c
+                "  {name}, renderer a frame: {:.0} instances, {:.1} draw calls, {:.0}K px damaged, {:.1} rects of {:.0} pt², {:.1} patched, {:.2} layer repaints, {:.2} backdrop copies, {:.2} passes ({:.2} blur, {:.2} effect)",
+                sums[0] / c, sums[1] / c, sums[2] / c / 1e3, sums[3] / c, sums[4] / c, sums[5] / c, sums[6] / c, sums[7] / c, sums[8] / c, sums[9] / c, sums[10] / c
             );
         }
         for (name, (frames, by_phase)) in ["chunk frames", "fade-only frames"].iter().zip(&kinds) {
