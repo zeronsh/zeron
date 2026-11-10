@@ -225,6 +225,69 @@ end
 -- scrolled back): each tool's call by its id, each group by its key. One
 -- map each, holding only what's open (or, for a group, chosen), not a
 -- state per tool.
+-- A row's call and what it did, as it opens (`row`): `now`, its tool.
+local Opened = ui.component(function(props: { now: () -> Tool }): Node
+	local now = props.now
+	return ui.column {
+		w_full = true,
+		ui.show(function(): boolean
+			return now().call ~= nil
+		end, call_block(now)),
+		ui.show(
+			function(): boolean
+				return ToolDetail.has(now() :: any)
+			end,
+			ui.div {
+				ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+				mb = "$space.1",
+				ToolDetail.ToolDetail { tool = now :: any },
+			}
+		),
+	}
+end)
+
+-- A row's line, as FadeText makes it (ds/fade_text: a box that clips the
+-- text at its own width, fading its end while it overflows), built here
+-- directly: a long group makes thousands.
+local function target_line(now: () -> Tool): Node
+	local clip, text = ui.ref(), ui.ref()
+	return ui.row {
+		ref = clip,
+		shrink = 1,
+		min_w = 0,
+		overflow = "hidden",
+		items = "center",
+		fade_x = function()
+			local over = (text.width or 0) > (clip.width or 0) + 0.5
+			return { 0, if over then 24 else 0 }
+		end,
+		ui.text {
+			function(): string
+				return line_of(now())
+			end,
+			ref = text,
+			shrink = 0,
+			literal = true,
+			font = "$font.mono",
+			text_size = "$font.size.sm",
+			color = "$text.primary",
+		},
+	}
+end
+
+-- A row's branch (`tree_line.branch`), made once for each height and
+-- whether the trunk goes on: rows of a height share it.
+local BRANCHES: { [string]: any } = {}
+local function branch_of(h: number, on: boolean): any
+	local k = `{h}:{on}`
+	local path = BRANCHES[k]
+	if path == nil then
+		path = tree_line.branch { x = TRUNK, mid = ROW / 2, tip = BRANCH_END, h = h, bend = BEND, on = on }
+		kept_set(BRANCHES, k, path)
+	end
+	return path
+end
+
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
 
@@ -475,7 +538,8 @@ local COUNTS: { [string]: boolean } = { edit = true, write = true }
 
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
 -- one; `running`: it is the one in flight, its glyph the working loader;
--- `resized`: told the row's size as it's laid out.)
+-- `resized`: told the row's size as it's laid out; `settled`: it is before
+-- the group's last, so never the one in flight.)
 -- A row is built often (each comes into view, a long group's thousands), so
 -- what can't change once a tool has started is read once as it's made (its
 -- kind, its verb, its glyph); only what a tool's result changes follows it.
@@ -486,7 +550,8 @@ local function row(
 	open_subagent: ((sub: any) -> ())?,
 	writing: Writing?,
 	group: string?,
-	resized: ((size: { w: number, h: number }) -> ())?
+	resized: ((size: { w: number, h: number }) -> ())?,
+	settled: boolean?
 ): Node
 	local t = now()
 	if t.kind == "thought" then
@@ -543,7 +608,7 @@ local function row(
 			pointer_events = "none",
 			draw = function(c, _, h)
 				local mid = ROW / 2
-				c:fill(tree_line.branch { x = TRUNK, mid = mid, tip = BRANCH_END, h = h, bend = BEND, on = below() }, "$zeron.tree")
+				c:fill(branch_of(h, below()), "$zeron.tree")
 			end,
 		},
 		ui.button {
@@ -578,16 +643,27 @@ local function row(
 					CALLS_OPEN:set(all)
 				end
 			end,
-			ui.div {
-				absolute = true,
-				left = GLYPH_LEFT,
-				top = (ROW - GLYPH_SIZE) / 2,
-				color = tint,
-				ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
+			-- (A row before the group's last never runs: its glyph alone, placed
+			-- and coloured itself. The last may be the one in flight.)
+			if settled
+				then Icon {
 					name = GLYPH[t.kind],
 					size = GLYPH_SIZE,
-				}),
-			},
+					absolute = true,
+					left = GLYPH_LEFT,
+					top = (ROW - GLYPH_SIZE) / 2,
+					color = tint,
+				}
+				else ui.div {
+					absolute = true,
+					left = GLYPH_LEFT,
+					top = (ROW - GLYPH_SIZE) / 2,
+					color = tint,
+					ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
+						name = GLYPH[t.kind],
+						size = GLYPH_SIZE,
+					}),
+				},
 			ui.row {
 				pl = ui.raw(GUTTER, "past the tree's gutter"),
 				grow = 1,
@@ -604,16 +680,7 @@ local function row(
 				-- (Its line as the tool goes on: a command's input may still
 				-- be arriving as it starts.)
 				if t.target
-					then FadeText {
-						function(): string
-							return line_of(now())
-						end,
-						literal = true,
-						shrink = 1,
-						font = "$font.mono",
-						text_size = "$font.size.sm",
-						color = "$text.primary",
-					}
+					then target_line(now)
 					else ui.show(
 					function(): boolean
 						return now().target ~= nil
@@ -667,23 +734,9 @@ local function row(
 					else nil,
 			},
 		},
-		-- What it opens to, made only once it's opened.
-		ui.presence(function(): string?
-			return if showing() then "open" else nil
-		end, function(): Node
-			return ui.column {
-				w_full = true,
-				ui.show(has_call, call_block(now)),
-				ui.show(
-					has_detail,
-					ui.div {
-						ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
-						mb = "$space.1",
-						ToolDetail.ToolDetail { tool = now :: any },
-					}
-				),
-			}
-		end, { w_full = true }),
+		-- What it opens to, made only once it's opened (a component's body
+		-- runs as it mounts: closed, nothing of it is made).
+		ui.show(showing, Opened { now = now }),
 	}
 end
 
@@ -841,7 +894,7 @@ return ui.component(function(props: Props): Node
 				return place() < last_branch:get()
 			end, function(): boolean
 				return live() and place() == count:get()
-			end, props.open_subagent, props.thought, props.key, resized)
+			end, props.open_subagent, props.thought, props.key, resized, place() < count:peek())
 		end
 		-- (A call arriving joins as a row joining a `ui.each` does; the rest
 		-- are made as they come into view, as they were.)
