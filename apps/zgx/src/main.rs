@@ -122,6 +122,8 @@ mod scroll_script_tests;
 #[cfg(test)]
 mod transcript_scroll_tests;
 #[cfg(test)]
+mod transcript_paint_tests;
+#[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
 mod i18n_tests;

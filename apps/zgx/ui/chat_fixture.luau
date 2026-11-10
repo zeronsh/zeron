@@ -1171,6 +1171,54 @@ do
 			end
 		end,
 	}
+	-- `long_chat_cross`: the same, other chats' long messages (folded behind
+	-- Show more) between its turns.
+	ui.command {
+		id = "long_chat_cross",
+		title = "Tall replies becomes a long working chat with other chats' messages",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_cross_late`: the same, but its other chats' messages and
+	-- the replies after them not yet whole (a synced chat's rows as they first
+	-- come); `long_chat_cross_fill`: they come whole, in place.
+	ui.command {
+		id = "long_chat_cross_late",
+		title = "A long working chat whose last rows aren't whole yet",
+		run = function()
+			local whole = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			local now = {}
+			for i, m in whole do
+				local early = table.clone(m)
+				if i > #whole - 40 and (m.sender or string.sub(m.id, 1, 2) == "ly") then
+					early.text = string.sub(m.text, 1, 40)
+					early.copy = early.text
+					if early.blocks then
+						early.blocks = { early.blocks[1] }
+					end
+				end
+				table.insert(now, early)
+			end
+			TRANSCRIPTS.s7 = now
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(now)
+			end
+		end,
+	}
+	ui.command {
+		id = "long_chat_cross_fill",
+		title = "The long working chat's last rows come whole",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
 	-- `long_chat_sent`: the same, up to the reply before its last prompt
 	-- (sent then from the composer); `long_chat_streams`, run again and
 	-- again: its last reply streams in, a step at a time, then ends.

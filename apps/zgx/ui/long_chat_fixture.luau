@@ -128,7 +128,10 @@ end
 -- reply cut by its work), the newest at the end. `sent`: up to the suspects
 -- alone, the answer to be sent from the composer (`ANSWER`) and the trigger
 -- to stream in (`stages`).
-local function chat(turns: number, sent: boolean?): { any }
+-- A message another chat sent, long enough to fold behind Show more.
+local LANE = "Render graph lane: received. On GO: land f0eeab7f0 first, then tell the perf lane the SHA. Plan, in order: (a) resolve in Final's input: read the MSAA colour per sample (texture_multisampled), weight each sample by 1/(1+luma) before averaging and invert after; a test on a high-contrast edge vs today's LDR path and vs a 16x supersampled reference; I'll send you the numbers. (b) then the bloom chain at half resolution, its mips kept between frames, and a test that a still scene costs nothing after the first frame. (c) last, the tone map as its own pass, so the perf lane can time each step apart."
+
+local function chat(turns: number, sent: boolean?, cross: boolean?): { any }
 	local out: { any } = {}
 	local bodies = { STATE, SUSPECTS, TRIGGER }
 	for i = 1, turns do
@@ -138,6 +141,14 @@ local function chat(turns: number, sent: boolean?): { any }
 			{ id = "a", kind = "text", text = bodies[i % #bodies + 1] },
 			work(`w{i}`, 1 + i % 4),
 		}))
+		if cross then
+			-- Another chat's word, then a short reply of work and a line.
+			table.insert(out, { id = `lx{i}`, role = "user", text = LANE, at = "Nov 10, 3:30 PM", copy = LANE, sender = { chat = "lane", title = "zgx 3D: render graph and post chain (R0)" } })
+			table.insert(out, reply(`ly{i}`, i, {
+				work(`wy{i}`, 3),
+				{ id = "a", kind = "text", text = "Ten lanes are building up unlanded local work in the meantime." },
+			}))
+		end
 	end
 	table.insert(out, { id = "orbit-go", role = "user", text = PROMPTS[1], at = "Nov 10, 12:56 PM", copy = PROMPTS[1] })
 	table.insert(out, reply("orbit-suspects", 0, {
