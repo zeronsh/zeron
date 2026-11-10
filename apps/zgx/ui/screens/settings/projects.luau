@@ -268,7 +268,11 @@ local function removal_words(): string
 		if #all == 0 then ui.t("settings.projects.remove_none"):get() else ui.t("settings.projects.remove_sessions", { n = #all }):get(),
 	}
 	if #running > 0 then
-		table.insert(parts, ui.t("settings.projects.remove_running", { n = #running }):get())
+		-- (Its only session, or some of several.)
+		table.insert(
+			parts,
+			if #all == 1 then ui.t("settings.projects.remove_running_only"):get() else ui.t("settings.projects.remove_running", { n = #running }):get()
+		)
 	end
 	local where: string? = nil
 	for _, d in sessions.devices:get() do
@@ -445,13 +449,25 @@ local function group(_g: Group, _i: number, g: State<Group>): Node
 	local list = ui.computed(function(): { sessions.Project }
 		return g:get().projects
 	end)
-	return ds.Settings.Section {
-		title = (function(): string
-			return g:get().name
-		end) :: any,
-		trail = ui.show(function(): boolean
-			return g:get().here
-		end, ds.Badge { ui.t("settings.devices.this_device"), size = "sm" }),
+	local function name(): string
+		return g:get().name
+	end
+	-- A Settings.Section, its "This device" right after the name as Devices'
+	-- row has it (a section's own `trail` stands at the far edge).
+	return ui.column {
+		w_full = true,
+		gap = "$space.2",
+		role = "group",
+		label = name,
+		ui.row {
+			px = ds.Settings.inset(),
+			gap = "$space.2",
+			items = "center",
+			ds.SectionTitle { name, heading = 2 },
+			ui.show(function(): boolean
+				return g:get().here
+			end, ds.Badge { ui.t("settings.devices.this_device"), size = "sm" }),
+		},
 		ds.Settings.Each(list, project_row, {
 			key = function(p: sessions.Project): string
 				return p.id

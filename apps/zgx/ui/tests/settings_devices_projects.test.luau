@@ -186,7 +186,7 @@ test("a project is removed after a confirm that says its folder stays, its runni
 	local dialog = 'role:dialog "Remove “Atlas”?"'
 	expect(app:has(dialog)).to_be(true)
 	expect(app:has(`{dialog} >> ~"Its 4 sessions are deleted for good, on every device."`)).to_be(true)
-	expect(app:has(`{dialog} >> ~"That session is running now, and is stopped first."`)).to_be(true)
+	expect(app:has(`{dialog} >> ~"One of them is running now and is stopped first."`)).to_be(true)
 	expect(app:has(`{dialog} >> ~"The folder /work/atlas stays on MacBook Pro with all its files. Zeron just forgets it."`)).to_be(true)
 	app:click(`{dialog} >> role:button "Remove project"`)
 	app:frames(30)
@@ -287,4 +287,28 @@ test("an edge without image icons says so plainly, and an emoji still saves", fu
 	app:frames(30)
 	expect(said(app)).to_contain("set_project_icon:borealis:🚀::")
 	expect(app:state("project_edit_open")).to_be(false)
+end)
+
+test("the confirm says how many of a project's sessions are running, or that its only one is", function()
+	local app = open("Projects", { "fixture.running_projects" })
+	menu(app, "Atlas")
+	app:click('role:menu >> role:button "Remove…"')
+	app:frames(20)
+	local dialog = 'role:dialog "Remove “Atlas”?"'
+	expect(app:has(`{dialog} >> ~"2 of them are running now and are stopped first."`)).to_be(true)
+	app:key("Escape")
+	app:wait('"nothing"', { timeout_ms = 400 })
+	menu(app, "Solo")
+	app:click('role:menu >> role:button "Remove…"')
+	app:frames(20)
+	dialog = 'role:dialog "Remove “Solo”?"'
+	expect(app:has(`{dialog} >> ~"Its session is deleted for good, on every device. It's running now and is stopped first."`)).to_be(true)
+end)
+
+test("This device stands right after its name on Projects, as on Devices", function()
+	local app = open("Projects")
+	local nx, ny, nw = box(app, `{PAGE} >> role:heading "MacBook Pro"`)
+	local bx, by = box(app, `{PAGE} >> "This device"`)
+	expect(bx > nx + nw and bx - (nx + nw) <= 12).to_be(true)
+	expect(math.abs(by - ny) <= 6).to_be(true)
 end)

@@ -757,6 +757,20 @@ ui.command {
 		publish()
 	end,
 }
+-- Sessions running in projects: two of Atlas's, and Solo's only one.
+ui.command {
+	id = "fixture.running_projects",
+	title = "Fixture: Atlas busy twice, and Solo's one session running",
+	run = function()
+		local c = find("a2")
+		if c then
+			c.status = "working"
+		end
+		table.insert(model.projects, { id = "solo", name = "Solo", device = "mac", path = "/work/solo", git = true })
+		table.insert(model.chats, { id = "s1", title = "Only one", project = "solo", device = "mac", status = "working", updated = NOW - 60, created = NOW - HOUR, agent = "claude" })
+		publish()
+	end,
+}
 ui.command {
 	id = "fixture.nothing_heard",
 	title = "Fixture: an engine that hasn't answered, nothing heard at all",
