@@ -41,7 +41,7 @@ local function shows(app: any, i: number, case: string)
 	if not top or not bottom or not y or not b then
 		error(`{case}: no list or no row {i} in:\n{tree}`)
 	end
-	local inside = y >= top - 0.5 and b <= bottom + 0.5
+	local inside = (y :: number) >= (top :: number) - 0.5 and (b :: number) <= (bottom :: number) + 0.5
 	expect(`{case}: row {i} at {y}..{b} in {top}..{bottom}: {inside}`).to_be(`{case}: row {i} at {y}..{b} in {top}..{bottom}: true`)
 end
 

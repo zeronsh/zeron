@@ -340,10 +340,6 @@ function M.List(props: { lines: Node, h: any, before: { Node }?, [any]: any }): 
 	return ui.column(col)
 end
 
--- How tall a list's lines stand, up to its first `rows` rows (with the
--- headings among them): a list's scroll's height, whole rows and nothing
--- under them. `lines` in order, each `"heading"` or `"row"`; `row` a row's
--- height. (A first heading's as `M.Heading` lays it: no room over it.)
 -- A line's height there: a row's `row`, a heading's the theme's (a first
 -- one's without the room over it).
 local function line_height(line: string, i: number, row: number): number
@@ -358,6 +354,10 @@ local function list_gap(): number
 	return (ui.theme.get("zeron.list.gap") :: number?) or 2
 end
 
+-- How tall a list's lines stand, up to its first `rows` rows (with the
+-- headings among them): a list's scroll's height, whole rows and nothing
+-- under them. `lines` in order, each `"heading"` or `"row"`; `row` a row's
+-- height. (A first heading's as `M.Heading` lays it: no room over it.)
 function M.list_height(lines: { string }, rows: number, row: number): number
 	local h, n, any = 0, 0, false
 	local gap = list_gap()
