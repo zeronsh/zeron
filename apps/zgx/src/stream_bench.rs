@@ -237,7 +237,7 @@ fn start(view: &Rc<View>, bench: &Bench) {
         if let Some(reset) = opening
             && let Some(view) = weak.upgrade().filter(|v| v.generation.get() == generation)
         {
-            view.heard_frame(reset);
+            view.heard_frame(&reset);
         }
         let start = Instant::now() + lead;
         let mut late = Lateness::default();
@@ -255,7 +255,7 @@ fn start(view: &Rc<View>, bench: &Bench) {
             };
             cpu.get_or_insert_with(Cpu::now);
             let (c, b) = appended(&frame);
-            view.heard_frame(frame);
+            view.heard_frame(&frame);
             delivered += 1;
             chunks += c;
             bytes += b;

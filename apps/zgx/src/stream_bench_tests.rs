@@ -9,6 +9,25 @@ use super::*;
 use std::{collections::VecDeque, future::Future, pin::Pin, time::Duration};
 use zgx_script::testing::TestApp;
 
+/// A folder of its own under the system's temporary one, gone with it
+/// (this build has no `tempfile`).
+struct TempDir(std::path::PathBuf);
+impl TempDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("zeron-stream-bench-{}-{:?}", std::process::id(), std::time::Instant::now()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 type Queued = Rc<RefCell<VecDeque<Pin<Box<dyn Future<Output = ()>>>>>>;
 
 const TEXT: &str = "## Streamed through the host\n\n\
@@ -21,11 +40,9 @@ fn window_view(host: &ScriptHost) -> Rc<View> {
     let view = Rc::new(View {
         session: host.shared("chat.session", Value::Nil),
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
-        subagents: host.shared("chat.subagents", Value::List(Rc::from([]))),
         draft: host.shared("chat.draft", draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
-        pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
@@ -64,7 +81,7 @@ fn messages(view: &View) -> Json {
 #[test]
 fn a_recorded_stream_reaches_the_transcript_through_the_host() {
     // The recording, written as the generator writes one.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = TempDir::new();
     let path = dir.path().join("frames.jsonl");
     let frames = record::frames(TEXT, 24, 1_700_000_000_000);
     let lines: Vec<String> = frames.iter().map(|f| f.to_string()).collect();
@@ -231,7 +248,7 @@ fn full_tree(app: &TestApp) -> std::collections::HashMap<u32, String> {
 #[test]
 #[ignore = "a probe: release, --ignored --nocapture"]
 fn stream_bench_profile() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = TempDir::new();
     let path = dir.path().join("frames.jsonl");
     let frames = record::standard(1_700_000_000_000);
     let lines: Vec<String> = frames.iter().map(|f| f.to_string()).collect();
