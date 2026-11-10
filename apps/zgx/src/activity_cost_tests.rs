@@ -88,6 +88,8 @@ fn dump_row(bench: &mut Bench) {
 }
 
 thread_local! {
+    /// Whether `DEBUG_NODE` has shown its node.
+    static NODE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether frames show their damage now (`DEBUG_DAMAGE`: the scroll's).
     static DAMAGE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -485,6 +487,9 @@ impl Bench {
         let drawn = !report.damage.is_empty();
         if drawn && let Some(gpu) = &mut self.gpu {
             let stats = gpu.render(&self.app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
+            if std::env::var_os("DEBUG_GPU").is_some() && zgx::trace::enabled() {
+                eprintln!("GPU {stats:?}");
+            }
             if std::env::var_os("DEBUG_DAMAGE").is_some() && DAMAGE_SHOWN.get() {
                 eprintln!("DAMAGE frame: {} rects, {} px repainted, {} scroll copies, {} layer repaints, {} backdrop copies", report.damage.len(), stats.damaged_pixels, stats.scroll_copies, stats.layer_repaints, stats.backdrop_copies);
                 show_damage(&self.app.ui.scene.borrow(), &report.damage);
@@ -698,6 +703,29 @@ fn scenarios(n: usize, think: usize, open: bool) {
                     let k = format!("{:?}", scene.kind(id));
                     k.split(|c: char| c == '(' || c == '{' || c == ' ').next().unwrap_or("").to_owned()
                 };
+                // (`DEBUG_NODE=<n>`: that node's kind, what's above it, and the
+                // texts under the box above it.)
+                if std::env::var_os("DEBUG_NODE").is_some()
+                    && frame.index > 40
+                    && let Some(m) = frame.layout.top.first()
+                    && !NODE_SHOWN.replace(true)
+                    && let Some(&id) = by_number.get(&m.node)
+                {
+                    let mut at = Some(id);
+                    for _ in 0..8 {
+                        let Some(node) = at else { break };
+                        let b = scene.bounds(node);
+                        eprintln!("NODE #{} {} {:.0},{:.0} {:.0}x{:.0}", node.number(), format!("{:?}", scene.kind(node)).chars().take(160).collect::<String>(), b.x, b.y, b.width, b.height);
+                        at = scene.parent(node);
+                    }
+                    let mut stack = vec![scene.parent(scene.parent(id).unwrap_or(id)).unwrap_or(id)];
+                    while let Some(node) = stack.pop() {
+                        if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(node) {
+                            eprintln!("NODE text {text:?}");
+                        }
+                        stack.extend(scene.children(node).iter().copied());
+                    }
+                }
                 for m in &frame.layout.top {
                     let Some(&id) = by_number.get(&m.node) else {
                         eprintln!("TRACE   measured #{} {:.1} µs (own {:.1}) (gone)", m.node, m.micros, m.self_micros);
