@@ -394,6 +394,8 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			on_aux_click = function(e: any)
 				if e.button == "middle" then
 					close(id)
+				else
+					route.aux_click(e)
 				end
 			end,
 			focus = control.ring,

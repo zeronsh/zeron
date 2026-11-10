@@ -96,7 +96,8 @@ return function(props: Props): Node
 	pane.relative = true
 	pane.overflow = "hidden"
 	-- No `on_navigate`: a trackpad's swipe over the page scrolls and never
-	-- steps the history (that's the title bar's arrows, ⌘[ and ⌘]).
+	-- steps the history (that's the title bar's arrows, the mouse's buttons,
+	-- ⌘[ and ⌘]).
 	-- Whether it shows, for what stands over it (screens/shell/art).
 	ui.effect(function()
 		local on = home() and not on_plugin() and appearance.showing:get() ~= "none"

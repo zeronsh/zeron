@@ -47,6 +47,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "usage.read",
     "accounts.read",
     "accounts.switch",
+    "accounts.pin",
     "models.read",
     "models.set",
     // Sending messages in your chats, starting chats and answering their
