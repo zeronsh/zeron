@@ -87,7 +87,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: DEVICE_STATS,
-            description: "One device's machine stats, asked live of that device (local when omitted): OS (name, version, kernel, architecture, hostname), CPU (model, physical and logical cores), memory (total and available bytes), storage (the volumes holding Zeron's data and the home folder, plus every local volume: mount point, filesystem, total/available/used bytes), GPU names where the platform says them cheaply, uptime, load average (Unix), battery, and the Zeron engine version. Any field is null when that machine can't say. Another device answers within about 5 s, or the error says it's offline (with when it was last seen) or its Zeron is too old. Reports are cached for 5 s.",
+            description: "One device's machine stats, asked live of that device (local when omitted): OS (name, version, kernel, architecture), CPU (model, physical and logical cores), memory (total and available bytes), storage (the volumes holding Zeron's data and the home folder, plus every local volume: mount point, filesystem, total/available/used bytes), GPU names where the platform says them cheaply, uptime, load average (Unix), battery, and the Zeron engine version. Any field is null when that machine can't say. Another device answers within about 5 s, or the error says it's offline (with when it was last seen) or its Zeron is too old. Reports are cached for 5 s.",
             input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {

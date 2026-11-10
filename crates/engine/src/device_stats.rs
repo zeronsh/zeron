@@ -9,8 +9,9 @@
 //! `null` for it, and nothing here fails the whole report.
 //!
 //! Privacy: a report names volumes by their mount points only. It never
-//! carries the data dir's or the home folder's own path, a user name, or a
-//! serial number.
+//! carries the data dir's or the home folder's own path, a user name, the
+//! machine's hostname (it often holds a person's name; the device's Zeron
+//! name says which machine it is), or a serial number.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -52,8 +53,6 @@ pub struct OsStats {
     pub kernel: Option<String>,
     /// e.g. "arm64", "x86_64".
     pub arch: Option<String>,
-    /// The machine's network name.
-    pub hostname: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -206,7 +205,6 @@ pub fn collect(places: &Places) -> DeviceStats {
         long_version: tidy(System::long_os_version()),
         kernel: tidy(System::kernel_version()),
         arch: tidy(System::cpu_arch()),
-        hostname: tidy(System::host_name()),
     };
     let uptime_seconds = Some(System::uptime()).filter(|s| supported && *s > 0);
     let load_average = if cfg!(unix) && supported {
@@ -591,6 +589,8 @@ mod tests {
         );
         assert_eq!(stats.zeron.engine_version, env!("CARGO_PKG_VERSION"));
         assert!(stats.collected_at.is_some());
+        let os = serde_json::to_value(&stats.os).unwrap();
+        assert!(os.get("hostname").is_none(), "no hostname: {os}");
         if sysinfo::IS_SUPPORTED_SYSTEM {
             assert!(stats.memory.total_bytes.is_some_and(|t| t > 0), "{stats:?}");
             assert!(stats.cpu.logical_cores.is_some_and(|n| n > 0), "{stats:?}");
