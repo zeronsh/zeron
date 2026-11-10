@@ -281,6 +281,16 @@ fn stream_bench_profile() {
     let scale: u32 = std::env::var("PROBE_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let mut gpu = zgx_gpu::GpuRenderer::new(w * scale, h * scale).expect("a GPU");
     gpu.set_scale_factor(scale as f32);
+    // `PROBE_PIXEL_SCALE=1`: the scene told its pixel scale, as a window's is
+    // (scroll content then moves on whole device pixels).
+    if std::env::var_os("PROBE_PIXEL_SCALE").is_some_and(|v| v == "1") {
+        app.ui.scene.borrow_mut().set_pixel_scale(scale as f32);
+    }
+    // `PROBE_PNG=<file>`, `PROBE_PNG_FRAME=<n>`: the frame drawn by the nth
+    // frame of the stream, read back from the renderer, as a PNG.
+    let png_out = std::env::var_os("PROBE_PNG").map(std::path::PathBuf::from);
+    let png_frame: u32 = std::env::var("PROBE_PNG_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(2400);
+    let want_png = Cell::new(false);
     let pump = |app: &TestApp| {
         while let Some(work) = queued.borrow_mut().pop_front() {
             app.executor.borrow_mut().spawn(work);
@@ -315,6 +325,18 @@ fn stream_bench_profile() {
             let area: f64 = damage.iter().map(|r| f64::from(r.width) * f64::from(r.height)).sum();
             *last.borrow_mut() = Some((stats, damage.len(), area));
             drawn.set(drawn.get() + 1);
+        }
+        if want_png.get()
+            && let Some(out) = &png_out
+        {
+            let pixels = gpu.readback().expect("read back");
+            let file = std::fs::File::create(out).unwrap();
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w * scale, h * scale);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+            eprintln!("stream_bench_profile: frame {png_frame} written to {}", out.display());
+            want_png.set(false);
         }
     };
     // (Its id alone: the whole draft as JSON would cost more than the page.)
@@ -508,6 +530,8 @@ fn stream_bench_profile() {
     while streaming(&view) {
         tick(&app, &mut draw, &mut ran);
         n += 1;
+        // (The next frame drawn is read back.)
+        want_png.set(n + 1 == png_frame);
         if tracing && n == 1500 {
             mid_tree = full_tree(&app);
         }
