@@ -441,6 +441,8 @@ fn stream_bench_profile() {
     // thread's CPU clock; what no phase counts is the rest.
     let profiling = zgx::profile::enabled();
     let mut phases: std::collections::BTreeMap<String, f64> = Default::default();
+    // Instructions by phase too: unlike time, unmoved by the CPU's clock.
+    let mut instructions: std::collections::BTreeMap<String, u64> = Default::default();
     zgx::profile::take();
     while streaming(&view) {
         tick(&app, &mut draw, &mut ran);
@@ -449,8 +451,9 @@ fn stream_bench_profile() {
             mid_tree = full_tree(&app);
         }
         if profiling {
-            for (phase, _, time) in zgx::profile::take() {
+            for (phase, counted, time) in zgx::profile::take() {
                 *phases.entry(format!("{phase:?}")).or_default() += time.as_secs_f64();
+                *instructions.entry(format!("{phase:?}")).or_default() += counted;
             }
         }
     }
@@ -472,6 +475,18 @@ fn stream_bench_profile() {
             thread / secs * 1e3,
             100. * counted / thread.max(1e-9),
             (thread - counted) / secs * 1e3,
+        );
+        let total: u64 = instructions.values().sum();
+        eprintln!(
+            "  instructions: {} ; total {:.1}M/s ({:.0}K a frame)",
+            instructions
+                .iter()
+                .filter(|(_, n)| **n > 0)
+                .map(|(p, n)| format!("{p} {:.1}M", *n as f64 / secs / 1e6))
+                .collect::<Vec<_>>()
+                .join(", "),
+            total as f64 / secs / 1e6,
+            total as f64 / f64::from(n.max(1)) / 1e3,
         );
     }
     eprintln!(
