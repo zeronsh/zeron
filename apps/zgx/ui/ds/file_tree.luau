@@ -2666,9 +2666,9 @@ local function component(props: Props): Node
 			wanted = nil
 			return nil
 		end,
-		-- (Its scrollbar is the rail over it, below: the engine's bar is the
-		-- list's own child, so its fades and its clip under the stack would
-		-- take the bar with the rows.)
+		-- The scrollbar: Zeron's rail, zgx's own bar over the list, never
+		-- faded with the rows.
+		scrollbar = Rail(),
 		overscan = 4,
 		heights = function(): { number }
 			return heights:get()
@@ -3082,18 +3082,6 @@ local function component(props: Props): Node
 			empty,
 			rename_err,
 			foot_note,
-			-- The scrollbar, over all of it, never faded.
-			Rail {
-				id = "file-tree-rail",
-				offset = list_offset,
-				extent = function(): number
-					heights:get()
-					return total()
-				end,
-				view = function(): number
-					return list_view.height or 0
-				end,
-			},
 		},
 	}
 	return ui.column(box)

@@ -258,8 +258,6 @@ local List = ui.component(function(props: ListProps): Node
 	-- Blocks measure themselves; the list takes the height it last saw.
 	local measured: { [string]: number } = {}
 	local remeasure = ui.use_state(0)
-	-- How tall the list is, for its rail.
-	local seen = ui.use_state(0)
 	-- What the rows show, kept here in Lua as the rows are worked out: each
 	-- open file's lines (and side by side, their pairs), each file by its
 	-- path, each row by its key. (The rows are state: a value in them is
@@ -391,13 +389,6 @@ local List = ui.component(function(props: ListProps): Node
 			hs[i] = measured[r.key] or r.h
 		end
 		return hs
-	end)
-	local total = ui.computed(function(): number
-		local sum = 0
-		for _, h in heights:get() do
-			sum += h
-		end
-		return sum
 	end)
 	-- A file open in place: its row sticks to the top while its lines
 	-- scroll under it, the next file's row pushing it up (zgx's sticky
@@ -662,8 +653,7 @@ local List = ui.component(function(props: ListProps): Node
 		grow = 1,
 		min_h = 0,
 		relative = true,
-		on_resize = function(size, el)
-			seen:set(size.h)
+		on_resize = function(_size, el)
 			if props.on_frame then
 				props.on_frame(el)
 			end
@@ -673,6 +663,8 @@ local List = ui.component(function(props: ListProps): Node
 			w_full = true,
 			h_full = true,
 			offset = offset,
+			-- Zeron's rail: zgx's own bar, over the rows.
+			scrollbar = Rail(),
 			overscan = 6,
 			heights = function(): { number }
 				return heights:get()
@@ -698,7 +690,6 @@ local List = ui.component(function(props: ListProps): Node
 				return if r and r.file then r.file.path elseif r and r.path then r.path elseif r and r.dir then r.dir else ""
 			end,
 		},
-		Rail { id = if props.id then `{props.id}-rail` else "changes-rail", offset = offset, extent = total, view = seen },
 	}
 end)
 

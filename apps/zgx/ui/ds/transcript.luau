@@ -974,32 +974,6 @@ local function Transcript(props: Props): Node
 		return messages:len()
 	end)
 
-	-- How long the conversation is, for its scrollbar: the rail over the
-	-- list, not the list's own bar, which its edge fades would fade with the
-	-- rows. As the list itself knows it: each row's height once it has been
-	-- measured (kept as it scrolls out of view), the estimate until then.
-	local sizes: { [string]: number } = {}
-	local known, seen_n = 0, 0
-	local sized = ui.state(`transcript_sized{kept}`, 0)
-	local function size_row(id: string, h: number)
-		local was = sizes[id]
-		if was == h then
-			return
-		end
-		if was then
-			known += h - was
-		else
-			known += h
-			seen_n += 1
-		end
-		sizes[id] = h
-		sized:set(sized:peek() + 1)
-	end
-	local function extent(): number
-		sized:get()
-		return known + math.max(0, count:get() - seen_n) * ESTIMATE
-	end
-
 	-- The runway. The last reply's row (its foot's room included) is always
 	-- at least as tall as the view less its prompt's row, so those two rows
 	-- fill the view exactly: at the end the last prompt's row starts at the
@@ -1790,7 +1764,6 @@ local function Transcript(props: Props): Node
 				if TRACING then
 					trace("row", m.id, size.h, need())
 				end
-				size_row(m.id, size.h)
 				put_back(m.id)
 				-- Its width changed (the view's did): its lines rewrapped this
 				-- frame; if the reading place is in it, put that back now.
@@ -2007,8 +1980,11 @@ local function Transcript(props: Props): Node
 			at_end = at_end,
 			height = ESTIMATE,
 			overscan = 3,
-			-- (Its scrollbar is the rail below, over it: a bar of its own
-			-- would fade at its edges with the rows.)
+			-- The scrollbar: Zeron's rail, zgx's own bar over the list, never
+			-- faded with the rows and running its whole height (at the
+			-- window's edge, beside the composer rather than under it, so
+			-- scrolled to the end it reaches the page's end).
+			scrollbar = Rail(),
 			w_full = true,
 			h_full = true,
 			-- (Zeron's 24 under the title bar; at the foot, the band the
@@ -2030,20 +2006,6 @@ local function Transcript(props: Props): Node
 			-- painting them again (a view between device pixels can't).
 			snap = true,
 		} } },
-		-- The scrollbar, over the list and never faded, running its whole
-		-- height: at the window's edge, beside the composer rather than
-		-- under it, so scrolled to the end it reaches the page's end.
-		Rail {
-			id = "transcript-rail",
-			offset = offset,
-			extent = extent,
-			view = function(): number
-				return list.height or 0
-			end,
-			track = function(): number
-				return list.height or 0
-			end,
-		},
 		-- What a selection offers.
 		ui.presence(function()
 			return if spot:get() then "shown" else nil

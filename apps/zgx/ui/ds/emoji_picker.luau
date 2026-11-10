@@ -315,6 +315,8 @@ return ui.component(function(props: Props): Node
 			w_full = true,
 			h_full = true,
 			offset = offset,
+			-- Zeron's rail: zgx's own bar, over the grid.
+			scrollbar = Rail(),
 			overscan = 4,
 			heights = function(): { number }
 				return heights:get()
@@ -353,9 +355,6 @@ return ui.component(function(props: Props): Node
 				return table.concat(names, ", ")
 			end,
 		},
-		Rail { offset = offset, extent = function(): number
-			return total:get()
-		end, view = seen, id = if props.id then `{props.id}-rail` else nil },
 		-- Nothing found: says so, where the grid was.
 		ui.show(function(): boolean
 			return #rows:get() == 0

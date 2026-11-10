@@ -960,7 +960,6 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 	local offset = ui.use_state(0)
 	local over = ui.use_state(false)
 	return ui.column {
-		relative = true,
 		w_full = true,
 		on_hover = function(inside: boolean)
 			over:set(inside)
@@ -969,6 +968,14 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 			class = "md-table",
 			ref = box,
 			offset = offset,
+			-- Zeron's rail along its foot (zgx's own bar, not faded with the
+			-- edges), shown too while the pointer is over the table: a table
+			-- can't be seen to scroll sideways until it's tried.
+			scrollbar = Rail {
+				hint = function(): boolean
+					return over:get()
+				end,
+			},
 			w_full = true,
 			wheel_across = true,
 			rounded = "$radius.xl",
@@ -999,19 +1006,6 @@ local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
 					cells,
 				},
 			},
-		},
-		Rail {
-			horizontal = true,
-			offset = offset,
-			extent = function(): number
-				return content.width or 0
-			end,
-			view = function(): number
-				return math.max(0, (box.width or 0) - 2)
-			end,
-			hint = function(): boolean
-				return over:get()
-			end,
 		},
 	}
 end)

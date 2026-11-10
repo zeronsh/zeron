@@ -16,8 +16,6 @@ local kit = require("@demos/kit")
 -- A scroll view's offset, how tall its content is and how tall it is, for
 -- the rail over it.
 local rail_at = ui.state("sx_rail_at", 0)
-local rail_extent = ui.state("sx_rail_extent", 0)
-local rail_view = ui.state("sx_rail_view", 0)
 
 local view = ui.state("sx_view", "unified")
 local wrap = ui.state("sx_wrap", true)
@@ -148,33 +146,27 @@ return {
 					w = 420,
 					gap = "$space.3",
 					Hint { "The app's rail over a scroll view: there while it scrolls and a moment after, or under the pointer; dragged, the view follows. Scroll the card." },
-					-- A card of lines, taller than it is: the rail lays over the
-					-- scroll in a `relative` box, its thumb 2 in from the card's
-					-- edge and 4 from its ends, so it clears the corners.
+					-- A card of lines, taller than it is: the rail is the scroll's
+					-- own bar, its thumb 2 in from the card's edge and 4 from its
+					-- ends, so it clears the corners.
 					ui.div {
 						id = "sx-rail-card",
 						w = 320,
 						h = 200,
-						relative = true,
 						rounded = "$radius.xl",
 						bg = "$zeron.settings.card",
 						border = 1,
 						border_color = "$zeron.settings.edge",
 						overflow = "hidden",
-						on_resize = function(size)
-							rail_view:set(size.h)
-						end,
 						ui.scroll {
 							w_full = true,
 							h_full = true,
 							offset = rail_at,
+							scrollbar = Rail(),
 							ui.column {
 								w_full = true,
 								px = "$space.3",
 								py = "$space.2",
-								on_resize = function(size)
-									rail_extent:set(size.h)
-								end,
 								table.unpack((function(): { Node }
 									local rows: { Node } = {}
 									for n = 1, 40 do
@@ -184,7 +176,6 @@ return {
 								end)()),
 							},
 						},
-						Rail { offset = rail_at, extent = rail_extent, view = rail_view },
 					},
 				}
 			)
