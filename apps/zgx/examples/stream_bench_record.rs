@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("--tools-settled") => record::tools(num(3), 0, true, at_ms),
         // (A turn at work with nothing arriving: its row streaming, no more.)
         Some("--tools-working") => record::tools(num(3), 0, false, at_ms),
+        // (A long chat at rest, to scroll: `--chat <turns>`.)
+        Some("--chat") => record::chat(num(3), at_ms),
         _ => record::standard(at_ms),
     };
     let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);

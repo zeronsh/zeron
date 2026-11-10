@@ -183,3 +183,25 @@ pub fn tools(calls: usize, arrivals: usize, settled: bool, at_ms: i64) -> Vec<Js
     }
     out
 }
+
+/// A long chat at rest, to scroll: `turns` prompts, each answered by a
+/// settled reply of markdown (one of `reply`'s sections), all in the
+/// opening tail (a reset), no more frames.
+pub fn chat(turns: usize, at_ms: i64) -> Vec<Json> {
+    let mut entries = Vec::with_capacity(2 * turns);
+    for i in 0..turns {
+        let at = at_ms + i as i64 * 60_000;
+        entries.push(json!({
+            "id": format!("chat-q{i}"), "role": "user",
+            "parts": [{ "id": format!("chat-q{i}-text"), "kind": "text", "text": format!("Question {i}: what about part {i}?") }],
+            "createdAt": at, "deviceId": DEVICE,
+        }));
+        let text = reply(1).replace("Part 1", &format!("Part {i}"));
+        entries.push(json!({
+            "id": format!("chat-a{i}"), "role": "assistant",
+            "parts": [{ "id": format!("chat-a{i}-text"), "kind": "text", "text": text }],
+            "createdAt": at + 1_000, "deviceId": DEVICE, "status": "complete", "durationMs": 8_000,
+        }));
+    }
+    vec![json!({ "reset": entries })]
+}
