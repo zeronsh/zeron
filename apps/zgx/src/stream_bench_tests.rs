@@ -29,6 +29,12 @@ fn window_view(host: &ScriptHost) -> Rc<View> {
         generation: Cell::new(0),
         snapshot: Cell::new(false),
     });
+    // `PROBE_VEIL_OFF=1`: the streaming veil shows words at once (ds/markdown
+    // reads it once), all else as it is.
+    let _ = host.shared(
+        "bench.veil_off",
+        Value::Bool(std::env::var_os("PROBE_VEIL_OFF").is_some_and(|v| v == "1")),
+    );
     CHATS.with(|chats| {
         chats.views.borrow_mut().push(Rc::downgrade(&view));
         // (The page's catalog, as `chat::install` shares it.)
@@ -271,11 +277,31 @@ fn stream_bench_profile() {
         }
     };
     let frame = Duration::from_micros(8_333);
+    // `PROBE_ON_DEMAND=1`: frames still come on the 120/s deadlines (so the
+    // test's timers, and with them the stream's chunks, keep their pace), but
+    // a frame is drawn only when it has something to draw (its flush's damage
+    // isn't empty), as a window presents only what changed. Else every frame
+    // is drawn. `drawn` counts the frames drawn; `wanted` those the frame
+    // clock was asked for (an animation running) as they began.
+    let on_demand = std::env::var_os("PROBE_ON_DEMAND").is_some_and(|v| v == "1");
+    eprintln!(
+        "stream_bench_profile: {} drawing, veil {}",
+        if on_demand { "on-demand" } else { "forced 120/s" },
+        if std::env::var_os("PROBE_VEIL_OFF").is_some_and(|v| v == "1") { "off" } else { "on" }
+    );
+    let drawn = Cell::new(0u32);
+    let wanted = Cell::new(0u32);
     let mut draw = |app: &TestApp| {
         pump(app);
+        if app.clock.wants_frame() {
+            wanted.set(wanted.get() + 1);
+        }
         app.frames(1);
         let damage = app.ui.scene.borrow_mut().flush().damage;
-        gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+        if !on_demand || !damage.is_empty() {
+            gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+            drawn.set(drawn.get() + 1);
+        }
     };
     // (Its id alone: the whole draft as JSON would cost more than the page.)
     let streaming = |view: &View| {
@@ -412,14 +438,17 @@ fn stream_bench_profile() {
     let mut ran = Ran::default();
     let (cpu, at) = (Cpu::now(), std::time::Instant::now());
     let mut n = 0u32;
+    let (drawn0, wanted0) = (drawn.get(), wanted.get());
     while at.elapsed() < Duration::from_secs(4) {
         tick(&app, &mut draw, &mut ran);
         n += 1;
     }
     let (took, spent) = (at.elapsed(), cpu.since());
     eprintln!(
-        "stream_bench_profile: at rest: {n} frames over {:.2} s: {}",
+        "stream_bench_profile: at rest: {n} frames over {:.2} s, {:.1} drawn/s, {:.1} wanted/s: {}",
         took.as_secs_f64(),
+        f64::from(drawn.get() - drawn0) / took.as_secs_f64(),
+        f64::from(wanted.get() - wanted0) / took.as_secs_f64(),
         spent.describe(took)
     );
     if tracing {
@@ -453,7 +482,11 @@ fn stream_bench_profile() {
         })
     };
     let mut had = words(&view);
+    let (drawn0, wanted0) = (drawn.get(), wanted.get());
+    // Drawn frames by kind too: (chunk, fade-only).
+    let mut drawn_kinds = [0u32; 2];
     zgx::profile::take();
+    let mut drawn_last = drawn.get();
     while streaming(&view) {
         tick(&app, &mut draw, &mut ran);
         n += 1;
@@ -462,8 +495,13 @@ fn stream_bench_profile() {
         }
         if profiling {
             let now = words(&view);
-            let kind = &mut kinds[usize::from(now == had)];
+            let k = usize::from(now == had);
+            let kind = &mut kinds[k];
             had = now;
+            if drawn.get() != drawn_last {
+                drawn_kinds[k] += 1;
+            }
+            drawn_last = drawn.get();
             kind.0 += 1;
             for (phase, counted, time) in zgx::profile::take() {
                 *phases.entry(format!("{phase:?}")).or_default() += time.as_secs_f64();
@@ -503,6 +541,14 @@ fn stream_bench_profile() {
             total as f64 / secs / 1e6,
             total as f64 / f64::from(n.max(1)) / 1e3,
         );
+        let d = drawn.get() - drawn0;
+        eprintln!(
+            "  per drawn frame: {:.0}K ({} drawn); drawn chunk frames {:.1}/s, drawn fade-only frames {:.1}/s",
+            total as f64 / f64::from(d.max(1)) / 1e3,
+            d,
+            f64::from(drawn_kinds[0]) / secs,
+            f64::from(drawn_kinds[1]) / secs,
+        );
         for (name, (frames, by_phase)) in ["chunk frames", "fade-only frames"].iter().zip(&kinds) {
             let total: u64 = by_phase.values().sum();
             eprintln!(
@@ -519,9 +565,11 @@ fn stream_bench_profile() {
         }
     }
     eprintln!(
-        "stream_bench_profile: {n} frames over {:.2} s ({:.1}/s): {}",
+        "stream_bench_profile: {n} frames over {:.2} s ({:.1}/s), {:.1} drawn/s, {:.1} wanted/s: {}",
         took.as_secs_f64(),
         n as f64 / took.as_secs_f64(),
+        f64::from(drawn.get() - drawn0) / took.as_secs_f64(),
+        f64::from(wanted.get() - wanted0) / took.as_secs_f64(),
         spent.describe(took)
     );
     if tracing {
