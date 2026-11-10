@@ -58,6 +58,7 @@ mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
+mod hosted_models;
 mod model_catalogs;
 mod plugin_agents;
 pub mod plugins;

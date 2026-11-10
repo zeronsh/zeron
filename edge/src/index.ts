@@ -81,6 +81,7 @@ import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
+import { modelListRoute } from "./model-list";
 import { releaseRoute } from "./releases";
 import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
@@ -152,6 +153,8 @@ export default {
     }
     const release = await releaseRoute(request, env, url);
     if (release) return release;
+    const modelList = await modelListRoute(request, env, url);
+    if (modelList) return modelList;
 
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────

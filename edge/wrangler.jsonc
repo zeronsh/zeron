@@ -261,6 +261,9 @@
       "vars": {
         "WORKOS_CLIENT_ID": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
         "AUTH_MODE": "workos",
+        // The hosted model list at /models/v1.json (src/model-list.ts).
+        // Production sets none yet: engines there use their built-in lists.
+        "MODEL_LIST": "staging",
         "SANDBOX_PROVIDER": "boat",
         "CLOUD_TTL_SECONDS": "7200",
         "CLOUD_IDLE_MINUTES": "10",
