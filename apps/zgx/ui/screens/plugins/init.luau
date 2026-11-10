@@ -216,8 +216,12 @@ local function run(r: any)
 		end
 	elseif r.kind == "link" and type(r.value) == "string" then
 		-- A plugin's link (the host checked "links.open" and that it's a web
-		-- link): where Zeron opens links.
-		require("@ds/links").open(r.value)
+		-- link): where Zeron opens links, never back into a plugin's tab (the
+		-- GitHub viewer's Open on GitHub is a pull request's link too).
+		local url = r.value
+		require("@app/screens/shell/plugin_links").unclaimed(function()
+			require("@ds/links").open(url)
+		end)
 	elseif r.kind == "toast" then
 		ds.toast.show { title = r.title, body = r.value }
 	elseif r.kind == "plugin_failed" then
