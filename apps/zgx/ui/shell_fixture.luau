@@ -1189,6 +1189,28 @@ ui.command {
 		publish()
 	end,
 }
+-- Atlas's three chats each with two subagents running (the pill before the
+-- corner) and their last move 5m, 12h and 104w ago: the corner's width
+-- (tests/sidebar_corner_width).
+ui.command {
+	id = "corner_width",
+	title = "Atlas's chats: two subagents each, times 5m, 12h and 104w",
+	run = function()
+		for _, c in model.chats do
+			if c.id == "a1" then
+				c.running_subagents = 2
+				c.updated = NOW - 5 * 60
+			elseif c.id == "a2" then
+				c.running_subagents = 2
+				c.updated = NOW - 12 * HOUR
+			elseif c.id == "a3" then
+				c.running_subagents = 2
+				c.updated = NOW - 104 * 7 * DAY
+			end
+		end
+		publish()
+	end,
+}
 -- Fix the build's side chats, on this computer as Tidy the tests is (no branch):
 -- the panel home's rows to set beside the sidebar's (tests/
 -- sidebar_panel_parity). One moved last and made first, one the other way.
