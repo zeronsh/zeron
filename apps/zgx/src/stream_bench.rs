@@ -96,6 +96,7 @@ pub(super) fn install(cx: &mut WindowContext) {
     let windows = cx.windows.clone();
     let quit = std::env::var("ZERON_STREAM_BENCH_QUIT").is_ok_and(|v| v == "1");
     scroll(cx);
+    measure(cx);
     set(Bench {
         path,
         every: millis("ZERON_STREAM_BENCH_EVERY_MS", 25).max(Duration::from_millis(1)),
@@ -189,6 +190,30 @@ fn scroll(cx: &mut WindowContext) {
             took.as_secs_f64(),
             cpu.since().describe(took),
         );
+    });
+}
+
+/// `ZERON_STREAM_BENCH_MEASURE_S=<seconds>`: the CPU the main thread and the
+/// process spend over that long, from `ZERON_STREAM_BENCH_MEASURE_AFTER_MS`
+/// (6000) after the window opens, with nothing played meanwhile (a chat at
+/// rest, or a turn working with nothing arriving): logged, then the app quits.
+fn measure(cx: &mut WindowContext) {
+    let Some(seconds) = std::env::var("ZERON_STREAM_BENCH_MEASURE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    else {
+        return;
+    };
+    let after = millis("ZERON_STREAM_BENCH_MEASURE_AFTER_MS", 6000);
+    let windows = cx.windows.clone();
+    cx.tasks.spawn(async move {
+        zgx::timer::sleep(after).await;
+        let start = Instant::now();
+        let cpu = Cpu::now();
+        zgx::timer::sleep(Duration::from_secs_f64(seconds)).await;
+        let took = start.elapsed();
+        eprintln!("zeron-zgx: stream-bench: measured {:.2} s; CPU {}", took.as_secs_f64(), cpu.since().describe(took));
+        windows.quit();
     });
 }
 

@@ -25,6 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frames = match args.get(2).map(String::as_str) {
         Some("--tools") => record::tools(num(3), num(4), false, at_ms),
         Some("--tools-settled") => record::tools(num(3), 0, true, at_ms),
+        // (A turn at work with nothing arriving: its row streaming, no more.)
+        Some("--tools-working") => record::tools(num(3), 0, false, at_ms),
         _ => record::standard(at_ms),
     };
     let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
