@@ -1090,6 +1090,119 @@ fn activity_goal() {
     report(&format!("{n} calls open, scrolled ({} nodes at the end)", bench.nodes()), &cost, ticks, ticks, seconds);
 }
 
+/// The goal (`activity_goal`) for long thinking: a reply whose thought is
+/// written for minutes (`ACTIVITY_GOAL_SECONDS`, 120 unless set: 20 more
+/// characters every 50 ms, as a model thinks), its group folded and open,
+/// and a long thought (`ACTIVITY_GOAL_THINK` KB, 50) shown whole and
+/// scrolled (a wheel's 8 points every 1/120 s, for 10 s).
+#[test]
+#[ignore = "a benchmark: run it --release"]
+fn activity_goal_thinking() {
+    profiled();
+    // SAFETY: set before the renderer reads it, on this test's thread alone.
+    unsafe { std::env::set_var("DEBUG_SCROLL_COPY", "1") };
+    let seconds: f64 = std::env::var("ACTIVITY_GOAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.);
+    let think_kb: usize = std::env::var("ACTIVITY_GOAL_THINK").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+    let report = |what: &str, cost: &Cost, frames: usize, ticks: usize, seconds: f64| {
+        let names: String = PHASES
+            .iter()
+            .zip(cost.phases.iter())
+            .filter(|(_, p)| p.0 > 0)
+            .map(|(name, p)| format!(" {}={:.2}M/s", name.name(), p.0 as f64 / 1e6 / seconds))
+            .collect();
+        println!(
+            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames drawn, host {:.1} ms; spare {:.1}M/s;{names}",
+            cost.process.as_secs_f64() / seconds * 100.,
+            cost.process.as_secs_f64() * 1e3,
+            cost.cpu.as_secs_f64() / seconds * 100.,
+            cost.host.as_secs_f64() * 1e3,
+            cost.spare as f64 / 1e6 / seconds,
+        );
+    };
+    let only = std::env::var("ACTIVITY_GOAL_ONLY").ok();
+    for open in [true, false].into_iter().filter(|_| only.as_deref() != Some("scroll")) {
+        let mut bench = Bench::made_with(Some((zgx::clock::VirtualClock::new(), Duration::ZERO)), true, true);
+        bench.step = 1. / 120.;
+        let mut text = prose("the thought being written", 2000);
+        let mut entry = turn(10, 1024, Some(&text), true);
+        bench.publish(&entry);
+        bench.settle(120);
+        // (A group at work is open unless folded: pressed to fold it, and
+        // back at the end, where a turn at work is followed.)
+        if !open {
+            bench.toggle();
+            bench.app.scroll("transcript", 100_000.);
+        }
+        bench.settle(240);
+        let mut cost = Cost::default();
+        let (mut frames, ticks) = (0, (seconds * 120.) as usize);
+        let words = "and then the parser reads the next frame; ";
+        for tick in 0..ticks {
+            let mut host = Duration::ZERO;
+            let published = tick % 6 == 0;
+            if published {
+                let at = (tick / 6) % words.len().saturating_sub(20).max(1);
+                text.push_str(&words[at..(at + 20).min(words.len())]);
+                if tick % 600 == 0 {
+                    text.push_str("\n\n");
+                }
+                entry["parts"].as_array_mut().unwrap().last_mut().unwrap()["text"] = json!(text);
+                host += bench.publish_draft(&entry);
+            }
+            if published || bench.app.clock.wants_frame() {
+                let mut c = bench.frame();
+                c.host = host;
+                cost.add(&c);
+                frames += 1;
+            } else {
+                bench.tick();
+            }
+        }
+        report(
+            &format!("thinking {seconds:.0} s ({} KB at the end), {}", text.len() / 1024, if open { "open" } else { "folded" }),
+            &cost,
+            frames,
+            ticks,
+            seconds,
+        );
+    }
+    // A long thought shown whole, scrolled down and back.
+    let mut bench = Bench::made_with(Some((zgx::clock::VirtualClock::new(), Duration::ZERO)), true, true);
+    bench.step = 1. / 120.;
+    bench.after = vec![built(&prompt("u2", "And the rest?"))];
+    bench.publish(&turn(10, think_kb * 1024, None, false));
+    bench.settle(120);
+    bench.to_turn();
+    bench.toggle();
+    bench.app.click("role:button ~\"Show all\"");
+    bench.settle(240);
+    let mut cost = Cost::default();
+    let ticks = 10 * 120;
+    let traced = std::env::var_os("DEBUG_GOAL_TRACE").is_some();
+    for tick in 0..ticks {
+        let dy = if tick < ticks / 2 { 8. } else { -8. };
+        if traced && tick == 300 {
+            zgx::trace::set_enabled(true);
+        }
+        bench.app.scroll("transcript", dy);
+        cost.add(&bench.frame());
+        if traced && tick == 303 {
+            // (`DEBUG_GOAL_TRACE`: a few scroll frames' runs and what they laid out.)
+            for frame in zgx::trace::frames(8) {
+                let mut runs = frame.runs.clone();
+                runs.sort_by(|a, b| b.micros.total_cmp(&a.micros));
+                let phases: String = frame.phases.iter().filter(|p| p.1 > 0).map(|p| format!(" {} {}k", p.0, p.1 / 1000)).collect();
+                eprintln!("TRACE frame {} | measured {} | runs {} |{phases}", frame.index, frame.layout.measured, frame.runs.len());
+                for run in runs.iter().take(8) {
+                    eprintln!("TRACE   run {:>7.1} µs {}", run.micros, run.name.as_deref().unwrap_or("?"));
+                }
+            }
+            zgx::trace::set_enabled(false);
+        }
+    }
+    report(&format!("a {think_kb} KB thought shown whole, scrolled ({} nodes)", bench.nodes()), &cost, ticks, ticks, 10.);
+}
+
 #[test]
 #[ignore = "a comparison: run it --release, as the doc above says"]
 fn activity_pixels() {
