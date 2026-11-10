@@ -1891,31 +1891,12 @@ return ui.component(function(props: Props): Node
 			right = eased(text_right),
 			top = eased(text_top),
 			h = eased(text_h),
-			-- Its placeholder, the composer's own (it changes with what is
-			-- asked): over the empty draft, taking no pointer.
-			ui.show(
-				function()
-					return value:get() == ""
-				end,
-				ui.text {
-					placeholder,
-					absolute = true,
-					left = 0,
-					top = 0,
-					right = 0,
-					truncate = true,
-					pointer_events = "none",
-					aria_hidden = true,
-					text_size = "$zeron.composer.text",
-					line_height = "$zeron.composer.line",
-					color = "$text.tertiary",
-				}
-			),
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
 				label = locale.t("ds.composer.message"),
-				placeholder = "",
+				placeholder = placeholder,
+				placeholder_color = "$text.tertiary",
 				read_only = disabled,
 				w_full = true,
 				h_full = true,

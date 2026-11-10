@@ -382,8 +382,14 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		return where.plan() :: any
 	end
+	-- (A chat sent already has its host in the session: `device` is only
+	-- seeded while it's unsent.)
 	local accounts = Shared.model_accounts(function(): string?
-		return device:get()
+		if unsent() then
+			return device:get()
+		end
+		local s = session:get()
+		return if s then s.device else nil
 	end)
 	-- A new side chat's composer takes the keys as it's made.
 	if lanes.take_keys:peek()[chat] then

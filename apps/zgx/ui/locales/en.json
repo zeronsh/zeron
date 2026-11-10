@@ -3342,6 +3342,10 @@
           "title": "Switch which account your agents use",
           "detail": "It can make another saved account the active one. It can't sign in or remove an account."
         },
+        "accounts_pin": {
+          "title": "Run chats on other saved accounts",
+          "detail": "It can run a chat on a saved account instead of the active one, and decide the account a new chat starts on. The active account stays as it is. It can't sign in or remove an account."
+        },
         "models_read": {
           "title": "See your agents' models",
           "detail": "The models, efforts and options each offers, and what a chat uses."
