@@ -1135,6 +1135,34 @@ fn page_value(state: &str, dirs: Option<&(PathBuf, PathBuf)>, list: &[Item], tem
     Value::record(fields)
 }
 
+/// How long to wait before each retry of a reload that ran out of time.
+const RELOAD_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
+
+/// Whether `error` is a script passing its time budget, not a fault in it.
+fn is_budget_error(error: &str) -> bool {
+    error.contains("exceeded its time budget")
+}
+
+/// Calls `reload` again, waiting `RELOAD_RETRIES`'s time before each, while it
+/// fails on the time budget; the first other outcome, or the last failure.
+async fn retry_budget<F, W, Fut>(mut reload: F, mut sleep: W) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+    W: FnMut(Duration) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut last = Err(String::new());
+    for wait in RELOAD_RETRIES {
+        sleep(wait).await;
+        last = reload();
+        match &last {
+            Err(error) if is_budget_error(error) => {}
+            _ => return last,
+        }
+    }
+    last
+}
+
 impl Bridge {
     fn me(&self) -> Rc<Bridge> {
         self.me.borrow().upgrade().expect("the bridge is alive while its host is")
@@ -1332,10 +1360,31 @@ impl Bridge {
     }
 
     fn reload(&self) {
-        if let Err(error) = self.host.reload() {
-            eprintln!("zeron-zgx: the window didn't reload with its plugins: {error}");
+        let Err(error) = self.host.reload() else { return };
+        eprintln!("zeron-zgx: the window didn't reload with its plugins: {error}");
+        if !is_budget_error(&error) {
             self.blame(&error);
+            return;
         }
+        // A cold first load can pass the script time budget with nothing
+        // wrong in it (disk and antivirus cold). `loaded` is already what was
+        // asked, so no later sync would load it again: try again here, a
+        // little later each time, and blame only what still fails.
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            let again = || {
+                let Some(b) = me.upgrade() else { return Ok(()) };
+                let result = b.host.reload();
+                if let Err(error) = &result {
+                    eprintln!("zeron-zgx: the window didn't reload with its plugins (again): {error}");
+                }
+                result
+            };
+            let result = retry_budget(again, |wait| zgx::timer::sleep(wait)).await;
+            if let (Err(error), Some(b)) = (result, me.upgrade()) {
+                b.blame(&error);
+            }
+        });
     }
 
     /// `blame`, after this turn.
@@ -3414,6 +3463,73 @@ fn reveal(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(v) = future.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::park_timeout(Duration::from_millis(50));
+        }
+    }
+
+    const BUDGET: &str = "app.luau: runtime error: script exceeded its time budget";
+
+    /// A window's reload that ran out of time on a cold first load is tried
+    /// again, after a wait each time, and a later one that loads ends it.
+    #[test]
+    fn a_reload_that_ran_out_of_time_is_tried_again() {
+        let calls = std::cell::Cell::new(0);
+        let waits = std::cell::RefCell::new(Vec::new());
+        let got = block_on(retry_budget(
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 2 { Err(BUDGET.to_string()) } else { Ok(()) }
+            },
+            |wait| {
+                waits.borrow_mut().push(wait);
+                std::future::ready(())
+            },
+        ));
+        assert_eq!(got, Ok(()));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(*waits.borrow(), RELOAD_RETRIES.to_vec());
+    }
+
+    /// Out of time every time, it gives up after the retries with that error
+    /// (to blame); any other error stops the retries at once.
+    #[test]
+    fn a_reload_retries_only_the_time_budget_and_only_so_often() {
+        let calls = std::cell::Cell::new(0);
+        let got = block_on(retry_budget(
+            || {
+                calls.set(calls.get() + 1);
+                Err(BUDGET.to_string())
+            },
+            |_| std::future::ready(()),
+        ));
+        assert_eq!(got, Err(BUDGET.to_string()));
+        assert_eq!(calls.get(), RELOAD_RETRIES.len());
+        let calls = std::cell::Cell::new(0);
+        let got = block_on(retry_budget(
+            || {
+                calls.set(calls.get() + 1);
+                Err("app.luau:3: attempt to index nil".to_string())
+            },
+            |_| std::future::ready(()),
+        ));
+        assert!(got.is_err());
+        assert_eq!(calls.get(), 1);
+    }
 
     fn item(json: Json) -> Item {
         Item { json }
