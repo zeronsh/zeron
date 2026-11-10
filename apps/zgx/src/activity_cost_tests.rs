@@ -705,11 +705,17 @@ fn scenarios(n: usize, think: usize, open: bool) {
                 };
                 // (`DEBUG_NODE=<n>`: that node's kind, what's above it, and the
                 // texts under the box above it.)
-                if std::env::var_os("DEBUG_NODE").is_some()
-                    && frame.index > 40
-                    && let Some(m) = frame.layout.top.first()
+                // (A number: that node, as the frame's runs name it.)
+                let asked = std::env::var("DEBUG_NODE").ok();
+                let numbered = asked.as_deref().and_then(|n| n.parse::<u32>().ok());
+                let pick = match numbered {
+                    Some(n) => Some(n),
+                    None if asked.is_some() && frame.index > 40 => frame.layout.top.first().map(|m| m.node),
+                    None => None,
+                };
+                if let Some(n) = pick
                     && !NODE_SHOWN.replace(true)
-                    && let Some(&id) = by_number.get(&m.node)
+                    && let Some(&id) = by_number.get(&n)
                 {
                     let mut at = Some(id);
                     for _ in 0..8 {
