@@ -373,8 +373,8 @@ fn every_menu_item_is_in_the_command_palette() {
 
 /// The page's card stays concentric with the window's corner where the host
 /// says what it is (Windows): its radius less the 4 the card is set in by, 4
-/// on Windows 11's 8; square once the window is (maximized, full screen,
-/// Windows 10). Told nothing (macOS), the theme's own.
+/// on Windows 11's 8, maximized or not (the host tells the same); square
+/// only where the window is (Windows 10). Told nothing (macOS), the theme's own.
 #[test]
 fn the_cards_corner_follows_the_windows() {
     let mut app = mount(windows(W));
@@ -395,4 +395,28 @@ fn the_cards_corner_follows_the_windows() {
         app.frames(10);
         assert_eq!(corner(&mut app), card, "a window's {window} corner");
     }
+}
+/// The host's corner effect (`tell_window_corner`) runs once for the window's
+/// radius, then not again however many frames follow, and the cards' effect
+/// beside it settles: a loop between them would spend the scripts' time
+/// budget (a launch's "script exceeded its time budget").
+#[test]
+fn telling_the_windows_corner_runs_once_and_does_not_loop() {
+    let mut app = mount(windows(W));
+    let radius = app.ui.signal(8.0_f64);
+    let told = app.host.shared("window.corner_radius", Value::Nil);
+    let runs = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let counted = runs.clone();
+    let _effect = crate::tell_window_corner(&app.ui.runtime, radius.clone(), move |r| {
+        counted.set(counted.get() + 1);
+        told.set(Value::from(r));
+    });
+    let started = std::time::Instant::now();
+    app.frames(300);
+    assert_eq!(app.error(), None, "the shell failed");
+    assert_eq!(runs.get(), 1, "the effect ran again with nothing changed");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "300 frames took {:?}", started.elapsed());
+    radius.set(0.);
+    app.frames(10);
+    assert_eq!(runs.get(), 2, "one run for one change");
 }
