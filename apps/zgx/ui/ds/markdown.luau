@@ -231,6 +231,16 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 	end
 	return going
 end
+-- The stream bench's switch (src/stream_bench_tests.rs, `PROBE_VEIL_OFF=1`): the
+-- veil shows words at once. Read once; no such value (the app, a plugin) is off.
+local VEIL_OFF: boolean? = nil
+local function veil_off(): boolean
+	if VEIL_OFF == nil then
+		local ok, s = pcall(ui.shared, "bench.veil_off", false)
+		VEIL_OFF = ok and s ~= nil and (s :: any):peek() == true
+	end
+	return VEIL_OFF :: boolean
+end
 -- A link's or inline code's ink (ds/look).
 local accented_ink = look.accented_ink
 
@@ -1774,7 +1784,7 @@ return function(props: Props): Node
 	end
 	-- Fading in as it streams (`veil`, with `key`), unless motion is reduced. `veil_seed`:
 	-- what's there as it's first built stays as it is (a chat opened mid-reply).
-	if props.veil and props.key and not Motion.reduced_now() then
+	if props.veil and props.key and not Motion.reduced_now() and not veil_off() then
 		local v = veil_of(props.key, props.veil_seed == true)
 		v.tick = ui.use_state(0)
 		if v.seeding then
