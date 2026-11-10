@@ -74,10 +74,22 @@ impl Consent {
     }
 }
 
-/// The plugin a sheet may show: one waiting for you (or changed since).
+/// The plugin a sheet may show: one waiting for you (or changed since), or
+/// one you declined ("Not now": off, still asking), which the Plugins page
+/// offers to review again.
 fn showable(bridge: &Bridge, id: &str, on: &On) -> Option<super::Item> {
     let device = on.as_ref().map(|(d, _)| d.as_str());
-    bridge.item_on(device, id).filter(|i| matches!(i.status(), "pending" | "tampered"))
+    bridge.item_on(device, id).filter(reviewable)
+}
+
+/// Whether `item` is awaiting a decision: new or changed, or declined and
+/// asking still. (Off with nothing asked is a plugin you turned off.)
+fn reviewable(item: &super::Item) -> bool {
+    match item.status() {
+        "pending" | "tampered" => true,
+        "off" => item.json["ask"].as_array().is_some_and(|ask| !ask.is_empty()),
+        _ => false,
+    }
 }
 
 /// Notes when the sheet started showing what it shows now (a new plugin,
@@ -531,5 +543,20 @@ mod tests {
         assert!(!claimable(&item("tampered", "unknown")));
         assert!(!claimable(&item("pending", "verified")));
         assert!(!claimable(&item("pending", "you")));
+    }
+
+    /// A plugin you said "Not now" to (off, still asking) can be reviewed
+    /// again, here as for another device; one you turned off, or that runs,
+    /// has nothing waiting.
+    #[test]
+    fn a_declined_plugin_can_be_reviewed_again() {
+        let item = |status: &str, ask: Json| super::super::Item { json: json!({ "status": status, "ask": ask }) };
+        assert!(reviewable(&item("pending", json!(["ui.add"]))));
+        assert!(reviewable(&item("tampered", json!(["ui.add"]))));
+        assert!(reviewable(&item("off", json!(["ui.add"]))), "declined: off, asking still");
+        assert!(!reviewable(&item("off", json!([]))), "turned off by you, nothing asked");
+        assert!(!reviewable(&item("off", Json::Null)));
+        assert!(!reviewable(&item("on", json!([]))));
+        assert!(!reviewable(&item("broken", json!(["ui.add"]))));
     }
 }
