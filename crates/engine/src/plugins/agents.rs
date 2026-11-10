@@ -1039,7 +1039,7 @@ impl Agents {
             .and_then(Json::as_str)
             .map(str::to_owned)
             .or_else(|| config.model.clone())
-            .or_else(|| models.first().map(|m| m.id.clone()))
+            .or_else(|| models.iter().find(|m| m.default).or(models.first()).map(|m| m.id.clone()))
             .unwrap_or_default();
         let model = models.iter().find(|m| m.id == model_id).ok_or_else(|| {
             Refused::new(reason::NOT_FOUND, format!("{} has no model \"{model_id}\"", config.harness.as_str()))

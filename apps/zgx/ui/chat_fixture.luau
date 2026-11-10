@@ -1865,6 +1865,39 @@ ui.command {
 		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
 	end,
 }
+-- The agent marks a default that isn't its first row (Claude lists
+-- best-first and marks the CLI's own default).
+ui.command {
+	id = "catalog_marks_fusion_default",
+	title = "The catalog marks Fusion its agent's default",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = {}
+		for _, m in c.models do
+			local row = table.clone(m) :: any
+			row.default = if m.value == "fusion" then true else nil
+			table.insert(models, row)
+		end
+		store.catalog:set({ state = "ready", complete = (c :: any).complete, harnesses = c.harnesses, models = models } :: any)
+	end,
+}
+-- The same, complete and without Opus: a new chat on Opus gives way.
+ui.command {
+	id = "catalog_complete_without_opus_marks_fusion",
+	title = "The catalog is complete, without Opus, Fusion its default",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = {}
+		for _, m in c.models do
+			if m.value ~= "opus" then
+				local row = table.clone(m) :: any
+				row.default = if m.value == "fusion" then true else nil
+				table.insert(models, row)
+			end
+		end
+		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
+	end,
+}
 -- The open session runs a model no catalog shown lists (Pi's, on a device
 -- not looked at yet), named by the host.
 ui.command {

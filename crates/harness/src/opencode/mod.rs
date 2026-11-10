@@ -1659,6 +1659,7 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                 levels.sort();
                 levels.dedup();
                 Model {
+                    default: false,
                     id: format!("{provider_id}/{model_id}"),
                     label,
                     description: Some(provider_name.to_owned()),

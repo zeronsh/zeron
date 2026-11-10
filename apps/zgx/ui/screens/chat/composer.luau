@@ -83,6 +83,22 @@ local WHERE = { "checkout", "device", "project", "branch" }
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
+-- An agent's default model: the row its catalog marks, else its first
+-- (harness nil: the first agent listed's).
+local function default_of(models: { any }, harness: string?): any
+	local first = nil
+	for _, m in models do
+		local h = harness or m.harness
+		harness = h
+		if m.harness == h then
+			if m.default then
+				return m
+			end
+			first = first or m
+		end
+	end
+	return first
+end
 local function equal(a: any, b: any): boolean
 	if type(a) == "table" or type(b) == "table" then
 		local x: { [string]: any } = if type(a) == "table" then a else {}
@@ -433,7 +449,7 @@ local function Composer(): Node
 				return
 			end
 		end
-		local first = cat.models[1]
+		local first = default_of(cat.models)
 		if first then
 			model:set(first.value)
 			if first.effort then
@@ -695,15 +711,16 @@ local function Composer(): Node
 			store.load_catalog()
 		end
 	end)
-	-- A new chat with no model yet: the catalog's first. (Never a session's:
+	-- A new chat with no model yet: the first agent's default. (Never a session's:
 	-- its model is its own.) Whenever that's so: the catalog come, or the
 	-- new page come back to with none chosen there, so what shows is what a
 	-- reload shows too.
 	ui.effect(function()
 		local c = store.catalog:get()
 		if session_id:get() == nil and c.state == "ready" and model:get() == nil and #c.models > 0 then
-			model:set(c.models[1].value)
-			effort:set(c.models[1].effort)
+			local first = default_of(c.models)
+			model:set(first.value)
+			effort:set(first.effort)
 		end
 	end)
 
@@ -1148,12 +1165,8 @@ local function Composer(): Node
 				if not s or s.model ~= nil or s.harness == nil then
 					return nil
 				end
-				for _, m in store.catalog:get().models do
-					if m.harness == s.harness then
-						return m.value
-					end
-				end
-				return nil
+				local m = default_of(store.catalog:get().models, s.harness)
+				return m and m.value
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
