@@ -48,7 +48,7 @@ function M.price(cents: number): string
 	return string.format("$%d.%02d", cents // 100, cents % 100)
 end
 
--- "about 750 hours" of a standard machine.
+-- "about 750 small-machine hours": a credit is a minute of a small machine.
 function M.hours(credits: number): string
 	return ui.t("settings.billing.hours", { n = group(math.floor(credits / 60 + 0.5)) }):get()
 end

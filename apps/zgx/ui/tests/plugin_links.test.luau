@@ -51,17 +51,22 @@ test("an issue's link and another site's are left alone", function()
 	end
 end)
 
-test("a plugin opening a pull request's link itself gets that page, not its tab again", function()
-	-- (The GitHub plugin's "Open on GitHub": with its setting on, its own
-	-- link went back to the tab it was pressed in, and nothing happened.)
+-- A link the GitHub plugin opens itself (its viewer's Open on GitHub, a
+-- comment's) is the pull request's page: it goes where links go, and never
+-- back into the plugin's tab, which would only bring that tab forward.
+test("a pull request's link a plugin opens itself goes where links go", function()
 	local app = open(github(true))
 	app:set_state("shell_fixture.plugins", true)
 	app:frames(10)
-	app:set_state("plugins.request", {
-		{ seq = 1, kind = "link", title = "GitHub", value = "https://github.com/acme/atlas/pull/12" },
-	})
+	local url = "https://github.com/acme/atlas/pull/12"
+	app:set_state("plugins.request", { { seq = 1, kind = "link", title = "GitHub", value = url } })
 	app:frames(40)
 	expect(pr_tab(app)).to_be(false)
-	expect(app:state("links_last")).never.to_be("")
+	local last = app:state("links_last")
+	expect(string.sub(last, -#url)).to_be(url)
+	-- (And a link in the chat is still the plugin's, after.)
+	app:command("click_pr_link")
+	app:frames(40)
+	expect(pr_tab(app)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)

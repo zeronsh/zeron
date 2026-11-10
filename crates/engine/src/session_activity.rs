@@ -29,7 +29,9 @@ impl SessionsEngine {
         }
         let inner = Arc::downgrade(&self.inner);
         let task = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            // Only checks: a refresh is stored once a heartbeat old, so this
+            // bounds terminal leases to a heartbeat plus one tick apart.
+            let mut tick = tokio::time::interval(super::HEARTBEAT_CHECK);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             tick.tick().await;
             let mut previous = Vec::<Session>::new();
@@ -49,7 +51,8 @@ impl SessionsEngine {
                 );
                 // Unrelated native transitions must not turn terminal leases
                 // into per-event registry writes. Refresh them at most every
-                // ten seconds unless an actual program report changed.
+                // heartbeat (each refresh is a stored write) unless an actual
+                // program report changed.
                 for row in &mut current {
                     if let Some(old) = previous_by_id.get(row.chat_id.as_str())
                         && old.terminal_activity == row.terminal_activity
@@ -57,7 +60,8 @@ impl SessionsEngine {
                             .terminal_activity
                             .as_ref()
                             .is_some_and(|a| a.report.state.active())
-                        && (now - old.updated_at).num_milliseconds() < 10_000
+                        && (now - old.updated_at).num_milliseconds()
+                            < zeron_proto::view::SESSION_HEARTBEAT_MS
                     {
                         let native_at = native
                             .borrow()

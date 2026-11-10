@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use zeron_doc::{
-    COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
+    CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
     evaluate_command, join_continuation_entries,
@@ -48,11 +48,23 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+/// The largest checkpoint a chat room takes, in parts past one request's most
+/// (`MAX_STAGED_CHECKPOINT_BYTES` in the edge).
+const ROOM_CHECKPOINT_LIMIT: usize = 256 * 1024 * 1024;
+
+fn checkpoint_fits(bytes: usize) -> bool {
+    bytes <= ROOM_CHECKPOINT_LIMIT
+}
 
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
 /// heartbeats without turning a vanished client into an invisible permanent
 /// lock. Expiry fails closed into ReviewRequired rather than releasing.
 pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;
+
+/// A Cloud machine woken on the person's say-so takes a while to boot and read
+/// its chat: a waiting message whose clock runs out within this long goes
+/// again with a fresh one rather than expire on the way.
+const WAKE_BOOT_MARGIN_MS: i64 = 60 * 60 * 1000;
 
 /// Warm-doc LRU: how many unwatched, run-less docs stay fully open. Everything
 /// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
@@ -102,6 +114,8 @@ const TRANSFER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs
 /// A command whose attachment bytes are still in transit waits at most this
 /// long before the drain rejects it loudly (and the transfer task gives up on
 /// the same clock) — a chat must never wedge behind bytes that aren't coming.
+/// Bytes safely in the edge's store ARE coming: a Cloud host checks there
+/// before this cap applies (doc_host_attachments.rs), however long it slept.
 const ATTACHMENT_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const ATTACHMENT_WAIT_MAX_MS: i64 = ATTACHMENT_WAIT_MAX.as_millis() as i64;
 /// Re-check cadence while a chat's queue is deferred on in-transit bytes
@@ -237,6 +251,9 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
     }
 }
 
+mod relay;
+pub use relay::relay_layer_enabled;
+
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
     pub device_id: String,
@@ -248,6 +265,7 @@ pub struct DocHostConfig {
 }
 
 struct DocHostInner {
+    /// Opens direct links to other devices. Set only with the relay layer on.
     store: Arc<DocsStore>,
     config: DocHostConfig,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
@@ -257,6 +275,7 @@ struct DocHostInner {
     /// Quiesced for a Cloud sleep ([`DocHost::quiesce_for_sleep`]): drains
     /// leave new work pending in the room, for the machine once it wakes.
     quiesced: AtomicBool,
+    boot_recovery_finished: AtomicBool,
     /// Bumped per quiesce: only the newest one's lease lifts it.
     quiesce_generation: AtomicU64,
     /// Drains between their quiesce check and the end of their dispatch (a
@@ -316,6 +335,17 @@ struct DocHostInner {
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
+    /// Chats with a worker draining their held sends (doc_host_attachments.rs).
+    held_active: Mutex<HashSet<String>>,
+    /// Releasing a held send and removing one exclude each other: a removed
+    /// send never goes out, and a send that went out reads as not removed.
+    held_gate: Mutex<()>,
+    /// Cuts a held send's backoff short on the user's retry.
+    held_kick: tokio::sync::Notify,
+    /// The outbox as the local interface shows it.
+    held_status: watch::Sender<Vec<zeron_proto::HeldSendStatus>>,
+    /// A Cloud host's looks in the attachment store, by `pending://` ref.
+    store_looks: Mutex<HashMap<String, attachment_store::StoreLook>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -584,6 +614,8 @@ pub struct ChatDocHandle {
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
     queue_tx: watch::Sender<Vec<QueuedMessage>>,
+    /// Bumped on every change to the doc (`WatchWaitingMessages` follows it).
+    changes: watch::Receiver<u64>,
     /// Serializes everything that TAKES from the queue. Both the doc-change
     /// task and the turn-end status watcher call `drain_queue`, and nothing
     /// keeps those two apart: without this they interleave across the
@@ -611,6 +643,8 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    /// The queue is paused because it was restored from disk, not by a person.
+    queue_frozen_by_recovery: AtomicBool,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -662,6 +696,8 @@ pub struct ChatDocHandle {
     publication_failed: AtomicBool,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
+    /// The relay layer's state for this chat. None with the flag off.
+    relay: Mutex<Option<Arc<relay::ChatRelayState>>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
 }
@@ -724,6 +760,25 @@ pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<Ha
 }
 
 impl ChatDocHandle {
+    /// The outbox entries a join should upload. With the relay layer off, all.
+    pub(crate) fn uploadable_updates(&self, pending: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+        match &*lock(&self.relay) {
+            Some(state) => state.uploadable(pending),
+            None => pending,
+        }
+    }
+
+    /// This host is storing a chat: what it imports must go into rows as well.
+    pub(crate) fn republishes_imports(&self) -> bool {
+        lock(&self.relay).as_ref().is_some_and(|state| state.republishes_queue_rows())
+    }
+
+    pub(crate) fn republish(&self, bytes: Vec<u8>) {
+        if let Some(client) = &*lock(&self.chat2) {
+            client.enqueue_batch(uuid::Uuid::new_v4().to_string(), bytes);
+        }
+    }
+
     /// The turn ending now is followed at once by a message the user has
     /// already sent: one still on its way through the command log (a burst
     /// the agent outran), or one held for a turn-boundary agent's turn end.
@@ -1002,6 +1057,30 @@ impl ChatDocHandle {
         Ok(stamped)
     }
 
+    /// A turn ended with nothing in the transcript to say so (its reply never
+    /// reached this disk, or it never got to run): write that it failed, so
+    /// the chat doesn't just stop at the user's message. Idempotent per `key`.
+    pub fn note_turn_failure(&self, key: &str, note: &str) -> Result<(), DocError> {
+        let id = format!("{key}-interrupted");
+        if self.doc.read_entries()?.iter().any(|entry| entry.id == id) {
+            return Ok(());
+        }
+        self.doc.push_message(&SessionMessageEntry {
+            id: id.clone(),
+            role: MessageRole::Assistant,
+            parts: Vec::new(),
+            created_at: now_ms(),
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Aborted),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        self.doc
+            .append_error_part(&id, &format!("{id}-note"), note)?;
+        self.publish_messages();
+        Ok(())
+    }
+
     fn publish_messages(&self) {
         let _import = lock(&self.transcript_import);
         self.publish_messages_locked();
@@ -1068,6 +1147,7 @@ impl DocHost {
                 config,
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
+                boot_recovery_finished: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
@@ -1087,6 +1167,11 @@ impl DocHost {
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
                 transfers: watch::channel(Vec::new()).0,
+                held_active: Mutex::new(HashSet::new()),
+                held_gate: Mutex::new(()),
+                held_kick: tokio::sync::Notify::new(),
+                held_status: watch::channel(Vec::new()).0,
+                store_looks: Mutex::new(HashMap::new()),
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
@@ -1175,14 +1260,24 @@ impl DocHost {
         let running = self
             .sessions()
             .map_or(0, |sessions| sessions.active_count());
+        // Sleeping stops the engine, and a parked chat's subagents with it.
+        let background = self
+            .sessions()
+            .map_or(0, |sessions| sessions.background_count());
         let busy = if running > 0 {
             Some(format!("{running} chat(s) have a turn in flight"))
+        } else if background > 0 {
+            Some(format!("{background} chat(s) have background work running"))
         } else if self.has_waiting_commands() {
             Some("a message is waiting to run".to_string())
         } else {
             None
         };
         if let Some(why) = busy {
+            self.lift_quiesce();
+            return Err(why);
+        }
+        if let Err(why) = self.checkpoint_relayed_chats_for_sleep().await {
             self.lift_quiesce();
             return Err(why);
         }
@@ -1206,8 +1301,10 @@ impl DocHost {
         self.inner.quiesced.store(true, Ordering::SeqCst);
     }
 
-    /// End a quiesce and run everything that queued meanwhile.
+    /// End a quiesce and run everything that queued meanwhile. A boot that held
+    /// work has done its recovery by now, whatever it was holding for.
     pub fn lift_quiesce(&self) {
+        self.inner.boot_recovery_finished.store(true, Ordering::Release);
         if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -1221,8 +1318,81 @@ impl DocHost {
         }
     }
 
+    /// Boot recovery reads this disk, and a machine that died can come back
+    /// with a disk older than its chat's room: a turn that was running then
+    /// has no open journal here, so recovery never saw it. Once the room has
+    /// caught up, a reply still streaming from this device with no run behind
+    /// it, or a message marked delivered that this disk's ledger has never
+    /// heard of, is such a turn. It says so; a message still pending just runs.
+    async fn settle_rolled_back_turn(&self, weak: Weak<ChatDocHandle>) {
+        const CATCH_UP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + CATCH_UP_WAIT;
+        let handle = loop {
+            let Some(handle) = weak.upgrade() else {
+                return;
+            };
+            let caught_up = self.inner.config.edge.is_none()
+                || lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+            if caught_up {
+                break handle;
+            }
+            drop(handle);
+            if tokio::time::Instant::now() >= deadline {
+                return; // the next boot looks again
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        };
+        let Some(sessions) = self.sessions() else {
+            return;
+        };
+        if !self.is_host(&handle.chat_id)
+            || sessions.has_run(&handle.chat_id)
+            || sessions.reviving(&handle.chat_id)
+        {
+            return;
+        }
+        let Ok(commands) = handle.doc.read_commands() else {
+            return;
+        };
+        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(true);
+        // Running or about to: this isn't a lost turn.
+        if commands.iter().any(|c| {
+            c.status == SessionCommandStatus::Pending || lock(&self.inner.executing).contains(&c.id)
+        }) {
+            return;
+        }
+        let stamped = match handle.mark_abandoned_streams(ROLLED_BACK_NOTE) {
+            Ok(stamped) => stamped,
+            Err(err) => {
+                tracing::warn!(chat = %handle.chat_id, error = %err, "settling a lost turn failed");
+                return;
+            }
+        };
+        if !stamped.is_empty() {
+            tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
+            return;
+        }
+        let Ok(entries) = handle.doc.read_entries() else {
+            return;
+        };
+        let Some(last) = entries.last().filter(|entry| entry.role == MessageRole::User) else {
+            return;
+        };
+        let lost = commands.iter().any(|c| {
+            matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if *message_id == last.id)
+                && c.status == SessionCommandStatus::Applied
+                && !is_processed(&c.id)
+        });
+        if lost {
+            tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
+            if let Err(err) = handle.note_turn_failure(&last.id, ROLLED_BACK_NOTE) {
+                tracing::warn!(chat = %handle.chat_id, error = %err, "noting a lost turn failed");
+            }
+        }
+    }
+
     /// A hosted chat has a command no drain has executed yet.
-    fn has_waiting_commands(&self) -> bool {
+    pub(crate) fn has_waiting_commands(&self) -> bool {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
         handles.iter().any(|handle| {
@@ -1343,12 +1513,43 @@ impl DocHost {
     /// and the transfer-read jail.
     pub fn set_uploads(&self, uploads: crate::uploads::Uploads) {
         let _ = self.inner.uploads.set(uploads);
+        // Sends still held for their attachment bytes pick up where they were.
+        // Here because they read those bytes from this store.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.resume_held_sends();
+        }
     }
 
     /// Wire the peer-link cache (engine assembly, edge runtimes only) — the
     /// transport for queued attachment transfers to a remote host.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         let _ = self.inner.links.set(links);
+    }
+
+    /// Boot recovery has been through every chat it cut off, and each it means
+    /// to pick back up is marked: queues it restored can go now, or after those
+    /// turns.
+    pub fn boot_recovery_finished(&self) {
+        self.inner.boot_recovery_finished.store(true, Ordering::Release);
+        self.kick_drains();
+    }
+
+    /// A Cloud machine restarts on every wake, which nobody there asked for or
+    /// sees, so a message queued before a sleep or a kill was meant to go, and
+    /// frozen it would wait for a prompt that may never come. Not ahead of a turn
+    /// the kill cut off, though: boot recovery brings that back first, and a row
+    /// sent now would read to it as the chat having moved on.
+    fn thaw_recovered_queue(&self, handle: &ChatDocHandle, sessions: &SessionsEngine) {
+        if !handle.queue_frozen_by_recovery.load(Ordering::Acquire)
+            || !zeron_proto::is_cloud_device(&self.inner.config.device_id, "")
+            || !self.inner.boot_recovery_finished.load(Ordering::Acquire)
+            || sessions.revival_pending(&handle.chat_id)
+        {
+            return;
+        }
+        if handle.queue_frozen_by_recovery.swap(false, Ordering::AcqRel) {
+            handle.queue_paused.store(false, Ordering::Release);
+        }
     }
 
     /// Re-evaluate every open chat's commands and queue NOW. Called after an
@@ -1551,6 +1752,10 @@ impl DocHost {
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        // A chat with no id has no room to sync with: it dialed one forever.
+        if chat_id.is_empty() {
+            return Err(EngineError::Other("a chat needs an id".into()));
+        }
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
@@ -1725,6 +1930,30 @@ impl DocHost {
                     .import(&bytes)
                     .map_err(|e| EngineError::Other(e.to_string()))?;
             }
+            // The same for what a crash left unsaved of what came by relay. A row
+            // this build can't read is skipped, as a stored row would be.
+            let (received, _) = self.inner.store.pending_chat_inbox(chat_id)?;
+            for bytes in received {
+                if let Err(err) = doc.doc().import(&bytes) {
+                    tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a kept update");
+                }
+            }
+            // Updates that came ahead of their history. Once all of them are in, none
+            // is needed again; until then all stay.
+            let parked_key = crate::chat2_host::parked_inbox(chat_id);
+            let (parked, newest) = self.inner.store.pending_chat_inbox(&parked_key)?;
+            if !parked.is_empty() {
+                let mut waiting = false;
+                for bytes in &parked {
+                    match doc.doc().import(bytes) {
+                        Ok(status) => waiting |= status.pending.is_some(),
+                        Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a parked update"),
+                    }
+                }
+                if !waiting {
+                    self.inner.store.retire_chat_inbox(&parked_key, newest)?;
+                }
+            }
         }
         let doc = Arc::new(doc);
         let persistence = (room_gen >= 2 && !deferred_adoption).then(|| {
@@ -1769,6 +1998,7 @@ impl DocHost {
         // user submitted to this live engine. Keep that recovered work frozen
         // until an explicit prompt / Send now / Steer action thaws it. Rows
         // appended after the handle exists retain the normal automatic drain.
+        // A Cloud machine thaws it itself (`thaw_recovered_queue`).
         let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
 
@@ -1780,12 +2010,14 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             queue_tx,
+            changes: changed_rx.clone(),
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             held_sends: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            queue_frozen_by_recovery: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             last_focus: AtomicU64::new(0),
@@ -1809,6 +2041,7 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
+            relay: Mutex::new(None),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -1854,12 +2087,16 @@ impl DocHost {
                             // check and the push let the join's store+drain
                             // slip between, orphaning the update forever).
                             let client_guard = lock(&handle.chat2);
+                            let relay_state = lock(&handle.relay).clone();
                             for bytes in lock(&own_order).order(handle.doc.doc(), bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
                                 if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, &bytes) {
                                     handle.publication_failed.store(true, Ordering::Release);
                                     lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
                                     tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
+                                }
+                                if relay_state.as_ref().is_some_and(|state| state.publish_local(&batch_id, &bytes)) {
+                                    continue;
                                 }
                                 if let Some(client) = &*client_guard {
                                     client.enqueue_batch(batch_id, bytes);
@@ -2164,6 +2401,7 @@ impl DocHost {
                     // explicit service deadline, never the short reuse grace.
                     let idle = caught_up
                         && !handle.sync_protected()
+                        && handle.relay_lets_socket_close()
                         && (now_ms() - handle.last_access.load(Ordering::Relaxed) >= SYNC_IDLE_MS
                             || (handle.sync_background.load(Ordering::Acquire) && caught_up))
                         && !host
@@ -2420,6 +2658,10 @@ impl DocHost {
             ).with_priority(priority));
             let remote_host = host.remote_host_for(&chat);
             let url = edge.room_url_with_host(format!("/chat2/{chat}/ws"), remote_host.clone());
+            let relay_state = relay::relay_layer_enabled()
+                .then(|| host.relay_state_for(&weak, &device, sink.clone()))
+                .flatten();
+            let relay = relay_state.as_ref().map(|state| state.relay.clone());
             let mut wake = zeron_sync::wake::subscribe();
             // Sibling-dial successes end a backoff wait immediately, exactly
             // like the joined clients' own reconnect loops (chat_client.rs).
@@ -2444,16 +2686,17 @@ impl DocHost {
                     edge.clone(),
                     chat.clone(),
                     device.clone(),
-                ).with_host_device(remote_host.clone()).with_priority(priority));
+                ).with_host_device(remote_host.clone()).with_priority(priority).with_relay(relay.is_some()));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    zeron_sync::ChatClient::connect_via_transport(
+                    zeron_sync::ChatClient::connect_via_relay(
                         url.clone(),
                         sink.clone(),
                         fetcher.clone(),
                         &device,
                         cursor,
                         transport,
+                        relay.clone(),
                     ),
                 )
                 .await;
@@ -2478,7 +2721,12 @@ impl DocHost {
                             // Include commits made after the sink's initial
                             // load but before installation. The same lock is
                             // held by the local-update subscription.
-                            for (id, bytes) in host.inner.store.pending_chat_updates(&chat).unwrap_or_default() {
+                            let pending = host.inner.store.pending_chat_updates(&chat).unwrap_or_default();
+                            let pending = match &relay_state {
+                                Some(state) => state.uploadable(pending),
+                                None => pending,
+                            };
+                            for (id, bytes) in pending {
                                 client.enqueue_batch(id, bytes);
                             }
                             let pending: Vec<(String, Vec<u8>)> =
@@ -2489,6 +2737,10 @@ impl DocHost {
                             *client_slot = Some(client);
                         }
                         tracing::info!(chat = %chat, "chat2 client admitted (catch-up pending)");
+                        match relay_state.clone() {
+                            Some(state) => host.spawn_relay_maintenance(&handle, state, cancel.clone()),
+                            None => host.spawn_rollback_heal(&handle, cancel.clone()),
+                        }
                         // A missed event, failed POST or actor restart must not
                         // forget rejected operations. Any author can checkpoint
                         // its own durable history, including a non-host desktop.
@@ -2545,7 +2797,10 @@ impl DocHost {
                                     .read_entries()
                                     .map(|e| !e.is_empty())
                                     .unwrap_or(false);
-                                if no_checkpoint && has_content {
+                                let relayed = lock(&handle.relay).is_some()
+                                    && host.workspace().and_then(|ws| ws.chat(&handle.chat_id).ok().flatten())
+                                        .is_some_and(|chat| chat.room_gen.unwrap_or(1) >= zeron_proto::relay_gen::RELAY_ROOM_GEN);
+                                if no_checkpoint && has_content && !relayed {
                                     tracing::info!(chat = %handle.chat_id,
                                         "chat2 room has rows but no checkpoint; posting bootstrap checkpoint");
                                     host.spawn_chat2_checkpoint(&handle, "bootstrap");
@@ -3026,6 +3281,11 @@ impl DocHost {
         if handle.retired.load(Ordering::Relaxed) {
             return;
         }
+        // Relaying: no stored rows to trim. A device-hosted chat isn't stored at
+        // all, and a Cloud host's checkpoints follow their own policy.
+        if lock(&handle.relay).as_ref().is_some_and(|state| state.relaying()) {
+            return;
+        }
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
             None => return,
@@ -3093,11 +3353,33 @@ impl DocHost {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
+        // On a relayed chat only its host stores a checkpoint: a viewer's is behind
+        // the host's as often as not, and the room may hold nothing else.
+        if let Some(workspace) = self.workspace()
+            && let Ok(Some(chat)) = workspace.chat(&handle.chat_id)
+            && !relay::posts_checkpoint(reason, chat.room_gen.unwrap_or(1), workspace.is_host(&handle.chat_id))
+        {
+            return;
+        }
+        // A relaying host's socket closes when idle, and it still owes checkpoints.
+        let relay_state = lock(&handle.relay).clone();
+        // So does a build with the layer off, healing what one with it on left.
+        let relay_era = reason.starts_with("relay-")
+            || relay_state.as_ref().is_some_and(|state| state.relaying());
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
+            None if relay_era => Default::default(),
             None => return,
         };
         let chat_id = handle.chat_id.clone();
+        // A checkpoint can be all the room holds. A doc that hasn't caught up may
+        // have less than what it would replace.
+        if relay_era
+            && let Some(state) = &relay_state
+            && (!state.checkpoint_may_run() || !state.caught_up() || state.refused_as_too_large())
+        {
+            return;
+        }
         if handle
             .checkpointing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -3108,9 +3390,15 @@ impl DocHost {
         let in_flight = handle.checkpointing.clone();
         let publication_store = self.inner.store.clone();
         let snapshot_doc = handle.doc.clone();
-        let seq_covered = stats.cursor;
+        // A relay-era checkpoint prunes nothing: stored rows stay where they are.
+        // Sampled before the export below, so a mode change after this makes the
+        // result too old to count as the checkpoint that change owes.
+        let at_floor = relay_era;
+        let seq_covered = if at_floor { stats.seq_floor } else { stats.cursor };
+        let mode_epoch = relay_state.as_ref().map_or(0, |state| state.mode_epoch());
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
+        let relay_host = self.clone();
         let reset = ResetFlag(in_flight);
         self.spawn_worker(async move {
             let _reset = reset;
@@ -3130,35 +3418,67 @@ impl DocHost {
             let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
                 return;
             };
+            // The room refuses it, and only after receiving all of it: a chat past the
+            // limit sent that much on every retry.
+            if !checkpoint_fits(snapshot.len()) {
+                tracing::warn!(chat = %chat_id, bytes = snapshot.len(), reason, "chat2 checkpoint too big for the room; not sent");
+                if let Some(state) = &relay_state {
+                    state.checkpoint_refused(413, "", None);
+                }
+                return;
+            }
 
             let Ok(bearer) = edge.bearer().await else {
                 return;
             };
+            // The relay's flags go with the commit, whole or in parts.
+            let commit_flags = format!(
+                "{}{}",
+                if at_floor { "&atFloor=1" } else { "" },
+                if reason == relay::HEAL_REASON { "&heal=1" } else { "" }
+            );
             let Ok(_permit) = zeron_sync::budget::shared().http(zeron_sync::budget::Priority::Background).await else {
                 return;
             };
             let size = snapshot.len() as u64;
+            let frontier_sent = frontier.clone();
             let parts = chat2_checkpoint_parts(snapshot.len());
-            match post_chat2_checkpoint(&http, &edge.url, &chat_id, &bearer, seq_covered, &frontier, snapshot).await {
+            match post_chat2_checkpoint(&http, &edge.url, &chat_id, &bearer, seq_covered, &frontier, &commit_flags, snapshot).await {
                 Ok(()) => {
                     tracing::info!(chat = %chat_id, seq_covered, reason, size, parts, "chat2 checkpoint posted");
+                    if let Some(state) = &relay_state
+                        && let Ok(version) = loro::VersionVector::decode(&frontier_sent)
+                    {
+                        state.checkpoint_landed(version, reason, mode_epoch);
+                    }
+                    if relay_state.is_none() && reason == relay::HEAL_REASON {
+                        relay_host.finish_rollback_heal(&chat_id);
+                    }
                     for batch_id in &covered_rejections {
                         if let Err(err) = publication_store.acknowledge_chat_update(&chat_id,batch_id) {
                             tracing::warn!(%err, "chat2: checkpoint obligation retirement failed; will retry");
                         }
                     }
 
-                    if let Some(handle) = weak_note.upgrade()
+                    if !at_floor
+                        && let Some(handle) = weak_note.upgrade()
                         && let Some(client) = &*lock(&handle.chat2)
                     {
                         client.note_checkpoint(seq_covered, size);
                     }
                 }
-                Err(CheckpointPost::Rejected(status)) => {
-                    tracing::warn!(chat = %chat_id, status, size, parts, "chat2 checkpoint rejected");
+                Err(CheckpointPost::Rejected(status, body)) => {
+                    tracing::warn!(chat = %chat_id, status, %body, size, parts, "chat2 checkpoint rejected");
+                    if let Some(state) = &relay_state {
+                        state.checkpoint_failed();
+                        state.checkpoint_refused(status, &body, weak_note.upgrade().as_deref());
+                    }
                 }
                 Err(CheckpointPost::Failed(err)) => {
                     tracing::warn!(chat = %chat_id, error = %err, size, parts, "chat2 checkpoint POST failed");
+                    if let Some(state) = &relay_state {
+                        state.checkpoint_failed();
+                    }
                 }
             }
         });
@@ -3252,6 +3572,9 @@ impl DocHost {
             return true;
         }
         if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
+            return true;
+        }
+        if !handle.relay_lets_socket_close() {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.
@@ -3617,6 +3940,16 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
+        // A chat hosted on Cloud: the bytes go to the edge's store first, and
+        // the message enters the chat only once they're there.
+        if matches!(
+            payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+        ) && let Some(id) = self.hold_if_needed(chat_id, &payload, &transfers)?
+        {
+            self.unarchive_on_send(chat_id);
+            return Ok(id);
+        }
         let id = new_id();
         let now = now_ms();
         let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
@@ -3633,7 +3966,7 @@ impl DocHost {
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now,
             based_on,
-            expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+            expires_at: Some(now + self.command_ttl(chat_id)),
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
@@ -3689,9 +4022,29 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_transfers(
+            chat_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::queue_message_with_behavior`] plus the row's `pending://` bytes,
+    /// already committed to THIS device's uploads dir: a Cloud-hosted chat's
+    /// row waits until they're in the edge's store, like a command does.
+    pub fn queue_message_with_transfers(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
-        handle.doc.push_queued(&QueuedMessage {
+        let item = QueuedMessage {
             id: id.clone(),
             text: queued_row_text(text, !attachments.is_empty()).to_string(),
             attachments,
@@ -3700,8 +4053,14 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
-        })?;
+        };
+        if self.hold_row_if_needed(chat_id, &item, &transfers)? {
+            self.unarchive_on_send(chat_id);
+            return Ok(id);
+        }
+        handle.doc.push_queued(&item)?;
         handle.publish_queue();
+        self.spawn_row_transfers(chat_id, transfers);
         // Same reasoning as a command: the user is acting in this chat again.
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
@@ -4253,6 +4612,7 @@ impl DocHost {
         // lock next re-reads the queue and the status, so a drain that became
         // unnecessary while it waited simply finds nothing to do.
         let _drain = handle.drain_lock.lock().await;
+        self.thaw_recovered_queue(handle, &sessions);
         if handle.queue_paused.load(Ordering::Acquire) {
             return;
         }
@@ -4301,7 +4661,15 @@ impl DocHost {
             // while the bytes chase it over the peer link. Hold it (in order)
             // until they land — UploadCommit re-drains — rather than handing
             // the agent refs it cannot open.
-            if !self.missing_row_attachments(&head).is_empty() {
+            let missing = self.missing_row_attachments(&head);
+            if !missing.is_empty() {
+                self.fetch_from_store(&handle.chat_id, &missing);
+                // Nothing on the way: the row fails, with a retry, rather than
+                // wait for bytes that aren't coming.
+                if self.row_bytes_lost(&head, &missing) && self.fail_queued_row(handle, &head) {
+                    self.forget_store_looks(&missing);
+                    continue;
+                }
                 tracing::info!(chat = %handle.chat_id, row = %head.id,
                     "queued row held: attachment bytes in transit");
                 self.arm_attachment_wait(handle);
@@ -4415,6 +4783,7 @@ impl DocHost {
         {
             return Ok(false);
         }
+        handle.queue_frozen_by_recovery.store(false, Ordering::Release);
         handle.queue_paused.store(true, Ordering::Release);
         self.cancel_held_sends(handle);
         match sessions.interrupt(&handle.chat_id).await {
@@ -4766,22 +5135,64 @@ impl DocHost {
     /// `pending://` refs (idempotent: re-pushing landed bytes re-commits the
     /// same file; the processed ledger keeps execution exactly-once).
     pub fn retry_delivery(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.retry_delivery_within(chat_id, 0)
+    }
+
+    /// The person woke a chat's Cloud machine (a size picked, a fresh
+    /// machine): what waited for it while it couldn't be woken goes now,
+    /// however long that was. A message's clock only runs once its machine can
+    /// take it, so one whose clock ran out while it waited — or would while
+    /// the machine boots — goes again with a fresh one, as a retry would send
+    /// it, and every other road is re-kicked as a retry does.
+    /// (A chat this device has no row for has nothing of ours waiting: its
+    /// doc isn't opened, which could mint it in the wrong room.)
+    pub fn restart_waiting_clocks(&self, chat_id: &str) -> Result<(), EngineError> {
+        let known = self
+            .workspace()
+            .and_then(|w| w.chat(chat_id).ok().flatten())
+            .is_some();
+        if !known {
+            return Ok(());
+        }
+        self.retry_delivery_within(chat_id, WAKE_BOOT_MARGIN_MS)
+    }
+
+    /// [`Self::retry_delivery`], also re-issuing a pending attempt whose clock
+    /// runs out within `ending_within` ms: it can't execute (or won't, by the
+    /// time its host reads it), and re-sending it is what the caller asked.
+    fn retry_delivery_within(&self, chat_id: &str, ending_within: i64) -> Result<(), EngineError> {
         let handle = self.open(chat_id)?;
         if let Some(chat2) = lock(&handle.chat2).as_ref() {
             chat2.redial();
         }
-        self.nudge_remote_host(chat_id);
+        // A message still in the outbox isn't there for the host to find, and a
+        // woken machine bills: the send wakes it once its bytes are stored.
+        let held_messages = self.held_message_ids(chat_id);
+        if held_messages.is_empty() {
+            self.nudge_remote_host(chat_id);
+        }
+        self.retry_held_sends(chat_id)?;
+        let peer_transfers = self.peer_transfers_needed(chat_id);
         let commands = handle.doc.read_commands()?;
+        let ends_by = now_ms() + ending_within;
+        let ending = |c: &SessionCommandEntry| {
+            c.status == SessionCommandStatus::Pending && c.effective_expiry() <= ends_by
+        };
         let pending: Vec<SessionCommandEntry> = commands
             .iter()
             .filter(|c| {
                 c.status == SessionCommandStatus::Pending
+                    && !ending(c)
                     && !self.inner.store.is_processed(&c.id).unwrap_or(false)
             })
             .cloned()
             .collect();
         for entry in pending {
-            let transfers = command_transfers(&entry);
+            let transfers = if peer_transfers {
+                command_transfers(&entry)
+            } else {
+                Vec::new()
+            };
             self.spawn_command_delivery(chat_id, entry, transfers);
         }
         // Dead attempts: a Run/Steer whose user message never landed and
@@ -4803,7 +5214,7 @@ impl DocHost {
             }) else {
                 continue;
             };
-            if message_landed(mid) {
+            if message_landed(mid) || held_messages.iter().any(|held| held == mid) {
                 continue;
             }
             let dead = match c.status {
@@ -4811,6 +5222,11 @@ impl DocHost {
                 // window. Expired: the entry outlived its TTL undelivered —
                 // an explicit user retry is exactly the consent to re-send.
                 SessionCommandStatus::Rejected | SessionCommandStatus::Expired => true,
+                // Its clock ran out unexecuted (its host would mark it
+                // Expired), or is about to: the same consent applies.
+                SessionCommandStatus::Pending if ending(c) => {
+                    !lock(&self.inner.executing).contains(&c.id)
+                }
                 SessionCommandStatus::Pending => {
                     self.inner.store.is_processed(&c.id).unwrap_or(false)
                         && !lock(&self.inner.executing).contains(&c.id)
@@ -4825,6 +5241,7 @@ impl DocHost {
             let live_attempt = commands.iter().any(|o| {
                 o.id != c.id
                     && o.status == SessionCommandStatus::Pending
+                    && !ending(o)
                     && !self.inner.store.is_processed(&o.id).unwrap_or(false)
                     && match (&o.payload, &c.payload) {
                         (
@@ -4856,12 +5273,12 @@ impl DocHost {
             if old.status == SessionCommandStatus::Pending {
                 // Terminalize the consumed-but-dead original so the doc tells
                 // the truth and the next retry pass doesn't see it again.
-                self.resolve_command(
-                    &handle,
-                    &old.id,
-                    SessionCommandStatus::Rejected,
-                    Some("interrupted before completion — superseded by retry"),
-                );
+                let why = if ending(old) {
+                    "its time ran out while it waited — superseded by retry"
+                } else {
+                    "interrupted before completion — superseded by retry"
+                };
+                self.resolve_command(&handle, &old.id, SessionCommandStatus::Rejected, Some(why));
             }
             let now = now_ms();
             let reissue = SessionCommandEntry {
@@ -4873,14 +5290,17 @@ impl DocHost {
                     turn_id: Some(m.id.clone()),
                     frontier: None,
                 }),
-                expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+                expires_at: Some(now + self.command_ttl(chat_id)),
                 status: SessionCommandStatus::Pending,
                 resolution: None,
             };
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
-            handle.doc.queue_command(&reissue)?;
             let transfers = command_transfers(&reissue);
+            if self.hold_reissue(chat_id, &reissue, &transfers)? {
+                continue;
+            }
+            handle.doc.queue_command(&reissue)?;
             self.spawn_command_delivery(chat_id, reissue, transfers);
         }
         // Locally-hosted (or already-synced) commands: a drain pass is the
@@ -4906,7 +5326,9 @@ impl DocHost {
         let handle = self.open(chat_id)?;
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
-        if !self.missing_attachments(&entry).is_empty() {
+        let missing = self.missing_attachments(&entry);
+        if !missing.is_empty() {
+            self.fetch_from_store(chat_id, &missing);
             return Err(EngineError::Other("attachments not landed yet".into()));
         }
         let sessions = self
@@ -5317,29 +5739,43 @@ impl DocHost {
             // command must stay eligible): a Run/Steer naming `pending://`
             // refs whose bytes haven't landed on this device yet waits for
             // the transfer instead of running without its images. The wait is
-            // bounded; past it the command fails loudly.
+            // bounded unless they're safely stored; past it the command fails
+            // loudly.
             if matches!(disposition, CommandDisposition::Execute) {
                 let missing = self.missing_attachments(&entry);
                 if !missing.is_empty() {
-                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS {
+                    self.fetch_from_store(&handle.chat_id, &missing);
+                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS
+                        || self.bytes_on_their_way(&missing)
+                    {
                         tracing::info!(chat = %handle.chat_id, command = %entry.id,
                             missing = missing.len(), "command deferred: attachment bytes in transit");
                         self.arm_attachment_wait(handle);
                         return; // preserve order; UploadCommit / the wait timer re-kick
                     }
+                    // In-flight claim, as for an execute: between the mark and
+                    // the outcome, a racing drain's dead-command sweep would
+                    // otherwise take this for a crash and write its own reason.
+                    if !lock(&self.inner.executing).insert(entry.id.clone()) {
+                        skipped.insert(entry.id.clone());
+                        continue;
+                    }
                     if let Err(err) = self.inner.store.mark_processed(&entry.id) {
                         tracing::error!(chat = %handle.chat_id, error = %err,
                             "processed-ledger write failed; halting drain");
+                        lock(&self.inner.executing).remove(&entry.id);
                         return;
                     }
                     tracing::warn!(chat = %handle.chat_id, command = %entry.id,
                         "command rejected: attachments never arrived");
+                    self.forget_store_looks(&missing);
                     self.resolve_command(
                         handle,
                         &entry.id,
                         SessionCommandStatus::Rejected,
                         Some("attachments never arrived"),
                     );
+                    lock(&self.inner.executing).remove(&entry.id);
                     continue;
                 }
             }
@@ -5372,6 +5808,7 @@ impl DocHost {
                         entry.payload,
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
+                        crate::wake_trace::mark_command(entry.issued_at);
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
@@ -5473,14 +5910,14 @@ impl DocHost {
         };
         for path in attachments.iter_mut() {
             if let Some(abs) = uploads.localize(path) {
-                *prompt = prompt.replace(path.as_str(), &abs);
+                *prompt = crate::uploads::rewrite_pending_ref(prompt, path, &abs);
                 *path = abs;
             }
         }
         // Paths only the prompt names (older clients sent no list).
         for path in crate::uploads::attachment_lines_in(&prompt.clone()) {
             if let Some(abs) = uploads.localize(&path) {
-                *prompt = prompt.replace(path.as_str(), &abs);
+                *prompt = crate::uploads::rewrite_pending_ref(prompt, &path, &abs);
             }
         }
     }
@@ -5514,9 +5951,15 @@ impl DocHost {
             return prompt.to_string();
         };
         let mut out = prompt.to_string();
-        for r in crate::uploads::attachment_lines_in(prompt) {
+        let mut refs = crate::uploads::pending_refs_in(prompt);
+        for path in crate::uploads::attachment_lines_in(prompt) {
+            if !refs.contains(&path) {
+                refs.push(path);
+            }
+        }
+        for r in refs {
             if let Some(abs) = uploads.localize(&r) {
-                out = out.replace(&r, &abs);
+                out = crate::uploads::rewrite_pending_ref(&out, &r, &abs);
             }
         }
         out
@@ -5679,7 +6122,20 @@ impl DocHost {
                 // client, another device's switch) waits for the turn: the
                 // provider never changes by killing a turn mid-flight.
                 let other_provider = sessions.live_harness(chat_id).is_some_and(|live| live != harness);
-                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                // Sent before the turn now running had started: the sender never
+                // saw that turn, so it can't be a steer into it. Two messages sent
+                // to a sleeping Cloud machine (or an offline host) start one turn
+                // each; steering the second into the first cut the first off with
+                // an empty reply.
+                // Only when an earlier send started that turn: nothing else changes.
+                let sent_before_turn = sessions
+                    .turn_started_ms(chat_id)
+                    .is_some_and(|started| entry.issued_at < started)
+                    && self.live_turn_sent_earlier(handle, entry, message_id);
+                if other_provider
+                    || sent_before_turn
+                    || sessions.defers_to_turn_end(chat_id, Some((harness, &request)))
+                {
                     self.hold_until_turn_end(
                         handle,
                         message_id,
@@ -5840,6 +6296,36 @@ impl DocHost {
     /// Park a prompt for a turn-boundary agent in the visible queue instead
     /// of its mailbox, keeping the message id so the transcript entry written
     /// at delivery is the same message. Steers lead ordinary rows.
+    /// The running turn is the latest message in the transcript, sent as a run no
+    /// later than `entry` and not `entry`'s own: a second send that went out while
+    /// the host was away, now arriving behind the first.
+    fn live_turn_sent_earlier(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        entry: &SessionCommandEntry,
+        message_id: &str,
+    ) -> bool {
+        let Some(live) = handle.doc.read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e.role == MessageRole::User)
+                .map(|e| e.id.clone())
+        }) else {
+            return false;
+        };
+        if live == message_id {
+            return false;
+        }
+        handle.doc.read_commands().is_ok_and(|commands| {
+            commands.iter().any(|c| {
+                c.id != entry.id
+                    && c.issued_at <= entry.issued_at
+                    && matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if *message_id == live)
+            })
+        })
+    }
+
     fn hold_until_turn_end(
         &self,
         handle: &Arc<ChatDocHandle>,
@@ -6216,6 +6702,17 @@ impl DocHost {
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).
+    /// The store's WAL folded into its file ([`DocsStore::flush_for_sleep`]):
+    /// before a Cloud sleep's snapshot, and at shutdown.
+    pub fn checkpoint_store(&self) -> bool {
+        self.inner.store.flush_for_sleep()
+    }
+
+    /// The store this host writes (its path, and what its open recovered).
+    pub fn store(&self) -> &Arc<DocsStore> {
+        &self.inner.store
+    }
+
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
@@ -6625,6 +7122,10 @@ mod queued_message_prompt_tests {
 
 /// Per-chat background task: reacts to doc changes (local commits and remote imports)
 /// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
+/// Why a Cloud chat's reply stopped when its machine lost its place.
+const ROLLED_BACK_NOTE: &str =
+    "The Cloud machine stopped during this turn and lost its place. Send a message to continue.";
+
 /// Holds only a weak handle so a dropped host tears the task down.
 async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
     // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
@@ -6644,6 +7145,11 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
             }
         }
     });
+    if crate::runner::session().is_some() {
+        let settling = host.clone();
+        let settling_weak = weak.clone();
+        host.spawn_worker(async move { settling.settle_rolled_back_turn(settling_weak).await });
+    }
     // Initial pass: the snapshot may already carry pending commands. The
     // mirror stays lazy — it materializes on the first watch attach.
     {
@@ -6878,6 +7384,26 @@ mod publication_eviction_tests {
     }
 
     #[tokio::test]
+    async fn a_chat_without_an_id_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "writer".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        assert!(host.open("").is_err());
+        assert!(host.open_local("").is_err());
+        let steer = SessionCommandPayload::Steer { prompt: "hi".into(), message_id: None };
+        assert!(host.queue_command_with_transfers("", steer, Vec::new()).is_err());
+        assert!(lock(&host.inner.handles).is_empty());
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
     async fn salvage_inspection_does_not_open_healthy_or_unrecoverable_chats() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
@@ -6970,3 +7496,5 @@ mod sync_lifecycle_tests;
 #[path = "doc_host_delivery.rs"]
 mod remote_delivery;
 
+#[path = "doc_host_attachments.rs"]
+mod attachment_store;

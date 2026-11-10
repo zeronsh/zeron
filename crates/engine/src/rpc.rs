@@ -190,6 +190,10 @@ struct QueueMessageParams {
     /// supports mid-turn steering.
     #[serde(default)]
     hold_for_turn_end: bool,
+    /// The row's `pending://` bytes, already committed locally. A Cloud-hosted
+    /// chat's row waits until they're in the edge's store.
+    #[serde(default)]
+    transfers: Vec<crate::uploads::AttachmentTransfer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1154,6 +1158,14 @@ impl EngineRpc {
                         "Cloud runs Codex and Claude Code only".into(),
                     )));
                 }
+                // What Cloud's machines run: the edge's list (the last one read,
+                // when it's out of reach), as a phone reads it. This computer's
+                // own catalog only before either: it fails where an agent isn't
+                // installed or signed in here, and Cloud's are signed in on the
+                // machine.
+                if let Some(models) = self.cloud_models(p.harness).await {
+                    return Some(RpcReply::value(&models));
+                }
                 Some(self.handle(method, local(&[])).await)
             }
             methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
@@ -1165,6 +1177,31 @@ impl EngineRpc {
             ))),
             _ => None,
         }
+    }
+
+    /// Cloud's models for `harness`: the edge's list, kept on disk as it's
+    /// read, else the last one kept. `None` before the edge was ever read, or
+    /// with nothing listed for it.
+    async fn cloud_models(&self, harness: HarnessId) -> Option<Vec<zeron_proto::Model>> {
+        let key = serde_json::to_value(harness).ok()?.as_str()?.to_owned();
+        let path = self.repos.data_dir().join("cloud-models.json");
+        let listed = match self.cloud().models().await {
+            Ok(listed) => {
+                if let Ok(bytes) = serde_json::to_vec(&listed) {
+                    if let Err(error) = std::fs::write(&path, bytes) {
+                        tracing::warn!(%error, "Could not keep Cloud's models");
+                    }
+                }
+                listed
+            }
+            Err(error) => {
+                tracing::debug!(%error, "Cloud's models: the last list kept");
+                let bytes = std::fs::read(&path).ok()?;
+                serde_json::from_slice(&bytes).ok()?
+            }
+        };
+        let models = crate::cloud_client::cloud_models(listed.get(&key)?);
+        (!models.is_empty()).then_some(models)
     }
 
     /// `ListCloudBranches {repo, defaultBranch?}`: the branches a Cloud
@@ -3134,6 +3171,17 @@ impl RpcService for EngineRpc {
             .await;
         }
         if crate::cloud_client::handles(method) {
+            // The person wakes a chat's machine (a size picked, a fresh one):
+            // what waited for it goes with its clock started now, however
+            // long it waited. First, so the machine finds it as it boots.
+            if matches!(
+                method,
+                methods::CLOUD_SESSION_WAKE | methods::CLOUD_SESSION_RETRY
+            ) && let Ok(p) = serde_json::from_value::<ChatParams>(params.clone())
+                && let Err(err) = self.doc_host.restart_waiting_clocks(&p.chat_id)
+            {
+                tracing::warn!(chat = %p.chat_id, %err, "waiting messages not restarted for a wake");
+            }
             return Box::pin(crate::cloud_client::dispatch(
                 self.cloud(),
                 &self.agent_accounts,
@@ -3574,11 +3622,12 @@ impl RpcService for EngineRpc {
                 let p: QueueMessageParams = parse_params(params)?;
                 let id = self
                     .doc_host
-                    .queue_message_with_behavior(
+                    .queue_message_with_transfers(
                         &p.chat_id,
                         &p.text,
                         p.attachments,
                         p.hold_for_turn_end,
+                        p.transfers,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
@@ -3799,6 +3848,55 @@ impl RpcService for EngineRpc {
             methods::WATCH_TRANSFERS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_transfers(),
             ))),
+            methods::WATCH_HELD_SENDS => Ok(RpcReply::Stream(watch_stream(
+                self.doc_host.watch_held_sends(),
+            ))),
+            methods::REMOVE_HELD_SEND => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct RemoveHeldSendParams {
+                    chat_id: String,
+                    id: String,
+                }
+                let p: RemoveHeldSendParams = parse_params(params)?;
+                let removed = self
+                    .doc_host
+                    .remove_held_send(&p.chat_id, &p.id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "removed": removed }))
+            }
+            methods::WATCH_WAITING_MESSAGES => {
+                let p: ChatParams = parse_params(params)?;
+                let (changes, held) = self
+                    .doc_host
+                    .watch_waiting_messages(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let host = self.doc_host.clone();
+                let chat = p.chat_id;
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(
+                        (changes, held, true),
+                        move |(mut changes, mut held, first)| {
+                            let host = host.clone();
+                            let chat = chat.clone();
+                            async move {
+                                if !first {
+                                    tokio::select! {
+                                        changed = changes.changed() => changed.ok()?,
+                                        changed = held.changed() => changed.ok()?,
+                                    }
+                                }
+                                changes.borrow_and_update();
+                                held.borrow_and_update();
+                                let items = host.waiting_messages(&chat).unwrap_or_default();
+                                let value = serde_json::json!({ "items": items });
+                                Some((value, (changes, held, false)))
+                            }
+                        },
+                    )
+                    .boxed(),
+                ))
+            }
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self

@@ -617,6 +617,61 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
 }
 
+/// Host stamps repeat on every turn; one that says nothing new pushes
+/// nothing (each push is a stored row in the room and a broadcast).
+#[test]
+fn repeated_host_stamps_push_only_what_changed() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    ws.take_pushable();
+    let pushed = |ws: &mut RegistryDoc| -> Vec<Vec<String>> {
+        ws.take_pushable()
+            .into_iter()
+            .flat_map(|b| b.ops)
+            .map(|op| op.set.unwrap_or_default().into_keys().collect())
+            .collect()
+    };
+    let context = |branch: &str, at: i64| zeron_proto::ConversationSourceContext {
+        checkout_id: "co-1".into(),
+        repo_root: "/repo".into(),
+        cwd: "/repo".into(),
+        branch: branch.into(),
+        head_sha: None,
+        observed_at: ts(at),
+    };
+
+    assert!(ws.set_chat_harness_session("chat-1", "hs-1", "/repo", Some("claude")).unwrap());
+    assert_eq!(pushed(&mut ws).len(), 1);
+    assert!(ws.set_chat_harness_session("chat-1", "hs-1", "/repo", Some("claude")).unwrap());
+    assert!(pushed(&mut ws).is_empty(), "the same session again");
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", Some("claude")).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["harnessSessionId".to_string()]]);
+
+    ws.set_chat_source_context("chat-1", &context("main", 1_000)).unwrap();
+    assert_eq!(pushed(&mut ws).len(), 1);
+    ws.set_chat_source_context("chat-1", &context("main", 9_000)).unwrap();
+    assert!(pushed(&mut ws).is_empty(), "only the observation time moved");
+    ws.set_chat_source_context("chat-1", &context("feature", 9_000)).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["branch".to_string(), "sourceContext".to_string()]]);
+
+    ws.set_chat_branch("chat-1", "feature").unwrap();
+    ws.set_chat_checkout("chat-1", "co-1").unwrap();
+    ws.set_chat_room_gen("chat-1", 2).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["roomGen".to_string()]]);
+    ws.set_chat_room_gen("chat-1", 2).unwrap();
+    ws.set_chat_cwd("chat-1", "/tmp").unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["cwd".to_string()]]);
+
+    // A missing field reads as null: clearing it again is no write either.
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", None).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["harnessSessionHarness".to_string()]]);
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", None).unwrap();
+    assert!(pushed(&mut ws).is_empty());
+    let row = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(row.harness_session_id.as_deref(), Some("hs-2"));
+    assert_eq!(row.branch.as_deref(), Some("feature"));
+}
+
 #[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");

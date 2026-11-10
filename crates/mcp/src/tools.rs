@@ -1069,7 +1069,7 @@ impl Tools {
         // The chat's facts don't depend on reaching its host.
         match self
             .zeron
-            .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+            .window_of(&chat, TranscriptWindow::tail(1))
             .await
         {
             Ok(view) => {
@@ -1400,9 +1400,8 @@ impl Tools {
         let limit = args.limit.unwrap_or(40).clamp(1, 500);
         let view = self
             .zeron
-            .transcript_window(
-                &chat.id,
-                Some(&chat.device_id),
+            .window_of(
+                &chat,
                 TranscriptWindow {
                     limit,
                     offset: args.offset,
@@ -1625,7 +1624,7 @@ impl Tools {
             Some(id) => id,
             None => self
                 .zeron
-                .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+                .window_of(&chat, TranscriptWindow::tail(1))
                 .await?
                 .info
                 .pending_input
@@ -1973,6 +1972,9 @@ mod tests {
         accounts: Option<Value>,
         remote_accounts: Option<Value>,
         beta_remote: bool,
+        /// `dev-remote` is asleep: every read addressed to it fails, the way
+        /// a dial to a sleeping Cloud machine does.
+        remote_dark: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
@@ -1998,6 +2000,15 @@ mod tests {
                 }
             }
             let remote = params["targetDeviceId"] == "dev-remote";
+            if remote && self.remote_dark && method != methods::LIST_HARNESSES {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                return Err(RpcError::Transport(
+                    "peer dev-remote: device is offline (no recent presence)".into(),
+                ));
+            }
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
                 methods::ENGINE_INFO => RpcReply::Value(json!({
@@ -3290,6 +3301,37 @@ mod tests {
                 _ => self.world.handle(method, params).await,
             }
         }
+    }
+
+    /// A sleeping host can't be read, and only a send wakes it: the send must go
+    /// out through this engine's doc regardless, and reading the chat falls back
+    /// to the local replica.
+    #[tokio::test]
+    async fn a_send_to_a_sleeping_host_still_goes_out() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            remote_dark: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let result = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .unwrap();
+        assert_eq!(result["sent"]["delivery"], "run");
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::QUEUE_COMMAND);
+            assert!(params.get("targetDeviceId").is_none(), "a local doc write, which wakes the host");
+        }
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(read["total"].as_u64().unwrap() > 0);
+        let info = tools.call("get_chat", json!({"chat":"Beta"})).await.unwrap();
+        assert!(info["messageCount"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

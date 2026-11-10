@@ -243,10 +243,14 @@ impl Layout {
 
     /// What's left once the update has settled either way. Nothing in use is
     /// deleted: a process whose image is gone is what AppleSystemPolicy rejects
-    /// (#1037), and Windows refuses anyway.
-    fn tidy(&self) {
+    /// (#1037), and Windows refuses anyway. `abandoned` is the version an update
+    /// gave up on, when it did.
+    fn tidy(&self, abandoned: Option<&str>) {
         match self {
-            Self::Versioned { .. } => {}
+            Self::Versioned { app_root } => {
+                crate::prune_installed_versions(app_root, crate::older_versions_kept(), abandoned);
+                crate::strip_cloud_unused_installed(app_root);
+            }
             Self::MacBundle { bundle, .. } => crate::prune_retired_mac_bundles(bundle),
             Self::WindowsFolder { incoming, .. } => {
                 if let Some(folder) = incoming.parent() {
@@ -278,6 +282,10 @@ pub struct Transaction {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    /// Gone back because the service was stopped mid-trial (a sleep, a restart),
+    /// not because the release failed: it's tried again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 /// An update's state, as `UpdateStatus` reports it.
@@ -328,6 +336,14 @@ impl Transaction {
 
     pub fn in_progress(&self) -> bool {
         !self.phase.finished()
+    }
+
+    /// The version this update gave up on, once it has. Not one it went back from
+    /// only because it was stopped mid-trial: that's tried again, and its files
+    /// spare the download.
+    fn abandoned(&self) -> Option<&str> {
+        (matches!(self.phase, Phase::RolledBack | Phase::Failed) && !self.interrupted)
+            .then_some(self.target.as_str())
     }
 }
 
@@ -717,6 +733,10 @@ fn discard_snapshots(data_dir: &Path) {
 
 /// How long the new version gets, by how much it may have to migrate.
 fn trial_deadline(store_bytes: u64) -> Duration {
+    trial_deadline_from(BASE_DEADLINE, store_bytes)
+}
+
+fn trial_deadline_from(base: Duration, store_bytes: u64) -> Duration {
     if let Some(secs) = std::env::var(DEADLINE_ENV)
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -724,7 +744,7 @@ fn trial_deadline(store_bytes: u64) -> Duration {
         return Duration::from_secs(secs);
     }
     let gib = u32::try_from(store_bytes / GIB).unwrap_or(u32::MAX);
-    (BASE_DEADLINE + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
+    (base + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
 }
 
 pub(crate) fn new_id() -> String {
@@ -750,6 +770,20 @@ pub fn request(
     target: &str,
     restart: RestartMode,
 ) -> anyhow::Result<Transaction> {
+    request_within(data_dir, layout, from, target, restart, BASE_DEADLINE)
+}
+
+/// [`request`], when something is waiting on this update: `base` is the trial's
+/// deadline before the databases' size is counted, so a new version that hangs
+/// gives way sooner.
+pub fn request_within(
+    data_dir: &Path,
+    layout: Layout,
+    from: &str,
+    target: &str,
+    restart: RestartMode,
+    base: Duration,
+) -> anyhow::Result<Transaction> {
     if read(data_dir).is_some_and(|existing| existing.in_progress()) {
         bail!("An update is already in progress on this device.");
     }
@@ -764,11 +798,12 @@ pub fn request(
         phase: Phase::Requested,
         restart,
         requested_at: crate::now_ms(),
-        deadline_secs: trial_deadline(store_bytes(data_dir)).as_secs(),
+        deadline_secs: trial_deadline_from(base, store_bytes(data_dir)).as_secs(),
         trial_started_at: None,
         trial_pid: None,
         reason: None,
         finished_at: None,
+        interrupted: false,
     };
     write(data_dir, &transaction)?;
     crash_point("requested");
@@ -867,6 +902,33 @@ pub fn note_trial_failure(data_dir: &Path, why: &str) {
     let _ = write_durably(&data_dir.join(NOTE_FILE), why.as_bytes());
 }
 
+/// How an interrupted trial's note starts ([`note_trial_interrupted`]).
+const INTERRUPTED_NOTE: &str = "interrupted:";
+
+/// This process, on trial, is being stopped from outside (SIGTERM: the machine
+/// going to sleep, the service restarting, a person). That says nothing about the
+/// release: the old version still goes back, since nothing committed, but says
+/// why, and the release is tried again. Before this, such a stop read as "the new
+/// version stopped before it was ready", and a wake never tried the release again.
+pub fn note_trial_interrupted() {
+    if let Some(trial) = current_trial() {
+        note_trial_failure(&trial.data_dir, INTERRUPTED_NOTE);
+    }
+}
+
+/// This process, on trial, panicked: what it said, for the record (the log alone
+/// may be gone by the time anyone looks).
+pub fn note_trial_panicked(message: &str) {
+    if let Some(trial) = current_trial() {
+        let message = message.trim();
+        let message: String = message.chars().take(300).collect();
+        note_trial_failure(
+            &trial.data_dir,
+            &format!("The new version crashed while starting ({message})."),
+        );
+    }
+}
+
 /// The new version has proved itself: move `current`, which is the commit, then
 /// record it. A crash in between is settled by the next start.
 pub fn commit_trial() -> anyhow::Result<()> {
@@ -889,7 +951,7 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
     finish(data_dir, transaction, Phase::Updated, None)?;
     crash_point("commit-recorded");
     discard_snapshots(data_dir);
-    layout.tidy();
+    layout.tidy(None);
     Ok(())
 }
 
@@ -898,7 +960,7 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
 /// old bundle.
 pub fn tidy_latest(data_dir: &Path) {
     if let Some(latest) = read(data_dir).filter(|update| !update.in_progress()) {
-        latest.layout.tidy();
+        latest.layout.tidy(latest.abandoned());
     }
 }
 
@@ -938,7 +1000,7 @@ pub fn boot<G>(
         // Nothing's in progress, so no backup is needed any more, including
         // one a crash left behind. Cheap when there's none.
         discard_snapshots(data_dir);
-        transaction.layout.tidy();
+        transaction.layout.tidy(transaction.abandoned());
         return Ok(());
     }
     let Some(who) = transaction.layout.whoami(&transaction) else {
@@ -997,10 +1059,9 @@ pub fn boot<G>(
                 "Zeron {} was installed while this update was running, so the update stopped there.",
                 who.me
             );
-            let layout = transaction.layout.clone();
-            finish(data_dir, transaction, Phase::Failed, Some(reason))?;
+            let done = finish(data_dir, transaction, Phase::Failed, Some(reason))?;
             discard_snapshots(data_dir);
-            layout.tidy();
+            done.layout.tidy(done.abandoned());
             Ok(())
         }
         Step::WaitForRestore => {
@@ -1035,10 +1096,9 @@ fn start_trial<G>(
 ) -> anyhow::Result<()> {
     let give_up = |transaction: Transaction, why: String, cause: String| {
         tracing::error!(%cause, "update stopped before the new version ran");
-        let layout = transaction.layout.clone();
-        finish(data_dir, transaction, Phase::Failed, Some(why))?;
+        let done = finish(data_dir, transaction, Phase::Failed, Some(why))?;
         discard_snapshots(data_dir);
-        layout.tidy();
+        done.layout.tidy(done.abandoned());
         Ok(())
     };
     let exe_name = std::env::current_exe()?
@@ -1151,11 +1211,21 @@ fn hand_over(
 }
 
 fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()> {
-    let why = std::fs::read_to_string(data_dir.join(NOTE_FILE))
+    let note = std::fs::read_to_string(data_dir.join(NOTE_FILE))
         .ok()
-        .filter(|note| !note.trim().is_empty())
-        .or_else(|| transaction.reason.clone())
-        .unwrap_or_else(|| "The new version stopped before it was ready.".to_owned());
+        .filter(|note| !note.trim().is_empty());
+    // A restore that was itself interrupted keeps what the first pass decided.
+    if note.as_deref().is_some_and(|note| note.starts_with(INTERRUPTED_NOTE)) {
+        transaction.interrupted = true;
+    }
+    let why = if transaction.interrupted {
+        "Zeron was stopped while it was trying the new version (the machine went to sleep, or \
+         the service restarted)."
+            .to_owned()
+    } else {
+        note.or_else(|| transaction.reason.clone())
+            .unwrap_or_else(|| "The new version stopped before it was ready.".to_owned())
+    };
     tracing::warn!(id = %transaction.id, %why, "update failed; going back");
     if !snapshot_dir(data_dir, &transaction.id).is_dir() {
         // Trial is only recorded once the snapshot is done, so this is someone's
@@ -1171,16 +1241,15 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     }
     let from = transaction.from.clone();
     let target = transaction.target.clone();
-    let layout = transaction.layout.clone();
-    finish(
-        data_dir,
-        transaction,
-        Phase::RolledBack,
-        Some(format!("{why} Zeron went back to {from} instead of {target}.")),
-    )?;
+    let outcome = if transaction.interrupted {
+        format!("{why} It's on {from} for now and will try {target} again.")
+    } else {
+        format!("{why} Zeron went back to {from} instead of {target}.")
+    };
+    let done = finish(data_dir, transaction, Phase::RolledBack, Some(outcome))?;
     crash_point("rollback-recorded");
     discard_snapshots(data_dir);
-    layout.tidy();
+    done.layout.tidy(done.abandoned());
     Ok(())
 }
 
@@ -1440,8 +1509,8 @@ fn kill_process(_pid: u32) {}
 /// Whether something asked the service manager to act on this unit: a stop or
 /// restart is a queued job, a unit stopping because its process exited isn't.
 fn unit_has_job(unit: &str) -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "show", unit, "-p", "Job", "--value"])
+    crate::systemctl_query(unit)
+        .args(["show", unit, "-p", "Job", "--value"])
         .output()
         .is_ok_and(|output| {
             let job = String::from_utf8_lossy(&output.stdout);
@@ -1450,8 +1519,8 @@ fn unit_has_job(unit: &str) -> bool {
 }
 
 fn start_unit(unit: &str) {
-    let started = std::process::Command::new("systemctl")
-        .args(["--user", "--no-block", "start", unit])
+    let started = crate::systemctl_action(unit)
+        .args(["--no-block", "start", unit])
         .status();
     if !started.is_ok_and(|status| status.success()) {
         eprintln!("zeron-update: couldn't ask the service manager to start {unit}");
@@ -1527,6 +1596,7 @@ mod tests {
             trial_pid: None,
             reason: None,
             finished_at: None,
+            interrupted: false,
         }
     }
 

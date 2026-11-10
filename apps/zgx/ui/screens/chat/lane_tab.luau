@@ -12,6 +12,7 @@ local ds = require("@ds")
 local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
+local TurnGlue = require("@app/screens/chat/turn_glue")
 local store = require("@app/screens/chat/store")
 local prefs = require("@app/screens/settings/prefs")
 local locale = require("@ds/locale")
@@ -19,6 +20,8 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
+local CloudTray = require("@app/screens/chat/cloud_tray")
+local LinkNotice = require("@app/screens/chat/link_notice")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkChips = require("@app/screens/chat/link_chips")
@@ -287,6 +290,21 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	}
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
+	-- Its Cloud machine, on a chat that has one (a side chat shares its
+	-- parent's).
+	local machine = CloudTray.bind {
+		chat = function(): string?
+			return chat
+		end,
+		device = function(): string?
+			local s = session:get()
+			return s and s.device
+		end,
+		running = function(): boolean
+			local s = session:get()
+			return s ~= nil and s.running == true
+		end,
+	}
 	-- A queued message edited in its composer. (A split's pane: a press
 	-- focuses it, the window's composer doing this.)
 	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }? }?)
@@ -705,10 +723,22 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_mention = if completions then completions.on_mention else nil,
 		mention_empty = if completions then completions.empty else nil,
 		mention_sections = if completions then completions.sections else nil,
-		notice = notice,
+		-- (Its own line first, else its Cloud machine's, on a chat with one.)
+		notice = ui.computed(function(): any
+			local mine = notice:get()
+			if mine then
+				return mine
+			end
+			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			return if link then LinkNotice.of { cloud = link } else nil
+		end),
 		on_dismiss_notice = function()
 			notice:set(nil)
 		end,
+		on_notice_action = machine.wake,
+		alerts = machine.alerts,
+		on_alert_action = machine.on_alert,
+		on_dismiss_alert = machine.dismiss,
 		harnesses = function(): { any }
 			return store.catalog:get().harnesses
 		end,
@@ -1127,6 +1157,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_mention = quote,
 		on_attach = attach_quote,
 		find = if split then nil else find.marks(),
+		-- (A subagent's liveness is its own doc's: no session of its own.)
+		turn_state = if tab.kind == "subagent" then nil else TurnGlue.of(function(): any
+			return view.session:get()
+		end),
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,

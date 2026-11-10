@@ -193,6 +193,8 @@ struct Edge {
     enroll_status: Vec<u16>,
     token_ttl: i64,
     token_reject: bool,
+    /// Token requests still to answer 503 (a restored machine's first tries).
+    token_outages: u32,
     /// provider → (status, body). Absent → 403 not_authorized.
     grants: HashMap<String, (u16, Value)>,
     stale_once: bool,
@@ -229,6 +231,10 @@ fn edge_handler(state: Arc<Mutex<Edge>>) -> impl FnMut(&Req) -> (u16, Value) + S
                         403,
                         json!({"error": "forbidden", "message": "device deleted"}),
                     );
+                }
+                if edge.token_outages > 0 {
+                    edge.token_outages -= 1;
+                    return (503, json!({"error": "unavailable"}));
                 }
                 let device = b["deviceId"].as_str().unwrap();
                 let ts = b["ts"].as_i64().unwrap();
@@ -683,8 +689,19 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     let task = runner::spawn_heartbeat(
         identity.edge_url(),
         Arc::new(auth),
-        Arc::new(|| 2),
+        Arc::new(|| runner::RunCounts {
+            active: 2,
+            waiting: 1,
+            background: 1,
+        }),
+        Arc::new(|| {
+            Some(zeron_engine::cloud_disk::DiskUsage {
+                used_bytes: 1024,
+                total_bytes: 4096,
+            })
+        }),
         activity.clone(),
+        Duration::from_secs(3600),
         Duration::from_millis(50),
     );
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -696,10 +713,68 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     .expect("heartbeats");
     task.abort();
     let beats = rig.edge.requests("/runner/heartbeat");
-    assert_eq!(beats[0].body, json!({"activeRuns": 2, "clients": 3}));
+    assert_eq!(
+        beats[0].body,
+        json!({"activeRuns": 2, "clients": 3, "backgroundRuns": 1, "waitingRuns": 1, "diskUsedBytes": 1024, "diskTotalBytes": 4096, "everySecs": 1})
+    );
     // Drained by the delivered beat: an idle open link reports nothing.
-    assert_eq!(beats[1].body, json!({"activeRuns": 2, "clients": 0}));
+    assert_eq!(
+        beats[1].body,
+        json!({"activeRuns": 2, "clients": 0, "backgroundRuns": 1, "waitingRuns": 1, "diskUsedBytes": 1024, "diskTotalBytes": 4096, "everySecs": 1})
+    );
     assert!(beats[0].bearer.as_deref().is_some_and(|b| b.contains('.')));
+}
+
+/// A turn starting is reported at once, and beats come at the fast pace until it
+/// ends: a machine stopped mid-turn is noticed in under a minute.
+#[tokio::test]
+async fn heartbeat_speeds_up_while_a_turn_runs() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let auth = rig.auth(identity.clone());
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counts = active.clone();
+    let task = runner::spawn_heartbeat(
+        identity.edge_url(),
+        Arc::new(auth),
+        Arc::new(move || runner::RunCounts {
+            active: counts.load(std::sync::atomic::Ordering::SeqCst),
+            waiting: 0,
+            background: 0,
+        }),
+        Arc::new(|| None),
+        runner::RelayActivity::default(),
+        Duration::from_secs(3600),
+        Duration::from_millis(200),
+    );
+    let beats = |n: usize| {
+        let edge = &rig.edge;
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while edge.requests("/runner/heartbeat").len() < n {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("heartbeats");
+        }
+    };
+    beats(1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let first = rig.edge.requests("/runner/heartbeat");
+    assert_eq!(first.len(), 1, "idle: one beat an hour");
+    assert_eq!(first[0].body["everySecs"], 3600);
+    active.store(1, std::sync::atomic::Ordering::SeqCst);
+    beats(4).await;
+    active.store(0, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let all = rig.edge.requests("/runner/heartbeat");
+    task.abort();
+    assert_eq!(all[1].body["activeRuns"], 1);
+    assert_eq!(all[1].body["everySecs"], 1);
+    let last = all.last().unwrap();
+    assert_eq!(last.body["activeRuns"], 0, "the turn's end is reported too");
+    assert_eq!(last.body["everySecs"], 3600);
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +872,107 @@ async fn openai_key_backs_codex_when_no_chatgpt_grant_and_revocation_removes_it(
         .await
         .unwrap();
     assert!(!request.env.contains_key("CODEX_HOME"));
+}
+
+#[tokio::test]
+async fn a_boots_timeline_goes_to_the_edge_once_at_the_runs_first_output() {
+    use zeron_engine::wake_trace::{self, Stage};
+    let reports: Arc<Mutex<Vec<Value>>> = Default::default();
+    let seen = reports.clone();
+    let edge = Stub::start(move |req: &Req| {
+        if req.path == "/runner/wake-timing" {
+            assert_eq!(req.bearer.as_deref(), Some("runner-bearer"));
+            seen.lock().unwrap().push(req.body.clone());
+        }
+        (200, json!({"ok": true}))
+    })
+    .await;
+    struct Bearer;
+    #[async_trait::async_trait]
+    impl TokenSource for Bearer {
+        async fn token(&self) -> Result<String, TokenError> {
+            Ok("runner-bearer".into())
+        }
+    }
+    let data = tempfile::tempdir().unwrap();
+    wake_trace::enable(data.path());
+    wake_trace::report_to(&edge.url(), Arc::new(Bearer));
+    wake_trace::mark(Stage::Token);
+    wake_trace::mark_command(1_000);
+    wake_trace::mark(Stage::AgentSpawn);
+    // The CLI saying it started is not output yet.
+    wake_trace::note_agent_event(true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(reports.lock().unwrap().is_empty());
+
+    wake_trace::note_agent_event(false);
+    wake_trace::note_agent_event(false);
+    for _ in 0..200 {
+        if !reports.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let reports = reports.lock().unwrap();
+    assert_eq!(reports.len(), 1, "once per boot");
+    let report = &reports[0];
+    assert_eq!(report["sent"], 1_000);
+    // The names edge/src/cloud/wake.ts reads.
+    for stage in ["engineRun", "token", "command", "agentSpawn", "agentStarted", "firstOutput"] {
+        assert!(report[stage].as_i64().is_some(), "{stage}: {report}");
+    }
+}
+
+#[tokio::test]
+async fn a_boot_fetches_what_the_first_run_will_ask_for() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "claude",
+        200,
+        json!({"provider": "claude", "accessToken": "sk-ant-oat-x", "expiresAt": in_ms(4 * 3600), "generation": 2}),
+    );
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    broker.start();
+    let requests = |provider: &str| {
+        rig.state.lock().unwrap().grant_requests.get(provider).copied().unwrap_or(0)
+    };
+    for _ in 0..500 {
+        if requests("claude") == 1 && requests("codex") == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(requests("claude"), 1, "fetched without a run asking");
+    assert_eq!(requests("codex"), 1, "either agent may be the one to run");
+    // The run finds it cached: no round trip of its own before the spawn.
+    assert!(broker.credential(HarnessId::ClaudeCode).await.is_some());
+    assert_eq!(requests("claude"), 1);
+    broker.shutdown();
+}
+
+#[tokio::test]
+async fn a_runner_retries_a_failed_first_token_within_a_second() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.state.lock().unwrap().token_outages = 1;
+    let auth = rig.auth(identity);
+    let started = std::time::Instant::now();
+    let refresh = auth.spawn_refresh_loop();
+    let mut tokens = TokenSource::subscribe(&auth).expect("runner tokens change");
+    // Waits out the one failure (its cooldown is what's being measured).
+    tokio::time::timeout(Duration::from_secs(5), tokens.changed())
+        .await
+        .expect("a token arrives")
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "took {:?}: a machine just woken has a message waiting on this",
+        started.elapsed()
+    );
+    assert!(auth.access_token().await.is_ok());
+    refresh.abort();
 }
 
 #[tokio::test]
@@ -1017,6 +1193,139 @@ async fn runs_commit_as_the_signed_in_github_user() {
         Some(email)
     );
     assert_eq!(github.requests("/users/").len(), 1);
+}
+
+/// The vault keeps a session on its own GitHub login, and a grant names it:
+/// that login authors the commits, whichever others are connected.
+#[tokio::test]
+async fn runs_commit_as_the_login_the_vault_names_for_this_session() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "github",
+        200,
+        json!({"provider": "github", "accessToken": "ghs_installation", "expiresAt": in_ms(3600),
+               "account": "work-me", "installationId": 100, "generation": 7}),
+    );
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+    );
+    let github = Stub::start(|req: &Req| match req.path.as_str() {
+        "/users/work-me" => (
+            200,
+            json!({"login": "work-me", "id": 11, "name": "Work Me"}),
+        ),
+        _ => (404, json!({})),
+    })
+    .await;
+    let broker = rig.broker(identity, &github.url());
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(
+        request.env.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+        Some("11+work-me@users.noreply.github.com")
+    );
+    assert_eq!(
+        request.env.get("GIT_AUTHOR_NAME").map(String::as_str),
+        Some("Work Me")
+    );
+}
+
+/// A session whose own login is gone or dead doesn't run on as if nothing
+/// happened: the run fails saying which login and what to do, its token files
+/// go, and connecting the login again lets the next run through.
+#[tokio::test]
+async fn a_run_on_a_login_that_cant_serve_its_session_fails_naming_it() {
+    for (status, error, message, shown) in [
+        (
+            409,
+            "needs_reconnect",
+            "github_account_disconnected: GitHub account work-me was disconnected, and this session uses it. Connect it again in Settings → Cloud, or start a new session.",
+            "GitHub account work-me was disconnected, and this session uses it. Connect it again in Settings → Cloud, or start a new session.",
+        ),
+        (
+            409,
+            "needs_reconnect",
+            "github_account_needs_reconnect: GitHub account work-me needs reconnecting. Reconnect it in Settings → Cloud, then send again.",
+            "GitHub account work-me needs reconnecting. Reconnect it in Settings → Cloud, then send again.",
+        ),
+        (
+            404,
+            "not_found",
+            "github_account_no_access: GitHub account work-me can't reach acme/app any more, and this session uses it. Give it access on GitHub, or start a new session.",
+            "GitHub account work-me can't reach acme/app any more, and this session uses it. Give it access on GitHub, or start a new session.",
+        ),
+    ] {
+        let rig = Rig::new().await;
+        let identity = rig.enrolled().await;
+        rig.grant(
+            "anthropic-key",
+            200,
+            json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+        );
+        // Four minutes left: inside the slack, so each run asks the vault.
+        rig.grant(
+            "github",
+            200,
+            json!({"provider": "github", "accessToken": "ghs_one", "expiresAt": in_ms(240),
+                   "account": "work-me", "generation": 1}),
+        );
+        let github = Stub::start(|req: &Req| match req.path.as_str() {
+            "/users/work-me" => (200, json!({"login": "work-me", "id": 11})),
+            _ => (404, json!({})),
+        })
+        .await;
+        let broker = rig.broker(identity, &github.url());
+        let store = zeron_engine::credentials::git_credentials_path(&rig.data_dir);
+        broker
+            .prepare(HarnessId::ClaudeCode, &mut run_request())
+            .await
+            .unwrap();
+        assert!(store.exists(), "the first run has its token");
+
+        rig.grant(
+            "github",
+            status,
+            json!({"error": error, "message": message}),
+        );
+        let refused = broker
+            .prepare(HarnessId::ClaudeCode, &mut run_request())
+            .await
+            .unwrap_err();
+        assert_eq!(refused, shown);
+        assert!(!store.exists(), "no token stays for a login that's gone");
+        assert_eq!(broker.ensure_git_credentials().await.unwrap_err(), shown);
+    }
+}
+
+/// Other reasons for having no GitHub grant still leave the run to work
+/// without it, as they always did: nothing about the session's login is wrong.
+#[tokio::test]
+async fn a_run_without_a_github_grant_for_other_reasons_still_starts() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+    );
+    rig.grant(
+        "github",
+        404,
+        json!({"error": "not_found", "message": "github_app_not_installed: The Zeron GitHub App isn't installed on acme"}),
+    );
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut request)
+        .await
+        .unwrap();
+    assert!(!request.env.contains_key("GIT_AUTHOR_EMAIL"));
 }
 
 #[tokio::test]

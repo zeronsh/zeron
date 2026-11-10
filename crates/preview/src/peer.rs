@@ -4,7 +4,8 @@ use crate::mux::{Connector, Mux, PeerScoped, Stream, Transport};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    net::IpAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,7 +18,8 @@ use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
     peer_connection::{
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-        RTCIceCandidateType, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent,
+        RTCIceCandidateInit, RTCIceCandidateType, RTCIceGatheringState, RTCIceServer,
+        RTCPeerConnectionIceEvent,
         RTCPeerConnectionState, RTCSessionDescription, SettingEngine,
     },
 };
@@ -43,6 +45,9 @@ struct Peer {
     stop: CancellationToken,
 }
 impl Peer {
+    fn is_open(&self) -> bool {
+        !self.stop.is_cancelled() && self.ready.borrow().as_ref().is_some_and(|mux| !mux.is_closed())
+    }
     async fn close(&self) {
         self.stop.cancel();
         let _ = self.pc.close().await;
@@ -277,10 +282,30 @@ impl Peers {
                 }
                 drop(peers);
                 let result = async {
+                    let offer = signal.sdp.context("missing offer")?;
+                    let their_public = public_addresses(&offer.sdp);
+                    // Checks start as soon as the offer is in, and our own public
+                    // address takes a STUN round trip. So its LAN addresses wait.
+                    let (kept, held) = if their_public.is_empty() {
+                        (offer.sdp, Vec::new())
+                    } else {
+                        split_lan_candidates(&offer.sdp)
+                    };
                     peer.pc
-                        .set_remote_description(signal.sdp.context("missing offer")?)
+                        .set_remote_description(RTCSessionDescription::offer(kept)?)
                         .await?;
                     let sdp = self.description(&peer, false).await?;
+                    if lan_may_reach(&public_addresses(&sdp.sdp), &their_public) {
+                        for candidate in held {
+                            let candidate = RTCIceCandidateInit {
+                                candidate: candidate.trim_start_matches("a=").to_owned(),
+                                ..Default::default()
+                            };
+                            if let Err(error) = peer.pc.add_ice_candidate(candidate).await {
+                                tracing::debug!(%error, "preview LAN candidate refused");
+                            }
+                        }
+                    }
                     self.send(
                         device,
                         Signal {
@@ -311,9 +336,15 @@ impl Peers {
                     .cloned()
                     .context("unexpected preview answer")?;
                 anyhow::ensure!(peer.session == signal.session, "stale preview answer");
-                peer.pc
-                    .set_remote_description(signal.sdp.context("missing answer")?)
-                    .await?;
+                let mut answer = signal.sdp.context("missing answer")?;
+                let ours = peer.pc.local_description().await.map(|sdp| sdp.sdp);
+                if !lan_may_reach(
+                    &public_addresses(ours.as_deref().unwrap_or_default()),
+                    &public_addresses(&answer.sdp),
+                ) {
+                    answer = RTCSessionDescription::answer(split_lan_candidates(&answer.sdp).0)?;
+                }
+                peer.pc.set_remote_description(answer).await?;
             }
             _ => anyhow::bail!("unknown preview signaling message"),
         }
@@ -400,6 +431,43 @@ impl Peers {
         }
         self.0.changed.notify_waiters();
     }
+    /// Signaling went away: drop what was still being set up, which has no way to
+    /// finish, and keep what's open. An open connection doesn't need signaling, and the
+    /// coordinator ends every socket every 15 minutes.
+    pub async fn clear_unopened(&self) {
+        self.0.requested.lock().await.clear();
+        let unopened: Vec<_> = {
+            let mut peers = self.0.peers.lock().await;
+            let names: Vec<_> = peers
+                .iter()
+                .filter(|(_, peer)| !peer.is_open())
+                .map(|(name, _)| name.clone())
+                .collect();
+            names.iter().filter_map(|name| peers.remove(name)).collect()
+        };
+        for peer in unopened {
+            peer.close().await;
+        }
+        self.0.changed.notify_waiters();
+    }
+    /// The coordinator says `device` left. That may only be its socket refreshing, so an
+    /// open connection carries on: if the device has really gone, ICE consent ends it.
+    /// One still being set up has no one to answer it. The pacing stays: offers to a
+    /// device that isn't there would otherwise repeat as fast as "gone" comes back.
+    pub async fn gone(&self, device: &str) {
+        let unopened = {
+            let mut peers = self.0.peers.lock().await;
+            if peers.get(device).is_some_and(|peer| !peer.is_open()) {
+                peers.remove(device)
+            } else {
+                None
+            }
+        };
+        if let Some(peer) = unopened {
+            peer.close().await;
+        }
+        self.0.changed.notify_waiters();
+    }
     pub async fn clear(&self) {
         self.0.requested.lock().await.clear();
         let peers = std::mem::take(&mut *self.0.peers.lock().await);
@@ -409,6 +477,53 @@ impl Peers {
         self.0.changed.notify_waiters();
     }
 }
+/// The public addresses a description says its device has.
+fn public_addresses(sdp: &str) -> HashSet<IpAddr> {
+    sdp.lines()
+        .filter_map(candidate_address)
+        .filter(|(_, kind)| *kind == "srflx")
+        .map(|(address, _)| address)
+        .collect()
+}
+
+/// An `a=candidate:` line's address and type.
+fn candidate_address(line: &str) -> Option<(IpAddr, &str)> {
+    let mut fields = line.strip_prefix("a=candidate:")?.split_ascii_whitespace();
+    let address = fields.nth(4)?.parse().ok()?;
+    let kind = fields.nth(2)?;
+    Some((address, kind))
+}
+
+/// A description without its private LAN addresses, and those lines. Others stay: a
+/// tailnet's or a public address is routed, so it may work from another network.
+fn split_lan_candidates(sdp: &str) -> (String, Vec<String>) {
+    let mut kept = String::with_capacity(sdp.len());
+    let mut lan = Vec::new();
+    for line in sdp.split_inclusive('\n') {
+        let private = candidate_address(line.trim_end()).is_some_and(|(address, kind)| {
+            kind == "host" && matches!(address, IpAddr::V4(v4) if v4.is_private())
+        });
+        if private {
+            lan.push(line.trim_end().to_owned());
+        } else {
+            kept.push_str(line);
+        }
+    }
+    (kept, lan)
+}
+
+/// Whether another device's private LAN addresses could be this device's neighbours.
+/// Only when they share a public address, or when one of them doesn't know its own.
+///
+/// Checks to an address from another network aren't just wasted. Networks are often
+/// numbered alike (192.168.1.x at home and at the office), and then the check fails on
+/// this device's own link, sent from the socket the hole punch needs. Between two real
+/// networks numbered alike, pairing went from about half of attempts to 12 of 12
+/// without them, while plain UDP between the same two sockets always got through.
+fn lan_may_reach(ours: &HashSet<IpAddr>, theirs: &HashSet<IpAddr>) -> bool {
+    ours.is_empty() || theirs.is_empty() || !ours.is_disjoint(theirs)
+}
+
 /// ICE tuned for pairing fast — a person is waiting on it (a terminal
 /// screen, a preview page):
 /// - checks every 50ms (RFC 8445's Ta; the library's default is 200ms),
@@ -542,6 +657,43 @@ impl Transport for ChannelTransport {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const OFFICE: &str = "v=0\r\n\
+        a=candidate:1 1 udp 2130706431 192.168.1.202 57396 typ host\r\n\
+        a=candidate:2 1 udp 2130706431 100.95.236.38 54551 typ host\r\n\
+        a=candidate:3 1 udp 1694498815 154.20.139.229 2358 typ srflx raddr 0.0.0.0 rport 57396\r\n\
+        a=end-of-candidates\r\n";
+
+    fn addresses(list: &[&str]) -> HashSet<IpAddr> {
+        list.iter().map(|ip| ip.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn a_description_says_where_its_device_is() {
+        assert_eq!(public_addresses(OFFICE), addresses(&["154.20.139.229"]));
+        assert!(public_addresses("v=0\r\na=candidate:1 1 udp 1 10.0.0.2 5 typ host\r\n").is_empty());
+    }
+
+    #[test]
+    fn only_private_lan_addresses_are_split_off() {
+        let (kept, lan) = split_lan_candidates(OFFICE);
+        assert_eq!(lan, ["a=candidate:1 1 udp 2130706431 192.168.1.202 57396 typ host"]);
+        assert!(!kept.contains("192.168.1.202"));
+        assert!(kept.contains("100.95.236.38"), "a tailnet is routed");
+        assert!(kept.contains("154.20.139.229"));
+        assert!(kept.contains("a=end-of-candidates"));
+        assert!(kept.starts_with("v=0\r\n"));
+    }
+
+    #[test]
+    fn lan_addresses_count_only_for_a_possible_neighbour() {
+        let home = addresses(&["108.180.45.253"]);
+        let office = addresses(&["154.20.139.229"]);
+        assert!(!lan_may_reach(&home, &office), "two networks");
+        assert!(lan_may_reach(&home, &home), "behind the same NAT");
+        assert!(lan_may_reach(&HashSet::new(), &office), "STUN is blocked here");
+        assert!(lan_may_reach(&home, &HashSet::new()), "STUN is blocked there");
+    }
     struct Echo;
     #[async_trait::async_trait]
     impl Connector for Echo {
@@ -604,6 +756,66 @@ mod tests {
         forward_a.abort();
         forward_b.abort();
         result.expect("a failed STUN probe must not prevent peer setup");
+    }
+    /// Two engines paired over loopback, each other's signaling forwarded.
+    fn loopback_pair(stop: &CancellationToken) -> (Peers, Peers, [tokio::task::JoinHandle<()>; 2]) {
+        let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
+        let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        a.set_ice_servers(Vec::new()).unwrap();
+        b.set_ice_servers(Vec::new()).unwrap();
+        let peer_b = b.clone();
+        let forward_a = tokio::spawn(async move {
+            while let Some(message) = a_out.recv().await {
+                let _ = peer_b.signal("a", message.signal).await;
+            }
+        });
+        let peer_a = a.clone();
+        let forward_b = tokio::spawn(async move {
+            while let Some(message) = b_out.recv().await {
+                let _ = peer_a.signal("b", message.signal).await;
+            }
+        });
+        (a, b, [forward_a, forward_b])
+    }
+    #[tokio::test]
+    async fn an_open_connection_outlives_signaling_going_away() {
+        let stop = CancellationToken::new();
+        let (a, b, forwards) = loopback_pair(&stop);
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            echo_round(&b, "a").await;
+            let before = a.ready("b").await.expect("connected");
+            // What a device does when its own socket ends, and what the other does when
+            // the room says so.
+            a.clear_unopened().await;
+            b.gone("a").await;
+            assert!(!before.is_closed(), "the same connection, not a new pairing");
+            assert!(a.ready("b").await.is_some());
+            echo_round(&b, "a").await;
+            echo_round(&a, "b").await;
+        })
+        .await;
+        stop.cancel();
+        a.clear().await;
+        b.clear().await;
+        forwards.iter().for_each(|forward| forward.abort());
+        result.expect("stalled");
+    }
+    #[tokio::test]
+    async fn a_device_that_left_is_not_offered_to_again_at_once() {
+        let stop = CancellationToken::new();
+        let (mut a, mut out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
+        a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        a.set_ice_servers(Vec::new()).unwrap();
+        a.pair("b").await.unwrap();
+        assert_eq!(out.recv().await.expect("an offer").signal.kind, "offer");
+        a.gone("b").await;
+        assert!(a.0.peers.lock().await.is_empty(), "a half-made peer has no one to answer it");
+        a.pair("b").await.unwrap();
+        assert!(out.try_recv().is_err(), "paced, not repeated");
+        stop.cancel();
+        a.clear().await;
     }
     async fn echo_round(peers: &Peers, device: &str) {
         let mut stream = peers.open(device, "service", false).await.unwrap();

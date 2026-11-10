@@ -69,6 +69,7 @@ separate layer, split at the exact glyph offset.
 | Line breaks vs CoreText on the same font bytes | `ZeronTests/LineBreakAccuracyTests`, `crates/text/tests/coretext.rs` |
 | Demo end-to-end (send → echo → reply, questions, queue, offline host) | `crates/client/tests/demo.rs`, `ZeronUITests/SessionFlowTests` |
 | Live sync against an in-process edge | `crates/client/tests/live.rs` |
+| The relay layer: live frames, journal, queue, catch-up, checkpoints, flips ([relay-mobile.md](design/relay-mobile.md)) | `crates/client/tests/relay.rs` |
 | Real stack (wrangler dev edge + headless engine, mock harness) | `ZeronUITests/LiveStackTests` |
 | Frame pacing (hitch ratio, idle + streaming) | `-lab -bench`, `ZeronUITests/ScrollPerformanceTests` |
 

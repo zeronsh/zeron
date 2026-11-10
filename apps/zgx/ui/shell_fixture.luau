@@ -1554,5 +1554,8 @@ ui.effect(function()
 		require("@app/screens/plugins")
 	end
 end)
+-- The theme, for captures (as ui/chat_fixture.luau's).
+ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
+ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
 local shell = require("@app/screens/shell")
 return shell()

@@ -215,33 +215,42 @@ export const handleVaultRoute = async (
       return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
     }
     // A Cloud machine's GitHub access is its own chat's repository, nothing
-    // else the user's GitHub reaches.
+    // else the user's GitHub reaches. A delegate's first grant takes the
+    // GitHub login of the session that started it; only this Worker says so,
+    // never a request's body.
+    let inheritFrom: string | undefined;
     if (auth.kind === "runner" && provider === "github") {
-      const own =
+      const cloud =
         env.CLOUD_ACCOUNTS && auth.orgId
-          ? await env.CLOUD_ACCOUNTS.get(env.CLOUD_ACCOUNTS.idFromName(cloudAccountName(auth.orgId, auth.userId))).repoOfDevice(
-              { orgId: auth.orgId, userId: auth.userId },
-              deviceId
-            )
+          ? env.CLOUD_ACCOUNTS.get(env.CLOUD_ACCOUNTS.idFromName(cloudAccountName(auth.orgId, auth.userId)))
           : undefined;
+      const owner = { orgId: auth.orgId ?? "", userId: auth.userId };
+      const own = cloud ? await cloud.repoOfDevice(owner, deviceId) : undefined;
       if (!own || typeof repo !== "string" || repo.toLowerCase() !== own.toLowerCase()) {
         return json({ error: "forbidden", message: "A Cloud machine may only get GitHub access to its own chat's repository." }, 403);
       }
+      inheritFrom = await cloud?.parentDeviceOf(owner, deviceId);
     }
-    const req: GrantRequest = { provider, deviceId, ts, sig, ...(repo !== undefined ? { repo } : {}) };
+    const req: GrantRequest = {
+      provider,
+      deviceId,
+      ts,
+      sig,
+      ...(repo !== undefined ? { repo } : {}),
+      ...(inheritFrom !== undefined ? { inheritFrom } : {})
+    };
     return call(() => vault.grant(caller, req));
   }
 
   // GET /vault/{orgId}/github/repos?q= — the repositories the user's GitHub
-  // connection can see, for picking a Cloud project. The vault calls GitHub
-  // itself; the token never leaves it. Runners are refused by runner-policy.
+  // logins can see, merged, for picking a Cloud project; beside them the App
+  // installations they come through and any login that didn't answer. The
+  // vault calls GitHub itself; the tokens never leave it. Runners are refused
+  // by runner-policy.
   if (rest[0] === "github" && rest[1] === "repos" && rest.length === 2 && method === "GET") {
     const query = url.searchParams.get("q") ?? undefined;
     if (query !== undefined && query.length > 200) return bad("Query too long.");
-    return call(async () => {
-      const result = await vault.githubRepos(caller, query);
-      return result.ok ? { ok: true as const, value: { repos: result.value } } : result;
-    });
+    return call(() => vault.githubListing(caller, query));
   }
 
   // GET /vault/{orgId}/github/branches?repo=owner/name — branch names for
