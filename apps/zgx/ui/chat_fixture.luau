@@ -1158,6 +1158,79 @@ do
 			end
 		end,
 	}
+	-- `long_chat`: Tall replies becomes a long working chat as a real
+	-- agent's reads (ui/long_chat_fixture), opened at its end: replies of
+	-- markdown and tables cut by their work, short prompts between them.
+	ui.command {
+		id = "long_chat",
+		title = "Tall replies becomes a long working chat",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_sent`: the same, up to the reply before its last prompt
+	-- (sent then from the composer); `long_chat_streams`, run again and
+	-- again: its last reply streams in, a step at a time, then ends.
+	ui.command {
+		id = "long_chat_sent",
+		title = "Tall replies becomes a long working chat, its last turn to come",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	local stage = 0
+	ui.command {
+		id = "long_chat_streams",
+		title = "The long working chat's last reply streams a step",
+		run = function()
+			local fixture = require("./long_chat_fixture") :: any
+			local stages = fixture.stages()
+			local n = store.messages:len()
+			if stage < 0 then
+				return
+			end
+			stage += 1
+			if stage == 1 then
+				local prompt = store.messages:peek()[n]
+				if prompt and prompt.role == "user" and prompt.waiting then
+					store.messages:set_key({ n, "waiting" }, ui.null)
+				end
+				store.messages:push { id = "orbit-trigger", role = "assistant", text = "", model = "Opus", streaming = true, started = ui.now() / 1000, tools = {}, blocks = {} }
+				publish(opened :: any, { running = true })
+				n += 1
+			end
+			local s = stages[stage]
+			if s then
+				ui.batch(function()
+					store.messages:set_key({ n, "blocks" }, s.blocks)
+					store.draft:set { id = "orbit-trigger", text = s.part_text or "", part = s.part, part_text = s.part_text }
+				end)
+				return
+			end
+			local done = fixture.trigger()
+			local text = {}
+			for _, b in done do
+				if b.kind == "text" then
+					table.insert(text, b.text)
+				end
+			end
+			ui.batch(function()
+				store.messages:set_key({ n, "blocks" }, done)
+				store.messages:set_key({ n, "text" }, table.concat(text, "\n\n"))
+				store.messages:set_key({ n, "streaming" }, false)
+				store.messages:set_key({ n, "at" }, "Nov 10, 1:13 PM")
+				store.draft:set { id = "", text = "" }
+			end)
+			publish(opened :: any, { running = false })
+			stage = -1
+		end,
+	}
 end
 -- The content of the shipping app's compare fixture (a reply's text, a
 -- tool group and a code block, then a settled turn), for side by sides.

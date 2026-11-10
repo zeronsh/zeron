@@ -458,9 +458,9 @@ that can't heal will never store them.
 ## What's built
 
 Behind `CHAT_RELAY_LAYER` on the edge: `1` for everyone, or a comma-separated list of user ids. It
-defaults off. Engines run the layer against the staging edge (`ZERON_EDGE_URL=https://staging.zeron.sh`) or
-with `ZERON_RELAY_LAYER=1`, and follow what the room answers; against production's edge, or any other, they stay on
-stored rows unless `ZERON_RELAY_LAYER=1` (`relay_layer_on` in `crates/engine/src/doc_host/relay.rs`).
+defaults off. Engines run the layer against every edge unless `ZERON_RELAY_LAYER` is set to anything but `1`,
+and follow what the room answers: a room that doesn't offer it (an edge without this code, or with its switch off)
+leaves every chat on stored rows, exactly as before (`relay_layer_on` in `crates/engine/src/doc_host/relay.rs`).
 
 **Built and tested:**
 

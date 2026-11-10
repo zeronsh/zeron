@@ -6,7 +6,7 @@
 -- a string, a message, a state or a function). Text props style it; `grow`, `shrink`,
 -- `basis`, `w`, `w_full`, `min_w`, `max_w` and the margins go to its box. `fade`: the
 -- fade's length (24 points); `roll = true`: a RollText (it rolls as it
--- changes).
+-- changes; `glide = false` as RollText takes it).
 
 local RollText = require("@self/roll_text")
 
@@ -38,6 +38,10 @@ return ui.component(function(props: { [any]: any }): Node
 		elseif k ~= "fade" and k ~= "roll" and k ~= "children" and k ~= "truncate" then
 			style[k] = v
 		end
+	end
+	-- (`glide`: a RollText's, as `roll` is.)
+	if not props.roll then
+		style.glide = nil
 	end
 	-- The text at its own width, inside a box that clips it.
 	style.ref = text

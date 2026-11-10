@@ -48,6 +48,7 @@ pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
 pub mod desktop_notify;
+pub mod device_stats;
 pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;

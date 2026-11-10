@@ -855,6 +855,9 @@ return ui.component(function(props: Props): Node
 			mb = if bottom_up then nil else ui.raw(-4, "the tab bar meets the rule"),
 			fade_x = { 20, 20 },
 			fade_overflow = true,
+			-- A mouse wheel without a sideways axis scrolls them too, once
+			-- the pointer has moved onto them (Shift + wheel always does).
+			wheel_across = true,
 			ui.row {
 				h = 36,
 				gap = "$zeron.space.hair",
