@@ -1684,6 +1684,7 @@
       "remove_sessions": "{n, plural, other {它的 # 个会话将在所有设备上被永久删除。}}",
       "remove_none": "它没有会话。",
       "remove_running": "{n, plural, other {其中 # 个正在运行，会先被停止。}}",
+      "remove_running_only": "它正在运行，会先被停止。",
       "remove_keeps_folder": "文件夹 {path} 及其中所有文件会保留在 {device} 上，Zeron 只是不再记录它。",
       "remove_keeps_repo": "它在 GitHub 上的仓库不受影响。",
       "remove_confirm": "移除项目",
