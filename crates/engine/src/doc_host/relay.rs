@@ -1,8 +1,7 @@
-//! The engine's side of the relay layer (docs/design/relay-layer.md). On against the
-//! staging edge, or wherever `ZERON_RELAY_LAYER=1` says so; off against production's
-//! edge (which may not serve the layer yet) and any other ([`relay_layer_on`]). On,
-//! the edge decides who relays, and a room that doesn't offer it leaves everything
-//! on stored rows. Off, nothing here runs: no chat handle carries relay state, no
+//! The engine's side of the relay layer (docs/design/relay-layer.md). On against
+//! every edge unless `ZERON_RELAY_LAYER` turns it off ([`relay_layer_on`]). On, the
+//! edge decides who relays, and a room that doesn't offer it (an edge without the
+//! layer, or with its switch off) leaves everything on stored rows. Off, nothing here runs: no chat handle carries relay state, no
 //! capability is advertised and no stream service is registered.
 //!
 //! The safety rule lives in [`DocHost::refresh_relay_mode`]: a host that stops
@@ -46,29 +45,19 @@ const LINGER_AFTER_PEER: Duration = Duration::from_secs(15);
 /// The gap is the room to grow while the heal lands.
 const RELAY_SNAPSHOT_LIMIT: usize = 24 * 1024 * 1024;
 
-/// The staging edge: the one edge the layer runs against without being asked.
-pub const STAGING_EDGE: &str = "https://staging.zeron.sh";
-
 /// The engine-wide switch, read once: [`relay_layer_on`] for this engine's
-/// `ZERON_RELAY_LAYER` and its edge (`ZERON_EDGE_URL`, production's when unset).
+/// `ZERON_RELAY_LAYER`.
 pub fn relay_layer_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        let flag = std::env::var("ZERON_RELAY_LAYER").ok();
-        let edge = std::env::var("ZERON_EDGE_URL").ok();
-        relay_layer_on(flag.as_deref(), edge.as_deref())
-    })
+    *ENABLED.get_or_init(|| relay_layer_on(std::env::var("ZERON_RELAY_LAYER").ok().as_deref()))
 }
 
-/// Whether an engine runs the relay layer. `ZERON_RELAY_LAYER`, when set, decides
-/// (`1` on, anything else off: the kill switch). Unset, it's on only against the
-/// staging edge; production's (the default) and any other stay on stored rows,
-/// exactly as before the layer.
-pub fn relay_layer_on(flag: Option<&str>, edge: Option<&str>) -> bool {
-    match flag {
-        Some(flag) => flag == "1",
-        None => edge.is_some_and(|edge| edge.trim().trim_end_matches('/').eq_ignore_ascii_case(STAGING_EDGE)),
-    }
+/// Whether an engine runs the relay layer: yes, whatever its edge, unless
+/// `ZERON_RELAY_LAYER` is set to anything but `1` (the kill switch). Whether a chat
+/// relays is still the room's call: an edge that doesn't offer the layer leaves
+/// every chat on stored rows, exactly as before it.
+pub fn relay_layer_on(flag: Option<&str>) -> bool {
+    flag.is_none_or(|flag| flag == "1")
 }
 
 #[derive(Default)]
@@ -726,25 +715,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_layer_runs_against_staging_or_when_asked() {
-        assert!(relay_layer_on(None, Some("https://staging.zeron.sh")));
-        assert!(relay_layer_on(None, Some("https://staging.zeron.sh/")));
-        assert!(relay_layer_on(Some("1"), None));
-        assert!(relay_layer_on(Some("1"), Some("https://edge.zeron.sh")));
-        assert!(relay_layer_on(Some("1"), Some("http://127.0.0.1:27640")));
+    fn the_layer_runs_by_default_or_when_asked() {
+        assert!(relay_layer_on(None), "unset: on, whatever the edge");
+        assert!(relay_layer_on(Some("1")));
     }
 
     #[test]
-    fn the_layer_stays_off_against_production_and_when_switched_off() {
-        // Production's edge, named or by default, and any other edge.
-        assert!(!relay_layer_on(None, Some("https://edge.zeron.sh")));
-        assert!(!relay_layer_on(None, None));
-        assert!(!relay_layer_on(None, Some("")));
-        assert!(!relay_layer_on(None, Some("http://127.0.0.1:27640")));
-        assert!(!relay_layer_on(None, Some("https://staging.zeron.sh.example")));
-        // The kill switch wins, staging included.
-        assert!(!relay_layer_on(Some("0"), Some("https://staging.zeron.sh")));
-        assert!(!relay_layer_on(Some(""), Some("https://staging.zeron.sh")));
+    fn the_layer_stays_off_only_when_switched_off() {
+        assert!(!relay_layer_on(Some("0")), "the kill switch");
+        assert!(!relay_layer_on(Some("")));
+        assert!(!relay_layer_on(Some("true")), "only 1 means on");
+        assert!(!relay_layer_on(Some("off")));
     }
 
     fn state() -> Arc<ChatRelayState> {
@@ -1089,5 +1070,189 @@ mod tests {
         assert!(!decide_relaying(true, true, STORED_ROOM_GEN, true, false), "the chat is on stored rows");
         assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, false, false), "too big to checkpoint");
         assert!(!decide_relaying(true, true, RELAY_ROOM_GEN, true, true), "an old reader is here");
+    }
+
+    /// What a room without the layer saw: production's edge before it, an old
+    /// self-hosted edge, or one with `CHAT_RELAY_LAYER` off.
+    #[derive(Default)]
+    struct OldRoomSeen {
+        hellos: Vec<serde_json::Value>,
+        /// The pushes it stored as rows, in order.
+        rows: Vec<Vec<u8>>,
+        /// Frame kinds it doesn't know, each answered with `bad_frame`.
+        refused: Vec<u8>,
+        checkpoint_posts: usize,
+    }
+
+    /// A chat room as production's edge serves it today (edge/src/chat-room.ts on
+    /// `main`): its state names no `relay`, it stores every push as a row, and it
+    /// answers any frame it doesn't know with `bad_frame`. Plain-HTTP pulls are
+    /// refused, so the socket does the work; checkpoint posts are counted.
+    async fn room_without_the_layer() -> (String, Arc<Mutex<OldRoomSeen>>) {
+        use futures::{SinkExt, StreamExt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use zeron_sync::chat_frames::{decode, encode, frame_type};
+
+        let seen = Arc::new(Mutex::new(OldRoomSeen::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let room = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { return };
+                let seen = room.clone();
+                tokio::spawn(async move {
+                    let mut buffer = vec![0; 64 * 1024];
+                    let headers = loop {
+                        let n = stream.peek(&mut buffer).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        if let Some(end) = buffer[..n].windows(4).position(|v| v == b"\r\n\r\n") {
+                            break String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+                        }
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    };
+                    if !headers.contains("upgrade: websocket") {
+                        let first = headers.lines().next().unwrap_or_default().to_owned();
+                        let _ = stream.read(&mut buffer).await;
+                        let reply: &[u8] = if first.starts_with("post") && first.contains("/checkpoint") {
+                            lock(&seen).checkpoint_posts += 1;
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"
+                        } else {
+                            b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        };
+                        let _ = stream.write_all(reply).await;
+                        return;
+                    }
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                    let mut head = 0u64;
+                    while let Some(Ok(message)) = ws.next().await {
+                        if let tokio_tungstenite::tungstenite::Message::Text(text) = &message {
+                            if text == "ping" {
+                                let _ = ws.send("pong".into()).await;
+                            }
+                            continue;
+                        }
+                        let Some(frame) = decode(&message.into_data()) else { continue };
+                        let reply = match frame.kind {
+                            frame_type::HELLO => {
+                                lock(&seen).hellos.push(frame.header.clone());
+                                encode(
+                                    frame_type::STATE,
+                                    &serde_json::json!({
+                                        "headSeq": head, "seqFloor": 0, "checkpointSeq": 0,
+                                        "checkpointSize": 0, "rowCount": head, "rowBytes": 0,
+                                    }),
+                                    &[],
+                                )
+                            }
+                            frame_type::ROWS_REQ => {
+                                encode(frame_type::ROWS_DONE, &serde_json::json!({ "headSeq": head }), &[])
+                            }
+                            frame_type::PUSH => {
+                                lock(&seen).rows.push(frame.payload.to_vec());
+                                head += 1;
+                                encode(
+                                    frame_type::ACK,
+                                    &serde_json::json!({ "batchId": frame.header["batchId"], "seq": head, "dup": false }),
+                                    &[],
+                                )
+                            }
+                            frame_type::PRESENCE => continue,
+                            frame_type::PROBE => {
+                                encode(frame_type::PROBE_OK, &serde_json::json!({ "headSeq": head }), &[])
+                            }
+                            other => {
+                                lock(&seen).refused.push(other);
+                                encode(
+                                    frame_type::ERROR,
+                                    &serde_json::json!({ "code": "bad_frame", "message": format!("unexpected type {other}") }),
+                                    &[],
+                                )
+                            }
+                        };
+                        if ws.send(reply.into()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    async fn until(what: &str, mut condition: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !condition() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The layer runs against every edge now, so an engine meets rooms that don't
+    /// offer it: production's edge until it ships the layer, an old self-hosted
+    /// edge, a local dev edge. There it must keep the chat on generation 2 and
+    /// publish every commit as a stored row, exactly as a build without the layer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_with_the_layer_on_stays_on_stored_rows_in_a_room_without_it() {
+        let _budget_guard = super::super::SYNC_TEST_LOCK.lock().await;
+        assert!(relay_layer_on(None), "this is what an engine runs by default");
+        let (url, seen) = room_without_the_layer().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, store) = host_on(&url, dir.path());
+        let workspace = crate::workspace_host::WorkspaceHost::open(
+            store.clone(),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "host".into(),
+                device_name: "host".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace.create_chat("chat", None, Some("host"), None, None).unwrap();
+        assert_eq!(workspace.chat("chat").unwrap().unwrap().room_gen, Some(STORED_ROOM_GEN));
+        host.set_workspace(workspace);
+        let handle = host.open("chat").unwrap();
+
+        until("the room's answer", || {
+            lock(&handle.chat2).as_ref().is_some_and(|client| client.relay_answer() == Some(false))
+        })
+        .await;
+        let state = lock(&handle.relay).clone().expect("the layer is on: the chat has relay state");
+        assert_eq!(lock(&seen).hellos[0]["relay"], 1, "the engine says it can; the room ignores it");
+
+        let body = handle.doc.doc().get_text("body");
+        for word in ["stored ", "as ", "rows"] {
+            body.insert(body.len_unicode(), word).unwrap();
+            handle.doc.doc().commit();
+        }
+        until("the commits as stored rows", || {
+            let reader = loro::LoroDoc::new();
+            for row in &lock(&seen).rows {
+                let _ = reader.import(row);
+            }
+            reader.get_text("body").to_string() == "stored as rows"
+        })
+        .await;
+
+        // Several maintenance ticks and a mode refresh: nothing moves.
+        tokio::time::sleep(MAINTENANCE_TICK * 3).await;
+        host.refresh_relay_mode(&handle, &state);
+        let row = host.workspace().unwrap().chat("chat").unwrap().unwrap();
+        assert_eq!(row.room_gen, Some(STORED_ROOM_GEN), "still on generation 2");
+        assert!(!state.relaying());
+        assert!(!state.heal_owed.load(Ordering::Acquire), "no heal: it never relayed");
+        assert!(!state.relay.queue_pushes());
+        let pending = store.pending_chat_updates("chat").unwrap();
+        assert_eq!(state.uploadable(pending.clone()).len(), pending.len(), "a rejoin uploads the whole outbox, as before");
+        let seen = lock(&seen);
+        assert!(seen.refused.is_empty(), "no relay frame reached a room that never offered: {:?}", seen.refused);
+        assert!(seen.hellos.iter().all(|hello| hello.get("relaying").is_none_or(|v| v.is_null())));
+        assert!(seen.hellos.iter().all(|hello| hello.get("gen").is_none_or(|v| v.is_null())));
     }
 }

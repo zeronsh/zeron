@@ -730,6 +730,11 @@ impl Driver {
     }
 
     fn announce(&mut self, hello: bool) {
+        // No room that offered the layer: nobody to tell, and the room's coming up
+        // announces anyway. Saves encoding the version on every commit's settle.
+        if self.room.is_none() {
+            return;
+        }
         let Some(version) = self.sink.relay_version() else {
             tracing::debug!(hello, "chat relay: no version to announce");
             return;
