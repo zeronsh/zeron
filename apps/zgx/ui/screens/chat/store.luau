@@ -8,7 +8,10 @@
 --   store.messages:get()  its transcript, ds.Transcript's messages, oldest
 --                         first, each keyed by `id`
 --   store.draft:get()     the reply being written ({ id, text }): it grows
---                         here, a small state, not in the whole list
+--                         here, a small state, not in the whole list; while
+--                         it writes a text part, { id, part, words }: the
+--                         part's words are store.words[words], grown by the
+--                         host a chunk at a time (src/chat.rs)
 --   store.catalog:get()   { state, harnesses, models } (ds.ModelPicker's)
 --
 --   store.open(id?)       watch that session (nil: none), the last one let go
@@ -114,6 +117,7 @@ export type Request = {
 M.session = ui.shared("chat.session", nil :: Session?)
 M.messages = ui.shared("chat.messages", {} :: { Message })
 M.draft = ui.shared("chat.draft", { id = "", text = "" } :: Draft)
+M.words = { ui.shared("chat.draft.words.1", ""), ui.shared("chat.draft.words.2", "") }
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.

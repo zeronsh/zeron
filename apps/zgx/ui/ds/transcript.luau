@@ -118,6 +118,10 @@ export type Props = {
 	-- growing writes here, a small state, rather than into the whole list
 	-- on every word; its message takes the text once it's done.
 	draft: State<Draft>?,
+	-- The words of the text part being written (the draft's `words`, 1 or
+	-- 2), grown by the host a chunk at a time: a reply's block being written
+	-- reads them in Rust, with no script per chunk.
+	draft_words: { State<string> }?,
 	-- What a selection's Mention and Attach do with it. With neither, a
 	-- selection offers nothing.
 	on_mention: ((q: Quote.Quote) -> ())?,
@@ -194,9 +198,11 @@ export type TranscriptFind = {
 	current: () -> { key: string, block: number, k: number, row: number }?,
 }
 -- The words being written: the whole reply's (`text`), and, with blocks,
--- the text block they grow (`part`) and its words alone (`part_text`).
+-- the text block they grow (`part`) and its words alone (`part_text`), or,
+-- from the host, which of its words states holds them (`words`), with
+-- their math read into code.
 -- (`thought`, `thought_text`: the thought the reply is at, and its words so far.)
-export type Draft = { id: string, text: string, part: string?, part_text: string?, thought: string?, thought_text: string? }
+export type Draft = { id: string, text: string?, part: string?, part_text: string?, words: number?, thought: string?, thought_text: string? }
 -- A block of a reply: a text, or a group of tools (its line, and whether
 -- it is open while the reply is written).
 -- In a compact transcript, a reply's work is one group ("work") holding
@@ -546,6 +552,8 @@ end
 -- (And the pictures its replies show: Props' `pictures`.)
 -- (`at_end`: whether the list rests at its end, the end then what it holds.)
 type View = {
+	-- The draft's words states (Props' `draft_words`).
+	words: { State<string> }?,
 	view: Ref,
 	offset: State<number>,
 	at_end: State<boolean>?,
@@ -651,8 +659,28 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				reason = ReplyPicture.plain(b.text),
 			}
 		end
+		-- Which of the host's words states holds its words while this is the
+		-- text being written (the draft's `words`), if it does.
+		local states = if view then view.words else nil
+		local function live(): number?
+			if not (states and draft) then
+				return nil
+			end
+			local n = now()
+			if n.streaming then
+				local d = (draft :: State<Draft>):get()
+				if d.id == m.id and d.part == b.id and d.words then
+					return d.words
+				end
+			end
+			return nil
+		end
 		-- Its words: the draft's while this is the text being written.
 		local function words(): string
+			local at = live()
+			if at and states then
+				return states[at]:get()
+			end
 			local n = now()
 			if n.streaming and draft then
 				local d = draft:get()
@@ -664,6 +692,9 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		return Markdown {
 			text = words,
+			-- While it's written, read by the markdown view from the host's
+			-- words state, a chunk at a time, with no script.
+			words = if states then { at = live, states = states } else nil,
 			-- Drawn by zgx's markdown view: its prose in Rust (ds/prose).
 			native = true,
 			-- Parsed incrementally only while it can grow.
@@ -715,7 +746,7 @@ local function reply(
 		local n = now()
 		if n.streaming and draft then
 			local d = draft:get()
-			if d.id == m.id then
+			if d.id == m.id and d.text then
 				return d.text
 			end
 		end
@@ -1810,7 +1841,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for, words = props.draft_words }),
 			},
 		}
 	end

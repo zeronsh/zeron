@@ -267,6 +267,7 @@ local function Session(id: Id?): Node
 							end,
 							on_jump_width = shared.pill_teller("jump", "page"),
 							draft = store.draft,
+							draft_words = store.words,
 							-- Settings' compact transcript: each reply's work
 							-- folded into one group.
 							compact = function(): boolean

@@ -21,6 +21,8 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
         session: app.host.shared("test.session", Value::Nil),
         messages: app.host.shared("test.messages", Value::Nil),
         draft: app.host.shared("test.draft", Value::Nil),
+        words: [app.host.shared("test.words.1", ""), app.host.shared("test.words.2", "")],
+        writing: RefCell::default(),
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
@@ -164,4 +166,69 @@ fn a_saved_first_prompt_stays_visible_after_the_sending_indicator_expires() {
     assert_eq!(messages(&view)[0]["text"], "Find the startup bug");
     assert!(messages(&view)[0]["waiting"].is_null());
     assert!(!view.pending.borrow().contains_key("new-chat"));
+}
+
+/// A reply's text part being written reaches its words state a chunk at a
+/// time, its math read into code; a new part writes the other state, the
+/// last part's left as it was; the draft names the part and the state, and
+/// stays as it is while words come.
+#[test]
+fn a_text_part_being_written_grows_its_words_state_alone() {
+    let app = TestApp::new(|runtime| {
+        ScriptHost::new(
+            runtime,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/activity_fixture.luau"),
+        )
+    });
+    let view = Rc::new(View {
+        session: app.host.shared("w.session", Value::Nil),
+        messages: app.host.shared("w.messages", Value::Nil),
+        draft: app.host.shared("w.draft", Value::Nil),
+        words: [app.host.shared("w.words.1", ""), app.host.shared("w.words.2", "")],
+        writing: RefCell::default(),
+        rpc: RefCell::default(),
+        open: RefCell::default(),
+        pending: RefCell::default(),
+        subagents: app.host.shared("w.subagents", Value::Nil),
+        generation: Cell::new(0),
+        snapshot: Cell::new(false),
+    });
+    let entry = |parts: Json| {
+        Entry::new(json!({ "id": "r", "role": "assistant", "status": "streaming", "parts": parts }))
+    };
+    let set = |parts: Json| {
+        *view.open.borrow_mut() = Some(Open { id: "c".into(), entries: vec![entry(parts)], ..Open::default() });
+    };
+    let words = |slot: usize| view.words[slot].with_untracked(|v| v.to_string());
+    let text = "Say $x^2$ here, and $$a$$ then more words `code $y$` and $z";
+    let draft_writes = Rc::new(Cell::new(0));
+    let counting = draft_writes.clone();
+    let draft = view.draft.signal();
+    let _watch = app.ui.runtime.effect(move || {
+        draft.with(|_| ());
+        counting.set(counting.get() + 1);
+    });
+    for (writes, end) in (1..=text.len()).step_by(3).chain([text.len()]).enumerate() {
+        set(json!([{ "id": "t1", "kind": "text", "text": &text[..end] }]));
+        view.publish_draft(writes > 0);
+        assert_eq!(words(0), crate::math_source::prepare(&text[..end]), "at {end}");
+    }
+    let d = view.draft.with_untracked(Clone::clone);
+    assert_eq!(d.field("part").map(|v| v.to_string()).as_deref(), Some("t1"));
+    assert_eq!(d.field("words").and_then(Value::as_f64), Some(1.));
+    assert!(d.field("part_text").is_none() && d.field("text").is_none(), "no words in the draft");
+    app.frames(1);
+    assert!(draft_writes.get() <= 3, "the draft woke readers {} times", draft_writes.get());
+    // A new part: the other state, the first left as it was.
+    let first = words(0);
+    set(json!([
+        { "id": "t1", "kind": "text", "text": text },
+        { "id": "tool", "kind": "tool" },
+        { "id": "t2", "kind": "text", "text": "And on." }
+    ]));
+    view.publish_draft(false);
+    assert_eq!(words(1), "And on.");
+    assert_eq!(words(0), first);
+    let d = view.draft.with_untracked(Clone::clone);
+    assert_eq!(d.field("words").and_then(Value::as_f64), Some(2.));
 }

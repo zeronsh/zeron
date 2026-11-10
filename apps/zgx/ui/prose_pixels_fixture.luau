@@ -5,7 +5,10 @@
 -- reply's text; `pixels.key` names it while it streams in (a chunk at a
 -- time, parsed for what's new), "" once it's whole. `pixels.veil`: its
 -- words fade in as they arrive (with a key), `pixels.seed` what's there as
--- it's made showing at once.
+-- it's made showing at once. `pixels.live`: the native reply reads its
+-- words from `pixels.words` (its text, its math read into code by the
+-- test, grown a chunk at a time) as a transcript's reply being written
+-- reads the host's, and its text again once that's false.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -20,6 +23,8 @@ local key = ui.shared("pixels.key", "")
 local scheme = ui.shared("pixels.theme", "dark")
 local veil = ui.shared("pixels.veil", false)
 local seed = ui.shared("pixels.seed", false)
+local live = ui.shared("pixels.live", false)
+local live_words = ui.shared("pixels.words", "")
 local veiled = veil:peek() and key:peek() ~= ""
 -- What the page knows of the reply's links and carries, as a transcript's
 -- (`pixels.known`: a skill the chat learns of after the reply shows).
@@ -102,7 +107,25 @@ local style = Prose.style()
 if renderer:peek() == "native-bold-700" then
 	style.strong = { weight = 700 }
 end
-if renderer:peek() ~= "luau" then
+if renderer:peek() == "native" then
+	-- As a transcript's reply (ds/markdown's native path).
+	reply = Markdown {
+		text = words,
+		native = true,
+		key = if key:peek() ~= "" then key:peek() else nil,
+		veil = veiled,
+		veil_seed = seed:peek(),
+		link_chip = link_chip,
+		attached = attached,
+		find = find,
+		words = {
+			at = function(): number?
+				return if live:get() then 1 else nil
+			end,
+			states = { live_words },
+		},
+	}
+elseif renderer:peek() ~= "luau" then
 	reply = ui.column {
 		w_full = true,
 		min_w = 0,

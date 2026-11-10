@@ -129,6 +129,11 @@ export type Props = {
 	-- in Rust (ds/prose), the rest by this module through the view's hook.
 	-- In place of `window`: the view builds each block once and keeps it.
 	native: boolean?,
+	-- Native: while its text is written, the state that holds it (`at`, which
+	-- of `states`; nil once it isn't), its math read into code by the host
+	-- and grown by each chunk: the view reads it a chunk at a time with no
+	-- script, and reads `text` again once it's done.
+	words: { at: () -> number?, states: { State<string> } }?,
 }
 export type FindAt = { key: string, block: number, k: number }
 export type Find = {
@@ -2291,15 +2296,33 @@ local function native_window(props: Props): { [string]: any }?
 	}
 end
 
+local native_view: (props: Props, source: State<string>) -> Node
 local function native_reply(props: Props): Node
 	local Prose = require("@self/prose")
 	local text = props.text :: () -> string
+	local words = props.words
+	if words then
+		-- Its words from the host's state while they're written, then its
+		-- text's: drawn again once, as it's done.
+		local states = words.states
+		return ui.presence(function(): number
+			return words.at() or 0
+		end, function(at: number): Node
+			return native_view(props, if at > 0 then states[at] else Prose.prepared(text))
+		end)
+	end
+	return native_view(props, Prose.prepared(text))
+end
+
+-- The view of `native_reply`, its text the state `source`.
+function native_view(props: Props, source: State<string>): Node
+	local Prose = require("@self/prose")
 	local open, track = props.open, props.track
 	return ui.column {
 		w_full = true,
 		min_w = 0,
 		ui.markdown_view {
-			Prose.prepared(text),
+			source,
 			style = Prose.style { small = props.small, ink = props.ink },
 			on_link = Prose.on_link(open),
 			link_menu = Prose.link_menu(open, props.link_menu),

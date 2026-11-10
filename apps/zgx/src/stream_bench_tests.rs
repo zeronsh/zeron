@@ -23,6 +23,8 @@ fn window_view(host: &ScriptHost) -> Rc<View> {
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
         subagents: host.shared("chat.subagents", Value::List(Rc::from([]))),
         draft: host.shared("chat.draft", draft_value("", "")),
+        words: [host.shared("chat.draft.words.1", ""), host.shared("chat.draft.words.2", "")],
+        writing: RefCell::default(),
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
@@ -48,6 +50,15 @@ fn window_view(host: &ScriptHost) -> Rc<View> {
 fn draft(view: &View) -> Json {
     view.draft
         .with_untracked(|value| serde_json::from_str(&value.to_json()).unwrap())
+}
+
+/// The words the draft's text part has so far (its words state's).
+fn words(view: &View, d: &Json) -> String {
+    let slot = d["words"].as_u64().unwrap_or(0) as usize;
+    if slot == 0 {
+        return String::new();
+    }
+    view.words[slot - 1].with_untracked(|v| v.to_string())
 }
 
 fn messages(view: &View) -> Json {
@@ -112,25 +123,24 @@ fn a_recorded_stream_reaches_the_transcript_through_the_host() {
         app.wait_until(|app| {
             pump(app);
             let d = draft(&view);
-            let so_far = d["part_text"].as_str().unwrap_or_default();
+            let so_far = words(&view, &d);
             if d["id"] != record::REPLY || so_far.len() < 40 {
                 return false;
             }
-            seen = Some(d.clone());
+            seen = Some((d.clone(), so_far));
             app.find("~\"Streamed through the host\"").is_some()
         }),
         "the draft never showed the reply mid-stream: {}\n{}",
         draft(&view),
         app.tree()
     );
-    let seen = seen.unwrap();
+    let (seen, so_far) = seen.unwrap();
     assert_eq!(seen["part"], record::PART);
-    let so_far = seen["part_text"].as_str().unwrap();
+    // (Its words, with no math in them, as written.)
     assert!(
-        TEXT.starts_with(so_far) && so_far.len() < TEXT.len(),
+        TEXT.starts_with(so_far.as_str()) && so_far.len() < TEXT.len(),
         "a prefix of the reply: {so_far:?}"
     );
-    assert_eq!(seen["text"], seen["part_text"]);
 
     // Its end: the row holds the whole reply, the draft lets it go.
     assert!(

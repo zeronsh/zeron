@@ -107,3 +107,61 @@ test("a paragraph's words fade in as they come and settle once faded", function(
 	expect(node_of(app, '~"A sentence with"')).to_be(id)
 	expect(app:text('~"A sentence with"')).to_contain("arriving")
 end)
+
+-- As the host writes a reply now: the draft names the block and which of
+-- its words states holds the block's words (`words`), and each chunk grows
+-- that state alone (src/chat.rs `write_words`), read by the view in Rust.
+local function write_words(app: any, text: string)
+	app:set_state("chat.draft", { id = "live", part = "t", words = 1 })
+	app:set_state("chat.draft.words.1", text)
+	app:frames(1)
+end
+
+test("a paragraph written through the host's words state keeps its node", function()
+	local app = reply(false)
+	local first: string? = nil
+	for n = 24, #PARAGRAPH + 23, 24 do
+		write_words(app, string.sub(PARAGRAPH, 1, math.min(n, #PARAGRAPH)))
+		expect(app:error()).to_be(nil)
+		local now = node_of(app, '~"Words arriving"')
+		if now then
+			first = first or now
+			expect(now).to_be(first)
+		end
+	end
+	expect(first).never.to_be(nil)
+	app:frames(30)
+	local text = app:text('~"Words arriving"') or ""
+	expect(text).to_contain("going on for a while.")
+end)
+
+test("a reply streamed through the host's words, then done, is the same text shown whole", function()
+	local streamed = reply(true)
+	for n = 24, #MIXED + 23, 24 do
+		write_words(streamed, string.sub(MIXED, 1, math.min(n, #MIXED)))
+		expect(streamed:error()).to_be(nil)
+	end
+	streamed:frames(10)
+	local whole = reply(true)
+	write(whole, MIXED)
+	whole:frames(10)
+	expect(shape(streamed)).to_be(shape(whole))
+	-- Done: its row holds the words, the draft lets them go; drawn the same.
+	streamed:set_state("chat.messages", (function()
+		local list = table.clone(streamed:state("chat.messages"))
+		local last = table.clone(list[#list])
+		last.streaming = false
+		last.text = MIXED
+		last.blocks = { { id = "t", kind = "text", text = MIXED } }
+		list[#list] = last
+		return list
+	end)())
+	streamed:set_state("chat.draft", { id = "", text = "" })
+	streamed:frames(10)
+	expect(streamed:error()).to_be(nil)
+	-- (Its words: the turn's "Working" line under them is the turn's.)
+	local function words(app: any): string
+		return string.match(shape(app), "^(.-)\"Working\"") or shape(app)
+	end
+	expect(words(streamed)).to_be(words(whole))
+end)

@@ -51,6 +51,7 @@ mod images;
 mod links;
 mod pasted;
 mod math;
+mod math_source;
 mod menu_bar;
 mod mermaid;
 mod plugins;

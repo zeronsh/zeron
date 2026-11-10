@@ -11,7 +11,12 @@
 //!                    context_tokens?, context_window?, ask?, queue, todos,
 //!                    tasks }, nil for none
 //!   `chat.messages`  its transcript as ds/transcript's messages, keyed by id
-//!   `chat.draft`     the reply being written: { id, text }
+//!   `chat.draft`     the reply being written: { id, text }, or, while it
+//!                    writes a text part, { id, part, words }: the part's
+//!                    words are `chat.draft.words.<words>` (1 or 2), its
+//!                    words with their math read into code (src/math_source),
+//!                    grown by each chunk's alone (`Shared::append`), which
+//!                    a reply's markdown view reads with no script
 //! and for every window, `chat.catalog`: { state, harnesses, models } as
 //! ds.ModelPicker takes them, a model's `value` "<harness>/<model>".
 //!
@@ -426,6 +431,22 @@ enum CatalogState {
     Ready,
 }
 
+/// The text part a view's words state is being written by (`View::write_words`).
+struct Writing {
+    /// Which of the view's two words states.
+    slot: usize,
+    entry: String,
+    part: String,
+    /// Its words' length when last written.
+    len: usize,
+    prepared: crate::math_source::Prepared,
+}
+impl Writing {
+    fn prepared_whole(&self) -> String {
+        self.prepared.made()
+    }
+}
+
 /// A window's open chat.
 struct View {
     session: Shared,
@@ -433,6 +454,11 @@ struct View {
     /// Its transcript's subagents, so reading them doesn't read a transcript.
     subagents: Shared,
     draft: Shared,
+    /// The words of the text part being written, prepared (see the top):
+    /// two, a new part taking the one the last didn't, so the block the
+    /// last part grew keeps its words until it has let them go.
+    words: [Shared; 2],
+    writing: RefCell<Option<Writing>>,
     rpc: RefCell<Option<Rpc>>,
     open: RefCell<Option<Open>>,
     /// Prompts not yet in the engine's transcript, by chat. They outlive
@@ -568,6 +594,8 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
         subagents: host.shared("chat.subagents", Value::List(Rc::from([]))),
         draft: host.shared("chat.draft", draft_value("", "")),
+        words: [host.shared("chat.draft.words.1", ""), host.shared("chat.draft.words.2", "")],
+        writing: RefCell::default(),
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
@@ -727,6 +755,11 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         messages: host.shared(&format!("chat.lane.{slot}.messages"), Value::List(Rc::from([]))),
         subagents: host.shared(&format!("chat.lane.{slot}.subagents"), Value::List(Rc::from([]))),
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
+        words: [
+            host.shared(&format!("chat.lane.{slot}.draft.words.1"), ""),
+            host.shared(&format!("chat.lane.{slot}.draft.words.2"), ""),
+        ],
+        writing: RefCell::default(),
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
@@ -1760,8 +1793,8 @@ impl View {
     }
 
     /// The reply being written: the last entry's words while it streams.
-    /// `grown`: its words grew (`Change::Words`), so it is written as it is
-    /// rather than compared with the last.
+    /// `grown`: its words grew (`Change::Words`): a text part's grow its
+    /// words state by what's new, and the draft, unchanged, wakes nothing.
     fn publish_draft(&self, grown: bool) {
         let value = {
             let open = self.open.borrow();
@@ -1774,36 +1807,72 @@ impl View {
                     });
                     let id = e["id"].as_str().unwrap_or_default();
                     let words = match tail {
-                        // (`text`, the tail's words too: the page reads the
-                        // block's, and of `text` only whether any are yet.)
-                        // (One copy of the words, shared by both fields.)
                         Some(tail) => {
-                            let words = Value::from(tail["text"].as_str().unwrap_or_default());
+                            let part = tail["id"].as_str().unwrap_or_default();
+                            let slot = self.write_words(id, part, tail["text"].as_str().unwrap_or_default(), grown);
                             Value::record([
                                 ("id", Value::from(id)),
-                                ("text", words.clone()),
-                                ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
-                                ("part_text", words),
+                                ("part", Value::from(part)),
+                                ("words", Value::Num(slot as f64 + 1.)),
                             ])
                         }
-                        None => draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default()),
+                        None => {
+                            self.writing.replace(None);
+                            draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default())
+                        }
                     };
                     with_thought(words, e["parts"].as_array())
                 }
-                _ => draft_value("", ""),
+                _ => {
+                    self.writing.replace(None);
+                    draft_value("", "")
+                }
             }
         };
-        // Grown, it's written as it is: `set` would reconcile it with the
-        // last draft and compare them, walking the whole reply over again
-        // for words that changed at its end (each chunk's).
-        if grown {
-            self.draft.signal().mutate(|draft| {
-                *draft = value;
-                true
-            });
-        } else {
-            self.draft.set(value);
+        // (Small: compared, so a chunk of words, which leaves it as it was,
+        // wakes nothing that reads it.)
+        self.draft.set(value);
+    }
+
+    /// The words of text part `part` of entry `entry` as they are now
+    /// (`text`), into the words state it's written to: grown by what's new
+    /// when it's the part written to last and only `grown` at its end, else
+    /// set whole in the other one. Which one it is (0 or 1).
+    fn write_words(&self, entry: &str, part: &str, text: &str, grown: bool) -> usize {
+        let mut writing = self.writing.borrow_mut();
+        let same = writing.as_ref().is_some_and(|w| w.entry == entry && w.part == part);
+        if !same {
+            let slot = writing.as_ref().map_or(0, |w| 1 - w.slot);
+            let mut prepared = crate::math_source::Prepared::default();
+            let made = match prepared.feed(text, false) {
+                crate::math_source::Edit::Set(whole) => whole,
+                _ => String::new(),
+            };
+            self.words[slot].set(Value::from(made.as_str()));
+            *writing = Some(Writing { slot, entry: entry.into(), part: part.into(), len: text.len(), prepared });
+            return slot;
         }
+        let w = writing.as_mut().expect("the part written to");
+        // (Grown at its end, as an append frame grows it, it's read on from
+        // where the last read could go on; anything else from its start.)
+        let extends = grown && text.len() >= w.len && text.is_char_boundary(w.len);
+        if extends && text.len() == w.len {
+            return w.slot;
+        }
+        w.len = text.len();
+        match w.prepared.feed(text, extends) {
+            crate::math_source::Edit::None => {}
+            crate::math_source::Edit::Append(more) => {
+                if self.words[w.slot].append(&more).is_err() {
+                    let whole = w.prepared_whole();
+                    self.words[w.slot].set(Value::from(whole.as_str()));
+                }
+            }
+            crate::math_source::Edit::Set(whole) => {
+                self.words[w.slot].set(Value::from(whole.as_str()));
+            }
+        }
+        w.slot
     }
 
     /// Whether a reset left so much to build that it goes a little at a time
