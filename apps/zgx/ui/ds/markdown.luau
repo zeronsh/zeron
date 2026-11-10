@@ -1964,40 +1964,14 @@ return function(props: Props): Node
 			return shows
 		end
 		judges[at] = judge
-		-- Its box within OVERSCAN of the view's, from both as laid out (nil
-		-- until they are): what `on_visible` will say, read once as it mounts.
-		local function near_now(): boolean?
-			local el, view = r:peek(), w.view:peek()
-			if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
-				return nil
-			end
-			local y, top = el.y :: number, view.y :: number
-			return y < top + (view.height :: number) + OVERSCAN and y + (el.height :: number) > top - OVERSCAN
-		end
 		return ui.div {
 			ref = r,
 			w_full = true,
 			min_w = 0,
-			-- Mounted (a row a jump brings into view, the list making it in
-			-- the frame that shows it): judged a tick on, once laid out, from
-			-- its box, as zgx first tells `on_visible` of it a frame later,
-			-- when it would show held, blank, for that frame.
-			on_mount = function()
-				ui.after(0, function()
-					if seen == nil then
-						seen = near_now()
-						judge()
-					end
-				end)
-			end,
 			visible_margin = OVERSCAN,
-			-- (Judged a tick on, as the frame's layout lets what's due at
-			-- once run and lays out again: a run a scroll brings near is
-			-- built in the frame it comes near in, as when a scroll's pass
-			-- judged it then.)
 			on_visible = function(visible: boolean)
 				seen = visible
-				ui.after(0, judge)
+				judge()
 			end,
 			on_resize = function(size: { w: number, h: number })
 				-- (Heard even when it was just judged away: it was laid out
