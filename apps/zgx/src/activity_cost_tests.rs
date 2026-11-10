@@ -1087,7 +1087,7 @@ fn activity_goal() {
         bench.app.scroll("transcript", dy);
         cost.add(&bench.frame());
     }
-    report(&format!("{n} calls open, scrolled"), &cost, ticks, ticks, seconds);
+    report(&format!("{n} calls open, scrolled ({} nodes at the end)", bench.nodes()), &cost, ticks, ticks, seconds);
 }
 
 #[test]
