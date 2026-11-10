@@ -554,11 +554,18 @@ fn scenarios(n: usize, think: usize, open: bool) {
         call_cost.add(&cost);
         if tracing {
             // (A few frames into the arrival's animations.)
-            bench.frames(6);
-            for frame in zgx::trace::frames(7) {
+            // (`DEBUG_TRACE_FRAMES`: how many of the arrival's frames, 7 unless set.)
+            let traced: usize = std::env::var("DEBUG_TRACE_FRAMES").ok().and_then(|n| n.parse().ok()).unwrap_or(7);
+            bench.frames(traced - 1);
+            for frame in zgx::trace::frames(2 * traced) {
                 let mut runs = frame.runs.clone();
                 runs.sort_by(|a, b| b.micros.total_cmp(&a.micros));
-                eprintln!("TRACE frame {} | measured {} nodes ({:.0} µs) | runs {}", frame.index, frame.layout.measured, frame.layout.micros, frame.runs.len());
+                let phases: String = frame.phases.iter().filter(|p| p.1 > 0).map(|p| format!(" {} {}k", p.0, p.1 / 1000)).collect();
+                let total: u64 = frame.phases.iter().map(|p| p.1).sum();
+                eprintln!(
+                    "TRACE frame {} | measured {} nodes ({:.0} µs) | runs {} | {}k instr:{phases}",
+                    frame.index, frame.layout.measured, frame.layout.micros, frame.runs.len(), total / 1000
+                );
                 for run in runs.iter().take(12) {
                     eprintln!("TRACE   run {:>7.1} µs {}", run.micros, run.name.as_deref().unwrap_or("?"));
                 }
