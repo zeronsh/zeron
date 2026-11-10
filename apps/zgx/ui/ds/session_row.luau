@@ -65,6 +65,9 @@ export type Session = {
 	id: string,
 	title: string,
 	status: status.Kind?,
+	-- Its device isn't reachable right now (its presence went quiet): its
+	-- row says so (`M.unreachable`).
+	offline: boolean?,
 	time: (number | string)?,
 	agent: Mark.Name?,
 	-- An agent from the ACP registry: its harness (`acp.<id>`) and icon,
@@ -309,6 +312,36 @@ function M.pr_badge(pr: { number: number, state: string?, title: string? }): Nod
 		},
 		ui.text { tostring(pr.number), text_size = "$font.size.xs", weight = "$font.weight.medium", color = hue, tabular = true, opacity = 0.85 },
 	}
+end
+
+-- A chat whose device is away: a small wifi-off glyph in the warning hue,
+-- its tooltip saying which device and what that means; reachable, nothing.
+-- (`on`: the "Unreachable chats" setting.)
+function M.unreachable(cur: () -> Session, on: () -> boolean): Node
+	-- What it says, or "" for nothing (a tooltip takes a string: it follows
+	-- its device's name and the language).
+	local function says(): string
+		if not (on() and cur().offline == true) then
+			return ""
+		end
+		return locale.s("ds.sidebar.unreachable", { device = cur().device or locale.s("shell.sidebar.unknown_device") })
+	end
+	-- (Not shown, it is no node at all: it leaves no gap beside its neighbours.)
+	return ui.show(function(): boolean
+		return says() ~= ""
+	end, ui.presence(says, function(text: string): Node
+		return ui.div {
+			shrink = 0,
+			w = 16,
+			h = 16,
+			items = "center",
+			justify = "center",
+			color = "$zeron.status.limited",
+			tooltip = text,
+			label = text,
+			Icon { name = "wifi-off", size = 14 },
+		}
+	end))
 end
 
 -- Subagents running under it (Zeron's running_pill.rs): its working dot

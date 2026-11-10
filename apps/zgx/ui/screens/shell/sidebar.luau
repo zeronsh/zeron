@@ -77,6 +77,9 @@ local shared = {
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
+		-- A chat whose device is away (its presence went quiet) wears a
+		-- wifi-off glyph, so a dead chat shows before it's clicked: on.
+		unreachable = ui.persist("shell_sidebar_show_unreachable", true),
 	},
 	-- The groups showing all their sessions ("Show N more"): until the app
 	-- quits (a reload keeps them).
@@ -257,6 +260,20 @@ local function devices(): ({ [string]: string }, string?)
 		end
 	end
 	return names, here
+end
+
+-- The devices that are away now, by id: the engine's own judgement of its
+-- presence (`online`: this device always, another seen within its
+-- heartbeat's window, src/sessions.rs). A device it doesn't list isn't
+-- called away.
+local function away(): { [string]: boolean }
+	local out: { [string]: boolean } = {}
+	for _, d in sessions.now:get().devices do
+		if d.online == false and not d.here then
+			out[d.id] = true
+		end
+	end
+	return out
 end
 
 -- A device's id by the name its group shows (ds.Sidebar groups by name):
@@ -476,6 +493,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	local only = narrow:get()
 	local just = only_project()
 	local names = devices()
+	local offline = away()
 	local out: { ds.SidebarProject } = {}
 	local by: { [string]: ds.SidebarProject } = {}
 	-- One group for each repository, whichever device its clones are on: it stands
@@ -545,6 +563,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			id = c.id,
 			title = c.title,
 			status = status :: any,
+			offline = offline[c.device] == true,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,

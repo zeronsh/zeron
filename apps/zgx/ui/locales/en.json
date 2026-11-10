@@ -446,6 +446,7 @@
         "label": "Pull request {n}, {state, select, open {open} merged {merged} closed {closed} other {draft}}"
       },
       "subagents_running": "{n, plural, one {# subagent running} other {# subagents running}}",
+      "unreachable": "{device} is offline — this chat can't run until it reconnects",
       "session_name": "Session name",
       "archive": "Archive",
       "unarchive": "Unarchive",
@@ -490,6 +491,7 @@
         "compact": "Compact",
         "create_section": "Create section",
         "keep_active": "Active when collapsed",
+        "unreachable": "Unreachable chats",
         "devices_first": "Devices first",
         "projects_first": "Projects first",
         "empty_projects": "Empty projects",

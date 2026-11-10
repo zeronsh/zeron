@@ -134,6 +134,9 @@ export type Details = {
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
 	keep_active: State<boolean>?,
+	-- A chat whose device is away wears a wifi-off glyph, in its row and on
+	-- the rail. On unless the caller says.
+	unreachable: State<boolean>?,
 }
 -- How grouped sessions are ordered (Zeron's Sort): the most recently
 -- updated first, or the most recently made. (Pinned and sections keep the
@@ -671,6 +674,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local expanded = props.expanded or ui.use_state({} :: { [string]: boolean })
 	-- Whether a folded place still lists its sessions in a state.
 	local keep_active: State<boolean> = details.keep_active or ui.use_state(true)
+	local show_unreachable: State<boolean> = details.unreachable or ui.use_state(true)
 	-- The first nine sessions the list shows, by id: their jump (⌘1–⌘9).
 	local slots = ui.use_state({} :: { [string]: number })
 	local function hinting(): boolean
@@ -1083,6 +1087,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- corner unseen).
 	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
 		local cur = row or now_of(s)
+		local function rail_offline(): boolean
+			return railed() and cur().status == nil and show_unreachable:get() and cur().offline == true
+		end
 		-- (On the rail, its state's glyph, one of its kind.)
 		return ui.div {
 			-- (Its glyph follows its state in place: ds/status.)
@@ -1097,9 +1104,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					size = 16,
 				}
 			),
+			-- (On the rail, a chat of a device that's away has no row to carry
+			-- its glyph: it takes the agent's place, in the warning hue.)
 			ui.show(function(): boolean
-				return not railed() or cur().status == nil
+				return (not railed() or cur().status == nil) and not rail_offline()
 			end, agent(s, strong, cur)),
+			ui.show(rail_offline, SessionRow.unreachable(cur, function(): boolean
+				return true
+			end)),
 		}
 	end
 	-- Whether a session asks to be seen: in a state, or the one open.
@@ -1399,6 +1411,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				line(
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
+					SessionRow.unreachable(function(): Session
+						return cur()
+					end, function(): boolean
+						return show_unreachable:get()
+					end),
 					subagents_pill(function(): number
 						return cur().subagents or 0
 					end),
@@ -4630,6 +4647,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 		{ key = "project_icon", label = "ds.sidebar.view.project_icon", icon = "project-default" },
 		{ key = "location", label = "ds.sidebar.view.location", icon = "remote-server" },
 	}
+	if (details :: any).unreachable then
+		table.insert(SHOW, { key = "unreachable", label = "ds.sidebar.view.unreachable", icon = "wifi-off" })
+	end
 	if (details :: any).keep_active then
 		table.insert(SHOW, { key = "keep_active", label = "ds.sidebar.view.keep_active", icon = "bell" })
 	end
