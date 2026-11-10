@@ -82,6 +82,9 @@ export type Child = {
 	created: number,
 	harness: string?,
 	agent: string?,
+	-- Started by a Zeron chat (through Zeron's tools), as a subagent or a
+	-- side chat: "subagent" | "side"; nil for one the person started.
+	child_kind: string?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.
@@ -125,6 +128,32 @@ M.now = ui.shared("sessions", {
 	places = { pinned = {}, sections = {} },
 	places_ready = false,
 } :: Now)
+
+-- Its parts, each followed on its own: a chat's message changes `chats`
+-- (every few seconds while chats run), and what reads only the projects,
+-- the devices or the places doesn't run again for it. Read one of these,
+-- not `now:get().projects`, where the part is all that's used.
+M.projects = ui.computed(function(): { Project }
+	return M.now:get().projects
+end)
+M.devices = ui.computed(function(): { Device }
+	return M.now:get().devices
+end)
+M.places = ui.computed(function(): Places
+	return M.now:get().places
+end)
+M.here = ui.computed(function(): string?
+	return M.now:get().here
+end)
+M.state = ui.computed(function(): string
+	return M.now:get().state
+end)
+M.archived = ui.computed(function(): { Chat }
+	return M.now:get().archived or {}
+end)
+M.connection = ui.computed(function(): string?
+	return M.now:get().connection
+end)
 
 local function quietly(): (any) -> ()
 	return function() end

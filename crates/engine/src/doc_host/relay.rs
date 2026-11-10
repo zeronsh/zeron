@@ -920,8 +920,8 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(posts.load(Ordering::SeqCst), 0);
-        assert!(crate::doc_host::checkpoint_fits(32 * 1024 * 1024));
-        assert!(!crate::doc_host::checkpoint_fits(32 * 1024 * 1024 + 1));
+        assert!(crate::doc_host::checkpoint_fits(256 * 1024 * 1024));
+        assert!(!crate::doc_host::checkpoint_fits(256 * 1024 * 1024 + 1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -177,6 +177,19 @@ pub fn headless_artifact(version: &str) -> String {
     format!("zeron-{version}-{os}-{arch}.tar.gz")
 }
 
+/// The directory under a managed install's root that holds `version`.
+///
+/// A beta's isn't named as a version: its engine is a shipped stable one, which
+/// reads `current`'s directory name, would take a beta's version for a newer
+/// engine and restart into itself each time it's idle. A name that doesn't
+/// parse tells it nothing was installed ([`installed_version`]).
+pub fn managed_dir(version: &str) -> String {
+    match Channel::of_version(version) {
+        Channel::Beta => format!("beta-{version}"),
+        Channel::Stable => version.to_owned(),
+    }
+}
+
 /// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
@@ -583,6 +596,18 @@ impl InstallKind {
         }
     }
 
+    /// Whether this install's updater follows `update-channel.json`: a macOS
+    /// app always; on Windows and the Linux desktop a beta build alone, so
+    /// stable builds there (and every engine, which is a stable build) stay on
+    /// stable and a tester can still leave beta.
+    pub fn follows_channels(&self) -> bool {
+        match self {
+            Self::MacApp { .. } => true,
+            Self::Unmanaged => false,
+            _ => self.supports_desktop_update() && Channel::of_version(app_version()) == Channel::Beta,
+        }
+    }
+
     /// Why this installation cannot replace itself, when it can't. Checked
     /// before downloading so the UI can explain the fix instead of failing
     /// after a wasted download with a raw rename error.
@@ -647,11 +672,11 @@ impl InstallKind {
                 Ok(())
             }
             Self::Managed { app_root } if self.supports_desktop_update() => {
-                let version = staged
+                let dir = staged
                     .file_name()
                     .and_then(|name| name.to_str())
                     .context("staged install has no version directory")?;
-                apply_headless(app_root, version)?;
+                apply_headless(app_root, dir.strip_prefix("beta-").unwrap_or(dir))?;
                 if relaunch {
                     let binary = app_root.join("current").join("zeron");
                     relaunch_after_exit(&binary, Path::new(""));
@@ -1062,7 +1087,8 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
 // Managed (symlink) installs — the daemon/VPS path and Linux desktop
 // ---------------------------------------------------------------------------
 
-/// Download + unpack the headless tarball into `app_root/<ver>` (idempotent —
+/// Download + unpack the headless tarball into `version`'s directory under
+/// `app_root` ([`managed_dir`]; idempotent —
 /// an already-staged version is reused). Returns the versioned dir.
 pub async fn stage_headless(
     edge_url: &str,
@@ -1086,7 +1112,7 @@ async fn stage_headless_on(
         parse_version(version).is_some(),
         "invalid release version {version:?}"
     );
-    let dest = app_root.join(version);
+    let dest = app_root.join(managed_dir(version));
     if dest.join("zeron").exists() {
         return Ok(dest);
     }
@@ -1133,12 +1159,12 @@ async fn stage_headless_on(
     result
 }
 
-/// Atomically repoint `app_root/current` at `app_root/<ver>` (symlink to a temp
+/// Atomically repoint `app_root/current` at `version`'s directory (symlink to a temp
 /// name, then rename over — never a window with no `current`).
 pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        let target = app_root.join(version);
+        let target = app_root.join(managed_dir(version));
         if !target.join("zeron").exists() {
             bail!("{} is not a staged install", target.display());
         }
@@ -3748,6 +3774,27 @@ mod tests {
         // A bundle from before the key.
         write("<plist><dict><key>CFBundleShortVersionString</key><string>0.2.134</string></dict></plist>");
         assert_eq!(bundle_engine_version(&bundle).as_deref(), Some("0.2.134"));
+    }
+
+    /// What a shipped engine reads from `current`: a beta's directory must not
+    /// look like a newer engine, or it restarts into itself whenever it's idle.
+    #[cfg(unix)]
+    #[test]
+    fn a_beta_s_directory_tells_an_engine_nothing_was_installed() {
+        assert_eq!(managed_dir("0.2.137"), "0.2.137");
+        assert_eq!(managed_dir("0.2.137-beta.1"), "beta-0.2.137-beta.1");
+        assert!(parse_version(&managed_dir("0.2.137-beta.1")).is_none());
+        let root = tempfile::tempdir().unwrap();
+        for dir in ["beta-0.2.137-beta.1", "0.2.136"] {
+            std::fs::create_dir_all(root.path().join(dir)).unwrap();
+            std::fs::write(root.path().join(dir).join("zeron"), "").unwrap();
+        }
+        let managed = InstallKind::Managed { app_root: root.path().to_path_buf() };
+        apply_headless(root.path(), "0.2.137-beta.1").unwrap();
+        assert_eq!(installed_version(&managed), None);
+        // Back on Stable it reads as ever.
+        apply_headless(root.path(), "0.2.136").unwrap();
+        assert_eq!(installed_version(&managed).as_deref(), Some("0.2.136"));
     }
 
     #[test]

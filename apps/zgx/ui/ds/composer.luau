@@ -127,6 +127,12 @@ export type Props = {
 	harnesses: { ModelPicker.Harness } | State<{ ModelPicker.Harness }> | () -> { ModelPicker.Harness },
 	models: { ModelPicker.Model } | State<{ ModelPicker.Model }> | () -> { ModelPicker.Model },
 	models_loading: (() -> boolean)?,
+	-- The model's name while the catalog doesn't list it (ds.ModelPicker's
+	-- `model_label`).
+	model_label: (() -> string?)?,
+	-- What runs while no model is chosen, shown and not sent
+	-- (ds.ModelPicker's `default_model`).
+	default_model: (() -> string?)?,
 	-- A model's agent's accounts, putting one in use, and asking after them
 	-- again (ds.ModelPicker's).
 	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
@@ -273,6 +279,12 @@ export type Props = {
 	-- send).
 	on_mention: ((item: any, trigger: string, token: string) -> ())?,
 	mention_empty: { [string]: string }?,
+	-- Whose draft it shows (a composer that moves between chats: the
+	-- chat), so a mention list put away is that draft's alone.
+	draft_key: (() -> any)?,
+	-- A trigger whose list is a launcher, by trigger: its sections, in order
+	-- (ds/composer_mentions `sections`).
+	mention_sections: { [string]: { { id: string, label: any } } }?,
 }
 
 -- Zeron's geometry. The one line: 47 points inside the hairline, the text
@@ -467,6 +479,7 @@ local function list_of(given: any): any
 end
 
 local function submenu(
+	siblings: { State<boolean> },
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
@@ -490,7 +503,16 @@ local function submenu(
 		-- (None yet, as a list still coming: a blank row.)
 		return listed[fallback] or listed[1] or { value = "", label = "" }
 	end
+	local own: State<boolean>? = nil
+	local function close_siblings()
+		for _, open in siblings do
+			if open ~= own then
+				open:set(false)
+			end
+		end
+	end
 	return Dropdown {
+		on_open = close_siblings,
 		value = value,
 		items = choices,
 		actions = actions,
@@ -498,16 +520,37 @@ local function submenu(
 		label = label :: any,
 		search = search or false,
 		width = 260,
+		submenu = true,
 		-- Close beside the panel, as a submenu sits: 2 from its edge (the
 		-- row it opens from sits 5 inside it, its inset and border).
 		placement = { side = "right", align = "start", offset = 7 },
 		trigger = function(menu: Dropdown.Menu): Node
-			return menu_row {
+			own = menu.open
+			table.insert(siblings, menu.open)
+			return ui.menu_item(Menu.look {
 				label = label,
 				bg = function()
 					return if menu.open:get() then "$hover" else "#00000000"
 				end,
-				on_click = menu.toggle,
+				-- A press opens it, as hovering does; one already open stays
+				-- open (a hover opened it just before), as a system menu's row.
+				on_click = function()
+					close_siblings()
+					if not menu.open:peek() then
+						menu.toggle()
+					end
+				end,
+				on_hover = function(inside: boolean)
+					if menu.on_hover then
+						menu.on_hover(inside)
+					end
+					if inside then
+						close_siblings()
+						if not menu.open:peek() then
+							menu.toggle()
+						end
+					end
+				end,
 				-- The choice's own tile (a project's hue or artwork), else its
 				-- icon: one or the other, following the choice.
 				ui.presence(function(): string
@@ -527,6 +570,10 @@ local function submenu(
 							end,
 							emoji = function(): string?
 								return current().emoji
+							end,
+							-- (A project's choice: its tile `.project-icon`.)
+							project = function(): string?
+								return (current() :: any).project
 							end,
 							size = 18,
 						}
@@ -552,7 +599,7 @@ local function submenu(
 					Icon { name = "wifi-off", size = 12 },
 				}),
 				Menu.chevron(),
-			}
+			})
 		end,
 	}
 end
@@ -601,6 +648,7 @@ local function work_in(
 	device: State<string?>?,
 	devices: ({ Device } | State<{ Device }> | () -> { Device })?
 ): Node
+	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
 	}
@@ -626,7 +674,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return #choices() > 0
-			end, submenu(locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
+			end, submenu(siblings, locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
 		)
 	end
 	if project and projects then
@@ -653,7 +701,7 @@ local function work_in(
 		local p = project
 		table.insert(
 			rows,
-			submenu(locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
+			submenu(siblings, locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
 				worded({
 					icon = "close",
 					on_click = function()
@@ -687,7 +735,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
-			end, submenu(locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
+			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }
@@ -1074,6 +1122,8 @@ return ui.component(function(props: Props): Node
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
 		on_choose = props.on_mention,
+		key = props.draft_key,
+		sections = props.mention_sections,
 		in_view = function(): boolean
 			return (pill_w:get() or 0) > 0
 		end,
@@ -1395,6 +1445,8 @@ return ui.component(function(props: Props): Node
 			harnesses = props.harnesses :: any,
 			models = props.models :: any,
 			loading = props.models_loading,
+			model_label = props.model_label,
+			default_model = props.default_model,
 			accounts = props.accounts,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,
@@ -1746,6 +1798,18 @@ return ui.component(function(props: Props): Node
 		return if type(own) == "string" then own else own:get()
 	end
 
+	-- A press on the composer's blank room (the pill's padding, its controls'
+	-- rows between them, under the draft): the draft takes the keys, its
+	-- caret at its end.
+	local function to_draft()
+		local el = field:peek()
+		if el then
+			el:focus()
+			local n = #value:peek()
+			el:set_selection_bytes(n, n)
+		end
+	end
+
 	local surface = ui.div {
 		ref = pill,
 		on_resize = measure(pill_w, "w"),
@@ -1775,7 +1839,10 @@ return ui.component(function(props: Props): Node
 				end
 			end
 			else nil,
-		-- A press anywhere but a control goes to the draft.
+		-- A press anywhere but a control goes to the draft (its caret at
+		-- its end). (Under the pill's controls and draft, which take their
+		-- own; `focus_on_press = false`, so zgx doesn't move focus off it
+		-- to what's under the press after.)
 		ui.div {
 			absolute = true,
 			left = 0,
@@ -1783,12 +1850,8 @@ return ui.component(function(props: Props): Node
 			top = 0,
 			bottom = 0,
 			cursor = "text",
-			on_press = function()
-				local el = field:peek()
-				if el then
-					el:focus()
-				end
-			end,
+			focus_on_press = false,
+			on_press = to_draft,
 		},
 		-- The measures: the draft on one line, and wrapped as it would be
 		-- opened out (a mark after it, so a last empty line counts).
@@ -1875,6 +1938,12 @@ return ui.component(function(props: Props): Node
 				highlight = mentions.highlight,
 				active_descendant = m.descendant,
 				on_caret = m.on_caret,
+				on_focus = function()
+					m.on_focus(true)
+				end,
+				on_blur = function()
+					m.on_focus(false)
+				end,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
@@ -2207,6 +2276,7 @@ return ui.component(function(props: Props): Node
 		footer = ui.row {
 			id = props.toolbar_id,
 			on_resize = measure(footer_w, "w"),
+			relative = true,
 			h = 24,
 			-- On the tray: a tight step under the pill and above the tray's
 			-- foot (the pill's full control inset read too airy there), and
@@ -2223,10 +2293,24 @@ return ui.component(function(props: Props): Node
 			end :: any,
 			items = "center",
 			gap = "$space.1",
+			-- Its blank room, between and beside its controls: the draft's,
+			-- as the pill's is.
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				focus_on_press = false,
+				on_press = to_draft,
+			},
 			-- Clipped: past every fold, it gives way under the right group
 			-- rather than running beneath it.
 			ui.row {
 				hook = "chat.composer.toolbar.start",
+				-- (Its blank room passes the press on, to the draft's;
+				-- its controls take their own.)
+				pointer_events = "none",
 				gap = "$space.1",
 				items = "center",
 				min_w = 0,
@@ -2236,6 +2320,7 @@ return ui.component(function(props: Props): Node
 			},
 			ui.row {
 				hook = "chat.composer.toolbar.end",
+				pointer_events = "none",
 				on_resize = measure(right_w, "w"),
 				items = "center",
 				shrink = 0,

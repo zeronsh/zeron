@@ -16,6 +16,14 @@ local sessions = require("@account/sessions")
 -- (Its start as it is, a new chat: not the launch's jump to the latest
 -- session, which its tests drive themselves.)
 require("@app/screens/shell/route").launched:set(true)
+-- (The sidebar these tests were written on: one list, Activity off, empty
+-- projects listed. The app opens with Activity, by project then device and
+-- no empty projects (tests/sidebar_defaults.test.luau); a test of those
+-- views turns them on itself.)
+require("@app/screens/shell/activity").on:set(false)
+local sidebar_options = require("@app/screens/shell/sidebar").options
+sidebar_options.organize:set({})
+sidebar_options.details.empty_projects:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
 -- The host's chats, as the engine has them: one record a chat (its session,
@@ -142,6 +150,17 @@ end
 -- (A headless host draws no WebP: a new chat on no picture.)
 local appearance = require("@app/screens/shell/appearance")
 appearance.wallpaper:set("none")
+-- A wallpaper chosen, for what stands over a new chat's art (v2's
+-- title-bar island): its picture needn't draw.
+ui.command {
+	id = "fixture.wallpaper",
+	title = "Fixture: a wallpaper",
+	menu = "Fixture",
+	run = function()
+		appearance.image:set({ path = "/fixture/wallpaper.png", name = "wallpaper.png", w = 1600, h = 1000, x = 0.5, y = 0.5, zoom = 1 })
+		appearance.choose("image")
+	end,
+}
 -- The files pane's host calls (its own fixture drives them): a folder of
 -- one file, a beat later, as the host settles.
 local files_api = require("@app/screens/files/api") :: any
@@ -191,12 +210,28 @@ files_api.search = function(): any
 end
 local chat_store = store :: any
 for name, f in chat_store do
-	if type(f) == "function" then
+	-- (A sent prompt's id is the store's own: its row is keyed by it.)
+	if type(f) == "function" and name ~= "new_id" then
 		chat_store[name] = function() end
 	end
 end
 -- (Its open chat shown as the host's chats have it, above.)
 chat_store.open = open_store
+-- A message sent, answered as the host would (taken); each kept in
+-- `fixture_sent`, for a test to read.
+local sent = ui.state("fixture_sent", {} :: { any })
+chat_store.send = function(req: any): any
+	local now = table.clone(sent:peek())
+	table.insert(now, req)
+	sent:set(now)
+	return {
+		after = function(_, ok: (any) -> ())
+			ui.after(0, function()
+				ok(nil)
+			end)
+		end,
+	}
+end
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
@@ -235,6 +270,8 @@ local model = {
 	places = { pinned = {}, sections = {} } :: any,
 }
 
+-- (`fixture.sessions_loading`: an engine that hasn't answered yet, nothing heard.)
+local unheard = false
 local function publish()
 	local chats = {}
 	for _, c in model.chats do
@@ -249,7 +286,7 @@ local function publish()
 		table.insert(sections, { id = s.id, name = s.name, sessions = table.clone(s.sessions), collapsed = s.collapsed == true })
 	end
 	sessions.now:set({
-		state = "ready",
+		state = if unheard then "loading" else "ready",
 		here = model.here,
 		devices = model.devices,
 		projects = model.projects,
@@ -456,6 +493,28 @@ local icons_refused: string? = nil
 -- Cloud's machines among the devices, as the engine lists them: two
 -- sessions' (their platform, id and capability say Cloud's), never a device
 -- to pick.
+ui.command {
+	id = "fixture.sessions_loading",
+	title = "Fixture: an engine that hasn't answered, no chats heard",
+	run = function()
+		unheard = true
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_sessions",
+	title = "Fixture: an engine that answered, with no chats",
+	run = function()
+		unheard = false
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
 ui.command {
 	id = "fixture.cloud_machines",
 	title = "Fixture: Cloud sessions' machines among the devices",
@@ -831,6 +890,13 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "session_delete_fails",
+	title = "The host refuses to delete “Tidy the tests”",
+	run = function()
+		refused.a3 = true
+	end,
+}
+ui.command {
 	id = "archive_many",
 	title = "Thirty sessions archived elsewhere",
 	run = function()
@@ -914,6 +980,30 @@ ui.command {
 	run = function()
 		table.insert(model.chats, { id = "reg1", title = "Moved to Factory Droid", project = "atlas", device = "mac", updated = NOW - 3 * HOUR, created = NOW - 6 * HOUR, agent = "acp.factory-droid", harness = "acp.factory-droid" })
 		publish()
+	end,
+}
+-- A message in a chat that's running: the third most recent comes to the
+-- top, as the engine's list says once a reply moves (src/slide_bench_tests.rs
+-- sends one every two seconds). Its time by a count, not the clock, so every
+-- run moves the same rows at the same frames.
+local messages = 0
+ui.command {
+	id = "message",
+	title = "A message lands in a running chat",
+	run = function()
+		local live = {}
+		for _, c in model.chats do
+			table.insert(live, c)
+		end
+		table.sort(live, function(a: any, b: any): boolean
+			return a.updated > b.updated
+		end)
+		local c = live[math.min(3, #live)]
+		if c then
+			messages += 1
+			c.updated = NOW + messages
+			publish()
+		end
 	end,
 }
 ui.command {
@@ -1165,12 +1255,15 @@ ui.command {
 	end,
 }
 -- A plugin narrowing the sidebar (`sidebar.filter`): to working sessions,
--- and to nonsense (a plugin's mistake, read as none).
+-- and to nonsense (a plugin's mistake, read as none). The host names the
+-- plugin allowed to (`sidebar.filter_by`), as src/plugins does.
 local sidebar_filter = ui.shared("sidebar.filter", nil :: any)
+local sidebar_filter_by = ui.shared("sidebar.filter_by", nil :: any)
 ui.command {
 	id = "focus",
 	title = "Focus shows working sessions only",
 	run = function()
+		sidebar_filter_by:set("Focus")
 		sidebar_filter:set({ statuses = { "working", "nonsense" }, by = "Focus" })
 	end,
 }
@@ -1205,6 +1298,15 @@ ui.command {
 	title = "A section of yours",
 	run = function()
 		model.places = { pinned = {}, sections = { { id = "later", name = "Later", sessions = { "b2" } } } }
+		publish()
+	end,
+}
+-- A section named longer than the sidebar is wide.
+ui.command {
+	id = "long_section",
+	title = "A section with a long name",
+	run = function()
+		model.places = { pinned = {}, sections = { { id = "later", name = "Everything to read again before the release goes out on Friday", sessions = { "b2" } } } }
 		publish()
 	end,
 }
@@ -1297,6 +1399,13 @@ local function editor(): any
 end
 ui.command { id = "fixture.edit_project", title = "Fixture: edit project", menu = "Fixture", run = function()
 	editor().open("borealis")
+end }
+-- (Each copy of Atlas after `atlas_cloned_on_box`: tests/project_default.)
+ui.command { id = "fixture.edit_project_atlas", title = "Fixture: edit Atlas", menu = "Fixture", run = function()
+	editor().open("atlas")
+end }
+ui.command { id = "fixture.edit_project_atlas_clone", title = "Fixture: edit Atlas's clone", menu = "Fixture", run = function()
+	editor().open("atlas-clone")
 end }
 ui.command { id = "fixture.edit_project_emoji", title = "Fixture: edit project, emoji", menu = "Fixture", run = function()
 	editor().open("borealis", { kind = "emoji", emoji = "🚀", hue = "amber" })

@@ -110,6 +110,38 @@ pub fn pending_refs_in(text: &str) -> Vec<String> {
         })
         .collect()
 }
+/// Every path listed on a text's attachment-ref lines (`- …`), refs or not.
+pub fn attachment_lines_in(text: &str) -> Vec<String> {
+    let Some(at) = text.find("Attached images (local files") else {
+        return Vec::new();
+    };
+    text[at..]
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let path = line.trim_start().strip_prefix("- ")?.trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// The last component of `path` in either separator: a path made on another
+/// device keeps its own (`C:\Users\…\x.png` read on macOS, or the reverse).
+fn foreign_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Whether `name` is a committed upload's (`{id8}-{sanitized name}`).
+fn is_upload_name(name: &str) -> bool {
+    let Some((id8, rest)) = name.split_once('-') else {
+        return false;
+    };
+    id8.len() == 8
+        && id8.chars().all(|c| c.is_ascii_alphanumeric())
+        && !rest.is_empty()
+        && sanitize(name) == name
+}
+
 /// Hard cap on an assembled file.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Multiple of 3 so independent base64 chunks concatenate losslessly.
@@ -285,6 +317,42 @@ impl Uploads {
             .join(format!("{id8}-{}", sanitize(file_name)))
     }
 
+    /// This device's own copy of an upload named by a path made elsewhere:
+    /// another device's or another OS user's uploads dir (its absolute path
+    /// means nothing here), whose bytes were also committed here under the
+    /// same deterministic `{id8}-{name}`. `None` when `path` is readable as it
+    /// is, isn't an upload's, or this device has no such file.
+    pub fn local_copy(&self, path: &str) -> Option<String> {
+        if is_pending_ref(path) || Path::new(path).is_file() {
+            return None;
+        }
+        let name = foreign_file_name(path);
+        if !is_upload_name(name) {
+            return None;
+        }
+        let read_roots = self
+            .inner
+            .read_only_roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        std::iter::once(self.inner.dir.clone())
+            .chain(read_roots)
+            .map(|root| root.join(name))
+            .find(|candidate| candidate.is_file())
+            .map(|found| found.to_string_lossy().to_string())
+    }
+
+    /// A path the agent can open on THIS device: a landed `pending://` ref's
+    /// file, this device's copy of an upload named by another's path, else
+    /// the path as given.
+    pub fn localize(&self, path: &str) -> Option<String> {
+        if is_pending_ref(path) {
+            return self.resolve_pending(path);
+        }
+        self.local_copy(path)
+    }
+
     /// Resolve a `pending://` ref against this device's uploads dir.
     /// `Some(absolute)` iff the bytes have landed here.
     pub fn resolve_pending(&self, path: &str) -> Option<String> {
@@ -380,8 +448,13 @@ impl Uploads {
         // Queued-attachment refs resolve against this device's uploads dir
         // (present only once the transfer landed) — then jail as usual.
         let resolved_ref;
+        // (So does an upload named by another device's or user's path, by
+        // this device's copy of it.)
         let path = if is_pending_ref(path) {
             resolved_ref = self.resolve_pending(path).ok_or_else(outside)?;
+            resolved_ref.as_str()
+        } else if let Some(local) = self.local_copy(path) {
+            resolved_ref = local;
             resolved_ref.as_str()
         } else {
             path
@@ -711,12 +784,17 @@ mod tests {
             ("sky.hdr".to_owned(), b"hdr".to_vec()),
         ];
         uploads.store_visual_assets("v:abc", &assets).unwrap();
-        let script = uploads.store_visual("v:abc", "return ui.text 'hi'").unwrap();
+        let script = uploads
+            .store_visual("v:abc", "return ui.text 'hi'")
+            .unwrap();
         let stem = script.strip_suffix("-visual.luau").unwrap();
         let names: Vec<String> =
             serde_json::from_slice(&std::fs::read(format!("{stem}-assets.json")).unwrap()).unwrap();
         assert_eq!(names, ["prism.glb", "sky.hdr"]);
-        assert_eq!(std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(), b"hdr");
+        assert_eq!(
+            std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(),
+            b"hdr"
+        );
         uploads.remove_visual("v:abc");
         assert_eq!(std::fs::read_dir(uploads.dir()).unwrap().count(), 0);
     }
@@ -845,6 +923,78 @@ mod tests {
             .unwrap();
         let committed = uploads.commit("abcd1234-rest", "my photo (1).png").unwrap();
         assert_eq!(uploads.resolve_pending(&r), Some(committed));
+    }
+
+    /// One upload committed here, as `{id8}-image.png`.
+    fn committed_here(uploads: &Uploads) -> String {
+        uploads
+            .append(
+                "2fbd2b3b-9c1e",
+                &BASE64.encode(b"\x89PNG\r\n\x1a\n"),
+                Some(0),
+            )
+            .unwrap();
+        uploads.commit("2fbd2b3b-9c1e", "image.png").unwrap()
+    }
+
+    #[test]
+    fn another_users_windows_path_finds_this_devices_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let here = committed_here(&uploads);
+        let theirs = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+        assert_eq!(uploads.local_copy(theirs), Some(here.clone()));
+        assert_eq!(uploads.localize(theirs), Some(here.clone()));
+        // Forward slashes too (another Mac's, or a Windows path written so).
+        let other = "/Users/someone/.zeron/uploads/2fbd2b3b-image.png";
+        assert_eq!(uploads.local_copy(other), Some(here.clone()));
+        let mixed = "C:/Users/ADMIN/AppData/Local/Zeron/uploads/2fbd2b3b-image.png";
+        assert_eq!(uploads.local_copy(mixed), Some(here));
+    }
+
+    #[test]
+    fn a_path_that_reads_here_or_isnt_an_upload_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let here = committed_here(&uploads);
+        assert_eq!(uploads.local_copy(&here), None, "already this device's");
+        assert_eq!(
+            uploads.local_copy(r"C:\Users\ADMIN\Pictures\image.png"),
+            None
+        );
+        assert_eq!(
+            uploads.local_copy(r"C:\Users\ADMIN\uploads\0badf00d-image.png"),
+            None
+        );
+        assert_eq!(
+            uploads.local_copy(r"C:\Users\ADMIN\uploads\2fbd2b3b-image (1).png"),
+            None
+        );
+        assert_eq!(uploads.local_copy(r"C:\x\..\2fbd2b3b-image.png\.."), None);
+    }
+
+    #[test]
+    fn another_users_path_reads_back_from_this_devices_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        committed_here(&uploads);
+        let theirs = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+        let chunk = uploads.read_chunk(theirs, 0, &[]).unwrap();
+        assert_eq!(chunk.name, "2fbd2b3b-image.png");
+        assert_eq!(BASE64.decode(chunk.data).unwrap(), b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn attachment_lines_are_every_listed_path() {
+        let text = "Look\n\nAttached images (local files — open them to view):\n- C:\\Users\\ADMIN\\uploads\\2fbd2b3b-image.png\n- pending://u2/c.png";
+        assert_eq!(
+            attachment_lines_in(text),
+            vec![
+                "C:\\Users\\ADMIN\\uploads\\2fbd2b3b-image.png".to_string(),
+                "pending://u2/c.png".to_string()
+            ]
+        );
+        assert!(attachment_lines_in("- a list item with no trailer").is_empty());
     }
 
     #[test]
@@ -1316,7 +1466,11 @@ impl Uploads {
     /// Store the files a visual's script uses, beside it: each as
     /// `{id}-asset-{name}`, and `{id}-assets.json` listing their names
     /// (clients find it from the script's path).
-    pub fn store_visual_assets(&self, id: &str, assets: &[(String, Vec<u8>)]) -> Result<(), EngineError> {
+    pub fn store_visual_assets(
+        &self,
+        id: &str,
+        assets: &[(String, Vec<u8>)],
+    ) -> Result<(), EngineError> {
         use std::io::Write;
         if assets.is_empty() {
             return Ok(());
@@ -1342,7 +1496,8 @@ impl Uploads {
                 written.push(file);
                 names.push(name);
             }
-            let manifest = serde_json::to_vec(&names).map_err(|err| EngineError::Other(err.to_string()))?;
+            let manifest =
+                serde_json::to_vec(&names).map_err(|err| EngineError::Other(err.to_string()))?;
             write(&format!("{id}-assets.json"), &manifest)
         })();
         if stored.is_err() {
@@ -1363,7 +1518,9 @@ impl Uploads {
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
         {
             for name in names {
-                let _ = std::fs::remove_file(self.dir().join(format!("{id}-asset-{}", sanitize(&name))));
+                let _ = std::fs::remove_file(
+                    self.dir().join(format!("{id}-asset-{}", sanitize(&name))),
+                );
             }
         }
         let _ = std::fs::remove_file(manifest);

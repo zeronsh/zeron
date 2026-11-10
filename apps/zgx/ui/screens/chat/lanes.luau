@@ -126,12 +126,19 @@ function M.subagents(): { any }
 	return subagents:get()
 end
 
+-- A child chat in the tray (one a Zeron chat started): its task's id, the
+-- chat's own after this (a subagent's is its doc).
+local CHILD = "chat:"
+
 -- The open chat's subagents as the composer's Running tray lists them (its
 -- tasks, ds/composer_dock): running first, in the order they were spawned,
 -- the finished (done or failed) after, newest first, as the lanes card
 -- orders them. A subagent not heard from yet counts as running, as it does
--- there. Each task's id is the subagent's doc (`ref`).
-function M.tasks(): { any }
+-- there. Each task's id is the subagent's doc (`ref`). With the chat
+-- (`session`), its child chats a Zeron chat started (`child_kind`, a
+-- subagent's or a side chat's, made through Zeron's tools) are among them,
+-- listed as a subagent is; those the person started aren't.
+function M.tasks(session: string?): { any }
 	local active, finished = {}, {}
 	for _, s in subagents:get() do
 		local task = { id = s.ref, kind = "agent", name = s.title }
@@ -143,14 +150,44 @@ function M.tasks(): { any }
 			table.insert(active, task)
 		end
 	end
+	-- (Oldest first, as subagents are spawned; at work, running; else how
+	-- it ended, a chat at rest done.)
+	local children = table.clone(sessions.children(session))
+	table.sort(children, function(a: any, b: any): boolean
+		return (a.created or 0) < (b.created or 0)
+	end)
+	for _, c in children do
+		if c.child_kind ~= nil then
+			local task = { id = CHILD .. c.id, kind = "agent", name = c.title }
+			local st = c.status
+			if st == "working" or st == "waiting" or st == "input" then
+				table.insert(active, task)
+			else
+				task.ended = if st == "failed" then "failed" else "done"
+				task.failed = st == "failed" or nil
+				table.insert(finished, 1, task)
+			end
+		end
+	end
 	for _, t in finished do
 		table.insert(active, t)
 	end
 	return active
 end
 
--- A tray row's subagent, opened as a tab of the session's panel.
+-- A tray row's subagent, opened as a tab of the session's panel; a child
+-- chat's, as a side chat's tab, as the panel's own list opens one.
 function M.open_task(session: string, ref: string)
+	if string.sub(ref, 1, #CHILD) == CHILD then
+		local id = string.sub(ref, #CHILD + 1)
+		for _, c in sessions.children(session) do
+			if c.id == id then
+				M.open(session, { kind = "side_chat", id = c.id, title = c.title })
+				return
+			end
+		end
+		return
+	end
 	for _, s in subagents:peek() do
 		if s.ref == ref then
 			M.open_subagent(session, s)

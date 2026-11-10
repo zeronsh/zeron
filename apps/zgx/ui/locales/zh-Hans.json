@@ -1069,6 +1069,29 @@
       "next_month": "下个月",
       "time": "时间",
       "first_weekday": "2"
+    },
+    "mention_launcher": {
+      "all": "全部",
+      "result": "{n} 个结果",
+      "results": "{n} 个结果",
+      "results_label": "结果",
+      "navigate": "移动",
+      "insert": "插入",
+      "switch_tab": "切换标签",
+      "loading": "正在查找…",
+      "empty": {
+        "all": "暂无可提及的内容",
+        "files": "没有文件",
+        "chats": "没有其他对话",
+        "attachments": "这条消息没有附件"
+      },
+      "none": {
+        "all": "没有与“{q}”匹配的内容",
+        "files": "没有与“{q}”匹配的文件",
+        "chats": "没有与“{q}”匹配的对话",
+        "attachments": "没有与“{q}”匹配的附件"
+      },
+      "placeholder": "搜索文件、对话和附件"
     }
   },
   "settings": {
@@ -1196,6 +1219,11 @@
         "terms": "动画 辅助功能 动态 淡入淡出 animation accessibility movement fade spring",
         "system_on": "电脑的“减弱动态效果”开启时启用：移动立即完成，淡入淡出时间缩短。",
         "description": "移动立即完成，淡入淡出时间缩短。电脑的“减弱动态效果”开启时始终启用。"
+      },
+      "accented": {
+        "label": "全局强调色",
+        "terms": "强调色 颜色 链接 圆点 高亮 accent color",
+        "description": "链接、工作中的圆点、查找高亮、@ 文件、列表标记、引用和行内代码使用强调色。"
       },
       "glass": {
         "label": "毛玻璃",
@@ -1760,7 +1788,8 @@
         "label": "获取测试版更新",
         "terms": "测试版 抢先 渠道 稳定版 beta stable",
         "on": "正在获取测试版更新。关闭即可回到稳定版。",
-        "off": "抢先试用下一版 Zeron。需要 macOS {version} 或更高版本。"
+        "off": "抢先试用下一版 Zeron。需要 macOS {version} 或更高版本。",
+        "off_any": "抢先试用下一版 Zeron。"
       },
       "updates_self_description": "Zeron 会自动更新：新版本在后台下载，重新启动时安装。",
       "version_info": {
@@ -2345,6 +2374,7 @@
         "new_session": "新建会话",
         "will_delete": "“{title}”将被永久删除。此操作无法撤销。",
         "delete_title": "删除会话？",
+        "couldnt_delete": "无法删除“{title}”",
         "rename_title": "重命名会话",
         "name": "名称",
         "name_placeholder": "会话名称"
@@ -2826,7 +2856,21 @@
       "edit_unavailable": "暂时无法编辑该消息",
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
-      "drop_to_mention": "松开以提及"
+      "drop_to_mention": "松开以提及",
+      "mention_sections": {
+        "files": "文件",
+        "chats": "对话",
+        "attachments": "附件"
+      },
+      "attachment_kind": {
+        "comment": "评论",
+        "quote": "引用",
+        "annotation": "标注",
+        "chat": "对话",
+        "appshot": "应用截图",
+        "image": "图片",
+        "file": "文件"
+      }
     },
     "cloud_machine": {
       "specs": "{vcpu} vCPU · {memory} GB 内存 · {disk} GB 磁盘",
@@ -3286,6 +3330,30 @@
           "title": "向你发送通知",
           "detail": "与其他通知一样，可在“设置”→“通知”中管理。"
         },
+        "usage_read": {
+          "title": "查看你的智能体套餐用量",
+          "detail": "每个账户的用量、套餐和重置时间，但不包括账户是谁。"
+        },
+        "accounts_read": {
+          "title": "查看你的智能体已保存的账户",
+          "detail": "哪个账户正在使用，以及每个账户的邮箱和名称。绝不包括密码或登录凭据。"
+        },
+        "accounts_switch": {
+          "title": "切换智能体使用的账户",
+          "detail": "它可以把另一个已保存的账户设为当前账户。它不能登录或删除账户。"
+        },
+        "models_read": {
+          "title": "查看你的智能体模型",
+          "detail": "每个智能体提供的模型、推理强度和选项，以及对话正在使用的模型。"
+        },
+        "models_set": {
+          "title": "更改对话使用的模型",
+          "detail": "对话下一轮的模型、推理强度和选项，以及新对话的默认设置。"
+        },
+        "messages_send": {
+          "title": "以你的身份向智能体发送消息",
+          "detail": "它可以向任何对话发送消息、开始新对话并回答它们的问题，就像你亲自输入一样。你的智能体会照它说的去做。"
+        },
         "links_open": {
           "title": "打开链接",
           "detail": "使用你在“设置”→“链接”中选择的打开方式。"
@@ -3300,7 +3368,8 @@
         "network": {
           "title": "连接互联网",
           "title_any": "连接到互联网上的任何网站",
-          "title_hosts": "连接到这些地方"
+          "title_hosts": "连接到这些地方",
+          "detail_named": "指定的主机可能在这台电脑或你的网络上。"
         },
         "clipboard": {
           "title": "读取和更改你的剪贴板"
@@ -3438,8 +3507,7 @@
       "try_again": "重试",
       "remove_body_device": "它会立即在 {device} 上的 Zeron 各处停止。它的文件夹会移到那台电脑插件文件夹的已移除项目中，以便你想找回。",
       "install_dialog_title_device": "在 {device} 上安装插件",
-      "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
-      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台电脑的插件。",
+      "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接，或选择这台电脑上的文件。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
       "setup_title": "完成账户设置",
       "setup_body": "选择工作空间后，你的插件会立即加载。"
     },
@@ -3447,7 +3515,7 @@
       "made_by_you": "由你制作",
       "made_by": "由 @{username} 制作",
       "unknown_author": "作者未知",
-      "tampered_why": "你允许后它发生了更改。请在运行前重新查看。",
+      "tampered_why": "你允许后它发生了更改，因此不会运行。请移除它，或从原来的来源重新安装。",
       "unknown_why": "Zeron 无法确定制作者。仅在信任来源时允许。",
       "nothing": "无需授权",
       "asks_nothing": "除了在自己的空间中运行外，它没有请求其他权限。",
@@ -3463,12 +3531,16 @@
       "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。",
       "made_on_your_device": "由你的另一台设备制作",
       "grew": "自你允许以来新增：",
-      "allow_there": "请在{device}上允许：它会在那台电脑的 Zeron 中询问。",
+      "allow_there": "只在{device}上允许。你的其他电脑会各自询问。",
+      "allow_on": "在{device}上允许",
       "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台电脑上把它当作你的插件。",
       "mine_cancel": "取消",
       "mine_sign": "签名为我的",
       "details": "详细信息",
-      "details_hide": "隐藏详细信息"
+      "details_hide": "隐藏详细信息",
+      "remove": "移除",
+      "reinstall": "重新安装",
+      "tampered_why_no_source": "你允许后它发生了更改，因此不会运行。请移除它；如果仍需要，再重新安装。"
     },
     "permissions": {
       "screen_recording": {
@@ -3519,6 +3591,33 @@
       "template_failed_body": "修复并保存前，这部分将显示默认界面。",
       "template_broken": "{name}无法运行",
       "template_broken_body": "修复并保存模板前，将显示默认界面。"
+    },
+    "failure": {
+      "not_a_package": "该文件不是 Zeron 插件。",
+      "unsigned": "它没有签名，因此无法得知是谁制作的。",
+      "tampered": "它的文件在签名后被改动过。请从作者那里重新获取。",
+      "bad_signature": "它的签名无法通过验证。请从作者那里重新获取。",
+      "too_big": "它太大了，不能作为插件。",
+      "bad_file": "它包含 Zeron 不会写入的文件。",
+      "git_missing": "从代码仓库安装需要 git，但这里没有安装。请先安装 git 再试，或改用 .zeron-plugin 文件或 GitHub 发布版本安装。",
+      "git_timeout": "代码仓库响应超时。请稍后再试。",
+      "repo_unreadable": "无法读取该代码仓库。请确认它是公开的，并且分支正确。",
+      "ref_not_found": "找不到该分支或标签。",
+      "no_manifest": "那里没有 zeron-plugin.json。",
+      "rate_limited": "GitHub 暂时拒绝了来自此设备的请求。请稍后再试，或使用 GitHub 命令行工具登录（gh auth login），让 Zeron 以你的身份请求。",
+      "github_unreachable": "无法连接 GitHub。请检查网络连接后再试。",
+      "release_not_found": "找不到该发布版本。",
+      "no_package": "该发布版本中没有 Zeron 可以安装的文件。",
+      "download_failed": "下载失败。请检查网络连接后再试。",
+      "not_a_link": "该链接不是插件包，也不是 git 代码仓库。",
+      "https_only": "插件只能来自 https 链接。",
+      "other_signer": "已安装一个同名插件，但由其他人签名。请先移除它，再安装这个。",
+      "new_signer": "新版本由其他人签名，因此不会安装。",
+      "installed_unsigned": "已安装一个同名插件，且它没有签名。请先移除它，再安装这个。",
+      "not_newer": "该版本并不比已安装的版本新，因此不会替换它。",
+      "different_plugin": "新版本是另一个插件。",
+      "up_to_date": "已是最新版本。",
+      "no_source": "已无法确定它的来源，因此无法从原处重新安装。请先移除它，再重新安装。"
     }
   },
   "templates": {

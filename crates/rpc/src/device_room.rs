@@ -356,7 +356,7 @@ impl HostRelayConfig {
 
 /// The service as relay clients see it: every method but the ones a peer
 /// may not have answered here ([`crate::peer_refused`]: the local-only
-/// ones, allowing a plugin, a file path on the caller's device), refused
+/// ones, a file path on the caller's device), refused
 /// before they reach it; the rest served as [`crate::Caller::Peer`], with
 /// the device the edge verified for this connection (`fromDevice`), if any.
 struct RelayGuard {
@@ -1412,7 +1412,7 @@ mod tests {
     /// from a link (which lands waiting here). What it reaches runs as a
     /// peer.
     #[tokio::test]
-    async fn relay_refuses_allowing_and_paths_from_peers() {
+    async fn relay_carries_peers_approvals_but_not_paths_signing_or_templates() {
         use crate::{RpcReply, RpcService, methods};
         use std::sync::{Arc, Mutex};
 
@@ -1433,10 +1433,7 @@ mod tests {
         let guard = super::RelayGuard { inner: Arc::new(Seen(seen.clone())), device: None };
         let hash = "ab".repeat(32);
         for (method, params) in [
-            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash})),
-            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})),
-            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
-            (methods::REVIEW_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
+            (methods::REVIEW_TEMPLATE, serde_json::json!({"pending": "x", "hash": hash})),
             (methods::SIGN_PLUGIN, serde_json::json!({"id": "x"})),
             (methods::DECIDE_TEMPLATE, serde_json::json!({"pending": "x", "allow": true, "hash": hash})),
             (methods::INSTALL_PLUGIN, serde_json::json!({"path": "/tmp/x.zeron-plugin"})),
@@ -1448,15 +1445,24 @@ mod tests {
         }
         assert!(seen.lock().unwrap().is_empty(), "refused before the service");
 
-        for (method, params) in [
+        // Your other devices' Settings → Plugins: reviews and allows (the
+        // engine holds each to a review minted for that very device,
+        // plugins/reviews.rs), installs from a link or a file sent here.
+        let reached = [
             (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": false, "hash": hash})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})),
+            (methods::REVIEW_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
             (methods::SET_PLUGIN_OFF, serde_json::json!({"id": "x", "off": true})),
             (methods::INSTALL_PLUGIN, serde_json::json!({"url": "https://example.com/x.zeron-plugin"})),
-        ] {
+            (methods::STAGE_PLUGIN_PACKAGE, serde_json::json!({"data": ""})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"upload": "u", "name": "x.zeron-plugin"})),
+        ];
+        let count = reached.len();
+        for (method, params) in reached {
             guard.handle(method, params).await.expect(method);
         }
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), count);
         assert!(
             seen.iter().all(|(_, caller)| matches!(caller, crate::Caller::Peer { .. })),
             "served as a peer: {seen:?}"

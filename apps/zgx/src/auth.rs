@@ -99,7 +99,8 @@ const PRODUCTION: Env = Env {
 /// How long the browser has to come back (the engine forgets a sign-in
 /// after 15 minutes).
 const SIGN_IN_WAIT: Duration = Duration::from_secs(10 * 60);
-/// How long a launch waits for the engine's session before saying signed out.
+/// How long a launch with no session kept waits for the engine's word before
+/// saying signed out. (With one kept, it waits for the engine: [`gives_up_on_session`].)
 const RESTORE_WAIT: Duration = Duration::from_secs(20);
 /// A bearer this close to its end is asked for again.
 const TOKEN_SLACK: i64 = 30;
@@ -233,7 +234,8 @@ struct Auth {
     /// A sign-in waiting on the browser.
     waiting: Cell<bool>,
     failure: Cell<Option<Outcome>>,
-    /// The launch gave up waiting for the engine: shown signed out.
+    /// The launch, with no session kept, gave up waiting for the engine:
+    /// shown signed out.
     gave_up: Cell<bool>,
     access: RefCell<Option<Access>>,
     /// Moves on every sign-in, cancel and sign-out: what comes back for an
@@ -436,6 +438,11 @@ pub fn session_exists() -> bool {
         .is_ok_and(|config| config.data_dir.join("session.json").is_file())
 }
 
+/// Whether a launch still without the engine's answer shows signed out.
+fn gives_up_on_session(session_kept: bool) -> bool {
+    !session_kept
+}
+
 impl Auth {
     fn new() -> Self {
         let endpoint = endpoint();
@@ -548,11 +555,14 @@ impl Auth {
         }
     }
 
-    /// The launch's wait for the engine: none in time, signed out (the
-    /// engine's session shows as soon as it answers).
+    /// The launch's wait for the engine: with no session kept (or no engine
+    /// this app could start to ask), none in time is signed out (the engine's
+    /// word shows as soon as it answers). With one kept, only the engine can
+    /// say it's gone, whatever keeps it from answering now.
     async fn restore_deadline(self: Rc<Self>) {
         zgx::timer::sleep(RESTORE_WAIT).await;
-        if *self.session.borrow() == Session::Unknown {
+        let kept = session_exists() && engine::get().can_start();
+        if *self.session.borrow() == Session::Unknown && gives_up_on_session(kept) {
             eprintln!("zeron-zgx: account: no answer from the engine yet; shown signed out");
             self.gave_up.set(true);
             self.publish();
@@ -606,7 +616,7 @@ impl Auth {
             json!({ "screenHint": "sign-in", "fresh": self.signed_out_here.get() })
         };
         let answer = engine::get()
-            .call("SignIn", params)
+            .call_soon("SignIn", params)
             .await
             .map_err(|error| {
                 eprintln!("zeron-zgx: account: the engine didn't start a sign-in: {error}");
@@ -1141,6 +1151,14 @@ mod tests {
             }
             std::thread::park_timeout(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// A kept session is signed in until the engine says otherwise, however
+    /// long it takes to answer; with none kept, sign-in is shown as before.
+    #[test]
+    fn a_kept_session_is_never_given_up_on() {
+        assert!(!gives_up_on_session(true));
+        assert!(gives_up_on_session(false));
     }
 
     /// While the account's setup isn't finished the engine answers template

@@ -74,6 +74,18 @@ M.elapsed = elapsed
 local ago = locale.ago_short
 M.ago = ago
 
+-- Seconds since `t` (a time, `os.time()` seconds), followed: what reads it
+-- in a binding moves on as the clock ticks, so "now" becomes "1m" without
+-- anything else changing. One timer for every reader, sleeping between
+-- ticks. (The clock is never behind the wall's: a test can set it ahead.)
+local clock = ui.state("ds_status_clock", os.time())
+ui.every(30000, function()
+	clock:set(os.time())
+end)
+function M.since(t: number): number
+	return math.max(0, math.max(clock:get(), os.time()) - t)
+end
+
 -- Working: the dashed ring (the glyph's eight dashes, on its 24-unit grid:
 -- radius 10, stroke 2, round ends), drawn along. An unseen lead runs the
 -- ring twice in one eased sweep (slow away, quick round, slow home); the
@@ -142,14 +154,24 @@ fn fill(input:FillInput)->vec4<f32> {
 -- the frames that draw one draw them all.
 local RUN, REST, FPS = 3.9, 900, 30
 
--- A node whose loop (`start(el)`'s animation) plays only while it can be
--- seen: out of sight (in a collapsed sidebar, a closed panel) it stops,
--- and starts again as it shows.
+-- Its loop put where one clock has it: a loop of `period` ms that started
+-- when that clock read 0. Every ring (and every dot) stands at the same
+-- point of its cycle whenever it shows, so one coming back into sight picks
+-- up in step with the rest, not from its start. (Set as the loop is made,
+-- before the renderer ever takes it over, which it still may.)
+function M.in_phase(anim: any, period: number)
+	anim.currentTime = ui.now() % period
+end
+
+-- A node whose loop (`start(el)`'s animation, `period` ms a cycle) plays
+-- only while it can be seen: out of sight (in a collapsed sidebar, a
+-- closed panel, scrolled away) it stops, and starts again as it shows, in
+-- step with the clock (`in_phase`).
 -- Left looping there, it would be all the animation engine had to play,
 -- and the engine, seeing only unseen loops, looks just four times a second:
 -- an animation starting then would wait for that look, and leap. Still
 -- when motion is reduced.
-local function looping(props: ContainerProps, start: (el: Element) -> Animation): Node
+local function looping(props: ContainerProps, start: (el: Element) -> Animation, period: number): Node
 	-- Whether it plays, and not the loop itself: a handle held here strongly
 	-- would hold its element, the element this node, and this node this
 	-- function, a cycle through Rust that no collector sees; held weakly, the
@@ -159,7 +181,7 @@ local function looping(props: ContainerProps, start: (el: Element) -> Animation)
 		if visible then
 			if not playing and not motion.reduced_now() then
 				playing = true
-				start(el)
+				M.in_phase(start(el), period)
 			end
 		elseif playing then
 			playing = false
@@ -188,7 +210,7 @@ local function ring(ink: string, size: number): Node
 			ease = "linear",
 			frameRate = FPS,
 		})
-	end)
+	end, RUN * 1000 + REST)
 end
 
 -- The working ring alone, as a spinner: `size` points, in `ink` (a token;
@@ -301,7 +323,8 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 			loopDelay = 800,
 			frameRate = FPS,
 		})
-	end)
+		-- (A dimming and a brightening, each with its pause.)
+	end, 2 * (200 + 800))
 end
 
 -- A state's dot and its long name beside it, small, in its hue (a list

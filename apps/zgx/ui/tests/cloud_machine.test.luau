@@ -1183,7 +1183,7 @@ end
 -- A size picked with the next send refused: what was held is tried once.
 local function wake_refused(app: any, words: string)
 	send_to(app, words)
-	app:command("send_fails_next")
+	app:command("send_fails")
 	app:click('role:button "Open Alerts"')
 	app:frames(30)
 	app:click(`{size("Extra large")} >> role:button "Wake here"`)

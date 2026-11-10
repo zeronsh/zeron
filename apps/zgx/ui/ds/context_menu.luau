@@ -119,7 +119,8 @@ local function rule(): Node
 	return Menu.Rule()
 end
 local function heading(name: string): Node
-	return Menu.Heading { name }
+	-- (It opens its group: no room over it but the group's inset.)
+	return Menu.Heading { name, first = true }
 end
 
 -- One open menu's panel (the root, or a submenu): its rows, the keys among

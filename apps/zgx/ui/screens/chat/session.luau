@@ -20,6 +20,7 @@ local shared = require("@app/screens/chat/shared")
 local prefs = require("@app/screens/settings/prefs")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
@@ -36,7 +37,7 @@ local sent_pictures = ReplyImages.for_attachments(function(): any
 	if not s or s.state == "missing" then
 		return nil
 	end
-	return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+	return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
 end)
 
 export type Id = string | () -> string? | State<string?> | nil
@@ -260,14 +261,12 @@ local function Session(id: Id?): Node
 							-- Under the docked composer: the conversation runs
 							-- behind it, its end held clear of it.
 							foot = room.foot,
+							-- (Its pair with the window's composer: shared's
+							-- `pill_width_of`.)
 							beside = function(): number?
-								return shared.pill_width:get()
+								return shared.pill_width_of("waiting", "window"):get()
 							end,
-							on_jump_width = function(w: number?)
-								if shared.jump_width:peek() ~= w then
-									shared.jump_width:set(w)
-								end
-							end,
+							on_jump_width = shared.pill_teller("jump", "page"),
 							draft = store.draft,
 							-- Settings' compact transcript: each reply's work
 							-- folded into one group.
@@ -306,6 +305,9 @@ local function Session(id: Id?): Node
 							end,
 							open_link = open_link,
 							-- Their context menus (screens/chat/link_menu).
+							link_chip = LinkChips(function(): any
+								return store.session:peek()
+							end),
 							link_menu = LinkMenu(open_link, function(): any
 								return store.session:peek()
 							end),

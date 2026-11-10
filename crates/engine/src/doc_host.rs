@@ -37,6 +37,7 @@ use zeron_doc::{
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
+use crate::chat2_checkpoint::{CheckpointPost, chat2_checkpoint_parts, post_chat2_checkpoint};
 use crate::http_error::describe_http_error;
 use crate::project_actions::{
     ProjectActionSetupHandoff, ProjectActionsStore, launch_project_setup_action,
@@ -47,8 +48,9 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
-/// The largest checkpoint a chat room takes (`MAX_CHECKPOINT_BYTES` in the edge).
-const ROOM_CHECKPOINT_LIMIT: usize = 32 * 1024 * 1024;
+/// The largest checkpoint a chat room takes, in parts past one request's most
+/// (`MAX_STAGED_CHECKPOINT_BYTES` in the edge).
+const ROOM_CHECKPOINT_LIMIT: usize = 256 * 1024 * 1024;
 
 fn checkpoint_fits(bytes: usize) -> bool {
     bytes <= ROOM_CHECKPOINT_LIMIT
@@ -516,6 +518,17 @@ fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
         body
     };
     format!("{body}{trailer}")
+}
+
+/// What a queue row says: its words, or for files with no words, what a run
+/// of them says. A row needs text on every device (one without is refused and
+/// dropped as read), so files alone must not come to an empty one.
+fn queued_row_text(text: &str, has_files: bool) -> &str {
+    if has_files && text.trim().is_empty() {
+        ATTACHMENT_ONLY_PROMPT
+    } else {
+        text
+    }
 }
 
 fn queue_text_hash(text: &str) -> String {
@@ -3337,7 +3350,6 @@ impl DocHost {
         if self.inner.edge_disconnected.load(Ordering::Acquire) {
             return;
         }
-        use base64::Engine as _;
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
@@ -3419,11 +3431,9 @@ impl DocHost {
             let Ok(bearer) = edge.bearer().await else {
                 return;
             };
-            let url = format!(
-                "{}/chat2/{}/checkpoint?seqCovered={}{}{}",
-                edge.url.trim_end_matches('/'),
-                chat_id,
-                seq_covered,
+            // The relay's flags go with the commit, whole or in parts.
+            let commit_flags = format!(
+                "{}{}",
                 if at_floor { "&atFloor=1" } else { "" },
                 if reason == relay::HEAL_REASON { "&heal=1" } else { "" }
             );
@@ -3432,20 +3442,10 @@ impl DocHost {
             };
             let size = snapshot.len() as u64;
             let frontier_sent = frontier.clone();
-            match http
-                .post(&url)
-                .timeout(std::time::Duration::from_secs(300))
-                .bearer_auth(&bearer)
-                .header(
-                    "x-chat2-frontier",
-                    base64::engine::general_purpose::STANDARD.encode(&frontier),
-                )
-                .body(snapshot)
-                .send()
-                .await
-            {
-                Ok(res) if res.status().is_success() => {
-                    tracing::info!(chat = %chat_id, seq_covered, reason, "chat2 checkpoint posted");
+            let parts = chat2_checkpoint_parts(snapshot.len());
+            match post_chat2_checkpoint(&http, &edge.url, &chat_id, &bearer, seq_covered, &frontier, &commit_flags, snapshot).await {
+                Ok(()) => {
+                    tracing::info!(chat = %chat_id, seq_covered, reason, size, parts, "chat2 checkpoint posted");
                     if let Some(state) = &relay_state
                         && let Ok(version) = loro::VersionVector::decode(&frontier_sent)
                     {
@@ -3467,18 +3467,15 @@ impl DocHost {
                         client.note_checkpoint(seq_covered, size);
                     }
                 }
-                Ok(res) => {
-                    let status = res.status().as_u16();
-                    let body = res.text().await.unwrap_or_default();
-                    tracing::warn!(chat = %chat_id, status, %body, "chat2 checkpoint rejected");
+                Err(CheckpointPost::Rejected(status, body)) => {
+                    tracing::warn!(chat = %chat_id, status, %body, size, parts, "chat2 checkpoint rejected");
                     if let Some(state) = &relay_state {
                         state.checkpoint_failed();
                         state.checkpoint_refused(status, &body, weak_note.upgrade().as_deref());
                     }
                 }
-                Err(err) => {
-                    let err = describe_http_error(err);
-                    tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
+                Err(CheckpointPost::Failed(err)) => {
+                    tracing::warn!(chat = %chat_id, error = %err, size, parts, "chat2 checkpoint POST failed");
                     if let Some(state) = &relay_state {
                         state.checkpoint_failed();
                     }
@@ -3917,6 +3914,25 @@ impl DocHost {
     /// over the peer link (retry until they land) while the command is
     /// already durably queued. The send is a local write — attachment bytes
     /// chase it, never gate it (2026-08-19 incident).
+    /// The question (or approval) `chat_id` waits on, latest first: its
+    /// request id, or `None` when nothing waits.
+    pub(crate) fn pending_input(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let entries = handle.doc.read_entries()?;
+        Ok(entries.iter().rev().flat_map(|e| e.parts.iter().rev()).find_map(|part| match part {
+            zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
+            _ => None,
+        }))
+    }
+
+    /// Record who sent message (or queued row) `id` of `chat_id`, beside
+    /// its transcript (`SessionDoc::sent_by`; synced with the chat, shown
+    /// nowhere).
+    pub(crate) fn mark_sent_by(&self, chat_id: &str, id: &str, by: serde_json::Value) -> Result<(), EngineError> {
+        self.open(chat_id)?.doc.mark_sent_by(id, by)?;
+        Ok(())
+    }
+
     pub fn queue_command_with_transfers(
         &self,
         chat_id: &str,
@@ -4030,7 +4046,7 @@ impl DocHost {
         let id = new_id();
         let item = QueuedMessage {
             id: id.clone(),
-            text: text.to_string(),
+            text: queued_row_text(text, !attachments.is_empty()).to_string(),
             attachments,
             hold_for_turn_end,
             issued_by: self.inner.config.device_id.clone(),
@@ -4330,7 +4346,10 @@ impl DocHost {
             }
 
             let replacement = match action {
-                FinishQueueEditAction::Commit => Some(text.unwrap_or_default()),
+                FinishQueueEditAction::Commit => Some(queued_row_text(
+                    text.unwrap_or_default(),
+                    attachments.map_or(!item.attachments.is_empty(), |kept| !kept.is_empty()),
+                )),
                 FinishQueueEditAction::Cancel | FinishQueueEditAction::ReleaseUnchanged => None,
                 FinishQueueEditAction::Discard => Some(""),
             };
@@ -5890,9 +5909,15 @@ impl DocHost {
             return;
         };
         for path in attachments.iter_mut() {
-            if let Some(abs) = uploads.resolve_pending(path) {
+            if let Some(abs) = uploads.localize(path) {
                 *prompt = crate::uploads::rewrite_pending_ref(prompt, path, &abs);
                 *path = abs;
+            }
+        }
+        // Paths only the prompt names (older clients sent no list).
+        for path in crate::uploads::attachment_lines_in(&prompt.clone()) {
+            if let Some(abs) = uploads.localize(&path) {
+                *prompt = crate::uploads::rewrite_pending_ref(prompt, &path, &abs);
             }
         }
     }
@@ -5926,8 +5951,14 @@ impl DocHost {
             return prompt.to_string();
         };
         let mut out = prompt.to_string();
-        for r in crate::uploads::pending_refs_in(prompt) {
-            if let Some(abs) = uploads.resolve_pending(&r) {
+        let mut refs = crate::uploads::pending_refs_in(prompt);
+        for path in crate::uploads::attachment_lines_in(prompt) {
+            if !refs.contains(&path) {
+                refs.push(path);
+            }
+        }
+        for r in refs {
+            if let Some(abs) = uploads.localize(&r) {
                 out = crate::uploads::rewrite_pending_ref(&out, &r, &abs);
             }
         }

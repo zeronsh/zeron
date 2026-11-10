@@ -163,6 +163,8 @@ export type Props = {
 	-- Whether a change of width now should follow at once, not ease (the
 	-- window being resized).
 	direct: (() -> boolean)?,
+	-- The sessions haven't been heard yet: none isn't "none" until they have.
+	loading: (() -> boolean)?,
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
@@ -356,6 +358,7 @@ return ui.component(function(props: Props): Node
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
 	local easing: any = nil
+	local steps = 0
 	local was_folded = collapsed:peek()
 	-- Its width is where it's going (`base`, which its edge dragged or the
 	-- window resized moves at once) and, after a step (folding, coming
@@ -391,14 +394,15 @@ return ui.component(function(props: Props): Node
 			end
 			step:set(showing - to)
 			local params = motion.column(step:peek(), 0)
-			local this: any = nil
+			-- (By number: a callback holding its own clip would keep both for good.)
+			steps += 1
+			local this = steps
 			params.onComplete = function()
-				if easing == this then
+				if steps == this then
 					easing = nil
 				end
 			end
-			this = anime.animate(step, params)
-			easing = this
+			easing = anime.animate(step, params)
 		else
 			base = to
 		end
@@ -1027,13 +1031,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 	end
 	-- A session's agent: its mark, faint unless the session asks to be seen.
-	local function agent(s: Session, strong: () -> boolean): Node
-		return SessionRow.mark(now_of(s), strong)
+	-- (`cur`: its row's own `now_of`, where the row has one: one computed a
+	-- row, not one for each of its parts, each woken by any session's change.)
+	local function agent(s: Session, strong: () -> boolean, cur: (() -> Session)?): Node
+		return SessionRow.mark(cur or now_of(s), strong)
 	end
 	-- A session's slot: its agent; collapsed, its state (if it has one, its
 	-- corner unseen).
-	local function session_glyph(s: Session, strong: () -> boolean): Node
-		local cur = now_of(s)
+	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
+		local cur = row or now_of(s)
 		-- (On the rail, its state's glyph, one of its kind.)
 		return ui.div {
 			-- (Its glyph follows its state in place: ds/status.)
@@ -1050,7 +1056,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			),
 			ui.show(function(): boolean
 				return not railed() or cur().status == nil
-			end, agent(s, strong)),
+			end, agent(s, strong, cur)),
 		}
 	end
 	-- A session's corner: its state (a glyph of its kind), else its time.
@@ -1290,7 +1296,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				items = "center",
 				ui.show(details.project_icon, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
 					local hue, src, emoji = look(p)
-					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16 }
+					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16, project = p.id }
 				end)() }),
 				title,
 			}
@@ -1342,7 +1348,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			wide = in_flyout,
 			hovered = hovered,
-			lead = if in_flyout then agent(s, strong) else session_glyph(s, strong),
+			lead = if in_flyout then agent(s, strong, cur) else session_glyph(s, strong, cur),
 			words = ui.column {
 				w_full = true,
 				gap = "$zeron.space.hair",
@@ -1455,7 +1461,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						color = "$text.secondary",
 						agent(s, function(): boolean
 							return true
-						end),
+						end, cur),
 					},
 					line(label(cur().title)),
 				}
@@ -1607,7 +1613,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (a palette hue's 500, inked in its 50; or `{ bg, ink }`, tokens of its
 	-- own), or the project's own artwork; and, when its sessions can't be
 	-- seen, a badge for the most pressing of them.
-	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?): Node
+	-- (`project`: a project's id, its tile then `.project-icon`.)
+	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?, project: string?): Node
 		local function badge(kind: status.Kind): Node
 			return ui.div {
 				absolute = true,
@@ -1622,7 +1629,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				relative = true,
 				w = 18,
 				h = 18,
-				Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji },
+				Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 				if most then ui.show(hidden, badge(most)) else nil,
 			}
 		end
@@ -1632,7 +1639,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			relative = true,
 			w = 18,
 			h = 18,
-			Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji },
+			Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 			ui.presence(function(): status.Kind?
 				return if hidden() then pressing(listed(sessions)) else nil
 			end, badge),
@@ -1800,7 +1807,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 								live or own,
 								hidden,
 								src,
-								emoji
+								emoji,
+								p.id
 							)
 						end,
 					})
@@ -3310,7 +3318,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				drag_y = nil
 			end,
 			drag_preview = function()
-				return lifted(TITLE, ui.text { sec_now().name, literal = true, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" })
+				-- (A long name fades at the card's end, as on its row.)
+				return lifted(TITLE, FadeText { sec_now().name, literal = true, grow = 1, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" })
 			end,
 			ui.show(
 				editing,
@@ -3347,7 +3356,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						end)
 					end,
 				})),
-				ui.text {
+				FadeText {
 					function(): string
 						return sec_now().name
 					end,
@@ -3825,6 +3834,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 						emoji = function(): string?
 							local p = project_at(i)
 							return if p then p.emoji else nil
+						end,
+						project = function(): string?
+							local p = project_at(i)
+							return if p then p.id else nil
 						end,
 					},
 				}
@@ -4973,7 +4986,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 		ui.show(function(): boolean
 			local ix = index:get()
 			local grouped = SessionRow.levels(organize:get())[1] == "project" and #ix.projects > 0
-			return not is_island and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
+			local loading = props.loading ~= nil and props.loading()
+			return not is_island and not loading and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
 		end, ui.text {
 			locale.t("ds.sidebar.empty"),
 			id = "sidebar-empty",

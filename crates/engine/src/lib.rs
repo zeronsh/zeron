@@ -38,6 +38,7 @@ pub fn build_id() -> &'static str {
 pub mod auth;
 mod change_request_store;
 pub mod change_requests;
+mod chat2_checkpoint;
 pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;
@@ -58,6 +59,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+mod plugin_agents;
 pub mod plugins;
 pub mod profile;
 pub mod project_actions;
@@ -429,6 +431,22 @@ impl EngineCore {
         registry.set_account_environment(Arc::new(agent_accounts::MuseRunEnvironment(
             agent_accounts.clone(),
         )));
+        // Plugins' agent ops (usage, accounts, models: plugins/agents) reach
+        // the engine as Settings and the composer do, and hear what changes.
+        plugins.agents().set_host(Arc::new(plugin_agents::EngineAgentHost {
+            accounts: agent_accounts.clone(),
+            registry: registry.clone(),
+            data_dir: repos.data_dir().to_path_buf(),
+            workspace: workspace.clone(),
+            sessions: sessions.clone(),
+            doc_host: doc_host.clone(),
+            default_harness,
+        }));
+        plugins.follow_agents(
+            agent_accounts.watch_snapshots(),
+            sessions.watch_sessions(),
+            workspace.watch_chats(),
+        );
         // Agents added from the ACP registry (this engine's own, under its
         // data dir): harnesses before the update coordinator lists them.
         acp_registry::start(data_dir, &registry);
@@ -1308,12 +1326,13 @@ impl Engine {
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;
         // Only a port this process actually serves goes to agents: the
-        // injected MCP server must dial back into THIS engine.
-        runtime.core().sessions.set_ipc_port(config.ipc_port);
+        // injected MCP server must dial back into THIS engine. (Its bearer
+        // first: a run revived on boot waits on the port, then reads both.)
         runtime
             .core()
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
+        runtime.core().sessions.set_ipc_port(config.ipc_port);
         update_trial::prove_and_commit(runtime.core(), &config);
         wake_update::start(runtime.core());
         let corruption_watch = watch_store_corruption(

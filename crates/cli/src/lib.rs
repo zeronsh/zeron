@@ -41,6 +41,10 @@ struct Cli {
     /// Open a Zeron conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
+    /// Open with Zeron's own interface, whatever template is in use (as
+    /// holding Alt, or ⌥ on a Mac, as Zeron opens does).
+    #[arg(long)]
+    safe_mode: bool,
     #[cfg(windows)]
     #[arg(long, hide = true)]
     wait_for_exit: Option<u32>,
@@ -140,6 +144,26 @@ pub enum PluginCommand {
     Verify { path: String },
     /// List the plugins Zeron knows.
     List,
+    /// Save a plugin as one signed .zeron-plugin file to share (attach it
+    /// to a GitHub release, or send it): anyone installs it from that file
+    /// or its link. Your own plugin is signed again first.
+    Export {
+        /// The plugin's id (`zeron plugin list` names them).
+        id: String,
+        /// Where to save it: a folder, or a file ending .zeron-plugin
+        /// (defaults to Zeron's plugin-exports folder).
+        #[arg(long, value_name = "PATH", value_parser = absolute_path)]
+        to: Option<std::path::PathBuf>,
+    },
+}
+
+/// A path as given, made absolute against the current folder (the engine
+/// takes full paths only).
+fn absolute_path(text: &str) -> Result<std::path::PathBuf, String> {
+    if text.trim().is_empty() {
+        return Err("give a path".into());
+    }
+    std::path::absolute(text).map_err(|e| e.to_string())
 }
 
 #[derive(Subcommand)]
@@ -197,8 +221,9 @@ pub enum Launch {
     Done(anyhow::Result<()>),
     /// Run this in-process ([`Engines::InProcess`] only); logging is set up.
     Engine(EngineCommand),
-    /// No subcommand: open the window, on a conversation URL if one was given.
-    Window { open_url: Option<String> },
+    /// No subcommand: open the window, on a conversation URL if one was
+    /// given; `safe_mode` with Zeron's own interface (`--safe-mode`).
+    Window { open_url: Option<String>, safe_mode: bool },
     /// Ask the running headed instance for an Appshot (the interface's own).
     #[cfg(target_os = "linux")]
     Appshot,
@@ -298,6 +323,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
         }),
         None => Launch::Window {
             open_url: cli.open_url,
+            safe_mode: cli.safe_mode,
         },
     }
 }
@@ -403,6 +429,7 @@ mod tests {
             &["quiesce"],
             &["mcp"],
             &["plugin", "new"],
+            &["plugin", "export"],
             &["template", "use"],
             &["daemon", "install"],
             &["update"],
@@ -434,6 +461,7 @@ mod tests {
             &["quiesce"],
             &["mcp"],
             &["plugin", "list"],
+            &["plugin", "export", "focus"],
             &["template", "list"],
         ] {
             assert!(parse(args).unwrap().runs_engine(), "{args:?}");
@@ -442,6 +470,37 @@ mod tests {
             assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
         }
         assert!(parse(&[]).is_none());
+    }
+
+    /// `--to` reaches the engine as a full path: a relative one is taken
+    /// from the current folder.
+    #[test]
+    fn plugin_export_takes_a_full_path() {
+        let export = |args: &[&str]| {
+            let argv = ["zeron", "plugin", "export"].into_iter().chain(args.iter().copied());
+            match Cli::from_arg_matches(&command("0.0.0").try_get_matches_from(argv).unwrap())
+                .unwrap()
+                .command
+            {
+                Some(Command::Plugin { command: PluginCommand::Export { id, to } }) => (id, to),
+                _ => panic!("not plugin export"),
+            }
+        };
+        assert_eq!(export(&["focus"]), ("focus".to_owned(), None));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            export(&["focus", "--to", "dist/focus.zeron-plugin"]).1,
+            Some(cwd.join("dist/focus.zeron-plugin"))
+        );
+        assert_eq!(export(&["focus", "--to", "."]).1.unwrap(), cwd);
+        let full = if cfg!(windows) { r"C:\out" } else { "/tmp/out" };
+        assert_eq!(export(&["focus", "--to", full]).1, Some(std::path::PathBuf::from(full)));
+        assert!(
+            command("0.0.0")
+                .try_get_matches_from(["zeron", "plugin", "export", "focus", "--to", ""])
+                .is_err()
+        );
+        assert!(command("0.0.0").try_get_matches_from(["zeron", "plugin", "export"]).is_err());
     }
 
     #[test]

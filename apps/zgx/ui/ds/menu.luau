@@ -269,13 +269,17 @@ function M.Row(props: RowProps): Node
 end
 
 -- A group's title, over its rows: small, quiet, a short row of its own so
--- the gap under it is the rows'.
+-- the gap under it is the rows'. `first`: it opens its list, so it has no
+-- room over it of its own (the list's inset is that room): the space over
+-- a list's first line is its inset whatever that line is, as under its last.
 function M.Heading(props: { [any]: any }): Node
+	local first = props.first == true
 	return ui.row {
 		w_full = true,
-		h = "$zeron.menu.heading",
+		h = if first then nil else "$zeron.menu.heading",
+		pb = if first then "$space.1" else nil,
 		px = "$space.2",
-		items = "center",
+		items = if first then "end" else "center",
 		shrink = 0,
 		aria_hidden = true,
 		ui.text {
@@ -305,9 +309,63 @@ function M.Group(props: { heading: (string | Message)?, [any]: any }): Node
 	if heading then
 		p.role = p.role or "group"
 		p.label = p.label or heading
-		table.insert(p, 1, M.Heading { heading })
+		table.insert(p, 1, M.Heading { heading, first = true })
 	end
 	return ui.column(p)
+end
+
+-- A menu's list that scrolls: its lines (rows, headings) in a scroll inset
+-- from the panel's edge as a group is, the list's gap between them. `h` is
+-- the scroll's height, `M.list_height` of what it holds: its lines' own,
+-- up to whole rows (a scroll isn't as tall as its content of itself), so
+-- the space over the first line and under the last is the inset alone,
+-- whatever it holds (a line, a full list scrolled, nothing at all).
+-- `before`: lines over the scroll in the same inset (a heading, what an
+-- empty or loading list says). `id` names the list; other props go to the
+-- scroll (its role, its label).
+function M.List(props: { lines: Node, h: any, before: { Node }?, [any]: any }): Node
+	local scroll: { [any]: any } = { w_full = true, overscroll = "contain" }
+	for k, v in props do
+		if k ~= "lines" and k ~= "before" and k ~= "id" and type(k) ~= "number" then
+			scroll[k] = v
+		end
+	end
+	table.insert(scroll, props.lines)
+	local col: { [any]: any } = { id = props.id, w_full = true, shrink = 0, p = "$space.1", gap = 0 }
+	for _, n in props.before or {} do
+		table.insert(col, n)
+	end
+	table.insert(col, ui.scroll(scroll))
+	return ui.column(col)
+end
+
+-- How tall a list's lines stand, up to its first `rows` rows (with the
+-- headings among them): a list's scroll's height, whole rows and nothing
+-- under them. `lines` in order, each `"heading"` or `"row"`; `row` a row's
+-- height. (A first heading's as `M.Heading` lays it: no room over it.)
+function M.list_height(lines: { string }, rows: number, row: number): number
+	local h, n, any = 0, 0, false
+	local heading = (ui.theme.get("zeron.menu.heading") :: number?) or 24
+	local inset = (ui.theme.get("space.1") :: number?) or 4
+	local gap = (ui.theme.get("zeron.list.gap") :: number?) or 2
+	for i, line in lines do
+		if line == "row" then
+			n += 1
+			if n > rows then
+				break
+			end
+		end
+		if any then
+			h += gap
+		end
+		any = true
+		if line == "heading" then
+			h += if i == 1 then heading - inset else heading
+		else
+			h += row
+		end
+	end
+	return h
 end
 
 -- A panel of the menus' glass, its groups and rules edge to edge.

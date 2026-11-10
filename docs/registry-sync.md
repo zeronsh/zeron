@@ -143,6 +143,23 @@ The legacy snapshot is retained for rollback.
   read, `POST /registry/:orgId/reset` operator wipe (fleet re-seeds automatically).
 - Legacy `/workspace/*` routes remain for older engine builds; nothing new joins them.
 
+## Repository looks
+
+A project's name and icon belong to its repository, so every copy of it shows the
+same ones. A `repositoryLooks` row holds them, keyed by the sha-256 of the shared
+`repositoryId` (which may name a subfolder in any spelling, so can't be an id itself).
+A `local:` or absent identity shares nothing: that folder keeps its own fields.
+
+A set writes `name` or `icon` to the look row and to the one space it was made on, in
+one batch. `RegistryDoc` decides what a space reads, per field: the newest clock among
+the look row and its copies' fields. So disagreements settle with no migration, and
+what an older engine or a Cloud runner (refused this kind, and not shown it) writes to
+its own row still reaches copies on current engines. A field written by a row's
+creating upsert (same clock as `createdAt`) counts only if it says something: a null,
+or the folder's own name, is no choice. Older engines ignore the unknown kind and read
+each row's own fields. The row outlives its copies: a repository added again gets its
+look back.
+
 ## Sidebar sections
 
 Signed-in profiles store section metadata in `sidebarSections` rows and session

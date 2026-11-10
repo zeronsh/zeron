@@ -1364,7 +1364,7 @@ local function component(props: Props): Node
 	local own_group = Menu.Group(menu_rows :: any)
 	local extras_list = ui.each(extras, function(item: Extra, i: number): Node
 		if item.heading then
-			return Menu.Heading { item.heading }
+			return Menu.Heading { item.heading, first = i == 1 }
 		end
 		local label = item.label or ""
 		return ui.menu_item(Menu.lights(Menu.look({

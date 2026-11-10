@@ -437,13 +437,6 @@ return function(): Node
 						end
 						return false
 					end,
-					on_navigate = function(e)
-						if e.direction == "back" then
-							route.back()
-						else
-							route.forward()
-						end
-					end,
 					boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
 						return settings.View({ inset = true, collapsed = collapsed :: any })
 					end),
@@ -619,10 +612,9 @@ return function(): Node
 				end
 				local function device(): (string?, boolean)
 					local c = chat()
-					local now = sessions.now:get()
-					for _, d in now.devices do
+					for _, d in sessions.devices:get() do
 						if c and d.id == c.device then
-							return d.name, d.here or d.id == now.here
+							return d.name, d.here or d.id == sessions.here:get()
 						end
 					end
 					return nil, false
@@ -669,7 +661,7 @@ return function(): Node
 								if not c or not c.project then
 									return nil
 								end
-								for _, p in sessions.now:get().projects do
+								for _, p in sessions.projects:get() do
 									if p.id == c.project then
 										return p.name
 									end

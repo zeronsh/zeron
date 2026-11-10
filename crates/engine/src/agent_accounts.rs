@@ -795,6 +795,9 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    /// The last snapshot a list, switch or removal made, for whoever follows
+    /// them (plugins' usage and account events). Never holds a credential.
+    snapshots: tokio::sync::watch::Sender<Option<AgentAccountsSnapshot>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -886,8 +889,40 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                snapshots: tokio::sync::watch::channel(None).0,
             }),
         }
+    }
+
+    /// Each snapshot as lists, switches and removals make them (from
+    /// Settings, the composer's usage ring, a plugin): the current one at
+    /// once, then every change.
+    pub fn watch_snapshots(&self) -> tokio::sync::watch::Receiver<Option<AgentAccountsSnapshot>> {
+        self.inner.snapshots.subscribe()
+    }
+
+    fn published(
+        &self,
+        result: Result<AgentAccountsSnapshot, EngineError>,
+    ) -> Result<AgentAccountsSnapshot, EngineError> {
+        // (A live login is saved again at each list: when isn't a change.)
+        fn unstamped(s: &AgentAccountsSnapshot) -> AgentAccountsSnapshot {
+            let mut s = s.clone();
+            for a in &mut s.accounts {
+                a.saved_at = None;
+            }
+            s
+        }
+        if let Ok(snapshot) = &result {
+            self.inner.snapshots.send_if_modified(|last| {
+                let changed = last.as_ref().map(unstamped) != Some(unstamped(snapshot));
+                if changed {
+                    *last = Some(snapshot.clone());
+                }
+                changed
+            });
+        }
+        result
     }
 
     /// Test seam: run `harness`'s sign-in with the CLI at `path` instead of
@@ -923,7 +958,8 @@ impl AgentAccounts {
     /// backoff window or probed in the last [`FORCED_MIN_INTERVAL`].
     pub async fn list(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
         let _ops = self.inner.ops.lock().await;
-        self.list_locked(force_usage).await
+        let listed = self.list_locked(force_usage).await;
+        self.published(listed)
     }
 
     /// Caller holds [`Inner::ops`].
@@ -1138,6 +1174,15 @@ impl AgentAccounts {
     /// would write its own order back over any change — so zeron keeps it
     /// read-only (see [`stores`]).
     pub async fn activate(
+        &self,
+        harness: HarnessId,
+        account_id: &str,
+    ) -> Result<AgentAccountsSnapshot, EngineError> {
+        let activated = self.activate_unpublished(harness, account_id).await;
+        self.published(activated)
+    }
+
+    async fn activate_unpublished(
         &self,
         harness: HarnessId,
         account_id: &str,
@@ -1470,6 +1515,15 @@ impl AgentAccounts {
     // ── forget ──────────────────────────────────────────────────────────────
 
     pub async fn forget(
+        &self,
+        harness: HarnessId,
+        account_id: &str,
+    ) -> Result<AgentAccountsSnapshot, EngineError> {
+        let forgotten = self.forget_unpublished(harness, account_id).await;
+        self.published(forgotten)
+    }
+
+    async fn forget_unpublished(
         &self,
         harness: HarnessId,
         account_id: &str,
@@ -6721,5 +6775,41 @@ mod login_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_watch_tests {
+    use super::*;
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Lists publish what they found (for plugins' events), once per change.
+    #[tokio::test]
+    async fn a_list_publishes_its_snapshot_once_per_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig::isolated(dir.path());
+        write(
+            &config.claude_config_file,
+            &serde_json::json!({ "oauthAccount": { "accountUuid": "u-1", "emailAddress": "one@example.com" } }).to_string(),
+        );
+        write(
+            &config.claude_creds_file(),
+            &serde_json::json!({ "claudeAiOauth": { "accessToken": "at", "refreshToken": "rt", "expiresAt": 1 } }).to_string(),
+        );
+        let accounts = AgentAccounts::new(config);
+        let mut watch = accounts.watch_snapshots();
+        assert!(watch.borrow_and_update().is_none(), "nothing listed yet");
+        let listed = accounts.list(false).await.unwrap();
+        assert!(watch.has_changed().unwrap());
+        assert_eq!(watch.borrow_and_update().as_ref(), Some(&listed));
+        let text = serde_json::to_string(&listed).unwrap();
+        assert!(!text.contains("\"at\"") && !text.contains("\"rt\""), "no credential in a snapshot: {text}");
+        // (A live login is saved again at each list: not a change.)
+        accounts.list(false).await.unwrap();
+        assert!(!watch.has_changed().unwrap(), "the same snapshot again isn't a change");
     }
 }

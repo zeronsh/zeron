@@ -268,9 +268,12 @@ impl Desktop {
         let status = status.as_ref();
         let channel = zeron_update::channel::read(&self.data_dir).channel;
         fields.push(("self_updating", Value::Bool(self.self_updating())));
-        fields.push(("channels", Value::Bool(matches!(self.install, InstallKind::MacApp { .. }))));
+        fields.push(("channels", Value::Bool(self.install.follows_channels())));
         fields.push(("channel", Value::from(channel.as_str())));
-        fields.push(("beta_minimum", Value::from(zeron_update::channel::BETA_MINIMUM_MACOS)));
+        // (The floor is macOS's alone.)
+        if matches!(self.install, InstallKind::MacApp { .. }) {
+            fields.push(("beta_minimum", Value::from(zeron_update::channel::BETA_MINIMUM_MACOS)));
+        }
         if let Some(note) = self.note.borrow().as_deref() {
             fields.push(("channel_note", Value::from(note)));
         }

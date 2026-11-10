@@ -3914,3 +3914,225 @@ fn settings_pages_lay_out_at_full_width_with_plugins_loaded() {
         assert_eq!(app.error(), None);
     }
 }
+
+// ── Your agents: usage, accounts, models (plugins/agents in the engine) ──
+
+/// The shell with `items`, each plugin's agent ops answered by `answer`
+/// (`op` → its value, or `{ "refuse": "<reason>: <words>" }`), each one
+/// heard as `("agents", asked)`.
+fn shell_with_agents(items: Vec<Item>, answer: serde_json::Value) -> (TestApp, Heard) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
+    let heard: Heard = Heard::default();
+    let log = heard.clone();
+    let app = TestApp::new(move |runtime| {
+        let heard = log.clone();
+        let host = super::lend_design_system(ScriptHost::new(runtime, path.clone()), &path);
+        host.shared("zgx.window.size", zgx_script::window_size_value(1200., 800.));
+        offline(&host);
+        host.action("zeron.open", |_| {});
+        host.action("close", |_| {});
+        expose_surface(&host);
+        let mut plugins = Vec::new();
+        for item in &items {
+            let id = item.id().to_string();
+            expose_own(&host, &id);
+            super::locales::publish(&host, &id, Path::new(item.json["snapshot"].as_str().unwrap()));
+            for name in ["result", "ack", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "open_url", "setting_status", "cost", "store_set", "service_call"] {
+                let (heard, key) = (heard.clone(), format!("plugin.{id}.{name}"));
+                host.action(key.clone(), move |v: zgx_script::Value| heard.borrow_mut().push((key.clone(), v.to_json())));
+            }
+            let (heard, answer) = (heard.clone(), answer.clone());
+            host.async_action(format!("plugin.{id}.agents"), move |v: zgx_script::Value| {
+                let asked: serde_json::Value = serde_json::from_str(&v.to_json()).unwrap_or_default();
+                heard.borrow_mut().push(("agents".into(), asked.to_string()));
+                let reply = &answer[asked["op"].as_str().unwrap_or_default()];
+                let out = match reply["refuse"].as_str() {
+                    Some(why) => Err(why.to_string()),
+                    None => Ok(json_value(reply)),
+                };
+                async move { out }
+            });
+            plugins.extend(item.plugin());
+        }
+        host.set_plugins(plugins);
+        host
+    });
+    app.ui.scene.borrow_mut().resize(1200., 800.);
+    app.frames(30);
+    (app, heard)
+}
+
+/// An event in plugin `id`'s inbox, as the bridge brings one (this device's).
+fn tell(app: &mut TestApp, id: &str, event: &str, data: serde_json::Value) {
+    let inbox = app.host.shared(&format!("plugin.{id}.inbox"), json_value(&json!([])));
+    let mut now: serde_json::Value = serde_json::from_str(&inbox.signal().with_untracked(zgx_script::Value::clone).to_json()).unwrap_or(json!([]));
+    if !now.is_array() {
+        now = json!([]);
+    }
+    let list = now.as_array_mut().unwrap();
+    let seq = list.len() + 1;
+    list.push(json!({ "seq": seq, "from": { "id": "this-mac", "name": "This Mac" }, "event": event, "here": true, "data": data, "at": 0 }));
+    inbox.set(json_value(&now));
+    app.frames(5);
+}
+
+fn said(heard: &Heard, key: &str) -> Vec<String> {
+    heard.borrow().iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone()).collect()
+}
+
+/// A plugin of the test's own: `init` its window, granted `permissions`.
+fn own_plugin(id: &str, permissions: &[&str], init: &str) -> (tempfile::TempDir, Item) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(id);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("init.luau"), init).unwrap();
+    std::fs::write(root.join("zeron.luau"), include_str!("../../plugins-sdk/zeron.luau")).unwrap();
+    std::fs::write(
+        root.join("zeron-plugin.json"),
+        json!({ "id": id, "name": "Watcher", "version": "1.0.0", "entry": "init.luau", "permissions": permissions }).to_string(),
+    )
+    .unwrap();
+    let item = from(root, id);
+    (dir, item)
+}
+
+#[test]
+fn account_rotate_says_what_its_service_did() {
+    let (mut app, heard) = shell_with_agents(vec![example("account-rotate")], json!({}));
+    assert_eq!(app.error(), None, "the shell with the example failed");
+    tell(&mut app, "account-rotate", "rotating", json!({ "status": "waiting", "to": "b@example.com", "window": "Session", "remaining": 6 }));
+    tell(&mut app, "account-rotate", "rotated", json!({ "to": "b@example.com" }));
+    tell(&mut app, "account-rotate", "stuck", json!({ "window": "Week", "remaining": 4 }));
+    let toasts = said(&heard, "plugin.account-rotate.toast");
+    assert_eq!(toasts.len(), 3, "{toasts:?}");
+    assert!(toasts[0].contains("when its chats finish"), "{toasts:?}");
+    assert!(toasts[1].contains("switched to b@example.com"), "{toasts:?}");
+    assert!(toasts[2].contains("no other saved account"), "{toasts:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn a_window_listens_through_the_engine_and_hears_only_its_own_listeners() {
+    let init = r#"
+local zeron = require("./zeron")("watcher")
+zeron.on("usage.threshold", function(e, event)
+	zeron.toast(`{event} {e.remaining}`)
+end, { below = 10, provider = "claude-code" })
+local stop = zeron.on("turn.finished", function(e) zeron.toast("never") end)
+stop()
+zeron.usage({ provider = "claude-code" }):after(function(rows)
+	zeron.toast(`usage {#rows} {rows[1].windows[1].remaining}`)
+end)
+zeron.switch_account({ provider = "claude-code", account = "a2" }):after(nil, function(err)
+	zeron.toast(`switch {zeron.reason(err)}`)
+end)
+"#;
+    let (_dir, item) = own_plugin("watcher", &["usage.read"], init);
+    let answers = json!({
+        "listen": null,
+        "usage": [{ "provider": "claude-code", "account": "a1", "active": true, "windows": [{ "label": "Session", "used": 40, "remaining": 60 }] }],
+        "switch_account": { "refuse": "not_allowed: Watcher wasn't allowed to switch your agents' accounts" },
+    });
+    let (mut app, heard) = shell_with_agents(vec![item], answers);
+    assert_eq!(app.error(), None);
+    app.frames(10);
+    let asked: Vec<serde_json::Value> = said(&heard, "agents").iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+    // The engine's told what it listens for: the threshold, not the one stopped.
+    let last_listen = asked.iter().rev().find(|a| a["op"] == "listen").expect("it listened");
+    let listeners = last_listen["listeners"].as_array().unwrap();
+    assert_eq!(listeners.len(), 1, "{listeners:?}");
+    assert_eq!(listeners[0]["event"], "usage.threshold");
+    assert_eq!(listeners[0]["opts"]["below"], 10);
+    let key = listeners[0]["key"].as_str().unwrap().to_owned();
+    // Usage read (no device: this one), and a refusal said with its reason.
+    assert!(asked.iter().any(|a| a["op"] == "usage" && a["args"]["provider"] == "claude-code"), "{asked:?}");
+    let toasts = said(&heard, "plugin.watcher.toast");
+    assert!(toasts.iter().any(|t| t.contains("usage 1 60")), "{toasts:?}");
+    assert!(toasts.iter().any(|t| t.contains("switch not_allowed")), "{toasts:?}");
+    // Its event, for its listener: heard. Another key's, or a service's
+    // event of the same name: not this listener's.
+    tell(&mut app, "watcher", "zeron:usage.threshold", json!({ "listener": key, "data": { "remaining": 5 } }));
+    tell(&mut app, "watcher", "zeron:usage.threshold", json!({ "listener": "w999", "data": { "remaining": 1 } }));
+    tell(&mut app, "watcher", "usage.threshold", json!({ "remaining": 2 }));
+    let toasts = said(&heard, "plugin.watcher.toast");
+    assert_eq!(toasts.iter().filter(|t| t.contains("usage.threshold")).count(), 1, "{toasts:?}");
+    assert!(toasts.iter().any(|t| t.contains("usage.threshold 5")), "{toasts:?}");
+    assert!(!toasts.iter().any(|t| t.contains("never")), "{toasts:?}");
+    // What Zeron says of it (a listener failing, a loop stopped): its row says so.
+    tell(&mut app, "watcher", "zeron:plugin.notice", json!({ "listener": "@notice", "data": { "notice": "Its usage.changed listener failed (3 times in a row): boom" } }));
+    let problems = said(&heard, "plugin.watcher.problem");
+    assert!(problems.iter().any(|p| p.contains("Its usage.changed listener failed (3 times in a row)")), "{problems:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn keep_going_says_what_its_service_sent() {
+    let (mut app, heard) = shell_with_agents(vec![example("keep-going")], json!({}));
+    assert_eq!(app.error(), None, "the shell with the example failed");
+    tell(&mut app, "keep-going", "continued", json!({ "chat": "s-unknown", "delivery": "run" }));
+    let toasts = said(&heard, "plugin.keep-going.toast");
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert!(toasts[0].contains("Sent \\\"continue\\\" to"), "{toasts:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn a_window_sends_starts_and_answers_through_the_engine() {
+    let init = r#"
+local zeron = require("./zeron")("sender")
+zeron.send_message({ chat = "c1", text = "hello", mode = "steer" }):after(function(r)
+	zeron.toast(`sent {r.delivery}`)
+end)
+zeron.new_chat({ prompt = "Fix the build", harness = "claude-code", effort = "high" }):after(function(r)
+	zeron.toast(`started {r.chat}`)
+end)
+zeron.answer({ chat = "c1", answers = { q1 = "Yes" } }):after(nil, function(err)
+	zeron.toast(`answer {zeron.reason(err)}`)
+end)
+"#;
+    let (_dir, item) = own_plugin("sender", &["messages.send"], init);
+    let answers = json!({
+        "send_message": { "status": "sent", "chat": "c1", "delivery": "steer", "id": "m1" },
+        "new_chat": { "status": "sent", "chat": "c9", "id": "m2" },
+        "answer": { "refuse": "not_found: That chat isn't waiting on a question" },
+    });
+    let (mut app, heard) = shell_with_agents(vec![item], answers);
+    assert_eq!(app.error(), None);
+    app.frames(10);
+    let asked: Vec<serde_json::Value> = said(&heard, "agents").iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+    let send = asked.iter().find(|a| a["op"] == "send_message").expect("it sent");
+    assert_eq!((send["args"]["chat"].as_str(), send["args"]["text"].as_str(), send["args"]["mode"].as_str()), (Some("c1"), Some("hello"), Some("steer")));
+    let start = asked.iter().find(|a| a["op"] == "new_chat").expect("it started a chat");
+    assert_eq!((start["args"]["prompt"].as_str(), start["args"]["effort"].as_str()), (Some("Fix the build"), Some("high")));
+    assert!(asked.iter().any(|a| a["op"] == "answer" && a["args"]["answers"]["q1"] == "Yes"), "{asked:?}");
+    let toasts = said(&heard, "plugin.sender.toast");
+    for want in ["sent steer", "started c9", "answer not_found"] {
+        assert!(toasts.iter().any(|t| t.contains(want)), "{want}: {toasts:?}");
+    }
+    assert_eq!(app.error(), None);
+}
+
+/// Every copy of the SDK in this repository (Zeron's own plugins, the
+/// examples) is the canonical one (plugins-sdk/zeron.luau), byte for byte: a
+/// copy is signed into each plugin and Zeron's own ship as they lie, so a
+/// stale one goes out without the helpers the guide documents. Fix with
+/// `for f in apps/zgx/plugins-{builtin,dev}/*/zeron.luau; do cp apps/zgx/plugins-sdk/zeron.luau "$f"; done`.
+#[test]
+fn sdk_copies_match_canonical() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let canonical = std::fs::read(root.join("plugins-sdk/zeron.luau")).unwrap();
+    let mut seen = 0;
+    let mut stale = Vec::new();
+    for group in ["plugins-builtin", "plugins-dev"] {
+        for entry in std::fs::read_dir(root.join(group)).unwrap().flatten() {
+            let copy = entry.path().join("zeron.luau");
+            let Ok(bytes) = std::fs::read(&copy) else { continue };
+            seen += 1;
+            if bytes != canonical {
+                stale.push(copy.strip_prefix(root).unwrap().display().to_string());
+            }
+        }
+    }
+    assert!(seen >= 14, "expected the SDK in every builtin and example, found {seen}");
+    assert!(stale.is_empty(), "stale SDK copies (re-copy plugins-sdk/zeron.luau): {stale:?}");
+}

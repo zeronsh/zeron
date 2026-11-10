@@ -141,8 +141,12 @@ impl Harness for RecordingHarness {
 fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness));
-    EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    // Served, as the engine's port is right after assembly: a turn revived on
+    // boot waits for it (see `a_revived_turn_waits_for_the_port_its_zeron_tools_dial`).
+    core.sessions.set_ipc_port(27699);
+    core
 }
 
 fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
@@ -759,15 +763,11 @@ async fn a_parked_side_chat_stays_warm_when_native_subagents_switch() {
     core.shutdown().await;
 }
 
-#[tokio::test]
-async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("data");
-    std::fs::create_dir_all(&dir).unwrap();
+/// Same manufactured kill -9 state as above, but FRESH: the streaming entry
+/// crashed moments ago, inside the 12h revival window.
+fn seed_fresh_crash(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
-
-    // Same manufactured kill -9 state as above, but FRESH: the streaming entry
-    // crashed moments ago, inside the 12h revival window.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -830,6 +830,13 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             )
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    seed_fresh_crash(&dir);
 
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let core = assemble(
@@ -892,6 +899,60 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         revived.resume.as_deref(),
         Some("hs-crash"),
         "auto-resume must reattach the crashed harness session"
+    );
+    core.shutdown().await;
+}
+
+/// Boot recovery revives a cut-off turn while the engine is still being
+/// assembled, before it serves its IPC port. Dispatched then, the run went out
+/// with no Zeron MCP server: its agent found its Zeron tools gone. It waits for
+/// the port, and carries the server once it's recorded.
+#[tokio::test]
+async fn a_revived_turn_waits_for_the_port_its_zeron_tools_dial() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    seed_fresh_crash(&dir);
+
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RecordingHarness {
+        requests: requests.clone(),
+        session_id: "hs-after-crash".into(),
+        fail_starts: Default::default(),
+    }));
+    // Assembled, the port not served yet.
+    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "the revived turn must not go out before the port"
+    );
+
+    core.sessions.set_ipc_port(27699);
+    wait_for(
+        || {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt.contains("Continue where you left off"))
+        },
+        "the revived turn to dispatch",
+    )
+    .await;
+    let recorded = requests.lock().unwrap().clone();
+    let revived = recorded
+        .iter()
+        .find(|r| r.prompt.contains("Continue where you left off"))
+        .unwrap();
+    let zeron = revived
+        .mcp
+        .as_ref()
+        .expect("the revived run carries Zeron's MCP server");
+    assert_eq!(
+        zeron.env.get("ZERON_IPC_PORT").map(String::as_str),
+        Some("27699")
     );
     core.shutdown().await;
 }

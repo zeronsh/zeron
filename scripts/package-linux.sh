@@ -8,6 +8,12 @@
 #
 # Usage: scripts/package-linux.sh
 # Env:   PROFILE=debug for a fast unoptimized package (CI smoke); default release.
+#
+# The beta (.github/workflows/zgx-beta.yml), with both of these set: the zgx
+# interface (apps/zgx, its `beta` feature) as `zeron`, its scripts beside it,
+# and the `zeron-engine` it's given, built from the same commit:
+#   BETA_VERSION=<workspace version>-beta.<n>
+#   ZGX_BETA_ENGINE=<a zeron-engine binary, or a release's linux tarball>
 
 set -euo pipefail
 
@@ -16,12 +22,50 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 PROFILE="${PROFILE:-release}"
 ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+BETA_VERSION="${BETA_VERSION:-}"
+if [[ -n "$BETA_VERSION" ]]; then
+  [[ "$BETA_VERSION" == "$VERSION"-beta.* ]] || { echo "BETA_VERSION $BETA_VERSION isn't a beta of the workspace's $VERSION" >&2; exit 1; }
+  [[ -f "${ZGX_BETA_ENGINE:-}" ]] || { echo "ZGX_BETA_ENGINE: a zeron-engine binary, or a release's linux tarball" >&2; exit 1; }
+  VERSION="$BETA_VERSION"
+fi
 OUT_DIR="$ROOT/target/package"
 STAGE="$OUT_DIR/zeron-$VERSION-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
-if [[ "$PROFILE" == "release" ]]; then
+if [[ -n "$BETA_VERSION" ]]; then
+  # The engine: the binary given, or the one in a release's tarball.
+  if [[ "$ZGX_BETA_ENGINE" == *.tar.gz ]]; then
+    UNPACK="$OUT_DIR/.stable"
+    rm -rf "$UNPACK" && mkdir -p "$UNPACK"
+    tar -xzf "$ZGX_BETA_ENGINE" -C "$UNPACK" --strip-components=1
+    ENGINE_BIN="$UNPACK/zeron-engine"
+  else
+    ENGINE_BIN="$ZGX_BETA_ENGINE"
+  fi
+  [[ -x "$ENGINE_BIN" ]] || { echo "no zeron-engine in $ZGX_BETA_ENGINE" >&2; exit 1; }
+  # The interface hands `zeron headless` and the engine's other subcommands to
+  # this engine, as scripts/package-zgx-beta.sh requires of macOS's. (Read,
+  # not run: an engine from before the shared command line starts on any
+  # argument.)
+  LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
+    { echo "the stable engine predates the shared command line" >&2; exit 1; }
+  # A workspace of its own (its own lock, patches).
+  ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release --locked --features beta \
+    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target"
+  BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
+  [[ "$("$BIN" --version)" == "zeron $BETA_VERSION" ]] ||
+    { echo "$BIN isn't the $BETA_VERSION beta (it says '$("$BIN" --version)')" >&2; exit 1; }
+  # Production's only: neither binary may carry staging's edge or sign-in.
+  STAGING_MARKS='staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
+  for bin in "$BIN" "$ENGINE_BIN"; do
+    if LC_ALL=C grep -aqE "$STAGING_MARKS" "$bin"; then
+      echo "$bin carries staging's edge or sign-in client:" >&2
+      LC_ALL=C grep -aoE "$STAGING_MARKS" "$bin" | sort -u >&2
+      exit 1
+    fi
+  done
+elif [[ "$PROFILE" == "release" ]]; then
   # Fat LTO in one codegen unit: `zeron` goes from 205 to 172 MB (16% less), with
   # the same start-up (median engine boot 387 ms both ways, n=20 each), at about
   # 60% more build time. A Cloud machine copies the binary back in on every wake,
@@ -36,7 +80,7 @@ else
 fi
 # The background engine the app starts: sessions keep running with the app
 # closed, in a process of its own.
-ENGINE_BIN="$(dirname "$BIN")/zeron-engine"
+ENGINE_BIN="${ENGINE_BIN:-$(dirname "$BIN")/zeron-engine}"
 
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
@@ -48,6 +92,20 @@ install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
+if [[ -n "$BETA_VERSION" ]]; then
+  # The scripts and Zeron's own plugins, as scripts/package-zgx-beta.sh: read
+  # beside the binary. Not zgx's generated types or the tests.
+  rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
+    "$ROOT/apps/zgx/ui/" "$STAGE/ui/"
+  rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
+    "$ROOT/apps/zgx/plugins-builtin/" "$STAGE/plugins-builtin/"
+  # Each ships the canonical SDK, as scripts/package-zgx-beta.sh.
+  for dir in "$STAGE/plugins-builtin/"*/; do
+    cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
+  done
+  cp "$ROOT/apps/zgx/fonts/"*-OFL.txt "$STAGE/licenses/fonts/"
+  rm -rf "$OUT_DIR/.stable"
+fi
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
@@ -59,7 +117,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="__VERSION__"
 APP_ROOT="$HOME/.zeron/app"
-DEST="$APP_ROOT/$VERSION"
+# A beta's directory isn't named as a version: crates/update `managed_dir`.
+case "$VERSION" in
+  *-beta.*) DEST="$APP_ROOT/beta-$VERSION" ;;
+  *) DEST="$APP_ROOT/$VERSION" ;;
+esac
 mkdir -p "$APP_ROOT"
 if [ ! -x "$DEST/zeron" ]; then
   # Copy beside the final name, then rename: an interrupted install never

@@ -26,10 +26,20 @@ const WITHOUT_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(45);
 const FAILURE_INITIAL_BACKOFF: Duration = Duration::from_secs(20);
 const FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const CONTEXT_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// A checkout on its repository's default branch: a pull request whose head
+/// is that branch is rare (a release pull request), so it is asked about
+/// seldom. Every chat started in a project's main folder sits there, and each
+/// was asking GitHub every 45 s.
+const DEFAULT_BRANCH_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// What one provider question is of. Checkouts of one repository on one
+/// branch ask GitHub the same thing, so they share the answer: `scope` is
+/// empty when the remote names the repository, and the checkout's id only
+/// when it doesn't (that lookup fails without asking GitHub anyway).
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChangeRequestCacheKey {
-    pub checkout_id: String,
+    pub scope: String,
     pub branch: String,
     pub upstream_ref: String,
     pub remote: String,
@@ -42,6 +52,7 @@ struct Timing {
     failure_initial_backoff: Duration,
     failure_max_backoff: Duration,
     context_poll_interval: Duration,
+    default_branch_ttl: Duration,
 }
 
 impl Default for Timing {
@@ -52,6 +63,7 @@ impl Default for Timing {
             failure_initial_backoff: FAILURE_INITIAL_BACKOFF,
             failure_max_backoff: FAILURE_MAX_BACKOFF,
             context_poll_interval: CONTEXT_POLL_INTERVAL,
+            default_branch_ttl: DEFAULT_BRANCH_TTL,
         }
     }
 }
@@ -59,6 +71,17 @@ impl Default for Timing {
 struct CacheEntry {
     state: AsyncMutex<CacheState>,
     demand: AtomicUsize,
+    /// When what it holds goes stale (its `next_refresh`, readable without
+    /// the async lock): an entry nobody watches is kept until then, so a
+    /// watch that goes and comes back (a row scrolled away and back, a
+    /// plugin's watch started again) is answered without asking GitHub.
+    stale_at: Mutex<Instant>,
+}
+
+impl CacheEntry {
+    fn is_stale(&self, now: Instant) -> bool {
+        now >= *self.stale_at.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 struct CacheState {
@@ -208,7 +231,12 @@ impl CheckoutChangeRequests {
                     state.lease = Some(state.service.acquire(key.clone()));
                 }
                 let (snapshot, next_refresh) = state.service.refresh(&key, &source).await;
-                if let Some(snapshot) = snapshot {
+                if let Some(mut snapshot) = snapshot {
+                    // (The answer may be another checkout's of the same
+                    // repository and branch: told as this one's.)
+                    snapshot.checkout_id = state.identity.id.clone();
+                    snapshot.cwd = source.checkout_root.to_string_lossy().into_owned();
+                    snapshot.branch = source.branch.local_branch.clone();
                     let semantic = SemanticStatus::from(&snapshot);
                     if state.last_emitted.as_ref() != Some(&semantic) {
                         state.last_emitted = Some(semantic);
@@ -270,6 +298,11 @@ impl CheckoutChangeRequests {
                 .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            // Entries nobody watches go once stale.
+            let now = Instant::now();
+            entries.retain(|_, entry| {
+                entry.demand.load(Ordering::Acquire) > 0 || !entry.is_stale(now)
+            });
             let entry = entries
                 .entry(key.clone())
                 .or_insert_with(|| {
@@ -281,6 +314,7 @@ impl CheckoutChangeRequests {
                             last_error: None,
                         }),
                         demand: AtomicUsize::new(0),
+                        stale_at: Mutex::new(Instant::now()),
                     })
                 })
                 .clone();
@@ -318,13 +352,17 @@ impl CheckoutChangeRequests {
 
         match self.inner.lookup.resolve_github_source(source).await {
             Ok(change_request) => {
-                let ttl = if change_request.is_some() {
+                let on_default_branch = source.default_branch.as_deref()
+                    == Some(source.branch.head_branch.as_str());
+                let ttl = if on_default_branch {
+                    self.inner.timing.default_branch_ttl
+                } else if change_request.is_some() {
                     self.inner.timing.with_change_request_ttl
                 } else {
                     self.inner.timing.without_change_request_ttl
                 };
                 let snapshot = CheckoutChangeRequestStatus {
-                    checkout_id: key.checkout_id.clone(),
+                    checkout_id: String::new(),
                     device_id: self.inner.device_id.clone(),
                     cwd: source.checkout_root.to_string_lossy().into_owned(),
                     branch: source.branch.local_branch.clone(),
@@ -333,6 +371,7 @@ impl CheckoutChangeRequests {
                 };
                 state.last_success = Some(snapshot.clone());
                 state.next_refresh = Instant::now() + ttl;
+                *entry.stale_at.lock().unwrap_or_else(PoisonError::into_inner) = state.next_refresh;
                 state.failures = 0;
                 state.last_error = None;
                 (Some(snapshot), state.next_refresh)
@@ -345,6 +384,7 @@ impl CheckoutChangeRequests {
                     state.failures,
                 );
                 state.next_refresh = Instant::now() + delay;
+                *entry.stale_at.lock().unwrap_or_else(PoisonError::into_inner) = state.next_refresh;
                 if state.last_error != Some(error) {
                     tracing::warn!(%error, "change request refresh failed; retaining last success");
                     state.last_error = Some(error);
@@ -377,7 +417,12 @@ impl Drop for DemandLease {
         let is_cached_entry = entries
             .get(&self.key)
             .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
-        if is_cached_entry && self.entry.demand.load(Ordering::Acquire) == 0 {
+        // A fresh answer is kept for the next watch of it (`acquire` lets it
+        // go once stale); a stale one goes now.
+        if is_cached_entry
+            && self.entry.demand.load(Ordering::Acquire) == 0
+            && self.entry.is_stale(Instant::now())
+        {
             entries.remove(&self.key);
         }
     }
@@ -438,7 +483,7 @@ fn cache_key(checkout_id: &str, source: &CheckoutSourceContext) -> ChangeRequest
         })
         .unwrap_or_default();
     ChangeRequestCacheKey {
-        checkout_id: checkout_id.to_owned(),
+        scope: if remote.is_empty() { checkout_id.to_owned() } else { String::new() },
         branch: source.branch.local_branch.clone(),
         upstream_ref: source.branch.upstream_ref.clone().unwrap_or_default(),
         remote,
@@ -571,6 +616,7 @@ mod tests {
             failure_initial_backoff: Duration::from_secs(1),
             failure_max_backoff: Duration::from_secs(2),
             context_poll_interval: Duration::from_millis(5),
+            default_branch_ttl: Duration::from_secs(60),
         }
     }
 
@@ -747,6 +793,7 @@ mod tests {
             failure_initial_backoff: Duration::from_millis(1),
             failure_max_backoff: Duration::from_millis(1),
             context_poll_interval: Duration::from_millis(1),
+            default_branch_ttl: Duration::from_millis(1),
         };
         let service = service(lookup.clone(), timing);
         let key = cache_key("checkout-1", &source);
@@ -790,7 +837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_last_subscriber_evicts_cache_and_stops_refresh_work() {
+    async fn dropping_last_subscriber_stops_refresh_work_and_a_stale_entry_goes() {
         let lookup = FakeLookup::new(
             source("feature/status"),
             [Ok(Some(pull_request(90))), Ok(Some(pull_request(91)))],
@@ -801,16 +848,60 @@ mod tests {
         drop(stream);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(lookup.resolve_count(), 1, "nobody watching: nothing asked");
 
-        assert_eq!(lookup.resolve_count(), 1);
-        assert!(service.inner.entries.lock().unwrap().is_empty());
-
-        // A later observer gets a fresh entry rather than reviving the
-        // abandoned snapshot retained by an inactive checkout.
+        // Stale by now: a later observer asks again (and the stale entry
+        // nobody watched is gone).
         let mut renewed = service.watch_checkout(PathBuf::from("/checkout"), identity());
         let renewed_status = renewed.next().await.unwrap();
         assert_eq!(renewed_status.change_request.unwrap().number, 91);
         assert_eq!(lookup.resolve_count(), 2);
+        assert_eq!(service.inner.entries.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_watch_that_goes_and_comes_back_within_its_ttl_asks_nothing() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        for _ in 0..20 {
+            let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
+            assert_eq!(stream.next().await.unwrap().change_request.unwrap().number, 90);
+        }
+        assert_eq!(lookup.resolve_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn checkouts_of_one_repository_and_branch_share_one_provider_query() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        let other = CheckoutIdentity {
+            id: "checkout-2".into(),
+            root: PathBuf::from("/clone"),
+            git_dir: PathBuf::from("/clone/.git"),
+        };
+        let mut first = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        let first = first.next().await.unwrap();
+        let mut second = service.watch_checkout(PathBuf::from("/clone"), other);
+        let second = second.next().await.unwrap();
+        assert_eq!(lookup.resolve_count(), 1);
+        assert_eq!(second.change_request, first.change_request);
+        // Each is told as its own checkout.
+        assert_eq!((first.checkout_id.as_str(), second.checkout_id.as_str()), ("checkout-1", "checkout-2"));
+    }
+
+    #[tokio::test]
+    async fn the_default_branch_is_asked_about_seldom() {
+        let lookup = FakeLookup::new(source("main"), [Ok(None), Ok(None)]);
+        let service = service(lookup.clone(), fast_timing());
+        let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        assert_eq!(stream.next().await.unwrap().change_request, None);
+        // Many of the 10 ms no-PR TTLs later, still the one question.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), stream.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(lookup.resolve_count(), 1);
     }
 
     #[tokio::test]

@@ -98,7 +98,7 @@ end
 -- or Linux, not a phone), this one first. Choosing one asks the engine to
 -- address every agent call there (`agents.target`).
 local function computers(): { sessions.Device }
-	return sessions.computers(sessions.now:get().devices, true)
+	return sessions.computers(sessions.devices:get(), true)
 end
 local function here(): string?
 	for _, d in sessions.now:peek().devices or {} do

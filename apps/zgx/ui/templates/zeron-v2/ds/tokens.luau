@@ -14,12 +14,18 @@ function M.setup()
 	-- panel tint and row wash, in every theme and template, rather than
 	-- zgx's (a saturated highlight). Their rows and panel keep zgx's shape.
 	-- The app's own editors draw ds/editor_menu.
-	ui.theme.tokens {
-		menu = {
-			bg = "{zeron.menu.tint}",
-			hover = "{hover}",
-		},
-	}
+	-- (Their glass as the menus' own, ds/glass `menu`: the tint where a
+	-- popup's glass shows through, solid where it can't, or opaque.)
+	local material = require("@self/material")
+	ui.effect(function()
+		local through = material.menus_see_through()
+		ui.theme.tokens {
+			menu = {
+				bg = if through then "{zeron.menu.tint}" else "{zeron.menu.solid}",
+				hover = "{hover}",
+			},
+		}
+	end)
 	ui.theme.tokens {
 		zeron = {
 			-- Half-steps of the spacing scale (space.1 to 8: 4, 8, 12, 16, 24,
@@ -85,6 +91,11 @@ function M.setup()
 				heading = 24,
 				glyph = { box = 18, size = 16 },
 				width = 232,
+				-- The `@` launcher (ds/mention_launcher): its width, the least it
+				-- narrows to in a small window, a scope tab's height, and on each
+				-- row the time's column and the ↵ key's width (a key cap's: the
+				-- lit row's text fades out under it).
+				launcher = { width = 440, min_width = 320, tab = 24, time = 40, key = 18 },
 				blur = 30,
 			},
 			-- An island: controls gathered on glass over the page (the title
@@ -596,6 +607,52 @@ function M.setup()
 			},
 		},
 	}
+	-- What "Accent colour throughout" (Settings → Appearance, ds/look
+	-- `accented`) draws in the accent, as the shipping app does; off, each
+	-- is the neutral it was. The conversation's list markers, its quotes'
+	-- rail, its inline code's ink and wash, and its links' ink (each
+	-- neutral here; ds/look points them at `zeron.accented.*`).
+	ui.theme.tokens {
+		zeron = {
+			prose = {
+				marker = "{text.tertiary}",
+				quote_rail = "{border.strong}",
+				code_wash = "{zeron.code.wash}",
+			},
+			accented = {
+				ink = "{accent}",
+				-- A find's matches, and the one it's on (as the editor's
+				-- selection, but lighter, so the two aren't mistaken).
+				find = "alpha({accent}, 0.18)",
+				find_current = "alpha({accent}, 0.45)",
+				rail = "alpha({accent}, 0.6)",
+				code_wash = "alpha({accent}, 0.12)",
+			},
+		},
+	}
+	-- A chip in a message (a file, a chat, a skill or a command mentioned:
+	-- ds/markdown), as Zeron's shipping app paints one (composer/chip.rs
+	-- `paint_chip`): a pill of the text's ink at 9% (white on dark, black
+	-- on light: theme.rs `ink(0.09)`), its icon on a well of its own, a
+	-- point in from the pill's edge, white on light and black on dark, at
+	-- 32% over glass and 16% where the window is solid
+	-- (file_icons.rs `well_bg`); a glyph in the muted ink (a file's icon
+	-- in its own colours).
+	ui.effect(function()
+		local kind = ui.theme.kind()
+		local dark = not (kind == "light" or kind == "high-contrast-light")
+		local glass = material.see_through()
+		local well = if dark then "#000000" else "#ffffff"
+		ui.theme.tokens {
+			zeron = {
+				chip = {
+					bg = if dark then "#ffffff17" else "#00000017",
+					well = well .. (if glass then "52" else "29"),
+					glyph = "{text.secondary}",
+				},
+			},
+		}
+	end)
 	ui.theme.load("ds/themes/zeron-dark.json")
 	ui.theme.load("ds/themes/zeron-light.json")
 	-- The theme chosen for each scheme, else the template's own (its

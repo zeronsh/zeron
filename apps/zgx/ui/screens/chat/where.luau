@@ -129,7 +129,7 @@ function M.bind(c: Choices)
 	end
 
 	local function computers(): { sessions.Device }
-		return sessions.computers(sessions.now:get().devices)
+		return sessions.computers(sessions.devices:get())
 	end
 	local function device_row(id: string?): sessions.Device?
 		for _, d in computers() do
@@ -143,7 +143,7 @@ function M.bind(c: Choices)
 		if id == nil or id == M.NO_PROJECT then
 			return nil
 		end
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			if p.id == id then
 				return p
 			end
@@ -173,7 +173,7 @@ function M.bind(c: Choices)
 	end
 	local function on_device(device: string?): { sessions.Project }
 		local out = {}
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			-- (On Cloud: those it can open, on whichever device.)
 			if if device == M.CLOUD then cloud_repo(p) ~= nil else p.device == device then
 				table.insert(out, p)
@@ -232,7 +232,7 @@ function M.bind(c: Choices)
 		local out = {}
 		for _, p in on_device(c.device:get()) do
 			local l = route.look(p.id) or { hue = route.hue(p.id) }
-			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, plain = not p.git or nil })
+			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id, plain = not p.git or nil })
 		end
 		local chosen = c.project:get()
 		if chosen and chosen ~= M.NO_PROJECT then
@@ -294,13 +294,12 @@ function M.bind(c: Choices)
 		if not c.active() then
 			return
 		end
-		local now = sessions.now:get()
 		local d = c.device:get()
 		if d and (device_row(d) or d == M.CLOUD) then
 			return
 		end
 		local last = M.remembered:peek().device
-		local pick = if last and device_row(last) then last else now.here
+		local pick = if last and device_row(last) then last else sessions.here:get()
 		if pick and pick ~= d then
 			c.device:set(pick)
 		end
@@ -341,7 +340,7 @@ function M.bind(c: Choices)
 		local d = c.device:get()
 		-- (Only once the sessions have come: before, every device has no
 		-- projects, and none would be picked for good.)
-		if not c.active() or c.project:get() ~= nil or not d or sessions.now:get().state ~= "ready" then
+		if not c.active() or c.project:get() ~= nil or not d or sessions.state:get() ~= "ready" then
 			return
 		end
 		local here = on_device(d)
@@ -368,7 +367,7 @@ function M.bind(c: Choices)
 		end
 		local d, p = c.device:get(), c.project:get()
 		-- (Cloud is chosen afresh each time: its projects are its own.)
-		if not d or not device_row(d) or sessions.now:get().state ~= "ready" then
+		if not d or not device_row(d) or sessions.state:get() ~= "ready" then
 			return
 		end
 		local r = M.remembered:peek()

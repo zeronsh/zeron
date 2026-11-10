@@ -25,6 +25,8 @@
 //! `ZERON_ZGX_REPLAY=1` shows every page, as if none were finished.
 //! `--inspect` (or `ZGX_INSPECT_SOCKET=1`) serves devtools to `zgx inspect`.
 
+#![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
+
 mod about;
 mod acp_registry;
 mod agents;
@@ -70,6 +72,8 @@ mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
+mod label_fade_tests;
+#[cfg(test)]
 mod waiting_toast_tests;
 #[cfg(test)]
 mod split_tests;
@@ -102,7 +106,15 @@ mod chip_copy_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
+mod picker_settle_tests;
+#[cfg(test)]
 mod fit_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod slide_bench_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod activity_cost_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
@@ -204,6 +216,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
+    // The Windows beta's engine is the stable release's whole `zeron.exe`, in
+    // the beta's folder (scripts/package-windows.ps1).
+    #[cfg(all(windows, feature = "beta"))]
+    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
+        zeron_launch::set_full_app_engine(dir.join("beta").join(about::APP_VERSION).join("engine").join("zeron.exe"));
+    }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
@@ -214,7 +232,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
-            zeron_cli::Launch::Window { open_url: url } => open_url = url,
+            zeron_cli::Launch::Window { open_url: url, safe_mode } => {
+                open_url = url;
+                // Zeron's own interface (src/plugins/preview.rs safe mode):
+                // as Alt (⌥) held as it opens.
+                if safe_mode {
+                    plugins::ask_zeron_template();
+                }
+            }
             zeron_cli::Launch::Engine(_) => unreachable!("the helper runs the engine's commands"),
             #[cfg(target_os = "linux")]
             zeron_cli::Launch::Appshot => return Err("Appshots from the command line aren't in this app yet".into()),
@@ -235,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--inspect" => inspect = true,
             // Zeron's own template, whatever was in use (src/plugins/live.rs):
             // for one that breaks before its window can switch back.
-            "--zeron-template" => plugins::ask_zeron_template(),
+            "--zeron-template" | "--safe-mode" => plugins::ask_zeron_template(),
             // (Development: a fixture under ui/ in a window of its own, as
             // the gallery's; with `ZERON_ZGX_DEV_PLUGINS`, plugins in it.)
             other if other.starts_with("fixture=") && other.ends_with(".luau") => {
@@ -243,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => {
                 return Err(format!(
-                    "unknown argument `{other}`: expected intro, onboarding, main, gallery, --inspect or --zeron-template"
+                    "unknown argument `{other}`: expected intro, onboarding, main, gallery, --inspect, --safe-mode or --zeron-template"
                 )
                 .into());
             }
@@ -334,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// fixture, devtools), or none: not `zeron`'s command line.
 fn dev_launch(args: &[String]) -> bool {
     args.iter().all(|arg| {
-        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template")
+        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template" | "--safe-mode")
             || (arg.starts_with("fixture=") && arg.ends_with(".luau"))
     })
 }
@@ -909,6 +934,11 @@ fn serve_with(
     if inspect {
         zgx_script::inspect::prepare();
     }
+    // A press travels 6 points before it's a drag, so a click that wavers
+    // stays a click (a tab's above all). On macOS only: it gives no setting
+    // (zgx's own is 4); elsewhere zgx follows the system's.
+    #[cfg(target_os = "macos")]
+    cx.ui.input.set_drag_threshold(6.);
     // The platform, which the selection's Copy and Look Up go through, is
     // found as the view mounts.
     let platform = selection_platform(cx, &host);
@@ -1095,7 +1125,11 @@ fn palette_commands(bar: &[zgx_desktop::AppMenu], all: &[zgx_script::Command]) -
         for entry in entries {
             match entry {
                 zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
-                    let key = accelerator.as_ref().and_then(|_| all.iter().find(|c| c.id == action.0)).and_then(|c| c.key.clone());
+                    let key = accelerator.as_ref().and_then(|_| match all.iter().find(|c| c.id == action.0) {
+                        Some(command) => command.key.clone(),
+                        // The host's own way back has its key too.
+                        None => (action.0 == plugins::USE_ZERON_TEMPLATE).then(|| menu_bar::DEFAULT_INTERFACE_KEY.to_string()),
+                    });
                     let mut fields = vec![("id", Value::from(action.0.as_str())), ("title", Value::from(label.as_str())), ("menu", Value::from(menu))];
                     if let Some(key) = key {
                         fields.push(("key", Value::from(key.as_str())));
@@ -1145,6 +1179,19 @@ fn intro_window() -> WindowOptions {
     }
 }
 
+/// The glass under Zeron's window: the under-window blur alone, untinted
+/// (`plain`), which the theme's frost (`glass.tint`, Zeron's `glass` at
+/// 0.80) tints, on every platform. On Windows that's the acrylic accent's
+/// blur of what's behind the window (zgx #1495), gpui's `Blurred`, as the
+/// shipping app's: the frost values are that app's, made for it. The
+/// material's own backdrop there is Mica, which blurs nothing (solid under
+/// the frost); Acrylic, a transient material's, adds the system's tint
+/// under it and goes solid whenever the window isn't active. With
+/// Transparency effects off, plain glass goes solid (zgx #1496).
+fn zeron_glass() -> Glass {
+    Glass::new(GlassMaterial::UnderWindowBackground).plain()
+}
+
 /// Zeron's window: an inset title bar over the colourless under-window
 /// blur, which the theme's `background` tints (the shipping app's glass).
 fn zeron_window(width: f64, height: f64) -> WindowOptions {
@@ -1154,9 +1201,11 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         height,
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
-        glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
-        // (Windows: the caption buttons keep to the title row at any zoom.)
-        caption_height: Some(32.),
+        glass: Some(zeron_glass()),
+        // (Windows: the caption buttons keep to the title row at any zoom,
+        // the bar's whole 38, as Zeron's: shell.rs
+        // `render_windows_caption_controls`, `Theme::TITLEBAR_HEIGHT`.)
+        caption_height: Some(38.),
         ..Default::default()
     }
 }
@@ -1211,8 +1260,8 @@ fn gallery_window() -> WindowOptions {
 
 /// The scripts: this folder's `ui/`, or `ZERON_ZGX_UI` (scripts/smoke.sh's
 /// frozen copy, which other saves under ui/ can't reload mid-run), or, in
-/// an app bundle (the Zeron app: the beta), the copy in its `Contents/Resources/ui`
-/// (with `plugins-builtin` beside it).
+/// an installed Zeron app (the beta), the copy packaged with it (with
+/// `plugins-builtin` beside it).
 fn ui_dir() -> PathBuf {
     match dev::smoke_switch("ZERON_ZGX_UI") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -1220,13 +1269,23 @@ fn ui_dir() -> PathBuf {
     }
 }
 
-/// `Contents/Resources/ui` of the bundle this executable runs from, if any.
+/// The packaged scripts of the install this executable runs from, if any:
+/// `Contents/Resources/ui` of a macOS bundle, `ui` beside it on Linux (the
+/// tarball's, scripts/package-linux.sh), `beta\<version>\ui` beside it on
+/// Windows (scripts/package-windows.ps1).
 fn bundled_ui() -> Option<PathBuf> {
     static BUNDLED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     BUNDLED
         .get_or_init(|| {
             let exe = std::env::current_exe().ok()?;
-            let ui = exe.parent()?.parent()?.join("Resources").join("ui");
+            let dir = exe.parent()?;
+            let ui = if cfg!(target_os = "macos") {
+                dir.parent()?.join("Resources").join("ui")
+            } else if cfg!(windows) {
+                dir.join("beta").join(about::APP_VERSION).join("ui")
+            } else {
+                dir.join("ui")
+            };
             ui.join("app.luau").is_file().then_some(ui)
         })
         .clone()
@@ -1248,6 +1307,19 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod glass_tests {
+    /// The window's glass is the under-window blur alone on every
+    /// platform: on Windows, the acrylic accent's blur the shipping app's
+    /// frost was made for, not Mica, which blurs nothing.
+    #[test]
+    fn the_window_s_glass_is_plain_everywhere() {
+        let glass = super::zeron_glass();
+        assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
+        assert!(glass.plain);
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 -- Where the main window is: a new chat (`home`), a session
 -- (`session/:id`) or a page of settings (`settings/:page`), in one
 -- `ui.router` with the history behind and ahead (the title bar's arrows,
--- the mouse's buttons and a trackpad's swipe over the page, ⌘[ and ⌘]).
+-- ⌘[ and ⌘]; a trackpad's swipe doesn't step it).
 -- The other screens read where it is from here and move it from here:
 --
 --   route.make()            the router made (the shell, as it's built)
@@ -18,14 +18,22 @@
 --   route.projects:get()    the projects a new chat can work in, as
 --                           ds.Composer takes them ({ value, label, hue? })
 --   route.open_session(id)  to that session
+--   route.keep_keys()       the next arrival leaves the keys where they are
+--                           (a tab strip's arrows; `take_keys_kept()`)
 --   route.new_chat(project?, device?) to a new chat (in that project, a
---                           space id; "none" for none; nil, the one chosen
---                           last), on that device if given (a device id):
+--                           space id; "none" for none; nil, the one the
+--                           sidebar's project filter narrows to, else the
+--                           one chosen last), on that device if given (a device id):
 --                           the composer's device picked for it (a project
 --                           not there: its namesake there, else the
 --                           composer's pick there; `placed`)
 --   route.device_pick:get() that device, until the new chat's composer takes
 --                           it ({ device }; `take_device()` reads and clears)
+--   route.project_pick:get() the project a new chat was asked for (a
+--                           project's "+"), until its composer takes it
+--                           ({ project }; `take_project()` reads and clears);
+--                           otherwise the composer keeps the one last
+--                           picked on the new-chat page
 --   route.settings(page?)   to settings (a page's id; "general" first)
 --   route.leave_settings()  back where the chats were
 --   route.plugin_page(plugin, page)  to a plugin's page (`plugin`, `page`:
@@ -50,7 +58,7 @@ local M = {}
 export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string? }
 export type Project = { id: string, device: string?, path: string?, name: string? }
 export type Session = { id: string, device: string?, cwd: string?, title: string?, project: string? }
-export type Choice = { value: string, label: string, hue: string?, src: string? }
+export type Choice = { value: string, label: string, hue: string?, src: string?, emoji: string?, project: string? }
 
 local ROUTES = {
 	home = "/",
@@ -276,7 +284,7 @@ local function project_of(id: string?): sessions.Project?
 	if not id or id == "none" then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -297,7 +305,7 @@ local where = steady(function(): Current
 	end
 	local p = chosen:get()
 	-- A chosen project since deleted: none chosen.
-	if p and p ~= "none" and sessions.now:get().state == "ready" and not project_of(p) then
+	if p and p ~= "none" and sessions.state:get() == "ready" and not project_of(p) then
 		p = nil
 	end
 	return { name = "home", project = p }
@@ -337,10 +345,11 @@ end)
 
 -- What a new chat's composer has picked: where its panel works. (Not `chosen`: that's
 -- what someone chose, which a first launch with no projects asks them for.)
+-- On a new chat it's the composer's pick, the route's until it has made one.
 M.new_chat_project = ui.state("shell_new_chat_project", nil :: string?)
 M.project = steady(function(): Project?
 	local c = M.chat:get()
-	local p = project_of(c.project or (if c.name == "home" then M.new_chat_project:get() else nil))
+	local p = project_of(if c.name == "home" then (M.new_chat_project:get() or c.project) else c.project)
 	if not p then
 		return nil
 	end
@@ -364,15 +373,14 @@ M.device = steady(function(): string?
 	if p and p.device then
 		return p.device
 	end
-	return sessions.now:get().here
+	return sessions.here:get()
 end)
 
 -- A new chat with nowhere to work yet (Zeron's first launch): no project,
 -- and none not chosen ("No project"). Its page asks for one in the
 -- composer's place.
 M.needs_project = ui.computed(function(): boolean
-	local now = sessions.now:get()
-	return now.state == "ready" and #now.projects == 0 and M.chat:get().name == "home" and chosen:get() ~= "none"
+	return sessions.state:get() == "ready" and #sessions.projects:get() == 0 and M.chat:get().name == "home" and chosen:get() ~= "none"
 end)
 
 -- A project's hue: one of the palette's, the same for it every time (a
@@ -384,9 +392,9 @@ M.look = look.by_id
 
 M.projects = steady(function(): { Choice }
 	local out: { Choice } = {}
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		local l = look.of(p)
-		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji })
+		table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id })
 	end
 	return out
 end)
@@ -498,6 +506,31 @@ end)
 -- the composer is there already or arrives with the move home. (A named
 -- state: a reload in between keeps it.)
 M.device_pick = ui.state("shell_device_pick", nil :: { device: string }?)
+M.project_pick = ui.state("shell_project_pick", nil :: { project: string? }?)
+function M.take_project(): { project: string? }?
+	local pick = M.project_pick:peek()
+	if pick then
+		M.project_pick:set(nil)
+	end
+	return pick
+end
+-- An arrival that leaves the keys where they are: a tab strip's arrows
+-- choose a tab and keep the focus on it. `keep_keys()` just before the
+-- move; the composer's arrival takes it (`take_keys_kept()`) and leaves
+-- the keys alone. Unclaimed (a move that changed nothing), it lapses on
+-- the next turn.
+local keys_kept = false
+function M.keep_keys()
+	keys_kept = true
+	ui.after(0, function()
+		keys_kept = false
+	end)
+end
+function M.take_keys_kept(): boolean
+	local kept = keys_kept
+	keys_kept = false
+	return kept
+end
 function M.take_device(): string?
 	local pick = M.device_pick:peek()
 	if pick then
@@ -539,7 +572,19 @@ local function placed(project: string?, device: string): (string?, string)
 	return if named then named.id else nil, device
 end
 
+-- registered by screens/shell/sidebar: it requires this module, so this one
+-- can't require it back to read the project its filter narrows to
+local narrowed_to: () -> string? = function(): string?
+	return nil
+end
+function M.narrowed_project(get: () -> string?)
+	narrowed_to = get
+end
+
 function M.new_chat(project: string?, device: string?)
+	if project == nil and device == nil then
+		project = narrowed_to()
+	end
 	local on: string? = nil
 	-- (None of the project's there: none chosen, so the composer picks.)
 	local unchosen = false
@@ -553,6 +598,12 @@ function M.new_chat(project: string?, device: string?)
 			chosen:set(project)
 		elseif unchosen then
 			chosen:set(nil)
+		end
+		-- (Asked for: the new chat's composer takes it over the project
+		-- last picked there. A fresh table each time, so the same one asked
+		-- again is heard.)
+		if project or unchosen then
+			M.project_pick:set({ project = project })
 		end
 		if on then
 			-- (A fresh table each time, so the same device asked again is

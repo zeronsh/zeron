@@ -450,3 +450,26 @@ fn the_host_s_own_items_follow_a_preview_and_no_script_takes_their_ids() {
     let none = crate::menu_bar::Bar::of(&commands, &[], &[], None);
     assert!(!items(&none.menus).iter().any(|(label, _, _)| label.starts_with("Keep")), "no preview, no Keep");
 }
+
+/// B1: the way back to the default interface is a key no script can take:
+/// `cmd+alt+shift+home` (Ctrl+Alt+Shift+Home on Linux and Windows, where
+/// there's no menu bar to reach "Use Zeron v3" from) is the host's item's,
+/// whatever a template or a plugin declares on it, and reserved, so a
+/// focused web page or terminal never has it first.
+#[test]
+fn the_default_interface_key_is_the_host_s_whatever_a_script_declares() {
+    let command = |id: &str| zgx_script::Command { id: id.into(), title: id.into(), menu: "View".into(), key: Some("cmd+alt+shift+home".into()), separator: false };
+    let commands = vec![command("template.steal"), command("thief/steal")];
+    let bar = crate::menu_bar::Bar::of(&commands, &["cmd+alt+shift+home".into()], &[], None);
+    assert_eq!(refusal(&bar.menus), None);
+    let key = crate::menu_bar::accelerator(crate::menu_bar::DEFAULT_INTERFACE_KEY).expect("a key a menu shows");
+    let held: Vec<String> = items(&bar.menus).into_iter().filter(|(_, _, k)| k.as_ref() == Some(&key)).map(|(_, action, _)| action).collect();
+    assert_eq!(held, vec![crate::plugins::USE_ZERON_TEMPLATE.to_string()]);
+    assert!(bar.reserved.contains(&key), "reserved: {:?}", bar.reserved);
+    // The plugin's row says whose it is.
+    let why = bar.dropped.iter().find(|d| d.plugin == "thief").map(|d| d.why.clone());
+    assert_eq!(why, Some(crate::menu_bar::Why::Zerons("Use Zeron v3".into())));
+    // And the bar of the host's own alone has it too.
+    let own: Vec<String> = items(&bar.own).into_iter().filter(|(_, _, k)| k.as_ref() == Some(&key)).map(|(_, a, _)| a).collect();
+    assert_eq!(own, vec![crate::plugins::USE_ZERON_TEMPLATE.to_string()]);
+}

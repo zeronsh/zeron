@@ -23,6 +23,9 @@ use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
 use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
 
+/// The plugins' sends a chat keeps a record of (`SessionDoc::sent_by`).
+pub const SENT_BY_KEPT: usize = 200;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
     #[error("loro: {0}")]
@@ -503,6 +506,39 @@ impl SessionDoc {
             self.doc.get_map("meta").get("providerSwitched"),
             Some(loro::ValueOrContainer::Value(LoroValue::Bool(true)))
         )
+    }
+
+    /// Who sent each message a plugin sent, by the message's (or queued
+    /// row's) id: `{ plugin, name, kind, at }`. Kept beside the transcript,
+    /// never in it (nothing shows it), the newest [`SENT_BY_KEPT`]. One
+    /// atomic value so a synced reader never sees half a record.
+    pub fn sent_by(&self) -> BTreeMap<String, serde_json::Value> {
+        let Some(loro::ValueOrContainer::Value(LoroValue::String(value))) = self.doc.get_map("meta").get("sentBy")
+        else {
+            return BTreeMap::new();
+        };
+        serde_json::from_str(&value).unwrap_or_default()
+    }
+
+    pub fn mark_sent_by(&self, id: &str, by: serde_json::Value) -> Result<(), DocError> {
+        let mut all = self.sent_by();
+        all.insert(id.to_owned(), by);
+        while all.len() > SENT_BY_KEPT {
+            // The oldest (by its `at`) goes first.
+            let oldest = all
+                .iter()
+                .min_by_key(|(_, v)| v.get("at").and_then(serde_json::Value::as_i64).unwrap_or(0))
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => all.remove(&k),
+                None => break,
+            };
+        }
+        self.doc
+            .get_map("meta")
+            .insert("sentBy", serde_json::to_string(&all)?.as_str())?;
+        self.doc.commit();
+        Ok(())
     }
 
     pub fn mark_provider_switched(&self) -> Result<(), DocError> {
@@ -1679,6 +1715,23 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn who_sent_a_message_is_kept_beside_the_transcript_never_in_it() {
+        let doc = SessionDoc::init("sent").unwrap();
+        assert!(doc.sent_by().is_empty());
+        let by = serde_json::json!({ "plugin": "relay", "name": "Relay", "kind": "run", "at": 1 });
+        doc.mark_sent_by("m1", by.clone()).unwrap();
+        assert_eq!(doc.sent_by().get("m1"), Some(&by));
+        assert!(doc.read_entries().unwrap().is_empty(), "no entry of its own");
+        // Kept to the newest SENT_BY_KEPT.
+        for i in 0..(SENT_BY_KEPT + 5) {
+            doc.mark_sent_by(&format!("n{i}"), serde_json::json!({ "plugin": "relay", "at": 10 + i })).unwrap();
+        }
+        let all = doc.sent_by();
+        assert_eq!(all.len(), SENT_BY_KEPT);
+        assert!(!all.contains_key("m1") && all.contains_key(&format!("n{}", SENT_BY_KEPT + 4)));
     }
 
     #[test]
