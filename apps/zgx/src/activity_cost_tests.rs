@@ -493,6 +493,8 @@ fn scenarios(n: usize, think: usize, open: bool) {
     bench.publish(&entry);
     bench.settle(24);
     let mut call_cost = Cost::default();
+    // (And the second after each: the summary's roll, the row's arrival.)
+    let mut call_after = Cost::default();
     for _ in 0..samples {
         calls += 1;
         let new = call(calls, 4);
@@ -501,13 +503,50 @@ fn scenarios(n: usize, think: usize, open: bool) {
         if std::env::var_os("DEBUG_FRAMES").is_some() {
             eprintln!("@CALL {calls}");
         }
+        let tracing = std::env::var_os("DEBUG_TRACE").is_some() && calls == n + 2;
+        if tracing {
+            zgx::trace::set_enabled(true);
+        }
         let host = bench.publish_patched(&entry, &[id]);
         let mut cost = bench.frame();
         cost.host = host;
         call_cost.add(&cost);
-        bench.settle(24);
+        if tracing {
+            // (A few frames into the arrival's animations.)
+            bench.frames(3);
+            for frame in zgx::trace::frames(4) {
+                let mut runs = frame.runs.clone();
+                runs.sort_by(|a, b| b.micros.total_cmp(&a.micros));
+                eprintln!("TRACE frame {} | measured {} nodes ({:.0} µs) | runs {}", frame.index, frame.layout.measured, frame.layout.micros, frame.runs.len());
+                for run in runs.iter().take(12) {
+                    eprintln!("TRACE   run {:>7.1} µs {}", run.micros, run.name.as_deref().unwrap_or("?"));
+                }
+                let tree = bench.app.tree();
+                for m in &frame.layout.top {
+                    let tag = format!("@{} ", m.node);
+                    let what = tree.lines().find(|l| l.contains(&tag)).unwrap_or("(not in the tree's text)").trim();
+                    eprintln!("TRACE   measured {:.1} µs (own {:.1}) {}", m.micros, m.self_micros, &what[..what.len().min(100)]);
+                }
+            }
+            zgx::trace::set_enabled(false);
+        }
+        let mut after = cost;
+        for f in 0..60 {
+            let frame = bench.frame();
+            if std::env::var_os("DEBUG_ARRIVAL").is_some() && calls == n + 2 {
+                let k = |phase: Phase| frame.phase(phase) / 1000;
+                eprintln!(
+                    "ARRIVAL f{f:02} {}k | script {}k update {}k layout {}k paint {}k encode {}k | calls {} | proc {} µs",
+                    frame.instructions() / 1000, k(Phase::Script), k(Phase::Update), k(Phase::Layout), k(Phase::Paint), k(Phase::Encode),
+                    frame.calls, frame.process.as_micros()
+                );
+            }
+            after.add(&frame);
+        }
+        call_after.add(&after);
     }
     row(n, think, label, "call", &call_cost, samples, bench.nodes());
+    row(n, think, label, "call+1s", &call_after, samples, bench.nodes());
 
     // The running call's output grows (that call patched).
     let mut output_cost = Cost::default();
