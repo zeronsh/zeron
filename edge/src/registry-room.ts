@@ -23,6 +23,7 @@
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
+import { PushDiagnostics } from "./push-diagnostics";
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { chatHost, parentOf, runnerCanSee, runnerOpRefusal, type RunnerScope } from "./registry-runner";
 import { AUTH_USER_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, apnsConfig, type Env } from "./env";
@@ -67,12 +68,6 @@ interface RejectedOp {
 
 interface WireOp extends Op {}
 
-interface PushOutcome {
-  ok: number;
-  rejected: number;
-  lastOkAt: number;
-}
-
 /** A phone that asked for notifications (APNs token + its choices). */
 interface PushTarget {
   device: string;
@@ -102,6 +97,7 @@ const PUSH_LOG_MAX = 30;
 
 export class RegistryRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
+  private readonly pushDiagnostics: PushDiagnostics;
   private readonly env: Env;
   /** device → last presence beat (epoch ms). Memory-only. */
   private readonly presence = new Map<string, number>();
@@ -116,6 +112,7 @@ export class RegistryRoom implements DurableObject {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
+    this.pushDiagnostics = new PushDiagnostics(ctx.storage.sql);
     // Push targets are private to this room: never rows (those broadcast to
     // every socket, sync to every device and back up to R2).
     ctx.storage.sql.exec(
@@ -136,7 +133,7 @@ export class RegistryRoom implements DurableObject {
 
   private setMeta(key: string, value: string): void {
     this.ctx.storage.sql.exec(
-      "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE meta.value IS NOT excluded.value",
       key,
       value
     );
@@ -301,8 +298,9 @@ export class RegistryRoom implements DurableObject {
         tombstones,
         connectedSockets: this.ctx.getWebSockets().length,
         // The ONLY per-device attribution surface — kept from the 2026-08-05
-        // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>,
+        // incident tooling (SessionRoom's /stats pushOutcomes). Success
+        // totals are checkpointed best-effort; live stats include pending counts.
+        pushOutcomes: this.pushDiagnostics.snapshot(),
         lastBackupSeq: Number(this.getMeta("backupSeq") ?? "0"),
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
@@ -432,6 +430,7 @@ export class RegistryRoom implements DurableObject {
       // rowToSeedOp) — the ws4 repair recipe, built in.
       this.ctx.storage.sql.exec("DELETE FROM rows");
       this.ctx.storage.sql.exec("DELETE FROM meta");
+      this.pushDiagnostics.reset();
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "registry reset");
@@ -717,17 +716,7 @@ export class RegistryRoom implements DurableObject {
   }
 
   private recordPush(device: string, ok: boolean): void {
-    const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
-    if (ok) {
-      entry.ok += 1;
-      entry.lastOkAt = Date.now();
-    } else {
-      entry.rejected += 1;
-    }
-    outcomes[key] = entry;
-    this.setMeta("pushOutcomes", JSON.stringify(outcomes));
+    this.pushDiagnostics.record(device, ok);
   }
 
   private markBackupDirty(): void {
