@@ -8368,6 +8368,7 @@ mod tests {
                 upsert: Vec::new(),
                 append: Vec::new(),
                 remove: Vec::new(),
+                parts: Vec::new(),
                 count: 0,
             })
             .expect("empty delta");
