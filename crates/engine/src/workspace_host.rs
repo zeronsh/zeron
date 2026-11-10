@@ -1428,6 +1428,13 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    /// Another device removed from the account: its row tombstoned (see
+    /// `RegistryDoc::delete_device`). The rpc layer refuses this device and
+    /// one that's online; `false` when it was already gone.
+    pub fn delete_device(&self, device_id: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.delete_device(device_id))?)
+    }
+
     // ── git metadata (diff-sync host writes) ────────────────────────────────
 
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.

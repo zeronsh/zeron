@@ -1615,7 +1615,7 @@
     },
     "devices": {
       "title": "Devices",
-      "terms": "machines computers remote this device other devices rename",
+      "terms": "machines computers remote this device other devices rename remove delete forget",
       "yours": {
         "label": "Your devices",
         "terms": "online last seen version system"
@@ -1634,13 +1634,67 @@
       "empty_body": "Sign in to sync your sessions across your devices.",
       "this_device": "This device",
       "rename": "Rename",
-      "rename_name": "Rename {name}",
-      "dialog": {
-        "title": "Rename device",
-        "here": "This computer, as your other devices list it.",
-        "other": "As every one of your devices lists it.",
-        "field": "Device name"
-      }
+      "remove_one": {
+        "label": "Remove a device",
+        "terms": "remove delete forget old computer"
+      },
+      "more_for": "More for {name}",
+      "name_of": "Name for {name}",
+      "remove": "Remove…",
+      "remove_online": "Online now. Quit Zeron on it first.",
+      "remove_title": "Remove “{name}”?",
+      "remove_body": "It disappears from your devices everywhere. Its sessions and projects stay, so you can still read them, and nothing on the computer itself is deleted. If Zeron opens on it again, it comes back.",
+      "remove_confirm": "Remove device",
+      "couldnt_remove": "Couldn't remove it",
+      "online_now": "It's online now. Quit Zeron on it, then try again.",
+      "offline_title": "Can't show your devices"
+    },
+    "projects": {
+      "title": "Projects",
+      "description": "The folders your sessions work in, on each of your devices.",
+      "terms": "projects folders repositories repos rename remove delete forget finder icon emoji color picture",
+      "yours": {
+        "label": "Your projects",
+        "terms": "folders paths devices sessions"
+      },
+      "rename_one": {
+        "label": "Rename a project",
+        "terms": "name rename call"
+      },
+      "remove_one": {
+        "label": "Remove a project",
+        "terms": "remove delete forget"
+      },
+      "find": "Find a project",
+      "add": "Add project",
+      "cloud": "Cloud",
+      "device_gone": "A removed device",
+      "its_device": "its device",
+      "sessions": "{n, plural, one {# session} other {# sessions}}",
+      "no_sessions": "No sessions",
+      "more_for": "More for {name}",
+      "name_of": "Name for {name}",
+      "rename": "Rename",
+      "icon_of": "Change icon for {name}",
+      "change_icon": "Change icon…",
+      "change_icon_tip": "Change icon",
+      "show": "Show in Finder",
+      "remove": "Remove…",
+      "remove_title": "Remove “{name}”?",
+      "remove_sessions": "{n, plural, one {Its session is deleted for good, on every device.} other {Its # sessions are deleted for good, on every device.}}",
+      "remove_none": "It has no sessions.",
+      "remove_running": "{n, plural, one {That session is running now, and is stopped first.} other {# of them are running now, and are stopped first.}}",
+      "remove_keeps_folder": "The folder {path} stays on {device} with all its files. Zeron just forgets it.",
+      "remove_keeps_repo": "Its repository on GitHub isn't touched.",
+      "remove_confirm": "Remove project",
+      "couldnt_remove": "Couldn't remove the project",
+      "couldnt_rename": "Couldn't rename it",
+      "couldnt_show": "Couldn't show the folder",
+      "empty_title": "No projects yet",
+      "empty_body": "Add a folder on one of your devices to start sessions in it.",
+      "nothing_found": "No projects match",
+      "nothing_found_body": "Try another name or folder.",
+      "offline_title": "Can't show your projects"
     },
     "members": {
       "title": "Members",
@@ -2369,7 +2423,8 @@
             "save": "Couldn't save the project. Try again.",
             "save_outdated": "Zeron on this computer needs an update to save project icons. Update it, then save again.",
             "save_gone": "This project was removed on another device.",
-            "save_offline": "Zeron on this computer isn't responding. Try again in a moment."
+            "save_offline": "Zeron on this computer isn't responding. Try again in a moment.",
+            "unavailable": "Image icons aren't available for your account yet. Choose an emoji or a color instead."
           }
         }
       },

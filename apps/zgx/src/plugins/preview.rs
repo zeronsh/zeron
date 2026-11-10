@@ -87,6 +87,7 @@ pub const BLOCKED: &[&str] = &[
     "home.run_action",
     "home.save_action",
     "sessions.delete",
+    "sessions.remove_device",
     "projects.clone",
     "projects.delete",
     "github.disconnect",

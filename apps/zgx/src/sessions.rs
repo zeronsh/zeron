@@ -54,6 +54,10 @@
 //!                                  emoji, or an uploaded image's https URL:
 //!                                  projects.upload_icon; none: its default)
 //!   sessions.rename_device({ id, name })  how a device is called, everywhere
+//!   sessions.remove_device(id)     another of your devices off the account,
+//!                                  everywhere (its chats and projects stay);
+//!                                  refused "here", "online", "cloud" or
+//!                                  "outdated"
 //!   sessions.delete(id)            gone for good (its row; the engine keeps
 //!                                  the conversation's document)
 //!   sessions.collapse({ id, collapsed }) (an action)
@@ -341,6 +345,24 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 return Err("invalid".to_string());
             }
             a.mutate(params).await.map_err(String::from)
+        }
+    });
+    // Another of your devices removed from the account (`RemoveDevice`): its
+    // chats and projects stay. Refused, in a word the page says plainly: this
+    // device ("here"), one online now ("online"), one of Cloud's ("cloud"),
+    // an engine from before it ("outdated").
+    host.async_action("sessions.remove_device", move |id| {
+        let id = text(&id);
+        let params = json!({ "op": "removeDevice", "deviceId": id });
+        async move {
+            crate::plugins::preview::refuse("sessions.remove_device")?;
+            if id.trim().is_empty() {
+                return Err("invalid".to_string());
+            }
+            match engine::get().call("Mutate", params).await {
+                Ok(_) => Ok(Value::Nil),
+                Err(error) => Err(removal_refused(&error).to_string()),
+            }
         }
     });
     // A session's Zeron conversation link (production's links.rs): its id
@@ -999,6 +1021,21 @@ pub(crate) fn is_cloud(d: &Json) -> bool {
             .is_some_and(|c| c.iter().any(|c| matches!(c.as_str(), Some("cloud-session" | "cloud-account"))))
 }
 
+/// Why the engine didn't remove a device, as a word for the page.
+fn removal_refused(error: &str) -> Outcome {
+    if error.contains("this_device") {
+        "here"
+    } else if error.contains("device_online") {
+        "online"
+    } else if error.contains("cloud_device") {
+        "cloud"
+    } else if error.contains("unknown variant") {
+        "outdated"
+    } else {
+        fail(error)
+    }
+}
+
 /// An engine error as an outcome: offline, or failed.
 /// Why a project's picture wasn't set, as a word the dialog says plainly:
 /// `outdated` (this Mac's Zeron predates project icons and refused the
@@ -1534,6 +1571,22 @@ pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    /// Settings → Devices says why a device wasn't removed in a word of its
+    /// own for each of the engine's refusals (crates/engine rpc.rs
+    /// `RemoveDevice`), and an engine from before Remove says it's outdated.
+    #[test]
+    fn a_refused_removal_says_why() {
+        assert_eq!(super::removal_refused("bad params: this_device"), "here");
+        assert_eq!(super::removal_refused("device_online"), "online");
+        assert_eq!(super::removal_refused("bad params: cloud_device"), "cloud");
+        assert_eq!(
+            super::removal_refused("bad params: unknown variant `removeDevice`, expected one of `createChat`"),
+            "outdated"
+        );
+        assert_eq!(super::removal_refused("offline"), "offline");
+        assert_eq!(super::removal_refused("disk full"), "failed");
+    }
+
     /// A conversation link's workspace, hashed as production's links.rs
     /// does (so a link copied here opens there, and back).
     #[test]

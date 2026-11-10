@@ -1615,7 +1615,7 @@
     },
     "devices": {
       "title": "设备",
-      "terms": "设备 电脑远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
+      "terms": "设备 电脑远程 此设备 其他设备 重命名 移除 删除 machines computers remote this device other devices rename remove delete forget",
       "yours": {
         "label": "你的设备",
         "terms": "在线 上次在线 版本 系统 online last seen version system"
@@ -1634,13 +1634,67 @@
       "empty_body": "登录以在设备间同步会话。",
       "this_device": "此设备",
       "rename": "重命名",
-      "rename_name": "重命名 {name}",
-      "dialog": {
-        "title": "重命名设备",
-        "here": "此电脑在其他设备上显示的名称。",
-        "other": "此设备在所有设备上显示的名称。",
-        "field": "设备名称"
-      }
+      "remove_one": {
+        "label": "移除设备",
+        "terms": "移除 删除 忘记 旧电脑 remove delete forget old computer"
+      },
+      "more_for": "{name}的更多选项",
+      "name_of": "{name}的名称",
+      "remove": "移除…",
+      "remove_online": "当前在线。请先在该设备上退出 Zeron。",
+      "remove_title": "移除“{name}”？",
+      "remove_body": "它会从你所有设备的列表中消失。它的会话和项目会保留，你仍可查看，该电脑上的任何内容都不会被删除。如果再次在它上面打开 Zeron，它会重新出现。",
+      "remove_confirm": "移除设备",
+      "couldnt_remove": "无法移除",
+      "online_now": "它当前在线。请在该设备上退出 Zeron 后重试。",
+      "offline_title": "无法显示你的设备"
+    },
+    "projects": {
+      "title": "项目",
+      "description": "你的会话所在的文件夹，按设备列出。",
+      "terms": "项目 文件夹 仓库 重命名 移除 删除 访达 projects folders repositories repos rename remove delete forget finder 图标 表情 颜色 icon emoji color picture",
+      "yours": {
+        "label": "你的项目",
+        "terms": "文件夹 路径 设备 会话 folders paths devices sessions"
+      },
+      "rename_one": {
+        "label": "重命名项目",
+        "terms": "名称 重命名 name rename call"
+      },
+      "remove_one": {
+        "label": "移除项目",
+        "terms": "移除 删除 remove delete forget"
+      },
+      "find": "查找项目",
+      "add": "添加项目",
+      "cloud": "Cloud",
+      "device_gone": "已移除的设备",
+      "its_device": "其设备",
+      "sessions": "{n, plural, other {# 个会话}}",
+      "no_sessions": "没有会话",
+      "more_for": "{name}的更多选项",
+      "name_of": "{name}的名称",
+      "rename": "重命名",
+      "icon_of": "更改{name}的图标",
+      "change_icon": "更改图标…",
+      "change_icon_tip": "更改图标",
+      "show": "在访达中显示",
+      "remove": "移除…",
+      "remove_title": "移除“{name}”？",
+      "remove_sessions": "{n, plural, other {它的 # 个会话将在所有设备上被永久删除。}}",
+      "remove_none": "它没有会话。",
+      "remove_running": "{n, plural, other {其中 # 个正在运行，会先被停止。}}",
+      "remove_keeps_folder": "文件夹 {path} 及其中所有文件会保留在 {device} 上，Zeron 只是不再记录它。",
+      "remove_keeps_repo": "它在 GitHub 上的仓库不受影响。",
+      "remove_confirm": "移除项目",
+      "couldnt_remove": "无法移除项目",
+      "couldnt_rename": "无法重命名",
+      "couldnt_show": "无法显示该文件夹",
+      "empty_title": "暂无项目",
+      "empty_body": "在你的某台设备上添加一个文件夹，即可在其中开始会话。",
+      "nothing_found": "没有匹配的项目",
+      "nothing_found_body": "试试其他名称或文件夹。",
+      "offline_title": "无法显示你的项目"
     },
     "members": {
       "title": "成员",
@@ -2369,7 +2423,8 @@
             "save": "无法保存项目，请重试。",
             "save_outdated": "这台电脑上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
             "save_gone": "此项目已在另一台设备上被移除。",
-            "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。"
+            "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。",
+            "unavailable": "你的账户暂时还不能使用图片图标。请先选择表情符号或颜色。"
           }
         }
       },

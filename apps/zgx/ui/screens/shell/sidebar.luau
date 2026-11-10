@@ -1302,8 +1302,7 @@ local function project_menu(id: string): { any }?
 			label = locale.s("shell.sidebar.menu.edit_project"),
 			icon = "pen",
 			on_select = function()
-				project_editor().open(id)
-				project_editor_used:set(true)
+				M.edit_project(id)
 			end,
 		},
 		{
@@ -1680,6 +1679,13 @@ M.Sidebar = ui.component(function(props: Props): Node
 		project_dialogs(),
 	}
 end)
+
+-- A project's name and icon edited (Edit project…), from its header's menu
+-- or Settings → Projects: the window's one editor, `start` as its `open`'s.
+function M.edit_project(id: string, start: { [string]: any }?)
+	project_editor().open(id, start)
+	project_editor_used:set(true)
+end
 
 -- `Sidebar { … }` builds it; `sidebar.pin(id)`, `sidebar.archive(id)` and
 -- `sidebar.rename(id)` act on a session as its menu does.

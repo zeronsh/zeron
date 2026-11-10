@@ -1,5 +1,6 @@
 -- Settings' pages: General, Appearance, Notifications and Profile (yours,
--- your account included); Providers (this Mac's agents); Members (your
+-- your account included); Providers (this Mac's agents), Devices and
+-- Projects (the folders your sessions work in); Members (your
 -- organization); Cloud and Billing (the account's Cloud, while it has one).
 -- Each is a module of its own with `ID`, `TITLE` and `view`, added to the
 -- shell's settings (screens/shell/settings: the list, the page beside it),
@@ -23,6 +24,7 @@ local notifications = require("@app/screens/settings/notifications")
 local profile = require("@app/screens/settings/profile")
 local providers = require("@app/screens/settings/providers")
 local devices = require("@app/screens/settings/devices")
+local projects_page = require("@app/screens/settings/projects")
 local files = require("@app/screens/settings/files")
 local browser = require("@app/screens/settings/browser")
 local browser_history = require("@app/screens/settings/browser_history")
@@ -76,6 +78,7 @@ add(browser, "global", "Browser")
 add(browser_history, "clock-circle", "Browser")
 add(providers, "widget", "Devices")
 add(devices, "laptop", "Devices")
+add(projects_page, "folder-with-files", "Devices")
 add(members, "users-group-rounded", "Organization")
 -- Last, under Zeron's own heading (the shipping app's About and its
 -- updates, in its app menu): after everything, Archived too.

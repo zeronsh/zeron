@@ -11,7 +11,7 @@
 //! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, markChatSeen)
+//!   setChatArchived, deleteChat, renameDevice, removeDevice, markChatSeen)
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
@@ -823,6 +823,14 @@ enum MutateParams {
     DeleteChat { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RenameDevice { device_id: String, name: String },
+    /// Another of your devices removed from the account (Settings →
+    /// Devices): its row tombstoned, so no device lists or dials it. Its chats
+    /// and projects stay. Refused for this device (`this_device`: its own
+    /// engine writes its row back at every boot) and for one online now
+    /// (`device_online`: its engine is running, maybe with live chats, and
+    /// would drop out from under them).
+    #[serde(rename_all = "camelCase")]
+    RemoveDevice { device_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -2153,6 +2161,35 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::RemoveDevice { device_id } => {
+                if device_id == self.workspace.device_id() {
+                    return Err(RpcError::BadParams("this_device".into()));
+                }
+                // (Cloud's machines are the edge's to retire, with their sessions.)
+                let row = self
+                    .workspace
+                    .read_devices()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|d| d.id == device_id);
+                let cloud = zeron_proto::is_cloud_device(&device_id, "")
+                    || row.as_ref().is_some_and(|d| {
+                        zeron_proto::is_cloud_device(&d.id, &d.platform)
+                            || d.capabilities.iter().any(|c| {
+                                c == zeron_proto::CLOUD_SESSION_CAPABILITY || c == zeron_proto::CLOUD_ACCOUNT_CAPABILITY
+                            })
+                    });
+                if cloud {
+                    return Err(RpcError::BadParams("cloud_device".into()));
+                }
+                if self.workspace.peer_liveness(&device_id) == zeron_rpc::PeerLiveness::Live {
+                    return Err(RpcError::Failed("device_online".into()));
+                }
+                self.workspace
+                    .delete_device(&device_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::SetChatSleep { chat_id, until } => {
                 let until = match until {
                     Some(ms) => Some(

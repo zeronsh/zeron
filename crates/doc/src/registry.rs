@@ -1086,6 +1086,21 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// A device removed from the account (Settings → Devices, from any other
+    /// device): its row tombstoned, as the edge retires a deleted Cloud
+    /// session's machine. Nothing lists or dials it after (`device_deleted`);
+    /// its chats and spaces keep their rows. The device's own engine revives
+    /// the row at its next boot (`upsert_device` is a newer write), so a
+    /// computer still signed in comes back the next time Zeron opens on it.
+    /// `false` when no such row (already gone, or never heard of).
+    pub fn delete_device(&mut self, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_DEVICES, device_id) {
+            return Ok(false);
+        }
+        self.delete_row_ops(&[(KIND_DEVICES, device_id)]);
+        Ok(true)
+    }
+
     /// Stamp `lastSeenAt` on an existing device row (boot/shutdown only —
     /// periodic liveness rides presence frames, never rows).
     pub fn set_device_last_seen(

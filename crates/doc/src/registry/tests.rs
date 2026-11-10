@@ -2476,6 +2476,49 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
 }
 
 #[test]
+fn a_device_removed_from_another_is_gone_everywhere_and_comes_back_on_its_own_boot() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-a", "Laptop")).unwrap();
+    let mut b = RegistryDoc::new("dev-b");
+    b.upsert_device(&device("dev-b", "Old box")).unwrap();
+    let mut box_chat = chat("chat-b", "dev-b");
+    box_chat.space_id = Some("sp-b".into());
+    b.upsert_chat(&box_chat).unwrap();
+    b.upsert_space(&space("sp-b", "dev-b", "/srv/app")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_devices().unwrap().len(), 2);
+
+    // Removed from the laptop: gone there at once, then on the box too.
+    assert!(a.delete_device("dev-b").unwrap());
+    assert!(a.read_devices().unwrap().iter().all(|d| d.id != "dev-b"));
+    assert!(a.device_deleted("dev-b"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        let ids: Vec<String> = ws.read_devices().unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec!["dev-a".to_string()]);
+        assert!(ws.device_deleted("dev-b"));
+        // Its chats and projects stay, readable.
+        assert_eq!(ws.read_chats().unwrap().len(), 1);
+        assert_eq!(ws.read_spaces().unwrap().len(), 1);
+    }
+    // Already gone: nothing to do, nothing pushed; a rename finds no row.
+    assert!(!a.delete_device("dev-b").unwrap());
+    assert!(!a.delete_device("never-heard-of").unwrap());
+    assert!(!a.rename_device("dev-b", "x").unwrap());
+    assert_eq!(a.pending_len(), 0);
+
+    // Zeron opening on the box again revives its row everywhere.
+    b.upsert_device(&device("dev-b", "Old box")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        assert!(!ws.device_deleted("dev-b"));
+        assert_eq!(ws.read_devices().unwrap().len(), 2);
+    }
+}
+
+#[test]
 fn a_chat_sleeps_wakes_once_and_clears() {
     use zeron_proto::{ChatSleep, SleepState};
     let mut ws = RegistryDoc::new("dev-a");
