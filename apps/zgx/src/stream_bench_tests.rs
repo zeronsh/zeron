@@ -271,11 +271,18 @@ fn stream_bench_profile() {
         }
     };
     let frame = Duration::from_micros(8_333);
+    // (Wall time in the page's frame and in drawing it, summed.)
+    let spent_frame = std::cell::Cell::new(Duration::ZERO);
+    let spent_draw = std::cell::Cell::new(Duration::ZERO);
     let mut draw = |app: &TestApp| {
         pump(app);
+        let t = std::time::Instant::now();
         app.frames(1);
         let damage = app.ui.scene.borrow_mut().flush().damage;
+        let u = std::time::Instant::now();
         gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+        spent_frame.set(spent_frame.get() + (u - t));
+        spent_draw.set(spent_draw.get() + u.elapsed());
     };
     // (Its id alone: the whole draft as JSON would cost more than the page.)
     let streaming = |view: &View| {
@@ -300,14 +307,28 @@ fn stream_bench_profile() {
         again: (u32, f64),
         /// Runs again by the signal written that caused them.
         causes: std::collections::BTreeMap<usize, (u32, f64)>,
+        /// What each signal's writes ran again, by name (node ids kept).
+        fans: std::collections::BTreeMap<usize, std::collections::BTreeMap<String, u32>>,
+        /// Each phase's time, summed: (frames it ran in, µs).
+        phases: std::collections::BTreeMap<&'static str, (u32, f64)>,
     }
     impl Ran {
         fn add(&mut self, after: u64) {
             for f in zgx::trace::frames(4).iter().filter(|f| f.index > after) {
                 self.traced += 1;
                 self.measured.push(f.layout.measured);
+                for (phase, _, us) in &f.phases {
+                    let e = self.phases.entry(phase).or_default();
+                    e.0 += 1;
+                    e.1 += *us as f64;
+                }
                 for run in &f.runs {
                     let name = run.name.as_deref().unwrap_or("(unnamed)");
+                    if let Some(cause) = run.cause {
+                        *self.fans.entry(cause).or_default().entry(name.to_string()).or_default() += 1;
+                    } else {
+                        *self.fans.entry(0).or_default().entry(name.to_string()).or_default() += 1;
+                    }
                     if let Some(node) = name
                         .strip_suffix(" binding")
                         .and_then(|n| n.strip_prefix('@'))
@@ -356,6 +377,12 @@ fn stream_bench_profile() {
                 m.get(m.len() / 2).copied().unwrap_or(0),
                 m.get(m.len() * 9 / 10).copied().unwrap_or(0),
             );
+            let phases: Vec<String> = self
+                .phases
+                .iter()
+                .map(|(p, (_, us))| format!("{p} {:.0}", us / secs))
+                .collect();
+            eprintln!("    phases (µs/s): {}", phases.join(", "));
             let mut runs: Vec<_> = self.runs.iter().collect();
             runs.sort_by(|a, b| b.1.1.partial_cmp(&a.1.1).unwrap());
             for (run, (count, micros)) in runs.iter().take(25) {
@@ -373,6 +400,23 @@ fn stream_bench_profile() {
             causes.sort_by(|a, b| b.1.1.partial_cmp(&a.1.1).unwrap());
             for (cause, (count, micros)) in causes.iter().take(8) {
                 eprintln!("      signal {cause:#x}: {:.1}/s {:.1} µs/s", *count as f64 / secs, micros / secs);
+                if let Some(fan) = self.fans.get(cause) {
+                    let mut fan: Vec<_> = fan.iter().collect();
+                    fan.sort_by(|a, b| b.1.cmp(a.1));
+                    for (name, n) in fan.iter().take(24) {
+                        let node = name.strip_suffix(" binding").and_then(|n| n.strip_prefix('@')).and_then(|n| n.parse::<u32>().ok());
+                        let line = node.and_then(|n| tree.get(&n)).map(|l| l.chars().take(200).collect::<String>()).unwrap_or_default();
+                        eprintln!("          {:>6.1}/s {name} {line}", **n as f64 / secs);
+                    }
+                }
+            }
+            if let Some(fan) = self.fans.get(&0) {
+                let mut fan: Vec<_> = fan.iter().filter(|(n, _)| !n.starts_with('@')).collect();
+                fan.sort_by(|a, b| b.1.cmp(a.1));
+                eprintln!("      first runs, not bindings:");
+                for (name, n) in fan.iter().take(10) {
+                    eprintln!("          {:>6.1}/s {name}", **n as f64 / secs);
+                }
             }
             let mut bound: Vec<_> = self.bound.iter().collect();
             bound.sort_by(|a, b| b.1.1.partial_cmp(&a.1.1).unwrap());
@@ -432,6 +476,8 @@ fn stream_bench_profile() {
     }
     assert!(streaming(&view), "the reply never started");
     let mut ran = Ran::default();
+    spent_frame.set(Duration::ZERO);
+    spent_draw.set(Duration::ZERO);
     let cpu = Cpu::now();
     let started = std::time::Instant::now();
     let mut n = 0u32;
@@ -446,6 +492,11 @@ fn stream_bench_profile() {
     }
     let took = started.elapsed();
     let spent = cpu.since();
+    eprintln!(
+        "stream_bench_profile: wall in frames {:.1} ms/s, in drawing {:.1} ms/s",
+        spent_frame.get().as_secs_f64() * 1e3 / took.as_secs_f64(),
+        spent_draw.get().as_secs_f64() * 1e3 / took.as_secs_f64()
+    );
     eprintln!(
         "stream_bench_profile: {n} frames over {:.2} s ({:.1}/s): {}",
         took.as_secs_f64(),
