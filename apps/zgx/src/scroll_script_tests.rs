@@ -138,3 +138,90 @@ fn scroll_script() {
         println!("SCROLL   {n:>5}  {name}");
     }
 }
+
+/// What the transcript draws as it scrolls, frame by frame: a long chat of
+/// markdown replies, every tenth long (a reply of many windowed runs),
+/// drawn offscreen on the test's clock, each drawn frame's pixels hashed.
+/// A steady scroll, a fling and jumps (to the top, the end, the middle): run
+/// on two trees, the lists the same is the transcript drawing the same.
+///
+///   SCROLL_PIXELS=<dir> cargo test --release --bin zeron-zgx scroll_pixels -- --ignored --nocapture
+#[test]
+#[ignore = "a comparison: run it --release"]
+fn scroll_pixels() {
+    use std::hash::{Hash, Hasher};
+    use std::time::Duration;
+    const W: f32 = 1240.;
+    const H: f32 = 820.;
+    const SCALE: f32 = 2.;
+    let out = PathBuf::from(std::env::var("SCROLL_PIXELS").expect("SCROLL_PIXELS=<dir>"));
+    std::fs::create_dir_all(&out).unwrap();
+    // (`SCROLL_PIXELS_KEEP=steady:150,rest:90`: those frames' pixels too,
+    // raw RGBA at 2x, 16 MB each.)
+    let keep: Vec<String> = std::env::var("SCROLL_PIXELS_KEEP").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_default();
+    let clock = zgx::clock::VirtualClock::new();
+    let mut at = Duration::ZERO;
+    let fixture = ui().join("chat_fixture.luau");
+    let mut app = TestApp::new(move |runtime| ScriptHost::new(runtime, fixture));
+    let mut gpu = zgx_gpu::GpuRenderer::new((W * SCALE) as u32, (H * SCALE) as u32).expect("a GPU");
+    gpu.set_scale_factor(SCALE);
+    for font in crate::fonts() {
+        font.expect("the app's fonts").install(&mut gpu.text_system().borrow_mut());
+    }
+    gpu.install_text(&mut app.ui.scene.borrow_mut());
+    app.ui.refresh_text_geometry();
+    app.ui.scene.borrow_mut().resize(W, H);
+    app.frames(2);
+    assert!(app.host.run_command("go_s2"), "the fixture opens s2");
+    app.frames(30);
+    let messages = app.host.shared("chat.messages", Value::Nil);
+    let mut rows = Vec::new();
+    for i in 0..60 {
+        let at = 1_762_000_000_000_i64 + i as i64 * 60_000;
+        let text = if i % 10 == 3 { (0..24).map(|k| markdown(i * 100 + k)).collect::<Vec<_>>().join("\n") } else { markdown(i) };
+        rows.push(built(&json!({ "id": format!("u{i}"), "role": "user", "parts": [{ "id": format!("u{i}p"), "kind": "text", "text": format!("Question {i}: what about part {i}?") }], "createdAt": at })));
+        rows.push(built(&json!({ "id": format!("a{i}"), "role": "assistant", "status": "complete", "parts": [{ "id": format!("a{i}x"), "kind": "text", "text": text }], "createdAt": at + 1000, "durationMs": 8000 })));
+    }
+    messages.set(Value::List(rows.into()));
+    let mut lines = Vec::new();
+    let mut shot = |app: &mut TestApp, name: &str, frames: usize, step: f32| {
+        let node = app.find("transcript").expect("the transcript");
+        for f in 0..frames {
+            if step != 0. {
+                zgx_script::driver::scroll(&mut app.ui, node, step);
+            }
+            at += Duration::from_secs_f64(1. / 60.);
+            clock.advance(at, || {});
+            app.frame();
+            let report = app.ui.scene.borrow_mut().flush();
+            if report.damage.is_empty() {
+                continue;
+            }
+            gpu.render(&app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
+            let pixels = gpu.readback().expect("the frame's pixels");
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            pixels.hash(&mut h);
+            lines.push(format!("{name} frame {f} {:016x}", h.finish()));
+            if keep.iter().any(|k| *k == format!("{name}:{f}")) {
+                std::fs::write(out.join(format!("{name}-f{f:03}.rgba")), &pixels).unwrap();
+            }
+        }
+        assert_eq!(app.error(), None);
+    };
+    shot(&mut app, "opened", 120, 0.);
+    shot(&mut app, "steady", 240, -8.);
+    shot(&mut app, "rest", 120, 0.);
+    shot(&mut app, "fling", 60, -160.);
+    shot(&mut app, "fling-rest", 120, 0.);
+    shot(&mut app, "top", 1, -1_000_000.);
+    shot(&mut app, "top-rest", 90, 0.);
+    shot(&mut app, "down", 120, 24.);
+    shot(&mut app, "end", 1, 1_000_000.);
+    shot(&mut app, "end-rest", 90, 0.);
+    shot(&mut app, "middle", 1, -12_000.);
+    shot(&mut app, "middle-rest", 90, 0.);
+    shot(&mut app, "fling-down", 40, 200.);
+    shot(&mut app, "last-rest", 120, 0.);
+    std::fs::write(out.join("frames.txt"), lines.join("\n") + "\n").unwrap();
+    println!("scroll_pixels: {} frames drawn, in {}", lines.len(), out.display());
+}
