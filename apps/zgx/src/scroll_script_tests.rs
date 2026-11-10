@@ -154,7 +154,11 @@ fn scroll_pixels() {
     const W: f32 = 1240.;
     const H: f32 = 820.;
     const SCALE: f32 = 2.;
-    let out = PathBuf::from(std::env::var("SCROLL_PIXELS").expect("SCROLL_PIXELS=<dir>"));
+    // (Not asked for, as `scroll_script` runs it too: nothing to do.)
+    let Some(out) = std::env::var_os("SCROLL_PIXELS").map(PathBuf::from) else {
+        eprintln!("scroll_pixels: SCROLL_PIXELS=<dir> runs it");
+        return;
+    };
     std::fs::create_dir_all(&out).unwrap();
     // (`SCROLL_PIXELS_KEEP=steady:150,rest:90`: those frames' pixels too,
     // raw RGBA at 2x, 16 MB each.)
@@ -201,7 +205,15 @@ fn scroll_pixels() {
             let pixels = gpu.readback().expect("the frame's pixels");
             let mut h = std::collections::hash_map::DefaultHasher::new();
             pixels.hash(&mut h);
-            lines.push(format!("{name} frame {f} {:016x}", h.finish()));
+            // (And all but the rail's strip, the window's last 12 points:
+            // what the transcript shows, apart from where its thumb is.)
+            let row = (W * SCALE) as usize * 4;
+            let keep_w = ((W - 12.) * SCALE) as usize * 4;
+            let mut c = std::collections::hash_map::DefaultHasher::new();
+            for line in pixels.chunks(row) {
+                line[..keep_w.min(line.len())].hash(&mut c);
+            }
+            lines.push(format!("{name} frame {f} {:016x} {:016x}", h.finish(), c.finish()));
             if keep.iter().any(|k| *k == format!("{name}:{f}")) {
                 std::fs::write(out.join(format!("{name}-f{f:03}.rgba")), &pixels).unwrap();
             }
