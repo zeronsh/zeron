@@ -775,9 +775,9 @@ function M.setup()
 	local control = require("@self/control")
 	-- The cards set into the window keep their corners concentric with the
 	-- window's where the host says what it is now (Windows, `window.corner_
-	-- radius`: 8 on Windows 11, 0 maximized, in full screen and on Windows
-	-- 10): its radius less the gap they're set in by, square once that's
-	-- nothing. Elsewhere they keep the theme's (macOS's window and its 12).
+	-- radius`: 8 on Windows 11, 0 on Windows 10, the same maximized and in
+	-- full screen, where the gap they're set in by keeps their corner in
+	-- view): its radius less that gap, square once that's nothing. Elsewhere they keep the theme's (macOS's window and its 12).
 	local ok, corner = pcall(ui.shared, "window.corner_radius", nil :: number?)
 	if ok then
 		ui.effect(function()
