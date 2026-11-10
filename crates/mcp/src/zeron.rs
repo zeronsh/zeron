@@ -14,7 +14,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use zeron_doc::{
-    SessionCommandPayload, SessionMessageEntry, TranscriptFrame, apply_transcript_frame,
+    SessionCommandPayload, SessionMessageEntry, TranscriptFrame, TranscriptWindow,
+    TranscriptWindowInfo, apply_transcript_frame,
 };
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
@@ -27,6 +28,10 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Gap between resubscribes when a watch stream ends at a lifecycle
 /// boundary (chat2 cutover etc.) — the same contract the UI follows.
 const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
+
+/// How long a transcript read may take. A full read of a long chat crosses
+/// the relay at the uplink's speed.
+const TRANSCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Which chat this server speaks for, when the engine injected it into a
 /// harness. Unset when a human runs `zeron mcp` from a terminal.
@@ -396,37 +401,60 @@ impl Zeron {
         chat_id: &str,
         device: Option<&str>,
     ) -> anyhow::Result<Vec<SessionMessageEntry>> {
+        let mut follow = self.open_transcript(chat_id, device, None).await?;
+        tokio::time::timeout(TRANSCRIPT_TIMEOUT, follow.next())
+            .await
+            .map_err(|_| no_transcript())??;
+        Ok(follow.entries)
+    }
+
+    /// One window of the transcript, read and released.
+    pub async fn transcript_window(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+        window: TranscriptWindow,
+    ) -> anyhow::Result<TranscriptView> {
+        let mut follow = self.open_transcript(chat_id, device, Some(window)).await?;
+        tokio::time::timeout(TRANSCRIPT_TIMEOUT, follow.next())
+            .await
+            .map_err(|_| no_transcript())??;
+        Ok(follow.view())
+    }
+
+    /// A window kept up to date by the host's deltas: call
+    /// [`TranscriptFollow::next`] for each change, the first being the window
+    /// as it stands.
+    pub async fn follow_transcript(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+        window: TranscriptWindow,
+    ) -> anyhow::Result<TranscriptFollow> {
+        self.open_transcript(chat_id, device, Some(window)).await
+    }
+
+    async fn open_transcript(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+        window: Option<TranscriptWindow>,
+    ) -> anyhow::Result<TranscriptFollow> {
         let mut params = json!({ "chatId": chat_id });
         if let Some(device) = device {
             params["targetDeviceId"] = json!(device);
         }
-        let mut rx = self.subscribe(methods::WATCH_DOC_MESSAGES, params).await?;
-        let mut entries = Vec::new();
-        let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                bail!(
-                    "WatchDocMessages: no transcript within {}s",
-                    SNAPSHOT_TIMEOUT.as_secs()
-                );
-            }
-            let item = match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(item)) => item,
-                Ok(None) => bail!("WatchDocMessages: stream ended before the transcript arrived"),
-                Err(_) => bail!(
-                    "WatchDocMessages: no transcript within {}s",
-                    SNAPSHOT_TIMEOUT.as_secs()
-                ),
-            };
-            let is_reset = item.get("reset").is_some();
-            let frame: TranscriptFrame =
-                serde_json::from_value(item).context("WatchDocMessages: bad frame")?;
-            apply_transcript_frame(&mut entries, frame).map_err(|e| anyhow!("transcript: {e}"))?;
-            if is_reset {
-                return Ok(entries);
-            }
+        if let Some(window) = &window {
+            params["window"] = json!(window);
         }
+        let rx = self.subscribe(methods::WATCH_DOC_MESSAGES, params).await?;
+        Ok(TranscriptFollow {
+            rx,
+            window,
+            entries: Vec::new(),
+            info: None,
+            opened: false,
+        })
     }
 
     // ---- writes ------------------------------------------------------------
@@ -675,6 +703,86 @@ impl Zeron {
                     _ => {
                         last = Some(session);
                     }
+                }
+            }
+        }
+    }
+}
+
+fn no_transcript() -> anyhow::Error {
+    anyhow!(
+        "WatchDocMessages: no transcript within {}s",
+        TRANSCRIPT_TIMEOUT.as_secs()
+    )
+}
+
+/// A window of a transcript and the facts about the rest of it.
+#[derive(Debug, Clone)]
+pub struct TranscriptView {
+    pub entries: Vec<SessionMessageEntry>,
+    pub info: TranscriptWindowInfo,
+}
+
+/// A live `WatchDocMessages` subscription. Dropping it cancels on the host.
+pub struct TranscriptFollow {
+    rx: RpcSubscription,
+    window: Option<TranscriptWindow>,
+    /// The slice from a host that applied the window, else everything.
+    entries: Vec<SessionMessageEntry>,
+    info: Option<TranscriptWindowInfo>,
+    opened: bool,
+}
+
+impl TranscriptFollow {
+    /// Wait for the next change. Before the opening `reset` nothing else
+    /// counts; an error means this subscription is over.
+    pub async fn next(&mut self) -> anyhow::Result<()> {
+        loop {
+            let Some(mut item) = self.rx.recv().await else {
+                bail!("WatchDocMessages: stream ended before the transcript arrived");
+            };
+            let is_reset = item.get("reset").is_some();
+            if let Some(info) = item.get_mut("window").map(Value::take) {
+                self.info =
+                    Some(serde_json::from_value(info).context("WatchDocMessages: bad window")?);
+            }
+            let frame: TranscriptFrame =
+                serde_json::from_value(item).context("WatchDocMessages: bad frame")?;
+            apply_transcript_frame(&mut self.entries, frame)
+                .map_err(|e| anyhow!("transcript: {e}"))?;
+            self.opened |= is_reset;
+            if self.opened {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Whether the opening `reset` arrived on this subscription.
+    pub fn opened(&self) -> bool {
+        self.opened
+    }
+
+    /// The window as of the last [`Self::next`]. An older host ignored the
+    /// window and sent everything: the same slice is taken here.
+    pub fn view(&self) -> TranscriptView {
+        match (&self.info, &self.window) {
+            (Some(info), _) => TranscriptView {
+                entries: self.entries.clone(),
+                info: info.clone(),
+            },
+            (None, Some(window)) => {
+                let (slice, info) = window.apply(&self.entries);
+                TranscriptView {
+                    entries: slice.to_vec(),
+                    info,
+                }
+            }
+            (None, None) => {
+                let window = TranscriptWindow::tail(self.entries.len());
+                let (slice, info) = window.apply(&self.entries);
+                TranscriptView {
+                    entries: slice.to_vec(),
+                    info,
                 }
             }
         }
