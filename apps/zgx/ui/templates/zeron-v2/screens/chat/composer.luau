@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local Quote = require("@ds/quote")
@@ -1069,8 +1070,15 @@ local function Composer(): Node
 		}
 	end
 
+	local dictation = Dictation.bind(shared.text, function(): string
+		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
+	end, function(): boolean
+		return question:get() ~= nil or approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+	end, "main")
+
 	local function composer(): Node
 		return ds.Composer {
+			dictation = dictation,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",

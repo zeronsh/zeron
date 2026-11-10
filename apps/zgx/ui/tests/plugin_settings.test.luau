@@ -13,7 +13,7 @@ local TAB = `{NAV} >> role:tab "Greeter"`
 
 local function open(): any
 	local app = mount("plugin_settings_fixture.luau")
-	app:resize(1200, 900)
+	app:resize(1200, 940)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
 	app:command("shell.settings")

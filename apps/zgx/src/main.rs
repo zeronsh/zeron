@@ -36,6 +36,7 @@ mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
+mod dictation;
 mod completion;
 mod desktop_blur;
 mod engine;
@@ -776,6 +777,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         engine_update::install(cx, &host);
         // A chat: its transcript, sending, approvals (src/chat.rs).
         chat::install(cx, &host);
+        // Holding to dictate, and Settings → Voice (src/dictation.rs).
+        dictation::install(cx, &host);
         // Agent visuals in a transcript (src/visuals.rs).
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).

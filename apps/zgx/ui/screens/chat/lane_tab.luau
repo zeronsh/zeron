@@ -9,6 +9,7 @@
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
@@ -620,7 +621,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				return chat
 			end,
 		}
+	local dictation = Dictation.bind(draft, function(): string
+		local edit = editing:get()
+		return `{chat}|{name}|{if edit then edit.item else ""}`
+	end, function(): boolean
+		local current = session:get()
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil
+			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
+			or (focused ~= nil and not focused())
+	end, name)
 	return ds.Composer {
+		dictation = dictation,
 		value = draft,
 		snap = if split then snap else nil,
 		-- (Its transcript's "Jump to latest", while it shows: its trays'
