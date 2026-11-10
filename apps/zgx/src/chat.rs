@@ -1726,7 +1726,7 @@ impl View {
         };
         match applied {
             Ok(Change::Quiet) => {}
-            Ok(Change::Words) => self.publish_draft(),
+            Ok(Change::Words) => self.publish_draft(true),
             Ok(Change::Rows) => {
                 if self.long_to_build(&frame) {
                     self.build_in_steps();
@@ -1760,7 +1760,9 @@ impl View {
     }
 
     /// The reply being written: the last entry's words while it streams.
-    fn publish_draft(&self) {
+    /// `grown`: its words grew (`Change::Words`), so it is written as it is
+    /// rather than compared with the last.
+    fn publish_draft(&self, grown: bool) {
         let value = {
             let open = self.open.borrow();
             match open.as_ref().and_then(|o| o.entries.last()) {
@@ -1791,7 +1793,17 @@ impl View {
                 _ => draft_value("", ""),
             }
         };
-        self.draft.set(value);
+        // Grown, it's written as it is: `set` would reconcile it with the
+        // last draft and compare them, walking the whole reply over again
+        // for words that changed at its end (each chunk's).
+        if grown {
+            self.draft.signal().mutate(|draft| {
+                *draft = value;
+                true
+            });
+        } else {
+            self.draft.set(value);
+        }
     }
 
     /// Whether a reset left so much to build that it goes a little at a time
@@ -1992,7 +2004,7 @@ impl View {
         // before the draft lets them go.
         self.subagents.set(Value::List(subagents.into()));
         self.messages.set(Value::List(list.into()));
-        self.publish_draft();
+        self.publish_draft(false);
         self.after_model_moved();
     }
 
