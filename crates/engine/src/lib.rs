@@ -43,6 +43,7 @@ pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
+pub mod cloud_disk;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
@@ -68,6 +69,8 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod runner;
+pub mod wake_trace;
+pub mod wake_update;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
@@ -274,6 +277,9 @@ impl EngineCore {
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
         let store = Arc::new(DocsStore::open(profile.store_root())?);
+        if store.recovery().is_some() {
+            runner::note_store_recovered(chrono::Utc::now().timestamp_millis());
+        }
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
@@ -330,7 +336,9 @@ impl EngineCore {
                 desktop_notify::post_for(&data_dir, &focus, source, &title, body, session).to_owned()
             });
         }
-        if let Some(edge) = &edge {
+        // A Cloud machine's token isn't admitted there (edge/src/runner-policy.ts):
+        // it would ask, get a 403, and ask again every 30 s for as long as it's up.
+        if let Some(edge) = edge.as_ref().filter(|_| !runner::is_cloud_platform()) {
             plugins.set_directory(Arc::new(plugins::keys::EdgeDirectory::new(
                 &edge.url,
                 edge.token.clone(),
@@ -341,7 +349,9 @@ impl EngineCore {
         // A new version on trial may yet be undone, and recovering clears the
         // journals' marks of what to resume, which a rollback doesn't restore.
         // It waits for the commit (`update_trial`), with all other new work.
-        if zeron_update::transaction::in_trial() {
+        // A Cloud machine looking for a release does the same (`wake_update`): an
+        // update would cut off whatever started now.
+        if zeron_update::transaction::in_trial() || wake_update::armed() {
             doc_host.hold_work();
         } else {
             match sessions.recover_stale() {
@@ -349,6 +359,7 @@ impl EngineCore {
                 Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
                 Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
             }
+            doc_host.boot_recovery_finished();
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
@@ -498,6 +509,20 @@ impl EngineCore {
         self.workspace_scope
     }
 
+    /// When an update may restart this engine: never under a live run or an open
+    /// terminal. On a Cloud machine, a message waiting counts too: nothing is
+    /// running yet, and a restart would land just as its turn starts.
+    pub fn update_quiescence(&self, cloud: bool) -> zeron_update::QuiescentCheck {
+        let sessions = self.sessions.clone();
+        let terminals = self.terminals.clone();
+        let doc_host = cloud.then(|| self.doc_host.clone());
+        Arc::new(move || {
+            !sessions.any_active()
+                && !terminals.any_open()
+                && !doc_host.as_ref().is_some_and(DocHost::has_waiting_commands)
+        })
+    }
+
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
         self.plugins.attach_auth(auth.clone());
@@ -586,10 +611,17 @@ impl EngineCore {
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
         let auth = self.auth();
-        let config =
+        let mut config =
             zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+        if runner::is_cloud_platform() {
+            // One host per device room, so nothing to decorrelate from, and a
+            // message is usually waiting on this very dial.
+            config.max_jitter = std::time::Duration::from_millis(100);
+            config.on_connected = Some(Arc::new(|| wake_trace::mark(wake_trace::Stage::Relay)));
+        }
         let doc_host = self.doc_host.clone();
         let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
+            wake_trace::mark(wake_trace::Stage::Nudge);
             match doc_host.enqueue_wakeup(&chat_id) {
                 Ok(()) => true,
                 Err(err) => {
@@ -740,6 +772,9 @@ impl EngineCore {
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.workspace.shutdown();
+        // Last: the WAL into the database file, so a stopped engine leaves one
+        // self-contained file (a Cloud machine's disk is snapshotted next).
+        self.doc_host.checkpoint_store();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
         self.sessions.clear_doc_host();
@@ -767,6 +802,7 @@ struct HeadlessRpc {
     inner: Arc<dyn RpcService>,
     doc_host: DocHost,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    data_dir: PathBuf,
 }
 
 #[async_trait]
@@ -775,7 +811,23 @@ impl RpcService for HeadlessRpc {
         if method == methods::QUIESCE_FOR_SLEEP {
             // Local IPC only (never relayed): a Cloud sleep's last check.
             return RpcReply::value(&match self.doc_host.quiesce_for_sleep().await {
-                Ok(()) => serde_json::json!({ "quiesced": true }),
+                Ok(()) => {
+                    // Asleep it can't make room: leave it fitting its size.
+                    // Bounded, and never in the sleep's way.
+                    cloud_disk::pre_sleep_cleanup(&self.data_dir).await;
+                    // The provider snapshots the disk from outside once the
+                    // engine stops: the docs written so far go into the store,
+                    // and the store's WAL into its file, now. The stop does it
+                    // again, and the stop command flushes the disk after.
+                    let doc_host = self.doc_host.clone();
+                    let checkpointed = tokio::task::spawn_blocking(move || {
+                        doc_host.flush_all();
+                        doc_host.checkpoint_store()
+                    })
+                    .await
+                    .unwrap_or(false);
+                    serde_json::json!({ "quiesced": true, "checkpointed": checkpointed })
+                }
                 Err(busy) => serde_json::json!({ "quiesced": false, "busy": busy }),
             });
         }
@@ -816,6 +868,13 @@ impl EngineRuntime {
 
     pub async fn shutdown(&self) {
         self.stop_notifier();
+        // While the edge is still reachable: a relaying chat's newest changes may
+        // be only here, and a device opening it while this one is off would get
+        // an older checkpoint.
+        self.core
+            .doc_host
+            .checkpoint_relayed_chats_before_stop(std::time::Duration::from_secs(5))
+            .await;
         self.disconnect_edge();
         self.core.shutdown().await;
     }
@@ -1031,17 +1090,23 @@ impl Engine {
 
         let preview_org = profile.org_id().to_string();
         let device_root = profile.device_root().to_path_buf();
+        let registry = Arc::new(default_registry());
+        // Assembly's boot recovery may start a killed turn before the broker
+        // below is attached: it waits for it.
+        if auth.runner_identity().is_some() {
+            registry.expect_run_environment();
+        }
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
                 lock,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry()),
+                registry,
                 config.default_harness,
                 edge.clone(),
             )?,
@@ -1059,6 +1124,7 @@ impl Engine {
         // Attached before the host relay so relayed RPCs see the broker.
         if let Some(identity) = auth.runner_identity() {
             let tokens: Arc<dyn zeron_rpc::TokenSource> = Arc::new(auth.clone());
+            wake_trace::report_to(identity.edge_url(), tokens.clone());
             let broker = credentials::CredentialBroker::new(
                 credentials::BrokerConfig::detect(&device_root),
                 identity.clone(),
@@ -1071,9 +1137,11 @@ impl Engine {
             let heartbeat = runner::spawn_heartbeat(
                 identity.edge_url(),
                 tokens,
-                Arc::new(move || sessions.active_count()),
+                Arc::new(move || sessions.run_counts()),
+                Arc::new(cloud_disk::machine_usage),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
+                runner::HEARTBEAT_BUSY_INTERVAL,
             );
             // A session machine can stop without warning (a provider
             // auto-stop, a crash) after accepting a send: the message is in
@@ -1128,11 +1196,7 @@ impl Engine {
         // Spawned for every install: application updates must not depend on
         // workspace sync being enabled — the feed is the public release feed
         // (served without authentication), not an edge feature.
-        let quiescent: zeron_update::QuiescentCheck = {
-            let sessions = core.sessions.clone();
-            let terminals = core.terminals.clone();
-            Arc::new(move || !sessions.any_active() && !terminals.any_open())
-        };
+        let quiescent = core.update_quiescence(runner::is_cloud_platform());
         core.harness_updates.set_compatibility_feed(format!(
             "{}/releases/harness-compatibility.json",
             config.edge_url.trim_end_matches('/')
@@ -1141,7 +1205,14 @@ impl Engine {
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
-        if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
+        // (Not on a Cloud machine: every boot's first token would start a
+        // release check, and possibly a download, as the message starts its run.
+        // Its checks keep their own schedule; its token is never a recovery.)
+        if let Some(mut token_changes) = edge
+            .as_ref()
+            .filter(|_| !runner::is_cloud_platform())
+            .and_then(EdgeConfig::token_changes)
+        {
             let updater_for_tokens = updater.clone();
             let wake = tokio::spawn(async move {
                 while token_changes.changed().await.is_ok() {
@@ -1211,6 +1282,7 @@ impl Engine {
         // Cloud runner: runner.json wins; else ZERON_RUNNER_ENROLL enrolls
         // first (retrying network failures; a rejected code is fatal).
         if let Some(identity) = runner::bootstrap(&config.data_dir, &config.edge_url).await? {
+            wake_trace::enable(&config.data_dir);
             if identity.edge_url() != config.edge_url.trim_end_matches('/') {
                 tracing::info!(edge = %identity.edge_url(), "runner: using the edge this device enrolled with");
                 config.edge_url = identity.edge_url().to_string();
@@ -1225,6 +1297,7 @@ impl Engine {
                     "runner: Cloud session machine");
             }
             runner::set_session(session);
+            wake_update::arm();
         }
         let auth = Self::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
@@ -1257,6 +1330,7 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             doc_host: runtime.core().doc_host.clone(),
             stop_tx,
+            data_dir: config.data_dir.clone(),
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;
         // Only a port this process actually serves goes to agents: the
@@ -1268,9 +1342,19 @@ impl Engine {
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
         runtime.core().sessions.set_ipc_port(config.ipc_port);
         update_trial::prove_and_commit(runtime.core(), &config);
+        wake_update::start(runtime.core());
+        let corruption_watch = watch_store_corruption(
+            runtime.core().doc_host.store().path().to_path_buf(),
+            runner::session().is_some(),
+        );
 
         tokio::select! {
-            result = shutdown_signal() => result?,
+            result = shutdown_signal() => {
+                // Stopped from outside mid-trial (a sleep, a restart): not the
+                // release's fault, and the record should say so.
+                zeron_update::transaction::note_trial_interrupted();
+                result?
+            }
             requested = stop_rx.recv() => {
                 if requested.is_some() {
                     tracing::info!("headless shutdown requested over IPC");
@@ -1286,6 +1370,7 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        corruption_watch.abort();
         server.abort();
         // No token refresh mid-exchange when the next engine takes over the
         // session file (a refresh token is single-use).
@@ -1298,6 +1383,32 @@ impl Engine {
         Ok(())
     }
 }
+
+/// A docs store that reports corruption while running can't be trusted with
+/// another write, and every chat it holds is stuck behind it. Its next open
+/// checks it in full and rebuilds it ([`zeron_sync::DocsStore::open`]). A
+/// Cloud machine restarts at once for that (its unit starts it again in a
+/// second): nobody is there to restart it, and a waiting message would wait for
+/// good. Elsewhere the next start does it.
+fn watch_store_corruption(store: PathBuf, restart: bool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if zeron_sync::corruption_seen() {
+                zeron_sync::request_store_check(&store);
+                if restart {
+                    tracing::error!("the docs store is damaged; restarting to rebuild it");
+                    std::process::exit(STORE_DAMAGED_EXIT);
+                }
+                tracing::error!("the docs store is damaged; it's rebuilt on the next start");
+                return;
+            }
+        }
+    })
+}
+
+/// A Cloud engine restarting to rebuild a damaged store.
+const STORE_DAMAGED_EXIT: i32 = 70;
 
 /// Whether a stopping engine's cut-off turns stay ended rather than revive on
 /// the next boot ([`EngineCore::shutdown`] asks): a synced engine whose

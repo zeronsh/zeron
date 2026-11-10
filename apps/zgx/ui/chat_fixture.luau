@@ -177,6 +177,24 @@ for _, d in { "box", "old" } do
 		end,
 	}
 end
+-- The open session, on a Cloud machine of its own, which the device list
+-- says isn't online (a machine asleep or waking, as it does): what it says
+-- comes from `cloud_stub.session.*`.
+ui.command {
+	id = "session_on_cloud",
+	title = "The open session runs on Cloud",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		local devices = table.clone(now.devices)
+		table.insert(devices, { id = "cloud-s2", name = "Cloud machine", platform = "cloud", here = false, online = false, cloud = true })
+		now.devices = devices
+		sessions.now:set(now)
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { device = "cloud-s2" })
+		end
+	end,
+}
 -- The chat open, kept across a reload as the host keeps it (the fixture
 -- runs again on one; the host's transcript doesn't start over).
 local kept_open = ui.state("fixture_opened", nil :: string?)
@@ -289,6 +307,11 @@ ui.command {
 }
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	-- A send carries no time of its own: the host starts its clock when it
+	-- gets it (a message held back goes with its week starting then).
+	if req.at or req.issued_at or req.sent_at or req.expires_at then
+		note(`stamped:{req.text}`)
+	end
 	if SEND_FAILS:peek() then
 		SEND_FAILS:set(false)
 		return {
@@ -334,6 +357,36 @@ stub.send = function(req: any)
 end
 stub.retry = function(id: string, message: string)
 	note(`retry:{id}:{message}`)
+end
+-- This device's outbox, as the engine takes a send out of it (#1256's
+-- RemoveHeldSend): gone from the chat's waiting list, or not there. An
+-- engine from before it refuses.
+local no_removal = false
+ui.command {
+	id = "engine_without_removal",
+	title = "The engine can't take a send out of its outbox",
+	run = function()
+		no_removal = true
+	end,
+}
+stub.remove_held = function(id: string, item: string, message: string?): any
+	note(`remove_held:{id}:{item}:{message or "-"}`)
+	if no_removal then
+		return { after = function(_self: any, _ok: any, err: (any) -> ()) err({ message = "unsupported" }) end }
+	end
+	local s = META[id]
+	local kept, found = {}, false
+	for _, w in (s and s.waiting) or {} do
+		if w.id == item then
+			found = true
+		else
+			table.insert(kept, w)
+		end
+	end
+	if found then
+		publish(id, { waiting = kept })
+	end
+	return settled(found)
 end
 -- Each project's branches, as git where it lives would list them (the
 -- box's asked of the box).
@@ -665,6 +718,75 @@ ui.command {
 		local tools = table.clone(m.tools or {})
 		table.insert(tools, { id = `lt{#tools + 1}`, kind = "exec" :: any, verb = "Ran", target = "cargo test" })
 		store.messages:set_key({ n, "tools" }, tools)
+	end,
+}
+-- The reply's host stops reporting mid-turn (it died, or slept): the reply
+-- stays unfinished in the transcript, begun a while ago, and its session no
+-- longer says a turn runs.
+ui.command {
+	id = "reply_stalls",
+	title = "The reply's host stops reporting",
+	run = function()
+		local n = store.messages:len()
+		if n > 0 then
+			store.messages:set_key({ n, "started" }, ui.now() / 1000 - 120)
+		end
+		if opened then
+			publish(opened, { running = false })
+		end
+	end,
+}
+-- On its way to the chat and not yet taken, sent three days ago (the
+-- engine's WatchWaitingMessages); and one whose files the store refused.
+ui.command {
+	id = "waiting_old",
+	title = "A message sent three days ago, not yet taken",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "w1", message = "m-w1", text = "Sent long ago", sent = os.time() - 3 * 86400, expires = os.time() + 4 * 86400 } } })
+		end
+	end,
+}
+ui.command {
+	id = "waiting_expired",
+	title = "A message that waited past its week",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "w2", message = "m-w2", text = "Too late", sent = os.time() - 8 * 86400, expires = os.time() - 86400 } } })
+		end
+	end,
+}
+ui.command {
+	id = "waiting_store_full",
+	title = "A message whose files the store refused",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "o1", message = "m-o1", text = "With files", sent = os.time(), held = true, failure = "too many files are waiting for Cloud machines to collect them; retry once one has" } } })
+		end
+	end,
+}
+-- This device's outbox for the chat: one send still uploading, one that
+-- stopped trying.
+ui.command {
+	id = "waiting_outbox",
+	title = "Two sends in this device's outbox",
+	run = function()
+		if opened then
+			publish(opened, { waiting = {
+				{ id = "o-up", message = "m-up", text = "Still uploading", sent = os.time(), held = true },
+				{ id = "o-stop", message = "m-stop", text = "Gave up", sent = os.time(), held = true, failure = "upload failed" },
+			} })
+		end
+	end,
+}
+-- A message queued three days ago, still waiting.
+ui.command {
+	id = "queue_old",
+	title = "A message queued three days ago",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q-old", text = "Old words", at = os.time() - 3 * 86400 } } })
+		end
 	end,
 }
 ui.command {

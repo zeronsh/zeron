@@ -66,7 +66,13 @@ if [[ -n "$BETA_VERSION" ]]; then
     fi
   done
 elif [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p zeron
+  # Fat LTO in one codegen unit: `zeron` goes from 205 to 172 MB (16% less), with
+  # the same start-up (median engine boot 387 ms both ways, n=20 each), at about
+  # 60% more build time. A Cloud machine copies the binary back in on every wake,
+  # so its size is wake time. Only here: macOS and Windows keep their build times.
+  # The release was already stripped, with no debug info to split.
+  CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+    cargo build --release -p zeron
   BIN="$ROOT/target/release/zeron"
 else
   cargo build -p zeron

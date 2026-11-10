@@ -160,6 +160,9 @@ fn device_capabilities() -> Vec<String> {
     if crate::runner::session().is_some() {
         capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
     }
+    if crate::doc_host::relay_layer_enabled() {
+        capabilities.push(zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY.to_string());
+    }
     capabilities
 }
 
@@ -1361,31 +1364,16 @@ impl WorkspaceHost {
         last_message_at: Option<i64>,
         created_at: Option<i64>,
     ) -> Result<bool, EngineError> {
-        let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
-            return Ok(false);
-        };
-        if let Some(ms) = last_message_at {
-            chat.last_message_at = chrono::DateTime::<Utc>::from_timestamp_millis(ms);
-        }
-        if let Some(ms) = created_at
-            && let Some(at) = chrono::DateTime::<Utc>::from_timestamp_millis(ms)
-        {
-            chat.created_at = at;
-        }
-        self.mutate(|doc| doc.upsert_chat(&chat))?;
-        Ok(true)
+        // Only these fields: a whole-row write would put this device's copy of
+        // the rest back with a newer clock, the generation included.
+        Ok(self.mutate(|doc| doc.set_chat_activity(chat_id, last_message_at, created_at))?)
     }
 
     /// Re-home a chat to another device (tooling/seeds; a future device
     /// migration flow will drive this). Returns false when the chat doesn't
     /// exist.
     pub fn set_chat_host(&self, chat_id: &str, device_id: &str) -> Result<bool, EngineError> {
-        let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
-            return Ok(false);
-        };
-        chat.device_id = device_id.to_string();
-        self.mutate(|doc| doc.upsert_chat(&chat))?;
-        Ok(true)
+        Ok(self.mutate(|doc| doc.set_chat_host(chat_id, device_id))?)
     }
 
     /// Upsert a chat row copied verbatim from another profile (local→synced

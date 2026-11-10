@@ -16,6 +16,8 @@
 pub(crate) mod delivery;
 pub(crate) mod direct;
 pub(crate) mod escort;
+pub(crate) mod held;
+pub(crate) mod path_gate;
 pub(crate) mod relay;
 pub(crate) mod room;
 pub(crate) mod urls;
@@ -62,10 +64,14 @@ pub(crate) async fn wait_backoff(cancel: &CancellationToken, wait: Duration) -> 
         wait + jitter
     };
     tokio::select! {
+        _ = cancel.cancelled() => return false,
+        _ = tokio::time::sleep(wait) => {}
+        _ = wake.recv() => {}
+        _ = online.recv() => {}
+    }
+    tokio::select! {
         _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(wait) => true,
-        _ = wake.recv() => true,
-        _ = online.recv() => true,
+        _ = zeron_sync::wake::until_awake() => true,
     }
 }
 
@@ -127,6 +133,7 @@ struct RegistryHttp {
     edge: String,
     org_id: String,
     device_id: String,
+    relay: bool,
 }
 
 fn http_err(err: reqwest::Error) -> SyncError {
@@ -136,7 +143,7 @@ fn http_err(err: reqwest::Error) -> SyncError {
 impl RegistryTransport for RegistryHttp {
     fn fetch(&self, since: u64) -> BoxFuture<'static, std::result::Result<String, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::registry_rows(&self.edge, &self.org_id, &self.device_id, since);
+        let url = urls::registry_rows(&self.edge, &self.org_id, &self.device_id, since, self.relay);
         Box::pin(async move {
             let token = bearer.get().await?;
             let response = crate::auth::http()
@@ -203,6 +210,7 @@ pub(crate) struct LiveBackend {
     /// Direct peer connections (terminals), started with the backend.
     pub(crate) direct: std::sync::OnceLock<Option<zeron_preview::viewer::ViewerPeers>>,
     pub(crate) escorts: escort::Escorts,
+    pub(crate) held: held::HeldSends,
     pub(crate) delivery_wake: Arc<Notify>,
     cancel: CancellationToken,
 }
@@ -233,6 +241,7 @@ impl LiveBackend {
             relay: relay::Relay::new(inner, &edge, bearer),
             direct: std::sync::OnceLock::new(),
             escorts: escort::Escorts::new(&inner.config.data_dir),
+            held: held::HeldSends::default(),
             delivery_wake: Arc::new(Notify::new()),
             edge,
             store,
@@ -255,11 +264,25 @@ impl LiveBackend {
     /// registry saver.
     pub(crate) fn start(&self, inner: &Arc<ClientInner>) {
         // Signaling first: pairing with a host can then start the moment a
-        // terminal wants it.
-        let _ = self.direct.set(direct::start(inner));
+        // terminal wants it. It dials the edge too, so it waits on the platform's
+        // first path report like every other connect.
+        let path = inner.path_gate();
+        let weak = Arc::downgrade(inner);
+        let cancel = self.cancel.clone();
+        crate::runtime::shared().spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = path.ready() => {}
+            }
+            let Some(inner) = weak.upgrade() else { return };
+            if let Some(live) = inner.live() {
+                let _ = live.direct.set(direct::start(&inner));
+            }
+        });
         self.spawn_registry(inner);
         self.spawn_registry_saver(inner);
         self.escorts.respawn(inner);
+        self.held.resume(inner);
         delivery::start(inner, self.delivery_wake.clone(), self.cancel.clone());
     }
 
@@ -450,12 +473,18 @@ impl LiveBackend {
             edge: self.edge.clone(),
             org_id: inner.credentials.org_id().to_owned(),
             device_id: inner.config.device_id.clone(),
+            relay: inner.config.relay_layer,
         });
         let doc = inner.workspace.doc().clone();
         let device_id = inner.config.device_id.clone();
+        let path = inner.path_gate();
         crate::runtime::shared().spawn(async move {
             let mut backoff = JOIN_RETRY_BASE;
             let client = loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = path.ready() => {}
+                }
                 let attempt = RegistryClient::connect_via_transport(
                     provider.clone(),
                     doc.clone(),
@@ -505,7 +534,10 @@ impl LiveBackend {
                     _ = cancel.cancelled() => return,
                     _ = beat.tick() => {
                         let Some(inner) = weak.upgrade() else { return };
-                        if let Some(live) = inner.live()
+                        // Not suspended isn't the same as in use: Android can leave a
+                        // backgrounded process running for hours, and each beat wakes the radio.
+                        if inner.is_foreground()
+                            && let Some(live) = inner.live()
                             && let Some(client) = lock(&live.registry).as_ref()
                         {
                             client.set_presence(now_ms());

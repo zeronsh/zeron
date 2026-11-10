@@ -20,8 +20,9 @@
 //!   `zeron-runner-token\n{orgId}\n{userId}\n{deviceId}\n{ts}` — driven by
 //!   [`crate::Auth`]'s runner mode, so every room/relay/RPC bearer consumer
 //!   works unchanged.
-//! - **Heartbeat**: `POST {edge}/runner/heartbeat {activeRuns, clients}` every
-//!   60 s, feeding the CloudAccount DO's per-session idle sleep.
+//! - **Heartbeat**: `POST {edge}/runner/heartbeat {activeRuns, clients, …}`
+//!   every 60 s, feeding the CloudAccount DO's per-session idle sleep and disk
+//!   levels ([`crate::cloud_disk`]).
 //! - **Session**: every Cloud session runs in its own sandbox, provisioned with
 //!   `ZERON_CLOUD_{ACCOUNT,CHAT,REPO,PATH,BRANCH}` (persisted to
 //!   `cloud-session.json` for restarts). At boot it clones the project's
@@ -194,6 +195,9 @@ async fn prepare_checkout_with(
     if path.join(".git").exists() {
         // The disk survived a stop: this boot is a wake.
         record_setup("wake", "Woke the machine".into());
+        if let Some(version) = crate::wake_trace::updated_to() {
+            record_setup("update", format!("Updated Zeron to {version}"));
+        }
         return Ok(());
     }
     record_setup("start", "Started a machine".into());
@@ -271,15 +275,22 @@ async fn prepare_checkout_with(
         true,
     );
     let branch = session.session_branch();
+    // A fresh machine for a chat that already ran (its old disk expired): what
+    // the session pushed comes back. A first boot has no such branch.
+    let pushed = pushed_session_branch(path, &branch).await;
     let branch_step = begin_step(
         "branch",
         format!("Checking out {branch}"),
-        Some(format!("git checkout -B {branch}")),
+        Some(match &pushed {
+            Some(pushed) => format!("git checkout -B {branch} {pushed}"),
+            None => format!("git checkout -B {branch}"),
+        }),
     );
     let checkout = tokio::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["checkout", "-B", &branch])
+        .args(pushed.as_deref())
         .kill_on_drop(true)
         .output()
         .await;
@@ -304,6 +315,22 @@ async fn prepare_checkout_with(
     }
     tracing::info!(repo, path = %path.display(), branch, "runner: session checkout ready");
     Ok(())
+}
+
+/// `origin/{branch}`, when the session pushed that branch before this clone.
+async fn pushed_session_branch(path: &Path, branch: &str) -> Option<String> {
+    let remote = format!("origin/{branch}");
+    let found = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/remotes/{remote}"))
+        .kill_on_drop(true)
+        .output()
+        .await;
+    found
+        .is_ok_and(|out| out.status.success())
+        .then_some(remote)
 }
 
 /// One setup step of this boot (live: `running` until it finishes).
@@ -490,6 +517,17 @@ pub const ENROLL_ENV: &str = "ZERON_RUNNER_ENROLL";
 pub const PLATFORM_ENV: &str = "ZERON_DEVICE_PLATFORM";
 /// How often a runner reports activity to its CloudDevice DO.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+/// How long after boot a Cloud machine keeps its agent CLIs' update checks out of
+/// the way of the message that woke it: a check can start an install, which holds
+/// the run back until it ends.
+pub const CLOUD_BOOT_SETTLE: Duration = Duration::from_secs(120);
+/// How often while a turn runs. The edge counts a machine as gone three of these
+/// (at least 45 s) after its last beat, so a machine stopped mid-turn is brought
+/// back to resume it within about a minute rather than three.
+pub const HEARTBEAT_BUSY_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the heartbeat looks at whether a turn started or ended: a change is
+/// reported at once, so the edge's idea of the cadence is never a beat behind.
+const HEARTBEAT_LOOK: Duration = Duration::from_secs(2);
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const ENROLL_RETRY_BASE: Duration = Duration::from_secs(1);
@@ -972,10 +1010,78 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), Engi
 struct HeartbeatBody {
     active_runs: usize,
     clients: usize,
+    background_runs: usize,
+    waiting_runs: usize,
+    /// Older edges ignore these. The edge judges `used` against what the
+    /// machine's size holds, not `total`, which also counts the OS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_used_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_total_bytes: Option<u64>,
+    /// How often it beats from here on, in seconds. Older edges ignore it.
+    every_secs: u64,
+    /// When this run found its chat store damaged and rebuilt it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_recovered_at: Option<i64>,
 }
 
-/// Counts sessions with a turn in flight (the heartbeat's `activeRuns`).
-pub type ActiveRuns = Arc<dyn Fn() -> usize + Send + Sync>;
+/// Unix ms this process rebuilt a damaged chat store at its start (0: it didn't).
+static STORE_RECOVERED_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// The store's open found it damaged and rebuilt it: every heartbeat says so,
+/// for the edge to record and show.
+pub fn note_store_recovered(at_ms: i64) {
+    STORE_RECOVERED_AT.store(at_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn store_recovered_at() -> Option<i64> {
+    Some(STORE_RECOVERED_AT.load(std::sync::atomic::Ordering::SeqCst)).filter(|at| *at > 0)
+}
+
+/// The edge's answer: what this machine's size holds, when it says.
+#[derive(Debug, Default, Deserialize)]
+struct HeartbeatReply {
+    #[serde(default, rename = "diskCapacityGiB")]
+    disk_capacity_gib: Option<f64>,
+}
+
+/// Reads the disk for the heartbeat; `None` on a platform or path it can't.
+pub type DiskReader = Arc<dyn Fn() -> Option<crate::cloud_disk::DiskUsage> + Send + Sync>;
+
+/// What this machine's runs are doing, as the heartbeat reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunCounts {
+    /// Chats with a turn in flight: working, or parked on a question.
+    pub active: usize,
+    /// Of `active`, those parked on a question: they hold the machine, but a
+    /// parent chat waiting on them has something to hear.
+    pub waiting: usize,
+    /// Chats whose turn ended with background work still running (a parked
+    /// chat's subagents, background shells).
+    pub background: usize,
+}
+
+impl RunCounts {
+    /// A turn working (not parked on a question) or background work running:
+    /// what the edge waits on, and watches for going quiet.
+    pub fn working(&self) -> bool {
+        self.active > self.waiting || self.background > 0
+    }
+}
+
+/// Whether to beat now: the first time, when work started or stopped since the
+/// last beat, or once the cadence for what's running has passed.
+fn beat_due(last: Option<(Duration, bool)>, working: bool, idle: Duration, busy: Duration) -> bool {
+    match last {
+        None => true,
+        Some((since, was_working)) => {
+            was_working != working || since >= if working { busy } else { idle }
+        }
+    }
+}
+
+/// Reads [`RunCounts`] for the heartbeat.
+pub type ActiveRuns = Arc<dyn Fn() -> RunCounts + Send + Sync>;
 
 /// Relay requests served to remote devices since the last heartbeat — the
 /// heartbeat's `clients`. Filled by [`RelayActivity::wrap`] around the RPC
@@ -1064,10 +1170,16 @@ pub fn passive(method: &str) -> bool {
         || method == zeron_rpc::methods::SET_VIEWPORT_FOCUS
 }
 
-/// Post `{activeRuns, clients}` to `{edge}/runner/heartbeat` every `every`
-/// (first beat immediately).
+/// Post `{activeRuns, clients, backgroundRuns, waitingRuns, diskUsedBytes,
+/// diskTotalBytes, everySecs}` to `{edge}/runner/heartbeat` every `every`, or
+/// every `busy_every` while work runs (first beat immediately, and again as soon
+/// as work starts or stops). `everySecs` says which cadence follows.
 ///
-/// - `activeRuns`: chats with a turn in flight right now.
+/// - `activeRuns`: chats with a turn in flight right now; `waitingRuns`, the
+///   ones among them parked on a question.
+/// - `backgroundRuns`: chats whose turn ended with background work still
+///   running. They keep the machine awake as a turn would: sleeping stops the
+///   engine, and the work with it.
 /// - `clients`: relay RPC REQUESTS served to remote devices since the
 ///   previous delivered heartbeat (see [`RelayActivity`]) — not open links or
 ///   sockets. A laptop that merely keeps a link or a watch stream open must
@@ -1078,16 +1190,27 @@ pub fn spawn_heartbeat(
     edge_url: &str,
     tokens: Arc<dyn zeron_rpc::TokenSource>,
     active_runs: ActiveRuns,
+    disk: DiskReader,
     activity: RelayActivity,
     every: Duration,
+    busy_every: Duration,
 ) -> tokio::task::JoinHandle<()> {
     let url = format!("{}/runner/heartbeat", edge_url.trim_end_matches('/'));
+    let look = HEARTBEAT_LOOK.min(busy_every).min(every);
     tokio::spawn(async move {
         let http = http_client();
-        let mut ticker = tokio::time::interval(every);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last: Option<(tokio::time::Instant, bool)> = None;
         loop {
-            ticker.tick().await;
+            let runs = active_runs();
+            let working = runs.working();
+            let since = last.map(|(at, was)| (at.elapsed(), was));
+            if !beat_due(since, working, every, busy_every) {
+                tokio::time::sleep(look).await;
+                continue;
+            }
+            // Counted as a beat whether or not it lands: a failed one is tried
+            // again at the cadence, not every look.
+            last = Some((tokio::time::Instant::now(), working));
             let token = match tokens.token().await {
                 Ok(token) => token,
                 Err(err) => {
@@ -1095,15 +1218,30 @@ pub fn spawn_heartbeat(
                     continue;
                 }
             };
+            let cadence = if working { busy_every } else { every };
+            let usage = disk();
             let body = HeartbeatBody {
-                active_runs: active_runs(),
+                disk_used_bytes: usage.map(|usage| usage.used_bytes),
+                disk_total_bytes: usage.map(|usage| usage.total_bytes),
+                active_runs: runs.active,
                 clients: activity.take(),
+                background_runs: runs.background,
+                waiting_runs: runs.waiting,
+                every_secs: cadence.as_secs().max(1),
+                store_recovered_at: store_recovered_at(),
             };
             match http.post(&url).bearer_auth(token).json(&body).send().await {
                 Ok(res) if res.status().is_success() => {
+                    if let Ok(reply) = res.json::<HeartbeatReply>().await
+                        && let Some(capacity) = reply.disk_capacity_gib
+                    {
+                        crate::cloud_disk::set_capacity_gib(capacity);
+                    }
                     tracing::debug!(
                         active_runs = body.active_runs,
                         clients = body.clients,
+                        background_runs = body.background_runs,
+                        waiting_runs = body.waiting_runs,
                         "runner: heartbeat"
                     );
                 }
@@ -1164,6 +1302,33 @@ impl Drop for CloudRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beats_fast_while_work_runs_and_at_once_when_it_starts_or_stops() {
+        let (idle, busy) = (Duration::from_secs(60), Duration::from_secs(15));
+        let after = |secs, was| Some((Duration::from_secs(secs), was));
+        assert!(beat_due(None, false, idle, busy), "the first beat");
+        assert!(!beat_due(after(14, true), true, idle, busy));
+        assert!(beat_due(after(15, true), true, idle, busy), "busy cadence");
+        assert!(!beat_due(after(59, false), false, idle, busy));
+        assert!(beat_due(after(60, false), false, idle, busy), "idle cadence");
+        assert!(beat_due(after(1, false), true, idle, busy), "a turn started");
+        assert!(beat_due(after(1, true), false, idle, busy), "it ended");
+    }
+
+    #[test]
+    fn a_turn_parked_on_a_question_isnt_work_but_background_work_is() {
+        let counts = |active, waiting, background| RunCounts {
+            active,
+            waiting,
+            background,
+        };
+        assert!(!counts(0, 0, 0).working());
+        assert!(counts(1, 0, 0).working());
+        assert!(!counts(1, 1, 0).working());
+        assert!(counts(2, 1, 0).working());
+        assert!(counts(0, 0, 1).working());
+    }
 
     fn session_vars(name: &str) -> Option<String> {
         match name {
@@ -1402,6 +1567,17 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path.join("notes.txt")).unwrap(),
             "work in progress"
+        );
+        // A fresh machine picks up what the session pushed; a first boot has
+        // nothing to pick up.
+        assert_eq!(pushed_session_branch(&path, "zeron/cloud-abcdef0123").await, None);
+        git(&origin, &["branch", "zeron/cloud-abcdef0123"]);
+        git(&path, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            pushed_session_branch(&path, "zeron/cloud-abcdef0123")
+                .await
+                .as_deref(),
+            Some("origin/zeron/cloud-abcdef0123")
         );
         // An unreachable repository fails clearly and leaves nothing behind.
         let broken = CloudSession {

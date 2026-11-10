@@ -439,6 +439,54 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         loader.accessibilityIdentifier = "session-loading"
     }
 
+    /// Says why a transcript with nothing in it has nothing in it. Built on first use:
+    /// most sessions never need it.
+    private var emptyNoticeRow: (stack: UIStackView, glyph: StatusGlyph, label: UILabel)?
+
+    private func renderEmptyNotice(_ notice: SessionChrome.EmptyNotice?) {
+        guard let notice else {
+            emptyNoticeRow?.stack.isHidden = true
+            return
+        }
+        // It's the answer the loader was holding out for: there's nothing to reveal.
+        if holdingTranscript {
+            reportedOpen = true
+            showTranscriptIfReady()
+        }
+        let row = emptyNoticeRow ?? makeEmptyNotice()
+        emptyNoticeRow = row
+        row.label.text = notice.text
+        row.glyph.kind = notice.isWorking ? .spinner : .dot(Palette.warning)
+        row.stack.isHidden = false
+    }
+
+    private func makeEmptyNotice() -> (stack: UIStackView, glyph: StatusGlyph, label: UILabel) {
+        let glyph = StatusGlyph(.none)
+        glyph.setContentHuggingPriority(.required, for: .horizontal)
+        let label = UILabel()
+        label.font = Fonts.ui(.sans, 14)
+        label.textColor = Palette.tertiary
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.accessibilityIdentifier = "session-empty-notice"
+        let stack = UIStackView(arrangedSubviews: [glyph, label])
+        stack.axis = .horizontal
+        stack.alignment = .center
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.isUserInteractionEnabled = false
+        view.insertSubview(stack, aboveSubview: list)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor, constant: -40),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -32),
+            glyph.widthAnchor.constraint(equalToConstant: 12),
+            glyph.heightAnchor.constraint(equalToConstant: 12),
+        ])
+        return (stack, glyph, label)
+    }
+
     /// Both conditions met (push landed, rows in): show the transcript.
     private func showTranscriptIfReady() {
         guard holdingTranscript, landed, reportedOpen else { return }
@@ -455,6 +503,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     #if DEBUG
     private static var debugPickerShown = false
     private static var debugCompanionShown = false
+    private static var debugSendDone = false
 
     /// `-companions`, `-terminal`, `-subagent <tool id>`, `-side-chat <id>`.
     private func debugOpenCompanion(_ args: [String]) {
@@ -495,6 +544,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         if !Self.debugCompanionShown, !isCompanion, parentId == nil {
             Self.debugCompanionShown = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.debugOpenCompanion(args) }
+        }
+        // Rigs driving a real stack from outside: `-send-on-open <text>` sends once.
+        if !Self.debugSendDone, !isCompanion, let i = args.firstIndex(of: "-send-on-open"), i + 1 < args.count {
+            Self.debugSendDone = true
+            _ = source.send(text: args[i + 1], images: [], mode: .queue)
         }
         #endif
         showTranscriptIfReady()
@@ -755,6 +809,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             navigationItem.rightBarButtonItem?.menu = sessionMenu(title: c.title, subtitle: c.subtitle)
         }
         list.uploadProgress = c.uploadProgress
+        renderEmptyNotice(c.emptyNotice)
         composer.running = c.running
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder

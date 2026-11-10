@@ -1,3 +1,4 @@
+import { handleAttachmentBlob } from "../../src/attachment-blobs";
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
@@ -89,6 +90,14 @@ export class VaultStub extends WorkerEntrypoint {
       { fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", defaultBranch: "main", private: true, pushedAt: 2 }
     ]);
   }
+  githubListing(caller: Caller, query?: string) {
+    return this.answer("githubListing", [caller, query], {
+      repos: [
+        { fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", defaultBranch: "main", private: true, pushedAt: 2, installationId: 7, account: "ada", accounts: ["ada"] }
+      ],
+      installations: [{ id: 7, target: "acme", targetType: "Organization", reachedBy: ["ada"] }]
+    });
+  }
   githubBranches(caller: Caller, repo: string) {
     return this.answer("githubBranches", [caller, repo], ["main", "dev"]);
   }
@@ -157,7 +166,7 @@ export default {
         return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "nudge" && request.method === "POST") {
-        autoWakeCloudDevice(env, ctx, auth, deviceId);
+        autoWakeCloudDevice(env, ctx, auth, deviceId, env.CLOUD_EDGE_URL ?? url.origin);
         return forward(env.DEVICE_ROOMS, room, request, auth, "/nudge", "");
       }
       if (parts[2] === "status") return forward(env.DEVICE_ROOMS, room, request, auth, "/status", "");
@@ -176,7 +185,10 @@ export default {
     }
     const chat = chatRoute(request, env, auth.userId);
     if (chat) return chat;
-    if (parts[0] === "blob" && parts[1] && parts[2]) {
+    if (parts[0] === "blob" && parts.length === 4 && parts[2] === "attachments" && id.test(parts[1]) && id.test(parts[3])) {
+      return handleAttachmentBlob(request, env, auth, parts[1], parts[3]);
+    }
+    if (parts[0] === "blob" && parts[1] && parts[2] && parts.length === 3) {
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;
       const key = `blob/${auth.userId}/${parts[1]}/${parts[2]}`;

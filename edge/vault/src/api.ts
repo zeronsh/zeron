@@ -93,6 +93,8 @@ export interface VaultAccountView {
   readonly displayName?: string;
   readonly organization?: string;
   readonly plan?: string;
+  /** GitHub logins: their picture on github.com. */
+  readonly avatarUrl?: string;
   readonly authorizedDevices: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -122,6 +124,43 @@ export interface GithubRepoView {
   readonly description?: string;
   /** Unix ms of the last push. */
   readonly pushedAt: number;
+  /** The App installation that gives access to this repository. Access comes
+   * from here, not from a login; logins only say who may use it. */
+  readonly installationId?: number;
+  /** The connected login a new session on this repository would use. */
+  readonly account?: string;
+  /** Every connected login that reaches it, the one above first. */
+  readonly accounts?: readonly string[];
+}
+
+/** One installation of the Zeron GitHub App: repository access, a record of
+ * its own. It sits on an account or organization (`target`), and any number of
+ * connected logins may reach it (`reachedBy`). */
+export interface GithubInstallationView {
+  readonly id: number;
+  /** The account or organization it is installed on. */
+  readonly target?: string;
+  /** `User` · `Organization`. */
+  readonly targetType?: string;
+  readonly reachedBy: readonly string[];
+  /** Where the repositories it covers are chosen on GitHub. */
+  readonly manageUrl?: string;
+}
+
+/** A connected login whose repositories are missing from a listing. */
+export interface GithubUnavailableView {
+  readonly slot: string;
+  readonly account?: string;
+  /** `needs_reconnect`: it must be connected again. `upstream`: try later. */
+  readonly reason: "needs_reconnect" | "upstream";
+}
+
+/** Everything the connected logins reach, merged across them. */
+export interface GithubListingView {
+  readonly repos: readonly GithubRepoView[];
+  readonly installations: readonly GithubInstallationView[];
+  /** Absent when every login answered. */
+  readonly unavailable?: readonly GithubUnavailableView[];
 }
 
 export interface VaultStatusView {
@@ -188,10 +227,16 @@ export interface GrantRequest {
   readonly sig: string;
   /**
    * `github` only, and required there: the `owner/name` the device works on.
-   * Selects which of the user's App installations to mint for (the one on
-   * `owner`); the token then reaches every repository of that installation.
+   * Selects the login and App installation to use (the session's own, recorded
+   * at its first grant); the token reaches that one repository.
    */
   readonly repo?: string;
+  /**
+   * `github`, runners only, set by the main Worker and never from a client's
+   * body: the parent session's device, whose login and installation a delegate
+   * takes at its first grant.
+   */
+  readonly inheritFrom?: string;
 }
 
 export interface Grant {
@@ -209,8 +254,11 @@ export interface Grant {
   readonly subscriptionType?: string;
   /** Codex: id_token (the CLI's auth.json requires it). */
   readonly idToken?: string;
-  /** GitHub login / account email, for display. */
+  /** GitHub login / account email. For `github`, the session's login: the
+   * author of its commits. */
   readonly account?: string;
+  /** `github`: the App installation the token came from. */
+  readonly installationId?: number;
   readonly generation: number;
 }
 
@@ -225,6 +273,9 @@ export interface GithubDeviceStart {
 export interface GithubDevicePoll {
   readonly state: "pending" | "connected" | "failed";
   readonly account?: string;
+  /** Connected, but as a login that was already connected: nothing was added.
+   * GitHub approves as whoever the browser is signed in as. */
+  readonly alreadyConnected?: boolean;
   readonly error?: string;
 }
 
@@ -253,17 +304,20 @@ export interface VaultRpc {
   ): Promise<VaultResult<GithubDeviceStart>>;
   githubDevicePoll(caller: VaultCaller, flowId: string): Promise<VaultResult<GithubDevicePoll>>;
   /**
-   * Repositories the user's GitHub connection can see (GitHub App user token:
-   * every installation's repositories), newest push first, filtered by a
-   * case-insensitive substring of `fullName`. The vault calls GitHub itself;
-   * the token never leaves it. Users only (runners use their own grant).
-   * `not_found` when GitHub isn't connected.
+   * Repositories the user's GitHub logins can see (GitHub App user tokens:
+   * every installation's repositories), merged, newest push first, filtered by
+   * a case-insensitive substring of `fullName`. The vault calls GitHub itself;
+   * the tokens never leave it. Users only (runners use their own grant).
+   * `not_found` when GitHub isn't connected. One login failing leaves the
+   * others' repositories; it fails only when no login answered.
    */
   githubRepos(caller: VaultCaller, query?: string): Promise<VaultResult<readonly GithubRepoView[]>>;
+  /** `githubRepos` with the installations and any login that didn't answer. */
+  githubListing(caller: VaultCaller, query?: string): Promise<VaultResult<GithubListingView>>;
   /**
-   * Branch names of `repo` (`owner/name`) through the user's GitHub
-   * connection, for picking the branch a new Cloud session starts from.
-   * Users only. `not_found` when GitHub isn't connected or can't see it.
+   * Branch names of `repo` (`owner/name`) through the first login that can see
+   * it, for picking the branch a new Cloud session starts from. Users only.
+   * `not_found` when GitHub isn't connected or no login can see it.
    */
   githubBranches(caller: VaultCaller, repo: string): Promise<VaultResult<readonly string[]>>;
   /** Every stored login of `provider` (users only). */

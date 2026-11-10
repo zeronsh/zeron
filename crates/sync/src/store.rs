@@ -3,7 +3,7 @@
 //! processed BEFORE execution so a crash can never double-execute a command).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,9 +13,18 @@ use rusqlite::{Connection, OptionalExtension, params};
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(rusqlite::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<rusqlite::Error> for StoreError {
+    /// Every store error passes here: one that says the file is damaged is
+    /// noted, so the engine can recover the store ([`crate::corruption_seen`]).
+    fn from(err: rusqlite::Error) -> Self {
+        crate::store_recovery::note_error(&err);
+        Self::Sqlite(err)
+    }
 }
 
 /// Synchronous command/doc callbacks still need commit-before-send semantics.
@@ -74,6 +83,33 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // Updates that came by relay, until a saved snapshot holds them. Nothing on
+    // the edge can give these back to a device that crashes before saving.
+    "CREATE TABLE IF NOT EXISTS chat_inbox (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id TEXT NOT NULL,
+        bytes BLOB NOT NULL
+     ) STRICT;
+     CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
+    // Sends waiting for their attachment bytes to reach the edge
+    // (held_sends.rs). Ordinal order is send order, per chat.
+    // The relay inbox again: a pre-release build took the previous slot for
+    // this table, so a device that ran it skipped the inbox above.
+    "CREATE TABLE IF NOT EXISTS held_sends (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        chat_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        failure TEXT
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS held_sends_chat ON held_sends(chat_id,ordinal);
+    CREATE TABLE IF NOT EXISTS chat_inbox (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id TEXT NOT NULL,
+        bytes BLOB NOT NULL
+     ) STRICT;
+     CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -106,6 +142,9 @@ pub struct DocsStore {
     failed_publications: Mutex<HashSet<String>>,
     /// Snapshot jobs wait here asynchronously before entering the blocking pool.
     pub snapshot_writer: std::sync::Arc<tokio::sync::Mutex<()>>,
+    path: PathBuf,
+    /// This open found the file damaged and rebuilt the store.
+    recovery: Option<crate::store_recovery::Recovery>,
 }
 
 impl DocsStore {
@@ -114,6 +153,17 @@ impl DocsStore {
         let data_dir = data_dir.as_ref();
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("docs.sqlite3");
+        // A damaged file is moved aside before anything reads it; what can
+        // still be read of it is copied into the fresh store below.
+        let damaged = path
+            .exists()
+            .then(|| crate::store_recovery::damage(&path))
+            .flatten()
+            .map(|reason| -> Result<_, StoreError> {
+                tracing::error!(%reason, path = %path.display(), "docs store: damaged; rebuilding it");
+                Ok((reason, crate::store_recovery::quarantine(&path)?))
+            })
+            .transpose()?;
         let mut conn = Connection::open(&path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -127,11 +177,44 @@ impl DocsStore {
         // live size. Callers run `reclaim_free_space` off those paths.
         checkpoint_truncate(&conn, &path, "open");
         conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
+        let recovery = damaged.map(|(reason, kept_at)| {
+            let (salvaged_rows, damaged_tables) = crate::store_recovery::salvage(&kept_at, &conn);
+            tracing::warn!(
+                salvaged_rows,
+                ?damaged_tables,
+                kept_at = %kept_at.display(),
+                "docs store: rebuilt; what wasn't readable comes back from the rooms"
+            );
+            crate::store_recovery::Recovery { reason, kept_at, salvaged_rows, damaged_tables }
+        });
         Ok(Self {
             conn: Mutex::new(conn),
             failed_publications: Mutex::new(HashSet::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            path,
+            recovery,
         })
+    }
+
+    /// What this open found and did, when the file was damaged.
+    pub fn recovery(&self) -> Option<&crate::store_recovery::Recovery> {
+        self.recovery.as_ref()
+    }
+
+    /// Before the machine sleeps (its disk snapshotted from outside, at any
+    /// moment after) or the process stops: everything in the WAL goes into the
+    /// database file and the WAL is emptied, so the file alone is the store.
+    /// Returns whether the checkpoint completed.
+    pub fn flush_for_sleep(&self) -> bool {
+        let conn = self.conn();
+        checkpoint_truncate(&conn, &self.path, "sleep");
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0))
+            .is_ok_and(|busy| busy == 0)
+    }
+
+    /// The database file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Insert before sending. Stable IDs make crash-after-ACK replay idempotent.
@@ -219,6 +302,50 @@ impl DocsStore {
         Ok(stmt
             .query_map(params![doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?)
+    }
+
+    /// Keep an update that arrived by relay until a saved snapshot covers it.
+    /// Returns its position, for [`Self::retire_chat_inbox`].
+    pub fn journal_chat_inbox(&self, doc_id: &str, bytes: &[u8]) -> Result<i64, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO chat_inbox(doc_id,bytes) VALUES (?1,?2)",
+                params![doc_id, bytes],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// What a crash left unsaved, oldest first, with the newest position.
+    pub fn pending_chat_inbox(&self, doc_id: &str) -> Result<(Vec<Vec<u8>>, i64), StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut stmt =
+                conn.prepare("SELECT ordinal,bytes FROM chat_inbox WHERE doc_id=?1 ORDER BY ordinal")?;
+            let rows = stmt.query_map(params![doc_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut updates = Vec::new();
+            let mut newest = 0;
+            for row in rows {
+                let (ordinal, bytes) = row?;
+                newest = ordinal;
+                updates.push(bytes);
+            }
+            Ok((updates, newest))
+        })
+    }
+
+    /// A saved snapshot holds everything up to `through`.
+    pub fn retire_chat_inbox(&self, doc_id: &str, through: i64) -> Result<(), StoreError> {
+        store_blocking(|| {
+            self.conn().execute(
+                "DELETE FROM chat_inbox WHERE doc_id=?1 AND ordinal<=?2",
+                params![doc_id, through],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn acknowledge_chat_update(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
@@ -473,6 +600,10 @@ impl DocsStore {
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM chat_outbox WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
+            "DELETE FROM chat_inbox WHERE doc_id = ?1 OR doc_id = ?1 || '#parked'",
+            params![doc_id],
+        )?;
+        tx.execute(
             "DELETE FROM chat_sync_jobs WHERE doc_id = ?1",
             params![doc_id],
         )?;
@@ -721,6 +852,10 @@ fn reclaim_free_pages(conn: &Connection) -> rusqlite::Result<bool> {
 fn worth_vacuuming(page_size: i64, page_count: i64, freelist: i64) -> bool {
     freelist * page_size >= VACUUM_MIN_FREE_BYTES
         && freelist * VACUUM_MIN_FREE_DENOMINATOR >= page_count
+}
+
+pub(crate) fn now_millis() -> i64 {
+    now_ms()
 }
 
 fn now_ms() -> i64 {

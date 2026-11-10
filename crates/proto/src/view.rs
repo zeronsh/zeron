@@ -40,6 +40,27 @@ pub enum Indicator {
 /// §1.12). Engines heartbeat sessions well inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
+/// How often a host restamps `updated_at` on a session row that says
+/// something readers drop once it goes stale ([`session_expires`]). Every
+/// restamp is a stored registry write, so it is as rare as shipped readers
+/// allow: they judge staleness against [`SESSION_STALE_MS`] with no other
+/// signal. Hosts check every 5 s, so restamps land at most 30 s apart and
+/// leave 15 s for delivery and clock skew.
+pub const SESSION_HEARTBEAT_MS: i64 = 25_000;
+
+/// Whether a session row says anything that [`SESSION_STALE_MS`] expires: a
+/// live status, running subagents, background processes or a wait. Only
+/// such a row needs its host's heartbeat; any other row reads the same
+/// stale or fresh. Terminal activity is restamped by its own projection.
+pub fn session_expires(session: &Session) -> bool {
+    matches!(
+        session.status,
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    ) || session.running_subagents > 0
+        || !session.background_tasks.is_empty()
+        || session.waiting.is_some()
+}
+
 /// Only live activity expires. Completed/error records remain useful after
 /// process exit; a lost heartbeat is never evidence of successful completion.
 pub fn session_stale(session: &Session, now: DateTime<Utc>) -> bool {

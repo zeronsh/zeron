@@ -80,6 +80,8 @@ pub enum RegistryEvent {
     Presence,
 }
 
+// ── who can't follow the relay layer ────────────────────────────────────────
+
 // ── wire frames (JSON text; mirror edge/src/registry-room.ts) ───────────────
 
 #[derive(Serialize)]
@@ -520,6 +522,13 @@ impl Actor {
             if *self.shutdown.borrow() {
                 return;
             }
+            if crate::wake::is_resting() {
+                tokio::select! {
+                    _ = crate::wake::until_awake() => {}
+                    _ = self.shutdown.changed() => {}
+                }
+                continue;
+            }
             let attempt = self
                 .stats
                 .dial_seq
@@ -561,7 +570,11 @@ impl Actor {
             };
 
             let session_started = tokio::time::Instant::now();
-            match self.run_session(pipe, &mut ready).await {
+            let end = tokio::select! {
+                _ = crate::wake::until_resting() => SessionEnd::Reconnect,
+                end = self.run_session(pipe, &mut ready) => end,
+            };
+            match end {
                 SessionEnd::Stop => return,
                 SessionEnd::Reconnect => {
                     lock(&self.doc).mark_disconnected();
@@ -824,6 +837,9 @@ impl Actor {
     /// and retried on the next backoff cycle.
     fn spawn_offline_sync(&self) {
         use std::sync::atomic::Ordering::Relaxed;
+        if crate::wake::is_resting() {
+            return;
+        }
         let Some(transport) = self.transport.clone() else {
             return;
         };
@@ -977,6 +993,7 @@ impl Actor {
                 gc_floor,
                 rows,
                 presence,
+                ..
             } => {
                 // Servers only send state as a hello answer, but applying a
                 // late duplicate is harmless and simpler than special-casing.

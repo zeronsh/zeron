@@ -958,7 +958,17 @@ impl HarnessUpdateCoordinator {
             return;
         }
         let coordinator = self.clone();
+        // A Cloud machine is woken by a message: a check started now spawns
+        // the CLI twice on a disk still arriving, and if it finds a release
+        // the install holds the message's run back until it ends.
+        let settle = crate::runner::is_cloud_platform().then_some(crate::runner::CLOUD_BOOT_SETTLE);
         *worker = Some(tokio::spawn(async move {
+            if let Some(settle) = settle {
+                tokio::select! {
+                    _ = coordinator.inner.shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(settle) => {}
+                }
+            }
             let mut retry = FIRST_RETRY;
             'checks: loop {
                 // Shutdown must not wait out slow probes or registry requests.
