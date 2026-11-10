@@ -443,6 +443,16 @@ fn stream_bench_profile() {
     let mut phases: std::collections::BTreeMap<String, f64> = Default::default();
     // Instructions by phase too: unlike time, unmoved by the CPU's clock.
     let mut instructions: std::collections::BTreeMap<String, u64> = Default::default();
+    // And by the kind of frame: one a chunk landed on (the reply's words
+    // grew), or one where only fades move. (frames, instructions by phase)
+    let mut kinds: [(u32, std::collections::BTreeMap<String, u64>); 2] = Default::default();
+    // The reply's words so far, as the host has them: what a chunk grows.
+    let words = |view: &View| -> usize {
+        view.open.borrow().as_ref().and_then(|o| o.entries.last()).map_or(0, |e| {
+            e["parts"].as_array().into_iter().flatten().map(|p| p["text"].as_str().map_or(0, str::len)).sum()
+        })
+    };
+    let mut had = words(&view);
     zgx::profile::take();
     while streaming(&view) {
         tick(&app, &mut draw, &mut ran);
@@ -451,9 +461,14 @@ fn stream_bench_profile() {
             mid_tree = full_tree(&app);
         }
         if profiling {
+            let now = words(&view);
+            let kind = &mut kinds[usize::from(now == had)];
+            had = now;
+            kind.0 += 1;
             for (phase, counted, time) in zgx::profile::take() {
                 *phases.entry(format!("{phase:?}")).or_default() += time.as_secs_f64();
                 *instructions.entry(format!("{phase:?}")).or_default() += counted;
+                *kind.1.entry(format!("{phase:?}")).or_default() += counted;
             }
         }
     }
@@ -488,6 +503,20 @@ fn stream_bench_profile() {
             total as f64 / secs / 1e6,
             total as f64 / f64::from(n.max(1)) / 1e3,
         );
+        for (name, (frames, by_phase)) in ["chunk frames", "fade-only frames"].iter().zip(&kinds) {
+            let total: u64 = by_phase.values().sum();
+            eprintln!(
+                "  {name}: {:.1}/s, {:.0}K a frame: {}",
+                f64::from(*frames) / secs,
+                total as f64 / f64::from((*frames).max(1)) / 1e3,
+                by_phase
+                    .iter()
+                    .filter(|(_, n)| **n > 0)
+                    .map(|(p, n)| format!("{p} {:.0}K", *n as f64 / f64::from((*frames).max(1)) / 1e3))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
     }
     eprintln!(
         "stream_bench_profile: {n} frames over {:.2} s ({:.1}/s): {}",
