@@ -21,6 +21,15 @@ M.active = ui.computed(function(): boolean
 	local p = M.state:get().phase
 	return p == "starting" or p == "listening" or p == "finalizing"
 end)
+-- The voice bar's waveform: the microphone's loudness, one bar a 60 ms slot,
+-- newest first (0 to 1), from the host as each slot fills while listening.
+-- On its own, so what reads `state` doesn't run again at each slot.
+M.levels = ui.shared("dictation_levels", {} :: { number })
+-- starting, listening or finalizing (else what it last was): the waveform's
+-- mode, apart from the rest of `state`.
+M.phase = ui.computed(function(): string
+	return M.state:get().phase
+end)
 local function active_for(id: string): any
 	return ui.computed(function(): boolean
 		return M.active:get() and (M.state:get().target or "main") == id
@@ -162,6 +171,7 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 		editor = ui.ref(), value = value, key = key, blocked = blocked, id = id,
 		dictating = active_for(id),
 		mic = function(): Node return Mic(id) end,
+		levels = M.levels, phase = M.phase,
 		status = function(): string
 			local p = M.state:get().phase
 			return ui.t(if p == "finalizing" then "chat.dictation.transcribing" elseif p == "starting" then "chat.dictation.starting" else "ds.composer.listening"):get()
