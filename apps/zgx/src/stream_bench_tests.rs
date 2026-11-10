@@ -437,15 +437,43 @@ fn stream_bench_profile() {
     let mut n = 0u32;
     // (The tree mid-stream, to name the nodes bound then.)
     let mut mid_tree = std::collections::HashMap::new();
+    // `ZGX_PROFILE=1`: each phase's time over the stream, against the
+    // thread's CPU clock; what no phase counts is the rest.
+    let profiling = zgx::profile::enabled();
+    let mut phases: std::collections::BTreeMap<String, f64> = Default::default();
+    zgx::profile::take();
     while streaming(&view) {
         tick(&app, &mut draw, &mut ran);
         n += 1;
         if tracing && n == 1500 {
             mid_tree = full_tree(&app);
         }
+        if profiling {
+            for (phase, _, time) in zgx::profile::take() {
+                *phases.entry(format!("{phase:?}")).or_default() += time.as_secs_f64();
+            }
+        }
     }
     let took = started.elapsed();
     let spent = cpu.since();
+    if profiling {
+        let secs = took.as_secs_f64();
+        let counted: f64 = phases.values().sum();
+        let thread = spent.thread.as_secs_f64();
+        eprintln!(
+            "  phases: {} ; counted {:.1} ms/s of the thread's {:.1} ms/s CPU ({:.0}%); not in a phase {:.1} ms/s",
+            phases
+                .iter()
+                .filter(|(_, t)| **t > 0.)
+                .map(|(p, t)| format!("{p} {:.1}", t / secs * 1e3))
+                .collect::<Vec<_>>()
+                .join(", "),
+            counted / secs * 1e3,
+            thread / secs * 1e3,
+            100. * counted / thread.max(1e-9),
+            (thread - counted) / secs * 1e3,
+        );
+    }
     eprintln!(
         "stream_bench_profile: {n} frames over {:.2} s ({:.1}/s): {}",
         took.as_secs_f64(),
