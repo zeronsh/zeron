@@ -121,3 +121,65 @@ pub fn frames(text: &str, chunk: usize, at_ms: i64) -> Vec<Json> {
 pub fn standard(at_ms: i64) -> Vec<Json> {
     frames(&reply(80), CHUNK, at_ms)
 }
+
+/// The `i`th call of a tool group: a command (with output), a read, a search
+/// or an edit (src/activity_cost_tests.rs's `call`).
+fn call(i: usize) -> Json {
+    let id = format!("t{i}");
+    match i % 4 {
+        0 => json!({ "id": id, "kind": "tool", "call": { "kind": "exec", "command": format!("cargo test --package part{i} -- --nocapture") }, "output": format!("line 0 of command {i}: ok\nline 1 of command {i}: ok\n"), "exitCode": 0 }),
+        1 => json!({ "id": id, "kind": "tool", "call": { "kind": "readFile", "path": format!("/repo/src/part{i}.rs") }, "output": format!("fn part{i}() {{}}\n") }),
+        2 => json!({ "id": id, "kind": "tool", "call": { "kind": "search", "pattern": format!("fn part{i}"), "path": "/repo/src" } }),
+        _ => json!({ "id": id, "kind": "tool", "call": { "kind": "editFile", "path": format!("/repo/src/part{i}.rs") }, "diffStats": [{ "path": format!("/repo/src/part{i}.rs"), "additions": 3, "deletions": 1 }] }),
+    }
+}
+
+/// A reply at work on a long tool group, as the engine sends it with part
+/// patches (`partPatches`): the prompt (a reset), the reply's row with a
+/// thought and `calls` calls (an upsert, streaming), then `arrivals` calls,
+/// each in two frames: arriving (its call alone, a part added) and finished
+/// (its output, the part again in its place). `settled`: the row comes
+/// complete instead, and no calls follow (a group to scroll).
+pub fn tools(calls: usize, arrivals: usize, settled: bool, at_ms: i64) -> Vec<Json> {
+    let prompt = json!({
+        "id": PROMPT,
+        "role": "user",
+        "parts": [{ "id": "bench-prompt-text", "kind": "text", "text": "Go through every part and fix what fails." }],
+        "createdAt": at_ms,
+        "deviceId": DEVICE,
+    });
+    let mut parts = vec![json!({ "id": "r0", "kind": "reasoning", "text": "Looking at each part in turn, running its tests, reading what fails and editing it." })];
+    parts.extend((1..=calls).map(call));
+    let mut entry = json!({
+        "id": REPLY,
+        "role": "assistant",
+        "parts": parts,
+        "createdAt": at_ms + 1_000,
+        "deviceId": DEVICE,
+        "status": if settled { "complete" } else { "streaming" },
+    });
+    if settled {
+        entry["durationMs"] = json!(600_000);
+    }
+    let mut out = vec![json!({ "reset": [prompt] }), delta(vec![json!({ "after": PROMPT, "entry": entry })], vec![])];
+    if settled {
+        return out;
+    }
+    let patch = |at: usize, part: Json| {
+        json!({ "upsert": [], "append": [], "remove": [], "count": 2, "parts": [{ "entry": REPLY, "at": at, "part": part, "len": at + 1 }] })
+    };
+    for k in 0..arrivals {
+        let i = calls + 1 + k;
+        let at = calls + 1 + k;
+        let done = call(i);
+        let mut arriving = done.clone();
+        if let Some(o) = arriving.as_object_mut() {
+            o.remove("output");
+            o.remove("exitCode");
+            o.remove("diffStats");
+        }
+        out.push(patch(at, arriving));
+        out.push(patch(at, done));
+    }
+    out
+}

@@ -290,6 +290,17 @@ end
 
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
+-- (LOCAL MEASURING ONLY: the stream bench's `ZERON_STREAM_BENCH_GROUP`, its
+-- reply's group as a reader chose it.)
+local bench_group = ui.shared("bench.group", "")
+ui.effect(function()
+	local asked = bench_group:get()
+	if asked == "open" or asked == "folded" then
+		local all = table.clone(GROUPS_CHOSEN:peek())
+		all["bench-reply:g:r0"] = asked == "open"
+		GROUPS_CHOSEN:set(all)
+	end
+end)
 
 -- A thought's row: no glyph, no branch, no header, its words themselves
 -- where a tool's line sits, rendered as the reply's markdown is

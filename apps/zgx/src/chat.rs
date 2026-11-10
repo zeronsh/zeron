@@ -585,6 +585,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     if stream_bench::asked().is_some() {
         let off = std::env::var("ZERON_STREAM_BENCH_VEIL_OFF").is_ok_and(|v| v == "1");
         let _ = host.shared("bench.veil_off", Value::Bool(off));
+        // (`ZERON_STREAM_BENCH_GROUP=open|folded`: the reply's tool group so,
+        // as its reader chose: ui/stream_bench_fixture.luau.)
+        let group = std::env::var("ZERON_STREAM_BENCH_GROUP").unwrap_or_default();
+        let _ = host.shared("bench.group", Value::from(group.as_str()));
     }
     let chats = CHATS.with(Rc::clone);
     chats.catalog.borrow_mut().push(host.shared("chat.catalog", chats.catalog_value()));

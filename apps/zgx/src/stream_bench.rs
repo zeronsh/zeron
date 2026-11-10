@@ -95,6 +95,7 @@ pub(super) fn install(cx: &mut WindowContext) {
     let tasks = cx.tasks.clone();
     let windows = cx.windows.clone();
     let quit = std::env::var("ZERON_STREAM_BENCH_QUIT").is_ok_and(|v| v == "1");
+    scroll(cx);
     set(Bench {
         path,
         every: millis("ZERON_STREAM_BENCH_EVERY_MS", 25).max(Duration::from_millis(1)),
@@ -102,6 +103,92 @@ pub(super) fn install(cx: &mut WindowContext) {
         spawn: Rc::new(move |work| tasks.spawn(work)),
         quit: quit.then(|| Rc::new(move || windows.quit()) as Rc<dyn Fn()>),
         started: Cell::new(false),
+    });
+}
+
+/// `ZERON_STREAM_BENCH_SCROLL_PT=<points>`: the transcript scrolled that far
+/// every 1/120 s (a wheel's step, over the transcript), up for half of
+/// `ZERON_STREAM_BENCH_SCROLL_S` seconds (10) and back down for the rest (a
+/// chat opens at its end),
+/// from `ZERON_STREAM_BENCH_SCROLL_AFTER_MS` (5000) after the window opens;
+/// a line logs the CPU the main thread and the process spent meanwhile.
+fn scroll(cx: &mut WindowContext) {
+    let Some(step) = std::env::var("ZERON_STREAM_BENCH_SCROLL_PT")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    else {
+        return;
+    };
+    let seconds = std::env::var("ZERON_STREAM_BENCH_SCROLL_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(10.);
+    let after = millis("ZERON_STREAM_BENCH_SCROLL_AFTER_MS", 5000);
+    let weak = cx.ui.downgrade();
+    cx.tasks.spawn(async move {
+        zgx::timer::sleep(after).await;
+        let tick = Duration::from_secs_f64(1. / 120.);
+        let ticks = (seconds * 120.) as u32;
+        // What's under the wheel, and how many nodes the scene holds: that
+        // the scroll moved what it should (logged as it starts and halfway).
+        let probe = |ui: &zgx::widgets::Ui, x: f32, y: f32| {
+            let scene = ui.scene.borrow();
+            let hit = scene.hit_test(x, y);
+            let b = hit.map(|id| scene.bounds(id));
+            let mut at = hit;
+            for depth in 0..8 {
+                let Some(id) = at else { break };
+                let k = format!("{:?}", scene.kind(id));
+                let bb = scene.bounds(id);
+                eprintln!("zeron-zgx: stream-bench:   up {depth}: #{} {} {:.0},{:.0} {:.0}x{:.0}", id.number(), k.chars().take(90).collect::<String>(), bb.x, bb.y, bb.width, bb.height);
+                at = scene.parent(id);
+            }
+            // The tallest box: the transcript's content, moving as it scrolls.
+            let mut tallest = (scene.root(), 0f32);
+            let mut stack = vec![scene.root()];
+            while let Some(id) = stack.pop() {
+                let h = scene.bounds(id).height;
+                if h > tallest.1 {
+                    tallest = (id, h);
+                }
+                stack.extend(scene.children(id).iter().copied());
+            }
+            let t = scene.bounds(tallest.0);
+            eprintln!("zeron-zgx: stream-bench:   content #{} at y {:.0}, {:.0} tall", tallest.0.number(), t.y, t.height);
+            (scene.len(), hit, b)
+        };
+        let mut seen = None;
+        let start = Instant::now();
+        let cpu = Cpu::now();
+        for k in 0..ticks {
+            zgx::timer::sleep_until(start + tick * k).await;
+            let Some(mut ui) = weak.upgrade() else { return };
+            let (x, y) = {
+                let scene = ui.scene.borrow();
+                let b = scene.bounds(scene.root());
+                // (Over the transcript, above where the composer floats.)
+                (b.x + b.width / 2., b.y + 120.)
+            };
+            if k == 0 || k == ticks / 2 || k + 1 == ticks {
+                let (nodes, hit, b) = probe(&ui, x, y);
+                let moved = match (seen, hit, b) {
+                    (Some((was, at)), Some(now), Some(b)) if was == now => format!(", the same node now at y {:.0} (was {at:.0})", b.y),
+                    _ => String::new(),
+                };
+                eprintln!("zeron-zgx: stream-bench: scroll {k}: {nodes} nodes, under the wheel {hit:?} {b:?}{moved}");
+                if let (Some(hit), Some(b)) = (hit, b) {
+                    seen = Some((hit, b.y));
+                }
+            }
+            let dy = if k < ticks / 2 { -step } else { step };
+            ui.dispatch(zgx::input::InputEvent::Scroll { x, y, delta_x: 0., delta_y: dy });
+        }
+        let took = start.elapsed();
+        eprintln!(
+            "zeron-zgx: stream-bench: scrolled {ticks} steps of {step} pt in {:.2} s; CPU {}",
+            took.as_secs_f64(),
+            cpu.since().describe(took),
+        );
     });
 }
 
