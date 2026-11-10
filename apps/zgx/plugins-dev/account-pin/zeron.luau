@@ -245,7 +245,9 @@ return function(id: string): any
 			return nil
 		end
 		local r = records:get() or {}
-		if name == "session" or name == "message" then
+		-- (A project's, as `.project-icon` gives it: its name, device and
+		-- icon with "sessions.read".)
+		if name == "session" or name == "message" or name == "project" then
 			local found = (r[name .. "s"] or {})[value]
 			local out = { id = value }
 			for k, v in found or {} do

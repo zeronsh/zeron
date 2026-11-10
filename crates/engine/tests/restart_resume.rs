@@ -654,6 +654,64 @@ async fn a_switched_credential_replaces_the_parked_session() {
     core.shutdown().await;
 }
 
+/// An environment that decides a chat's credential while preparing its first
+/// run (a plugin's `run.preparing` pin): unknown before, known after.
+struct DecidedWhilePreparing(Arc<Mutex<Option<String>>>);
+
+#[async_trait]
+impl zeron_engine::registry::RunEnvironment for DecidedWhilePreparing {
+    async fn prepare(
+        &self,
+        _harness: HarnessId,
+        chat_id: Option<&str>,
+        _request: &mut RunRequest,
+    ) -> Result<(), String> {
+        if chat_id.is_some() {
+            self.0.lock().unwrap().get_or_insert_with(|| "pinned:1".into());
+        }
+        Ok(())
+    }
+    async fn credential(&self, _harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A credential decided while the first run was prepared is the one its
+/// session parks on: the next turn keeps the warm child.
+#[tokio::test]
+async fn a_credential_decided_while_preparing_keeps_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::Mock,
+        side_chats_only: Default::default(),
+    }));
+    registry.set_run_environment(Arc::new(DecidedWhilePreparing(Arc::new(Mutex::new(None)))));
+    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    pre_title(&core);
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn on the warm child",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "decided at the first run: same child");
+    core.shutdown().await;
+}
+
 /// Turning a provider's native subagents off (Settings → Providers) between
 /// turns replaces the parked child, whose successor's Zeron server is
 /// side-chats-only; an unchanged setting keeps it warm.
