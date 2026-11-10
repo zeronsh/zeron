@@ -1772,6 +1772,26 @@ fn the_page_stands_about_as_deep_as_v2_s() {
     assert!(three <= two + 1, "#shell-page under {three} boxes, v2's under {two}");
 }
 
+/// v2's window buttons and title-bar controls stand on glass over a new
+/// chat's wallpaper once its sidebar is closed (v3's top bar took the glass
+/// away from the shared title bar for both); v3's never do.
+#[test]
+fn v2_s_title_bar_island_shows_over_art_with_the_sidebar_closed() {
+    let t = scratch("island").join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let mut v2 = mount_at(&compose(&t, "zeron-v2").join("shell_fixture.luau"), &scratch("island-v2"));
+    let mut v3 = mount(&scratch("island-v3"));
+    for app in [&mut v2, &mut v3] {
+        assert!(app.host.run_command("fixture.wallpaper"));
+        app.frames(30);
+        assert!(app.opacity("#titlebar-island") < 0.01, "the sidebar open: no island");
+        assert!(app.host.run_command("shell.toggle_sidebar"));
+        app.frames(60);
+    }
+    assert!(v2.opacity("#titlebar-island") > 0.99, "v2, closed over a new chat's art: its island");
+    assert!(v3.opacity("#titlebar-island") < 0.01, "v3 has its top bar: no island");
+}
+
 /// Frames' work as a column moves, and where it went: p50/p95 (ms), the
 /// most, script calls a frame, and (with `ZGX_PROFILE=1`) each phase's
 /// share of a frame (µs).

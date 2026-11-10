@@ -150,6 +150,17 @@ end
 -- (A headless host draws no WebP: a new chat on no picture.)
 local appearance = require("@app/screens/shell/appearance")
 appearance.wallpaper:set("none")
+-- A wallpaper chosen, for what stands over a new chat's art (v2's
+-- title-bar island): its picture needn't draw.
+ui.command {
+	id = "fixture.wallpaper",
+	title = "Fixture: a wallpaper",
+	menu = "Fixture",
+	run = function()
+		appearance.image:set({ path = "/fixture/wallpaper.png", name = "wallpaper.png", w = 1600, h = 1000, x = 0.5, y = 0.5, zoom = 1 })
+		appearance.choose("image")
+	end,
+}
 -- The files pane's host calls (its own fixture drives them): a folder of
 -- one file, a beat later, as the host settles.
 local files_api = require("@app/screens/files/api") :: any
