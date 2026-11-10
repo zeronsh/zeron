@@ -300,14 +300,18 @@ local function service(id: string): any
 	-- tell it. Register listeners at the top level, in the same order each
 	-- time: they're known by their place. `opts`: a threshold's `below`
 	-- (percent remaining), and `provider`, `account`, `window` to narrow.
-	function M.on(event: string, fn: (any, string) -> (), opts: { [string]: any }?)
+	-- A `run.preparing` listener's return value is its answer: `{ account }`
+	-- pins the chat about to run for the first time to that saved account
+	-- (it has `prepare_wait`, 3 s, to say; "accounts.pin"). Say nothing and
+	-- the chat runs on the active account. Every other event ignores it.
+	function M.on(event: string, fn: (any, string) -> any, opts: { [string]: any }?)
 		assert(type(event) == "string" and event ~= "", "zeron.on(event, fn)")
 		assert(type(fn) == "function", "zeron.on(event, fn)")
 		table.insert(listeners, {
 			event = event,
 			opts = opts or {},
 			fn = function(data: any, call: any)
-				fn(data, (call and call.event) or event)
+				return fn(data, (call and call.event) or event)
 			end,
 		})
 	end
@@ -341,6 +345,20 @@ local function service(id: string): any
 	-- (within 30 minutes).
 	function M.switch_account(s: { provider: string, account: string, when_idle: boolean? }): any
 		return agents("switch_account", s)
+	end
+
+	-- Run one chat on a saved account of its own ("accounts.pin"), while
+	-- the active account stays as it is: for the chat's next run, on the
+	-- provider it has. No `account` takes the pin back. A promise of
+	-- { provider, chat, account? }; `already` when nothing changes.
+	function M.pin_account(s: { provider: string, chat: string, account: string? }): any
+		return agents("pin_account", s)
+	end
+
+	-- The chats pinned to an account ("accounts.read"): { { provider,
+	-- account, since, chat? } } (`chat` with "sessions.read").
+	function M.pins(opts: { provider: string? }?): any
+		return agents("pins", opts)
 	end
 
 	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
