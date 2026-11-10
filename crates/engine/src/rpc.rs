@@ -60,6 +60,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod device_stats;
 mod remote_plugins;
 mod voice_chat;
 mod voice_remote;
@@ -3044,6 +3045,11 @@ impl RpcService for EngineRpc {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
         let params = self.agent_gate(method, params)?;
+        // Machine stats: answered here, or asked of another of the
+        // account's devices with its own deadline and error words.
+        if method == methods::DEVICE_STATS {
+            return self.device_stats(params).await;
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)

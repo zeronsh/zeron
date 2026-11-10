@@ -178,6 +178,11 @@ pub mod methods {
     pub const LOCAL_DEVICE: &str = "LocalDevice";
     /// This engine runtime's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
+    /// What a device's machine can say about itself (OS, CPU, memory,
+    /// storage, GPU, load, battery, Zeron's version): `{targetDeviceId?}` →
+    /// `DeviceStats`. Another of the account's devices answers through its
+    /// relay within a few seconds, or the call says it's offline or too old.
+    pub const DEVICE_STATS: &str = "DeviceStats";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -770,6 +775,7 @@ pub fn agent_allowed(method: &str) -> bool {
         methods::ENGINE_INFO
             | methods::LOCAL_DEVICE
             | methods::WATCH_DEVICES
+            | methods::DEVICE_STATS
             | methods::WATCH_SPACES
             | methods::WATCH_CHATS
             | methods::WATCH_SESSIONS
