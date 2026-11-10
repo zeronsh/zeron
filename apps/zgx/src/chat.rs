@@ -560,6 +560,13 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // (A recorded reply played to this window's chat: src/stream_bench.rs.)
     #[cfg(feature = "stream-bench")]
     stream_bench::install(_cx);
+    // (`ZERON_STREAM_BENCH_VEIL_OFF=1`: the bench's reply shows its words at
+    // once, ds/markdown's `bench.veil_off`.)
+    #[cfg(feature = "stream-bench")]
+    if stream_bench::asked().is_some() {
+        let off = std::env::var("ZERON_STREAM_BENCH_VEIL_OFF").is_ok_and(|v| v == "1");
+        let _ = host.shared("bench.veil_off", Value::Bool(off));
+    }
     let chats = CHATS.with(Rc::clone);
     chats.catalog.borrow_mut().push(host.shared("chat.catalog", chats.catalog_value()));
     chats.asks_shared.borrow_mut().push(host.shared("chat.asks", chats.asks_value()));

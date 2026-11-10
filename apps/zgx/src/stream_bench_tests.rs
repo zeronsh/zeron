@@ -291,6 +291,8 @@ fn stream_bench_profile() {
     );
     let drawn = Cell::new(0u32);
     let wanted = Cell::new(0u32);
+    // The last frame drawn: what the renderer did, its damage's rects and area.
+    let last: RefCell<Option<(zgx_gpu::GpuStats, usize, f64)>> = RefCell::default();
     let mut draw = |app: &TestApp| {
         pump(app);
         if app.clock.wants_frame() {
@@ -299,7 +301,9 @@ fn stream_bench_profile() {
         app.frames(1);
         let damage = app.ui.scene.borrow_mut().flush().damage;
         if !on_demand || !damage.is_empty() {
-            gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+            let stats = gpu.render(&app.ui.scene.borrow(), &damage).expect("drawn");
+            let area: f64 = damage.iter().map(|r| f64::from(r.width) * f64::from(r.height)).sum();
+            *last.borrow_mut() = Some((stats, damage.len(), area));
             drawn.set(drawn.get() + 1);
         }
     };
@@ -485,6 +489,10 @@ fn stream_bench_profile() {
     let (drawn0, wanted0) = (drawn.get(), wanted.get());
     // Drawn frames by kind too: (chunk, fade-only).
     let mut drawn_kinds = [0u32; 2];
+    // And what the renderer did on them, by kind: (instances, draw calls,
+    // damaged pixels, damage rects, damage area in points, patched items,
+    // layer repaints, backdrop copies, render passes).
+    let mut gpu_kinds = [[0f64; 9]; 2];
     zgx::profile::take();
     let mut drawn_last = drawn.get();
     while streaming(&view) {
@@ -500,6 +508,22 @@ fn stream_bench_profile() {
             had = now;
             if drawn.get() != drawn_last {
                 drawn_kinds[k] += 1;
+                if let Some((g, rects, area)) = last.borrow_mut().take() {
+                    let row = [
+                        g.instances as f64,
+                        g.draw_calls as f64,
+                        g.damaged_pixels as f64,
+                        rects as f64,
+                        area,
+                        g.patched_items as f64,
+                        g.layer_repaints as f64,
+                        g.backdrop_copies as f64,
+                        g.render_passes as f64,
+                    ];
+                    for (sum, v) in gpu_kinds[k].iter_mut().zip(row) {
+                        *sum += v;
+                    }
+                }
             }
             drawn_last = drawn.get();
             kind.0 += 1;
@@ -549,6 +573,13 @@ fn stream_bench_profile() {
             f64::from(drawn_kinds[0]) / secs,
             f64::from(drawn_kinds[1]) / secs,
         );
+        for (name, (sums, count)) in ["drawn chunk frames", "drawn fade-only frames"].iter().zip(gpu_kinds.iter().zip(drawn_kinds)) {
+            let c = f64::from(count.max(1));
+            eprintln!(
+                "  {name}, renderer a frame: {:.0} instances, {:.1} draw calls, {:.0}K px damaged, {:.1} rects of {:.0} pt², {:.1} patched, {:.2} layer repaints, {:.2} backdrop copies, {:.1} passes",
+                sums[0] / c, sums[1] / c, sums[2] / c / 1e3, sums[3] / c, sums[4] / c, sums[5] / c, sums[6] / c, sums[7] / c, sums[8] / c
+            );
+        }
         for (name, (frames, by_phase)) in ["chunk frames", "fade-only frames"].iter().zip(&kinds) {
             let total: u64 = by_phase.values().sum();
             eprintln!(
