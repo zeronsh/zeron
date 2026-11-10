@@ -14,6 +14,8 @@ fn open_chat() -> (TestApp, Rc<View>) {
         session: app.host.shared("test.session", Value::Nil),
         messages: app.host.shared("test.messages", Value::Nil),
         draft: app.host.shared("test.draft", Value::Nil),
+        words: [app.host.shared("test.words.1", ""), app.host.shared("test.words.2", "")],
+        writing: RefCell::default(),
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
@@ -63,12 +65,18 @@ fn a_text_part_that_begins_empty_shows_its_words_while_they_stream() {
     };
     view.heard_frame(append("Hello", 5));
     assert_eq!(text_blocks(&view), vec![("t1".to_owned(), "Hello".to_owned())], "its first words make its block");
-    let draft = json_of(&view.draft);
-    assert_eq!((draft["part"].as_str(), draft["part_text"].as_str()), (Some("t1"), Some("Hello")));
+    // (The draft names the part and the words state it's written to.)
+    let words = |view: &View| {
+        let draft = json_of(&view.draft);
+        assert_eq!(draft["part"].as_str(), Some("t1"));
+        let slot = draft["words"].as_f64().expect("the draft names its words state") as usize - 1;
+        view.words[slot].with_untracked(|v| v.to_string())
+    };
+    assert_eq!(words(&view), "Hello");
 
     // More words are the draft's alone (the row isn't rebuilt per word).
     let before = json_of(&view.messages);
     view.heard_frame(append(" there", 11));
     assert_eq!(json_of(&view.messages), before);
-    assert_eq!(json_of(&view.draft)["part_text"], "Hello there");
+    assert_eq!(words(&view), "Hello there");
 }

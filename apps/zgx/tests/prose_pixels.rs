@@ -17,6 +17,12 @@ use std::sync::Arc;
 use zgx_desktop::FontData;
 use zgx_script::{ScriptHost, Value, testing::TestApp};
 
+// The host's read of a reply's math, as it grows (src/chat.rs feeds a
+// streaming reply's words through it to the state its view reads).
+#[allow(dead_code)]
+#[path = "../src/math_source.rs"]
+mod math_source;
+
 fn ui_dir() -> PathBuf {
     std::env::var_os("ZERON_ZGX_TEST_UI")
         .map(PathBuf::from)
@@ -156,6 +162,9 @@ struct Shown {
     h: f32,
     gpu: zgx_gpu::GpuRenderer,
     text: zgx_script::Shared,
+    /// A native reply streaming in (`pixels.live`): its words state, fed
+    /// as the host feeds a transcript's, and the text fed last.
+    words: Option<(zgx_script::Shared, std::cell::RefCell<(math_source::Prepared, String)>)>,
 }
 
 fn fonts() -> Vec<FontData> {
@@ -190,6 +199,8 @@ impl Shown {
     /// With more of the fixture's shared values (`pixels.veil`, say).
     fn made(w: f32, renderer: &str, scheme: &str, key: &str, text: &str, more: &[(&str, Value)]) -> Self {
         let mut shared = None;
+        let mut words = None;
+        let live = renderer == "native" && !key.is_empty();
         let app = TestApp::with_desktop(|runtime| {
             let host = ScriptHost::new(runtime, ui_dir().join("prose_pixels_fixture.luau"));
             host.shared("pixels.renderer", Value::from(renderer));
@@ -199,6 +210,16 @@ impl Shown {
                 host.shared(name, value.clone());
             }
             shared = Some(host.shared("pixels.text", Value::from(text)));
+            if live {
+                let mut prepared = math_source::Prepared::default();
+                let made = match prepared.feed(text, false) {
+                    math_source::Edit::Set(whole) => whole,
+                    _ => String::new(),
+                };
+                host.shared("pixels.live", Value::Bool(true));
+                let state = host.shared("pixels.words", Value::from(made.as_str()));
+                words = Some((state, std::cell::RefCell::new((prepared, text.to_string()))));
+            }
             host
         });
         app.ui.scene.borrow_mut().resize(w, H);
@@ -217,12 +238,33 @@ impl Shown {
             h: H,
             gpu,
             text: shared.unwrap(),
+            words,
         }
     }
 
     fn set(&self, text: &str) {
         self.text.set(Value::from(text));
+        if let Some((state, fed)) = &self.words {
+            let mut fed = fed.borrow_mut();
+            let extends = text.starts_with(fed.1.as_str());
+            match fed.0.feed(text, extends) {
+                math_source::Edit::None => {}
+                math_source::Edit::Append(more) => state.append(&more).expect("a string"),
+                math_source::Edit::Set(whole) => {
+                    state.set(Value::from(whole.as_str()));
+                }
+            }
+            fed.1 = text.to_string();
+        }
         self.app.frames(2);
+    }
+
+    /// A native reply's words done streaming: it reads its text again.
+    fn done(&self) {
+        if self.words.is_some() {
+            self.app.host.shared("pixels.live", Value::Nil).set(Value::Bool(false));
+            self.app.frames(2);
+        }
     }
 
     /// The window's pixels now, RGBA, all of it drawn.
@@ -570,7 +612,7 @@ fn code_and_tables_keep_their_nodes_as_they_grow_and_a_find_marks_them() {
         }
         None
     };
-    let mut native = Shown::at(W, "native", "dark", "reply:kept", "");
+    let native = Shown::at(W, "native", "dark", "reply:kept", "");
     let mut kept: Vec<(&str, zgx::scene::NodeId)> = Vec::new();
     let mut end = 0;
     while end < text.len() {
@@ -655,6 +697,11 @@ fn streamed(text: &str) -> Vec<String> {
                     break;
                 }
             }
+        }
+        // Done: the native reply reads its text again, drawn the same.
+        native.done();
+        if let Some(why) = compare(&format!("stream-{scheme}-{small}-{w}-done"), &mut luau, &mut native) {
+            failed.push(format!("done streaming: {why}"));
         }
         assert_eq!(native.app.error(), None);
         assert_eq!(luau.app.error(), None);
@@ -798,6 +845,12 @@ fn the_veil_fades_words_in_as_ds_markdowns() {
         if let Some(why) = compare(&format!("veil-{end}-later"), &mut luau, &mut native) {
             failed.push(format!("after {end} bytes, 11 ms on: {why}"));
         }
+    }
+    // Done streaming, its last words still fading: the native reply reads
+    // its text again, drawn the same, its fades going on.
+    native.done();
+    if let Some(why) = compared("veil-done", &mut luau, &mut native, false) {
+        failed.push(format!("done streaming, still fading: {why}"));
     }
     // Once every fade has ended, a reply streamed in is drawn as the same
     // reply drawn whole: a span the veil cut into pieces draws as the span
