@@ -2544,8 +2544,9 @@ mod access_tests {
         assert!(!harness.same_runtime(&chosen, &one_m));
         assert!(!harness.reconfigures_in_place(&chosen, &one_m));
         assert!(!harness.reconfigures_in_place(&one_m, &chosen));
-        assert!(harness.same_runtime(&one_m, &unset));
+        // Same `--model` and flags; only the 200K limit differs.
         assert!(!harness.same_runtime(&chosen, &unset));
+        assert!(harness.same_runtime(&unset, &with_options("claude-opus-5-5", json!({}))));
         // The command carries it.
         let env_of = |r: &RunRequest| {
             let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
