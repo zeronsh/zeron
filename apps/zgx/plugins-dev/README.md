@@ -1,6 +1,6 @@
 # Example plugins
 
-Nine plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
+Eleven plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
 
 | Folder | Proves | Asks for | Who signs it |
 |---|---|---|---|
@@ -38,7 +38,7 @@ A plugin is a folder in `<data>/plugins/<id>/`:
 - **Before it runs:** the signature is checked over every file first. Anyone else's waits until you allow what it asks; one signed by your own key turns on at once.
 - **Where it came from** is kept in its folder's `.source.json`. Zeron checks there for updates, when Settings → Plugins opens and every few hours.
 - **A row with an update** says what the update adds to or drops from what the plugin asks, and has Update.
-- **An update must be signed by the same key**, or it's refused. One that asks for something new waits for you again.
+- **An update must be signed by the same key**, or by another of your account's live keys (a new machine; it asks people again), or it's refused. One that asks for something new waits for you again.
 - **Removing it** takes away its folder, its storage and everything it placed.
 
 ## Templates: Zeron's whole interface, yours

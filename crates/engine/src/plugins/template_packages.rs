@@ -749,6 +749,7 @@ pub fn compare(dir: &Path, id: &str, key: &str, hash: &str, fetched: &Package, s
         refused,
         source: Some(source),
         digest_diff: None,
+        new_key: false,
     })
 }
 

@@ -302,7 +302,9 @@ function M.permission(item: any, permission: string): Line
 		if type(hosts) == "table" and #hosts > 0 then
 			local any = table.find(hosts, "*") ~= nil
 			local listed = hosts_said(hosts, item.network_local)
-			return line(listed.near, "global", if any then "plugins.words.permission.network.title_any" else "plugins.words.permission.network.title_hosts", nil, nil, { literal = listed.list })
+			-- (A host named exactly reaches where it resolves.)
+			local maybe_near = type(item.network_named) == "table" and #item.network_named > 0
+			return line(listed.near, "global", if any then "plugins.words.permission.network.title_any" else "plugins.words.permission.network.title_hosts", if maybe_near then "plugins.words.permission.network.detail_named" else nil, nil, { literal = listed.list })
 		end
 		return line(false, "global", "plugins.words.permission.network.title")
 	elseif permission == "clipboard" then
@@ -441,7 +443,8 @@ function M.diff(item: any): { Line }
 	end
 	if some(d.network_added) then
 		local listed = hosts_said(d.network_added, d.network_local)
-		table.insert(out, line(listed.near, "global", "plugins.words.diff.network", nil, nil, { literal = listed.list }))
+		local maybe_near = type(d.network_named) == "table" and #d.network_named > 0
+		table.insert(out, line(listed.near, "global", "plugins.words.diff.network", if maybe_near then "plugins.words.permission.network.detail_named" else nil, nil, { literal = listed.list }))
 	end
 	if d.settings_changed == true then
 		table.insert(out, line(false, "settings", "plugins.words.diff.settings"))

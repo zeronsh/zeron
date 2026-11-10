@@ -2353,6 +2353,7 @@
         "new_session": "新建会话",
         "will_delete": "“{title}”将被永久删除。此操作无法撤销。",
         "delete_title": "删除会话？",
+        "couldnt_delete": "无法删除“{title}”",
         "rename_title": "重命名会话",
         "name": "名称",
         "name_placeholder": "会话名称"
@@ -3259,7 +3260,8 @@
         "network": {
           "title": "连接互联网",
           "title_any": "连接到互联网上的任何网站",
-          "title_hosts": "连接到这些地方"
+          "title_hosts": "连接到这些地方",
+          "detail_named": "指定的主机可能在这台电脑或你的网络上。"
         },
         "clipboard": {
           "title": "读取和更改你的剪贴板"
@@ -3397,8 +3399,7 @@
       "try_again": "重试",
       "remove_body_device": "它会立即在 {device} 上的 Zeron 各处停止。它的文件夹会移到那台电脑插件文件夹的已移除项目中，以便你想找回。",
       "install_dialog_title_device": "在 {device} 上安装插件",
-      "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
-      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台电脑的插件。",
+      "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接，或选择这台电脑上的文件。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
       "setup_title": "完成账户设置",
       "setup_body": "选择工作空间后，你的插件会立即加载。"
     },
@@ -3422,7 +3423,8 @@
       "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。",
       "made_on_your_device": "由你的另一台设备制作",
       "grew": "自你允许以来新增：",
-      "allow_there": "请在{device}上允许：它会在那台电脑的 Zeron 中询问。",
+      "allow_there": "只在{device}上允许。你的其他电脑会各自询问。",
+      "allow_on": "在{device}上允许",
       "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台电脑上把它当作你的插件。",
       "mine_cancel": "取消",
       "mine_sign": "签名为我的",

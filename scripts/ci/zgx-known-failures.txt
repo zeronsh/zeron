@@ -1,0 +1,24 @@
+# Tests in apps/zgx known to fail, which scripts/ci/test-zgx.sh lets through so
+# its CI job (zgx-tests.yml) gates everything else. Every other failure fails the
+# job. A known one that passes again is reported: then delete its line.
+#
+#   rust: <test path>     `cargo test --bin zeron-zgx` (skipped, exact name)
+#   luau: <test name>     `zgx test ui` (run; its FAIL line accepted)
+#
+# Measured on macOS 2026-11-09 off origin/zeron/laurent-chips (edf4bf359). None
+# are plugin tests: the Rust ones are menus, focus and popups (a menu item not
+# found in time, headless); the Luau ones are About's rows (1155 UI tests ran).
+
+rust: focus_tests::escape_gives_focus_back_without_a_ring
+rust: menu_tests::every_menu_is_concentric_and_evenly_inset
+rust: palette_focus_tests::a_save_before_the_palette_keeps_focus_to_give_back
+rust: palette_focus_tests::a_save_while_the_palette_is_open_keeps_focus_to_give_back
+rust: palette_focus_tests::every_way_the_palette_closes_gives_focus_back
+rust: popups_tests::a_modal_opening_closes_the_popups_and_draws_over_them
+rust: shell_tests::a_session_is_renamed_in_its_row
+rust: shell_tests::a_sessions_copy_menu_copies_and_says_so
+rust: shell_tests::deleting_a_session_asks_first
+rust: split_tests::the_composers_menu_comes_back_with_the_window_and_stays_shut_after_escape
+
+luau: a settings link (About's rows): Open, as its click, and Copy link
+luau: About says which Zeron this is, and that this app isn't what updates
