@@ -209,10 +209,36 @@ pub enum TranscriptFrame {
         append: Vec<TextAppend>,
         #[serde(default)]
         remove: Vec<String>,
+        /// Parts of an entry replaced or added, the entry otherwise as it
+        /// was: a tool call arriving or finishing in a long reply sends that
+        /// call alone, not the reply. Only to a consumer that asked for them
+        /// (`DiffOptions::part_patches`); never sent empty, so an older
+        /// reader never sees the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<PartPatch>,
         /// Expected transcript length after applying this frame — the desync
         /// tripwire: a consumer that lands elsewhere resubscribes for a reset.
         count: usize,
     },
+}
+
+/// One part of entry `entry` set at `at` (from 0): a part there replaced (the
+/// same part, changed), or one added at its end (`at` its part count). `len`
+/// is the entry's part count after the frame's patches (desync tripwire).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartPatch {
+    pub entry: String,
+    pub at: usize,
+    pub part: MessagePart,
+    pub len: usize,
+}
+
+/// What a consumer of `WatchDocMessages` takes beyond the original frames.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiffOptions {
+    /// Part patches (`TranscriptFrame::Delta::parts`) for an entry whose
+    /// header and part order are unchanged, rather than the entry whole.
+    pub part_patches: bool,
 }
 
 /// An inserted or replaced entry, positioned after `after` (`None` = head).
@@ -247,8 +273,8 @@ impl TranscriptFrame {
     pub fn is_empty_delta(&self) -> bool {
         matches!(
             self,
-            Self::Delta { upsert, append, remove, .. }
-                if upsert.is_empty() && append.is_empty() && remove.is_empty()
+            Self::Delta { upsert, append, remove, parts, .. }
+                if upsert.is_empty() && append.is_empty() && remove.is_empty() && parts.is_empty()
         )
     }
 }
@@ -294,6 +320,38 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
     append
 }
 
+/// When `next` is `prev` with some of its parts changed in place (each the
+/// same part, by id) and/or parts added at its end, its header the same: those
+/// parts alone, as patches. `None` for any other change (a part removed or
+/// moved, the status or duration changed): the entry is sent whole.
+fn try_part_patches(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Option<Vec<PartPatch>> {
+    if prev.id != next.id
+        || prev.role != next.role
+        || prev.created_at != next.created_at
+        || prev.device_id != next.device_id
+        || prev.status != next.status
+        || prev.continuation_of != next.continuation_of
+        || prev.duration_ms != next.duration_ms
+        || next.parts.len() < prev.parts.len()
+    {
+        return None;
+    }
+    let mut patches = Vec::new();
+    for (at, n) in next.parts.iter().enumerate() {
+        match prev.parts.get(at) {
+            Some(p) if p == n => {}
+            Some(p) if p.id() != n.id() => return None,
+            _ => patches.push(PartPatch {
+                entry: next.id.clone(),
+                at,
+                part: n.clone(),
+                len: next.parts.len(),
+            }),
+        }
+    }
+    Some(patches)
+}
+
 /// Diff two transcript states into a frame. An entry is upserted when it is
 /// new, its content changed, or its predecessor changed (a Loro list merge can
 /// interleave a remote entry mid-list). Falls back to `Reset` when the delta
@@ -301,6 +359,16 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
 pub fn diff_transcript(
     prev: &[SessionMessageEntry],
     next: &[SessionMessageEntry],
+) -> TranscriptFrame {
+    diff_transcript_with(prev, next, DiffOptions::default())
+}
+
+/// `diff_transcript`, with what the consumer takes beyond the original
+/// frames (`options`).
+pub fn diff_transcript_with(
+    prev: &[SessionMessageEntry],
+    next: &[SessionMessageEntry],
+    options: DiffOptions,
 ) -> TranscriptFrame {
     let prev_by_id: std::collections::HashMap<&str, (usize, &SessionMessageEntry)> = prev
         .iter()
@@ -317,6 +385,7 @@ pub fn diff_transcript(
 
     let mut upsert = Vec::new();
     let mut append = Vec::new();
+    let mut parts = Vec::new();
     for (i, entry) in next.iter().enumerate() {
         let after = i.checked_sub(1).map(|p| next[p].id.as_str());
         match prev_by_id.get(entry.id.as_str()) {
@@ -329,6 +398,13 @@ pub fn diff_transcript(
                     && let Some(text_append) = try_text_append(prev_entry, entry)
                 {
                     append.push(text_append);
+                    continue;
+                }
+                if options.part_patches
+                    && prev_after == after
+                    && let Some(patches) = try_part_patches(prev_entry, entry)
+                {
+                    parts.extend(patches);
                     continue;
                 }
                 upsert.push(TranscriptUpsert {
@@ -351,6 +427,7 @@ pub fn diff_transcript(
         upsert,
         append,
         remove,
+        parts,
         count: next.len(),
     }
 }
@@ -375,6 +452,7 @@ pub fn apply_transcript_frame(
             upsert,
             append,
             remove,
+            parts,
             count,
         } => {
             if !remove.is_empty() {
@@ -423,6 +501,33 @@ pub fn apply_transcript_frame(
                     return Err(TranscriptDesync(format!(
                         "append length mismatch on {entry}#{part}: have {}, expected {len}",
                         tail.len()
+                    )));
+                }
+            }
+            for PartPatch {
+                entry,
+                at,
+                part,
+                len,
+            } in parts
+            {
+                let Some(target) = current.iter_mut().find(|e| e.id == entry) else {
+                    return Err(TranscriptDesync(format!("missing patch entry {entry}")));
+                };
+                let have = target.parts.len();
+                if at < have && target.parts[at].id() == part.id() {
+                    target.parts[at] = part;
+                } else if at == have {
+                    target.parts.push(part);
+                } else {
+                    return Err(TranscriptDesync(format!(
+                        "patch out of place on {entry}#{at}"
+                    )));
+                }
+                if target.parts.len() > len {
+                    return Err(TranscriptDesync(format!(
+                        "patch length mismatch on {entry}: have {}, expected {len}",
+                        target.parts.len()
                     )));
                 }
             }
@@ -564,9 +669,103 @@ mod tests {
                 len: 99,
             }],
             remove: vec![],
+            parts: vec![],
             count: 1,
         };
         let mut current = vec![entry("a", "hello")];
+        assert!(apply_transcript_frame(&mut current, frame).is_err());
+    }
+
+    fn tool(id: &str, output: Option<&str>) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: serde_json::from_value(serde_json::json!({ "kind": "exec", "command": "ls" })).unwrap(),
+            is_error: false,
+            resolved: output.is_some(),
+            output: output.map(Into::into),
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
+        }
+    }
+
+    fn working(calls: &[MessagePart]) -> SessionMessageEntry {
+        let mut e = entry("b", "");
+        e.parts = calls.to_vec();
+        e.status = Some(crate::parts::MessageStatus::Streaming);
+        e
+    }
+
+    /// A call arriving and another finishing in a long reply: asked for,
+    /// those two parts alone travel; not asked for, the entry whole, as ever.
+    #[test]
+    fn a_reply_s_changed_parts_travel_alone_when_asked_for() {
+        let a = entry("a", "prompt");
+        let calls: Vec<_> = (0..50).map(|i| tool(&format!("t{i}"), Some("ok"))).collect();
+        let b0 = working(&[calls.clone(), vec![tool("t50", None)]].concat());
+        let b1 = working(&[calls, vec![tool("t50", Some("done")), tool("t51", None)]].concat());
+        let options = DiffOptions { part_patches: true };
+        let frame = diff_transcript_with(&[a.clone(), b0.clone()], &[a.clone(), b1.clone()], options);
+        match &frame {
+            TranscriptFrame::Delta { upsert, parts, .. } => {
+                assert!(upsert.is_empty(), "the entry isn't sent whole");
+                let at: Vec<_> = parts.iter().map(|p| (p.at, p.part.id().to_owned())).collect();
+                assert_eq!(at, vec![(50, "t50".into()), (51, "t51".into())]);
+            }
+            other => panic!("expected delta, got {other:?}"),
+        }
+        let json = serde_json::to_value(&frame).unwrap();
+        let mut current = vec![a.clone(), b0.clone()];
+        apply_transcript_frame(&mut current, serde_json::from_value(json).unwrap()).unwrap();
+        assert_eq!(current, vec![a.clone(), b1.clone()]);
+        // Not asked for: whole, and no `parts` field on the wire.
+        let frame = diff_transcript(&[a.clone(), b0.clone()], &[a.clone(), b1.clone()]);
+        let json = serde_json::to_value(&frame).unwrap();
+        assert!(json.get("parts").is_none(), "{json}");
+        assert_eq!(json["upsert"].as_array().map(Vec::len), Some(1));
+        apply(&[a.clone(), b0], &[a, b1]);
+    }
+
+    /// A change parts can't say (the reply settling, a part going) is the
+    /// entry whole even when they're asked for.
+    #[test]
+    fn other_changes_send_the_entry_whole() {
+        let b0 = working(&[tool("t0", None), tool("t1", None)]);
+        let mut settled = b0.clone();
+        settled.status = Some(crate::parts::MessageStatus::Complete);
+        let fewer = working(&[tool("t0", None)]);
+        let moved = working(&[tool("t1", None), tool("t0", None)]);
+        let options = DiffOptions { part_patches: true };
+        for next in [settled, fewer, moved] {
+            let frame = diff_transcript_with(std::slice::from_ref(&b0), std::slice::from_ref(&next), options);
+            match &frame {
+                TranscriptFrame::Delta { upsert, parts, .. } => {
+                    assert_eq!(upsert.len(), 1);
+                    assert!(parts.is_empty());
+                }
+                other => panic!("expected delta, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_patch_out_of_place_is_desync() {
+        let frame = TranscriptFrame::Delta {
+            upsert: vec![],
+            append: vec![],
+            remove: vec![],
+            parts: vec![PartPatch { entry: "b".into(), at: 5, part: tool("t5", None), len: 6 }],
+            count: 1,
+        };
+        let mut current = vec![working(&[tool("t0", None)])];
         assert!(apply_transcript_frame(&mut current, frame).is_err());
     }
 
@@ -589,6 +788,7 @@ mod tests {
             }],
             append: vec![],
             remove: vec![],
+            parts: vec![],
             count: 2,
         };
         let mut current = Vec::new();
