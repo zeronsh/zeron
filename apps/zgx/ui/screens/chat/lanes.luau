@@ -204,6 +204,10 @@ function M.view(slot: string): any
 			session = ui.shared(`chat.lane.{slot}.session`, nil :: any),
 			messages = ui.shared(`chat.lane.{slot}.messages`, {} :: { any }),
 			draft = ui.shared(`chat.lane.{slot}.draft`, { id = "", text = "" } :: any),
+			words = {
+				ui.shared(`chat.lane.{slot}.draft.words.1`, "" :: any),
+				ui.shared(`chat.lane.{slot}.draft.words.2`, "" :: any),
+			},
 		}
 	end
 	return views[slot]

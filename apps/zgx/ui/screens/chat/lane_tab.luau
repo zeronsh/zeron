@@ -1139,6 +1139,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		fade_lead = if split then 12 else nil,
 		messages = messages,
 		draft = reply,
+		draft_words = view.words,
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
