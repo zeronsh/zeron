@@ -104,6 +104,17 @@ pub(crate) fn context_window() -> ModelOption {
     }
 }
 
+/// The Context Window select for models whose plain id already runs with the
+/// 1M window (the Fable models, Opus 4.7+, Sonnet 5+). Left unset, they run
+/// at 1M, so the select says so; 200K is an explicit choice that the launch
+/// enforces with `CLAUDE_CODE_DISABLE_1M_CONTEXT` (zeronsh/zeron#1083).
+fn native_1m_context_window() -> ModelOption {
+    ModelOption {
+        default_choice: "1m".into(),
+        ..context_window()
+    }
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
@@ -332,21 +343,21 @@ pub fn static_models() -> Vec<Model> {
             "Fable 5.1",
             "Most intelligent model for building agents",
             FULL_LADDER,
-            vec![context_window()],
+            vec![native_1m_context_window()],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
             "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![native_1m_context_window()],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Best for everyday, complex tasks",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![native_1m_context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-4-8",
@@ -367,7 +378,7 @@ pub fn static_models() -> Vec<Model> {
             "Sonnet 5",
             "Balanced speed and intelligence",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![native_1m_context_window()],
         ),
         model(
             "claude-haiku-4-5",

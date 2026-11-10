@@ -238,24 +238,14 @@ fn model_arg(request: &RunRequest) -> Option<String> {
 /// 1000000 -> 200000), and its own autocompact then works from that window.
 /// It is read at launch, so changing it needs a fresh process.
 ///
-/// An unset choice is the catalog default (200K) for the models that offer the
-/// option; a model without it keeps whatever the CLI gives it.
+/// Only an explicit 200K choice sets it. Unset, a model keeps the window the
+/// CLI gives it (1M for the long-context rows, whose select defaults to 1M).
 fn caps_context_at_200k(request: &RunRequest) -> bool {
-    match request
+    request
         .model_options
         .get("contextWindow")
         .and_then(Value::as_str)
-    {
-        Some(window) => window.eq_ignore_ascii_case("200k"),
-        None => request.model.as_deref().is_some_and(|model| {
-            catalog::static_models().iter().any(|m| {
-                m.id == model
-                    && m.options
-                        .iter()
-                        .any(|o| o.id == "contextWindow" && o.default_choice == "200k")
-            })
-        }),
-    }
+        .is_some_and(|window| window.eq_ignore_ascii_case("200k"))
 }
 
 /// Every flag-layer setting a request launches with, for
@@ -2530,11 +2520,16 @@ mod access_tests {
 
     #[test]
     fn the_200k_choice_limits_the_window_through_the_cli() {
-        // Chosen, or unset on a model whose catalog default is 200K.
+        // Only an explicit 200K choice caps; unset keeps the CLI's window
+        // (1M on Opus 5.5), which is what its select now shows as default.
         let chosen = with_options("claude-opus-5-5", json!({"contextWindow": "200k"}));
         let unset = with_options("claude-opus-5-5", json!({}));
         assert!(caps_context_at_200k(&chosen));
-        assert!(caps_context_at_200k(&unset));
+        assert!(!caps_context_at_200k(&unset));
+        assert!(catalog::static_models().iter().any(|m| m.id == "claude-opus-5-5"
+            && m.options
+                .iter()
+                .any(|o| o.id == "contextWindow" && o.default_choice == "1m")));
         // 1M keeps the `[1m]` id and never the limit.
         let one_m = with_options("claude-opus-5-5", json!({"contextWindow": "1m"}));
         assert!(!caps_context_at_200k(&one_m));
@@ -2549,7 +2544,8 @@ mod access_tests {
         assert!(!harness.same_runtime(&chosen, &one_m));
         assert!(!harness.reconfigures_in_place(&chosen, &one_m));
         assert!(!harness.reconfigures_in_place(&one_m, &chosen));
-        assert!(harness.same_runtime(&chosen, &unset));
+        assert!(harness.same_runtime(&one_m, &unset));
+        assert!(!harness.same_runtime(&chosen, &unset));
         // The command carries it.
         let env_of = |r: &RunRequest| {
             let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
@@ -2560,6 +2556,7 @@ mod access_tests {
         };
         assert_eq!(env_of(&chosen).as_deref(), Some("1"));
         assert_eq!(env_of(&one_m), None);
+        assert_eq!(env_of(&unset), None);
     }
 
     #[test]
