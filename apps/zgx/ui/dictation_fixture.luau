@@ -20,6 +20,11 @@ ui.command { id = "empty", run = function() D.state:set({ serial = serial, phase
 ui.command { id = "send_other", run = function() D.before_send("another-composer") end }
 ui.command { id = "cancel", run = D.cancel }
 ui.command { id = "move", run = function() key:set("two") end }
+-- The voice bar's waveform: the host's levels (newest first) and its phases.
+ui.command { id = "listen", run = function() D.state:set({ serial = serial, phase = "listening", target = "main" }) end }
+ui.command { id = "levels", run = function() D.levels:set({ 1, 0.5, 0 }) end }
+ui.command { id = "starting", run = function() D.state:set({ serial = serial, phase = "starting", target = "main" }) end }
+ui.command { id = "finalizing", run = function() D.state:set({ serial = serial, phase = "finalizing", target = "main" }) end }
 ui.command { id = "fail", run = function() D.state:set({ serial = serial, phase = "failed", error = "Unavailable" }) end }
 return ui.column {
 	w_full = true, h_full = true, justify = "end", p = "$space.4",

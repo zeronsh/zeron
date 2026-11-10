@@ -273,3 +273,74 @@ fn voice_page_turned_off_mid_download_cancels_it() {
     assert!(a.tree().contains("downloads a 670 MB speech model"), "{}", a.tree());
     assert_eq!(a.error(), None);
 }
+/// The voice bar's waveform while listening, and what a slot costs: scripts
+/// run as the host's levels change, not between them (only the track's
+/// clock, its `ui.every(500)`, ticks there), and not at all when nothing is
+/// being dictated. Prints the numbers (`--nocapture`).
+#[test]
+fn dictation_waveform_follows_levels_with_no_script_between_slots() {
+    let (mut a, _) = at("dictation_fixture.luau", true);
+    let levels = a.host.shared("dictation_levels", Value::Nil);
+    // Not dictating: no track, and frames run no scripts.
+    let before = a.calls();
+    a.frames(30);
+    assert_eq!(a.calls() - before, 0, "idle frames call scripts");
+    assert!(a.find("#voice-wave").is_none());
+    command(&mut a, "listen");
+    a.frames(30);
+    assert!(a.find("#voice-bar-1").is_some(), "{}", a.tree());
+    assert_eq!(a.bounds("#voice-bar-1").height, 3.0);
+    // A slot: the newest at the trailing edge, older ones scrolling left.
+    let mut bars: Vec<f64> = Vec::new();
+    let (mut per_slot, mut times, mut between) = (Vec::new(), Vec::new(), 0);
+    for n in 0..60u32 {
+        bars.insert(0, if n % 4 == 0 { 1.0 } else { 0.25 });
+        bars.truncate(128);
+        let value = Value::from_json(&serde_json::to_string(&bars).unwrap()).unwrap();
+        let calls = a.calls();
+        let start = std::time::Instant::now();
+        levels.set(value);
+        a.frame();
+        times.push(start.elapsed());
+        per_slot.push(a.calls() - calls);
+        // The rest of the slot (60 ms: three more frames).
+        let calls = a.calls();
+        a.frames(3);
+        between += a.calls() - calls;
+    }
+    // 60 slots of 4 frames: 4 s, 8 ticks of the clock at most.
+    assert!(between <= 9, "frames between slots call scripts: {between}");
+    let newest = a.bounds("#voice-bar-1");
+    let older = a.bounds("#voice-bar-2");
+    // 0.25: 0.08 + 0.92 × 0.25 of 16 points.
+    assert!((newest.height - (0.08 + 0.92 * 0.25) * 16.0).abs() < 0.01, "{newest:?}");
+    assert!(older.x + 6.0 - newest.x < 0.01, "6 points a slot: {older:?} {newest:?}");
+    assert_eq!(a.bounds("#voice-bar-4").height, 16.0);
+    per_slot.sort();
+    times.sort();
+    eprintln!(
+        "voice waveform: per slot {} script calls (median, max {}), {:?} median / {:?} max for the update and its frame; {between} calls in the 180 frames between slots (the clock)",
+        per_slot[per_slot.len() / 2],
+        per_slot[per_slot.len() - 1],
+        times[times.len() / 2],
+        times[times.len() - 1]
+    );
+    // Finalizing: the bars hold; frames run no scripts (the sweep is the
+    // engine's).
+    command(&mut a, "finalizing");
+    let held = a.bounds("#voice-bar-4").height;
+    let calls = a.calls();
+    a.frames(30);
+    let sweep = a.calls() - calls;
+    assert!(sweep <= 2, "the sweep calls scripts: {sweep}");
+    assert_eq!(a.bounds("#voice-bar-4").height, held);
+    // Starting: the breathing baseline alone, no bars.
+    command(&mut a, "starting");
+    assert!(a.find("#voice-bar-1").is_none());
+    let calls = a.calls();
+    a.frames(30);
+    let breath = a.calls() - calls;
+    assert!(breath <= 2, "the breath calls scripts: {breath}");
+    eprintln!("voice waveform: 30 frames finalizing {sweep} calls, 30 frames starting {breath} calls (the clock)");
+    assert_eq!(a.error(), None);
+}

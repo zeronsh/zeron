@@ -19,6 +19,9 @@ use zgx_script::{ScriptHost, Value};
 
 use crate::plugins::{json_value, off_thread, value_json};
 
+mod meter;
+use meter::Meter;
+
 const MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
 
 #[cfg(target_os = "macos")]
@@ -47,6 +50,8 @@ fn authorize() -> Result<(), String> {
 trait Recording {
     fn poll(&mut self) -> Option<zeron_voice::Event>;
     fn finish(&mut self);
+    /// Peak microphone RMS since the previous take.
+    fn take_level(&self) -> f32;
 }
 impl Recording for zeron_voice::Session {
     fn poll(&mut self) -> Option<zeron_voice::Event> {
@@ -54,6 +59,9 @@ impl Recording for zeron_voice::Session {
     }
     fn finish(&mut self) {
         self.finish()
+    }
+    fn take_level(&self) -> f32 {
+        self.take_level()
     }
 }
 
@@ -81,6 +89,10 @@ struct Service {
     deadline: Option<Instant>,
     state: Json,
     serial: u64,
+    /// The voice bar's waveform while listening, and whether its bars
+    /// changed since they were last published (`dictation_levels`).
+    meter: Meter,
+    levels_changed: bool,
 }
 impl Service {
     fn new(dir: Option<PathBuf>) -> Self {
@@ -91,13 +103,34 @@ impl Service {
             deadline: None,
             state: json!({"phase":"idle"}),
             serial: 0,
+            meter: Meter::default(),
+            levels_changed: false,
         }
     }
     fn needs_poll(&self) -> bool {
         self.session.is_some() || self.download.is_some()
     }
+    fn clear_levels(&mut self) {
+        self.meter.reset();
+        self.levels_changed = true;
+    }
+    /// The waveform's bars, newest first, once each time they change.
+    fn take_levels(&mut self) -> Option<Vec<f32>> {
+        std::mem::take(&mut self.levels_changed).then(|| self.meter.newest())
+    }
+    /// How long the poll loop waits: to the next slot while listening (the
+    /// bars move once a slot), else its usual beat.
+    fn poll_wait(&self) -> Duration {
+        const BEAT: Duration = Duration::from_millis(40);
+        self.meter
+            .until_next(Instant::now())
+            .map_or(BEAT, |d| (d + Duration::from_millis(1)).min(BEAT))
+    }
     fn cancel(&mut self) {
         self.session = None;
+        // (What was drawn stays until the next recording: the bar is on
+        // its way out.)
+        self.meter.reset();
         if let Some(job) = &self.download {
             job.cancel.store(true, Ordering::Release);
         }
@@ -107,6 +140,7 @@ impl Service {
     fn stop(&mut self) {
         if let Some(session) = &mut self.session {
             session.finish();
+            self.meter.freeze(Instant::now());
             self.deadline
                 .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
             self.state["phase"] = json!("finalizing");
@@ -143,6 +177,7 @@ impl Service {
             .map(str::to_owned);
         let session = zeron_voice::Session::start(dir, device).map_err(|e| e.to_string())?;
         self.session = Some(Box::new(session));
+        self.clear_levels();
         self.serial += 1;
         self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
         Ok(self.state.clone())
@@ -215,10 +250,13 @@ impl Service {
                     zeron_voice::Event::Listening => {
                         if self.deadline.is_none() {
                             self.state["phase"] = json!("listening");
+                            self.meter.start(Instant::now());
+                            session.take_level();
                         }
                     }
                     zeron_voice::Event::Finalizing => {
                         self.state["phase"] = json!("finalizing");
+                        self.meter.freeze(Instant::now());
                         self.deadline
                             .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
                     }
@@ -234,10 +272,14 @@ impl Service {
                     }
                 }
             }
+            if !ended && self.meter.record(Instant::now(), session.take_level()) {
+                self.levels_changed = true;
+            }
         }
         if ended {
             self.session = None;
             self.deadline = None;
+            self.meter.reset();
         }
     }
 }
@@ -281,6 +323,9 @@ struct Dictation {
     service: RefCell<Service>,
     lease: RefCell<Option<EditorLease>>,
     shared: zgx_script::Shared,
+    /// The voice bar's bars, newest first (0–1), on their own so readers of
+    /// `dictation` don't run again at each slot.
+    levels: zgx_script::Shared,
     wake: zgx::task::LatestSender<()>,
 }
 impl Dictation {
@@ -289,7 +334,20 @@ impl Dictation {
         if self.shared.signal().with_untracked(Value::clone) != now {
             self.shared.set(now);
         }
+        let levels = self.service.borrow_mut().take_levels();
+        if let Some(levels) = levels {
+            self.levels.set(levels_value(&levels));
+        }
     }
+}
+
+/// The bars as Luau reads them, to the thousandth (finer is never drawn).
+fn levels_value(levels: &[f32]) -> Value {
+    let rounded: Vec<f64> = levels
+        .iter()
+        .map(|a| (f64::from(*a) * 1000.0).round() / 1000.0)
+        .collect();
+    json_value(&json!(rounded))
 }
 
 /// `dictation.call { op, … }` and `dictation.guard`, for the window's scripts;
@@ -299,6 +357,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let dir = crate::engine::data_dir().map(|d| d.join("models").join(MODEL));
     let me = Rc::new(Dictation {
         shared: host.shared("dictation", json_value(&json!({"phase":"idle"}))),
+        levels: host.shared("dictation_levels", json_value(&json!([]))),
         service: RefCell::new(Service::new(dir)),
         lease: RefCell::default(),
         wake,
@@ -372,7 +431,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 }
                 me.service.borrow_mut().poll();
                 me.publish();
-                zgx::timer::sleep(Duration::from_millis(40)).await;
+                let wait = me.service.borrow().poll_wait();
+                zgx::timer::sleep(wait).await;
             }
         }
     });
@@ -387,6 +447,7 @@ mod tests {
         events: Rc<RefCell<VecDeque<Event>>>,
         cancelled: Rc<Cell<bool>>,
         stopped: Rc<Cell<bool>>,
+        level: Rc<Cell<f32>>,
     }
     impl Recording for Fake {
         fn poll(&mut self) -> Option<Event> {
@@ -394,6 +455,9 @@ mod tests {
         }
         fn finish(&mut self) {
             self.stopped.set(true);
+        }
+        fn take_level(&self) -> f32 {
+            self.level.replace(0.0)
         }
     }
     impl Drop for Fake {
@@ -417,8 +481,57 @@ mod tests {
             events: events.clone(),
             cancelled: cancelled.clone(),
             stopped: stopped.clone(),
+            level: Rc::default(),
         }));
         (s, events, cancelled, stopped)
+    }
+    /// Listening, with the microphone's level to set.
+    fn metered() -> (Service, Rc<RefCell<VecDeque<Event>>>, Rc<Cell<f32>>) {
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let level = Rc::new(Cell::new(0.0));
+        let mut s = Service::new(None);
+        s.state = json!({"phase":"starting", "serial":1});
+        s.session = Some(Box::new(Fake {
+            events: events.clone(),
+            cancelled: Rc::default(),
+            stopped: Rc::default(),
+            level: level.clone(),
+        }));
+        (s, events, level)
+    }
+    #[test]
+    fn dictation_levels_follow_the_microphone_at_slot_rate_while_listening() {
+        let (mut s, events, level) = metered();
+        // Starting: the microphone isn't live, no bars.
+        level.set(0.3);
+        s.poll();
+        assert_eq!(s.take_levels(), None);
+        assert_eq!(s.poll_wait(), Duration::from_millis(40));
+        events.borrow_mut().push_back(Event::Listening);
+        s.poll();
+        // The first slot, at once (what came before listening isn't in it).
+        assert_eq!(s.take_levels(), Some(vec![0.0]));
+        // Within the slot nothing is published again, and the loop waits
+        // for the next slot rather than its usual beat.
+        level.set(0.1);
+        s.poll();
+        assert_eq!(s.take_levels(), None);
+        let wait = s.poll_wait();
+        assert!(wait <= Duration::from_millis(61) && wait > Duration::ZERO, "{wait:?}");
+        std::thread::sleep(meter::STEP);
+        s.poll();
+        let bars = s.take_levels().unwrap();
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0], meter::normalize(0.1));
+        // Finalizing holds them: no more slots.
+        events.borrow_mut().push_back(Event::Finalizing);
+        s.poll();
+        let _ = s.take_levels();
+        level.set(0.5);
+        std::thread::sleep(meter::STEP);
+        s.poll();
+        assert_eq!(s.take_levels(), None);
+        assert_eq!(s.poll_wait(), Duration::from_millis(40));
     }
     #[test]
     fn dictation_cancel_stops_capture_and_publishes_no_stale_text() {

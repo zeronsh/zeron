@@ -52,6 +52,7 @@ local dock = require("@self/composer_dock")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
+local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
@@ -250,7 +251,9 @@ export type Props = {
 	on_dictate: (() -> ())?,
 	on_cancel_dictation: (() -> ())?,
 	-- Dictation for real (screens/chat/dictation's `bind`): its microphone,
-	-- the editor's events it follows, and Send waiting for its words.
+	-- the editor's events it follows, and Send waiting for its words. With
+	-- its `levels` and `phase`, the track's waveform follows the microphone
+	-- (ds/voice_wave); without, it moves from the time alone.
 	dictation: any?,
 	-- Nothing can be written (a chat archived, an agent gone): dimmed, the
 	-- notice saying why.
@@ -946,7 +949,8 @@ local function place_line(p: Place): { Child }
 	}
 end
 
--- The voice, while dictating: bars across the track, each breathing on
+-- The voice, while dictating with no levels to follow (the gallery, fixtures:
+-- ds/voice_wave draws the microphone): bars across the track, each breathing on
 -- its own, from the time alone (no script per frame). params[0]: the ink.
 local VOICE = ui.shader([[
 fn fill(input: FillInput) -> vec4<f32> {
@@ -1680,7 +1684,7 @@ return ui.component(function(props: Props): Node
 						bg = "$zeron.composer.voice.ink",
 						opacity = ui.loop { from = 0.35, to = 1, duration = 900, fps = 30 },
 					},
-					ui.div {
+					if spoken and spoken.levels and spoken.phase then VoiceWave { levels = spoken.levels, phase = spoken.phase } else ui.div {
 						grow = 1,
 						h = 16,
 						min_w = 24,
