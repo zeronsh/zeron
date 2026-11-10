@@ -567,8 +567,15 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			focus:add(1)
 		end)
 	end
+	-- (A chat sent already has its host in the session: `device` is only
+	-- seeded while it's unsent, so reading it alone asked this computer's
+	-- engine for a chat running on another's.)
 	local accounts = Shared.model_accounts(function(): string?
-		return device:get()
+		if unsent() then
+			return device:get()
+		end
+		local s = session:get()
+		return if s then s.device else nil
 	end)
 	-- What `@`, `/` and `$` offer, as the chat page's. (A split's pane: the
 	-- window's composer types, a press focusing it.)
