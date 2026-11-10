@@ -106,11 +106,13 @@ pub struct RelayedCallback {
 }
 
 mod muse;
+mod pins;
 mod oauth;
 mod registry_login;
 #[cfg(test)]
 mod provider_tests;
 pub use muse::MuseRunEnvironment;
+pub use pins::{ChatPin, PinHook, PinRunEnvironment};
 mod stores;
 mod usage;
 
@@ -798,6 +800,12 @@ struct Inner {
     /// The last snapshot a list, switch or removal made, for whoever follows
     /// them (plugins' usage and account events). Never holds a credential.
     snapshots: tokio::sync::watch::Sender<Option<AgentAccountsSnapshot>>,
+    /// Chats pinned to an account of their own; mirrored to disk (see
+    /// [`pins`]).
+    pins: Mutex<pins::PinState>,
+    /// Asked for a chat's account at its first run (a plugin's
+    /// `run.preparing`).
+    pin_hook: Mutex<Option<PinHook>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -864,6 +872,7 @@ impl AgentAccounts {
                 }
             }
         }
+        let pins = pins::PinState::load(&config.root_dir().join(pins::PINS_FILE));
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -890,6 +899,8 @@ impl AgentAccounts {
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
                 snapshots: tokio::sync::watch::channel(None).0,
+                pins: Mutex::new(pins),
+                pin_hook: Mutex::new(None),
             }),
         }
     }

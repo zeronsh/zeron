@@ -11,6 +11,7 @@
 //! | `usage.read` | read each account's usage windows and plan; usage events |
 //! | `accounts.read` | read the saved accounts (and their email); account events |
 //! | `accounts.switch` | make another saved account the active one |
+//! | `accounts.pin` | run one chat on a saved account of its own, and answer the pre-run hook |
 //! | `models.read` | read a harness's models and a chat's model; model events |
 //! | `models.set` | set a chat's model, effort and options |
 //! | `messages.send` | send a chat a message, start a chat, answer a question, as the composer does |
@@ -57,6 +58,7 @@ use zeron_proto::{
 pub const USAGE_READ: &str = "usage.read";
 pub const ACCOUNTS_READ: &str = "accounts.read";
 pub const ACCOUNTS_SWITCH: &str = "accounts.switch";
+pub const ACCOUNTS_PIN: &str = "accounts.pin";
 pub const MODELS_READ: &str = "models.read";
 pub const MODELS_SET: &str = "models.set";
 pub const MESSAGES_SEND: &str = "messages.send";
@@ -70,6 +72,9 @@ pub const EVENTS: &[&str] = &[
     "usage.reset",
     "limit.hit",
     "account.switched",
+    "account.pinned",
+    "account.unpinned",
+    "run.preparing",
     "account.signed_out",
     "login.expired",
     "model.changed",
@@ -85,7 +90,8 @@ pub const EVENTS: &[&str] = &[
 pub fn event_needs(event: &str) -> Option<&'static str> {
     Some(match event {
         "usage.changed" | "usage.threshold" | "usage.reset" | "limit.hit" => USAGE_READ,
-        "account.switched" | "account.signed_out" | "login.expired" => ACCOUNTS_READ,
+        "account.switched" | "account.pinned" | "account.unpinned" | "account.signed_out" | "login.expired" => ACCOUNTS_READ,
+        "run.preparing" => ACCOUNTS_PIN,
         "model.changed" | "models.updated" => MODELS_READ,
         "turn.started" | "turn.finished" | "turn.errored" | "chat.awaiting_input" | "chat.input_answered" => {
             SESSIONS_READ
@@ -101,6 +107,9 @@ pub struct Pacing {
     pub refresh_gap: Duration,
     /// How long a `when_idle` switch waits for that provider's chats.
     pub idle_wait: Duration,
+    /// How long a chat's first run waits for a plugin's `run.preparing`
+    /// answer before it goes on without a pin.
+    pub prepare_wait: Duration,
 }
 
 impl Default for Pacing {
@@ -108,6 +117,7 @@ impl Default for Pacing {
         Self {
             refresh_gap: Duration::from_secs(5 * 60),
             idle_wait: Duration::from_secs(30 * 60),
+            prepare_wait: Duration::from_secs(3),
         }
     }
 }
@@ -195,6 +205,30 @@ pub trait AgentHost: Send + Sync + 'static {
     fn default_harness(&self) -> Option<HarnessId> {
         None
     }
+    /// How a chat can run on `account` while the live login stays as it is
+    /// (`"env"`: a credential in the chat's own process, `"root"`: a config
+    /// of its own), or `None` when this device can't.
+    fn pin_mechanism(&self, _account: &AgentAccount) -> Option<&'static str> {
+        None
+    }
+    /// Every chat pinned to an account on this device.
+    fn pins(&self) -> Vec<Pin> {
+        Vec::new()
+    }
+    /// Pin `chat` (of `harness`) to `account`, or take its pin back (`None`).
+    fn set_pin(&self, _harness: HarnessId, _chat: &str, _account: Option<&str>) -> Result<(), String> {
+        Err("Pinning isn't available on this device".into())
+    }
+}
+
+/// A chat running on a saved account of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pin {
+    pub chat: String,
+    pub harness: HarnessId,
+    pub account: String,
+    /// Epoch millis it was pinned.
+    pub since: i64,
 }
 
 /// How a plugin's message goes, as the composer would send it.
@@ -249,6 +283,10 @@ pub trait Sink: Send + Sync + 'static {
     fn to_window(&self, plugin: &str, listener: &str, event: &str, data: Json);
     /// To `plugin`'s service on this device (started if need be).
     fn to_service(&self, plugin: &str, listener: &str, event: &str, data: Json) -> BoxFuture<'static, Result<(), String>>;
+    /// To `plugin`'s service, and what its listener answers (`run.preparing`).
+    fn ask_service(&self, _plugin: &str, _listener: &str, _event: &str, _data: Json) -> BoxFuture<'static, Result<Json, String>> {
+        Box::pin(async { Err("its service isn't running here".into()) })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -310,6 +348,8 @@ struct State {
     /// A plugin's message queued behind a chat's running turn: the next
     /// turn is its.
     queued_by: HashMap<String, By>,
+    /// Chats `run.preparing` passed on, so each is asked once.
+    declined: HashSet<(String, HarnessId)>,
     /// Each chat's last turn's final reply, until its `turn.finished`.
     replies: HashMap<String, String>,
     /// Each plugin's last actions (`plugin_status`).
@@ -351,6 +391,9 @@ struct Inner {
     sink: Mutex<Option<Arc<dyn Sink>>>,
     pacing: Pacing,
     state: Mutex<State>,
+    /// One chat's `run.preparing` at a time: each answer sees the pin of the
+    /// last (a plugin that spreads chats counts pins).
+    preparing: tokio::sync::Mutex<()>,
 }
 
 /// One event before it's fitted to a plugin's grants: what it says, and the
@@ -418,6 +461,13 @@ fn window_json(w: &zeron_proto::AgentUsageWindow) -> Json {
 
 /// An account's usage, as `usage.read` shows it (no email).
 fn usage_row(a: &AgentAccount) -> Json {
+    let limited_until = a
+        .usage_windows
+        .iter()
+        .filter(|w| w.used_fraction >= 1.0)
+        .filter_map(|w| w.resets_at.map(|t| t.timestamp_millis()))
+        .filter(|at| *at > crate::now_ms())
+        .max();
     let mut row = json!({
         "provider": a.harness.as_str(),
         "account": a.id,
@@ -433,17 +483,33 @@ fn usage_row(a: &AgentAccount) -> Json {
     if let Some(error) = &a.usage_error {
         row["error"] = json!(error);
     }
+    if let Some(until) = limited_until {
+        row["limited_until"] = json!(until);
+    }
     row
 }
 
+/// Whether a usage error says the login needs signing in again.
+fn signed_out(error: &Option<String>) -> bool {
+    error.as_deref().is_some_and(|e| {
+        zeron_proto::run_errors::provider_problem(e) == Some(ProviderProblem::SignedOut)
+            || e.to_ascii_lowercase().contains("sign in")
+    })
+}
+
 /// An account, as `accounts.read` shows it (never a token, never a credit).
-fn account_row(a: &AgentAccount) -> Json {
+fn account_row(a: &AgentAccount, mechanism: Option<&'static str>) -> Json {
     let mut row = json!({
         "provider": a.harness.as_str(),
         "account": a.id,
         "active": a.active,
         "switchable": a.switchable,
+        "pinnable": mechanism.is_some(),
+        "signed_out": signed_out(&a.usage_error),
     });
+    if let Some(mechanism) = mechanism {
+        row["mechanism"] = json!(mechanism);
+    }
     for (key, value) in [
         ("email", &a.email),
         ("name", &a.display_name),
@@ -516,6 +582,7 @@ impl Agents {
                 sink: Mutex::new(None),
                 pacing,
                 state: Mutex::new(State::default()),
+                preparing: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -602,12 +669,36 @@ impl Agents {
                 need(ACCOUNTS_READ, "see your agents' accounts")?;
                 let provider = provider_arg(&args, "provider")?;
                 let snapshot = self.read_accounts(false).await?;
+                let host = self.host()?;
                 Ok(json!(
                     snapshot
                         .accounts
                         .iter()
                         .filter(|a| provider.is_none_or(|p| a.harness == p))
-                        .map(account_row)
+                        .map(|a| account_row(a, host.pin_mechanism(a)))
+                        .collect::<Vec<_>>()
+                ))
+            }
+            "pin_account" => {
+                need(ACCOUNTS_PIN, "run your chats on saved accounts")?;
+                self.pin_account(&by, &args).await
+            }
+            "pins" => {
+                need(ACCOUNTS_READ, "see your agents' accounts")?;
+                let provider = provider_arg(&args, "provider")?;
+                let names = grant.allows(SESSIONS_READ);
+                Ok(json!(
+                    self.host()?
+                        .pins()
+                        .iter()
+                        .filter(|p| provider.is_none_or(|h| p.harness == h))
+                        .map(|p| {
+                            let mut row = json!({ "provider": p.harness.as_str(), "account": p.account, "since": p.since });
+                            if names {
+                                row["chat"] = json!(p.chat);
+                            }
+                            row
+                        })
                         .collect::<Vec<_>>()
                 ))
             }
@@ -761,6 +852,143 @@ impl Agents {
             return Ok(json!({ "status": "waiting", "provider": harness.as_str(), "account": account }));
         }
         self.activate(by, harness, &account).await
+    }
+
+    /// `pin_account { provider, chat, account? }`: run `chat` on `account`
+    /// (a saved login), or, with no account, take its pin back.
+    async fn pin_account(&self, by: &By, args: &Json) -> Result<Json, Refused> {
+        let harness = provider_arg(args, "provider")?
+            .ok_or_else(|| Refused::new(reason::BAD_CALL, "Say which provider's account"))?;
+        let chat = self.chat(args)?.id;
+        let account = args.get("account").and_then(Json::as_str).filter(|a| !a.is_empty());
+        let host = self.host()?;
+        let current = host.pins().into_iter().find(|p| p.harness == harness && p.chat == chat);
+        let Some(account) = account else {
+            let current = current.ok_or_else(|| Refused::new(reason::ALREADY, "That chat isn't pinned to an account"))?;
+            self.loop_guard(by)?;
+            host.set_pin(harness, &chat, None).map_err(|why| Refused::new(reason::FAILED, why))?;
+            self.record(by, json!({ "op": "pin_account", "provider": harness.as_str(), "chat": chat }));
+            self.tell_unpinned(harness, &current.account, &chat, Some(by), None);
+            return Ok(json!({ "provider": harness.as_str(), "chat": chat }));
+        };
+        let snapshot = self.read_accounts(false).await?;
+        let target = snapshot
+            .accounts
+            .iter()
+            .find(|a| a.harness == harness && a.id == account)
+            .ok_or_else(|| Refused::new(reason::NOT_FOUND, format!("There's no saved {} account {account}", harness.as_str())))?;
+        if host.pin_mechanism(target).is_none() {
+            return Err(Refused::new(reason::FAILED, "Zeron can't run a chat on that account on this device"));
+        }
+        if current.as_ref().is_some_and(|p| p.account == account) {
+            return Err(Refused::new(reason::ALREADY, "That chat runs on that account already"));
+        }
+        self.loop_guard(by)?;
+        self.apply_pin(by, harness, &chat, account, current.map(|p| p.account))
+    }
+
+    fn apply_pin(&self, by: &By, harness: HarnessId, chat: &str, account: &str, from: Option<String>) -> Result<Json, Refused> {
+        self.host()?
+            .set_pin(harness, chat, Some(account))
+            .map_err(|why| Refused::new(reason::FAILED, why))?;
+        self.record(by, json!({ "op": "pin_account", "provider": harness.as_str(), "chat": chat, "account": account }));
+        self.tell(vec![
+            Raw::new("account.pinned", json!({ "provider": harness.as_str(), "account": account, "from": from, "by": by.json() }))
+                .with(SESSIONS_READ, "chat", json!(chat)),
+        ]);
+        Ok(json!({ "provider": harness.as_str(), "account": account, "chat": chat }))
+    }
+
+    fn tell_unpinned(&self, harness: HarnessId, account: &str, chat: &str, by: Option<&By>, why: Option<&str>) {
+        let mut data = json!({ "provider": harness.as_str(), "account": account });
+        if let Some(by) = by {
+            data["by"] = by.json();
+        }
+        if let Some(why) = why {
+            data["reason"] = json!(why);
+        }
+        self.tell(vec![Raw::new("account.unpinned", data).with(SESSIONS_READ, "chat", json!(chat))]);
+    }
+
+    /// A chat of `harness` is about to run for the first time without a pin:
+    /// the plugins that listen for `run.preparing` (and may pin) are asked,
+    /// each for at most `prepare_wait`, and the first account one answers
+    /// (`{ account }`) becomes the chat's pin. `None`: the chat runs on the
+    /// live login. A listener that fails, is late or answers with something
+    /// else is passed over (its row says so). Each chat is asked once.
+    pub async fn preparing(&self, harness: HarnessId, chat: &str) -> Option<String> {
+        let (host, sink) = (self.host().ok()?, self.sink()?);
+        let _one_at_a_time = self.inner.preparing.lock().await;
+        let listeners: Vec<(String, String)> = {
+            let st = self.state();
+            if st.declined.contains(&(chat.to_owned(), harness)) {
+                return None;
+            }
+            st.listeners
+                .iter()
+                .filter(|((_, target), _)| *target == Target::Service)
+                .flat_map(|((plugin, _), list)| {
+                    list.iter()
+                        .filter(|l| l.event == "run.preparing" && matches(&l.opts, &json!({ "provider": harness.as_str() })))
+                        .map(move |l| (plugin.clone(), l.key.clone()))
+                })
+                .collect()
+        };
+        // (Nobody listening: nothing to ask, and nothing read.)
+        if listeners.is_empty() || host.pins().iter().any(|p| p.harness == harness && p.chat == chat) {
+            return None;
+        }
+        let snapshot = self.read_accounts(false).await.ok()?;
+        // Only where a chat of this provider can run on another account.
+        if !snapshot.accounts.iter().any(|a| a.harness == harness && host.pin_mechanism(a).is_some()) {
+            return None;
+        }
+        let mut chosen = None;
+        for (plugin, key) in listeners {
+            let Some(grant) = sink.grants(&plugin).filter(|g| g.allows(ACCOUNTS_PIN)) else { continue };
+            let by = By { plugin: plugin.clone(), name: grant.name.clone() };
+            let mut data = json!({ "provider": harness.as_str() });
+            if grant.allows(SESSIONS_READ) {
+                data["chat"] = json!(chat);
+            }
+            let asked = tokio::time::timeout(
+                self.inner.pacing.prepare_wait,
+                sink.ask_service(&plugin, &key, "run.preparing", data),
+            )
+            .await;
+            let answer = match asked {
+                Err(_) => {
+                    self.notice(&plugin, format!("Its run.preparing listener didn't answer in {} s, so a chat ran without it", self.inner.pacing.prepare_wait.as_secs().max(1)));
+                    continue;
+                }
+                Ok(Err(why)) => {
+                    self.notice(&plugin, format!("Its run.preparing listener failed: {why}"));
+                    continue;
+                }
+                Ok(Ok(answer)) => answer,
+            };
+            let Some(account) = answer.get("account").and_then(Json::as_str).map(str::to_owned) else { continue };
+            let usable = snapshot
+                .accounts
+                .iter()
+                .find(|a| a.harness == harness && a.id == account)
+                .is_some_and(|a| host.pin_mechanism(a).is_some());
+            if !usable {
+                self.notice(&plugin, format!("Its run.preparing answer named {account}, which can't be pinned here"));
+                continue;
+            }
+            if self.loop_guard(&by).is_err() {
+                continue;
+            }
+            if self.apply_pin(&by, harness, chat, &account, None).is_ok() {
+                chosen = Some(account);
+                break;
+            }
+        }
+        if chosen.is_none() {
+            self.state().declined.insert((chat.to_owned(), harness));
+        }
+        chosen
     }
 
     async fn activate(&self, by: &By, harness: HarnessId, account: &str) -> Result<Json, Refused> {
@@ -1284,6 +1512,20 @@ impl Agents {
         }
         self.tell(events);
         self.thresholds(next, prev.is_none());
+        self.unpin_gone(next);
+    }
+
+    /// Pins on an account that's no longer saved are taken back, and told.
+    fn unpin_gone(&self, snapshot: &AgentAccountsSnapshot) {
+        let Ok(host) = self.host() else { return };
+        for pin in host.pins() {
+            if snapshot.accounts.iter().any(|a| a.harness == pin.harness && a.id == pin.account) {
+                continue;
+            }
+            if host.set_pin(pin.harness, &pin.chat, None).is_ok() {
+                self.tell_unpinned(pin.harness, &pin.account, &pin.chat, None, Some("removed"));
+            }
+        }
     }
 
     /// Each threshold listener's line, for the accounts in `snapshot`: told

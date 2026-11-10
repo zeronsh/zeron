@@ -1,0 +1,9 @@
+{
+  "id": "account-pin",
+  "name": "Account pin",
+  "version": "1.0.0",
+  "description": "Starts each new Claude Code chat on the saved account with the fewest chats, and leaves the active account as it is.",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": ["service", "accounts.read", "accounts.pin", "sessions.read"]
+}
