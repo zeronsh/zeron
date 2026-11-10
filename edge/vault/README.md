@@ -19,14 +19,17 @@ and hands enrolled devices short-lived **grants**: access tokens only, never ref
   `parentId` = the account's logical Cloud device. A credential connected once for that parent
   covers every session. Revoking the parent (even one that never enrolled a key) refuses all its
   children, present and future. Revoking a session touches only that session.
-- **Vault-side GitHub calls.** `githubRepos` lists the repositories of the App installations
-  the GitHub connection can reach, using the stored user token inside the vault, and returns
-  metadata only. Pagination follows `next` links on `api.github.com` only.
-- **GitHub grants are installation tokens.** The user token never leaves the vault. A `github`
+- **Vault-side GitHub calls.** `githubRepos` and `githubListing` list the repositories of the
+  App installations every connected GitHub login can reach, merged, using the stored user tokens
+  inside the vault, and return metadata only. Pagination follows `next` links on
+  `api.github.com` only.
+- **GitHub grants are installation tokens.** User tokens never leave the vault. A `github`
   grant names `repo` (`owner/name`); the vault finds the installation on `owner` among the
-  user's own installations (`/user/installations`, so nobody can name someone else's) and mints
-  a one-hour installation token with an App JWT. Minted tokens are cached sealed per
-  installation and reused while more than 15 minutes remain.
+  session login's own installations (`/user/installations`, so nobody can name someone else's)
+  and mints a one-hour installation token for that repository with an App JWT. Minted tokens are
+  cached sealed per repository and access level and reused while more than 15 minutes remain.
+- **Logins and installations are separate records.** A session keeps both from its first grant
+  (`github_sessions`); docs/design/cloud-device.md, "Several logins", states the rules.
 - **Nothing decrypts from storage alone.** Records are AES-256-GCM under a KEK held as a
   Worker secret (`VAULT_KEK`), never in Durable Object storage, and imported as a
   non-extractable key. AAD `{userId}|{provider}|{generation}` binds each ciphertext to its slot.

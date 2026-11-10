@@ -7,7 +7,7 @@ use crate::{
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PreviewService;
@@ -78,6 +78,29 @@ pub async fn run_with_wake(
     .await
 }
 
+/// [`run_with_wake`] for a phone that lets go of its socket while nobody's using it.
+pub async fn run_unless_resting(
+    config: Config,
+    catalog: Catalog,
+    peers: Peers,
+    outgoing: mpsc::Receiver<OutgoingSignal>,
+    stop: CancellationToken,
+    wake: Arc<Notify>,
+    resting: watch::Receiver<bool>,
+) {
+    run_signing_in_unless_resting(
+        config,
+        catalog,
+        peers,
+        outgoing,
+        stop,
+        wake,
+        Arc::new(|| false),
+        resting,
+    )
+    .await
+}
+
 /// Whether this device is in the middle of a provider sign-in whose
 /// callback rides the direct connection.
 pub type SigningIn = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -90,12 +113,39 @@ pub async fn run_signing_in(
     config: Config,
     catalog: Catalog,
     peers: Peers,
-    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    outgoing: mpsc::Receiver<OutgoingSignal>,
     stop: CancellationToken,
     wake: Arc<Notify>,
     signing_in: SigningIn,
 ) {
+    let (_awake, resting) = watch::channel(false);
+    run_signing_in_unless_resting(config, catalog, peers, outgoing, stop, wake, signing_in, resting).await
+}
+
+/// Resolves once `resting` reads `state`. False: its sender is gone.
+async fn resting_is(resting: &mut watch::Receiver<bool>, state: bool) -> bool {
+    resting.wait_for(|rest| *rest == state).await.is_ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_signing_in_unless_resting(
+    config: Config,
+    catalog: Catalog,
+    peers: Peers,
+    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    stop: CancellationToken,
+    wake: Arc<Notify>,
+    signing_in: SigningIn,
+    mut resting: watch::Receiver<bool>,
+) {
     loop {
+        if *resting.borrow() {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                _ = resting_is(&mut resting, false) => {}
+            }
+            continue;
+        }
         let connected = connect(
             &config,
             &catalog,
@@ -104,20 +154,43 @@ pub async fn run_signing_in(
             &wake,
             signing_in(),
         );
-        tokio::select! { _ = stop.cancelled() => break, result = connected => {
-            if let Err(error) = result { tracing::debug!(%error, "preview coordinator disconnected"); }
-        } }
+        let mut rest = resting.clone();
+        let refused = tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = resting_is(&mut rest, true) => false,
+            result = connected => {
+                let refused = result.as_ref().is_err_and(credentials_refused);
+                if let Err(error) = result { tracing::debug!(%error, "preview coordinator disconnected"); }
+                refused
+            }
+        };
         catalog.clear_remote();
-        peers.clear().await;
+        // Open connections were admitted by credentials that may have ended since, and
+        // one kept at rest would keep the radio up.
+        if refused || *resting.borrow() || config.tokens.token().await.is_err() {
+            peers.clear().await;
+        } else {
+            peers.clear_unopened().await;
+        }
         while outgoing.try_recv().is_ok() {} // signaling from the old lease is stale
         tokio::select! {
             _ = stop.cancelled() => break,
             _ = tokio::time::sleep(Duration::from_secs(3)) => {}
             _ = wake.notified() => {}
+            _ = resting_is(&mut resting, true) => {}
         }
     }
     catalog.clear_remote();
     peers.clear().await;
+}
+
+/// The coordinator turned these credentials away, as opposed to a socket that ended.
+fn credentials_refused(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<tokio_tungstenite::tungstenite::Error>(),
+        Some(tokio_tungstenite::tungstenite::Error::Http(response))
+            if matches!(response.status().as_u16(), 401 | 403)
+    )
 }
 
 fn coordinator_url(
@@ -208,7 +281,7 @@ async fn connect(
                         anyhow::ensure!(text.len() <= 1024*1024, "oversized preview coordinator message");
                         match serde_json::from_str::<Incoming>(&text)? {
                             Incoming::Catalog { device, services } => catalog.set_remote(&device, services)?,
-                            Incoming::Gone { device } => { catalog.remove_remote(&device); peers.remove(&device).await; }
+                            Incoming::Gone { device } => { catalog.remove_remote(&device); peers.gone(&device).await; }
                             Incoming::Signal { from, signal } => {
                                 anyhow::ensure!(negotiations.len() < 16, "too many concurrent preview negotiations");
                                 let peers = peers.clone();
@@ -236,6 +309,21 @@ mod tests {
         async fn token(&self) -> anyhow::Result<String> {
             anyhow::bail!("unused")
         }
+    }
+
+    #[test]
+    fn only_a_refusal_counts_as_losing_credentials() {
+        use tokio_tungstenite::tungstenite::{Error, http::Response};
+        let refusal = |status: u16| {
+            anyhow::Error::from(Error::Http(
+                Response::builder().status(status).body(None).unwrap(),
+            ))
+        };
+        assert!(credentials_refused(&refusal(401)));
+        assert!(credentials_refused(&refusal(403)));
+        assert!(!credentials_refused(&refusal(429)), "the device limit");
+        assert!(!credentials_refused(&refusal(503)));
+        assert!(!credentials_refused(&anyhow::anyhow!("preview coordinator closed")));
     }
 
     #[test]

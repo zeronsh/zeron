@@ -1028,7 +1028,7 @@ fn fail(error: &str) -> Outcome {
 /// (Cloud can't reach the repository, the project has none) without the
 /// machine's prefixes; out of credits said plainly; anything else, or too
 /// long to read, a plain retry.
-fn cloud_words(error: &str) -> String {
+pub(crate) fn cloud_words(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("credit") {
         return "You're out of Cloud credits. Add some in Settings → Billing.".into();

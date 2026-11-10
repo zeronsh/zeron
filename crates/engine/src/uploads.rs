@@ -7,8 +7,9 @@
 //! in-memory buffers), and `commit` assembles them into
 //! `{uploads_root}/{id8}-{name}` and returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
-//! Attachments live only on the host device — every read proxies through the
-//! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
+//! Attachments live on the host device — every read proxies through the owning
+//! device via `ReadAttachmentChunk`. The edge only ever holds bytes in transit
+//! to a Cloud machine, until it has them (docs/design/cloud-attachments.md).
 //!
 //! `read_chunk` serves attachments back in 45KB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
@@ -69,6 +70,34 @@ pub fn parse_pending_ref(path: &str) -> Option<(&str, &str)> {
 pub struct AttachmentTransfer {
     pub upload_id: String,
     pub file_name: String,
+}
+
+/// Rewrite a landed ref to its absolute path everywhere a prompt names it. An
+/// app capture names its image in an XML attribute, where both the ref and the
+/// path are escaped; everywhere else they're plain text.
+pub fn rewrite_pending_ref(prompt: &str, reference: &str, absolute: &str) -> String {
+    let attribute = |path: &str| format!("image=\"{}\"", xml_attribute_escape(path));
+    prompt
+        .replace(&attribute(reference), &attribute(absolute))
+        .replace(reference, absolute)
+}
+
+/// The escaping the composer gives an app capture's attributes.
+fn xml_attribute_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\r' => escaped.push_str("&#13;"),
+            '\n' => escaped.push_str("&#10;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// Pending refs listed on a text's attachment-ref lines (`- pending://…`).
@@ -252,6 +281,28 @@ impl Uploads {
         std::fs::write(&path, &bytes)?;
         let _ = std::fs::remove_dir_all(&dir);
         Ok(path.to_string_lossy().to_string())
+    }
+
+    /// Save whole bytes fetched from the edge's attachment store, at the path
+    /// their `pending://` ref resolves to. Written aside and renamed: a landed
+    /// ref must only ever name a complete file (the drain trusts `is_file`).
+    pub fn commit_fetched(
+        &self,
+        upload_id: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<String, EngineError> {
+        self.staging_dir(upload_id)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(EngineError::Other("Upload too large".into()));
+        }
+        std::fs::create_dir_all(&self.inner.dir)?;
+        std::fs::create_dir_all(&self.inner.tmp)?;
+        let target = self.pending_target(upload_id, file_name);
+        let part = self.inner.tmp.join(format!("{upload_id}.fetched"));
+        std::fs::write(&part, bytes)?;
+        std::fs::rename(&part, &target)?;
+        Ok(target.to_string_lossy().to_string())
     }
 
     /// The committed absolute path a pending ref resolves to on THIS device
@@ -944,6 +995,39 @@ mod tests {
             ]
         );
         assert!(attachment_lines_in("- a list item with no trailer").is_empty());
+    }
+
+    #[test]
+    fn a_capture_attribute_and_the_trailer_each_get_their_own_spelling() {
+        let reference = "pending://u1/a&b.png";
+        let prompt = "look\n\n<appshot app=\"Notes\" image=\"pending://u1/a&amp;b.png\">\nbody\n</appshot>\n\n- pending://u1/a&b.png";
+        assert_eq!(
+            rewrite_pending_ref(prompt, reference, "/home/o'neil/u1-a_b.png"),
+            "look\n\n<appshot app=\"Notes\" image=\"/home/o&apos;neil/u1-a_b.png\">\nbody\n</appshot>\n\n- /home/o'neil/u1-a_b.png"
+        );
+        // A name with nothing to escape still gets an escaped path in the attribute.
+        let plain = "<appshot image=\"pending://u1/a.png\">\n- pending://u1/a.png";
+        assert_eq!(
+            rewrite_pending_ref(plain, "pending://u1/a.png", "/a&b/a.png"),
+            "<appshot image=\"/a&amp;b/a.png\">\n- /a&b/a.png"
+        );
+    }
+
+    #[test]
+    fn fetched_bytes_land_where_the_ref_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let reference = pending_ref("abcd1234-rest", "my photo (1).png");
+        assert_eq!(uploads.resolve_pending(&reference), None);
+
+        let path = uploads
+            .commit_fetched("abcd1234-rest", "my photo (1).png", b"png")
+            .unwrap();
+        assert_eq!(uploads.resolve_pending(&reference).as_deref(), Some(path.as_str()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        // Nothing half-written stays behind, and a bad id can't name a path.
+        assert_eq!(std::fs::read_dir(dir.path().join("uploads/tmp")).unwrap().count(), 0);
+        assert!(uploads.commit_fetched("../evil", "a.png", b"png").is_err());
     }
 
     #[test]

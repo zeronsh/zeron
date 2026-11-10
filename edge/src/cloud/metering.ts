@@ -26,13 +26,17 @@
  * read after it stopped and before the DELETE (providers stop serving usage
  * for deleted sandboxes), and its rows are closed right then.
  *
- * Credits: one credit is one minute of a small machine — 60 of the
- * provider's billable seconds, which already carry the machine-size
- * multiplier.
+ * Credits: one credit is one minute of a small machine, which the provider
+ * bills at 0.5×: 30 of its billable seconds, which already carry the
+ * machine-size multiplier. Balances are worked out from the raw seconds every
+ * time, so the rate goes by the UTC day the usage fell on
+ * ([`secondsPerCredit`]): days before the cutover stay at 60 seconds a credit.
  *
  * The planning and month math are pure (unit-tested in Node); the SQL
  * helpers take the DO's `SqlStorage`.
  */
+
+import { machineSpec } from "./policy";
 
 export const CLOSE_GRACE_MS = 60 * 60_000;
 /** Reconcile at least this often while anything is open. */
@@ -42,9 +46,8 @@ const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 const DAY_RE = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 export const DAY_MS = 24 * 60 * 60_000;
 
-/** Billable seconds per credit by default: a minute of a machine the
- * provider bills at 1×. `CLOUD_CREDIT_SECONDS` overrides it, so a credit is
- * a minute of the default machine whatever its provider multiplier. */
+/** Billable seconds per credit on every day before a cutover, and on every
+ * day when there is none. */
 export const CREDIT_SECONDS = 60;
 
 /** `CLOUD_CREDIT_SECONDS`, when a positive number; else [`CREDIT_SECONDS`]. */
@@ -53,7 +56,28 @@ export const creditSeconds = (configured: string | undefined): number => {
   return Number.isFinite(value) && value > 0 ? value : CREDIT_SECONDS;
 };
 
-export const creditsOf = (seconds: number, perCredit = CREDIT_SECONDS): number =>
+/** What a credit costs from a cutover day on. */
+export interface CreditRate {
+  /** Billable seconds per credit from `from` on. */
+  readonly seconds: number;
+  /** The first UTC day at `seconds`. Without one, `seconds` never applies. */
+  readonly from?: string;
+}
+
+export const NO_CUTOVER: CreditRate = { seconds: CREDIT_SECONDS };
+
+/** The rate from `CLOUD_CREDIT_SECONDS` and `CLOUD_CREDIT_RATE_FROM`. A new
+ * rate only ever applies from a real day: anything else in the day var (the
+ * placeholder, a typo) leaves every day where it was, because a rate with no
+ * day would re-price all past usage. */
+export const creditRate = (seconds: string | undefined, from: string | undefined): CreditRate =>
+  from !== undefined && isDayKey(from) ? { seconds: creditSeconds(seconds), from } : NO_CUTOVER;
+
+/** Billable seconds per credit for usage on a UTC day. */
+export const secondsPerCredit = (day: string, rate: CreditRate): number =>
+  rate.from !== undefined && day >= rate.from ? rate.seconds : CREDIT_SECONDS;
+
+export const creditsOf = (seconds: number, perCredit: number): number =>
   Math.round((seconds / perCredit) * 100) / 100;
 
 export const isDayKey = (value: string): boolean => DAY_RE.test(value) && dayKey(Date.parse(`${value}T00:00:00Z`)) === value;
@@ -110,17 +134,10 @@ export const monthClosable = (month: string, now: number, graceMs = CLOSE_GRACE_
   now >= monthEnd(month) + graceMs;
 
 /** Provider billing multiplier per sandbox size, relative to `default`
- * (Boat's published figures, docs.boat.dev/pricing). Only for the live
- * estimate between meter reads: the reconciled figure is the provider's own
- * billable seconds, which carry the multiplier already. */
-export const SIZE_MULTIPLIER: Readonly<Record<string, number>> = {
-  small: 0.5,
-  default: 1,
-  large: 2,
-  xlarge: 5.56
-};
-
-export const sizeMultiplier = (type: string | undefined): number => SIZE_MULTIPLIER[type ?? "default"] ?? 1;
+ * (policy.ts's catalog). Only for the live estimate between meter reads: the
+ * reconciled figure is the provider's own billable seconds, which carry the
+ * multiplier already, also across a resize mid-life. */
+export const sizeMultiplier = (type: string | undefined): number => machineSpec(type ?? "default")?.creditMultiplier ?? 1;
 
 export interface SandboxRecord {
   readonly provider: string;
@@ -301,14 +318,26 @@ export const creditsPerDay = (
   from: string,
   to: string,
   rows: readonly UsageRow[],
-  perCredit = CREDIT_SECONDS
+  rate: CreditRate = NO_CUTOVER
 ): { readonly day: string; readonly credits: number }[] => {
   const seconds = new Map<string, number>();
   for (const row of rows) seconds.set(row.day, (seconds.get(row.day) ?? 0) + row.seconds);
   return daysBetween(dayStart(from), dayStart(to)).map((day) => ({
     day,
-    credits: creditsOf(seconds.get(day) ?? 0, perCredit)
+    credits: creditsOf(seconds.get(day) ?? 0, secondsPerCredit(day, rate))
   }));
+};
+
+/** What a running machine has spent since its meter was last read: wall time
+ * from `since` to `now` at its size, each UTC day at that day's rate. */
+export const unmeteredCredits = (since: number, now: number, multiplier: number, rate: CreditRate = NO_CUTOVER): number => {
+  if (now <= since) return 0;
+  let credits = 0;
+  for (const day of daysBetween(since, now)) {
+    const seconds = (Math.min(now, dayEnd(day)) - Math.max(since, dayStart(day))) / 1000;
+    credits += (seconds * multiplier) / secondsPerCredit(day, rate);
+  }
+  return credits;
 };
 
 /** Wire shape of `CloudUsage` (crates/proto/src/cloud.rs): the caller's
@@ -334,7 +363,17 @@ export type LedgerEvent =
   | "stop"
   | "delete"
   | "ttl_extend"
-  | "error";
+  | "error"
+  /** A wake moved the sandbox onto another size. */
+  | "resize"
+  /** A sleeping machine was resumed only to keep its disk from expiring. */
+  | "refresh"
+  /** A wake's timeline (`detail`: `WakeTiming` JSON, wake.ts). */
+  | "wake_timing"
+  /** A wake taking far longer than normal (`detail`: what it was stuck on). */
+  | "wake_slow"
+  /** Its engine found its chat store damaged on a start and rebuilt it. */
+  | "store_recovered";
 
 export interface LedgerEntry {
   readonly at: number;
@@ -417,13 +456,13 @@ export const creditBreakdown = (
   periods: readonly CreditPeriod[],
   rows: readonly UsageRow[],
   now: number,
-  perCredit = CREDIT_SECONDS
+  rate: CreditRate = NO_CUTOVER
 ): CreditBreakdown => {
   const byStart = [...periods].sort((a, b) => a.start - b.start);
   const used = new Map<CreditPeriod, number>();
   let uncovered = 0;
   for (const row of rows) {
-    const credits = creditsOf(row.seconds, perCredit);
+    const credits = creditsOf(row.seconds, secondsPerCredit(row.day, rate));
     if (credits === 0) continue;
     let period: CreditPeriod | undefined;
     for (const p of byStart) {
@@ -507,6 +546,18 @@ export const recordSandbox = (sql: SqlStorage, sandbox: SandboxRecord): void => 
     sandbox.createdAt
   );
 };
+
+/** A resume moved the sandbox onto another size. Its usage rows keep the
+ * provider's own figures; this is the size it is on from now. */
+export const setSandboxType = (sql: SqlStorage, ref: SandboxRef, type: string): void => {
+  sql.exec("UPDATE sandboxes SET type = ? WHERE provider = ? AND sandbox_id = ?", type, ref.provider, ref.sandboxId);
+};
+
+/** The size a sandbox was last recorded on. */
+export const sandboxType = (sql: SqlStorage, ref: SandboxRef): string | undefined =>
+  [...sql.exec("SELECT type FROM sandboxes WHERE provider = ? AND sandbox_id = ?", ref.provider, ref.sandboxId)][0]?.type as
+    | string
+    | undefined;
 
 export const markSandboxFinal = (sql: SqlStorage, ref: SandboxRef, finalAt: number): void => {
   sql.exec("UPDATE sandboxes SET final_at = ? WHERE provider = ? AND sandbox_id = ?", finalAt, ref.provider, ref.sandboxId);

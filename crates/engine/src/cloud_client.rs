@@ -23,6 +23,7 @@ use zeron_proto::{
     GithubConnectProgress, GithubDeviceFlow, GithubRepo, HarnessId, VaultAccount,
     VaultAccountProfile, VaultProvider, VaultStatus,
 };
+use zeron_proto::{CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD};
 
 #[derive(Deserialize)]
 struct AccountList {
@@ -78,6 +79,11 @@ impl SessionAction {
         }
     }
 }
+
+/// Starts the error of a wake the edge refused as too small for the machine's
+/// disk, so a client can tell it from any other failure across the RPC's
+/// plain-text errors. The edge's own sentence follows it.
+pub const DISK_TOO_SMALL: &str = "disk_too_small";
 
 /// Shown for anything forwarded to the logical Cloud device, which has no
 /// engine: work happens on a session's own device.
@@ -276,6 +282,76 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `PUT /cloud/{orgId}/machine`: the size new sessions start on.
+    pub async fn set_machine(&self, machine: &str) -> Result<CloudStatus, EngineError> {
+        require_id(machine, "machine")?;
+        self.target()?
+            .call::<CloudStatus>(
+                reqwest::Method::PUT,
+                &["cloud", "machine"],
+                &[],
+                Some(serde_json::json!({ "machine": machine })),
+                "Set the Cloud machine size",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/wake {machine?, wake?}`.
+    pub async fn wake_session(
+        &self,
+        chat_id: &str,
+        machine: Option<&str>,
+        wake: Option<bool>,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let mut body = serde_json::Map::new();
+        if let Some(machine) = machine {
+            require_id(machine, "machine")?;
+            body.insert("machine".into(), machine.into());
+        }
+        if let Some(wake) = wake {
+            body.insert("wake".into(), wake.into());
+        }
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "wake"],
+                &[],
+                Some(serde_json::Value::Object(body)),
+                SessionAction::Wake.verb(),
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/retry {machine?}`: a failed
+    /// lifecycle again, or a fresh machine once its data expired.
+    pub async fn retry_session(
+        &self,
+        chat_id: &str,
+        machine: Option<&str>,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let body = match machine {
+            Some(machine) => {
+                require_id(machine, "machine")?;
+                serde_json::json!({ "machine": machine })
+            }
+            None => serde_json::json!({}),
+        };
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "retry"],
+                &[],
+                Some(body),
+                "Start a fresh Cloud machine",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
     /// `POST /cloud/{orgId}/sessions/{chatId}/{wake|sleep}`.
     pub async fn session_action(
         &self,
@@ -341,6 +417,32 @@ impl CloudClient {
             )
             .await
             .map_err(Failure::into_error)
+    }
+
+    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent
+    /// (`claude-code`, `codex`), kept on the edge by hand so a new one needs no
+    /// app release. Each model is as the edge wrote it; [`cloud_models`] reads
+    /// them leniently.
+    pub async fn models(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>, EngineError> {
+        #[derive(Deserialize)]
+        struct Models {
+            #[serde(default)]
+            models: std::collections::HashMap<String, Vec<serde_json::Value>>,
+        }
+        let reply = self
+            .target()?
+            .call::<Models>(
+                reqwest::Method::GET,
+                &["cloud", "models"],
+                &[],
+                None,
+                "Read Cloud's models",
+            )
+            .await
+            .map_err(Failure::into_error)?;
+        Ok(reply.models)
     }
 
     /// `GET /vault/{orgId}/github/repos[?q=]` — the vault calls GitHub with
@@ -678,6 +780,20 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `DELETE /vault/{orgId}/accounts/github/{slot}`: one GitHub login, the
+    /// others left as they are.
+    async fn github_forget(&self, slot: &str) -> Result<Vec<VaultAccount>, EngineError> {
+        require_id(slot, "account id")?;
+        self.vault_forget(VaultProvider::Github, slot).await
+    }
+
+    /// `POST /vault/{orgId}/accounts/github/active {slot}`: the login new
+    /// sessions try first.
+    async fn github_activate(&self, slot: &str) -> Result<Vec<VaultAccount>, EngineError> {
+        require_id(slot, "account id")?;
+        self.vault_activate(VaultProvider::Github, Some(slot)).await
+    }
+
     /// `PATCH /vault/{orgId}/credentials/{provider}` with `{authorizedDevices}`.
     pub async fn authorize(
         &self,
@@ -779,8 +895,10 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::BILLING_CHECKOUT
             | methods::BILLING_PORTAL
             | methods::CLOUD_SESSIONS
+            | methods::CLOUD_SET_MACHINE
             | methods::CLOUD_SESSION_WAKE
             | methods::CLOUD_SESSION_SLEEP
+            | methods::CLOUD_SESSION_RETRY
             | methods::CLOUD_SESSION_DELETE
             | methods::VAULT_STATUS
             | methods::VAULT_CONNECT_CODEX
@@ -791,7 +909,25 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::VAULT_REVOKE_DEVICE
             | methods::GITHUB_CONNECT_START
             | methods::GITHUB_CONNECT_POLL
+            | methods::GITHUB_ACCOUNTS
+            | methods::GITHUB_ACCOUNT_FORGET
+            | methods::GITHUB_ACCOUNT_ACTIVATE
     )
+}
+
+#[derive(Deserialize)]
+struct MachineParams {
+    machine: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SizedChatParams {
+    chat_id: String,
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    wake: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -851,6 +987,12 @@ struct FlowParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SlotParams {
+    slot: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChatParams {
     chat_id: String,
 }
@@ -895,11 +1037,24 @@ pub(crate) async fn dispatch(
         methods::CLOUD_ENABLE => RpcReply::value(&cloud.enable().await.map_err(failed)?),
         methods::CLOUD_DELETE => RpcReply::value(&cloud.delete().await.map_err(failed)?),
         methods::CLOUD_SESSIONS => RpcReply::value(&cloud.sessions().await.map_err(failed)?),
+        methods::CLOUD_SET_MACHINE => {
+            let p: MachineParams = params(raw)?;
+            RpcReply::value(&cloud.set_machine(&p.machine).await.map_err(failed)?)
+        }
         methods::CLOUD_SESSION_WAKE => {
-            let p: ChatParams = params(raw)?;
+            let p: SizedChatParams = params(raw)?;
             RpcReply::value(
                 &cloud
-                    .session_action(&p.chat_id, SessionAction::Wake)
+                    .wake_session(&p.chat_id, p.machine.as_deref(), p.wake)
+                    .await
+                    .map_err(failed)?,
+            )
+        }
+        methods::CLOUD_SESSION_RETRY => {
+            let p: SizedChatParams = params(raw)?;
+            RpcReply::value(
+                &cloud
+                    .retry_session(&p.chat_id, p.machine.as_deref())
                     .await
                     .map_err(failed)?,
             )
@@ -1005,6 +1160,23 @@ pub(crate) async fn dispatch(
         methods::GITHUB_CONNECT_POLL => {
             let p: FlowParams = params(raw)?;
             RpcReply::value(&cloud.github_poll(&p.flow_id).await.map_err(failed)?)
+        }
+        methods::GITHUB_ACCOUNTS => {
+            let accounts = cloud
+                .vault_accounts(VaultProvider::Github)
+                .await
+                .map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
+        methods::GITHUB_ACCOUNT_FORGET => {
+            let p: SlotParams = params(raw)?;
+            let accounts = cloud.github_forget(&p.slot).await.map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
+        methods::GITHUB_ACCOUNT_ACTIVATE => {
+            let p: SlotParams = params(raw)?;
+            let accounts = cloud.github_activate(&p.slot).await.map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
         }
         methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE => {
             let p: DevicesParams = params(raw)?;
@@ -1125,7 +1297,11 @@ impl Target {
         let is_read = method == reqwest::Method::GET;
         let is_delete = method == reqwest::Method::DELETE;
         let token = self.token.token().await.map_err(token_error)?;
-        let mut request = self.http.request(method, url).bearer_auth(token);
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(token)
+            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1156,6 +1332,24 @@ impl Target {
     }
 }
 
+
+/// The edge's models, as this engine's catalog takes them: each read alone, so
+/// one this build can't read (a reasoning level it doesn't know, say) drops
+/// that level or that model, never the list.
+pub fn cloud_models(listed: &[serde_json::Value]) -> Vec<zeron_proto::Model> {
+    listed
+        .iter()
+        .filter_map(|m| {
+            let mut m = m.clone();
+            if let Some(levels) = m.get_mut("reasoningLevels").and_then(|l| l.as_array_mut()) {
+                levels.retain(|l| {
+                    serde_json::from_value::<zeron_proto::ReasoningLevel>(l.clone()).is_ok()
+                });
+            }
+            serde_json::from_value::<zeron_proto::Model>(m).ok()
+        })
+        .collect()
+}
 
 fn available_vault(status: VaultStatus) -> VaultStatus {
     VaultStatus {
@@ -1218,6 +1412,11 @@ fn edge_error(status: u16, body: &[u8], what: &str) -> EngineError {
         (_, status) => format!("{what} failed ({status})."),
     });
     tracing::warn!(status, code = code.as_deref().unwrap_or(""), %what, "cloud: edge refused");
+    // The one refusal a client acts on rather than shows: kept in the text, as
+    // an RPC's error is only text.
+    if code.as_deref().is_some_and(|c| c.contains("too_small")) {
+        return EngineError::Other(format!("{DISK_TOO_SMALL}: {text}"));
+    }
     EngineError::Other(text)
 }
 
@@ -1233,6 +1432,7 @@ mod tests {
         method: String,
         target: String,
         authorization: Option<String>,
+        cloud_states: Option<String>,
         body: serde_json::Value,
     }
 
@@ -1275,6 +1475,7 @@ mod tests {
                         let target = request_line.next().unwrap_or("").to_string();
                         let mut length = 0usize;
                         let mut authorization = None;
+                        let mut cloud_states = None;
                         for line in lines {
                             if let Some((name, value)) = line.split_once(':') {
                                 let value = value.trim();
@@ -1282,6 +1483,8 @@ mod tests {
                                     length = value.parse().unwrap_or(0);
                                 } else if name.eq_ignore_ascii_case("authorization") {
                                     authorization = Some(value.to_string());
+                                } else if name.eq_ignore_ascii_case(CLOUD_STATES_HEADER) {
+                                    cloud_states = Some(value.to_string());
                                 }
                             }
                         }
@@ -1301,6 +1504,7 @@ mod tests {
                             method,
                             target,
                             authorization,
+                            cloud_states,
                             body,
                         });
                         let reply = reply.to_string();
@@ -1468,6 +1672,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cloud_models_are_read_one_at_a_time() {
+        let listed = vec![
+            serde_json::json!({ "id": "opus", "label": "Opus", "reasoningLevels": ["low", "ultrathink", "someday"], "options": [] }),
+            serde_json::json!({ "label": "No id" }),
+            serde_json::json!({ "id": "sonnet", "label": "Sonnet" }),
+        ];
+        let models = cloud_models(&listed);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus", "sonnet"]);
+        // A level this build doesn't know goes; the model stays.
+        assert_eq!(models[0].reasoning_levels.len(), 2);
+    }
+
     #[tokio::test]
     async fn cloud_lifecycle_against_the_edge() {
         let edge = MockEdge::start(edge).await;
@@ -1498,6 +1716,7 @@ mod tests {
                     private: true,
                     description: None,
                     pushed_at: 0,
+                    ..Default::default()
                 },
                 Some("feature/x"),
             )
@@ -1515,6 +1734,33 @@ mod tests {
             busy.to_string(),
             "All 5 of your Cloud sessions that may run at once are busy."
         );
+        // Every call says which states this build can parse: without it the
+        // edge answers as it must to an engine that can't read them.
+        assert!(
+            edge.requests()
+                .iter()
+                .all(|r| r.cloud_states.as_deref() == Some(CLOUD_STATES_UNDERSTOOD)),
+            "{:?}",
+            edge.requests()
+        );
+        // The size picked rides the wake, and only then.
+        let _ = client.wake_session("chat-1", Some("xlarge"), None).await;
+        let _ = client.wake_session("chat-1", Some("large"), Some(false)).await;
+        let _ = client.retry_session("chat-1", Some("large")).await;
+        let _ = client.set_machine("small").await;
+        let sent: Vec<(String, serde_json::Value)> = edge
+            .requests()
+            .into_iter()
+            .rev()
+            .take(4)
+            .map(|r| (r.target.clone(), r.body.clone()))
+            .collect();
+        assert_eq!(sent[3].1, serde_json::json!({ "machine": "xlarge" }));
+        assert_eq!(sent[2].1, serde_json::json!({ "machine": "large", "wake": false }));
+        assert!(sent[1].0.ends_with("/sessions/chat-1/retry"), "{}", sent[1].0);
+        assert_eq!(sent[1].1, serde_json::json!({ "machine": "large" }));
+        assert!(sent[0].0.ends_with("/machine"), "{}", sent[0].0);
+        assert_eq!(sent[0].1, serde_json::json!({ "machine": "small" }));
         // A malformed chat id never reaches the edge.
         assert!(
             client
@@ -1716,6 +1962,41 @@ mod tests {
             start.body,
             serde_json::json!({"authorizedDevices": ["cloud-1"]})
         );
+    }
+
+    #[tokio::test]
+    async fn a_size_too_small_is_told_apart_across_the_rpcs_plain_text_errors() {
+        fn edge(_: &str, target: &str, _: &serde_json::Value) -> (u16, serde_json::Value) {
+            if target.ends_with("/data-expired/wake") {
+                return (
+                    409,
+                    serde_json::json!({"error": "data_expired", "message": "Its files are gone."}),
+                );
+            }
+            (
+                409,
+                serde_json::json!({
+                    "error": "machine_too_small",
+                    "message": "This machine needs 118.3 GiB of disk; a large machine holds 111.8 GiB.",
+                    "machine": "large", "neededGiB": 118.3, "capacityGiB": 111.8
+                }),
+            )
+        }
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let refused = client
+            .wake_session("chat-1", Some("large"), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.starts_with("disk_too_small: "), "{refused}");
+        assert!(refused.contains("118.3 GiB"), "{refused}");
+        // Any other refusal stays the edge's own sentence.
+        let expired = client
+            .wake_session("data-expired", None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(expired.to_string(), "Its files are gone.");
     }
 
     #[tokio::test]

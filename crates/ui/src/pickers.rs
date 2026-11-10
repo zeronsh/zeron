@@ -8339,6 +8339,7 @@ mod tests {
                     private: true,
                     description: None,
                     pushed_at: 0,
+                    ..Default::default()
                 }]);
                 state
             });

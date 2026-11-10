@@ -149,6 +149,10 @@ type InstalledProbe = Box<dyn Fn() -> bool + Send + Sync>;
 /// download and install the real agent when merely probed.
 pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[HarnessId::Codex, HarnessId::ClaudeCode];
 
+/// How long a run waits for an expected [`RunEnvironment`]: far longer than the
+/// engine's assembly, on any disk.
+const RUN_ENVIRONMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Host-side environment for agent spawns (the Cloud device's credential
 /// broker). Called right before a request reaches the harness; whatever it
 /// puts in [`zeron_proto::RunRequest::env`] is never persisted.
@@ -212,6 +216,8 @@ pub struct HarnessRegistry {
     update_generation: tokio::sync::watch::Sender<u64>,
     /// Spawn-time environment provider (Cloud runner only).
     run_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
+    /// False from [`Self::expect_run_environment`] until it's installed.
+    run_environment_ready: tokio::sync::watch::Sender<bool>,
     /// Spawn-time environment of the agent accounts zeron keeps itself
     /// (Muse's per-account roots); after the Cloud broker, never over it.
     account_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
@@ -300,6 +306,7 @@ impl HarnessRegistry {
             pending_updates: Mutex::new(std::collections::HashSet::new()),
             update_generation,
             run_environment: Mutex::new(None),
+            run_environment_ready: tokio::sync::watch::channel(true).0,
             account_environment: Mutex::new(None),
             commit_credit: std::sync::OnceLock::new(),
         }
@@ -312,6 +319,15 @@ impl HarnessRegistry {
             .run_environment
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(environment);
+        self.run_environment_ready.send_replace(true);
+    }
+
+    /// One is on its way: runs wait for it rather than start without it. On a
+    /// Cloud machine, boot recovery dispatches a killed turn while the engine
+    /// is still assembling, ahead of the credential broker. Started then, the
+    /// agent has no login and none of its earlier conversations, and it fails.
+    pub fn expect_run_environment(&self) {
+        self.run_environment_ready.send_replace(false);
     }
 
     /// Install the agent accounts' environment provider (every device).
@@ -345,6 +361,13 @@ impl HarnessRegistry {
         chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
+        let mut ready = self.run_environment_ready.subscribe();
+        if tokio::time::timeout(RUN_ENVIRONMENT_WAIT, ready.wait_for(|ready| *ready))
+            .await
+            .is_err()
+        {
+            return Err("This machine's agent logins aren't ready yet. Send again in a moment.".into());
+        }
         for environment in self.environments() {
             environment.prepare(harness, chat_id, request).await?;
         }

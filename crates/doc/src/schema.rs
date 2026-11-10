@@ -416,12 +416,17 @@ pub struct ProviderSessionMark {
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    /// See `queue_row_guard` (queue.rs).
+    pub(crate) queue_rows: std::sync::Mutex<()>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            queue_rows: std::sync::Mutex::new(()),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -431,7 +436,7 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self::from_doc(doc))
     }
 
     pub fn doc(&self) -> &LoroDoc {
