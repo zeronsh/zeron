@@ -1656,7 +1656,7 @@ return ui.component(function(props: Props): Node
 			rounded = "$radius.full",
 			pointer_events = "none",
 			ui.presence(function(): string?
-				return if dictating() then "on" else nil
+				return if dictating() then `on:{ui.theme.current:get()}` else nil
 			end, function(_k: string): Node
 				return ui.row {
 					absolute = true,
@@ -1687,7 +1687,10 @@ return ui.component(function(props: Props): Node
 						bg_shader = VOICE,
 						-- (The engine steps its time: without it, it holds its first frame.)
 						shader_clock = true,
-						shader_params = { "$zeron.composer.voice.ink", { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
+						-- (Its ink as a colour, not a token: a clocked shader's parameters
+						-- drop theme tokens, zgx 4809bcce. Its presence's key holds the
+						-- theme, so the bar is made again as that changes.)
+						shader_params = { ui.theme.get("zeron.composer.voice.ink"), { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
 					},
 					ui.text {
 						clock,
