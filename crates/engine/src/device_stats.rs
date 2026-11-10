@@ -193,10 +193,19 @@ pub fn collect(places: &Places) -> DeviceStats {
         logical_cores: logical
             .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get())),
     };
+    // macOS: sysinfo subtracts the compressor's pages from free + inactive
+    // + purgeable, which floors at 0 on a busy Mac (more compressed than
+    // reclaimable); this asks the kernel the way psutil does instead. A 0
+    // anywhere else is no answer either: null, never a false "nothing left".
+    #[cfg(target_os = "macos")]
+    let available = mac_memory::available_bytes();
+    #[cfg(not(target_os = "macos"))]
+    let available = Some(system.available_memory());
     let memory = MemoryStats {
         total_bytes: Some(system.total_memory()).filter(|n| supported && *n > 0),
-        available_bytes: Some(system.available_memory())
-            .filter(|_| supported && system.total_memory() > 0),
+        available_bytes: available
+            .filter(|n| supported && *n > 0 && system.total_memory() > 0)
+            .map(|n| n.min(system.total_memory())),
     };
     let tidy = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let os = OsStats {
@@ -473,6 +482,52 @@ fn linux_battery(root: &Path) -> Option<BatteryStats> {
     })
 }
 
+/// The kernel's VM statistics: memory that can be handed out without
+/// swapping, i.e. free (speculative included) + inactive pages, as psutil
+/// counts it on macOS.
+#[cfg(target_os = "macos")]
+mod mac_memory {
+    use std::sync::OnceLock;
+
+    unsafe extern "C" {
+        // Declared here: libc marks its binding deprecated in favour of the
+        // mach2 crate, for this one call.
+        fn mach_host_self() -> libc::mach_port_t;
+    }
+
+    /// One send right to the host port for the engine's lifetime, not one
+    /// per report.
+    fn host() -> libc::mach_port_t {
+        static HOST: OnceLock<libc::mach_port_t> = OnceLock::new();
+        // SAFETY: no arguments; returns the caller's host port name.
+        *HOST.get_or_init(|| unsafe { mach_host_self() })
+    }
+
+    pub fn available_bytes() -> Option<u64> {
+        // SAFETY: `stat` is plain data the call fills; `count` says its size
+        // in natural-sized words, as the call requires.
+        unsafe {
+            let mut stat: libc::vm_statistics64 = std::mem::zeroed();
+            let mut count = libc::HOST_VM_INFO64_COUNT;
+            let status = libc::host_statistics64(
+                host(),
+                libc::HOST_VM_INFO64,
+                &mut stat as *mut libc::vm_statistics64 as *mut libc::integer_t,
+                &mut count,
+            );
+            if status != libc::KERN_SUCCESS {
+                return None;
+            }
+            let page = libc::sysconf(libc::_SC_PAGESIZE);
+            if page <= 0 {
+                return None;
+            }
+            let pages = u64::from(stat.free_count) + u64::from(stat.inactive_count);
+            Some(pages.saturating_mul(page as u64))
+        }
+    }
+}
+
 /// IOKit's power sources: the internal battery's capacity and state.
 #[cfg(target_os = "macos")]
 mod mac_battery {
@@ -593,6 +648,18 @@ mod tests {
         assert!(os.get("hostname").is_none(), "no hostname: {os}");
         if sysinfo::IS_SUPPORTED_SYSTEM {
             assert!(stats.memory.total_bytes.is_some_and(|t| t > 0), "{stats:?}");
+            // Some memory is always free or reclaimable on a running machine,
+            // however busy (a Mac whose compressor holds more than that read 0
+            // through sysinfo).
+            let total = stats.memory.total_bytes.unwrap_or_default();
+            assert!(
+                stats
+                    .memory
+                    .available_bytes
+                    .is_some_and(|a| a > 0 && a <= total),
+                "available memory: {:?} of {total}",
+                stats.memory.available_bytes
+            );
             assert!(stats.cpu.logical_cores.is_some_and(|n| n > 0), "{stats:?}");
             let data = stats
                 .storage
