@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 parakeet-rs = "=0.3.8"
+# Keep the nested ZGX workspace on the same native runtime as ZUI.
+ort = "=2.0.0-rc.13"
+ort-sys = "=2.0.0-rc.13"
 cpal = "=0.17.3"
 rubato = "=0.16.2"
 reqwest.workspace = true

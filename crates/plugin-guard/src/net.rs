@@ -170,7 +170,8 @@ impl HostRule {
 
 /// Whether a `network.hosts` entry reaches this device or your network
 /// (consent words it so): `localhost`, a private address, `.local`,
-/// `.internal`, `.lan`, `.home.arpa`, or a one-label name.
+/// `.internal`, `.lan`, `.home.arpa`, a one-label name, or a name ending in a
+/// number, which a resolver reads as an address (`127.1`, `0x7f.1`).
 pub fn risky(entry: &str) -> bool {
     let Ok(rule) = HostRule::parse(entry) else { return true };
     if let Ok(ip) = rule.host.parse::<IpAddr>() {
@@ -179,9 +180,25 @@ pub fn risky(entry: &str) -> bool {
     let host = rule.host.as_str();
     host == "localhost"
         || !host.contains('.')
+        || ends_in_a_number(host)
         || [".localhost", ".local", ".internal", ".lan", ".home.arpa", ".intranet", ".corp"]
             .iter()
             .any(|tail| host.ends_with(tail))
+}
+
+/// Whether `host`'s last label is a number (decimal, or `0x` hex).
+fn ends_in_a_number(host: &str) -> bool {
+    let last = host.trim_end_matches('.').rsplit('.').next().unwrap_or(host);
+    let hex = last.strip_prefix("0x").map(|digits| digits.bytes().all(|b| b.is_ascii_hexdigit()));
+    hex.unwrap_or_else(|| !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether a `network.hosts` entry names one host exactly, and so may reach a
+/// private address it resolves to ([`Policy::resolved`]): any but `*.` and
+/// the any-host `*`. A person is asked about each of these, because nothing
+/// can tell from a name where it will point.
+pub fn names_exactly(entry: &str) -> bool {
+    entry != "*" && !entry.trim_start().starts_with("*.")
 }
 
 /// A plugin's network rules: open (any public host) or its manifest's
@@ -402,5 +419,16 @@ mod tests {
         }
         assert!(risky("localhost:8080") && risky("10.0.0.5") && risky("nas.local") && risky("printer") && risky("[::1]"));
         assert!(!risky("api.example.com") && !risky("*.example.org"));
+        // A resolver reads these as this device.
+        for numeric in ["127.1", "127.1:8080", "0x7f.1", "0x7f.0x1", "2130706433", "1.2.3", "example.0x1"] {
+            assert!(risky(numeric), "{numeric}");
+        }
+        for name in ["a1.example.com", "1.example.com", "example.x1", "0x7f.example.com", "box.tail1234.ts.net"] {
+            assert!(!risky(name), "{name}");
+        }
+        for exact in ["api.example.com", "localhost:8080", "box.tail1234.ts.net", "10.0.0.5"] {
+            assert!(names_exactly(exact), "{exact}");
+        }
+        assert!(!names_exactly("*.example.org") && !names_exactly("*"));
     }
 }

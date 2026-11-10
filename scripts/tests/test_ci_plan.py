@@ -70,7 +70,7 @@ class PlanTests(unittest.TestCase):
 
     def test_lockfile_runs_every_rust_suite(self):
         suites = plan.plan(files("Cargo.lock"), "fast")
-        self.assertEqual(selected(suites), {"core", "ui", "cursor", "windows", "macos", "ios", "android"})
+        self.assertEqual(selected(suites), {"core", "ui", "cursor", "windows", "macos", "ios", "android", "zgx"})
 
     def test_mobile_core_selects_ios_and_android(self):
         suites = plan.plan(files("crates/sync/src/lib.rs", patch="+let x = 1;"), "fast")
@@ -95,6 +95,15 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(plan.plan(change, "fast")["voice"])
         self.assertFalse(plan.plan(change, "full")["voice"])
         self.assertTrue(plan.plan(change, "full", nightly=True)["voice"])
+
+    def test_zgx_runs_for_its_app_and_the_crates_it_builds(self):
+        zgx = ["crates/engine/**", "crates/proto/**"]
+        self.assertEqual(selected(plan.plan(files("apps/zgx/ui/app.luau"), "fast", zgx=zgx)), {"zgx"})
+        self.assertEqual(selected(plan.plan(files("apps/zgx/plugins-sdk/zeron.luau"), "fast", zgx=zgx)), {"zgx"})
+        self.assertIn("zgx", selected(plan.plan(files("crates/engine/src/plugins/mod.rs"), "fast", zgx=zgx)))
+        self.assertNotIn("zgx", selected(plan.plan(files("crates/ui/src/lib.rs"), "fast", zgx=zgx)))
+        # Without the workspace's closure: the static list.
+        self.assertIn("zgx", selected(plan.plan(files("crates/visual/src/lib.rs"), "fast")))
 
     def test_edge_and_installer(self):
         self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
@@ -144,14 +153,15 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + ui + cursor + voice + ios-core + apk; voice runtime + windows x2; native + ios-tests
-        self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 2})
+        # result + core + ui + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
+        # native + ios-tests + zgx-macos
+        self.assertEqual(counts, {"linux": 8, "windows": 3, "macos": 3})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
-        self.assertEqual(main["linux"], 8)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=2")
+        self.assertEqual(main["linux"], 9)  # + android publish
+        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=3 macos=3")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
-        self.assertEqual(daytime, {"linux": 7, "windows": 2, "macos": 2})  # no voice
+        self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
@@ -173,6 +183,7 @@ class WorkflowConsistencyTests(unittest.TestCase):
         "frame_source": ("macos.yml", ["macos-frame-source"]),
         "ios": ("macos.yml", ["ios-core", "ios-tests"]),
         "android": ("android.yml", ["apk"]),
+        "zgx": ("zgx-tests.yml", ["zgx-macos", "zgx-linux"]),
     }
 
     def test_job_runners_match(self):

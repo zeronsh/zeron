@@ -4066,6 +4066,19 @@ end)
 }
 
 #[test]
+fn account_pin_says_what_its_service_did() {
+    let (mut app, heard) = shell_with_agents(vec![example("account-pin")], json!({}));
+    assert_eq!(app.error(), None, "the shell with the example failed");
+    tell(&mut app, "account-pin", "pinned", json!({ "chat": "s-unknown", "to": "b@example.com" }));
+    tell(&mut app, "account-pin", "lost", json!({ "account": "acct-b", "chat": "s-unknown" }));
+    let toasts = said(&heard, "plugin.account-pin.toast");
+    assert_eq!(toasts.len(), 2, "{toasts:?}");
+    assert!(toasts[0].contains("running on b@example.com"), "{toasts:?}");
+    assert!(toasts[1].contains("saved account was removed"), "{toasts:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
 fn keep_going_says_what_its_service_sent() {
     let (mut app, heard) = shell_with_agents(vec![example("keep-going")], json!({}));
     assert_eq!(app.error(), None, "the shell with the example failed");
@@ -4110,4 +4123,29 @@ end)
         assert!(toasts.iter().any(|t| t.contains(want)), "{want}: {toasts:?}");
     }
     assert_eq!(app.error(), None);
+}
+
+/// Every copy of the SDK in this repository (Zeron's own plugins, the
+/// examples) is the canonical one (plugins-sdk/zeron.luau), byte for byte: a
+/// copy is signed into each plugin and Zeron's own ship as they lie, so a
+/// stale one goes out without the helpers the guide documents. Fix with
+/// `for f in apps/zgx/plugins-{builtin,dev}/*/zeron.luau; do cp apps/zgx/plugins-sdk/zeron.luau "$f"; done`.
+#[test]
+fn sdk_copies_match_canonical() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let canonical = std::fs::read(root.join("plugins-sdk/zeron.luau")).unwrap();
+    let mut seen = 0;
+    let mut stale = Vec::new();
+    for group in ["plugins-builtin", "plugins-dev"] {
+        for entry in std::fs::read_dir(root.join(group)).unwrap().flatten() {
+            let copy = entry.path().join("zeron.luau");
+            let Ok(bytes) = std::fs::read(&copy) else { continue };
+            seen += 1;
+            if bytes != canonical {
+                stale.push(copy.strip_prefix(root).unwrap().display().to_string());
+            }
+        }
+    }
+    assert!(seen >= 14, "expected the SDK in every builtin and example, found {seen}");
+    assert!(stale.is_empty(), "stale SDK copies (re-copy plugins-sdk/zeron.luau): {stale:?}");
 }

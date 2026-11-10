@@ -52,6 +52,7 @@ local dock = require("@self/composer_dock")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
+local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
@@ -249,6 +250,11 @@ export type Props = {
 	dictating: State<boolean>?,
 	on_dictate: (() -> ())?,
 	on_cancel_dictation: (() -> ())?,
+	-- Dictation for real (screens/chat/dictation's `bind`): its microphone,
+	-- the editor's events it follows, and Send waiting for its words. With
+	-- its `levels` and `phase`, the track's waveform follows the microphone
+	-- (ds/voice_wave); without, it moves from the time alone.
+	dictation: any?,
 	-- Nothing can be written (a chat archived, an agent gone): dimmed, the
 	-- notice saying why.
 	disabled: (boolean | () -> boolean)?,
@@ -943,7 +949,8 @@ local function place_line(p: Place): { Child }
 	}
 end
 
--- The voice, while dictating: bars across the track, each breathing on
+-- The voice, while dictating with no levels to follow (the gallery, fixtures:
+-- ds/voice_wave draws the microphone): bars across the track, each breathing on
 -- its own, from the time alone (no script per frame). params[0]: the ink.
 local VOICE = ui.shader([[
 fn fill(input: FillInput) -> vec4<f32> {
@@ -989,7 +996,11 @@ return ui.component(function(props: Props): Node
 	end
 	local value = props.value
 	local running = props.running
-	local field = ui.ref()
+	local spoken = props.dictation
+	if spoken then
+		props.dictating, props.on_cancel_dictation = spoken.dictating, spoken.cancel
+	end
+	local field = if spoken then spoken.editor else ui.ref()
 	local pill = ui.ref()
 
 	-- What it is laid out from, as layout last measured it (0: not yet):
@@ -1094,6 +1105,9 @@ return ui.component(function(props: Props): Node
 		value:set("")
 	end
 	local function send()
+		if spoken and spoken.before_send() then
+			return
+		end
 		local text = value:peek()
 		if asking() then
 			answer()
@@ -1107,8 +1121,11 @@ return ui.component(function(props: Props): Node
 		end
 		value:set("")
 	end
+	if spoken then
+		spoken.send = send
+	end
 	local function stopping(): boolean
-		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking()
+		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
 
 	-- Mentions at the caret.
@@ -1511,8 +1528,9 @@ return ui.component(function(props: Props): Node
 			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
 		end,
 		disabled = function()
-			return disabled() or not (has_text() or has_cargo())
+			return disabled() or not (has_text() or has_cargo() or dictating())
 		end,
+		on_press = if spoken then spoken.on_send_press else nil,
 		on_click = send,
 		Icon { name = "arrow-up", size = 14 },
 	}
@@ -1642,7 +1660,7 @@ return ui.component(function(props: Props): Node
 			rounded = "$radius.full",
 			pointer_events = "none",
 			ui.presence(function(): string?
-				return if dictating() then "on" else nil
+				return if dictating() then `on:{ui.theme.current:get()}` else nil
 			end, function(_k: string): Node
 				return ui.row {
 					absolute = true,
@@ -1666,19 +1684,17 @@ return ui.component(function(props: Props): Node
 						bg = "$zeron.composer.voice.ink",
 						opacity = ui.loop { from = 0.35, to = 1, duration = 900, fps = 30 },
 					},
-					ui.text {
-						locale.t("ds.composer.listening"),
-						shrink = 0,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
-					},
-					ui.div {
+					if spoken and spoken.levels and spoken.phase then VoiceWave { levels = spoken.levels, phase = spoken.phase } else ui.div {
 						grow = 1,
 						h = 16,
 						min_w = 24,
 						bg_shader = VOICE,
-						shader_params = { "$zeron.composer.voice.ink", { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
+						-- (The engine steps its time: without it, it holds its first frame.)
+						shader_clock = true,
+						-- (Its ink as a colour, not a token: a clocked shader's parameters
+						-- drop theme tokens, zgx 4809bcce. Its presence's key holds the
+						-- theme, so the bar is made again as that changes.)
+						shader_params = { ui.theme.get("zeron.composer.voice.ink"), { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
 					},
 					ui.text {
 						clock,
@@ -1888,31 +1904,12 @@ return ui.component(function(props: Props): Node
 			right = eased(text_right),
 			top = eased(text_top),
 			h = eased(text_h),
-			-- Its placeholder, the composer's own (it changes with what is
-			-- asked): over the empty draft, taking no pointer.
-			ui.show(
-				function()
-					return value:get() == ""
-				end,
-				ui.text {
-					placeholder,
-					absolute = true,
-					left = 0,
-					top = 0,
-					right = 0,
-					truncate = true,
-					pointer_events = "none",
-					aria_hidden = true,
-					text_size = "$zeron.composer.text",
-					line_height = "$zeron.composer.line",
-					color = "$text.tertiary",
-				}
-			),
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
 				label = locale.t("ds.composer.message"),
-				placeholder = "",
+				placeholder = placeholder,
+				placeholder_color = "$text.tertiary",
 				read_only = disabled,
 				w_full = true,
 				h_full = true,
@@ -1934,13 +1931,26 @@ return ui.component(function(props: Props): Node
 				-- behind each file, command or skill mentioned.
 				highlight = mentions.highlight,
 				active_descendant = m.descendant,
-				on_caret = m.on_caret,
+				on_caret = if spoken
+					then function(line, column, anchor, focus)
+						m.on_caret(line, column, anchor, focus)
+						spoken.on_caret()
+					end
+					else m.on_caret,
+				on_change = if spoken then spoken.on_change else nil,
 				on_focus = function()
 					m.on_focus(true)
+					if spoken and spoken.on_focus then
+						spoken.on_focus()
+					end
 				end,
 				on_blur = function()
 					m.on_focus(false)
+					if spoken and spoken.on_blur then
+						spoken.on_blur()
+					end
 				end,
+				on_key_up = if spoken then spoken.on_key_up else nil,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
@@ -2064,7 +2074,7 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				mic,
+				if spoken then spoken.mic() else mic,
 				ui.show(stopping, stop_button),
 				ui.show(function()
 					return not stopping()

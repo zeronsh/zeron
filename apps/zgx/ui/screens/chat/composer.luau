@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
@@ -37,15 +38,14 @@ local Appshots = require("@app/screens/chat/appshots")
 local Carried = require("@app/screens/chat/carried")
 local Completions = require("@app/screens/chat/completions")
 
--- The title bar's height (Zeron's): a new chat centres under it.
-local TITLE_H = 38
 -- Zeron's dock spring (ω ≈ 27).
 local DOCK: SpringOptions = { stiffness = 730, damping = 54 }
 -- Its gap to the window's foot, docked. Its width, rising and docked: the
 -- transcript's column (Settings' "Conversation width"), as Zeron's
 -- composer lines up with the conversation over it (its edges on the
 -- column's).
-local FOOT = require("@app/screens/chat/dock").GAP
+local Dock = require("@app/screens/chat/dock")
+local FOOT = Dock.GAP
 
 -- What a new chat starts with: what was last chosen on the new-chat page
 -- (its settings, its own: a chat shown or made never changes them), kept
@@ -927,9 +927,8 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
-	local accounts = shared.model_accounts(function(): string?
-		return device:get()
-	end)
+	-- (The catalog's device, a new chat's project's host included.)
+	local accounts = shared.model_accounts(run_device)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -960,8 +959,15 @@ local function Composer(): Node
 		}
 	end
 
+	local dictation = Dictation.bind(shared.text, function(): string
+		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
+	end, function(): boolean
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+	end, "main")
+
 	local function composer(): Node
 		return ds.Composer {
+			dictation = dictation,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",
@@ -1224,7 +1230,7 @@ local function Composer(): Node
 		-- and grows down from there. Only a draft that would run off the
 		-- page's foot moves it, up by as much.)
 		local rest = rest_tall:get() or tall
-		local hero = TITLE_H + (h - TITLE_H - 96) / 2
+		local hero = h / 2 + Dock.hero_offset()
 		local docked = h - FOOT - rest / 2
 		return math.min(hero - docked, rest - tall)
 	end
@@ -1382,7 +1388,7 @@ local function Composer(): Node
 					tall = shared.dock_h:get()
 				end
 				local rest = rest_tall:get() or tall
-				local at = TITLE_H / 2 - 48 - rest / 2
+				local at = Dock.hero_offset() - rest / 2
 				-- (Only a draft that would run off the page's foot moves it.)
 				local h = page.height or 0
 				if h > 0 then

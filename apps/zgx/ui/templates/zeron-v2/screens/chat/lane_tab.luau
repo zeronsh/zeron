@@ -9,6 +9,7 @@
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
@@ -364,8 +365,14 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		return where.plan() :: any
 	end
+	-- (A chat sent already has its host in the session: `device` is only
+	-- seeded while it's unsent.)
 	local accounts = Shared.model_accounts(function(): string?
-		return device:get()
+		if unsent() then
+			return device:get()
+		end
+		local s = session:get()
+		return if s then s.device else nil
 	end)
 	-- A new side chat's composer takes the keys as it's made.
 	if lanes.take_keys:peek()[chat] then
@@ -417,7 +424,16 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		run = run_command,
 	}
+	local dictation = Dictation.bind(draft, function(): string
+		local edit = editing:get()
+		return `{chat}|{name}|{if edit then edit.item else ""}`
+	end, function(): boolean
+		local current = session:get()
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil
+			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
+	end, name)
 	return ds.Composer {
+		dictation = dictation,
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = function(cid: string)

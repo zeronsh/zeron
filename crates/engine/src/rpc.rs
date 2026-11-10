@@ -60,6 +60,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod remote_plugins;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -2474,16 +2475,20 @@ fn forwardable(method: &str) -> bool {
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
             // Plugins are per device (what it runs, what it allowed): Settings
-            // → Plugins' device switcher lists, declines, turns off, installs
-            // (from a link; it lands waiting there) and removes them on
-            // another of your devices from this one. Allowing stays with
-            // that device's own window (`zeron_rpc::peer_refused`, both ends).
+            // → Plugins' device switcher lists, reviews, allows, declines,
+            // turns off, installs (from a link, or a file it sends there)
+            // and removes them on another of your devices from this one.
+            // What the consent window sends goes only for this device's app
+            // (`zeron_rpc::app_forward_only`), and there it's held to a
+            // review minted for this device (plugins/reviews.rs).
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
+            | methods::REVIEW_PLUGIN
             | methods::DECIDE_PLUGIN
             | methods::SET_PLUGIN_OFF
             | methods::REMOVE_PLUGIN
             | methods::INSTALL_PLUGIN
+            | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
             | methods::PLUGIN_STATUS
@@ -2983,12 +2988,22 @@ impl RpcService for EngineRpc {
                     "Another device installs a plugin from a link (url), not a file on this one".into(),
                 ));
             }
-            // Allowing a plugin is that device's person's, in its own window
-            // (the receiving side refuses it too: `zeron_rpc::peer_refused`).
+            // What only that device may answer for itself (credentials,
+            // signing, templates' consent), refused there too.
             if zeron_rpc::peer_refused(method, &params) {
                 return Err(RpcError::Failed(format!(
                     "{method}: only that device's own window can do that. It's waiting for you there."
                 )));
+            }
+            // A review, an allow and a file sent there are Zeron's consent
+            // window's and Settings → Plugins': this device's app, never an
+            // agent's token (which can't call them here either).
+            if zeron_rpc::app_forward_only(method, &params) {
+                if !zeron_rpc::caller().is_local() {
+                    return Err(crate::plugins::reviews::needed("Allowing a plugin on another device"));
+                }
+                let reply = self.forward(&target, method, params).await;
+                return reply.map_err(|error| remote_plugins::older_engine(&target, method, error));
             }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)

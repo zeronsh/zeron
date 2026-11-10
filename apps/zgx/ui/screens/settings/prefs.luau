@@ -31,10 +31,14 @@ local PrivateText = require("@ds/private_text")
 local M = {}
 
 M.send_with = ui.persist("settings_send_with", "enter")
+-- Settings → Voice: dictation on (the shipping app's `dictation_enabled`, off
+-- by default), and the microphone it hears ("system" for the system's).
+M.dictation = ui.persist("settings_dictation", false)
+M.dictation_input = ui.persist("settings_dictation_input", "system")
 M.escape_stops = ui.persist("settings_escape_stops", false)
 -- Whether closing a panel's last tab closes the panel too (off: it stays
--- open on its home). Off by default.
-M.close_panel_with_last_tab = ui.persist("settings_close_panel_with_last_tab", false)
+-- open on its home). On by default: an empty panel is one nobody's using.
+M.close_panel_with_last_tab = ui.persist("settings_close_panel_with_last_tab", true)
 M.compact_transcript = ui.persist("settings_compact_transcript", false)
 -- (Told to the host, which lays a reply being written out compact only while
 -- the transcript shows it so: src/chat.rs `compact_shown`.)

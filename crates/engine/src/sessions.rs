@@ -1077,7 +1077,7 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self.inner.registry.run_credential(harness_id).await;
+        let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1308,7 +1308,7 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self.inner.registry.run_credential(harness_id).await {
+        match self.inner.registry.run_credential(harness_id, Some(chat_id)).await {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
@@ -4088,11 +4088,20 @@ async fn drive_run(
                 );
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
-                match inner
+                let prepared = inner
                     .registry
-                    .prepare_run(harness_id, &mut wire_request)
-                    .await
-                {
+                    .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
+                    .await;
+                if prepared.is_ok() {
+                    // Preparing can decide the chat's account (a plugin's
+                    // `run.preparing` pin): the session parks on what it
+                    // really started with, not on what dispatch read before.
+                    let now = inner.registry.run_credential(harness_id, Some(&chat_id)).await;
+                    if let Some(h) = lock(&inner.runs).get_mut(&chat_id).filter(|h| h.run_id == run_id) {
+                        h.credential = now;
+                    }
+                }
+                match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => harness.run(wire_request, controls).await,
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),

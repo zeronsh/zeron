@@ -124,7 +124,7 @@ impl AgentAccounts {
 
     /// The environment that points Muse at account `name`'s config root,
     /// with its mirror refreshed.
-    fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
+    pub(super) fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
         let home = self.muse_home(name)?;
         private_dir(&home)?;
         let root = home.join("config");
@@ -392,6 +392,7 @@ impl crate::registry::RunEnvironment for MuseRunEnvironment {
     async fn prepare(
         &self,
         harness: HarnessId,
+        _chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
         if harness != HarnessId::Muse {
@@ -405,7 +406,7 @@ impl crate::registry::RunEnvironment for MuseRunEnvironment {
         Ok(())
     }
 
-    async fn credential(&self, harness: HarnessId) -> Option<String> {
+    async fn credential(&self, harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         (harness == HarnessId::Muse)
             .then(|| {
                 self.0
@@ -607,7 +608,7 @@ for line in sys.stdin:
 
         // None kept yet: Muse runs on its own login.
         assert_eq!(
-            env.credential(HarnessId::Muse).await.as_deref(),
+            env.credential(HarnessId::Muse, None).await.as_deref(),
             Some(OWN_LOGIN)
         );
 
@@ -658,14 +659,14 @@ for line in sys.stdin:
 
         // A run gets the selected account's root; switching changes it.
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, &mut request).await.unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request).await.unwrap();
         let root_a = request.env["XDG_CONFIG_HOME"].clone();
         assert_eq!(request.env["TBH_CREDENTIAL_BACKEND"], "file");
         assert_eq!(
             std::fs::read_to_string(Path::new(&root_a).join("muse/auth.json")).unwrap(),
             r#"{"email": "a@example.com"}"#
         );
-        let before = env.credential(HarnessId::Muse).await;
+        let before = env.credential(HarnessId::Muse, None).await;
         let listed = rows(
             accounts
                 .activate(HarnessId::Muse, &listed[1].2)
@@ -673,13 +674,13 @@ for line in sys.stdin:
                 .unwrap(),
         );
         assert!(listed[1].1 && !listed[0].1);
-        assert_ne!(env.credential(HarnessId::Muse).await, before);
+        assert_ne!(env.credential(HarnessId::Muse, None).await, before);
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, &mut request).await.unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request).await.unwrap();
         assert_ne!(request.env["XDG_CONFIG_HOME"], root_a);
         // Other agents are untouched; the user's own login never moved.
         let mut other = run_request();
-        env.prepare(HarnessId::ClaudeCode, &mut other)
+        env.prepare(HarnessId::ClaudeCode, None, &mut other)
             .await
             .unwrap();
         assert!(other.env.is_empty());
@@ -698,7 +699,7 @@ for line in sys.stdin:
         assert_eq!(listed.len(), 1);
         assert_eq!(std::fs::read_to_string(fake.join("logouts")).unwrap(), "1");
         assert_eq!(
-            env.credential(HarnessId::Muse).await.as_deref(),
+            env.credential(HarnessId::Muse, None).await.as_deref(),
             Some(OWN_LOGIN)
         );
     }

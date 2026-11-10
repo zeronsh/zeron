@@ -9,6 +9,7 @@
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
@@ -567,8 +568,15 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			focus:add(1)
 		end)
 	end
+	-- (A chat sent already has its host in the session: `device` is only
+	-- seeded while it's unsent, so reading it alone asked this computer's
+	-- engine for a chat running on another's.)
 	local accounts = Shared.model_accounts(function(): string?
-		return device:get()
+		if unsent() then
+			return device:get()
+		end
+		local s = session:get()
+		return if s then s.device else nil
 	end)
 	-- What `@`, `/` and `$` offer, as the chat page's. (A split's pane: the
 	-- window's composer types, a press focusing it.)
@@ -620,7 +628,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				return chat
 			end,
 		}
+	local dictation = Dictation.bind(draft, function(): string
+		local edit = editing:get()
+		return `{chat}|{name}|{if edit then edit.item else ""}`
+	end, function(): boolean
+		local current = session:get()
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil
+			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
+			or (focused ~= nil and not focused())
+	end, name)
 	return ds.Composer {
+		dictation = dictation,
 		value = draft,
 		snap = if split then snap else nil,
 		-- (Its transcript's "Jump to latest", while it shows: its trays'

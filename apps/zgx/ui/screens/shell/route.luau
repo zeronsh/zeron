@@ -1,7 +1,8 @@
 -- Where the main window is: a new chat (`home`), a session
 -- (`session/:id`) or a page of settings (`settings/:page`), in one
 -- `ui.router` with the history behind and ahead (the title bar's arrows,
--- the mouse's buttons and a trackpad's swipe over the page, ⌘[ and ⌘]).
+-- the mouse's back and forward buttons, ⌘[ and ⌘]; a trackpad's swipe
+-- doesn't step it).
 -- The other screens read where it is from here and move it from here:
 --
 --   route.make()            the router made (the shell, as it's built)
@@ -581,10 +582,30 @@ function M.narrowed_project(get: () -> string?)
 	narrowed_to = get
 end
 
+-- The chat last open, until a new chat is started (the one open on a
+-- chat's route, held under settings too). A new chat asked for in no
+-- project starts where it was, when the list isn't narrowed to one.
+local last_chat = ui.state("shell_last_chat", nil :: string?)
+ui.effect(function()
+	local c = M.chat:get()
+	if c.name == "session" and c.session and c.session ~= last_chat:peek() then
+		last_chat:set(c.session)
+	end
+end)
+
 function M.new_chat(project: string?, device: string?)
 	if project == nil and device == nil then
 		project = narrowed_to()
+		if project == nil then
+			-- (Its project, on its device; a chat in none, "No project" on its
+			-- device. One gone, or no chat open before: the project chosen stays.)
+			local c = chat_of(last_chat:peek())
+			if c and c.device then
+				project, device = c.project or "none", c.device
+			end
+		end
 	end
+	last_chat:set(nil)
 	local on: string? = nil
 	-- (None of the project's there: none chosen, so the composer picks.)
 	local unchosen = false
@@ -695,6 +716,21 @@ function M.forward()
 	if router then
 		router.forward()
 	end
+end
+
+-- A mouse's side buttons (X1 back, X2 forward: `button` 4 and 5 of an
+-- `on_aux_click`) as a browser takes them. Whether it was one. (A
+-- trackpad's swipe never steps it; Alt+←/→ are zgx's own `router.back`
+-- and `router.forward` commands.)
+function M.aux_click(e: { button: any }): boolean
+	if e.button == 4 then
+		M.back()
+		return true
+	elseif e.button == 5 then
+		M.forward()
+		return true
+	end
+	return false
 end
 
 return M

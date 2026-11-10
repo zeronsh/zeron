@@ -150,6 +150,17 @@ end
 -- (A headless host draws no WebP: a new chat on no picture.)
 local appearance = require("@app/screens/shell/appearance")
 appearance.wallpaper:set("none")
+-- A wallpaper chosen, for what stands over a new chat's art (v2's
+-- title-bar island): its picture needn't draw.
+ui.command {
+	id = "fixture.wallpaper",
+	title = "Fixture: a wallpaper",
+	menu = "Fixture",
+	run = function()
+		appearance.image:set({ path = "/fixture/wallpaper.png", name = "wallpaper.png", w = 1600, h = 1000, x = 0.5, y = 0.5, zoom = 1 })
+		appearance.choose("image")
+	end,
+}
 -- The files pane's host calls (its own fixture drives them): a folder of
 -- one file, a beat later, as the host settles.
 local files_api = require("@app/screens/files/api") :: any
@@ -879,6 +890,13 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "session_delete_fails",
+	title = "The host refuses to delete “Tidy the tests”",
+	run = function()
+		refused.a3 = true
+	end,
+}
+ui.command {
 	id = "archive_many",
 	title = "Thirty sessions archived elsewhere",
 	run = function()
@@ -1237,12 +1255,15 @@ ui.command {
 	end,
 }
 -- A plugin narrowing the sidebar (`sidebar.filter`): to working sessions,
--- and to nonsense (a plugin's mistake, read as none).
+-- and to nonsense (a plugin's mistake, read as none). The host names the
+-- plugin allowed to (`sidebar.filter_by`), as src/plugins does.
 local sidebar_filter = ui.shared("sidebar.filter", nil :: any)
+local sidebar_filter_by = ui.shared("sidebar.filter_by", nil :: any)
 ui.command {
 	id = "focus",
 	title = "Focus shows working sessions only",
 	run = function()
+		sidebar_filter_by:set("Focus")
 		sidebar_filter:set({ statuses = { "working", "nonsense" }, by = "Focus" })
 	end,
 }
@@ -1277,6 +1298,15 @@ ui.command {
 	title = "A section of yours",
 	run = function()
 		model.places = { pinned = {}, sections = { { id = "later", name = "Later", sessions = { "b2" } } } }
+		publish()
+	end,
+}
+-- A section named longer than the sidebar is wide.
+ui.command {
+	id = "long_section",
+	title = "A section with a long name",
+	run = function()
+		model.places = { pinned = {}, sections = { { id = "later", name = "Everything to read again before the release goes out on Friday", sessions = { "b2" } } } }
 		publish()
 	end,
 }

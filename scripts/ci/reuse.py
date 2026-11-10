@@ -77,6 +77,9 @@ SUITE_INPUTS: dict[str, list[str]] = {
     "ios": [".github/workflows/macos.yml", "apps/ios/**", "scripts/ios/**"],
     "android": [".github/workflows/android.yml", "apps/android/**", "scripts/android/**",
                 "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**"],
+    # apps/zgx is a workspace of its own: all of it (sources, lockfile, Luau UI
+    # and tests, plugins, SDK) is an input; its path dependencies are in SUITE_PACKAGES.
+    "zgx": [".github/workflows/zgx-tests.yml", "apps/zgx/**"] + NEXTEST,
 }
 
 # The workspace packages each suite builds and tests (their dependencies are added).
@@ -91,6 +94,10 @@ SUITE_PACKAGES: dict[str, list[str]] = {
     "macos": ["zeron-update", "zeron-preview", "zeron-ui", "zeron-text", "zeron"],
     "ios": ["zeron-mobile", "zeron-text", "zeron-markdown", "zeron-client"],
     "android": ["zeron-mobile"],
+    # zeron-engine's plugin tests, and the root crates apps/zgx builds against.
+    "zgx": ["zeron-engine", "zatex", "zeron-theme", "zeron-preview-label", "zeron-cli", "zeron-launch",
+            "zeron-notify", "zeron-proto", "zeron-update", "zeron-visual", "zeron-plugin-guard",
+            "zeron-visual-gpu"],
 }
 
 # A ../ path that names something (a bare "../.." names no file); "/../x" as in
@@ -292,7 +299,7 @@ def covered(path: str, inputs: dict[str, tuple[list[str], set[str]]]) -> bool:
 
 # Changed files here that no fingerprint covers mean the inputs are not understood:
 # nothing is reused (fail closed).
-BUILD_PATHS = ["crates/**", "apps/zeron/**", "Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml"]
+BUILD_PATHS = ["crates/**", "apps/zeron/**", "apps/zgx/**", "Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml"]
 
 
 def passed_jobs(api, repo: str, key: str, trusted_refs: set[str]) -> set[str]:

@@ -36,6 +36,7 @@ mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
+mod dictation;
 mod completion;
 mod desktop_blur;
 mod engine;
@@ -71,6 +72,8 @@ mod audit_shots;
 mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod label_fade_tests;
 #[cfg(test)]
 mod waiting_toast_tests;
 #[cfg(test)]
@@ -230,7 +233,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
-            zeron_cli::Launch::Window { open_url: url } => open_url = url,
+            zeron_cli::Launch::Window { open_url: url, safe_mode } => {
+                open_url = url;
+                // Zeron's own interface (src/plugins/preview.rs safe mode):
+                // as Alt (⌥) held as it opens.
+                if safe_mode {
+                    plugins::ask_zeron_template();
+                }
+            }
             zeron_cli::Launch::Engine(_) => unreachable!("the helper runs the engine's commands"),
             #[cfg(target_os = "linux")]
             zeron_cli::Launch::Appshot => return Err("Appshots from the command line aren't in this app yet".into()),
@@ -251,7 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--inspect" => inspect = true,
             // Zeron's own template, whatever was in use (src/plugins/live.rs):
             // for one that breaks before its window can switch back.
-            "--zeron-template" => plugins::ask_zeron_template(),
+            "--zeron-template" | "--safe-mode" => plugins::ask_zeron_template(),
             // (Development: a fixture under ui/ in a window of its own, as
             // the gallery's; with `ZERON_ZGX_DEV_PLUGINS`, plugins in it.)
             other if other.starts_with("fixture=") && other.ends_with(".luau") => {
@@ -259,7 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => {
                 return Err(format!(
-                    "unknown argument `{other}`: expected intro, onboarding, main, gallery, --inspect or --zeron-template"
+                    "unknown argument `{other}`: expected intro, onboarding, main, gallery, --inspect, --safe-mode or --zeron-template"
                 )
                 .into());
             }
@@ -350,7 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// fixture, devtools), or none: not `zeron`'s command line.
 fn dev_launch(args: &[String]) -> bool {
     args.iter().all(|arg| {
-        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template")
+        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template" | "--safe-mode")
             || (arg.starts_with("fixture=") && arg.ends_with(".luau"))
     })
 }
@@ -767,6 +777,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         engine_update::install(cx, &host);
         // A chat: its transcript, sending, approvals (src/chat.rs).
         chat::install(cx, &host);
+        // Holding to dictate, and Settings → Voice (src/dictation.rs).
+        dictation::install(cx, &host);
         // Agent visuals in a transcript (src/visuals.rs).
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
@@ -1116,7 +1128,11 @@ fn palette_commands(bar: &[zgx_desktop::AppMenu], all: &[zgx_script::Command]) -
         for entry in entries {
             match entry {
                 zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
-                    let key = accelerator.as_ref().and_then(|_| all.iter().find(|c| c.id == action.0)).and_then(|c| c.key.clone());
+                    let key = accelerator.as_ref().and_then(|_| match all.iter().find(|c| c.id == action.0) {
+                        Some(command) => command.key.clone(),
+                        // The host's own way back has its key too.
+                        None => (action.0 == plugins::USE_ZERON_TEMPLATE).then(|| menu_bar::DEFAULT_INTERFACE_KEY.to_string()),
+                    });
                     let mut fields = vec![("id", Value::from(action.0.as_str())), ("title", Value::from(label.as_str())), ("menu", Value::from(menu))];
                     if let Some(key) = key {
                         fields.push(("key", Value::from(key.as_str())));

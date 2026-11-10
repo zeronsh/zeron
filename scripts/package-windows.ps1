@@ -129,6 +129,10 @@ try {
         Copy-Scripts 'apps/zgx/ui' (Join-Path $beta 'ui')
         Remove-Item -LiteralPath (Join-Path $beta 'ui/tests') -Recurse -Force
         Copy-Scripts 'apps/zgx/plugins-builtin' (Join-Path $beta 'plugins-builtin')
+        # Each ships the canonical SDK, as scripts/package-zgx-beta.sh.
+        foreach ($dir in Get-ChildItem -Directory -LiteralPath (Join-Path $beta 'plugins-builtin')) {
+            Copy-Item -LiteralPath 'apps/zgx/plugins-sdk/zeron.luau' -Destination (Join-Path $dir.FullName 'zeron.luau') -Force
+        }
         New-Item -ItemType Directory -Force -Path (Join-Path $beta 'engine') | Out-Null
         Copy-Item -LiteralPath $BetaEngine -Destination (Join-Path $beta 'engine/zeron.exe')
         Copy-Item -Path 'apps/zgx/fonts/*-OFL.txt' -Destination $licenses
