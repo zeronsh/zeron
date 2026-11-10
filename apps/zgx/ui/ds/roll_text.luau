@@ -141,10 +141,14 @@ return ui.component(function(props: { [any]: any }): Node
 		local a, b = chars(r.from), chars(r.to)
 		local head, tail = shared(a, b)
 		local em = size()
-		-- The strings to measure: each word's prefixes and its characters.
+		-- The strings to measure: the words, and where each character that
+		-- moves stands (`at`): the changed middle's, and the shared tail's
+		-- first. Its prefix up to and with it, and it alone; none of the
+		-- shared head, which stays as one text (a long label changing a
+		-- digit measures a few strings, not every prefix of both words).
 		local wanted: { [string]: boolean } = { [r.from] = true, [r.to] = true }
 		local function want(w: { string })
-			for i = 1, #w do
+			for i = math.max(head + 1, 2), math.min(#w - tail + 1, #w) do
 				wanted[join(w, 1, i)] = true
 				wanted[w[i]] = true
 			end
