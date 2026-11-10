@@ -15,7 +15,10 @@
 -- text; `ref`, `shrink`, `grow`, `min_w`, `max_w` go to its box. `anchor =
 -- "end"` for a label held by its right edge: the old characters rise out
 -- from that edge too. `rolls`: asked as the text changes, false for a change
--- that isn't one to watch (the new text at once).
+-- that isn't one to watch (the new text at once). `glide = false`: the box
+-- takes the new word's width at once rather than easing to it, for a label
+-- whose box shows nothing of its own width (one that fills what holds it):
+-- the roll the same, without laying the row out again every frame.
 
 local motion = require("@self/motion")
 local prefers = require("@self/prefers")
@@ -79,7 +82,7 @@ return ui.component(function(props: { [any]: any }): Node
 	local box: { [any]: any } = {}
 	for k, v in props do
 		-- (`children`: what ui.component adds of a component's own.)
-		if k ~= 1 and k ~= "children" and k ~= "anchor" and k ~= "rolls" then
+		if k ~= 1 and k ~= "children" and k ~= "anchor" and k ~= "rolls" and k ~= "glide" then
 			if BOX[k] then
 				box[k] = v
 			end
@@ -241,16 +244,19 @@ return ui.component(function(props: { [any]: any }): Node
 			local tail_to = function(): number
 				return offset(r.to) + at(b, #b - tail + 1)
 			end
+			local glide = props.glide ~= false
 			local v: { [any]: any } = {
 				relative = true,
-				w = width_of(r.from),
+				w = if glide then width_of(r.from) else width_of(r.to),
 				h = height,
 				on_resize = function(sz: { w: number, h: number })
 					box_w:set(sz.w)
 				end,
-				on_mount = function(el)
-					anime.animate(el, { w = { width_of(r.from), width_of(r.to) }, duration = DURATION, ease = EASE })
-				end,
+				on_mount = if glide
+					then function(el)
+						anime.animate(el, { w = { width_of(r.from), width_of(r.to) }, duration = DURATION, ease = EASE })
+					end
+					else nil,
 			}
 			-- The shared head, where both words put it.
 			if head > 0 then

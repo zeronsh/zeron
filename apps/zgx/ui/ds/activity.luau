@@ -943,7 +943,9 @@ return ui.component(function(props: Props): Node
 				-- ring over the trunk below; done, the summary alone, on the
 				-- reply's left edge.
 				ui.show(live, status.StatusIcon { kind = "working", size = LOADER }),
-				FadeText { title, roll = true, grow = 1, text_size = "$font.size.sm" },
+				-- (Its box fills the header: its width easing would show nothing,
+				-- and lay the header out every frame of a roll.)
+				FadeText { title, roll = true, glide = false, grow = 1, text_size = "$font.size.sm" },
 			}
 		),
 		-- The tree: its rows, each arriving under the last.
