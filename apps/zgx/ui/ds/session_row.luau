@@ -318,17 +318,18 @@ end
 -- its tooltip saying which device and what that means; reachable, nothing.
 -- (`on`: the "Unreachable chats" setting.)
 function M.unreachable(cur: () -> Session, on: () -> boolean): Node
-	-- (Keyed by what it says, as a tooltip takes a string: it follows its
-	-- device's name and the language.)
-	return ui.presence(function(): string
+	-- What it says, or "" for nothing (a tooltip takes a string: it follows
+	-- its device's name and the language).
+	local function says(): string
 		if not (on() and cur().offline == true) then
 			return ""
 		end
 		return locale.s("ds.sidebar.unreachable", { device = cur().device or locale.s("shell.sidebar.unknown_device") })
-	end, function(says: string): Node
-		if says == "" then
-			return ui.div { shrink = 0, w = 0, h = 0 }
-		end
+	end
+	-- (Not shown, it is no node at all: it leaves no gap beside its neighbours.)
+	return ui.show(function(): boolean
+		return says() ~= ""
+	end, ui.presence(says, function(text: string): Node
 		return ui.div {
 			shrink = 0,
 			w = 16,
@@ -336,11 +337,11 @@ function M.unreachable(cur: () -> Session, on: () -> boolean): Node
 			items = "center",
 			justify = "center",
 			color = "$zeron.status.limited",
-			tooltip = says,
-			label = says,
+			tooltip = text,
+			label = text,
 			Icon { name = "wifi-off", size = 14 },
 		}
-	end)
+	end))
 end
 
 -- Subagents running under it (Zeron's running_pill.rs): its working dot

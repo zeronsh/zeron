@@ -59,3 +59,24 @@ test("Show → Unreachable chats off hides it; on, it's back", function()
 	app:frames(30)
 	expect(glyphs(app)).to_be(2)
 end)
+
+-- A row with no glyph to show has none to leave a gap for: its pull request
+-- badge and its subagents pill stand one gap (8 points) apart, as they did
+-- before the glyph's place in the line. On the sidebar in
+-- ui/sidebar_gap_fixture.luau.
+test("a row that's reachable leaves no gap where its glyph would be", function()
+	local app = mount("sidebar_gap_fixture.luau")
+	app:resize(600, 700)
+	app:frames(30)
+	local pr_right, pill_left = 0, 0
+	for line in app:tree('#wide >> role:button "Write the docs"'):gmatch("[^\n]+") do
+		local x, w = line:match(" (%-?%d+),%-?%d+ (%d+)x%d+")
+		if line:find("Pull request", 1, true) and x then
+			pr_right = tonumber(x) + tonumber(w)
+		elseif line:find("subagent", 1, true) and not line:find("text ", 1, true) and x then
+			pill_left = tonumber(x) :: number
+		end
+	end
+	expect(pr_right > 0 and pill_left > 0).to_be(true)
+	expect(pill_left - pr_right).to_be(8)
+end)
