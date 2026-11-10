@@ -1680,18 +1680,13 @@ return ui.component(function(props: Props): Node
 						bg = "$zeron.composer.voice.ink",
 						opacity = ui.loop { from = 0.35, to = 1, duration = 900, fps = 30 },
 					},
-					ui.text {
-						if spoken then spoken.status else locale.t("ds.composer.listening"),
-						shrink = 0,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
-					},
 					ui.div {
 						grow = 1,
 						h = 16,
 						min_w = 24,
 						bg_shader = VOICE,
+						-- (The engine steps its time: without it, it holds its first frame.)
+						shader_clock = true,
 						shader_params = { "$zeron.composer.voice.ink", { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } },
 					},
 					ui.text {
