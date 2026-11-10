@@ -49,6 +49,7 @@ mod github;
 mod haptics;
 mod heap;
 mod images;
+mod intro_handoff;
 mod links;
 mod pasted;
 mod math;
@@ -126,7 +127,8 @@ mod visuals_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
-use zgx::{compose::component, platform::PlatformService, scene::Rect, widgets::Ui};
+use intro_handoff::Handoff;
+use zgx::{compose::component, platform::PlatformService, reactive::Signal, scene::Rect, widgets::Ui};
 use zgx_desktop::{
     Application, FontData, Glass, GlassMaterial, Titlebar, WindowBounds, WindowContext,
     WindowHandle, WindowLevel, WindowOptions,
@@ -415,18 +417,32 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
     // Setup's `onboarding.epoch`: when the way in was taken, which its card
     // wall reckons its drift from, as the intro's copy of it does.
     let epoch: Rc<RefCell<Option<Shared>>> = Rc::default();
+    // What the hand-off does with the two windows (src/intro_handoff.rs).
+    let setup_active: Rc<RefCell<Option<Signal<bool>>>> = Rc::default();
+    let handoff = Rc::new(Handoff::new(intro_handoff::HostWindows {
+        intro: cx.window.clone(),
+        intro_active: cx.ui.observe_window_active(),
+        setup: setup.clone(),
+        setup_active: setup_active.clone(),
+        windows: cx.windows.clone(),
+        open_setup: Box::new(|windows| {
+            windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
+        }),
+    }));
+    let closing = handoff.clone();
+    cx.on_closed(move || closing.intro_closed());
 
-    let window = cx.window.clone();
+    let (window, interactive) = (cx.window.clone(), handoff.clone());
     host.action("interactive", move |_| {
         window.set_pointer_passthrough(false);
-        window.request_focus();
+        interactive.interactive();
     });
     // `prepare { x, y, w, h }`: setup's window at that rect (points from the
     // overlay's top left, where the intro draws its screen over it), once,
     // made hidden (its screen built and its first frame drawn meanwhile, so
     // the intro can ask for it at launch, over the desktop) until `reveal`
     // shows it whole.
-    let (overlay, windows, opened) = (cx.window.clone(), cx.windows.clone(), setup.clone());
+    let (prepared, windows, opened) = (handoff.clone(), cx.windows.clone(), setup.clone());
     let (bounds, viewport) = (cx.window_info.bounds.clone(), cx.viewport.clone());
     let (arriving, epoch_slot) = (arrival.clone(), epoch.clone());
     host.action("prepare", move |rect| {
@@ -448,9 +464,10 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             visible: false,
             ..onboarding_window()
         };
-        let (overlay, radius, arriving, epoch_slot) =
-            (overlay.clone(), radius.clone(), arriving.clone(), epoch_slot.clone());
+        let (prepared, radius, arriving, epoch_slot, setup_active) =
+            (prepared.clone(), radius.clone(), arriving.clone(), epoch_slot.clone(), setup_active.clone());
         let handle = windows.open(options, move |cx| {
+            *setup_active.borrow_mut() = Some(cx.ui.observe_window_active());
             radius.set(cx.window_info.corner_radius.with_untracked(|r| *r).into());
             // Devtools are one socket a process: the intro keeps them (run
             // `onboarding` to inspect setup).
@@ -459,37 +476,25 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             *epoch_slot.borrow_mut() = Some(host.shared("onboarding.epoch", 0.));
             serve(cx, host, "app.luau", false);
             // Keys stay with the intro until it hands over.
-            overlay.request_focus();
+            prepared.prepared();
         });
         *opened.borrow_mut() = Some(handle);
     });
     // The way in taken (at `ui.now()`'s time, the argument): setup's window
     // shows, under the scene's picture, its card wall reckoned from then.
-    let shown = setup.clone();
+    let shown = handoff.clone();
     host.action("reveal", move |at| {
         if let (Some(epoch), Some(at)) = (&*epoch.borrow(), at.as_f64()) {
             epoch.set(Value::Num(at));
         }
-        if let Some(window) = &*shown.borrow() {
-            window.set_visible(true);
-        }
+        shown.reveal();
     });
     // The card has faded over setup's window: it takes over.
-    let (overlay, windows) = (cx.window.clone(), cx.windows.clone());
     host.action("done", move |_| {
         if let Some(arrived) = &*arrival.borrow() {
             arrived.set(Value::Bool(true));
         }
-        match &*setup.borrow() {
-            Some(window) => {
-                window.set_visible(true);
-                window.request_focus();
-            }
-            None => {
-                windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
-            }
-        }
-        overlay.close();
+        handoff.done();
     });
     serve(cx, host, "intro.luau", inspect);
 }
