@@ -282,6 +282,9 @@ function M.permission(item: any, permission: string): Line
 	elseif permission == "accounts.switch" then
 		-- (A change to what your agents run as: always asked, said so.)
 		return line(true, "user-rounded", "plugins.words.permission.accounts_switch.title", "plugins.words.permission.accounts_switch.detail")
+	elseif permission == "accounts.pin" then
+		-- (A change to what a chat runs as: always asked, said so.)
+		return line(true, "user-rounded", "plugins.words.permission.accounts_pin.title", "plugins.words.permission.accounts_pin.detail")
 	elseif permission == "models.read" then
 		return line(false, "list", "plugins.words.permission.models_read.title", "plugins.words.permission.models_read.detail")
 	elseif permission == "models.set" then

@@ -321,6 +321,68 @@ async fn agents_the_account_rotate_example_switches_once_a_running_chat_finishes
     assert_eq!(active, ["a2"]);
 }
 
+/// The example (plugins-dev/account-pin), as it ships: with no window open,
+/// each chat's first run asks it, and it answers with the saved account that
+/// has the fewest chats, so new chats take turns and the active account is
+/// never switched.
+#[tokio::test]
+async fn agents_the_account_pin_example_spreads_new_chats_across_saved_accounts() {
+    let f = fixture();
+    lock(&f.host.mechanisms).insert(zeron_proto::HarnessId::ClaudeCode, "env");
+    let dir = f.plugins.plugins_dir().join("account-pin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let example = "../../apps/zgx/plugins-dev/account-pin";
+    for file in ["zeron-plugin.json", "init.luau", "service.luau"] {
+        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(example).join(file), dir.join(file)).unwrap();
+    }
+    std::fs::write(dir.join("zeron.luau"), scaffold::SDK).unwrap();
+    // A signed-out account in front: never chosen.
+    {
+        let mut s = lock(&f.host.snapshot);
+        let mut out = account("a0", false, 0.1);
+        out.usage_error = Some("Sign in again".into());
+        s.accounts.insert(0, out);
+    }
+    let signed = call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": "account-pin" })).await;
+    assert!(signed.get("rpc_error").is_none(), "{signed}");
+    let item = call(&f.plugins, methods::LIST_PLUGINS, json!({})).await["plugins"][0].clone();
+    assert_eq!(item["id"], "account-pin");
+    let decided = call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "account-pin", "allow": true, "hash": item["hash"] })).await;
+    assert_eq!(decided["status"], "on", "{decided}");
+    until("its listeners are known", || {
+        f.plugins.inner.services.status("account-pin")["listeners"].as_array().is_some_and(|l| l.len() == 2)
+    })
+    .await;
+    let agents = f.plugins.agents().clone();
+    agents.observe_accounts(&snapshot(&f));
+    let mut chosen = Vec::new();
+    for chat in ["c1", "c2", "c3", "c4"] {
+        chosen.push(agents.preparing(zeron_proto::HarnessId::ClaudeCode, chat).await);
+    }
+    let chosen: Vec<Option<&str>> = chosen.iter().map(|c| c.as_deref()).collect();
+    assert_eq!(chosen, [Some("a1"), Some("a2"), Some("a1"), Some("a2")], "the fewest chats, in turn");
+    assert_eq!(lock(&f.host.pinned).len(), 4);
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 0, "the active account is never switched");
+    // Told as the plugin's pins, in its status.
+    let state = call(&f.plugins, methods::PLUGIN_STATUS, json!({ "id": "account-pin" })).await;
+    let ops: Vec<&str> = state["agents"]["actions"].as_array().unwrap().iter().filter_map(|a| a["op"].as_str()).collect();
+    assert_eq!(ops, ["pin_account"; 4], "{state}");
+}
+
+#[test]
+fn agents_pinning_is_known_and_stays_outside_the_sandbox() {
+    assert!(manifest::KNOWN_PERMISSIONS.contains(&"accounts.pin"));
+    assert!(capability::OUTSIDE_SANDBOX.contains(&"accounts.pin"));
+    let manifest = manifest::Manifest::from_value(json!({
+        "id": "svc", "name": "Svc", "version": "1.0.0", "entry": "init.luau",
+        "permissions": ["ui.add", "accounts.pin"],
+    }))
+    .unwrap();
+    assert_eq!(manifest.problem(), None);
+    let granted = capability::inside_sandbox(&capability::record(&manifest));
+    assert_eq!(granted["permissions"], json!(["ui.add"]), "installing your own never grants it");
+}
+
 #[test]
 fn agents_permissions_are_known_and_controls_stay_outside_the_sandbox() {
     for p in ["usage.read", "accounts.read", "accounts.switch", "models.read", "models.set"] {

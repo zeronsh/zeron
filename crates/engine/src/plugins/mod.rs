@@ -2775,6 +2775,17 @@ impl agents::Sink for AgentSink {
         event: &str,
         data: serde_json::Value,
     ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let asked = self.ask_service(plugin, listener, event, data);
+        Box::pin(async move { asked.await.map(|_| ()) })
+    }
+
+    fn ask_service(
+        &self,
+        plugin: &str,
+        listener: &str,
+        event: &str,
+        data: serde_json::Value,
+    ) -> futures::future::BoxFuture<'static, Result<serde_json::Value, String>> {
         let plan = self
             .inner
             .upgrade()
@@ -2788,7 +2799,6 @@ impl agents::Sink for AgentSink {
             services
                 .call(&plan, service::Kind::Event, &listener, data, call, AGENT_EVENT_TIMEOUT)
                 .await
-                .map(|_| ())
                 .map_err(|refusal| refusal.message)
         })
     }
