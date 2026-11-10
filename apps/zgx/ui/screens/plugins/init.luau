@@ -215,8 +215,18 @@ local function run(r: any)
 		end
 	elseif r.kind == "link" and type(r.value) == "string" then
 		-- A plugin's link (the host checked "links.open" and that it's a web
-		-- link): where Zeron opens links.
-		require("@ds/links").open(r.value)
+		-- link): where Zeron opens links, the browser beside the chat or
+		-- yours. Not offered to plugins' own claims on links: a plugin
+		-- opening a link wants that page (the GitHub plugin's "Open on
+		-- GitHub" is a pull request's link, which its own setting would
+		-- take back to the tab it's pressed in, and nothing would happen).
+		local Links = require("@ds/links")
+		local url: string = r.value
+		if Links.in_app and Links.in_app() and Links.panel and Links.panel(url) then
+			Links.last:set(`app:{url}`)
+		else
+			Links.outside(url)
+		end
 	elseif r.kind == "toast" then
 		ds.toast.show { title = r.title, body = r.value }
 	elseif r.kind == "plugin_failed" then
