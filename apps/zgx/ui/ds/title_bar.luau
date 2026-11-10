@@ -398,6 +398,7 @@ local TitleBar = ui.component(function(props: Props): Node
 	}
 	local island_ref = ui.ref()
 	local left_island: ContainerProps = {
+		id = "titlebar-island",
 		ref = island_ref,
 		absolute = true,
 		left = ISLAND_LEFT,

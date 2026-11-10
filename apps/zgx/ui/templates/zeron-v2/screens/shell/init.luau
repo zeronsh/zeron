@@ -644,13 +644,6 @@ return function(): Node
 					end
 					return false
 				end,
-				on_navigate = function(e)
-					if e.direction == "back" then
-						route.back()
-					else
-						route.forward()
-					end
-				end,
 				boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
 					return settings.View()
 				end),
