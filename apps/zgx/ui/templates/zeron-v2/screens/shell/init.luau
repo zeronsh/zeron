@@ -399,6 +399,9 @@ return function(): Node
 			fit.set_viewport(size.w)
 		end,
 		id = "shell",
+		-- The mouse's back and forward buttons, anywhere not taken by a
+		-- node with its own (a trackpad's swipe: the pages').
+		on_aux_click = route.aux_click,
 		-- The accent chosen (Settings → Appearance, setup's Make it yours), as
 		-- setup's frame wears it, and the interface's text size (ds.look):
 		-- nothing for the theme's own.
