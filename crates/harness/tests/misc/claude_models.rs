@@ -29,8 +29,18 @@ async fn initialize_is_shared_and_curated_metadata_survives_the_live_union() {
     let catalog = catalog.unwrap();
     assert_eq!(catalog.source, "live");
     assert_eq!(commands.unwrap()[0].name, "review");
-    assert_eq!(catalog.models[0].id, "claude-opus-5-5[1m]");
-    assert_eq!(catalog.models[1].id, "claude-opus-5-5");
+    // Best-first, the CLI's default marked rather than moved: its `[1m]`
+    // row folds into the listed base in pickers, so the base carries it.
+    assert_eq!(catalog.models[0].id, "claude-fable-5-2");
+    let defaults: Vec<_> = catalog
+        .models
+        .iter()
+        .filter(|m| m.default)
+        .map(|m| m.id.as_str())
+        .collect();
+    assert_eq!(defaults, ["claude-opus-5-5"]);
+    let at = |id: &str| catalog.models.iter().position(|m| m.id == id).unwrap();
+    assert_eq!(at("claude-opus-5-5") + 1, at("claude-opus-5-5[1m]"));
     for curated in zeron_harness::claude::catalog::static_models() {
         assert_eq!(
             catalog.models.iter().find(|m| m.id == curated.id),

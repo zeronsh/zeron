@@ -218,6 +218,7 @@ mod tests {
     }
     fn models() -> Vec<Model> {
         vec![Model {
+            default: false,
             id: "live".into(),
             label: "Live".into(),
             description: None,

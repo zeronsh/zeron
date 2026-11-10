@@ -198,11 +198,10 @@ pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode 
 // Pure: default resolution (no "Default" placeholders — a concrete pick always)
 // ---------------------------------------------------------------------------
 
-/// The harness's default model: the first catalog row (both curated catalogs
-/// lead with the flagship — zeron's `pickDefaultModel` Opus preference maps to
-/// the same row here).
+/// The harness's default model: the row its catalog marks `default` (Claude
+/// lists best-first and marks the CLI's own default), else the first row.
 pub fn default_model(models: &[Model]) -> Option<&Model> {
-    models.first()
+    models.iter().find(|m| m.default).or_else(|| models.first())
 }
 
 /// An explicit selection never silently becomes a different model after refresh.
@@ -2818,6 +2817,7 @@ impl Pickers {
                         selected_only: true,
                         ambiguous: false,
                         model: Model {
+                            default: false,
                             id: id.into(),
                             label,
                             description: Some(
@@ -8940,6 +8940,7 @@ mod tests {
 
     fn bare_model(id: &str, label: &str) -> Model {
         Model {
+            default: false,
             id: id.into(),
             label: label.into(),
             description: None,
@@ -11115,6 +11116,7 @@ mod tests {
     fn default_model_is_first_catalog_row() {
         let models = vec![
             Model {
+                default: false,
                 id: "flagship".into(),
                 label: "Flagship".into(),
                 description: None,
@@ -11122,6 +11124,7 @@ mod tests {
                 options: vec![],
             },
             Model {
+                default: false,
                 id: "fast".into(),
                 label: "Fast".into(),
                 description: None,
@@ -11131,6 +11134,9 @@ mod tests {
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));
         assert!(default_model(&[]).is_none());
+        let mut marked = models.clone();
+        marked[1].default = true;
+        assert_eq!(default_model(&marked).map(|m| &*m.id), Some("fast"));
     }
 
     #[test]

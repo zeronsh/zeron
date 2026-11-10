@@ -625,6 +625,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
         let options = model_service_tier(item).into_iter().collect();
         models.push((
             Model {
+                default: false,
                 id: id.to_owned(),
                 label,
                 description,

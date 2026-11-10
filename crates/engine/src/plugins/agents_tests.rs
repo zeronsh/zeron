@@ -42,6 +42,7 @@ pub(crate) fn account(id: &str, active: bool, used: f32) -> AgentAccount {
 
 pub(crate) fn model(id: &str) -> Model {
     Model {
+        default: false,
         id: id.into(),
         label: id.to_uppercase(),
         description: None,

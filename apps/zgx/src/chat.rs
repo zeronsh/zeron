@@ -1453,6 +1453,10 @@ fn model_value(harness: &str, m: &Json) -> Value {
     if !options.is_empty() {
         fields.push(("options", Value::List(options.into())));
     }
+    // The agent's own default (Claude lists best-first, not default-first).
+    if m["default"].as_bool() == Some(true) {
+        fields.push(("default", Value::Bool(true)));
+    }
     Value::record(fields)
 }
 
@@ -5888,6 +5892,10 @@ mod tests {
         let claude = json!({ "id": "opus", "options": [{ "id": "fastMode", "label": "Fast", "defaultChoice": "off", "choices": [{ "id": "off", "label": "Off" }, { "id": "on", "label": "On" }] }] });
         assert_eq!(fast_option(&claude), Some(("fastMode".into(), "on".into(), "off".into())));
         assert!(model_value("claude-code", &claude).field("options").is_none());
+        // The agent's default rides along when marked, and only then.
+        assert!(model_value("claude-code", &claude).field("default").is_none());
+        let marked = json!({ "id": "claude-opus-5-5", "default": true });
+        assert!(matches!(model_value("claude-code", &marked).field("default"), Some(Value::Bool(true))));
     }
 
     #[test]
