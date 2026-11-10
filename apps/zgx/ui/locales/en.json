@@ -2210,6 +2210,30 @@
         "never": "Never",
         "days": "{n, plural, one {After # day} other {After # days}}"
       }
+    },
+    "voice": {
+      "title": "Voice",
+      "terms": "speech dictation microphone model parakeet",
+      "description": "Speak into the composer. Transcription runs on this device; audio is never saved or sent.",
+      "couldnt": "Voice couldn't do that",
+      "microphone": "Microphone",
+      "system_default": "System default",
+      "disconnected": "Disconnected microphone",
+      "dictation": {
+        "label": "Dictation",
+        "description": "Hold the microphone, speak, and let go. You edit the words before sending.",
+        "needs_download": "Turning this on downloads a {total} MB speech model.",
+        "downloading": "Downloading · {done} of {total} MB. Turn off to cancel."
+      },
+      "shortcut": {
+        "label": "Shortcut",
+        "description": "Hold to talk, release to transcribe."
+      },
+      "model": {
+        "label": "Speech model",
+        "description": "Parakeet v3 · {total} MB",
+        "remove": "Remove"
+      }
     }
   },
   "common": {
@@ -2416,7 +2440,8 @@
         "shell_find": "Find",
         "shell_close": "Close",
         "shell_reload": "Reload Zeron",
-        "shell_reload_interface": "Reload interface"
+        "shell_reload_interface": "Reload interface",
+        "shell_dictate": "Hold to dictate"
       },
       "group": {
         "sessions": "Sessions",
@@ -2849,6 +2874,14 @@
         "image": "Image",
         "file": "File"
       }
+    },
+    "dictation": {
+      "failed": "Dictation stopped",
+      "hold": "Hold to dictate",
+      "hold_hint": "Hold the microphone or shortcut while speaking.",
+      "no_speech": "No speech recognized. Your draft is unchanged.",
+      "transcribing": "Transcribing…",
+      "starting": "Starting…"
     }
   },
   "panel": {

@@ -632,7 +632,7 @@ thread_local! {
 
 /// `work` on a thread of its own, its result once done (none if it panicked):
 /// a look's file work, which reads folders of a thousand files.
-async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+pub(crate) async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     let (tell, mut heard) = zgx::task::latest::<T>();
     std::thread::spawn(move || {
         tell.send(work());

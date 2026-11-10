@@ -117,6 +117,7 @@ zeron-preview-label = { path = "../../crates/preview-label" }
 # the engine helper's start-up (src/engine/manager.rs) and the app's own
 # updates and release channel (src/about.rs): the shipping app's crates,
 # with no engine and no GPUI in them.
+zeron-voice = { path = "../../crates/voice" }
 zeron-cli = { path = "../../crates/cli" }
 zeron-launch = { path = "../../crates/launch" }
 # `zeron://` links: a chat's (src/sessions.rs, src/links.rs) and a clicked

@@ -249,6 +249,9 @@ export type Props = {
 	dictating: State<boolean>?,
 	on_dictate: (() -> ())?,
 	on_cancel_dictation: (() -> ())?,
+	-- Dictation for real (screens/chat/dictation's `bind`): its microphone,
+	-- the editor's events it follows, and Send waiting for its words.
+	dictation: any?,
 	-- Nothing can be written (a chat archived, an agent gone): dimmed, the
 	-- notice saying why.
 	disabled: (boolean | () -> boolean)?,
@@ -989,7 +992,11 @@ return ui.component(function(props: Props): Node
 	end
 	local value = props.value
 	local running = props.running
-	local field = ui.ref()
+	local spoken = props.dictation
+	if spoken then
+		props.dictating, props.on_cancel_dictation = spoken.dictating, spoken.cancel
+	end
+	local field = if spoken then spoken.editor else ui.ref()
 	local pill = ui.ref()
 
 	-- What it is laid out from, as layout last measured it (0: not yet):
@@ -1094,6 +1101,9 @@ return ui.component(function(props: Props): Node
 		value:set("")
 	end
 	local function send()
+		if spoken and spoken.before_send() then
+			return
+		end
 		local text = value:peek()
 		if asking() then
 			answer()
@@ -1107,8 +1117,11 @@ return ui.component(function(props: Props): Node
 		end
 		value:set("")
 	end
+	if spoken then
+		spoken.send = send
+	end
 	local function stopping(): boolean
-		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking()
+		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
 
 	-- Mentions at the caret.
@@ -1511,8 +1524,9 @@ return ui.component(function(props: Props): Node
 			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
 		end,
 		disabled = function()
-			return disabled() or not (has_text() or has_cargo())
+			return disabled() or not (has_text() or has_cargo() or dictating())
 		end,
+		on_press = if spoken then spoken.on_send_press else nil,
 		on_click = send,
 		Icon { name = "arrow-up", size = 14 },
 	}
@@ -1667,7 +1681,7 @@ return ui.component(function(props: Props): Node
 						opacity = ui.loop { from = 0.35, to = 1, duration = 900, fps = 30 },
 					},
 					ui.text {
-						locale.t("ds.composer.listening"),
+						if spoken then spoken.status else locale.t("ds.composer.listening"),
 						shrink = 0,
 						text_size = "$font.size.sm",
 						weight = "$font.weight.medium",
@@ -1934,13 +1948,26 @@ return ui.component(function(props: Props): Node
 				-- behind each file, command or skill mentioned.
 				highlight = mentions.highlight,
 				active_descendant = m.descendant,
-				on_caret = m.on_caret,
+				on_caret = if spoken
+					then function(line, column, anchor, focus)
+						m.on_caret(line, column, anchor, focus)
+						spoken.on_caret()
+					end
+					else m.on_caret,
+				on_change = if spoken then spoken.on_change else nil,
 				on_focus = function()
 					m.on_focus(true)
+					if spoken and spoken.on_focus then
+						spoken.on_focus()
+					end
 				end,
 				on_blur = function()
 					m.on_focus(false)
+					if spoken and spoken.on_blur then
+						spoken.on_blur()
+					end
 				end,
+				on_key_up = if spoken then spoken.on_key_up else nil,
 				on_paste = function(e)
 					-- (Files first: a copied file puts its name in `text` too.)
 					if e.files and #e.files > 0 and props.on_files then
@@ -2064,7 +2091,7 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				mic,
+				if spoken then spoken.mic() else mic,
 				ui.show(stopping, stop_button),
 				ui.show(function()
 					return not stopping()

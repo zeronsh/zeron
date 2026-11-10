@@ -149,6 +149,7 @@ local TITLE_KEYS: { [string]: { string } } = {
 	appearance = { "Appearance", "settings.appearance.title" },
 	activity = { "Activity", "settings.activity.title" },
 	notifications = { "Notifications", "settings.notifications.title" },
+	voice = { "Voice", "settings.voice.title" },
 	files = { "Files", "settings.files.title" },
 	browser = { "Browsing", "settings.browser.page_title" },
 	browser_history = { "History", "settings.browser_history.title" },
