@@ -3220,18 +3220,32 @@ fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
 }
 
 /// An entry as its row reads it.
-pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
+pub(crate) fn built_entry(
+    entry: &Json,
+    doc: &str,
+    device: Option<&str>,
+    model: Option<&str>,
+) -> Option<Value> {
     // (One still being written is built again with its next change.)
     let settled = entry["status"].as_str() != Some("streaming");
     if settled {
         ROW_BUILD.set(Some(RowBuild::default()));
     } else {
         LIVE_PASS.set(Some(Default::default()));
+        // Changed in its last group's calls alone, as it was last built:
+        // only those built again (`LiveRow`).
+        if let Some(row) = live_row_patched(entry, model) {
+            LIVE_PASS.set(None);
+            return Some(row);
+        }
     }
     let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
         None => message(entry, model),
     };
+    if !settled && let Some(row) = &row {
+        live_row_keep(entry, row, model);
+    }
     LIVE_PASS.set(None);
     if let Some(mut build) = ROW_BUILD.take()
         && let Some(row) = &mut row
@@ -3239,6 +3253,286 @@ pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: 
         share_parts(row, &mut build.seen);
     }
     row
+}
+
+/// A reply being written, as it was last built (`built_entry`), for a change
+/// to the calls of its last group alone (a call arriving, one finishing, by
+/// part patches): its row made again from the parts that changed, not from
+/// all of them. What it keeps is what the whole build makes of the parts no
+/// patch touched: those are trusted to be as they were (`PATCHED`).
+struct LiveRow {
+    /// Its parts' ids, in order, and where each is.
+    ids: Vec<Rc<str>>,
+    at: rustc_hash::FxHashMap<Rc<str>, usize>,
+    /// Where its last group starts: every part from there is a plain call
+    /// or thought (`plain_part`), all of them the group.
+    tail: usize,
+    /// What each part of the group adds to its line, and their sum.
+    tallies: Vec<Tally>,
+    group: GroupTally,
+    /// Its row's `tools`, those of the last group at their end, in order.
+    tools: Vec<Value>,
+    /// Its blocks before the last group's.
+    head: Vec<Value>,
+    text: Value,
+    started: f64,
+    /// Its last text part, if any (before the last group: none is in it), as
+    /// `draft_of` looks for it.
+    last_text: Option<usize>,
+}
+thread_local! {
+    /// Replies being written (`LiveRow`), by id; a few at once.
+    static LIVE_ROWS: RefCell<rustc_hash::FxHashMap<String, LiveRow>> = RefCell::default();
+    /// While a row is built whole for a test (`built_whole`): `LIVE_ROWS`
+    /// neither read nor kept.
+    static LIVE_ROWS_OFF: Cell<bool> = const { Cell::new(false) };
+    /// Rows made from their kept ones (`live_row_patched`), for tests.
+    static LIVE_ROW_HITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// `build`, its rows built whole: `LIVE_ROWS` untouched (a test's reference).
+#[cfg(test)]
+pub(crate) fn built_whole<T>(build: impl FnOnce() -> T) -> T {
+    LIVE_ROWS_OFF.set(true);
+    let made = build();
+    LIVE_ROWS_OFF.set(false);
+    made
+}
+
+/// How many rows were made from their kept ones so far (`live_row_patched`).
+#[cfg(test)]
+pub(crate) fn live_row_hits() -> u64 {
+    LIVE_ROW_HITS.get()
+}
+/// The most replies `LIVE_ROWS` keeps before it starts again.
+const LIVE_ROWS_MOST: usize = 16;
+
+/// A part a last group's change may be made from alone: a call that isn't a
+/// display's nor a subagent's, nor cut short (`with_host`), or a thought
+/// with words. Each is a row of the group and of `tools`, in its place.
+fn plain_part(p: &Json) -> bool {
+    match p["kind"].as_str() {
+        Some("tool") => {
+            !display_tool(p) && !is_agent(p) && p["outputTruncated"].as_bool() != Some(true)
+        }
+        Some("reasoning") => !p["text"].as_str().unwrap_or_default().trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// The last group's block, from its parts' tools (`tools`, the group's at the
+/// end) and its tally: as `blocks_of` makes it while the reply is written.
+fn live_group_block(
+    parts: &[Json],
+    tail: usize,
+    tools: &[Value],
+    group: &GroupTally,
+) -> Option<Value> {
+    let n = parts.len() - tail;
+    let mut shown: Vec<Value> = tools[tools.len() - n..].to_vec();
+    // (The part being written: its own value.)
+    let last = shown.last_mut()?;
+    *last = tool_live(parts.last()?, true)?;
+    let first = parts[tail]["id"].as_str().unwrap_or_default();
+    Some(Value::record([
+        ("id", Value::from(format!("g:{first}").as_str())),
+        ("kind", Value::from("tools")),
+        ("summary", Value::from(group.text().as_str())),
+        ("live", Value::Bool(true)),
+        ("tools", Value::List(shown.into())),
+    ]))
+}
+
+/// A reply's row as `message` makes it while it's written, from its parts
+/// (`text`, `tools` and `blocks` given).
+fn live_row_value(
+    entry: &Json,
+    text: Value,
+    tools: Vec<Value>,
+    blocks: Vec<Value>,
+    started: f64,
+    model: Option<&str>,
+) -> Value {
+    let mut fields = vec![
+        ("id", Value::from(entry["id"].as_str().unwrap_or_default())),
+        ("role", Value::from("assistant")),
+        ("text", text),
+        ("tools", Value::List(tools.into())),
+        ("blocks", Value::List(blocks.into())),
+        ("streaming", Value::Bool(true)),
+        ("started", Value::Num(started)),
+    ];
+    if let Some(model) = model {
+        fields.push(("model", Value::from(model)));
+    }
+    if let Some(ms) = entry["durationMs"].as_f64() {
+        fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
+    }
+    Value::record(fields)
+}
+
+/// Keep `row`, just built in whole from `entry` (a reply being written), for
+/// its next change (`live_row_patched`), if its last group is made of plain
+/// parts and making it from them gives the very block the build did.
+fn live_row_keep(entry: &Json, row: &Value, model: Option<&str>) {
+    let Some(id) = entry["id"].as_str() else {
+        return;
+    };
+    if LIVE_ROWS_OFF.get() {
+        return;
+    }
+    LIVE_ROWS.with_borrow_mut(|rows| {
+        rows.remove(id);
+    });
+    // (Laid out compact as well, it's built in whole each time.)
+    if COMPACT_SHOWN.get() || entry["role"].as_str() != Some("assistant") {
+        return;
+    }
+    let Some(parts) = entry["parts"].as_array() else {
+        return;
+    };
+    let tail = parts
+        .iter()
+        .rposition(|p| !plain_part(p))
+        .map_or(0, |at| at + 1);
+    if tail == parts.len() {
+        return;
+    }
+    let (Some(Value::List(tools)), Some(Value::List(blocks))) =
+        (row.field("tools").cloned(), row.field("blocks").cloned())
+    else {
+        return;
+    };
+    let n = parts.len() - tail;
+    if tools.len() < n || blocks.is_empty() {
+        return;
+    }
+    let tallies: Vec<Tally> = parts[tail..].iter().map(Tally::of).collect();
+    let mut group = GroupTally::default();
+    for t in &tallies {
+        group.add(t);
+    }
+    // The group as the parts make it, against what the build made: anything
+    // the build saw that this doesn't (a display call before the run, joining
+    // it) and it isn't kept.
+    let made = live_group_block(parts, tail, &tools, &group);
+    if made.as_ref() != blocks.last() {
+        return;
+    }
+    let ids: Vec<Rc<str>> = parts
+        .iter()
+        .map(|p| Rc::from(p["id"].as_str().unwrap_or_default()))
+        .collect();
+    let at = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i))
+        .collect();
+    let kept = LiveRow {
+        ids,
+        at,
+        tail,
+        tallies,
+        group,
+        tools: tools.to_vec(),
+        head: blocks[..blocks.len() - 1].to_vec(),
+        text: row.field("text").cloned().unwrap_or(Value::Nil),
+        started: row
+            .field("started")
+            .and_then(|v| {
+                if let Value::Num(n) = v {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.),
+        last_text: parts[..tail]
+            .iter()
+            .rposition(|p| p["kind"].as_str() == Some("text")),
+    };
+    let _ = model;
+    LIVE_ROWS.with_borrow_mut(|rows| {
+        if rows.len() >= LIVE_ROWS_MOST {
+            rows.clear();
+        }
+        rows.insert(id.to_owned(), kept);
+    });
+}
+
+/// `entry`'s row from its kept one (`LiveRow`), if only part patches changed
+/// it since and only in its last group: plain parts changed in it or added at
+/// its end. `None` for anything else, built in whole.
+fn live_row_patched(entry: &Json, model: Option<&str>) -> Option<Value> {
+    if COMPACT_SHOWN.get() || LIVE_ROWS_OFF.get() {
+        return None;
+    }
+    let id = entry["id"].as_str()?;
+    let parts = entry["parts"].as_array()?;
+    let patched: Vec<String> =
+        PATCHED.with_borrow(|p| p.as_ref().map(|p| p.iter().cloned().collect()))?;
+    LIVE_ROWS.with_borrow_mut(|rows| {
+        let row = rows.get_mut(id)?;
+        let was = row.ids.len();
+        if parts.len() < was {
+            return None;
+        }
+        // Each part patched: in the last group or after it, a plain one, the
+        // one that was there; every part added, patched.
+        let mut changed: Vec<usize> = Vec::with_capacity(patched.len());
+        for pid in &patched {
+            let at = match row.at.get(pid.as_str()) {
+                Some(&at) => at,
+                None => {
+                    was + parts[was..]
+                        .iter()
+                        .position(|p| p["id"].as_str() == Some(pid.as_str()))?
+                }
+            };
+            if at < row.tail
+                || parts[at]["id"].as_str() != Some(pid.as_str())
+                || !plain_part(&parts[at])
+            {
+                return None;
+            }
+            changed.push(at);
+        }
+        if (was..parts.len()).any(|at| !changed.contains(&at)) {
+            return None;
+        }
+        changed.sort_unstable();
+        let first_tool = row.tools.len() - (was - row.tail);
+        // The part written before (its row no longer the one being written).
+        for &at in &changed {
+            let tally = Tally::of(&parts[at]);
+            let value = tool_live(&parts[at], false)?;
+            let j = at - row.tail;
+            if at < was {
+                row.group.remove(&row.tallies[j]);
+                row.tallies[j] = tally.clone();
+                row.tools[first_tool + j] = value;
+            } else {
+                let pid: Rc<str> = Rc::from(parts[at]["id"].as_str().unwrap_or_default());
+                row.at.insert(pid.clone(), at);
+                row.ids.push(pid);
+                row.tallies.push(tally.clone());
+                row.tools.push(value);
+            }
+            row.group.add(&tally);
+        }
+        let block = live_group_block(parts, row.tail, &row.tools, &row.group)?;
+        let mut blocks = row.head.clone();
+        blocks.push(block);
+        LIVE_ROW_HITS.set(LIVE_ROW_HITS.get() + 1);
+        Some(live_row_value(
+            entry,
+            row.text.clone(),
+            row.tools.clone(),
+            blocks,
+            row.started,
+            model,
+        ))
+    })
 }
 
 /// The newest plan in these entries, newest first.
@@ -4172,76 +4466,192 @@ fn is_agent(part: &Json) -> bool {
 /// `tool_group_summary` over crates/proto view.rs's): its thinking, then
 /// what its tools did, then how many failed; the first letter raised.
 fn group_summary(group: &[&Json]) -> String {
-    let thoughts = group.iter().filter(|p| p["kind"].as_str() == Some("reasoning")).count();
-    let calls: Vec<&&Json> = group.iter().filter(|p| p["kind"].as_str() == Some("tool")).collect();
-    let mut segments: Vec<String> = Vec::new();
-    match thoughts {
-        0 => {}
-        1 => segments.push("thought process".into()),
-        n => segments.push(format!("thought {n} times")),
+    let mut tally = GroupTally::default();
+    for p in group {
+        tally.add(&Tally::of(p));
     }
-    if !calls.is_empty() {
-        let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut other, mut failed) =
-            (0, 0, 0, 0, 0, 0, 0);
-        // (Each file once, however often it was edited: a set, so a long
-        // run of edits isn't counted against every one before it.)
-        let mut edited: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for p in &calls {
-            if p["isError"].as_bool() == Some(true) {
-                failed += 1;
-            }
-            let call = &p["call"];
-            match call["kind"].as_str().unwrap_or_default() {
-                "exec" => commands += 1,
-                "writeFile" | "editFile" => {
-                    edited.insert(call["path"].as_str().unwrap_or_default().to_owned());
+    tally.text()
+}
+
+/// What one part of a group adds to its line (`group_summary`): a thought,
+/// a call of a kind (and the file it edited), or nothing.
+#[derive(Clone, PartialEq, Debug)]
+enum Tally {
+    None,
+    Thought,
+    Call {
+        kind: CallKind,
+        failed: bool,
+        edited: Option<String>,
+    },
+}
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CallKind {
+    Command,
+    Edit,
+    Read,
+    Search,
+    Fetch,
+    Todo,
+    Other,
+}
+impl Tally {
+    fn of(p: &Json) -> Tally {
+        match p["kind"].as_str() {
+            Some("reasoning") => Tally::Thought,
+            Some("tool") => {
+                let failed = p["isError"].as_bool() == Some(true);
+                let call = &p["call"];
+                let (kind, edited) = match call["kind"].as_str().unwrap_or_default() {
+                    "exec" => (CallKind::Command, None),
+                    "writeFile" | "editFile" => (
+                        CallKind::Edit,
+                        Some(call["path"].as_str().unwrap_or_default().to_owned()),
+                    ),
+                    "applyPatch" => (
+                        CallKind::Edit,
+                        Some(call["path"].as_str().unwrap_or("patch").to_owned()),
+                    ),
+                    "readFile" => (CallKind::Read, None),
+                    "search" | "glob" | "webSearch" => (CallKind::Search, None),
+                    "webFetch" => (CallKind::Fetch, None),
+                    "todo" => (CallKind::Todo, None),
+                    _ => (CallKind::Other, None),
+                };
+                Tally::Call {
+                    kind,
+                    failed,
+                    edited,
                 }
-                "applyPatch" => {
-                    edited.insert(call["path"].as_str().unwrap_or("patch").to_owned());
+            }
+            _ => Tally::None,
+        }
+    }
+}
+/// A group's parts, counted for its line: kept as parts come, change and go
+/// (a reply being written: `LiveRow`), so the line is made without looking
+/// at the group's other parts again.
+#[derive(Default, Clone)]
+struct GroupTally {
+    thoughts: usize,
+    calls: usize,
+    commands: usize,
+    reads: usize,
+    searches: usize,
+    fetches: usize,
+    todos: usize,
+    other: usize,
+    failed: usize,
+    /// Each file once, however often it was edited: how many edits each.
+    edited: HashMap<String, usize>,
+}
+impl GroupTally {
+    fn add(&mut self, tally: &Tally) {
+        self.count(tally, true);
+    }
+    fn remove(&mut self, tally: &Tally) {
+        self.count(tally, false);
+    }
+    fn count(&mut self, tally: &Tally, add: bool) {
+        let step = |n: &mut usize| {
+            if add {
+                *n += 1;
+            } else {
+                *n -= 1;
+            }
+        };
+        match tally {
+            Tally::None => {}
+            Tally::Thought => step(&mut self.thoughts),
+            Tally::Call {
+                kind,
+                failed,
+                edited,
+            } => {
+                step(&mut self.calls);
+                if *failed {
+                    step(&mut self.failed);
                 }
-                "readFile" => reads += 1,
-                "search" | "glob" | "webSearch" => searches += 1,
-                "webFetch" => fetches += 1,
-                "todo" => todos += 1,
-                _ => other += 1,
+                match kind {
+                    CallKind::Command => step(&mut self.commands),
+                    CallKind::Read => step(&mut self.reads),
+                    CallKind::Search => step(&mut self.searches),
+                    CallKind::Fetch => step(&mut self.fetches),
+                    CallKind::Todo => step(&mut self.todos),
+                    CallKind::Other => step(&mut self.other),
+                    CallKind::Edit => {
+                        let path = edited.clone().unwrap_or_default();
+                        if add {
+                            *self.edited.entry(path).or_default() += 1;
+                        } else if let Some(n) = self.edited.get_mut(&path) {
+                            *n -= 1;
+                            if *n == 0 {
+                                self.edited.remove(&path);
+                            }
+                        }
+                    }
+                }
             }
         }
-        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-        let mut tools: Vec<String> = Vec::new();
-        if commands > 0 {
-            tools.push(format!("ran {}", plural(commands, "command", "commands")));
-        }
-        if !edited.is_empty() {
-            tools.push(format!("edited {}", plural(edited.len(), "file", "files")));
-        }
-        if reads > 0 {
-            tools.push(format!("read {}", plural(reads, "file", "files")));
-        }
-        if searches > 0 {
-            tools.push(format!("searched {}", plural(searches, "time", "times")));
-        }
-        if fetches > 0 {
-            tools.push(format!("fetched {}", plural(fetches, "page", "pages")));
-        }
-        if todos > 0 {
-            tools.push("updated todos".into());
-        }
-        if other > 0 {
-            tools.push(format!("called {}", plural(other, "tool", "tools")));
-        }
-        if tools.is_empty() {
-            tools.push(plural(calls.len(), "tool", "tools"));
-        }
-        if failed > 0 {
-            tools.push(format!("{failed} failed"));
-        }
-        segments.push(tools.join(" · "));
     }
-    let mut summary = segments.join(" · ");
-    if let Some(first) = summary.get_mut(..1) {
-        first.make_ascii_uppercase();
+    /// The line: its thinking, then what its tools did, then how many failed;
+    /// the first letter raised.
+    fn text(&self) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        match self.thoughts {
+            0 => {}
+            1 => segments.push("thought process".into()),
+            n => segments.push(format!("thought {n} times")),
+        }
+        if self.calls > 0 {
+            let plural = |n: usize, one: &str, many: &str| {
+                format!("{n} {}", if n == 1 { one } else { many })
+            };
+            let mut tools: Vec<String> = Vec::new();
+            if self.commands > 0 {
+                tools.push(format!(
+                    "ran {}",
+                    plural(self.commands, "command", "commands")
+                ));
+            }
+            if !self.edited.is_empty() {
+                tools.push(format!(
+                    "edited {}",
+                    plural(self.edited.len(), "file", "files")
+                ));
+            }
+            if self.reads > 0 {
+                tools.push(format!("read {}", plural(self.reads, "file", "files")));
+            }
+            if self.searches > 0 {
+                tools.push(format!(
+                    "searched {}",
+                    plural(self.searches, "time", "times")
+                ));
+            }
+            if self.fetches > 0 {
+                tools.push(format!("fetched {}", plural(self.fetches, "page", "pages")));
+            }
+            if self.todos > 0 {
+                tools.push("updated todos".into());
+            }
+            if self.other > 0 {
+                tools.push(format!("called {}", plural(self.other, "tool", "tools")));
+            }
+            if tools.is_empty() {
+                tools.push(plural(self.calls, "tool", "tools"));
+            }
+            if self.failed > 0 {
+                tools.push(format!("{} failed", self.failed));
+            }
+            segments.push(tools.join(" · "));
+        }
+        let mut summary = segments.join(" · ");
+        if let Some(first) = summary.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        summary
     }
-    summary
 }
 
 /// A part as ds/activity's tool: its kind, what it did, to what.
@@ -4756,16 +5166,47 @@ pub(crate) fn draft_of(e: &Json) -> Value {
     if e["status"].as_str() != Some("streaming") {
         return draft_value("", "");
     }
-    let tail = e["parts"].as_array().and_then(|parts| parts.iter().rev().find(|p| p["kind"].as_str() == Some("text")));
     let id = e["id"].as_str().unwrap_or_default();
+    // Its row kept as it is now (`LiveRow`): where its last text is, without
+    // looking back through the calls after it.
+    let kept = e["parts"]
+        .as_array()
+        .filter(|_| !LIVE_ROWS_OFF.get())
+        .and_then(|parts| {
+            LIVE_ROWS.with_borrow(|rows| {
+                let row = rows.get(id)?;
+                let last = parts.last()?["id"].as_str()?;
+                (row.ids.len() == parts.len() && row.ids.last().is_some_and(|l| **l == *last))
+                    .then_some(row.last_text)
+            })
+        });
+    if let Some(None) = kept
+        && let Some(Value::Str(text)) =
+            LIVE_ROWS.with_borrow(|rows| rows.get(id).map(|row| row.text.clone()))
+    {
+        return with_thought(draft_value(id, &text), e["parts"].as_array());
+    }
+    let tail = e["parts"].as_array().and_then(|parts| match kept {
+        Some(Some(at)) => parts.get(at).filter(|p| p["kind"].as_str() == Some("text")),
+        _ => parts
+            .iter()
+            .rev()
+            .find(|p| p["kind"].as_str() == Some("text")),
+    });
     let words = match tail {
         // (`text`, the tail's words too: the page reads the block's, and of
         // `text` only whether any are yet.)
         Some(tail) => Value::record([
             ("id", Value::from(id)),
-            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
+            (
+                "text",
+                Value::from(tail["text"].as_str().unwrap_or_default()),
+            ),
             ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
-            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
+            (
+                "part_text",
+                Value::from(tail["text"].as_str().unwrap_or_default()),
+            ),
         ]),
         None => draft_value(id, &entry_text(e)),
     };

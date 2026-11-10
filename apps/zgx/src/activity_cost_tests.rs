@@ -88,6 +88,8 @@ fn dump_row(bench: &mut Bench) {
 }
 
 thread_local! {
+    /// Whether `DEBUG_NODE` has shown its node.
+    static NODE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether frames show their damage now (`DEBUG_DAMAGE`: the scroll's).
     static DAMAGE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -253,6 +255,120 @@ fn prompt(id: &str, words: &str) -> Json {
 
 fn reply(id: &str, len: usize) -> Json {
     json!({ "id": id, "role": "assistant", "status": "complete", "parts": [{ "id": format!("{id}x"), "kind": "text", "text": prose(id, len) }], "createdAt": 1_762_000_000_000_i64 })
+}
+
+/// A reply being written, changed by part patches alone (calls arriving,
+/// finishing, failing, editing a file edited before, two at once): each row
+/// made from the one kept (`LiveRow`) is the row built whole from the reply
+/// as it is.
+#[test]
+fn a_reply_made_from_its_patches_is_the_reply_built_whole() {
+    let patched = |entry: &Json, ids: &[&str]| {
+        let set: std::collections::HashSet<String> = ids.iter().map(|s| s.to_string()).collect();
+        crate::chat::trusting(Some(&set), || built(entry))
+    };
+    // Its row, and its draft as published after it (`draft_of`).
+    let patched = |entry: &Json, ids: &[&str]| (patched(entry, ids), crate::chat::draft_of(entry));
+    let whole =
+        |entry: &Json| crate::chat::built_whole(|| (built(entry), crate::chat::draft_of(entry)));
+    let mut entry = turn(0, 200, None, true);
+    // Text before the run being written: its block kept as it was.
+    entry["parts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "x0", "kind": "text", "text": "Looking at it." }));
+    entry["parts"].as_array_mut().unwrap().push(call(1000, 2));
+    assert_eq!(
+        (built(&entry), crate::chat::draft_of(&entry)),
+        whole(&entry)
+    );
+    let hits = crate::chat::live_row_hits();
+    let mut fast = 0;
+    for i in 1..=60 {
+        let id = format!("t{i}");
+        // Arriving: its call alone.
+        let mut part = call(i, 2);
+        let output = part.as_object_mut().unwrap().remove("output");
+        if i % 10 == 0 {
+            // An edit of a file edited before: one file, counted once.
+            part = json!({ "id": id, "kind": "tool", "call": { "kind": "editFile", "path": "/repo/src/part3.rs" } });
+        }
+        entry["parts"].as_array_mut().unwrap().push(part);
+        assert_eq!(patched(&entry, &[&id]), whole(&entry), "call {i} arriving");
+        fast += 1;
+        // Finished: its output, every seventh failing.
+        let last = entry["parts"].as_array_mut().unwrap().last_mut().unwrap();
+        if let Some(output) = output {
+            last["output"] = output;
+        }
+        if i % 7 == 0 {
+            last["isError"] = json!(true);
+        }
+        assert_eq!(patched(&entry, &[&id]), whole(&entry), "call {i} finishing");
+        fast += 1;
+        // Two at once now and then: an earlier one's result late, a thought.
+        if i % 9 == 0 && i > 2 {
+            let earlier = format!("t{}", i - 2);
+            let at = entry["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|p| p["id"] == earlier.as_str())
+                .unwrap();
+            entry["parts"][at]["output"] = json!("late\n");
+            let thought = format!("r{i}");
+            entry["parts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "id": thought, "kind": "reasoning", "text": "Next, the rest." }));
+            assert_eq!(
+                patched(&entry, &[&earlier, &thought]),
+                whole(&entry),
+                "call {i}: two at once"
+            );
+            fast += 1;
+        }
+    }
+    assert_eq!(
+        crate::chat::live_row_hits() - hits,
+        fast,
+        "every change made from the kept row"
+    );
+    // Text after the run: no change of the run's, built whole, and right.
+    entry["parts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "x9", "kind": "text", "text": "Done." }));
+    assert_eq!(
+        patched(&entry, &["x9"]),
+        whole(&entry),
+        "text after the run"
+    );
+    assert_eq!(crate::chat::live_row_hits() - hits, fast, "built whole");
+}
+
+/// The same with no text in the reply at all: its draft's words its text's
+/// (none), as kept.
+#[test]
+fn a_reply_with_no_text_made_from_its_patches_is_the_reply_built_whole() {
+    let mut entry = turn(1, 100, None, true);
+    let whole =
+        |entry: &Json| crate::chat::built_whole(|| (built(entry), crate::chat::draft_of(entry)));
+    assert_eq!(
+        (built(&entry), crate::chat::draft_of(&entry)),
+        whole(&entry)
+    );
+    for i in 2..=20 {
+        let id = format!("t{i}");
+        entry["parts"].as_array_mut().unwrap().push(call(i, 1));
+        let set: std::collections::HashSet<String> = [id].into_iter().collect();
+        let fast = crate::chat::trusting(Some(&set), || built(&entry));
+        assert_eq!(
+            (fast, crate::chat::draft_of(&entry)),
+            whole(&entry),
+            "call {i}"
+        );
+    }
 }
 
 fn built(entry: &Json) -> Value {
@@ -485,6 +601,9 @@ impl Bench {
         let drawn = !report.damage.is_empty();
         if drawn && let Some(gpu) = &mut self.gpu {
             let stats = gpu.render(&self.app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
+            if std::env::var_os("DEBUG_GPU").is_some() && zgx::trace::enabled() {
+                eprintln!("GPU {stats:?}");
+            }
             if std::env::var_os("DEBUG_DAMAGE").is_some() && DAMAGE_SHOWN.get() {
                 eprintln!("DAMAGE frame: {} rects, {} px repainted, {} scroll copies, {} layer repaints, {} backdrop copies", report.damage.len(), stats.damaged_pixels, stats.scroll_copies, stats.layer_repaints, stats.backdrop_copies);
                 show_damage(&self.app.ui.scene.borrow(), &report.damage);
@@ -698,6 +817,35 @@ fn scenarios(n: usize, think: usize, open: bool) {
                     let k = format!("{:?}", scene.kind(id));
                     k.split(|c: char| c == '(' || c == '{' || c == ' ').next().unwrap_or("").to_owned()
                 };
+                // (`DEBUG_NODE=<n>`: that node's kind, what's above it, and the
+                // texts under the box above it.)
+                // (A number: that node, as the frame's runs name it.)
+                let asked = std::env::var("DEBUG_NODE").ok();
+                let numbered = asked.as_deref().and_then(|n| n.parse::<u32>().ok());
+                let pick = match numbered {
+                    Some(n) => Some(n),
+                    None if asked.is_some() && frame.index > 40 => frame.layout.top.first().map(|m| m.node),
+                    None => None,
+                };
+                if let Some(n) = pick
+                    && !NODE_SHOWN.replace(true)
+                    && let Some(&id) = by_number.get(&n)
+                {
+                    let mut at = Some(id);
+                    for _ in 0..8 {
+                        let Some(node) = at else { break };
+                        let b = scene.bounds(node);
+                        eprintln!("NODE #{} {} {:.0},{:.0} {:.0}x{:.0}", node.number(), format!("{:?}", scene.kind(node)).chars().take(160).collect::<String>(), b.x, b.y, b.width, b.height);
+                        at = scene.parent(node);
+                    }
+                    let mut stack = vec![scene.parent(scene.parent(id).unwrap_or(id)).unwrap_or(id)];
+                    while let Some(node) = stack.pop() {
+                        if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(node) {
+                            eprintln!("NODE text {text:?}");
+                        }
+                        stack.extend(scene.children(node).iter().copied());
+                    }
+                }
                 for m in &frame.layout.top {
                     let Some(&id) = by_number.get(&m.node) else {
                         eprintln!("TRACE   measured #{} {:.1} µs (own {:.1}) (gone)", m.node, m.micros, m.self_micros);
