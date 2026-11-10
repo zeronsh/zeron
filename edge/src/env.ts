@@ -20,6 +20,9 @@ export interface Env {
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
+  /** The hosted model list this deployment serves at /models/v1.json
+   * (src/model-list.ts): "staging", or unset for none (404). */
+  MODEL_LIST?: string;
   WORKOS_CLIENT_ID: string;
   /** "workos" (verify AuthKit JWTs) or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
