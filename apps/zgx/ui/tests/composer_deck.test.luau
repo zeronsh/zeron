@@ -117,3 +117,26 @@ test("alerts: first in the pill, each with its action and its dismiss", function
 	expect(app:has('role:button "Open Alerts"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
+
+-- A box from the test tree's first line under `target`: x, y, w, h.
+local function box(app: any, target: string): (number, number, number, number)
+	local line = string.match(app:tree(target), "[^\n]+") or ""
+	local x, y, w, h = line:match(" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+	return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
+end
+
+test("the pill's capsules sit the same inset in from all four of its sides", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_running_tasks", tasks(2))
+	app:frames(30)
+	local px, py, pw, ph = box(app, 'role:toolbar "What\'s waiting"')
+	local cx, cy, _, ch = box(app, 'role:button "Open Running"')
+	local ex, _, ew = box(app, 'role:button "Show what\'s waiting"')
+	local top, bottom = cy - py, (py + ph) - (cy + ch)
+	-- (Its glass's border is laid out inside it: the inset counts it.)
+	expect(top).to_be(bottom)
+	expect(cx - px).to_be(top)
+	expect((px + pw) - (ex + ew)).to_be(top)
+end)

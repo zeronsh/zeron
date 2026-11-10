@@ -595,7 +595,11 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	local function pill(): Node
 		local p = glass.style({
 			h = PILL_H,
-			px = ui.raw(PILL_PAD, "the capsules' inset in the pill"),
+			-- The capsules' inset, the same on all four sides: the glass's 1
+			-- point border is laid out inside the pill, so the padding is the
+			-- inset less it (a side padding alone left the ends a point wider
+			-- than the top and bottom).
+			p = ui.raw(PILL_PAD - 1, "the capsules' inset in the pill, less its border"),
 			gap = "$zeron.space.hair",
 			items = "center",
 			shrink = 0,
