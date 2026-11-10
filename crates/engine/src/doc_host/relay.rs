@@ -1,8 +1,9 @@
-//! The engine's side of the relay layer (docs/design/relay-layer.md). On unless
-//! `ZERON_RELAY_LAYER` says otherwise: the edge decides who relays, and a room that
-//! doesn't offer it leaves everything on stored rows. Off, nothing here runs: no chat
-//! handle carries relay state, no capability is advertised and no stream service is
-//! registered.
+//! The engine's side of the relay layer (docs/design/relay-layer.md). On against the
+//! staging edge, or wherever `ZERON_RELAY_LAYER=1` says so; off against production's
+//! edge (which may not serve the layer yet) and any other ([`relay_layer_on`]). On,
+//! the edge decides who relays, and a room that doesn't offer it leaves everything
+//! on stored rows. Off, nothing here runs: no chat handle carries relay state, no
+//! capability is advertised and no stream service is registered.
 //!
 //! The safety rule lives in [`DocHost::refresh_relay_mode`]: a host that stops
 //! relaying sets its mode first and posts a checkpoint exported after that, so
@@ -45,11 +46,29 @@ const LINGER_AFTER_PEER: Duration = Duration::from_secs(15);
 /// The gap is the room to grow while the heal lands.
 const RELAY_SNAPSHOT_LIMIT: usize = 24 * 1024 * 1024;
 
-/// The engine-wide kill switch: on unless `ZERON_RELAY_LAYER` is set to something
-/// other than 1.
+/// The staging edge: the one edge the layer runs against without being asked.
+pub const STAGING_EDGE: &str = "https://staging.zeron.sh";
+
+/// The engine-wide switch, read once: [`relay_layer_on`] for this engine's
+/// `ZERON_RELAY_LAYER` and its edge (`ZERON_EDGE_URL`, production's when unset).
 pub fn relay_layer_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ZERON_RELAY_LAYER").map_or(true, |flag| flag == "1"))
+    *ENABLED.get_or_init(|| {
+        let flag = std::env::var("ZERON_RELAY_LAYER").ok();
+        let edge = std::env::var("ZERON_EDGE_URL").ok();
+        relay_layer_on(flag.as_deref(), edge.as_deref())
+    })
+}
+
+/// Whether an engine runs the relay layer. `ZERON_RELAY_LAYER`, when set, decides
+/// (`1` on, anything else off: the kill switch). Unset, it's on only against the
+/// staging edge; production's (the default) and any other stay on stored rows,
+/// exactly as before the layer.
+pub fn relay_layer_on(flag: Option<&str>, edge: Option<&str>) -> bool {
+    match flag {
+        Some(flag) => flag == "1",
+        None => edge.is_some_and(|edge| edge.trim().trim_end_matches('/').eq_ignore_ascii_case(STAGING_EDGE)),
+    }
 }
 
 #[derive(Default)]
@@ -705,6 +724,28 @@ fn decide_relaying(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_layer_runs_against_staging_or_when_asked() {
+        assert!(relay_layer_on(None, Some("https://staging.zeron.sh")));
+        assert!(relay_layer_on(None, Some("https://staging.zeron.sh/")));
+        assert!(relay_layer_on(Some("1"), None));
+        assert!(relay_layer_on(Some("1"), Some("https://edge.zeron.sh")));
+        assert!(relay_layer_on(Some("1"), Some("http://127.0.0.1:27640")));
+    }
+
+    #[test]
+    fn the_layer_stays_off_against_production_and_when_switched_off() {
+        // Production's edge, named or by default, and any other edge.
+        assert!(!relay_layer_on(None, Some("https://edge.zeron.sh")));
+        assert!(!relay_layer_on(None, None));
+        assert!(!relay_layer_on(None, Some("")));
+        assert!(!relay_layer_on(None, Some("http://127.0.0.1:27640")));
+        assert!(!relay_layer_on(None, Some("https://staging.zeron.sh.example")));
+        // The kill switch wins, staging included.
+        assert!(!relay_layer_on(Some("0"), Some("https://staging.zeron.sh")));
+        assert!(!relay_layer_on(Some(""), Some("https://staging.zeron.sh")));
+    }
 
     fn state() -> Arc<ChatRelayState> {
         struct NoDoc;
