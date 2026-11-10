@@ -699,7 +699,7 @@ end
 
 -- A mouse's side buttons (X1 back, X2 forward: `button` 4 and 5 of an
 -- `on_aux_click`) as a browser takes them. Whether it was one. (A
--- trackpad's swipe is `on_navigate`; Alt+←/→ are zgx's own `router.back`
+-- trackpad's swipe never steps it; Alt+←/→ are zgx's own `router.back`
 -- and `router.forward` commands.)
 function M.aux_click(e: { button: any }): boolean
 	if e.button == 4 then
