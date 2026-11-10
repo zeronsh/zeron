@@ -217,6 +217,63 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// Alt+←/→ step the history on Windows and Linux (zgx's router binds them
+/// there, ⌘[ ⌘] on macOS, where ⌥← ⌥→ are the caret's word-jump and must
+/// not): from anywhere, text fields included, as a browser's are (the
+/// caret's word-jump on Windows and Linux is Ctrl+←/→).
+#[test]
+fn alt_arrows_step_the_history_on_windows_and_linux_only() {
+    let mac = cfg!(target_os = "macos");
+    let mut wrong = Vec::new();
+    for at in [Focus::Nothing, Focus::Composer] {
+        let mut w = mount();
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(20);
+        let session = w.route();
+        w.press("cmd+n");
+        assert_eq!(w.route(), "/");
+        let (back, forward) = if mac { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
+        focus(&mut w, at);
+        let heard = w.press(back);
+        if heard.as_deref() != Some("router.back") || w.route() != session {
+            wrong.push(format!("{at:?}: {back} reached {heard:?}, at {}", w.route()));
+        }
+        focus(&mut w, at);
+        let heard = w.press(forward);
+        if heard.as_deref() != Some("router.forward") || w.route() != "/" {
+            wrong.push(format!("{at:?}: {forward} reached {heard:?}, at {}", w.route()));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The mouse's side buttons (X1, X2) go back and forward, over the chat or
+/// a session's tab.
+#[test]
+fn the_mouse_side_buttons_step_the_history() {
+    use zgx::input::{InputEvent, PointerButton};
+    let mut w = mount();
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(20);
+    let session = w.route();
+    w.press("cmd+n");
+    assert_eq!(w.route(), "/");
+    let side = |w: &mut Window, n: u16, id: &str| {
+        let b = w.app.bounds(id);
+        let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+        w.app.ui.dispatch(InputEvent::PointerDown { x, y, button: PointerButton::Other(n) });
+        w.app.ui.dispatch(InputEvent::PointerUp { x, y, button: PointerButton::Other(n) });
+        w.app.frames(30);
+    };
+    side(&mut w, 4, "#shell-chats");
+    assert_eq!(w.route(), session, "X1 didn't go back");
+    side(&mut w, 5, "#shell-chats");
+    assert_eq!(w.route(), "/", "X2 didn't go forward");
+    // Over the sidebar too (not a node with a handler of its own).
+    side(&mut w, 4, "#shell-sidebar");
+    assert_eq!(w.route(), session, "X1 over the sidebar didn't go back");
+}
+
 /// ⌘W: the visible panel's active tab, wherever the keyboard is; else the chat's tab
 /// (a split's focused pane: split_tests), a new chat's page after the last; only
 /// with no chat, the window.
