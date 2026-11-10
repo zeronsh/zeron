@@ -50,3 +50,18 @@ test("an issue's link and another site's are left alone", function()
 		expect(pr_tab(app)).to_be(false)
 	end
 end)
+
+test("a plugin opening a pull request's link itself gets that page, not its tab again", function()
+	-- (The GitHub plugin's "Open on GitHub": with its setting on, its own
+	-- link went back to the tab it was pressed in, and nothing happened.)
+	local app = open(github(true))
+	app:set_state("shell_fixture.plugins", true)
+	app:frames(10)
+	app:set_state("plugins.request", {
+		{ seq = 1, kind = "link", title = "GitHub", value = "https://github.com/acme/atlas/pull/12" },
+	})
+	app:frames(40)
+	expect(pr_tab(app)).to_be(false)
+	expect(app:state("links_last")).never.to_be("")
+	expect(app:error()).to_be_nil()
+end)
