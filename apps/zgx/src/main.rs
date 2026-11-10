@@ -594,7 +594,10 @@ fn script_host(cx: &mut WindowContext, entry: &str) -> ScriptHost {
 fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptHost {
     // Zeron's design system, lent to the window's plugins (`@ds`).
     let lent = path.clone();
-    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID), &lent);
+    // A long chat's heap, past 32 MB, collected aiming for 150% of what's in
+    // use rather than Luau's double: its rows' nodes, which the collector
+    // can't see the size of, go sooner (zgx #1837, the carry it replaces).
+    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150), &lent);
     // The network, for `ui.fetch` and remote images: the app's scripts, and
     // plugins granted "network" (zgx's own transport; a plugin without the
     // grant reaches none).
