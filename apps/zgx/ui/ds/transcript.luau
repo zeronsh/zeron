@@ -235,6 +235,9 @@ local ESTIMATE = 96
 local WORD, ACTION, CLEAR, MARGIN, FOOT = 26, 32, 6, 8, 46
 -- How often a shown action looks whether the selection is still there.
 local WATCH = 200
+-- How often a scroll under way is looked at, to tell when it has rested
+-- (`moving`): its frames hear nothing of it meanwhile.
+local POLL = 50
 
 -- The room left under the conversation's last row, over what floats at its
 -- foot: Zeron's (transcript.rs, the fade band and 8).
@@ -1299,50 +1302,19 @@ local function Transcript(props: Props): Node
 			go_back(target)
 		end
 	end)
-	-- The message under the pointer, its lane shown ("" for none), by id.
-	-- A row's `on_hover` says when the pointer crosses into it; content
-	-- scrolling under a still pointer says nothing, so the pointer's place
-	-- is kept and, as the list scrolls, the message there is looked up
-	-- again: the lane goes with the pointer, never with a row scrolled away.
+	-- The message under the pointer, its lane shown ("" for none), by id:
+	-- each row's `on_hover` says so as the pointer crosses into it, and as
+	-- content scrolls under a still pointer (zgx hovers again what the
+	-- resting pointer is over once layout moves it): the lane goes with the
+	-- pointer, never with a row scrolled away, and a scroll's frames run
+	-- nothing here.
 	local hover = ui.state(`transcript_hover{kept}`, "")
-	local pointer: { x: number, y: number }? = nil
-	local function under(x: number, y: number): string
-		for id, r in rows do
-			local el = r.inner:peek()
-			if el and el.x and el.y and el.width and el.height then
-				if x >= el.x and x < el.x + el.width and y >= el.y and y < el.y + el.height then
-					return if r.m.role == "switch" then "" else id
-				end
-			end
-		end
-		return ""
-	end
 	local function set_hover(id: string)
 		if hover:peek() ~= id then
 			trace("hover", id)
 			hover:set(id)
 		end
 	end
-	-- (A frame on from the first move, once the rows stand where the scroll
-	-- put them: each run's timer goes as the next run starts, so that run
-	-- starts one for what is left of the frame.)
-	local look_at: number? = nil
-	ui.effect(function()
-		offset:get()
-		if pointer == nil then
-			return
-		end
-		local now = ui.now()
-		local due = look_at or now + 16
-		look_at = due
-		ui.after(math.max(0, due - now), function()
-			look_at = nil
-			local at = pointer
-			if at then
-				set_hover(under(at.x, at.y))
-			end
-		end)
-	end)
 	-- Where it is, written once a scroll settles (at its end, nowhere: it
 	-- opens there again), for a view made again to come back to.
 	local keep = props.keep
@@ -1493,21 +1465,52 @@ local function Transcript(props: Props): Node
 		end
 		r.within = within
 	end
-	-- 150 ms after the offset's last change: each change's run of the
-	-- effect starts the wait again (the run before's timer goes with it:
-	-- an effect's run owns what it makes). (Not `ui.debounced`: an offset
-	-- back where it was 150 ms ago, as a view opened at its end and
-	-- scrolled to its top, changes nothing there, and the place would go
-	-- unwritten.)
-	ui.effect(function()
-		offset:get()
-		ui.after(150, function()
-			remember()
-			find_reading()
-			if not at_end:peek() and ui.now() >= resizing_until then
-				end_held = false
+	-- Once the offset has rested 150 ms: where it is remembered, the reading
+	-- place found again, the end let go if it was scrolled away from. Only a
+	-- scroll's first move is heard: while it moves, a poll every 50 ms sees
+	-- whether it has moved since (the effect then reads nothing, so a
+	-- scroll's frames run nothing here), and lets it go once it rests.
+	-- (Not `ui.debounced`: an offset back where it was 150 ms ago, as a
+	-- view opened at its end and scrolled to its top, changes nothing there,
+	-- and the place would go unwritten.)
+	local function rested()
+		remember()
+		find_reading()
+		if not at_end:peek() and ui.now() >= resizing_until then
+			end_held = false
+		end
+	end
+	local moving = ui.state(`transcript_moving{kept}`, false)
+	local seen, moved_at = offset:peek(), 0
+	local function poll()
+		-- (Next look a poll on, or when it will have rested, if sooner.)
+		ui.after(math.max(0, math.min(POLL, moved_at + 150 - ui.now())), function()
+			local at = offset:peek()
+			if at ~= seen then
+				seen, moved_at = at, ui.now()
+			end
+			if ui.now() - moved_at >= 150 then
+				moving:set(false)
+				rested()
+			else
+				poll()
 			end
 		end)
+	end
+	-- (A view just made: its place told once it has stood 150 ms.)
+	ui.after(150, rested)
+	ui.effect(function()
+		if moving:get() then
+			-- (This run's: it goes as the next does, once at rest.)
+			poll()
+			return
+		end
+		local at = offset:get()
+		if at == seen then
+			return
+		end
+		seen, moved_at = at, ui.now()
+		moving:set(true)
 	end)
 	-- The selection the host read, and where its action stands: `y` from
 	-- the view's top, and its right edge, or its left when it stands above.
@@ -1871,14 +1874,10 @@ local function Transcript(props: Props): Node
 	return ui.overlay {
 		w_full = true,
 		h_full = true,
-		on_pointer_move = function(e: { x: number, y: number })
-			pointer = { x = e.x, y = e.y }
-		end,
 		-- The lightbox a message's pictures open in (one a window draws).
 		Lightbox.Host(),
 		on_hover = function(inside: boolean)
 			if not inside then
-				pointer = nil
 				hover:set("")
 			end
 		end,
