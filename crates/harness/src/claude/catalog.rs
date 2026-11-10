@@ -160,6 +160,40 @@ pub(crate) fn configured_models() -> Vec<Model> {
     models_with_settings(&root.join("settings.json"))
 }
 
+/// The catalog when discovery is unavailable: the configured models without
+/// the curated rows this Claude Code (`cli`, its version) is too old for.
+pub(crate) fn fallback_models(cli: Option<&str>) -> Vec<Model> {
+    let mut models = configured_models();
+    models.retain(|model| !too_old_for(&model.id, cli));
+    models
+}
+
+/// The oldest Claude Code that lists each curated model (T3 Code's model
+/// manifest, Nov 2026). An older CLI doesn't report the model at all.
+const MIN_CLI: &[(&str, &str)] = &[
+    ("claude-fable-5-2", "2.1.290"),
+    ("claude-fable-5-1", "2.1.257"),
+    ("claude-opus-5-5", "2.1.280"),
+    ("claude-opus-5", "2.1.219"),
+    ("claude-opus-4-8", "2.1.154"),
+    ("claude-opus-4-7", "2.1.111"),
+    ("claude-sonnet-5-5", "2.1.284"),
+    ("claude-haiku-5-5", "2.1.293"),
+];
+
+/// Whether `cli` (a Claude Code version) is known and older than the one
+/// `id` needs. An unknown or unparsable version is never too old.
+fn too_old_for(id: &str, cli: Option<&str>) -> bool {
+    let Some(cli) = cli.and_then(|v| semver::Version::parse(v.trim()).ok()) else {
+        return false;
+    };
+    MIN_CLI
+        .iter()
+        .find(|(model, _)| *model == id)
+        .and_then(|(_, min)| semver::Version::parse(min).ok())
+        .is_some_and(|min| cli < min)
+}
+
 fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
     let mut models = static_models();
     let settings = std::fs::read(path)
@@ -278,11 +312,21 @@ fn settings_models_keep_manifest_and_full_ladder() {
     assert_eq!(models_with_settings(&path), static_models());
 }
 
-/// Append new concrete model IDs and fill ID-only labels on existing rows;
-/// curated metadata remains authoritative.
+#[cfg(test)]
 pub(super) fn with_discovered_models(
+    models: Vec<Model>,
+    response: &serde_json::Value,
+) -> Result<Vec<Model>, crate::HarnessError> {
+    with_discovered_models_for(models, response, None)
+}
+
+/// Append new concrete model IDs and fill ID-only labels on existing rows;
+/// curated metadata remains authoritative. A curated row this Claude Code
+/// (`cli`, its version) is too old for is dropped unless the CLI reports it.
+pub(super) fn with_discovered_models_for(
     mut models: Vec<Model>,
     response: &serde_json::Value,
+    cli: Option<&str>,
 ) -> Result<Vec<Model>, crate::HarnessError> {
     fn entry_text<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
         entry
@@ -313,6 +357,7 @@ pub(super) fn with_discovered_models(
     }
     let mut default = None;
     let mut valid = false;
+    let mut reported = std::collections::HashSet::new();
     for entry in entries {
         let text = |key: &str| entry_text(entry, key);
         let Some(id) = text("resolvedModel").or_else(|| text("value")) else {
@@ -335,6 +380,7 @@ pub(super) fn with_discovered_models(
         if text("value") == Some("default") {
             default = Some(id.to_owned());
         }
+        reported.insert(id.strip_suffix("[1m]").unwrap_or(id).to_owned());
         if let Some(model) = models.iter_mut().find(|model| model.id == id) {
             if model.label == model.id
                 && let Some(label) = label
@@ -380,6 +426,10 @@ pub(super) fn with_discovered_models(
             "Claude returned an empty model catalog".into(),
         ));
     }
+    models.retain(|model| {
+        reported.contains(model.id.strip_suffix("[1m]").unwrap_or(&model.id))
+            || !too_old_for(&model.id, cli)
+    });
     // The CLI's default is marked, not moved: rows stay best-first and
     // clients preselect the marked row. Pickers fold a long-context row into
     // its listed base, so a `[1m]` default marks that base.
@@ -756,6 +806,84 @@ mod tests {
             .map(|m| &*m.id)
             .collect();
         assert_eq!(defaults, ["claude-opus-5-5[1m]"]);
+    }
+
+    #[test]
+    fn curated_rows_an_old_cli_is_too_old_for_are_dropped() {
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"default", "resolvedModel":"claude-opus-4-8", "displayName":"Default"},
+            {"value":"claude-opus-4-8", "displayName":"Opus 4.8"},
+        ]}});
+        let live = |cli| with_discovered_models_for(static_models(), &response, cli).unwrap();
+        // 2.1.200: older than Opus 5 (2.1.219) and everything after it.
+        let old = live(Some("2.1.200"));
+        assert_eq!(
+            ids(&old),
+            [
+                "claude-fable-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-sonnet-5",
+                "claude-haiku-4-5"
+            ]
+        );
+        let defaults: Vec<_> = old.iter().filter(|m| m.default).map(|m| &*m.id).collect();
+        assert_eq!(defaults, ["claude-opus-4-8"]);
+        // Each model at exactly its minimum stays, one patch below goes.
+        for (id, min) in MIN_CLI {
+            let min = semver::Version::parse(min).unwrap();
+            let below = semver::Version::new(min.major, min.minor, min.patch - 1).to_string();
+            assert!(!too_old_for(id, Some(&min.to_string())), "{id}");
+            assert!(too_old_for(id, Some(&below)), "{id}");
+        }
+        // The fallback drops them the same way.
+        let fallback = fallback_models(Some("2.1.285"));
+        for id in ["claude-fable-5-2", "claude-haiku-5-5"] {
+            assert!(fallback.iter().all(|m| m.id != id), "{id}");
+        }
+        for id in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"] {
+            assert!(fallback.iter().any(|m| m.id == id), "{id}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_cli_version_keeps_every_curated_row() {
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"claude-opus-4-8", "displayName":"Opus 4.8"},
+        ]}});
+        for cli in [None, Some(""), Some("not a version")] {
+            let models = with_discovered_models_for(static_models(), &response, cli).unwrap();
+            assert_eq!(ids(&models), ids(&static_models()), "{cli:?}");
+            assert_eq!(
+                ids(&fallback_models(cli)),
+                ids(&configured_models()),
+                "{cli:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_the_cli_reports_stays_whatever_its_version() {
+        // A CLI below Fable 5.2's 2.1.290 that lists it anyway (a gateway, a
+        // backport): its curated row stays, and so does a long-context or
+        // dated spelling of a reported model.
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"fable", "resolvedModel":"claude-fable-5-2", "displayName":"Fable 5.2"},
+            {"value":"claude-haiku-5-5-20261001", "displayName":"Haiku 5.5"},
+            {"value":"default", "resolvedModel":"claude-opus-5-5[1m]", "displayName":"Default"},
+        ]}});
+        let models =
+            with_discovered_models_for(static_models(), &response, Some("2.1.250")).unwrap();
+        let fable = models.iter().find(|m| m.id == "claude-fable-5-2").unwrap();
+        assert_eq!(fable, &static_models()[0]);
+        for id in ["claude-haiku-5-5", "claude-opus-5-5", "claude-opus-5-5[1m]"] {
+            assert!(models.iter().any(|m| m.id == id), "{id}");
+        }
+        // Not reported and too old: gone. Not reported but old enough: kept.
+        for id in ["claude-fable-5-1", "claude-sonnet-5-5"] {
+            assert!(models.iter().all(|m| m.id != id), "{id}");
+        }
+        assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
     }
 
     #[test]

@@ -29,9 +29,15 @@ async fn initialize_is_shared_and_curated_metadata_survives_the_live_union() {
     let catalog = catalog.unwrap();
     assert_eq!(catalog.source, "live");
     assert_eq!(commands.unwrap()[0].name, "review");
+    // The fake CLI is 2.1.228: too old for Fable 5.2, Sonnet 5.5 and Haiku
+    // 5.5, which it doesn't report, so their curated rows are dropped. It
+    // reports Fable 5.1 and Opus 5.5 (newer than it, too), which stay.
     // Best-first, the CLI's default marked rather than moved: its `[1m]`
     // row folds into the listed base in pickers, so the base carries it.
-    assert_eq!(catalog.models[0].id, "claude-fable-5-2");
+    assert_eq!(catalog.models[0].id, "claude-fable-5-1");
+    for gone in ["claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+        assert!(catalog.models.iter().all(|m| m.id != gone), "{gone}");
+    }
     let defaults: Vec<_> = catalog
         .models
         .iter()
@@ -42,10 +48,9 @@ async fn initialize_is_shared_and_curated_metadata_survives_the_live_union() {
     let at = |id: &str| catalog.models.iter().position(|m| m.id == id).unwrap();
     assert_eq!(at("claude-opus-5-5") + 1, at("claude-opus-5-5[1m]"));
     for curated in zeron_harness::claude::catalog::static_models() {
-        assert_eq!(
-            catalog.models.iter().find(|m| m.id == curated.id),
-            Some(&curated)
-        );
+        if let Some(row) = catalog.models.iter().find(|m| m.id == curated.id) {
+            assert_eq!(row, &curated);
+        }
     }
     let new = catalog
         .models

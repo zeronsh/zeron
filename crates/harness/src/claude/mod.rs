@@ -867,8 +867,10 @@ impl Harness for ClaudeHarness {
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
         crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
     }
+    /// Without the curated rows the installed Claude Code is too old for.
     fn fallback_models(&self) -> Vec<Model> {
-        catalog::configured_models()
+        let cli = self.model_context().ok().flatten().and_then(|c| c.binary_version);
+        catalog::fallback_models(cli.as_deref())
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -879,7 +881,12 @@ impl Harness for ClaudeHarness {
                 || self.model_context().map(|c| c.unwrap().key()),
                 || async {
                     let response = self.initialize().await?;
-                    catalog::with_discovered_models(catalog::configured_models(), &response)
+                    let cli = self.model_context()?.and_then(|c| c.binary_version);
+                    catalog::with_discovered_models_for(
+                        catalog::configured_models(),
+                        &response,
+                        cli.as_deref(),
+                    )
                 },
             )
             .await
