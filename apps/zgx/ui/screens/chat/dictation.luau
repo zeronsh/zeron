@@ -177,7 +177,7 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 		end,
 		on_key_up = function(e: any): boolean
 			local hold = M.state:peek().hold
-			if not (pending and hold) then return false end
+			if not (pending and hold) or type(e.key) ~= "string" then return false end
 			if string.lower(e.key) ~= string.lower(string.match(hold, "([^+]+)$") or hold) then return false end
 			finish()
 			return true
