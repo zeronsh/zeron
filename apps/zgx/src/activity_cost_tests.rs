@@ -440,6 +440,8 @@ struct Bench {
     ticked: bool,
     /// With time frames leave over, as a window has (`TestApp::with_spare_time`).
     spare: bool,
+    /// A frame's time on the test's clock: 1/60 s unless set (`activity_goal`'s 1/120).
+    step: f64,
 }
 
 impl Bench {
@@ -475,7 +477,7 @@ impl Bench {
             return;
         }
         if let Some((clock, at)) = &mut self.clock {
-            *at += Duration::from_secs_f64(1. / 60.);
+            *at += Duration::from_secs_f64(self.step);
             clock.advance(*at, || {});
         }
     }
@@ -516,7 +518,7 @@ impl Bench {
         let draft = app.host.shared("chat.draft", Value::Nil);
         let before = vec![built(&prompt("u0", "Where were we?")), built(&reply("a0", 3000)), built(&prompt("u1", "Make the group cheap."))];
         let at_frame = std::env::var_os("ACTIVITY_PUBLISH_AT_FRAME").is_some();
-        let mut bench = Self { app, gpu, messages, draft, before, after: Vec::new(), clock, at_frame, ticked: false, spare };
+        let mut bench = Self { app, gpu, messages, draft, before, after: Vec::new(), clock, at_frame, ticked: false, spare, step: 1. / 60. };
         bench.settle(10);
         bench
     }
@@ -982,6 +984,110 @@ fn activity_cost() {
             }
         }
     }
+}
+
+/// Wing's goal, measured as a window would spend it: under 5% of a core at
+/// 120 fps, for a long tool group streaming (calls arriving once a second,
+/// each finishing half a second later), folded and open, and for scrolling
+/// it open (a wheel's 8 points every 1/120 s). Frames on a 120 Hz test clock,
+/// drawn offscreen with scrolls copied as a window copies them, spare time
+/// spent as a window spends it; a frame only when one is wanted (an idle
+/// window draws none). The process's CPU over the time simulated is the
+/// figure (`ACTIVITY_GOAL_CALLS`, 1,000 unless set; `ACTIVITY_GOAL_SECONDS`, 20).
+#[test]
+#[ignore = "a benchmark: run it --release"]
+fn activity_goal() {
+    profiled();
+    // SAFETY: set before the renderer reads it, on this test's thread alone.
+    unsafe { std::env::set_var("DEBUG_SCROLL_COPY", "1") };
+    let n: usize = std::env::var("ACTIVITY_GOAL_CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+    let seconds: f64 = std::env::var("ACTIVITY_GOAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.);
+    let report = |what: &str, cost: &Cost, frames: usize, ticks: usize, seconds: f64| {
+        let names: String = PHASES
+            .iter()
+            .zip(cost.phases.iter())
+            .filter(|(_, p)| p.0 > 0)
+            .map(|(name, p)| format!(" {}={:.2}M/s", name.name(), p.0 as f64 / 1e6 / seconds))
+            .collect();
+        println!(
+            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames drawn, host {:.1} ms; spare {:.1}M/s;{names}",
+            cost.process.as_secs_f64() / seconds * 100.,
+            cost.process.as_secs_f64() * 1e3,
+            cost.cpu.as_secs_f64() / seconds * 100.,
+            cost.host.as_secs_f64() * 1e3,
+            cost.spare as f64 / 1e6 / seconds,
+        );
+    };
+    // (`ACTIVITY_GOAL_ONLY=scroll`: the scroll alone.)
+    let streams = std::env::var("ACTIVITY_GOAL_ONLY").ok().as_deref() != Some("scroll");
+    for open in [false, true].into_iter().filter(|_| streams) {
+        let mut bench = Bench::made_with(Some((zgx::clock::VirtualClock::new(), Duration::ZERO)), true, true);
+        bench.step = 1. / 120.;
+        bench.after = vec![built(&prompt("u2", "And the rest?"))];
+        let mut entry = turn(n, 2000, None, true);
+        bench.publish(&entry);
+        bench.settle(120);
+        bench.to_turn();
+        // (A group at work is open unless folded: pressed to fold it.)
+        if !open {
+            bench.toggle();
+        }
+        bench.settle(240);
+        let mut cost = Cost::default();
+        let (mut frames, ticks) = (0, (seconds * 120.) as usize);
+        let mut next = n + 1;
+        let mut finishing: Option<(usize, Json)> = None;
+        for tick in 0..ticks {
+            let mut host = Duration::ZERO;
+            let published = if tick % 120 == 0 {
+                // A call arriving: its call alone.
+                let mut part = call(next, 4);
+                let output = part.as_object_mut().unwrap().remove("output");
+                let id = format!("t{next}");
+                entry["parts"].as_array_mut().unwrap().push(part);
+                host += bench.publish_patched(&entry, &[id]);
+                finishing = output.map(|o| (next, o));
+                next += 1;
+                true
+            } else if tick % 120 == 60
+                && let Some((i, output)) = finishing.take()
+            {
+                // Finished: its output.
+                entry["parts"].as_array_mut().unwrap().last_mut().unwrap()["output"] = output;
+                host += bench.publish_patched(&entry, &[format!("t{i}")]);
+                true
+            } else {
+                false
+            };
+            if published || bench.app.clock.wants_frame() {
+                let mut c = bench.frame();
+                c.host = host;
+                cost.add(&c);
+                frames += 1;
+            } else {
+                bench.tick();
+            }
+        }
+        report(&format!("{n} calls streaming, {}", if open { "open" } else { "folded" }), &cost, frames, ticks, seconds);
+    }
+    // Scrolled open, down past the turn and back.
+    let mut bench = Bench::made_with(Some((zgx::clock::VirtualClock::new(), Duration::ZERO)), true, true);
+    bench.step = 1. / 120.;
+    bench.after = vec![built(&prompt("u2", "And the rest?"))];
+    bench.publish(&turn(n, 2000, None, false));
+    bench.settle(120);
+    bench.to_turn();
+    bench.toggle();
+    bench.settle(240);
+    let mut cost = Cost::default();
+    let ticks = (seconds * 120.) as usize;
+    for tick in 0..ticks {
+        // (Down for half, up for half: it stays in the group.)
+        let dy = if tick < ticks / 2 { 8. } else { -8. };
+        bench.app.scroll("transcript", dy);
+        cost.add(&bench.frame());
+    }
+    report(&format!("{n} calls open, scrolled"), &cost, ticks, ticks, seconds);
 }
 
 #[test]
