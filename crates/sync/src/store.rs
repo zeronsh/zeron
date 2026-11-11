@@ -14,6 +14,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 #[derive(Debug, Clone)]
 pub struct LoadedBase {
     pub token: u64,
+    /// The row's lineage epoch: a saver only continues a chat2 (epoch 2) row.
+    pub epoch: u32,
     pub version: loro::VersionVector,
     pub delta_rows: usize,
     pub delta_bytes: usize,
@@ -265,6 +267,10 @@ impl DocsStore {
     /// database file and the WAL is emptied, so the file alone is the store.
     /// Returns whether the checkpoint completed.
     pub fn flush_for_sleep(&self) -> bool {
+        // Both connections held (snapshot one first, the order every path
+        // takes): no snapshot write can land between the checkpoint and the
+        // sleep, so the WAL is empty when the disk is snapshotted.
+        let _snapshots = self.snap_conn();
         let conn = self.conn();
         checkpoint_truncate(&conn, &self.path, "sleep");
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0))
@@ -518,7 +524,9 @@ impl DocsStore {
                 Some(&(token, saved_at)) if token == base => saved_at,
                 _ => return Ok(false),
             };
-            let tx = conn.transaction()?;
+            // IMMEDIATE: take the write lock up front, so a busy store waits
+            // out its busy timeout here instead of failing at the INSERT.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             // The primary key alone: no read of the blob.
             let has_base: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM snapshots WHERE doc_id = ?1)",
@@ -766,8 +774,11 @@ impl DocsStore {
     /// the doc's parked inbox, which an open replays until nothing waits:
     /// they may hold ops (relay rows, local ops) nothing else still has.
     fn load_merged(&self, doc_id: &str) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
-        let conn = self.snap_conn();
-        let row = conn
+        let mut conn = self.snap_conn();
+        // The row and its deltas from ONE read transaction: a write on the
+        // other connection between the two reads can't pair them wrongly.
+        let read = conn.transaction()?;
+        let row = read
             .query_row(
                 "SELECT bytes, cursor, epoch, saved_at FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -782,11 +793,12 @@ impl DocsStore {
             )
             .optional()?;
         let Some((bytes, cursor, epoch, saved_at)) = row else { return Ok(None) };
-        let deltas = load_deltas(&conn, doc_id)?;
+        let deltas = load_deltas(&read, doc_id)?;
+        read.commit()?;
         drop(conn);
         if deltas.is_empty() {
             if let Ok(meta) = loro::LoroDoc::decode_import_blob_meta(&bytes, false) {
-                self.offer_base(doc_id, saved_at, meta.partial_end_vv, 0, 0, bytes.len());
+                self.offer_base(doc_id, saved_at, epoch, meta.partial_end_vv, 0, 0, bytes.len());
             }
             return Ok(Some((bytes, cursor, epoch)));
         }
@@ -803,7 +815,7 @@ impl DocsStore {
             && deltas.iter().all(|delta| delta.base_saved_at == saved_at)
         {
             let delta_bytes = deltas.iter().map(|delta| delta.bytes.len()).sum();
-            self.offer_base(doc_id, saved_at, version.clone(), deltas.len(), delta_bytes, bytes.len());
+            self.offer_base(doc_id, saved_at, epoch, version.clone(), deltas.len(), delta_bytes, bytes.len());
         }
         Ok(Some(match merge.merged {
             Some(merged) => {
@@ -822,6 +834,7 @@ impl DocsStore {
         &self,
         doc_id: &str,
         saved_at: i64,
+        epoch: u32,
         version: loro::VersionVector,
         delta_rows: usize,
         delta_bytes: usize,
@@ -840,7 +853,7 @@ impl DocsStore {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(
                 doc_id.to_owned(),
-                LoadedBase { token, version, delta_rows, delta_bytes, base_bytes },
+                LoadedBase { token, epoch, version, delta_rows, delta_bytes, base_bytes },
             );
     }
 

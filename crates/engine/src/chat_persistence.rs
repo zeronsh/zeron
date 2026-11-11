@@ -22,6 +22,15 @@ fn delta_budget(snapshot_bytes: usize) -> usize {
     (snapshot_bytes / 4).max(DELTA_MIN_BUDGET)
 }
 
+/// Past the budget above, a persister with a worker keeps writing deltas
+/// and folds them in once the chat has been quiet this long: a whole save
+/// of a big chat (47 MB) stalls every chat's commits while it writes, so it
+/// waits for a pause instead of landing mid-stream.
+const QUIET_FOR_COMPACTION: Duration = Duration::from_secs(2);
+/// ...unless the deltas reach this many times the budget: then the save is
+/// whole even mid-stream, so they can't grow without bound.
+const DELTA_HARD_CAP_FACTOR: usize = 4;
+
 /// What this process last saved in full, and the deltas on top of it.
 struct DeltaState {
     /// The store's token for that full save ([`DocsStore::save_base_snapshot`]).
@@ -43,6 +52,8 @@ pub(crate) struct ChatPersistence {
     urgent: AtomicBool,
     /// Guarded by `write` in practice; its own lock keeps that obvious.
     delta: Mutex<Option<DeltaState>>,
+    /// The deltas passed their budget: fold them in at the next quiet moment.
+    compaction_due: AtomicBool,
     /// Deltas already on disk when this persister started (left by a crash):
     /// a compaction folds them even if the chat never changes.
     inherited_deltas: AtomicBool,
@@ -80,7 +91,14 @@ impl ChatPersistence {
         // The state a load just found on disk, when it still is the doc's
         // base: deltas continue from it, so reopening a chat costs no whole
         // save (47 MB for the largest; one per hot chat per engine start).
-        let adopted = store.adopt_loaded_base(&chat_id);
+        // Only a chat2 row (epoch 2: deltas can't stamp a lineage) this doc
+        // grew from: the M3 path loads a pre-chat2 row, then starts a FRESH
+        // doc; deltas on that row would keep its old epoch, and a crash
+        // before compaction would make the next open discard it all.
+        let adopted = store.adopt_loaded_base(&chat_id).filter(|loaded| {
+            loaded.epoch == super::chat2_host::CHAT2_DOC_EPOCH
+                && doc.doc().oplog_vv().includes_vv(&loaded.version)
+        });
         let inherited = adopted.is_none()
             && store
                 .snapshot_delta_stats(&chat_id)
@@ -105,6 +123,7 @@ impl ChatPersistence {
                 rows: loaded.delta_rows,
             })),
             inherited_deltas: AtomicBool::new(inherited),
+            compaction_due: AtomicBool::new(false),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             cursor_verified: AtomicBool::new(verified),
@@ -197,7 +216,34 @@ impl ChatPersistence {
     }
 
     async fn run(weak: Weak<Self>, mut rx: mpsc::Receiver<()>) {
-        while rx.recv().await.is_some() {
+        loop {
+            let compaction_due = match weak.upgrade() {
+                Some(this) => this.compaction_due.load(Ordering::Acquire),
+                None => return,
+            };
+            if compaction_due {
+                tokio::select! {
+                    message = rx.recv() => if message.is_none() { return; },
+                    _ = tokio::time::sleep(QUIET_FOR_COMPACTION) => {
+                        // Quiet: fold the deltas in now, off the commit path's
+                        // busiest moments.
+                        let Some(this) = weak.upgrade() else { return };
+                        let permit = this.store.snapshot_writer.clone().lock_owned().await;
+                        let job = this.clone();
+                        if let Err(error) = tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            job.compact_sync();
+                        })
+                        .await
+                        {
+                            tracing::error!(%error, "chat snapshot compaction failed");
+                        }
+                        continue;
+                    }
+                }
+            } else if rx.recv().await.is_none() {
+                return;
+            }
             let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
             loop {
                 let Some(this) = weak.upgrade() else { return };
@@ -283,10 +329,18 @@ impl ChatPersistence {
                 hook();
             }
             let budget = delta_budget(self.snapshot_bytes.load(Ordering::Relaxed));
+            // With a worker, past the budget the save stays a delta and the
+            // worker folds them in at a quiet moment; the hard cap forces it.
+            // Without one (offline tools), the budget saves whole at once.
+            let (byte_limit, row_limit) = if self.wake.is_some() {
+                (budget * DELTA_HARD_CAP_FACTOR, DELTA_ROW_LIMIT * DELTA_HARD_CAP_FACTOR)
+            } else {
+                (budget, DELTA_ROW_LIMIT)
+            };
             if !compact
                 && let Some(state) = delta.as_mut()
-                && state.bytes < budget
-                && state.rows < DELTA_ROW_LIMIT
+                && state.bytes < byte_limit
+                && state.rows < row_limit
             {
                 let appended = doc
                     .doc()
@@ -311,6 +365,9 @@ impl ChatPersistence {
                         state.saved_vv = version;
                         state.bytes += len;
                         state.rows += 1;
+                        if state.bytes >= budget || state.rows >= DELTA_ROW_LIMIT {
+                            self.compaction_due.store(true, Ordering::Release);
+                        }
                         self.cursor_verified.store(true, Ordering::Release);
                         self.saved.store(generation, Ordering::Release);
                         return;
@@ -350,6 +407,7 @@ impl ChatPersistence {
                         .fetch_add(self.snapshot_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
                     // A whole save replaces every delta on disk.
                     self.inherited_deltas.store(false, Ordering::Release);
+                    self.compaction_due.store(false, Ordering::Release);
                     *delta = Some(DeltaState {
                         base,
                         saved_vv: version,
@@ -1298,6 +1356,116 @@ mod tests {
         doc.doc().commit();
         persistence.applied(cursor + 1, false);
         assert_eq!(persistence.writes.load(Ordering::Relaxed), 1, "a full write replaced the loaded base");
+    }
+
+    /// A streaming chat past its delta budget is not saved whole while
+    /// commits keep arriving (each whole save of a big chat stalls every
+    /// chat's commits); it is folded in once the chat pauses, and the hard
+    /// cap still forces it mid-stream so deltas can't grow without bound.
+    #[test]
+    fn a_streaming_chat_is_saved_whole_only_when_quiet_or_at_the_hard_cap() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("stream").unwrap());
+        let persistence = {
+            let _guard = runtime.enter();
+            ChatPersistence::new(&doc, store.clone(), "stream".into(), 0)
+        };
+        let mut cursor = 0u64;
+        let mut seed = 0x51_7cc1_b727_220a_95u64;
+        let mut tick = |cursor: &mut u64| {
+            // ~32 KB of incompressible text per 100 ms tick: ~320 KB/s.
+            let token: String = (0..2_000)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    format!("{seed:016x}")
+                })
+                .collect();
+            let text = doc.doc().get_text("t");
+            text.insert(text.len_unicode(), &token).unwrap();
+            doc.doc().commit();
+            *cursor += 1;
+            persistence.applied(*cursor, false);
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let whole = || persistence.writes.load(Ordering::Relaxed);
+        // The first save is whole.
+        tick(&mut cursor);
+        std::thread::sleep(Duration::from_millis(1_300));
+        let first = whole();
+        assert_eq!(first, 1);
+        // 1. Streaming past the 1 MiB budget, under the 4 MiB cap: no whole save.
+        for _ in 0..80 {
+            tick(&mut cursor);
+        }
+        assert!(persistence.compaction_due.load(Ordering::Acquire), "the fixture never passed the budget");
+        assert_eq!(whole(), first, "a whole save landed while commits kept arriving");
+        // 2. A pause: folded in within the quiet window.
+        std::thread::sleep(QUIET_FOR_COMPACTION + Duration::from_millis(1_500));
+        assert_eq!(whole(), first + 1, "the deltas weren't folded in when the chat went quiet");
+        assert_eq!(store.snapshot_delta_stats("stream").unwrap(), (0, 0));
+        // 3. Streaming far past the cap: it forces a whole save mid-stream.
+        for _ in 0..320 {
+            tick(&mut cursor);
+        }
+        assert!(whole() >= first + 2, "the hard cap didn't force a whole save");
+        persistence.compact_sync();
+        let (bytes, last, _) = store.load_snapshot_with_cursor("stream").unwrap().unwrap();
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(last, cursor);
+        drop(runtime);
+    }
+
+    /// The M3 path: an open loads a pre-chat2 row (epoch < 2), discards it,
+    /// and starts a FRESH doc. Its persister must not continue that row with
+    /// deltas: they would keep the old epoch, and after a crash before
+    /// compaction the next open would discard everything again. Nor may it
+    /// continue any row whose version the doc doesn't hold.
+    #[test]
+    fn a_fresh_doc_never_continues_a_row_it_did_not_grow_from() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+            let old = SessionDoc::init("m3").unwrap();
+            old.doc().get_text("t").insert(0, "pre-chat2 history").unwrap();
+            old.doc().commit();
+            store.save_snapshot_with_cursor("m3", &old.export_snapshot().unwrap(), 0, 0).unwrap();
+            // The open reads it (and so offers it as a base), then discards it.
+            let (_, _, epoch) = store.load_snapshot_with_cursor("m3").unwrap().unwrap();
+            assert_eq!(epoch, 0);
+            let fresh = Arc::new(SessionDoc::init("m3").unwrap());
+            let persistence = ChatPersistence::new(&fresh, store.clone(), "m3".into(), 0);
+            fresh.doc().get_text("t").insert(0, "the new lineage").unwrap();
+            fresh.doc().commit();
+            persistence.applied(1, false);
+            assert_eq!(persistence.writes.load(Ordering::Relaxed), 1, "the fresh doc wrote deltas on a pre-chat2 row");
+            assert_eq!(store.snapshot_epoch("m3").unwrap(), super::super::chat2_host::CHAT2_DOC_EPOCH);
+            // Crash: no compaction, no shutdown.
+        }
+        let store = DocsStore::open(dir.path()).unwrap();
+        let (bytes, _, epoch) = store.load_snapshot_with_cursor("m3").unwrap().unwrap();
+        assert_eq!(epoch, super::super::chat2_host::CHAT2_DOC_EPOCH, "the reopen would discard it (M3)");
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!(loaded.get_text("t").to_string(), "the new lineage");
+
+        // An epoch-2 row the doc didn't grow from: a whole save too.
+        let (store, _, _) = reopened_run(saved_in_an_earlier_run(1).path());
+        let unrelated = Arc::new(SessionDoc::init("reopen").unwrap());
+        let persistence = ChatPersistence::new(&unrelated, store, "reopen".into(), 0);
+        unrelated.doc().get_text("t").insert(0, "x").unwrap();
+        unrelated.doc().commit();
+        persistence.applied(1, false);
+        assert_eq!(persistence.writes.load(Ordering::Relaxed), 1);
     }
 }
 
