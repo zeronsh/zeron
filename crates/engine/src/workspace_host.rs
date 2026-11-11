@@ -1575,10 +1575,18 @@ impl WorkspaceHostInner {
             // a dead registry room must never fake an offline badge for
             // devices whose relay connection is fine.
             let room = lock(&self.room);
-            let live_map = room
+            let mut live_map = room
                 .as_ref()
                 .map(|room| room.presence())
                 .unwrap_or_default();
+            // The room never echoes our own beat back to us, so the map
+            // above only ever held our entry from a rejoin's hello state:
+            // after a reset our own `lastSeenAt` froze at that instant while
+            // the heartbeat kept going. Our own sent beat is the self view.
+            if let Some(at) = room.as_ref().and_then(|room| room.own_presence()) {
+                let entry = live_map.entry(self.config.device_id.clone()).or_insert(at);
+                *entry = (*entry).max(at);
+            }
             let mut seen = lock(&self.presence_seen);
             let now = now_ms();
             let mut live_fresh_peers = 0usize;

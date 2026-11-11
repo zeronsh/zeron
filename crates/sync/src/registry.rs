@@ -268,6 +268,7 @@ pub struct RegistryClient {
     redial: mpsc::Sender<()>,
     presence_out: mpsc::Sender<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
+    own_beat: Arc<std::sync::atomic::AtomicI64>,
     stats: Arc<Stats>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -343,6 +344,7 @@ impl RegistryClient {
         let (redial_tx, redial_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
         let presence = Arc::new(Mutex::new(HashMap::new()));
+        let own_beat = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let stats = Arc::new(Stats::default());
 
         let actor = Actor {
@@ -357,6 +359,8 @@ impl RegistryClient {
             redial_rx,
             presence_rx,
             presence: presence.clone(),
+            own_beat: own_beat.clone(),
+            beating: false,
             stats: stats.clone(),
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -373,6 +377,7 @@ impl RegistryClient {
                 redial: redial_tx,
                 presence_out: presence_tx,
                 presence,
+                own_beat,
                 stats,
                 task: Some(task),
             }),
@@ -414,6 +419,17 @@ impl RegistryClient {
             .filter(|(_, (_, seen))| now.duration_since(*seen) < PRESENCE_TTL)
             .map(|(device, (at, _))| (device.clone(), *at))
             .collect()
+    }
+
+    /// This device's own latest beat (epoch ms) that went out on a live
+    /// session. The room never echoes a device's beat back to its sender,
+    /// so [`Self::presence`] never holds our own entry; this is the self
+    /// view of the same heartbeat. `None` until the first beat is sent.
+    pub fn own_presence(&self) -> Option<i64> {
+        match self.own_beat.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            at => Some(at),
+        }
     }
 
     /// Liveness hint: probe the room now (deadline-checked).
@@ -473,6 +489,12 @@ struct Actor {
     redial_rx: mpsc::Receiver<()>,
     presence_rx: mpsc::Receiver<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
+    /// Our own last beat that went out on a live session (0 = none yet).
+    own_beat: Arc<std::sync::atomic::AtomicI64>,
+    /// The host has asked for presence at least once: every (re)join then
+    /// beats at once, so peers see this device live again right after a
+    /// reset instead of up to one heartbeat interval later.
+    beating: bool,
     stats: Arc<Stats>,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn RegistryTransport>>,
@@ -739,6 +761,14 @@ impl Actor {
         if !self.push_pending(&mut pipe).await {
             return SessionEnd::Reconnect;
         }
+        // Beats queued while the socket was down are stale; a fresh one
+        // goes out now (the room forgot us when every socket dropped).
+        while self.presence_rx.try_recv().is_ok() {
+            self.beating = true;
+        }
+        if self.beating && !self.send_beat(&mut pipe, epoch_ms()).await {
+            return SessionEnd::Reconnect;
+        }
 
         // ── steady state ────────────────────────────────────────────────────
         let mut last_frame = tokio::time::Instant::now();
@@ -765,9 +795,8 @@ impl Actor {
                 }
                 at = self.presence_rx.recv() => {
                     if let Some(at) = at {
-                        let frame = serde_json::to_string(&ClientFrame::Presence { at })
-                            .expect("presence serializes");
-                        if pipe.tx.send(frame).await.is_err() {
+                        self.beating = true;
+                        if !self.send_beat(&mut pipe, at).await {
                             return SessionEnd::Reconnect;
                         }
                     }
@@ -799,6 +828,20 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Send one presence beat; on success it becomes our own self-view
+    /// stamp and watchers are told (the engine re-publishes device rows).
+    async fn send_beat(&mut self, pipe: &mut TextPipe, at: i64) -> bool {
+        let frame =
+            serde_json::to_string(&ClientFrame::Presence { at }).expect("presence serializes");
+        if pipe.tx.send(frame).await.is_err() {
+            return false;
+        }
+        self.own_beat
+            .fetch_max(at, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.events.send(RegistryEvent::Presence);
+        true
     }
 
     async fn send_probe(
