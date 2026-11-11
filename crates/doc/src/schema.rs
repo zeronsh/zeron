@@ -2192,10 +2192,16 @@ mod tests {
     /// A read on one thread while another commits never mixes the new list
     /// with old cached contents: whenever the doc stood still around a
     /// cached read and a whole read, they're the same.
+    ///
+    /// The writer works in rounds and waits for the reader between them, so
+    /// every round gives the reader a still moment to compare (no clock
+    /// decides how many), while its reads during the next round's commits
+    /// still land in the window the slow subscriber opens.
     #[test]
     fn cached_reads_stay_whole_while_another_thread_commits() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Barrier};
+        const ROUNDS: u64 = 300;
         // A slow subscriber ahead of the doc's own: each change's events
         // reach the cache's observer only after the change already shows,
         // the window a reader on another thread can fall into.
@@ -2215,13 +2221,13 @@ mod tests {
         for i in 0..200 {
             doc.push_message(&entry(&format!("row-{i}"))).unwrap();
         }
-        let stop = Arc::new(AtomicBool::new(false));
+        // The last round the writer finished; it then waits at `next`.
+        let finished = Arc::new(AtomicU64::new(0));
+        let next = Arc::new(Barrier::new(2));
         let writer = {
-            let (doc, stop) = (doc.clone(), stop.clone());
+            let (doc, finished, next) = (doc.clone(), finished.clone(), next.clone());
             std::thread::spawn(move || {
-                let mut n = 0u64;
-                while !stop.load(Ordering::Relaxed) {
-                    n += 1;
+                for n in 1..=ROUNDS {
                     // Earlier rows changed in place, and rows added.
                     let at = format!("row-{}", n % 200);
                     doc.append_error_part(&at, &format!("{at}-note-{n}"), "again").unwrap();
@@ -2230,25 +2236,41 @@ mod tests {
                     if n % 5 == 0 {
                         doc.push_message(&entry(&format!("new-{n}"))).unwrap();
                     }
-                    // (Uneven gaps: reads land mid-commit and between.)
-                    std::thread::sleep(std::time::Duration::from_micros((n % 3) * 1500));
+                    finished.store(n, Ordering::Release);
+                    next.wait();
                 }
-                n
             })
         };
-        let (mut compared, started) = (0, std::time::Instant::now());
-        while compared < 300 && started.elapsed() < std::time::Duration::from_secs(20) {
-            let before = doc.doc().state_frontiers();
-            let cached = doc.read_entries().unwrap();
-            let whole = doc.read_entries_whole().unwrap();
-            if doc.doc().state_frontiers() == before {
-                assert_eq!(cached, whole, "a cached read mixed versions");
-                compared += 1;
+        // Comparisons while the writer was still committing: the ones in
+        // the race (the rest check the doc at rest).
+        let mut mid_round = 0;
+        for n in 1..=ROUNDS {
+            loop {
+                // (Seen before the reads: the writer is waiting all through them.)
+                let paused = finished.load(Ordering::Acquire) == n;
+                // A writer that failed never finishes the round: its error,
+                // not a reader spinning forever.
+                if !paused && writer.is_finished() {
+                    writer.join().expect("the writer failed");
+                    panic!("the writer stopped before round {n}");
+                }
+                let before = doc.doc().state_frontiers();
+                let cached = doc.read_entries().unwrap();
+                let whole = doc.read_entries_whole().unwrap();
+                if doc.doc().state_frontiers() == before {
+                    assert_eq!(cached, whole, "a cached read mixed versions (round {n})");
+                    if paused {
+                        break;
+                    }
+                    mid_round += 1;
+                } else {
+                    assert!(!paused, "the doc changed while the writer waited (round {n})");
+                }
             }
+            next.wait();
         }
-        stop.store(true, Ordering::Relaxed);
-        let commits = writer.join().unwrap();
-        assert!(compared >= 50, "too few still moments to compare ({compared}, {commits} commits)");
+        writer.join().unwrap();
+        eprintln!("{ROUNDS} rounds compared at rest, {mid_round} comparisons mid-round");
         assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
     }
 
