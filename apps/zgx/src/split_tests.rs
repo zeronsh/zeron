@@ -418,15 +418,19 @@ fn the_composers_menu_comes_back_with_the_window_and_stays_shut_after_escape() {
     app.click(field);
     app.type_text(field, "@");
     app.frames(20);
+    // (The popover round @'s launcher, and round the other triggers' list:
+    // ds/composer_mentions.)
     let open_now = |app: &mut TestApp| {
-        app.tree().lines().any(|l| l.contains("#mention-panel") && !l.contains(" hidden"))
+        app.tree().lines().any(|l| l.contains("#mention-popover") && !l.contains(" hidden"))
     };
     assert!(open_now(&mut app), "typed: its menu\n{}", app.tree());
-    // Either order of the two, as the platform has them.
+    // Either order of the two, as the platform has them: the popups closed
+    // and then the window at the back in one event (zgx-desktop's
+    // `Focused(false)`, no frame between: ds/composer_mentions tells the
+    // two apart as that event ends), or the window first.
     for popups_first in [true, false] {
         if popups_first {
             app.ui.dismiss_popups();
-            app.frames(2);
             app.ui.set_window_active(false);
         } else {
             app.ui.set_window_active(false);

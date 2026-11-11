@@ -207,12 +207,14 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
             press(&mut w, "ctrl+tab", "shell.next_session", false, &|w| w.route() != session);
             press(&mut w, "ctrl+shift+tab", "shell.previous_session", true, &|w| w.route() == session);
         }
-        // ⌘N a new chat, then ⌘[ back, ⌘] forward and ⌘[ back again from
-        // where focus went (putting it back would move the history).
+        // ⌘N a new chat, then back, forward and back again from where
+        // focus went (putting it back would move the history): ⌘[ ⌘] on a
+        // Mac, Alt+←/→ elsewhere (zgx's router's keys there).
+        let (back, forward) = if cfg!(target_os = "macos") { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
         press(&mut w, "cmd+n", "shell.new_chat", false, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
-        press(&mut w, "cmd+]", "router.forward", true, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
+        press(&mut w, forward, "router.forward", true, &|w| w.route() == "/");
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
@@ -605,9 +607,12 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     let recorder = "#settings-page >> role:button ~\"Change Toggle terminal\"";
     w.app.click(recorder);
     w.app.frames(5);
-    w.app.keys("ctrl+alt+t");
+    // (A key besides the command key: Control on a Mac, Super elsewhere,
+    // where Ctrl is the command key.)
+    let other = if cfg!(target_os = "macos") { "ctrl+alt+t" } else { "meta+alt+t" };
+    w.app.keys(other);
     w.app.frames(10);
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "rebound at once");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "rebound at once");
     assert!(w.app.texts().iter().any(|t| t.contains("Reset")), "a rebound row offers Reset");
 
     // ⌘B is Toggle sidebar's: recorded (the recorder takes every key while
@@ -615,7 +620,7 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     w.app.click(recorder);
     w.app.frames(5);
     assert_eq!(w.press("cmd+b"), None, "⌘B goes to the recorder, not its command");
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "a taken key is refused");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "a taken key is refused");
     assert_eq!(published(&w, "shell.toggle_sidebar").as_deref(), Some("cmd+b"));
     let said = w.app.texts();
     assert!(

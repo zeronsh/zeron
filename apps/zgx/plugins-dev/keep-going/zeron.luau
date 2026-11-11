@@ -1181,7 +1181,7 @@ return function(id: string): any
 	-- ── Agents: usage, accounts, models, and their events ─────────────────
 	-- Each asks the engine, which checks what this device (or `device`,
 	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
-	-- "accounts.switch", "models.read", "models.set". Each is a promise; a
+	-- "accounts.switch", "accounts.pin", "models.read", "models.set". Each is a promise; a
 	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
 	-- not_allowed, paced, already, loop, not_found, offline, …).
 	local function agents(op: string, args: any?, device: string?): any
@@ -1217,6 +1217,20 @@ return function(id: string): any
 	-- chats there are done.
 	function M.switch_account(s: { provider: string, account: string, when_idle: boolean?, device: string? }): any
 		return agents("switch_account", { provider = s.provider, account = s.account, when_idle = s.when_idle }, s.device)
+	end
+
+	-- Run one chat on a saved account of its own ("accounts.pin"), on this
+	-- device or `device`, while the active account stays as it is. No
+	-- `account` takes the pin back. { provider, chat, account? }.
+	function M.pin_account(s: { provider: string, chat: string, account: string?, device: string? }): any
+		return agents("pin_account", { provider = s.provider, chat = s.chat, account = s.account }, s.device)
+	end
+
+	-- The chats pinned to an account ("accounts.read"): { { provider,
+	-- account, since, chat? } } (`chat` with "sessions.read").
+	function M.pins(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("pins", { provider = o.provider }, o.device)
 	end
 
 	-- A harness's models ("models.read"): { { id, label, efforts, options } }.

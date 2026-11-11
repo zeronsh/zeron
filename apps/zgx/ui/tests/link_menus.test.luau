@@ -23,10 +23,16 @@ local function item(name: string): string
 	return `menuitem "{name}"`
 end
 
--- The menu rows drawn now (a closed menu's are listed `hidden`).
+-- The menu rows drawn now (a closed menu's are listed `hidden`). Read from
+-- the whole tree and from the menu's own: the whole tree is cut at its
+-- first 200 lines, which a long page (About's) fills before the menu.
 local function rows(app: any): { string }
 	local out = {}
-	for line in string.gmatch(app:tree(), "[^\n]+") do
+	local text = app:tree()
+	if app:has("role:menu") then
+		text ..= "\n" .. app:tree("role:menu")
+	end
+	for line in string.gmatch(text, "[^\n]+") do
 		if string.find(line, " menuitem ", 1, true) and not string.find(line, "hidden", 1, true) then
 			table.insert(out, line)
 		end

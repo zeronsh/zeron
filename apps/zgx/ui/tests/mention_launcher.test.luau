@@ -21,6 +21,12 @@ local function chat(): any
 	return app
 end
 
+-- A footer key's label as ds/kbd gives it: macOS's glyph (↑ said "Up
+-- Arrow", ↵ as it is), elsewhere the platform's word ("Up", "Enter").
+local function key_label(tree: string, mac: string, other: string): string
+	return if tree:find(`img "{mac}"`, 1, true) then mac else other
+end
+
 -- The rows shown, in order, and the section headings among them.
 local function rows(app: any): { string }
 	local out = {}
@@ -28,7 +34,7 @@ local function rows(app: any): { string }
 	for line in app:tree("#mention-launcher"):gmatch("[^\n]+") do
 		if line:find('listbox "Results"', 1, true) then
 			inside = true
-		elseif inside and line:find('img "Up Arrow"', 1, true) then
+		elseif inside and (line:find('img "Up Arrow"', 1, true) or line:find('img "Up"', 1, true)) then
 			break
 		elseif inside then
 			local option = line:match('option "([^"]+)"')
@@ -329,7 +335,8 @@ test("every row is one line, what's at its end ending at the same place on each,
 		expect(`{name}: {after[name]}`).to_be(`{name}: {ends}`)
 	end
 	-- ↵ over the lit row's end: it ends where every row's text does.
-	local key = app:tree("#mention-launcher"):match('img "↵" (%-?%d+,%-?%d+ %d+x%d+)')
+	local tree = app:tree("#mention-launcher")
+	local key = tree:match(`img "{key_label(tree, "↵", "Enter")}" (%-?%d+,%-?%d+ %d+x%d+)`)
 	local x, w = (key or ""):match("^(%-?%d+),%-?%d+ (%d+)x")
 	expect(`↵ ends at {(tonumber(x) or 0) + (tonumber(w) or 0)}`).to_be(`↵ ends at {edge}`)
 end)

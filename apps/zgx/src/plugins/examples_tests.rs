@@ -2700,17 +2700,33 @@ fn asked_service(heard: &Heard, method: &str) -> Vec<serde_json::Value> {
 /// device "box" in /work/atlas, its service played by `service` (and
 /// GitHub, when `with_github`, played by `github`).
 fn git_tab(service: serde_json::Value, github: Option<serde_json::Value>) -> (TestApp, Heard, World) {
+    git_tab_within(service, github, zgx_script::Limits::default())
+}
+
+/// `git_tab`, its scripts run within `limits`.
+fn git_tab_within(service: serde_json::Value, github: Option<serde_json::Value>, limits: zgx_script::Limits) -> (TestApp, Heard, World) {
     // The session as each plugin may read it: s1, its folder on "box".
     let records = json!({ "sessions": { "s1": {
         "title": "Fix the build", "status": "done", "device": "box", "cwd": "/work/atlas",
         "branch": "feature/graph", "project": "atlas",
     } }, "files_read": true });
-    git_in("git_fixture.luau", records, service, github)
+    git_in_within("git_fixture.luau", records, service, github, limits)
 }
 
 /// The Git plugin (and GitHub's, with `github`) in `fixture` (ui/), the
 /// session records `records`, the device's service played by `service`.
 fn git_in(fixture: &str, records: serde_json::Value, service: serde_json::Value, github: Option<serde_json::Value>) -> (TestApp, Heard, World) {
+    git_in_within(fixture, records, service, github, zgx_script::Limits::default())
+}
+
+/// `git_in`, its scripts run within `limits` (heap, and time per call).
+fn git_in_within(
+    fixture: &str,
+    records: serde_json::Value,
+    service: serde_json::Value,
+    github: Option<serde_json::Value>,
+    limits: zgx_script::Limits,
+) -> (TestApp, Heard, World) {
     let entry = crate::ui_dir().join(fixture);
     let mut items = vec![builtin("git")];
     if github.is_some() {
@@ -2722,7 +2738,7 @@ fn git_in(fixture: &str, records: serde_json::Value, service: serde_json::Value,
     let heard = calls.clone();
     let played = service.clone();
     let app = TestApp::new(move |runtime| {
-        let host = super::lend_design_system(ScriptHost::new(runtime, &entry), &entry);
+        let host = super::lend_design_system(ScriptHost::new(runtime, &entry).limits(limits), &entry);
         host.shared("zgx.window.size", zgx_script::window_size_value(1200., 800.));
         offline(&host);
         expose_surface(&host);
@@ -3787,7 +3803,14 @@ fn a_large_diff_loads_within_a_plugin_s_memory() {
     // Eight thousand lines, the window's width (the diff beside the list).
     let mut w = git_world();
     w["diff"]["text"] = json!(big_diff(8000));
-    let (mut app, _heard, _) = git_tab(w, None);
+    // What this holds to is the plugin's memory, its own limit (32 MB), as
+    // ever. Its time per call is given room: on a machine loaded past its
+    // cores (a load of 50 as the whole suite runs beside other builds), the
+    // syntax lexer's call over 8,000 lines came past a debug build's 500 ms,
+    // a budget for a runaway, which this isn't. (zgx-script's tests hold
+    // the budget itself.)
+    let limits = zgx_script::Limits { load: std::time::Duration::from_secs(30), call: std::time::Duration::from_secs(30), ..Default::default() };
+    let (mut app, _heard, _) = git_tab_within(w, None, limits);
     assert!(app.wait_until(|app| app.find("#git-diff").is_some()), "{}", app.tree());
     for _ in 0..40 {
         app.frames(5);

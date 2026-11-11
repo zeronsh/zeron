@@ -76,9 +76,12 @@ test("a plugin's page is listed under Plugins while it's on, and goes when it's 
 	-- Drawn by Zeron from what it declares: its sections and every kind.
 	app:click(TAB)
 	app:frames(30)
-	for _, part in { 'heading "Greeter"', 'heading "Greeting"', 'heading "More"', 'switch "Show the greeting"', 'textbox "Greeting"', 'radio "Excited"', 'button "Where it shows"', 'textbox "Greet again every"', 'button "Change Wave shortcut, now ⌃⌥G"', 'button "Choose Postcards folder"' } do
+	for _, part in { 'heading "Greeter"', 'heading "Greeting"', 'heading "More"', 'switch "Show the greeting"', 'textbox "Greeting"', 'radio "Excited"', 'button "Where it shows"', 'textbox "Greet again every"', 'button "Choose Postcards folder"' } do
 		expect(app:tree(PAGE)).to_contain(part)
 	end
+	-- (Its keys as this platform writes them: ⌃⌥G, or Ctrl+Alt+G off a Mac.)
+	local page = app:tree(PAGE)
+	expect(page:find('button "Change Wave shortcut, now ⌃⌥G"', 1, true) ~= nil or page:find('button "Change Wave shortcut, now Ctrl+Alt+G"', 1, true) ~= nil).to_be(true)
 	-- Turned off while open: the page goes, and its row with it.
 	app:command("plugin_off")
 	app:frames(30)

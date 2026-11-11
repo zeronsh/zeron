@@ -119,6 +119,18 @@ fn a_failing_handler_is_contained_with_its_message() {
 #[test]
 fn scenes_and_shaders_render_on_the_gpu_thread() {
     let mut app = mount(None);
+    // A machine with no GPU adapter at all (a CI runner without a Vulkan
+    // driver): a scene falls back to the software renderer and shows; a
+    // shader can't, and says so in place, as a reader's would.
+    if let Some(why) = zeron_visual_gpu::unavailable_reason() {
+        eprintln!("no GPU here ({why}): checking the software scene and the shader's notice");
+        let error = "#visual-shader >> .visual-error";
+        app.wait_until(|app| app.find(error).is_some());
+        assert!(has(&mut app, error), "the shader without a GPU: no notice\n{}", app.tree());
+        assert!(!has(&mut app, "#visual-scene >> .visual-error"), "the scene without a GPU\n{}", app.tree());
+        assert!(has(&mut app, "#visual-scene >> img \"Materials\""), "the scene without a GPU: not drawn\n{}", app.tree());
+        return;
+    }
     let drawn = |id: &str| crate::visuals::surfaces(id);
     let ready = app.wait_until(|_| {
         let (shaders, _) = drawn("v:fixture-shader");

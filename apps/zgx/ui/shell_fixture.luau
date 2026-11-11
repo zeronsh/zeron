@@ -16,13 +16,16 @@ local sessions = require("@account/sessions")
 -- (Its start as it is, a new chat: not the launch's jump to the latest
 -- session, which its tests drive themselves.)
 require("@app/screens/shell/route").launched:set(true)
--- (The sidebar these tests were written on: one list, Activity off, empty
--- projects listed. The app opens with Activity, by project then device and
--- no empty projects (tests/sidebar_defaults.test.luau); a test of those
--- views turns them on itself.)
+-- (The sidebar these tests were written on: grouped by project, Activity
+-- off, empty projects listed. The app opens with Activity, by project then
+-- device and no empty projects (tests/sidebar_defaults.test.luau); a test
+-- of those views turns them on itself. Each set once, to what it stays: a
+-- reload runs this again, and a value set and then changed back here moves
+-- the sidebar still showing (its list crossfading out takes the keyboard
+-- from its row before the reload can keep it there).)
 require("@app/screens/shell/activity").on:set(false)
 local sidebar_options = require("@app/screens/shell/sidebar").options
-sidebar_options.organize:set({})
+sidebar_options.organize:set("project")
 sidebar_options.details.empty_projects:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
@@ -1618,10 +1621,6 @@ ui.command { id = "fixture.project_icons", title = "Fixture: projects with icons
 end }
 
 publish()
-
--- Grouped by project (a view option; one list is the default): the tests
--- here follow projects' headers.
-require("@app/screens/shell/sidebar").options.organize:set("project")
 
 -- The plugins screen (what plugins ask of the shell: a tab in a panel, a
 -- link), as the app loads it beside the shell: on for the tests that need

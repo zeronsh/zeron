@@ -122,6 +122,12 @@ test("the / and $ lists: the same, their heading first", function()
 	even(app, "$")
 end)
 
+-- A footer key's label as ds/kbd gives it: macOS's glyph (↑ said "Up
+-- Arrow", ↵ as it is), elsewhere the platform's word ("Up", "Enter").
+local function key_label(tree: string, mac: string, other: string): string
+	return if tree:find(`img "{mac}"`, 1, true) then mac else other
+end
+
 -- The x of a printed line's box, its right edge, by what it says.
 local function edges(tree: string, needle: string): (number?, number?)
 	for line in tree:gmatch("[^\n]+") do
@@ -145,18 +151,19 @@ test("the launcher's bands line up: the trigger, the tabs, the headings, the til
 	-- text into its row and a tile into its row.)
 	local tab = edges(tree, 'tab "All"') :: number
 	local heading = edges(tree, 'text "Files"') :: number
-	local up = edges(tree, 'img "Up Arrow"') :: number
+	local up = edges(tree, `img "{key_label(tree, "Up Arrow", "Up")}"`) :: number
 	local option = edges(tree, 'option "chat.rs"') :: number
 	expect(`tab pill {tab - panel}`).to_be(`tab pill {option - panel}`)
 	expect(`heading {heading - panel}`).to_be(`heading {up - panel}`)
 	-- The trigger's slot is the tiles' column (its glyph centred in it).
 	local at, at_end = edges(tree, 'text "@"')
-	local tile = (edges(tree, 'img "↵"'))
+	local enter = `img "{key_label(tree, "↵", "Enter")}"`
+	local tile = (edges(tree, enter))
 	expect(tile).never.to_be_nil()
 	expect(math.abs(((at :: number) + (at_end :: number)) / 2 - (up + 9)) <= 1).to_be(true)
 	-- The right: the count's end, the ↵'s end.
 	local _, count_end = edges(tree, " results")
-	local _, key_end = edges(tree, 'img "↵"')
+	local _, key_end = edges(tree, enter)
 	expect(`count ends {count_end}`).to_be(`count ends {key_end}`)
 	-- Nothing typed: what to type, quiet, on the names' line.
 	expect(tree).to_contain('text "Search files, chats, attachments"')
@@ -231,7 +238,7 @@ test("the launcher's top, its tabs and its keys are each centred on their band's
 	-- (The footer's ↵: the last, under the lit row's.)
 	local ey, eh = 0, 0
 	for line in tree:gmatch("[^\n]+") do
-		if line:find('img "↵"', 1, true) then
+		if line:find(`img "{key_label(tree, "↵", "Enter")}"`, 1, true) then
 			local _, y, _, h = box(line)
 			ey, eh = y, h
 		end
