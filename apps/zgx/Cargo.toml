@@ -31,6 +31,8 @@ layout_probe = []
 
 [dependencies]
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
+# A chat's folded rows with its own dictionary (zstd's, trained on the device: `FoldDict`).
+zstd = { version = "0.13", default-features = false, features = ["zdict_builder"] }
 zgx = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
 # `mimalloc`: the program's allocator, in place of the system's. It hands
 # freed memory back to the system (the system's keeps the most it ever
