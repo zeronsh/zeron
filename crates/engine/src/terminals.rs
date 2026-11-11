@@ -273,6 +273,7 @@ fn windows_shell(
 
 /// Whether `shell` is PowerShell (7's `pwsh` or Windows PowerShell), which
 /// prints a banner as it starts unless told `-NoLogo`.
+#[cfg(any(windows, test))]
 fn is_powershell(shell: &str) -> bool {
     let name = std::path::Path::new(shell)
         .file_stem()
@@ -1126,9 +1127,14 @@ mod windows_tests {
             .subscribe(terminal_id, None)
             .expect("subscribe to startup");
         let mut events = Vec::new();
+        // `PS <cwd>>`, then the prompt's trailing space. With -NoLogo the
+        // prompt is ConPTY's first paint, which draws that space as a
+        // cursor move (`ESC[1C`), not a ' '.
         collect_until(&mut rx, &mut events, |events| {
             let output = decoded(events);
-            output.contains("PS ") && output.contains("> ")
+            output
+                .rfind("PS ")
+                .is_some_and(|start| output[start..].contains('>'))
         })
         .await;
     }
@@ -1476,7 +1482,11 @@ mod windows_shell_tests {
 
     #[test]
     fn powershell_is_told_no_logo() {
+        // A `\` path is only a path on Windows; elsewhere build one.
+        #[cfg(windows)]
         assert!(is_powershell(r"C:\Program Files\PowerShell\7\pwsh.exe"));
+        let pwsh = Path::new("PowerShell").join("7").join("pwsh.exe");
+        assert!(is_powershell(&pwsh.to_string_lossy()));
         assert!(is_powershell("powershell.exe"));
         assert!(is_powershell("PWSH"));
         assert!(!is_powershell(r"C:\WINDOWS\system32\cmd.exe"));
