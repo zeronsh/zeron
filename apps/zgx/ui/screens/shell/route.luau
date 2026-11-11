@@ -168,6 +168,10 @@ function M.make()
 		routes = ROUTES,
 		initial = entries[1],
 		scheme = "zeron",
+		-- Back steps through every place since launch, however many (zgx
+		-- keeps the last 100 unless told). What a reload replays is
+		-- `HISTORY_MAX`'s.
+		history = math.huge,
 	}
 	replaying = true
 	ui.batch(function()
