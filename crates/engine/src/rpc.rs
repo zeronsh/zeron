@@ -3907,7 +3907,13 @@ impl RpcService for EngineRpc {
                                 }
                                 changes.borrow_and_update();
                                 held.borrow_and_update();
-                                let items = host.waiting_messages(&chat).unwrap_or_default();
+                                // (Off the runtime's workers: a chat opened
+                                // cold reads its whole doc here.)
+                                let items = tokio::task::spawn_blocking(move || {
+                                    host.waiting_messages(&chat).unwrap_or_default()
+                                })
+                                .await
+                                .unwrap_or_default();
                                 let value = serde_json::json!({ "items": items });
                                 Some((value, (changes, held, false)))
                             }

@@ -748,8 +748,10 @@ impl Drop for ChatDocHandle {
 /// chat never switched, `Some(None)` for a seam naming no known harness.
 /// Seams above a fork's seam were copied from the source chat and don't
 /// count: the fork's own provider history starts there.
-pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<HarnessId>> {
-    for entry in entries.iter().rev() {
+pub(crate) fn latest_switch(
+    entries: &[impl std::borrow::Borrow<SessionMessageEntry>],
+) -> Option<Option<HarnessId>> {
+    for entry in entries.iter().rev().map(std::borrow::Borrow::borrow) {
         for part in &entry.parts {
             match part {
                 MessagePart::Switch { to_harness, .. } => {
@@ -804,7 +806,7 @@ impl ChatDocHandle {
                 })
                 .collect();
             !pending.is_empty()
-                && self.doc.read_entries().is_ok_and(|entries| {
+                && self.doc.read_entries_shared().is_ok_and(|entries| {
                     pending
                         .iter()
                         .any(|id| !entries.iter().any(|e| e.id == *id))
@@ -954,7 +956,7 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
-        if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
+        if self.doc.read_entries_shared()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
         self.doc.push_message(&SessionMessageEntry {
@@ -985,7 +987,7 @@ impl ChatDocHandle {
         created_at: i64,
     ) -> Result<bool, DocError> {
         let ((from_id, from), (to_id, to)) = (from, to);
-        let entries = self.doc.read_entries()?;
+        let entries = self.doc.read_entries_shared()?;
         if entries.is_empty() {
             return Ok(false);
         }
@@ -1027,7 +1029,7 @@ impl ChatDocHandle {
     pub fn mark_abandoned_streams(&self, note: &str) -> Result<Vec<(String, i64)>, DocError> {
         let mut stamped = Vec::new();
         let mut chips_changed = false;
-        for entry in self.doc.read_entries()? {
+        for entry in self.doc.read_entries_shared()? {
             if entry.role != MessageRole::Assistant || entry.device_id != self.device_id {
                 continue;
             }
@@ -1066,7 +1068,7 @@ impl ChatDocHandle {
     /// the chat doesn't just stop at the user's message. Idempotent per `key`.
     pub fn note_turn_failure(&self, key: &str, note: &str) -> Result<(), DocError> {
         let id = format!("{key}-interrupted");
-        if self.doc.read_entries()?.iter().any(|entry| entry.id == id) {
+        if self.doc.read_entries_shared()?.iter().any(|entry| entry.id == id) {
             return Ok(());
         }
         self.doc.push_message(&SessionMessageEntry {
@@ -1378,7 +1380,7 @@ impl DocHost {
             tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
             return;
         }
-        let Ok(entries) = handle.doc.read_entries() else {
+        let Ok(entries) = handle.doc.read_entries_shared() else {
             return;
         };
         let Some(last) = entries.last().filter(|entry| entry.role == MessageRole::User) else {
@@ -3934,7 +3936,7 @@ impl DocHost {
     /// request id, or `None` when nothing waits.
     pub(crate) fn pending_input(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
         let handle = self.open(chat_id)?;
-        let entries = handle.doc.read_entries()?;
+        let entries = handle.doc.read_entries_shared()?;
         Ok(entries.iter().rev().flat_map(|e| e.parts.iter().rev()).find_map(|part| match part {
             zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
             _ => None,
@@ -3968,7 +3970,7 @@ impl DocHost {
         }
         let id = new_id();
         let now = now_ms();
-        let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
+        let based_on = handle.doc.read_entries_shared()?.last().map(|m| CommandBasedOn {
             turn_id: Some(m.id.clone()),
             frontier: None,
         });
@@ -5219,7 +5221,7 @@ impl DocHost {
         // user-driven retry mints a FRESH attempt: new id, same payload and
         // message id (the executor's user-entry pre-write dedupes by message
         // id). One re-issue per message — the LATEST attempt speaks for it.
-        let messages = handle.doc.read_entries().unwrap_or_default();
+        let messages = handle.doc.read_entries_shared().unwrap_or_default();
         let message_landed = |mid: &str| messages.iter().any(|m| m.id == mid);
         let mut latest_dead: HashMap<String, &SessionCommandEntry> = HashMap::new();
         for c in &commands {
@@ -5359,7 +5361,7 @@ impl DocHost {
             None
         };
         let commands = handle.doc.read_commands()?;
-        let messages = handle.doc.read_entries().unwrap_or_default();
+        let messages = handle.doc.read_entries_shared().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
         let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
         let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
@@ -5738,7 +5740,7 @@ impl DocHost {
                 }
                 return;
             };
-            let messages = handle.doc.read_entries().unwrap_or_default();
+            let messages = handle.doc.read_entries_shared().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
             let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
             let disposition = evaluate_command(
@@ -6243,7 +6245,7 @@ impl DocHost {
                 // and must still reject, and a still-streaming entry's
                 // question belongs to the live run (a just-consumed resolver
                 // racing a second answer must not spawn a duplicate turn).
-                let questions = handle.doc.read_entries().ok().and_then(|entries| {
+                let questions = handle.doc.read_entries_shared().ok().and_then(|entries| {
                     entries
                         .iter()
                         .rev()
@@ -6321,7 +6323,7 @@ impl DocHost {
         entry: &SessionCommandEntry,
         message_id: &str,
     ) -> bool {
-        let Some(live) = handle.doc.read_entries().ok().and_then(|entries| {
+        let Some(live) = handle.doc.read_entries_shared().ok().and_then(|entries| {
             entries
                 .iter()
                 .rev()
@@ -6868,6 +6870,50 @@ mod transfer_progress_tests {
         );
         let published: Vec<_> = rx.borrow().entries.iter().map(|e| (**e).clone()).collect();
         assert_eq!(handle.doc().read_entries_whole().unwrap(), published);
+    }
+
+    /// The open chat's waiting-messages watch runs on every change to it:
+    /// with nothing waiting it reads no transcript (beta.5 read and copied
+    /// every entry per commit, on a runtime worker).
+    #[tokio::test]
+    async fn waiting_messages_in_a_whale_cost_what_waits() {
+        let (_dir, host) = host();
+        let source = zeron_doc::SessionDoc::init("waiting-whale").unwrap();
+        for i in 0..3000 {
+            source
+                .push_message(&zeron_doc::SessionMessageEntry {
+                    id: format!("row-{i}"),
+                    role: zeron_doc::MessageRole::User,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "text".into(),
+                        text: "x".repeat(2048),
+                    }],
+                    created_at: i,
+                    device_id: "remote".into(),
+                    status: None,
+                    continuation_of: None,
+                    duration_ms: None,
+                })
+                .unwrap();
+        }
+        host.inner
+            .store
+            .save_snapshot_with_cursor("waiting-whale", &source.export_snapshot().unwrap(), 0, 2)
+            .unwrap();
+        drop(source);
+        let handle = host.open("waiting-whale").unwrap();
+        let start = std::time::Instant::now();
+        let whole = handle.doc().read_entries_whole().unwrap();
+        let read = start.elapsed();
+        assert_eq!(whole.len(), 3000);
+        assert!(host.waiting_messages("waiting-whale").unwrap().is_empty());
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            assert!(host.waiting_messages("waiting-whale").unwrap().is_empty());
+        }
+        let each = start.elapsed() / 5;
+        eprintln!("waiting whale: whole read {read:?}, waiting_messages {each:?}");
+        assert!(each * 5 < read, "waiting_messages ({each:?}) should cost far less than a whole read ({read:?})");
     }
 
     #[tokio::test]

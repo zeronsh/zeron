@@ -72,18 +72,28 @@ impl DocHost {
     /// in its doc, then what this device still holds for it.
     pub fn waiting_messages(&self, chat_id: &str) -> Result<Vec<WaitingMessage>, EngineError> {
         let handle = self.open(chat_id)?;
-        let landed: std::collections::HashSet<String> = handle
-            .doc
-            .read_entries()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect();
-        let mut waiting: Vec<WaitingMessage> = handle
+        let pending: Vec<_> = handle
             .doc
             .read_commands()?
             .into_iter()
             .filter(|c| c.status == SessionCommandStatus::Pending)
+            .collect();
+        // (Read on every change to the chat while it's open: the
+        // transcript's ids only when a command waits, and shared, not
+        // copied. A long chat's every entry was copied here per commit.)
+        let landed: std::collections::HashSet<String> = if pending.is_empty() {
+            Default::default()
+        } else {
+            handle
+                .doc
+                .read_entries_shared()
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect()
+        };
+        let mut waiting: Vec<WaitingMessage> = pending
+            .into_iter()
             .filter_map(|c| {
                 let (message_id, prompt) = match &c.payload {
                     SessionCommandPayload::Run {
