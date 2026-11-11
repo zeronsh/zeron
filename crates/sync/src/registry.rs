@@ -57,12 +57,18 @@ const PROBE_QUIET_DEFAULT: Duration = Duration::from_secs(900);
 pub struct RegistryTuning {
     /// Send a liveness probe after this much protocol-frame silence.
     pub probe_quiet: Duration,
+    /// A (re)join beats at once only if the host asked for presence within
+    /// this long: a host that stopped beating on purpose (a phone in the
+    /// background) must not be shown online by every network change.
+    pub rejoin_beat_window: Duration,
 }
 
 impl Default for RegistryTuning {
     fn default() -> Self {
         Self {
             probe_quiet: PROBE_QUIET_DEFAULT,
+            // About two of the 15 s heartbeats engines and phones send.
+            rejoin_beat_window: Duration::from_secs(35),
         }
     }
 }
@@ -76,7 +82,7 @@ pub enum RegistryEvent {
     Disconnected,
     /// Rows/acks were applied to the doc — republish and persist.
     Applied,
-    /// A remote device's presence beat arrived.
+    /// A remote device's presence beat arrived, or a rejoin's own beat went out.
     Presence,
 }
 
@@ -269,6 +275,7 @@ pub struct RegistryClient {
     presence_out: mpsc::Sender<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     own_beat: Arc<std::sync::atomic::AtomicI64>,
+    last_asked: Arc<Mutex<Option<tokio::time::Instant>>>,
     stats: Arc<Stats>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -345,6 +352,7 @@ impl RegistryClient {
         let (presence_tx, presence_rx) = mpsc::channel(4);
         let presence = Arc::new(Mutex::new(HashMap::new()));
         let own_beat = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let last_asked = Arc::new(Mutex::new(None));
         let stats = Arc::new(Stats::default());
 
         let actor = Actor {
@@ -360,7 +368,7 @@ impl RegistryClient {
             presence_rx,
             presence: presence.clone(),
             own_beat: own_beat.clone(),
-            beating: false,
+            last_asked: last_asked.clone(),
             stats: stats.clone(),
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -378,6 +386,7 @@ impl RegistryClient {
                 presence_out: presence_tx,
                 presence,
                 own_beat,
+                last_asked,
                 stats,
                 task: Some(task),
             }),
@@ -407,6 +416,7 @@ impl RegistryClient {
 
     /// Publish this device's presence beat (epoch ms).
     pub fn set_presence(&self, at: i64) {
+        *lock(&self.last_asked) = Some(tokio::time::Instant::now());
         let _ = self.presence_out.try_send(at);
     }
 
@@ -491,10 +501,11 @@ struct Actor {
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     /// Our own last beat that went out on a live session (0 = none yet).
     own_beat: Arc<std::sync::atomic::AtomicI64>,
-    /// The host has asked for presence at least once: every (re)join then
-    /// beats at once, so peers see this device live again right after a
-    /// reset instead of up to one heartbeat interval later.
-    beating: bool,
+    /// When the host last asked for a beat ([`RegistryClient::set_presence`]).
+    /// A (re)join within `tuning.rejoin_beat_window` of it beats at once, so
+    /// peers see this device live again right after a reset instead of up
+    /// to one heartbeat later; a host that stopped beating stays quiet.
+    last_asked: Arc<Mutex<Option<tokio::time::Instant>>>,
     stats: Arc<Stats>,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn RegistryTransport>>,
@@ -762,12 +773,17 @@ impl Actor {
             return SessionEnd::Reconnect;
         }
         // Beats queued while the socket was down are stale; a fresh one
-        // goes out now (the room forgot us when every socket dropped).
-        while self.presence_rx.try_recv().is_ok() {
-            self.beating = true;
-        }
-        if self.beating && !self.send_beat(&mut pipe, epoch_ms()).await {
-            return SessionEnd::Reconnect;
+        // goes out now if the host is still beating (the room may have
+        // forgotten us when every socket dropped).
+        while self.presence_rx.try_recv().is_ok() {}
+        let beating = lock(&self.last_asked)
+            .is_some_and(|at| at.elapsed() < self.tuning.rejoin_beat_window);
+        if beating {
+            if !self.send_beat(&mut pipe, epoch_ms()).await {
+                return SessionEnd::Reconnect;
+            }
+            // Shown at once (steady beats show at the host's next publish).
+            let _ = self.events.send(RegistryEvent::Presence);
         }
 
         // ── steady state ────────────────────────────────────────────────────
@@ -795,7 +811,6 @@ impl Actor {
                 }
                 at = self.presence_rx.recv() => {
                     if let Some(at) = at {
-                        self.beating = true;
                         if !self.send_beat(&mut pipe, at).await {
                             return SessionEnd::Reconnect;
                         }
@@ -830,8 +845,7 @@ impl Actor {
         }
     }
 
-    /// Send one presence beat; on success it becomes our own self-view
-    /// stamp and watchers are told (the engine re-publishes device rows).
+    /// Send one presence beat; on success it becomes our own self-view stamp.
     async fn send_beat(&mut self, pipe: &mut TextPipe, at: i64) -> bool {
         let frame =
             serde_json::to_string(&ClientFrame::Presence { at }).expect("presence serializes");
@@ -840,7 +854,6 @@ impl Actor {
         }
         self.own_beat
             .fetch_max(at, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.events.send(RegistryEvent::Presence);
         true
     }
 

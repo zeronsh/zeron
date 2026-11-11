@@ -435,6 +435,7 @@ impl WorkspaceHost {
                 }
                 let tuning = RegistryTuning {
                     probe_quiet: REGISTRY_PROBE_QUIET,
+                    ..RegistryTuning::default()
                 };
                 // Production path (token present): dual transport — the WS
                 // dials as before, and a plain-HTTPS pull/push seam derived

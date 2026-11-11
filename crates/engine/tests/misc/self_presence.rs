@@ -13,7 +13,7 @@ use zeron_doc::RegistryDoc;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_proto::HarnessId;
 use zeron_sync::registry::mock_server::MockRegistryServer;
-use zeron_sync::{RegistryClient, RegistryEvent};
+use zeron_sync::{RegistryClient, RegistryEvent, RegistryTuning};
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -89,6 +89,60 @@ async fn presence_resumes_after_every_socket_drops_at_once() {
     wait_for(|| b.presence().get("dev-a") == Some(&later), "b to hear it").await;
     a.shutdown().await;
     b.shutdown().await;
+}
+
+async fn rejoined(events: &mut tokio::sync::broadcast::Receiver<RegistryEvent>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(events.recv().await, Ok(RegistryEvent::Disconnected)) {}
+        while !matches!(events.recv().await, Ok(RegistryEvent::Connected)) {}
+    })
+    .await
+    .expect("dropped and rejoined");
+}
+
+/// The phone stops beating in the background on purpose (each beat wakes
+/// the radio). A rejoin after a network change must not beat for it and
+/// show it online; a host still beating does beat at once on its rejoin.
+#[tokio::test]
+async fn a_client_that_stopped_beating_stays_quiet_after_a_rejoin() {
+    let server = MockRegistryServer::start().await;
+    let url = Arc::new(zeron_sync::StaticUrl(server.url()));
+    let short = RegistryTuning {
+        rejoin_beat_window: Duration::from_millis(300),
+        ..RegistryTuning::default()
+    };
+    let phone = RegistryClient::connect_via_tuned(url.clone(), doc("dev-phone"), "dev-phone", short)
+        .await
+        .expect("phone connects");
+    let laptop = RegistryClient::connect_via_tuned(url, doc("dev-laptop"), "dev-laptop", RegistryTuning::default())
+        .await
+        .expect("laptop connects");
+    phone.set_presence(1_000);
+    laptop.set_presence(2_000);
+    wait_for(
+        || server.presence_of("dev-phone") == Some(1_000) && server.presence_of("dev-laptop") == Some(2_000),
+        "both first beats",
+    )
+    .await;
+    // The phone goes to the background: no beat for longer than its window.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let before = now_ms();
+    let (mut phone_events, mut laptop_events) = (phone.events(), laptop.events());
+    server.drop_all_connections();
+    rejoined(&mut phone_events).await;
+    rejoined(&mut laptop_events).await;
+    wait_for(
+        || server.presence_of("dev-laptop").is_some_and(|at| at >= before),
+        "the laptop's rejoin beat",
+    )
+    .await;
+    // Time for a rejoin beat from the phone, were one coming.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(server.presence_of("dev-phone"), Some(1_000), "the backgrounded phone stays quiet");
+    assert_eq!(phone.own_presence(), Some(1_000));
+    phone.shutdown().await;
+    laptop.shutdown().await;
 }
 
 /// The engine: its own device row's `lastSeenAt` moves past the drop, here
