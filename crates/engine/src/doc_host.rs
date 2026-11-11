@@ -4236,15 +4236,21 @@ impl DocHost {
         else {
             return Ok(BeginQueueEditOutcome::Missing);
         };
+        // The same editor asking again (its Acquired reply was lost to a
+        // dropped app socket, or it reopened the chat) takes its own lease
+        // over: refusing it locked a person out of their own message for a
+        // whole lease, told it was "being edited on another device".
         if let Some(QueueDeliveryGate::Editing {
-            owner_device_id,
+            owner_device_id: held_device,
+            owner_instance_id: held_instance,
             expires_at_ms,
             ..
         }) = &item.delivery_gate
             && *expires_at_ms > now
+            && !(held_device == owner_device_id && held_instance == owner_instance_id)
         {
             return Ok(BeginQueueEditOutcome::Locked {
-                owner_device_id: owner_device_id.clone(),
+                owner_device_id: held_device.clone(),
                 expires_at_ms: *expires_at_ms,
             });
         }
