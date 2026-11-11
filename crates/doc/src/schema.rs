@@ -416,14 +416,38 @@ pub struct ProviderSessionMark {
 /// A list's items as last read, by their containers
 /// ([`SessionDoc::read_entries_cached`]): `None` for one that didn't parse.
 pub struct ListCache<T> {
-    items: std::collections::HashMap<loro::ContainerID, Option<T>>,
+    /// Each item, and roughly what it holds in bytes.
+    items: std::collections::HashMap<loro::ContainerID, (Option<T>, usize)>,
+    /// All items' bytes, roughly (the engine's memory budget counts them).
+    bytes: usize,
+    /// The doc's version (state frontiers) the items were read at.
+    read_at: Option<loro::Frontiers>,
     /// Items read from the doc (not the cache), all told.
     pub reads: usize,
 }
 
 impl<T> Default for ListCache<T> {
     fn default() -> Self {
-        Self { items: Default::default(), reads: 0 }
+        Self { items: Default::default(), bytes: 0, read_at: None, reads: 0 }
+    }
+}
+
+impl<T> ListCache<T> {
+    fn clear(&mut self) {
+        self.items.clear();
+        self.bytes = 0;
+        self.read_at = None;
+    }
+}
+
+/// Roughly what a value holds once parsed, in bytes.
+fn json_bytes(value: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => 24 + s.len(),
+        Value::Array(items) => 24 + items.iter().map(json_bytes).sum::<usize>(),
+        Value::Object(fields) => 48 + fields.iter().map(|(k, v)| 24 + k.len() + json_bytes(v)).sum::<usize>(),
+        _ => 16,
     }
 }
 
@@ -437,11 +461,16 @@ pub struct EntryChanges {
     pub ids: std::collections::HashSet<loro::ContainerID>,
     /// Anything may have changed: read every entry again.
     pub all: bool,
+    /// The doc's version the latest observed change brought it to: every
+    /// change up to it is in `ids`. (Loro delivers a change's events while
+    /// it still holds the doc's transaction lock, so the version read in the
+    /// callback is that change's own.)
+    pub at: Option<loro::Frontiers>,
 }
 
 impl EntryChanges {
     pub fn all() -> Self {
-        Self { ids: Default::default(), all: true }
+        Self { ids: Default::default(), all: true, at: None }
     }
 
     /// Note the entries `event` touched. A change inside an entry has the
@@ -483,6 +512,9 @@ pub struct SessionDoc {
     /// The same for [`Self::read_commands`] (the drain reads it every pass).
     command_cache: std::sync::Mutex<ListCache<SessionCommandEntry>>,
     command_changes: std::sync::Arc<std::sync::Mutex<EntryChanges>>,
+    /// Whether read entries are kept (`set_keep_read_cache`): off, every
+    /// read reads them all and keeps nothing.
+    keep_entries: std::sync::atomic::AtomicBool,
     _entry_events: loro::Subscription,
 }
 
@@ -492,9 +524,18 @@ impl SessionDoc {
         let entry_changes = std::sync::Arc::new(std::sync::Mutex::new(EntryChanges::all()));
         let command_changes = std::sync::Arc::new(std::sync::Mutex::new(EntryChanges::all()));
         let (entries, commands) = (entry_changes.clone(), command_changes.clone());
+        // (A clone of the doc in its own subscriber: the subscription is
+        // dropped with this `SessionDoc`, and the clone with it.)
+        let events_doc = doc.clone();
         let _entry_events = doc.subscribe_root(std::sync::Arc::new(move |event| {
-            entries.lock().unwrap_or_else(|e| e.into_inner()).observe_list(&event, "messages");
-            commands.lock().unwrap_or_else(|e| e.into_inner()).observe_list(&event, "commands");
+            let at = events_doc.state_frontiers();
+            let mut seen = entries.lock().unwrap_or_else(|e| e.into_inner());
+            seen.observe_list(&event, "messages");
+            seen.at = Some(at.clone());
+            drop(seen);
+            let mut seen = commands.lock().unwrap_or_else(|e| e.into_inner());
+            seen.observe_list(&event, "commands");
+            seen.at = Some(at);
         }));
         Self {
             doc,
@@ -503,6 +544,7 @@ impl SessionDoc {
             entry_changes,
             command_cache: Default::default(),
             command_changes,
+            keep_entries: std::sync::atomic::AtomicBool::new(true),
             _entry_events,
         }
     }
@@ -719,10 +761,33 @@ impl SessionDoc {
         &self,
     ) -> Result<Vec<std::sync::Arc<SessionMessageEntry>>, DocError> {
         let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = std::mem::take(
-            &mut *self.entry_changes.lock().unwrap_or_else(|e| e.into_inner()),
-        );
-        Ok(self.read_entries_cached(&mut cache, changed))
+        let keep = self.keep_entries.load(std::sync::atomic::Ordering::Acquire);
+        Ok(self.read_list_cached("messages", &mut cache, &self.entry_changes, keep, |value| {
+            self.parse_entry(value).map(std::sync::Arc::new)
+        }))
+    }
+
+    /// Whether read entries are kept between reads. The engine keeps them
+    /// for a chat someone is showing (its every commit reads them), and not
+    /// for one nobody is, so its transcript isn't held for nothing.
+    pub fn set_keep_read_cache(&self, keep: bool) {
+        self.keep_entries.store(keep, std::sync::atomic::Ordering::Release);
+        if !keep {
+            self.forget_cached_entries();
+        }
+    }
+
+    /// Lets go of the kept entries: the next read reads them all.
+    pub fn forget_cached_entries(&self) {
+        let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        self.entry_changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
+    }
+
+    /// What the kept entries and commands hold, roughly, in bytes.
+    pub fn cached_bytes(&self) -> usize {
+        self.entry_cache.lock().unwrap_or_else(|e| e.into_inner()).bytes
+            + self.command_cache.lock().unwrap_or_else(|e| e.into_inner()).bytes
     }
 
     /// Entries this doc's [`Self::read_entries`] has read from the doc (not
@@ -735,10 +800,7 @@ impl SessionDoc {
     /// reads them all again. For a chat nobody is showing, whose reads are
     /// rare, so its transcript isn't held twice for nothing.
     pub fn drop_read_cache(&self) {
-        let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if !cache.items.is_empty() {
-            *cache = EntryCache { items: Default::default(), reads: cache.reads };
-        }
+        self.forget_cached_entries();
     }
 
     /// Entries [`Self::read_entries`] keeps now.
@@ -784,54 +846,97 @@ impl SessionDoc {
         cache: &mut EntryCache,
         changed: EntryChanges,
     ) -> Vec<std::sync::Arc<SessionMessageEntry>> {
-        self.read_list_cached("messages", cache, changed, |value| {
+        let changed = std::sync::Mutex::new(changed);
+        self.read_list_cached("messages", cache, &changed, true, |value| {
             self.parse_entry(value).map(std::sync::Arc::new)
         })
     }
 
     /// Root list `root`'s items, each parsed by `parse` from its deep value:
-    /// those `changed` names, and those `cache` hasn't seen, read from the
-    /// doc; the rest from `cache`, which is left holding them all.
+    /// those `changes` names, and those `cache` hasn't seen, read from the
+    /// doc; the rest from `cache`, which is left holding them all (`keep`).
+    ///
+    /// The cache is trusted only for a doc whose every change up to now has
+    /// been observed: no transaction pending, and either nothing changed
+    /// since the cache was read or the latest observed change reached the
+    /// doc's present version. A change landing during the read reads again;
+    /// one that keeps landing gets a whole read (Loro's, in one go).
     fn read_list_cached<T: Clone>(
         &self,
         root: &str,
         cache: &mut ListCache<T>,
-        changed: EntryChanges,
+        changes: &std::sync::Mutex<EntryChanges>,
+        keep: bool,
         parse: impl Fn(serde_json::Value) -> Option<T>,
+    ) -> Vec<T> {
+        for _ in 0..3 {
+            let now = self.doc.state_frontiers();
+            let changed = std::mem::take(&mut *changes.lock().unwrap_or_else(|e| e.into_inner()));
+            let trusted = keep
+                && !changed.all
+                && self.doc.get_pending_txn_len() == 0
+                && (cache.read_at.as_ref() == Some(&now) || changed.at.as_ref() == Some(&now));
+            if trusted {
+                for id in &changed.ids {
+                    if let Some((_, bytes)) = cache.items.remove(id) {
+                        cache.bytes -= bytes;
+                    }
+                }
+            } else {
+                cache.clear();
+            }
+            let out = self.read_items(root, cache, &parse, keep);
+            if self.doc.get_pending_txn_len() == 0 && self.doc.state_frontiers() == now {
+                cache.read_at = keep.then_some(now);
+                return out;
+            }
+            // (It changed while being read: again, all of it.)
+            cache.clear();
+            changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
+        }
+        cache.clear();
+        changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
+        let LoroValue::List(items) = self.doc.get_list(root).get_deep_value() else {
+            return Vec::new();
+        };
+        items.iter().filter_map(|item| parse(item.to_json_value())).collect()
+    }
+
+    fn read_items<T: Clone>(
+        &self,
+        root: &str,
+        cache: &mut ListCache<T>,
+        parse: &impl Fn(serde_json::Value) -> Option<T>,
+        keep: bool,
     ) -> Vec<T> {
         let LoroValue::List(items) = self.doc.get_list(root).get_value() else {
             return Vec::new();
         };
-        // Changes not yet committed show in the doc but their events come
-        // only at the commit: read every item now (the commit's events then
-        // mark the ones it changed, to read again).
-        let changed = if self.doc.get_pending_txn_len() > 0 { EntryChanges::all() } else { changed };
-        if changed.all {
-            cache.items.clear();
-        } else {
-            for id in &changed.ids {
-                cache.items.remove(id);
-            }
-        }
-        let mut kept = std::collections::HashMap::with_capacity(items.len());
+        let mut kept = std::collections::HashMap::with_capacity(if keep { items.len() } else { 0 });
+        let mut bytes = 0;
         let mut out = Vec::with_capacity(items.len());
         for item in items.iter() {
             let parsed = match item {
                 LoroValue::Container(id) => {
-                    let parsed = match cache.items.remove(id) {
-                        Some(parsed) => parsed,
+                    let (parsed, size) = match cache.items.remove(id) {
+                        Some(held) => held,
                         None => {
                             cache.reads += 1;
                             match self.doc.get_container(id.clone()) {
                                 Some(loro::Container::Map(map)) => {
-                                    parse(map.get_deep_value().to_json_value())
+                                    let value = map.get_deep_value().to_json_value();
+                                    let size = json_bytes(&value);
+                                    (parse(value), size)
                                 }
-                                _ => None,
+                                _ => (None, 0),
                             }
                         }
                     };
                     let copy = parsed.clone();
-                    kept.insert(id.clone(), parsed);
+                    if keep {
+                        bytes += size;
+                        kept.insert(id.clone(), (parsed, size));
+                    }
                     copy
                 }
                 // (A plain value, not a container: never written so; read
@@ -841,6 +946,7 @@ impl SessionDoc {
             out.extend(parsed);
         }
         cache.items = kept;
+        cache.bytes = bytes;
         out
     }
 
@@ -915,10 +1021,7 @@ impl SessionDoc {
         // Each command read from the doc once, then again only when it
         // changes (`read_entries`' cache, for the ledger).
         let mut cache = self.command_cache.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = std::mem::take(
-            &mut *self.command_changes.lock().unwrap_or_else(|e| e.into_inner()),
-        );
-        Ok(self.read_list_cached("commands", &mut cache, changed, |value| {
+        Ok(self.read_list_cached("commands", &mut cache, &self.command_changes, true, |value| {
             match serde_json::from_value(value) {
                 Ok(entry) => Some(entry),
                 Err(err) => {
@@ -1951,6 +2054,69 @@ pub fn materialize_tail(
 mod tests {
     use super::*;
 
+    /// A read on one thread while another commits never mixes the new list
+    /// with old cached contents: whenever the doc stood still around a
+    /// cached read and a whole read, they're the same.
+    #[test]
+    fn cached_reads_stay_whole_while_another_thread_commits() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // A slow subscriber ahead of the doc's own: each change's events
+        // reach the cache's observer only after the change already shows,
+        // the window a reader on another thread can fall into.
+        let loro = LoroDoc::new();
+        let _slow = loro.subscribe_root(Arc::new(|_| std::thread::sleep(std::time::Duration::from_millis(3))));
+        let doc = Arc::new(SessionDoc::from_doc(loro));
+        let entry = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: "words".into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        for i in 0..200 {
+            doc.push_message(&entry(&format!("row-{i}"))).unwrap();
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (doc, stop) = (doc.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    n += 1;
+                    // Earlier rows changed in place, and rows added.
+                    let at = format!("row-{}", n % 200);
+                    doc.append_error_part(&at, &format!("{at}-note-{n}"), "again").unwrap();
+                    let status = if n % 2 == 0 { MessageStatus::Aborted } else { MessageStatus::Complete };
+                    doc.set_message_status(&format!("row-{}", (n * 7) % 200), status).unwrap();
+                    if n % 5 == 0 {
+                        doc.push_message(&entry(&format!("new-{n}"))).unwrap();
+                    }
+                    // (Uneven gaps: reads land mid-commit and between.)
+                    std::thread::sleep(std::time::Duration::from_micros((n % 3) * 1500));
+                }
+                n
+            })
+        };
+        let (mut compared, started) = (0, std::time::Instant::now());
+        while compared < 300 && started.elapsed() < std::time::Duration::from_secs(20) {
+            let before = doc.doc().state_frontiers();
+            let cached = doc.read_entries().unwrap();
+            let whole = doc.read_entries_whole().unwrap();
+            if doc.doc().state_frontiers() == before {
+                assert_eq!(cached, whole, "a cached read mixed versions");
+                compared += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let commits = writer.join().unwrap();
+        assert!(compared >= 50, "too few still moments to compare ({compared}, {commits} commits)");
+        assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
+    }
+
     /// The doc's own cached reads never go stale, however the doc moves:
     /// undo, revert, checkout and back, a fork, queue changes, and two
     /// devices editing the same earlier entry at once, each importing the
@@ -2059,9 +2225,12 @@ mod tests {
         let doc = SessionDoc::init("cached").unwrap();
         let changes = Arc::new(Mutex::new(EntryChanges::all()));
         let observed = changes.clone();
-        let _sub = doc
-            .doc()
-            .subscribe_root(Arc::new(move |event| observed.lock().unwrap().observe(&event)));
+        let events_doc = doc.doc().clone();
+        let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
+            let mut seen = observed.lock().unwrap();
+            seen.observe(&event);
+            seen.at = Some(events_doc.state_frontiers());
+        }));
         let mut cache = EntryCache::default();
         let mut check = |doc: &SessionDoc, what: &str| -> usize {
             let before = cache.reads;

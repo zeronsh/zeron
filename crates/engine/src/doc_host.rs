@@ -897,6 +897,8 @@ impl ChatDocHandle {
             }
             self.messages_tx.subscribe()
         };
+        // Watched: its every commit reads the transcript, so reads keep it.
+        self.doc.set_keep_read_cache(true);
         if self.mirror_dirty.load(Ordering::Acquire) {
             self.publish_messages_locked();
         }
@@ -1134,7 +1136,7 @@ impl ChatDocHandle {
             self.messages_tx.send_replace(TranscriptSnapshot::default());
             // And the doc's read cache, which the mirror shared: a chat
             // nobody shows holds its transcript no more than it used to.
-            self.doc.drop_read_cache();
+            self.doc.set_keep_read_cache(false);
             *lock(&self.transcript_history) = Default::default();
         } else {
             self.publish_messages_locked();
@@ -1147,7 +1149,9 @@ impl ChatDocHandle {
             .snapshot_bytes
             .load(Ordering::Relaxed)
             .max(self.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
+        // (The read cache a watched chat keeps comes on top.)
         (bytes * RESIDENT_BYTES_PER_SNAPSHOT_BYTE).max(DOC_RESIDENT_FLOOR_BYTES)
+            + self.doc.cached_bytes()
     }
 }
 
@@ -2016,6 +2020,9 @@ impl DocHost {
         let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
 
+        // Reads keep the transcript's entries only while someone watches it
+        // (`watch_messages`); until then each read reads it whole, as ever.
+        doc.set_keep_read_cache(false);
         let handle = Arc::new(ChatDocHandle {
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
@@ -7637,6 +7644,48 @@ mod publication_eviction_tests {
         host.shutdown_workers().await;
     }
 
+    /// Twelve chats open and read (as their drains read them), one watched:
+    /// only the watched one keeps its transcript's entries, and the memory
+    /// budget counts them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_watched_chat_keeps_its_read_cache() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig { device_id: "here".into(), default_harness: HarnessId::Mock, edge: None },
+        );
+        let handles: Vec<_> = (0..12).map(|i| host.open(&format!("chat-{i}")).unwrap()).collect();
+        for handle in &handles {
+            for m in 0..100 {
+                handle.write_user_message(&format!("m{m}"), &"words ".repeat(40), m).unwrap();
+            }
+        }
+        let watch = handles[0].watch_messages();
+        for handle in &handles {
+            assert_eq!(handle.doc().read_entries().unwrap().len(), 100);
+            handle.write_user_message("later", "a change", 500).unwrap();
+            handle.publish_messages_if_watched();
+            assert_eq!(handle.doc().read_entries().unwrap().len(), 101);
+        }
+        assert_eq!(handles[0].doc().entries_cached(), 101, "the watched chat keeps its entries");
+        let watched = handles[0].doc().cached_bytes();
+        assert!(watched > 100 * 240, "its entries' bytes are counted: {watched}");
+        for handle in &handles[1..] {
+            assert_eq!(handle.doc().entries_cached(), 0, "an unwatched chat keeps no entries");
+        }
+        let floor = handles[1].resident_estimate();
+        assert!(handles[0].resident_estimate() >= floor + watched, "the budget counts the watched chat's cache");
+        // Let go of: on its next change it keeps nothing either.
+        drop(watch);
+        handles[0].write_user_message("after", "a change", 600).unwrap();
+        handles[0].publish_messages_if_watched();
+        assert_eq!(handles[0].doc().entries_cached(), 0);
+        drop(handles);
+        host.shutdown_workers().await;
+    }
+
     /// A chat leaving the engine's cache takes its doc with it, read cache
     /// and all: what `read_entries` keeps lives in the doc, not beside it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7652,10 +7701,11 @@ mod publication_eviction_tests {
         for i in 0..200 {
             handle.write_user_message(&format!("m{i}"), "words", i).unwrap();
         }
-        // Read through the cache, and watched then let go, as a chat looked at.
+        // Watched and read, as a chat looked at, then let go.
+        let watch = handle.watch_messages();
         assert_eq!(handle.doc().read_entries().unwrap().len(), 200);
-        drop(handle.watch_messages());
         assert_eq!(handle.doc().entries_cached(), 200);
+        drop(watch);
         // A change while nobody watches lets the read cache go.
         handle.write_user_message("unwatched", "words", 999).unwrap();
         handle.publish_messages_if_watched();

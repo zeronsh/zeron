@@ -491,6 +491,20 @@ pub fn entry_sum(json: &serde_json::Value) -> u64 {
     h.0
 }
 
+/// A digest of the entries' order (their ids, in order), the same in the
+/// app (`order_sum`): a reader that applied a `since` frame checks it holds
+/// the rows in the engine's order, and asks for them whole if not.
+pub fn order_sum<'a>(ids: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for id in ids {
+        for byte in id.as_bytes().iter().chain(&[0u8]) {
+            h ^= u64::from(*byte);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
 /// [`entry_sum`] of an entry as it's sent.
 pub fn entry_sum_of(entry: &SessionMessageEntry) -> u64 {
     serde_json::to_value(entry).map_or(0, |json| entry_sum(&json))
@@ -510,6 +524,14 @@ pub fn delta_from_known<E: Borrow<SessionMessageEntry>>(
         .map(|(i, (id, sum))| (id.as_str(), (i, *sum)))
         .collect();
     let next_ids: std::collections::HashSet<&str> = next.iter().map(|e| e.id.as_str()).collect();
+    // The entries both hold must stand in the same order (an upsert places
+    // an entry after its new predecessor, and an entry whose predecessor is
+    // unchanged is left where the reader has it). If not, it's sent whole.
+    let both_known = known.iter().map(|(id, _)| id.as_str()).filter(|id| next_ids.contains(id));
+    let both_next = next.iter().map(|e| e.id.as_str()).filter(|id| known_at.contains_key(id));
+    if !both_known.eq(both_next) {
+        return TranscriptFrame::reset(&next);
+    }
     let remove: Vec<String> = known
         .iter()
         .filter(|(id, _)| !next_ids.contains(id.as_str()))
@@ -714,6 +736,41 @@ mod tests {
 
     /// `entry_sum` of `{"id":"x","n":1.5,"p":[{"k":"t","v":null}]}`.
     const PINNED_SUM: u64 = 0xec67_0b99_244f_a276;
+
+    /// Rows the reader holds in another order than the engine (an opening
+    /// tail appended after older rows, a concurrent insert) get the whole
+    /// copy, never a delta that would leave them out of order.
+    #[test]
+    fn a_reader_holding_rows_in_another_order_gets_them_whole() {
+        let row = |id: &str| entry(id, id);
+        let sums = |rows: &[SessionMessageEntry]| -> Vec<(String, u64)> {
+            rows.iter().map(|e| (e.id.clone(), entry_sum_of(e))).collect()
+        };
+        // The review's case: the reader has [A,B,C,P,X], the engine [A,P,X,B,C].
+        let held = [row("A"), row("B"), row("C"), row("P"), row("X")];
+        let engine = [row("A"), row("P"), row("X"), row("B"), row("C")];
+        assert!(matches!(delta_from_known(&sums(&held), &engine), TranscriptFrame::Reset { .. }));
+        // Same order with an insert and a removal: still a delta.
+        let held: Vec<_> = (0..20).map(|i| row(&format!("r{i}"))).collect();
+        let mut engine = held.clone();
+        engine.remove(7);
+        engine.insert(3, row("N"));
+        let frame = delta_from_known(&sums(&held), &engine);
+        assert!(matches!(frame, TranscriptFrame::Delta { .. }));
+        let mut current = held.clone();
+        apply_transcript_frame(&mut current, frame).unwrap();
+        assert_eq!(current, engine);
+        assert_eq!(
+            order_sum(current.iter().map(|e| e.id.as_str())),
+            order_sum(engine.iter().map(|e| e.id.as_str()))
+        );
+        assert_ne!(order_sum(["A", "B"]), order_sum(["B", "A"]));
+        assert_ne!(order_sum(["AB"]), order_sum(["A", "B"]));
+        // Pinned: the app's `order_sum` gives the same.
+        assert_eq!(order_sum(["a", "b"]), ORDER_PINNED);
+    }
+
+    const ORDER_PINNED: u64 = 0xab40_d782_0d40_8076;
 
     #[test]
     fn an_entry_sum_ignores_field_order() {

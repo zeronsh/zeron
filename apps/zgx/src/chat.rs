@@ -1009,10 +1009,20 @@ impl Chats {
     /// Keeps what a view's chat had (`let_go`), for a view that opens it
     /// again: the most recent `LET_GO_MOST`, for `LET_GO_KEPT`.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
-        // (Not while its rows are on a worker: it has only the ones they left.)
-        let Some(old) = old.filter(|o| o.heard && !o.stepping) else { return };
-        let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
+        let Some(old) = old else { return };
         let mut kept = self.let_go.borrow_mut();
+        // (Not while its rows are on a worker: it has only the ones they
+        // left. Nor rows to be built again for a moved model's name: opened
+        // again they'd say what they hold and keep the old name; any older
+        // copy of it goes too.)
+        if old.rebuild {
+            kept.retain(|held| held.id != old.id);
+            return;
+        }
+        if !old.heard || old.stepping {
+            return;
+        }
+        let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
         kept.retain(|held| held.id != id);
         kept.push(LetGo { at: std::time::Instant::now(), id, entries, older_todo, built, built_model, context, context_usage });
         prune_let_go(&mut kept);
@@ -1831,7 +1841,15 @@ impl View {
             if before.is_some() {
                 open.folding = None;
             }
-            let result = apply_counted(&mut open.entries, &mut frame, !waiting);
+            let mut result = apply_counted(&mut open.entries, &mut frame, !waiting);
+            // A `since` frame says the order the rows must now be in: held
+            // out of the engine's order, they're asked for whole instead.
+            if let Some(expected) = frame["orderSum"].as_u64()
+                && result.is_ok()
+                && order_sum(open.entries.iter().map(|e| &*e.id)) != expected
+            {
+                result = Err(());
+            }
             // What it changed, to build again: on a reset, the entries that
             // differ from what this view had, unless another view of this
             // chat has them built; else the ones it touched.
@@ -3982,6 +4000,19 @@ fn share_parts(value: &mut Value, seen: &mut Seen) {
         }
         _ => {}
     }
+}
+
+/// The engine's `order_sum` (crates/doc/src/transcript_delta.rs): the
+/// entries' ids in order, FNV-1a, each ended by a zero byte.
+fn order_sum<'a>(ids: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for id in ids {
+        for byte in id.as_bytes().iter().chain(&[0u8]) {
+            h ^= u64::from(*byte);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
 }
 
 /// `params` with what `open` holds (`known`), when it has rows to keep
@@ -7295,6 +7326,48 @@ mod tests {
         let b: serde_json::Value = serde_json::from_str(r#"{"p":[{"v":null,"k":"t"}],"n":1.5,"id":"x"}"#).unwrap();
         assert_eq!(super::sum_of(&a), 0xec67_0b99_244f_a276);
         assert_eq!(super::sum_of(&b), super::sum_of(&a));
+        // And the order digest (`zeron_doc::order_sum`).
+        assert_eq!(super::order_sum(["a", "b"]), 0xab40_d782_0d40_8076);
+    }
+
+    /// After the engine's live frames (text appends, part patches, an
+    /// upsert), the app's sum of each entry is the engine's `entry_sum` of
+    /// it: else every reopen would say it holds something else and get a
+    /// reset. The frames and sums come from the engine's own diff
+    /// (crates/doc/examples/app_sum_fixture.rs).
+    #[test]
+    fn sums_after_live_frames_match_the_engines() {
+        use super::{Open, View, draft_value};
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("live_frames_fixture.json")).unwrap();
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
+            view.heard_frame(step["frame"].clone());
+            let open = view.open.borrow();
+            let entries = &open.as_ref().unwrap().entries;
+            let engine: Vec<(String, u64)> = step["sums"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (p[0].as_str().unwrap().to_owned(), p[1].as_str().unwrap().parse().unwrap()))
+                .collect();
+            let here: Vec<(String, u64)> = entries.iter().map(|e| (e.id.to_string(), e.sum())).collect();
+            assert_eq!(here, engine, "after frame {n}: {}", step["frame"]);
+        }
+        assert_eq!(view.generation.get(), 0, "no frame asked for the whole copy again");
     }
 
     /// Rows held (opened before, or a new connection): the engine's `since`
@@ -7350,6 +7423,26 @@ mod tests {
         // A live change after it applies as ever.
         view.heard_frame(json!({ "upsert": [{ "after": "a50", "entry": reply("a51", "live") }], "count": 52 }));
         assert_eq!(view.open.borrow().as_ref().unwrap().entries.len(), 52);
+
+        // The engine's order, said: held so, the frame is taken.
+        let ids = |view: &View| view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>();
+        let reopen = |view: &View| view.open.borrow_mut().as_mut().unwrap().has_whole = true;
+        reopen(&view);
+        let mut order: Vec<String> = ids(&view);
+        order.push("a52".into());
+        let sum = super::order_sum(order.iter().map(String::as_str));
+        let generation = view.generation.get();
+        view.heard_frame(json!({ "since": true, "upsert": [{ "after": "a51", "entry": reply("a52", "more") }], "count": 53, "orderSum": sum }));
+        assert_eq!(view.generation.get(), generation, "held in the engine's order: taken");
+        assert_eq!(ids(&view), order);
+        // Held in another order than the engine's: asked for whole again.
+        reopen(&view);
+        let mut other = ids(&view);
+        other.swap(0, 1);
+        let sum = super::order_sum(other.iter().map(String::as_str));
+        view.heard_frame(json!({ "since": true, "count": 53, "orderSum": sum }));
+        assert_eq!(view.generation.get(), generation + 1, "out of the engine's order: watched again, for the whole copy");
+        assert!(!view.open.borrow().as_ref().unwrap().has_whole, "and without saying what it holds");
     }
 
     #[test]
@@ -7461,5 +7554,26 @@ mod tests {
         }
         assert!(chats.take_let_go("x0").is_none());
         assert!(chats.take_let_go(&format!("x{}", LET_GO_MOST + 1)).is_some());
+    }
+
+    /// A chat let go while its rows wait to be built again (its model's
+    /// name moved) isn't kept, and an older kept copy of it goes: opened
+    /// again it reads its rows whole, never says it holds old-model rows.
+    #[test]
+    fn a_chat_let_go_mid_rebuild_is_not_kept() {
+        use super::{Chats, Entry, Open};
+        use serde_json::json;
+        use std::rc::Rc;
+        let chats = Rc::new(Chats::default());
+        let open = |rebuild: bool| Open {
+            id: "m".into(),
+            entries: vec![Entry::new(json!({ "id": "m-1", "role": "user", "parts": [] }))],
+            heard: true,
+            rebuild,
+            ..Open::default()
+        };
+        chats.keep_let_go(Some(open(false)));
+        chats.keep_let_go(Some(open(true)));
+        assert!(chats.take_let_go("m").is_none(), "neither copy is kept");
     }
 }

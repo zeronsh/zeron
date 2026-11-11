@@ -2868,6 +2868,10 @@ async fn since_doc_messages_stream(
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
         first["since"] = serde_json::Value::Bool(true);
+        // The order the reader must now hold its rows in (it checks).
+        first["orderSum"] = serde_json::json!(zeron_doc::order_sum(
+            current.entries.iter().map(|e| e.id.as_str())
+        ));
         Ok::<_, crate::EngineError>((rx, handle.doc_arc(), first, (current, baseline)))
     })
     .await
@@ -6274,6 +6278,12 @@ mod tests {
         assert_eq!(upserts.len(), 1);
         assert_eq!(upserts[0]["entry"]["id"], "away");
         assert_eq!(first["count"], 301);
+        let ids: Vec<String> = handle.doc().read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(
+            first["orderSum"].as_u64(),
+            Some(zeron_doc::order_sum(ids.iter().map(String::as_str))),
+            "the order the reader must hold its rows in"
+        );
         assert!(serde_json::to_string(&first).unwrap().len() < 4_000);
         // Then live changes, as deltas.
         handle.write_user_message("next", "after", 500).unwrap();
