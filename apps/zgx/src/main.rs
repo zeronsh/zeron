@@ -235,9 +235,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(windows, feature = "beta"))]
     {
         windows_install::complete_if_needed(&argv);
-        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
             zeron_launch::set_full_app_engine(
-                zeron_update::windows::version_files(dir, about::APP_VERSION).join("engine").join("zeron.exe"),
+                zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
             );
         }
     }

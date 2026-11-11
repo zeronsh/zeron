@@ -19,7 +19,7 @@ name = "zeron-zgx"
 path = "src/main.rs"
 
 [features]
-# Zeron.app's beta (scripts/package-zgx-beta.sh): this interface as the
+# Zeron.app's beta (scripts/package-zgx-macos.sh): this interface as the
 # Zeron app itself, with the production edge and sign-in only (nothing of
 # staging's built in) and Zeron.app's own engine (the bundle's `Zeron Engine`,
 # ~/.zeron, port 27654), managed as Zeron.app manages it. Without it, the app

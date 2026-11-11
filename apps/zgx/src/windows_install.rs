@@ -8,7 +8,9 @@
 //! its folder missing brings it in from the release feed, as an update would
 //! (crates/update `windows::complete_install`), whether it was started as the
 //! app, relaunched by the update (`--wait-for-exit`), or started as
-//! `zeron.exe engine` by the old engine restarting into the new version.
+//! `zeron.exe engine` by the old engine restarting into the new version, or
+//! as an update's trial, run from where the update staged it in place of the
+//! installation (`ZERON_INSTALLED_AT`, as an engine on another device asked).
 //!
 //! On failure nothing has changed. A window launch says so and offers to try
 //! again; any other command prints why and exits, and the next start retries.

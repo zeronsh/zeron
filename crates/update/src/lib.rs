@@ -4118,7 +4118,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let contents = dir.path().join("Contents");
         std::fs::create_dir_all(&contents).unwrap();
-        // As scripts/package-zgx-beta.sh writes it.
+        // As scripts/package-zgx-macos.sh writes it.
         std::fs::write(
             contents.join("Info.plist"),
             "<plist><dict><key>CFBundleShortVersionString</key><string>0.2.137</string>\

@@ -285,11 +285,23 @@ pub enum Completion {
 ///
 /// That's how an updater that only swaps the one file (every Zeron before
 /// the zgx app, and the zgx app's own single-file artifact,
-/// [`artifact`]) leaves a zgx app: the executable alone.
+/// [`artifact`]) leaves a zgx app: the executable alone. And how an update's
+/// trial starts one: staged on its own, run in place of the installation.
 pub fn incomplete_install(exe: &Path, version: &str) -> Option<PathBuf> {
-    let directory = exe.parent()?;
-    (is_managed(exe) && !version_files(directory, version).join("engine").join("zeron.exe").is_file())
-        .then(|| directory.to_path_buf())
+    let directory = install_directory(exe)?;
+    (is_managed(&directory.join("zeron.exe"))
+        && !version_files(&directory, version).join("engine").join("zeron.exe").is_file())
+    .then_some(directory)
+}
+
+/// The installation the executable at `exe` belongs to: its folder, or, for a
+/// new version on trial (started from where the update staged it), the one
+/// it's going to become ([`super::INSTALLED_AT_ENV`]).
+pub fn install_directory(exe: &Path) -> Option<PathBuf> {
+    match std::env::var_os(super::INSTALLED_AT_ENV) {
+        Some(directory) => Some(PathBuf::from(directory)),
+        None => exe.parent().map(Path::to_path_buf),
+    }
 }
 
 /// Bring in this version's folder from the release feed (the one
@@ -318,6 +330,18 @@ pub async fn complete_install(
         bail!("the release feed offers Zeron {latest}, which is older than this Zeron {version}");
     }
     let staged = stage_package(edge_url, &manifest, directory).await?;
+    // A trial (or anything not run as the installed `zeron.exe`) can't
+    // replace the installation; it installs only its own version's files.
+    let installed = directory.join("zeron.exe");
+    let is_installed = std::env::current_exe()
+        .and_then(|exe| Ok(exe.canonicalize()? == installed.canonicalize()?))
+        .unwrap_or(false);
+    if latest != version && !is_installed {
+        if let Some(stage) = staged.parent() {
+            let _ = std::fs::remove_dir_all(stage);
+        }
+        bail!("the release feed has moved on to Zeron {latest}; this Zeron {version} can't be completed from it");
+    }
     if latest == version {
         let result = install_version_files(&staged, directory);
         if let Some(stage) = staged.parent() {
