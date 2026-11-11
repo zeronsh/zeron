@@ -2530,7 +2530,11 @@ impl View {
             .map_err(|e| engine::outcome(&e))?;
         match answer["outcome"].as_str() {
             Some("acquired") => {}
-            Some("locked") => return Err("locked"),
+            // Said as "on another device" only when it is: this device's
+            // other window holding it is only "can't edit it now".
+            Some("locked") if held_elsewhere(chats.here.borrow().as_deref(), answer["ownerDeviceId"].as_str().unwrap_or("")) => {
+                return Err("locked");
+            }
             _ => return Err("missing"),
         }
         let lease = Lease {
@@ -5258,7 +5262,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
             let gate = &q["deliveryGate"];
             if gate["kind"].as_str() == Some("editing") && !mine {
                 let who = gate["ownerDeviceId"].as_str().unwrap_or_default();
-                if chats.here.borrow().as_deref() != Some(who) {
+                if held_elsewhere(chats.here.borrow().as_deref(), who) {
                     fields.push(("locked", Value::from("Being edited on another device")));
                 }
             }
@@ -5630,6 +5634,13 @@ fn stamp(at: i64) -> Option<String> {
 #[cfg(not(unix))]
 fn stamp(_at: i64) -> Option<String> {
     None
+}
+
+/// Whether a queued message's edit lease is another device's: only once
+/// this device is known, and only for an owner that isn't it. (Unknown, a
+/// lease of this device's own was said as being edited on another device.)
+fn held_elsewhere(here: Option<&str>, owner: &str) -> bool {
+    here.is_some_and(|here| here != owner)
 }
 
 /// This window process's id, as an editor of queued messages.
@@ -6037,6 +6048,16 @@ mod tests {
         let words = super::thought_words(&format!("\n{}\n", long.join("\n")));
         assert!(words.starts_with("line 1\n") && words.ends_with("\nline 30"), "{words}");
         assert_eq!(words.lines().count(), 30);
+    }
+
+    /// 2026-11-11, work-laptop: a queued message on the Mac hosting it said
+    /// "being edited on another device" while the app didn't know yet which
+    /// device it was on. Only a known, different owner is another device.
+    #[test]
+    fn only_a_different_owner_is_another_device() {
+        assert!(super::held_elsewhere(Some("mac"), "phone"));
+        assert!(!super::held_elsewhere(Some("mac"), "mac"));
+        assert!(!super::held_elsewhere(None, "mac"));
     }
 
     #[test]
