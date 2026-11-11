@@ -857,3 +857,42 @@ async fn joining_the_room_counts_as_recent_activity() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     assert!(!relay.recently_active(Duration::from_millis(5)), "the join is a while ago");
 }
+
+#[tokio::test(start_paused = true)]
+async fn frames_a_full_room_queue_cant_take_yet_go_later_in_order() {
+    // A slow socket fills the path to the room. A frame skipped then parks every
+    // later one on the peers until a sync round; a skipped sync frame left the
+    // round waiting a minute.
+    let relay = RelayHandle::spawn("host", DocSink::new(LoroDoc::new()), RelayPolicy { confirm_queue: true });
+    let (tx, mut rx) = mpsc::channel(2);
+    relay.room_up(tx);
+    for i in 0..10u8 {
+        relay.local_update(vec![i; 4], true);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut relayed = Vec::new();
+    while relayed.len() < 10 {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("every held frame is offered again")
+            .expect("the room is open");
+        let frame = wire::decode(&bytes).expect("a frame");
+        if frame.kind == frame_type::RELAY {
+            relayed.push(frame.payload[0]);
+        }
+    }
+    assert_eq!(relayed, (0..10u8).collect::<Vec<_>>(), "all of them, in order");
+    assert_eq!(relay.stats().room_frames_dropped, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn frames_for_a_room_that_has_gone_are_counted() {
+    let relay = RelayHandle::spawn("host", DocSink::new(LoroDoc::new()), RelayPolicy { confirm_queue: true });
+    let (tx, rx) = mpsc::channel(super::PATH_QUEUE);
+    relay.room_up(tx);
+    drop(rx);
+    for i in 0..3u8 {
+        relay.local_update(vec![i; 4], true);
+    }
+    until("the drops to be counted", || relay.stats().room_frames_dropped >= 3).await;
+}
