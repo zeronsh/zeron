@@ -516,9 +516,10 @@ fn jitter(max: Duration) -> Duration {
 /// ([`serve_connection`]); its replies are pumped back as `{to: connId}` frames.
 ///
 /// Teardown is by channel closure, NOT task abort: dropping `in_tx` ends the dispatch
-/// loop, which aborts its in-flight request tasks (streams included); their reply senders
-/// drop and the pump task drains out. Aborting the dispatch loop directly would strand
-/// the request tasks it spawned.
+/// loop, which aborts its in-flight request tasks (streams included) and lets each
+/// terminal's input lane finish what was already sent; their reply senders drop and the
+/// pump task drains out. Aborting the dispatch loop directly would strand the request
+/// tasks it spawned.
 struct VirtualConn {
     in_tx: mpsc::Sender<String>,
     /// The device the edge verified for this conn (its first frame's
