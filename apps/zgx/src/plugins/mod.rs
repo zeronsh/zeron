@@ -32,6 +32,9 @@ pub mod consent;
 pub mod elements;
 #[cfg(target_os = "macos")]
 pub mod file_events;
+#[cfg(windows)]
+#[path = "file_events_windows.rs"]
+pub mod file_events;
 pub mod grants;
 pub mod live;
 pub mod records;
@@ -74,7 +77,7 @@ use crate::engine::{
 };
 
 /// How often the templates folder is looked at for a change, where the
-/// kernel doesn't say (not macOS, or its watch couldn't be made). A look
+/// kernel doesn't say (not macOS or Windows, or its watch couldn't be made). A look
 /// that finds nothing changed is a stat of each file, off the UI thread,
 /// and composes nothing.
 const TEMPLATES_LOOK: Duration = Duration::from_secs(2);
@@ -546,17 +549,20 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     });
 
     // Your templates, looked at as they change: as the kernel says they
-    // did (macOS), so an idle window doesn't wake for them; elsewhere,
-    // looked at twice a second.
+    // did (macOS's FSEvents, Windows' directory change notifications), so
+    // an idle window doesn't wake for them; elsewhere, looked at every
+    // `TEMPLATES_LOOK`. (On Windows the timed look cost about 6% of a core
+    // at idle: each look's `publish_templates` walks every template's files
+    // on the UI thread.)
     let weak = Rc::downgrade(&bridge);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let events = file_events::FileEvents::new();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if let Some(events) = &events {
         *bridge.rewatch.borrow_mut() = Some(events.poke());
     }
     cx.tasks.spawn(async move {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(mut events) = events {
             loop {
                 {
