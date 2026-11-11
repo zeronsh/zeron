@@ -28,9 +28,17 @@ export interface LogRow {
   bytes: Uint8Array;
 }
 
+/** How far back a push looks for its own batch id. Rooms created before this
+ * bound keep their `batch_id` index and answer it from there; newer rooms have
+ * no index (one billed row per push instead of two) and walk this many rows at
+ * most. Rows are read at a thousandth of a write's price, and a replay older
+ * than this is what a replay after a checkpoint prune already is: a new row
+ * whose re-import is a Loro no-op. */
+export const DEDUPE_WINDOW = 4096;
+
 export const ensureChatLog = (sql: SqlStorage): void => {
   sql.exec(
-    "CREATE TABLE IF NOT EXISTS rows (seq INTEGER PRIMARY KEY, device TEXT NOT NULL, batch_id TEXT NOT NULL UNIQUE, bytes BLOB NOT NULL, received_at INTEGER NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS rows (seq INTEGER PRIMARY KEY, device TEXT NOT NULL, batch_id TEXT NOT NULL, bytes BLOB NOT NULL, received_at INTEGER NOT NULL)"
   );
   sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
 };
@@ -48,7 +56,22 @@ export const setMeta = (sql: SqlStorage, key: string, value: string): void => {
   );
 };
 
-export const headSeq = (sql: SqlStorage): number => Number(getMeta(sql, "headSeq") ?? "0");
+/** The log's head comes from what the log holds, so it can never disagree with
+ * the rows: the highest row, or the floor when a checkpoint pruned them all.
+ * A checkpoint only deletes at or below its floor, so neither can regress.
+ * `meta.headSeq` is a lagging copy (see `flushHeadSeq`). */
+export const headSeq = (sql: SqlStorage): number => {
+  const top = [...sql.exec("SELECT MAX(seq) AS top FROM rows")][0]?.top as number | null;
+  return Math.max(top ?? 0, seqFloor(sql), Number(getMeta(sql, "headSeq") ?? "0"));
+};
+
+/** Bring the stored copy of the head up to date. Nothing here reads it for
+ * correctness; releases before the head was derived do, and would collide on
+ * `rows.seq` if they read a stale one (see `CHAT_ROOM_WRITE_THROUGH`). */
+export const flushHeadSeq = (sql: SqlStorage): void => {
+  const head = headSeq(sql);
+  if (head !== Number(getMeta(sql, "headSeq") ?? "0")) setMeta(sql, "headSeq", String(head));
+};
 
 /** Rows with `seq <= seqFloor` are gone — covered by the checkpoint. A cursor
  * below the floor must load the checkpoint before requesting rows. */
@@ -58,10 +81,11 @@ export type AppendOutcome =
   | { ok: true; seq: number; dup: boolean }
   | { ok: false; error: "too_large" | "empty" };
 
-/** Append one update row. `batch_id` UNIQUE dedupes reconnect re-pushes
- * server-side: a replay acks the ORIGINAL seq and appends nothing (Loro
- * re-import is a no-op client-side, so duplicates are safe end-to-end — this
- * just keeps the log tight). */
+/** Append one update row. The batch id dedupes reconnect re-pushes server-side:
+ * a replay acks the ORIGINAL seq and appends nothing (Loro re-import is a no-op
+ * client-side, so duplicates are safe end-to-end — this just keeps the log
+ * tight). The row is the only thing written: its presence IS the new head, so
+ * an ack can't outrun or disagree with it. */
 export const appendRow = (
   sql: SqlStorage,
   device: string,
@@ -71,20 +95,29 @@ export const appendRow = (
 ): AppendOutcome => {
   if (bytes.byteLength === 0) return { ok: false, error: "empty" };
   if (bytes.byteLength > MAX_ROW_BYTES) return { ok: false, error: "too_large" };
-  const existing = [...sql.exec("SELECT seq FROM rows WHERE batch_id = ?", batchId)];
+  const head = headSeq(sql);
+  const existing = [
+    ...sql.exec("SELECT seq FROM rows WHERE seq > ? AND batch_id = ?", head - DEDUPE_WINDOW, batchId)
+  ];
   if (existing.length > 0) {
     return { ok: true, seq: existing[0]!.seq as number, dup: true };
   }
-  const seq = headSeq(sql) + 1;
-  sql.exec(
-    "INSERT INTO rows (seq, device, batch_id, bytes, received_at) VALUES (?, ?, ?, ?, ?)",
+  const seq = head + 1;
+  // OR IGNORE: a room from before the bound still has its UNIQUE index on
+  // batch_id, and the window above doesn't reach a replay older than it. There
+  // the index answers; a plain INSERT would throw and the batch would never ack.
+  const insert = sql.exec(
+    "INSERT OR IGNORE INTO rows (seq, device, batch_id, bytes, received_at) VALUES (?, ?, ?, ?, ?)",
     seq,
     device,
     batchId,
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     receivedAt
   );
-  setMeta(sql, "headSeq", String(seq));
+  if (insert.rowsWritten === 0) {
+    const original = [...sql.exec("SELECT seq FROM rows WHERE batch_id = ?", batchId)];
+    return { ok: true, seq: original[0]!.seq as number, dup: true };
+  }
   return { ok: true, seq, dup: false };
 };
 

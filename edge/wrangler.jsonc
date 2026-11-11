@@ -180,6 +180,13 @@
     // snapshot.read. Unset ⇒ every session installs the engine (~30–60 s).
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos",
+    // Chat rooms offer the relay layer (docs/design/relay-layer.md) to every
+    // engine that asks: "1" for everyone, a comma-separated list of user ids, or
+    // "" for nobody. Turning it off is safe at any time: each host, as it next
+    // opens a chat, stores a checkpoint and moves the chat back to stored rows.
+    // Never deploy edge code older than this release while any room may still
+    // hold a relay queue or an unhealed chat (14 days after turning it off).
+    "CHAT_RELAY_LAYER": "1",
     // Sandbox provider for NEW Cloud devices (src/cloud/providers): "boat".
     // Existing sandboxes keep the provider they were created on.
     "SANDBOX_PROVIDER": "boat",
