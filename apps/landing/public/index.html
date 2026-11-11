@@ -7,7 +7,7 @@
 <meta name="description" content="Zeron runs Claude Code, Codex, Grok, Hermes and Pi on your machines. Control them from any device, live." />
 <meta property="og:title" content="Zeron" />
 <meta property="og:description" content="Control your coding agents from any of your devices." />
-<meta property="og:image" content="/assets/app-screenshot.jpg" />
+<meta property="og:image" content="/assets/hero/new-chat.jpg" />
 <link rel="icon" href="/assets/zeron-favicon-light.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: light)" />
 <link rel="icon" href="/assets/zeron-favicon-dark.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: dark)" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
@@ -332,22 +332,18 @@
   /* ── shot ────────────────────────────────────────────── */
   .shot { padding: 48px 0 0; position: relative; }
   .shot .wrap { max-width: 1240px; position: relative; }
-  /* the capture's panes are baked translucent at the app's own glass
-     alphas (shell .80, panels .88) over a real backdrop blur, so the
-     section's glyph field — and the pointer's afterglow — frost through
-     like vibrancy on a Mac desktop. The capture is a plain rectangle
-     (hairline and corners trimmed) so the browser rounds it with
-     anti-aliasing at display resolution; the radius is the capture's
-     30px corner as a fraction of its 2342×1532 size, and the rim is
-     redrawn on the same curve. Outer box-shadows never paint under the
-     box, so the see-through panes stay clean (a filter here would also
-     cut the backdrop blur off from the page) */
+  /* The Zeron app's new chat, redrawn from the app's own numbers
+     (public/hero: a canvas, the window 1176×768 points, which is this
+     wrap's width at full size). The window is opaque, as the app's
+     opaque look is; the page rounds and shadows it as macOS frames a
+     window. Until the canvas has drawn (or without WebGL2) the still,
+     rendered from the same code, stands in its place. */
   .showcase-window {
     position: relative;
     overflow: hidden;
-    border-radius: 1.281% / 1.958%;
-    -webkit-backdrop-filter: blur(10px) saturate(2) brightness(2.4);
-    backdrop-filter: blur(10px) saturate(2) brightness(2.4);
+    aspect-ratio: 1176 / 768;
+    background: #0e0e10;
+    border-radius: 1.36% / 2.083%;
     box-shadow:
       0 0 0 .5px rgba(0,0,0,0.9),
       0 24px 48px rgba(0,0,0,0.7);
@@ -360,7 +356,19 @@
     box-shadow: inset 0 0 0 1px rgba(255,255,255,0.1);
     pointer-events: none;
   }
-  .showcase-window img { display: block; width: 100%; height: auto; }
+  .showcase-window img,
+  .showcase-window canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .showcase-window canvas { opacity: 0; transition: opacity .3s ease-out; }
+  .showcase-window.is-live canvas { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .showcase-window canvas { transition: none; }
+  }
 
   /* ── agents ──────────────────────────────────────────── */
   .agents {
@@ -862,7 +870,7 @@
           <span>Sponsor Zeron</span><span class="ui-icon" data-icon="arrow-up-right" aria-hidden="true"></span>
         </a>
         <h1>
-          <b>The open source workspace for your coding agents.</b> Zeron runs
+          <b>The agent workspace that can become anything</b> Zeron runs
           <span class="hero-agent"><span class="brand-icon" aria-hidden="true" style="--icon: url('/assets/icons/brand/claude-mark.svg')"></span>Claude Code,</span>
           <span class="hero-agent"><span class="brand-icon" data-mono aria-hidden="true" style="--icon: url('/assets/icons/brand/openai-mark.svg')"></span>Codex,</span>
           <span class="hero-agent"><span class="brand-icon" aria-hidden="true" style="--icon: url('/assets/icons/brand/opencode-mark-dark.svg')"></span>OpenCode,</span>
@@ -887,8 +895,8 @@
 
   <section class="shot">
     <div class="wrap">
-      <div class="showcase-window">
-        <img src="/assets/shots/showcase.webp" alt="Zeron running a Claude Code session beside an open Rust file, the project tree, and a list of subagents" width="2342" height="1532" decoding="async" />
+      <div class="showcase-window" id="hero-app" data-label="The Zeron app on a new chat: the sidebar, and a composer floating over a cherry blossom scene drawn in characters">
+        <img src="/assets/hero/new-chat.webp" alt="The Zeron app on a new chat: the sidebar, and a composer floating over a cherry blossom scene drawn in characters" width="2352" height="1536" decoding="async" />
       </div>
     </div>
   </section>
@@ -1484,6 +1492,36 @@
   // frosts the field and the pointer's afterglow as it passes under it.
   // No parallax this far down the page (it would outrun the overscan).
   mountGlyphField(document.querySelector(".shot"), { ...field, parallax: 1, beam: null });
+</script>
+<script type="module">
+  // The app window: the Zeron app's new chat, live (public/hero). Mounted
+  // as it nears the viewport; its still stays without WebGL2, and comes
+  // back if the GPU context is lost. It draws only while its layers move.
+  const win = document.getElementById("hero-app");
+  const still = win?.querySelector("img");
+  const gl2 = (() => {
+    try { return !!document.createElement("canvas").getContext("webgl2"); } catch { return false; }
+  })();
+  if (win && gl2 && "IntersectionObserver" in window) {
+    const io = new IntersectionObserver(async ([entry]) => {
+      if (!entry.isIntersecting) return;
+      io.disconnect();
+      try {
+        const { mountHero } = await import("/hero/app.js");
+        const hero = await mountHero(win, { label: win.dataset.label });
+        if (!hero) return;
+        requestAnimationFrame(() => win.classList.add("is-live"));
+        win.addEventListener("herofailed", () => {
+          win.classList.remove("is-live");
+          hero.canvas.remove();
+        });
+        if (still) still.setAttribute("aria-hidden", "true");
+      } catch (err) {
+        console.warn("hero:", err);
+      }
+    }, { rootMargin: "400px 0px" });
+    io.observe(win);
+  }
 </script>
 <script>
   // Tweet wall: each column holds its cards twice so the drift loops;
