@@ -929,10 +929,10 @@ fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
 
 fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> InstallKind {
     #[cfg(windows)]
-    if os == "windows" && windows::is_managed(exe) {
-        return InstallKind::WindowsPortable {
-            directory: exe.parent().unwrap().to_owned(),
-        };
+    if os == "windows"
+        && let Some(directory) = windows::managed_directory(exe)
+    {
+        return InstallKind::WindowsPortable { directory };
     }
     // Never interpret a coincidental Windows `%HOME%\.zeron\app` layout as
     // the Unix symlink-managed installation.
@@ -1019,7 +1019,17 @@ pub async fn download_release_file(
     dest: &Path,
 ) -> anyhow::Result<()> {
     // From the feed the manifest came from: a beta's files are beta's.
-    let url = format!("{}/{file}", manifest.channel.base(&release_base(edge_url)?));
+    download_release_file_from(&manifest.channel.base(&release_base(edge_url)?), manifest, file, dest).await
+}
+
+/// [`download_release_file`] from the feed at `base`.
+pub(crate) async fn download_release_file_from(
+    base: &str,
+    manifest: &Manifest,
+    file: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    let url = format!("{base}/{file}");
     let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
     if expected.is_none() {
         tracing::warn!(

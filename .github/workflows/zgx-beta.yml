@@ -210,5 +210,9 @@ jobs:
           for f in dist/*; do
             put "beta/$(basename "$f")" "$f"
           done
-          # Last, so no reader sees a version before its files.
+          # This beta's own, beside its files (crates/update
+          # `windows::pinned_release`), then, last, so no reader sees a
+          # version before its files, the channel's.
+          VERSION="${GITHUB_REF_NAME#beta-v}"
+          put "beta/manifest-$VERSION.json" beta-manifest.json
           put beta/manifest.json beta-manifest.json

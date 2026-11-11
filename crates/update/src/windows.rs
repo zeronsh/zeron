@@ -73,11 +73,31 @@ pub(super) fn is_managed(exe: &Path) -> bool {
         && exe.parent().is_some_and(|dir| dir.join(CONFIG).is_file())
 }
 
+/// The installation `exe` belongs to, if it's update-managed: the folder of
+/// its `zeron.exe`, or for the zgx app's engine
+/// (`<directory>\beta\<version>\engine\zeron.exe`), the folder its version's
+/// files are in.
+pub(super) fn managed_directory(exe: &Path) -> Option<PathBuf> {
+    if is_managed(exe) {
+        return exe.parent().map(Path::to_path_buf);
+    }
+    let engine = exe.parent()?;
+    let folder = engine.parent()?.parent()?;
+    if exe.file_name()? != "zeron.exe" || engine.file_name()? != "engine" || folder.file_name()? != BETA {
+        return None;
+    }
+    let directory = folder.parent()?;
+    is_managed(&directory.join("zeron.exe")).then(|| directory.to_path_buf())
+}
+
 pub(super) fn release_url() -> anyhow::Result<Option<String>> {
     // A new version on trial runs from beside the installation.
     let exe = match std::env::var_os(super::INSTALLED_AT_ENV) {
         Some(directory) => PathBuf::from(directory).join("zeron.exe"),
-        None => std::env::current_exe()?,
+        None => match managed_directory(&std::env::current_exe()?) {
+            Some(directory) => directory.join("zeron.exe"),
+            None => return Ok(None),
+        },
     };
     if !is_managed(&exe) {
         return Ok(None);
@@ -143,8 +163,9 @@ async fn verify_staged_version(staged: &Path, version: &str) -> anyhow::Result<(
 
 /// Stage a release from its package: the executable where the single-file
 /// path leaves one (its checksum beside it), the rest in [`PACKAGE`].
+/// From the feed at `base` (a channel's, or one release's own).
 async fn stage_package(
-    edge_url: &str,
+    base: &str,
     manifest: &super::Manifest,
     directory: &Path,
 ) -> anyhow::Result<PathBuf> {
@@ -154,7 +175,7 @@ async fn stage_package(
         .prefix(".zeron-update-")
         .tempdir_in(directory)?;
     let archive = temporary.path().join(&file);
-    super::download_release_file(edge_url, manifest, &file, &archive).await?;
+    super::download_release_file_from(base, manifest, &file, &archive).await?;
     let unpacked = temporary.path().join(PACKAGE);
     std::fs::create_dir(&unpacked)?;
     // Windows' own tar (since Windows 10 1803), by its full path.
@@ -175,8 +196,11 @@ async fn stage_package(
         String::from_utf8_lossy(&output.stderr).trim()
     );
     std::fs::remove_file(&archive)?;
+    // The zgx app's package has its version's folder; the old app's (a
+    // release going back to it) has no such folder at all.
     ensure!(
-        version_files(&unpacked, &manifest.version).join("engine").join("zeron.exe").is_file(),
+        version_files(&unpacked, &manifest.version).join("engine").join("zeron.exe").is_file()
+            || !unpacked.join(BETA).exists(),
         "the package has no {BETA}\\{}\\engine\\zeron.exe",
         manifest.version
     );
@@ -211,7 +235,16 @@ fn install_version_files(staged: &Path, directory: &Path) -> anyhow::Result<()> 
             .with_context(|| format!("moving {} into place", target.display()))?;
     }
     let feed = package.join(CONFIG);
-    if feed.is_file() {
+    // Never a feed someone set themselves, and not in a trial, which may yet
+    // go back.
+    let default_feed = std::fs::read(directory.join(CONFIG))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
+        .is_some_and(|config| {
+            let url = config.releases_url.trim().trim_end_matches('/');
+            url == GITHUB_LATEST || url == EDGE_FEED
+        });
+    if feed.is_file() && default_feed && std::env::var_os(super::INSTALLED_AT_ENV).is_none() {
         // Only a feed this build would accept replaces the one there.
         let config: Config = serde_json::from_slice(&std::fs::read(&feed)?).context("reading the package's update configuration")?;
         super::validate_release_override(&config.releases_url)?;
@@ -249,8 +282,14 @@ pub async fn stage(
         valid_version(&manifest.version),
         "invalid Windows release version"
     );
-    if manifest.channel == super::Channel::Beta || packaged() {
-        return stage_package(edge_url, manifest, directory).await;
+    // The zgx app (this one, or the one whose engine this is: its version's
+    // folder is there) updates from the package, on every channel.
+    if manifest.channel == super::Channel::Beta
+        || packaged()
+        || version_files(directory, super::app_version()).is_dir()
+    {
+        let base = manifest.channel.base(&super::release_base(edge_url)?);
+        return stage_package(&base, manifest, directory).await;
     }
     let file = artifact(&manifest.version);
     let expected = expected_checksum(manifest, &file)?;
@@ -322,6 +361,22 @@ pub async fn complete_install(
         return Ok(Completion::Complete);
     }
     tracing::info!(version, "completing the install: this version's files aren't here");
+    // This version's own package first, wherever the feed keeps one release's
+    // files: what `latest` says can be older (a release withdrawn) or newer.
+    match pinned_release(edge_url, version).await {
+        Some((base, manifest)) => match stage_package(&base, &manifest, directory).await {
+            Ok(staged) => {
+                let result = install_version_files(&staged, directory);
+                if let Some(stage) = staged.parent() {
+                    let _ = std::fs::remove_dir_all(stage);
+                }
+                result?;
+                return Ok(Completion::Installed);
+            }
+            Err(err) => tracing::warn!(error = %format!("{err:#}"), "this version's own package didn't install; trying the latest"),
+        },
+        None => tracing::info!(version, "the feed keeps no package of this version apart; trying the latest"),
+    }
     let manifest = super::fetch_latest_on(edge_url, super::Channel::of_version(version))
         .await
         .context("reading the release feed")?;
@@ -329,7 +384,8 @@ pub async fn complete_install(
     if latest != version && !super::version_newer(&latest, version) {
         bail!("the release feed offers Zeron {latest}, which is older than this Zeron {version}");
     }
-    let staged = stage_package(edge_url, &manifest, directory).await?;
+    let base = manifest.channel.base(&super::release_base(edge_url)?);
+    let staged = stage_package(&base, &manifest, directory).await?;
     // A trial (or anything not run as the installed `zeron.exe`) can't
     // replace the installation; it installs only its own version's files.
     let installed = directory.join("zeron.exe");
@@ -352,6 +408,44 @@ pub async fn complete_install(
     }
     apply(&staged, directory, false)?;
     Ok(Completion::Updated(latest))
+}
+
+/// The GitHub release marked latest, the feed the old app's Windows installs name.
+const GITHUB_LATEST: &str = "https://github.com/zeronsh/zeron/releases/latest/download";
+/// The edge's feed, the zgx app's: stable at its root, the beta channel in `beta/`.
+const EDGE_FEED: &str = "https://zeron.sh/releases";
+
+/// Where the feed keeps `version`'s own files, and its manifest: a GitHub
+/// release of its own (`releases/download/v<version>`, whose `manifest.json`
+/// is that release's), or on the edge, the files of every release side by
+/// side with `manifest-<version>.json` (release.yml). `None` when there's
+/// none to be had.
+async fn pinned_release(edge_url: &str, version: &str) -> Option<(String, super::Manifest)> {
+    let channel = super::Channel::of_version(version);
+    let feed = super::release_base(edge_url).ok()?;
+    let (base, manifest_url) = match feed.strip_suffix("/releases/latest/download") {
+        Some(repository) if channel == super::Channel::Stable => {
+            let base = format!("{repository}/releases/download/v{version}");
+            let url = format!("{base}/manifest.json");
+            (base, url)
+        }
+        _ => {
+            let base = channel.base(&feed);
+            let url = format!("{base}/manifest-{version}.json");
+            (base, url)
+        }
+    };
+    let client = super::http_client().ok()?;
+    let response = super::fetch_release_metadata(&client, &manifest_url).await.ok()?;
+    if !response.status.is_success() {
+        return None;
+    }
+    let mut manifest: super::Manifest = serde_json::from_slice(&response.body).ok()?;
+    if manifest.version.trim() != version {
+        return None;
+    }
+    manifest.channel = channel;
+    Some((base, manifest))
 }
 
 /// Exclusive use of the completion lock, waiting up to ten minutes for
@@ -430,7 +524,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     swap_into_place(staged, &installed)?;
     // The old app (a single executable) reads no folder; the zgx app only
     // its own version's. Others' go, except while an engine still runs them.
-    let packaged_update = staged.with_file_name(PACKAGE).is_dir();
+    let packaged_update = staged.with_file_name(PACKAGE).join(BETA).is_dir();
     remove_version_files(directory, version.filter(|_| packaged_update));
     if let Some(version) = version {
         refresh_installer_version(version);

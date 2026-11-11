@@ -282,6 +282,10 @@ jobs:
           # (crates/update) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
           put manifest.json manifest.json
+          # This release's own, beside its files: a Windows install finishing
+          # itself takes its own version's package by it, whatever the latest
+          # is by then (crates/update `windows::pinned_release`).
+          put "manifest-$VERSION.json" manifest.json
           printf '%s' "$VERSION" > latest.txt
           put latest.txt latest.txt
           # The beta channel carries every release of the zgx app: a beta
@@ -289,8 +293,14 @@ jobs:
           # newer beta is already there, and stays on beta (crates/update
           # `follows_channels`). The same files under beta/, the manifest last.
           if [ "$APP" = zgx ]; then
-            beta="$(curl -fsS --retry 3 https://zeron.sh/releases/beta/manifest.json | jq -r .version || true)"
-            if python3 - "$VERSION" "$beta" <<'PY'
+            # Read from the bucket itself, not a cache; on any doubt, leave it.
+            beta=""
+            if npx wrangler@4 r2 object get comet-native-releases/beta/manifest.json --file beta-current.json --remote; then
+              beta="$(jq -r '.version // empty' beta-current.json)"
+            fi
+            if [ -z "$beta" ]; then
+              echo "couldn't read the beta channel's manifest: left as it is"
+            elif python3 - "$VERSION" "$beta" <<'PY'
           import re, sys
           def key(v):
               m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?", v.strip())
@@ -306,6 +316,7 @@ jobs:
               for f in dist/*; do
                 put "beta/$(basename "$f")" "$f"
               done
+              put "beta/manifest-$VERSION.json" manifest.json
               put beta/manifest.json manifest.json
             else
               echo "the beta channel's $beta is newer than $VERSION: left as it is"
