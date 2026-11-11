@@ -976,6 +976,22 @@ local function seed()
 	}) :: any)
 end
 seed()
+-- Cloud chats' machines, each with its own copy of Atlas's repository
+-- (acme/atlas), as the engine lists them.
+ui.command {
+	id = "fixture.cloud_copies",
+	title = "Fixture: Cloud machines, each with a copy of Atlas's repository",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.devices = table.clone(now.devices)
+		now.projects = table.clone(now.projects)
+		for i, created in { 100, 300, 200 } do
+			table.insert(now.devices, { id = `cloud-m{i}`, name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+			table.insert(now.projects, { id = `atlas-c{i}`, name = "atlas", device = `cloud-m{i}`, path = "/home/user/atlas", git = true, github = "acme/atlas", created = created })
+		end
+		sessions.now:set(now)
+	end,
+}
 -- This device's connection as the shell hears it (`connection`).
 for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offline", "offline" }, { "connection_back", nil } } do
 	ui.command {

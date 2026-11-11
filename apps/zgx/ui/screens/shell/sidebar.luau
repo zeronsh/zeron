@@ -1681,9 +1681,10 @@ M.Sidebar = ui.component(function(props: Props): Node
 end)
 
 -- A project's name and icon edited (Edit project…), from its header's menu
--- or Settings → Projects: the window's one editor, `start` as its `open`'s.
-function M.edit_project(id: string, start: { [string]: any }?)
-	project_editor().open(id, start)
+-- or Settings → Projects: the window's one editor, `start` and `also` as its
+-- `open`'s.
+function M.edit_project(id: string, start: { [string]: any }?, also: { string }?)
+	project_editor().open(id, start, also)
 	project_editor_used:set(true)
 end
 
