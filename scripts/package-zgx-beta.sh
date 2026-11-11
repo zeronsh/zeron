@@ -19,7 +19,8 @@
 #                       is the next release's (newer than the stable whose
 #                       engine goes in)
 #   ZGX_BETA_ENGINE     the engine: a built binary, a Zeron.app, its app tarball, or
-#                       its `Zeron Engine` binary
+#                       its `Zeron Engine` binary; built with LUAU_CXXFLAGS=-DNDEBUG
+#                       (checked), which a stable release from before that isn't
 #   ZGX_BETA_ZGX_BIN    the interface, built already (with --features beta and
 #                       ZERON_BETA_VERSION); otherwise built here
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)
@@ -70,6 +71,11 @@ ENGINE_VERSION="$("$ENGINE_BIN" --version | sed -n 's/^zeron-engine //p')"
 # for any argument instead. (Read, not run: running an old one starts it.)
 LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
   die "the $ENGINE_VERSION engine predates the shared command line: the beta needs a stable release with it"
+# Its Luau (visuals, plugin services) without its asserts: with them, each
+# LUAU_ASSERT keeps its Luau source file's path (Luau/Common.h's __FILE__),
+# VM/src/l*.cpp; with NDEBUG, none.
+! LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$ENGINE_BIN" ||
+  die "$ENGINE_BIN was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG"
 
 # The interface: apps/zgx is a workspace of its own (its own lock, patches).
 ZGX_BIN="${ZGX_BETA_ZGX_BIN:-}"

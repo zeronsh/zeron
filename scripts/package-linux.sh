@@ -14,6 +14,8 @@
 # and the `zeron-engine` it's given, built from the same commit:
 #   BETA_VERSION=<workspace version>-beta.<n>
 #   ZGX_BETA_ENGINE=<a zeron-engine binary, or a release's linux tarball>
+# The engine must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below), which
+# a stable release from before that isn't.
 
 set -euo pipefail
 
@@ -78,8 +80,9 @@ elif [[ "$PROFILE" == "release" ]]; then
   # the same start-up (median engine boot 387 ms both ways, n=20 each), at about
   # 60% more build time. A Cloud machine copies the binary back in on every wake,
   # so its size is wake time. Only here: macOS and Windows keep their build times.
-  # The release was already stripped, with no debug info to split.
-  CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+  # The release was already stripped, with no debug info to split. Luau (the
+  # engine's visuals and plugin services) without its asserts.
+  CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 LUAU_CXXFLAGS=-DNDEBUG \
     cargo build --release -p zeron
   BIN="$ROOT/target/release/zeron"
 else
@@ -89,6 +92,13 @@ fi
 # The background engine the app starts: sessions keep running with the app
 # closed, in a process of its own.
 ENGINE_BIN="${ENGINE_BIN:-$(dirname "$BIN")/zeron-engine}"
+# The engine's Luau (visuals, plugin services) without its asserts: with them,
+# each LUAU_ASSERT keeps its Luau source file's path (Luau/Common.h's
+# __FILE__), VM/src/l*.cpp; with NDEBUG, none. (A debug package has them.)
+if [[ "$PROFILE" == "release" ]] && LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$ENGINE_BIN"; then
+  echo "$ENGINE_BIN was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG" >&2
+  exit 1
+fi
 
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"

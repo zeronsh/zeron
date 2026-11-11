@@ -22,7 +22,14 @@ DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
-cargo build --release -p zeron
+# Luau (the engine's visuals and plugin services) without its asserts.
+LUAU_CXXFLAGS=-DNDEBUG cargo build --release -p zeron
+# With them, each LUAU_ASSERT keeps its Luau source file's path (Luau/
+# Common.h's __FILE__), VM/src/l*.cpp; with NDEBUG, none.
+if LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$ROOT/target/release/zeron-engine"; then
+  echo "target/release/zeron-engine was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG" >&2
+  exit 1
+fi
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
