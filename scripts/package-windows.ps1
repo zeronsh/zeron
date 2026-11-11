@@ -87,9 +87,15 @@ function Copy-Scripts([string]$From, [string]$To) {
 Push-Location $root
 try {
     if ($BetaVersion) {
-        # A workspace of its own (its own lock, patches).
+        # A workspace of its own (its own lock, patches). Built from its
+        # folder: cargo reads .cargo/config.toml by where it runs, not by the
+        # manifest, and the build's flags are there (Luau's NDEBUG), as
+        # scripts/package-zgx-beta.sh. Its target stays apps/zgx/target.
         $env:ZERON_BETA_VERSION = $BetaVersion
-        cargo build --release --locked --features beta --manifest-path apps/zgx/Cargo.toml --target-dir apps/zgx/target
+        Push-Location (Join-Path $root 'apps/zgx')
+        try {
+            cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
+        } finally { Pop-Location }
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './apps/zgx/target/release/zeron-zgx.exe').Path
     } else {
@@ -106,6 +112,11 @@ try {
         foreach ($binary in @($built, $BetaEngine)) {
             $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($binary))
             if ($text -match $stagingMarks) { throw "$binary carries staging's edge or sign-in client: $($Matches[0])" }
+            # Luau without its asserts (a fifth of script time): zgx-script
+            # compiles its warning about them in only when they're on.
+            if ($binary -eq $built -and $text.Contains('Luau was built with its asserts')) {
+                throw "$built was built with Luau's asserts: LUAU_CXXFLAGS=-DNDEBUG (apps/zgx/.cargo/config.toml) didn't reach it"
+            }
             if ($binary -eq $BetaEngine -and -not $text.Contains('Multi-device controller for coding agents')) {
                 throw 'The engine predates the shared command line'
             }
