@@ -308,6 +308,7 @@ impl EngineCore {
         )?;
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
+        sessions.follow_chat_deletions(workspace.watch_chats());
         let plugins = plugins::Plugins::new(data_dir, &device_id);
         plugins.set_workspace(workspace.clone());
         // A service's `zeron.folders()`: where this device's chats and

@@ -856,6 +856,10 @@ local renaming_row = ui.state("shell_renaming_row", nil :: string?)
 -- The session asked about deleting, and its dialog.
 local deleting = ui.state("shell_deleting", nil :: string?)
 local delete_open = ui.state("shell_delete_open", false)
+-- What the delete takes with it (its subagents and side chats, theirs in
+-- turn), as the host counted them when it was asked.
+local delete_subagents = ui.state("shell_delete_subagents", 0)
+local delete_sides = ui.state("shell_delete_sides", 0)
 -- Sleep → Custom…: the chat, the moment chosen, and whether it's asking.
 local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
 local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
@@ -1248,9 +1252,19 @@ local function menu(id: string): { any }?
 			icon = "trash-bin-minimalistic",
 			danger = true,
 			-- (Asked once more, as Zeron's: "Delete session?")
+			-- (Once it knows what goes with it, to say so.)
 			on_select = function()
-				deleting:set(id)
-				delete_open:set(true)
+				local function ask(subagents: number, sides: number)
+					delete_subagents:set(subagents)
+					delete_sides:set(sides)
+					deleting:set(id)
+					delete_open:set(true)
+				end
+				sessions.deleted_with(id):after(function(with: any)
+					ask(tonumber(with and with.subagents) or 0, tonumber(with and with.sides) or 0)
+				end, function()
+					ask(0, 0)
+				end)
 			end,
 		},
 	}
@@ -1461,7 +1475,17 @@ local function delete_dialog(): Node
 		local id = deleting:get()
 		local c = if id then chat(id) else nil
 		local t = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
-		return locale.s("shell.sidebar.session.will_delete", { title = t })
+		local will = locale.s("shell.sidebar.session.will_delete", { title = t })
+		local subagents, sides = delete_subagents:get(), delete_sides:get()
+		local also = if subagents > 0 and sides > 0
+			then locale.s("shell.sidebar.session.also_deletes_both", { subagents = subagents, sides = sides })
+			elseif subagents > 0 then locale.s("shell.sidebar.session.also_deletes_subagents", { n = subagents })
+			elseif sides > 0 then locale.s("shell.sidebar.session.also_deletes_side", { n = sides })
+			else nil
+		if not also then
+			return will
+		end
+		return locale.s("shell.sidebar.session.will_delete_with", { will = will, also = also })
 	end
 	return ds.Dialog {
 		open = delete_open,

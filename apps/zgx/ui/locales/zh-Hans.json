@@ -2453,6 +2453,10 @@
       "session": {
         "new_session": "新建会话",
         "will_delete": "“{title}”将被永久删除。此操作无法撤销。",
+        "will_delete_with": "{will}{also}",
+        "also_deletes_side": "{n, plural, other {它的 # 个侧边对话也会一并删除。}}",
+        "also_deletes_subagents": "{n, plural, other {它的 # 个子智能体也会一并删除。}}",
+        "also_deletes_both": "它的 {subagents, plural, other {# 个子智能体}}和 {sides, plural, other {# 个侧边对话}}也会一并删除。",
         "delete_title": "删除会话？",
         "couldnt_delete": "无法删除“{title}”",
         "rename_title": "重命名会话",

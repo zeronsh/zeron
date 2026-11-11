@@ -2165,32 +2165,34 @@ impl EngineRpc {
                 // A Cloud chat's children on Cloud go with it: its delegates
                 // (each on a machine of its own, which would otherwise outlive
                 // the parent) and its side chats (on its machine, now gone).
-                let children: Vec<String> = if on_cloud {
-                    self.workspace
-                        .read_chats()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|chat| {
-                            chat.parent_chat_id.as_deref() == Some(chat_id.as_str())
-                                && zeron_proto::is_cloud_device(&chat.device_id, "")
-                        })
-                        .map(|chat| chat.id)
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                // Its children on computers go too, and theirs in turn: the
+                // apps place a child under its parent, so one left behind
+                // can't be reached, yet keeps its doc and maybe a live run.
+                // (Their runs end with their rows: see
+                // `SessionsEngine::follow_chat_deletions`.)
+                let children = chat_descendants(
+                    &self.workspace.read_chats().unwrap_or_default(),
+                    &chat_id,
+                    on_cloud,
+                );
+                let cloud_children: Vec<String> = children
+                    .iter()
+                    .filter(|(_, cloud)| *cloud)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                let children: Vec<String> = children.into_iter().map(|(id, _)| id).collect();
                 self.voice.retire_chat(&chat_id);
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
                 for child in &children {
                     self.voice.retire_chat(child);
                     if let Err(err) = self.workspace.delete_chat(child) {
-                        tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
+                        tracing::warn!(chat = %child, error = %err, "deleting a deleted chat's child failed");
                     }
                     self.doc_host.purge_chat(child);
                 }
                 if on_cloud {
-                    self.delete_cloud_machines(std::iter::once(chat_id).chain(children).collect());
+                    self.delete_cloud_machines(std::iter::once(chat_id).chain(cloud_children).collect());
                 }
                 Ok(())
             }
@@ -2252,6 +2254,34 @@ impl EngineRpc {
             }
         }
     }
+}
+
+/// The chats that go when `root` is deleted, each with whether it is on
+/// Cloud: its children on computers (subagents, side chats) and theirs in
+/// turn, plus — when the parent is itself on Cloud — its children on Cloud.
+/// (A computer's chat keeps its Cloud delegates, as before.)
+fn chat_descendants(
+    chats: &[zeron_proto::Chat],
+    root: &str,
+    root_on_cloud: bool,
+) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::from([root]);
+    let mut frontier: Vec<(&str, bool)> = vec![(root, root_on_cloud)];
+    while let Some((parent, parent_on_cloud)) = frontier.pop() {
+        for chat in chats {
+            if chat.parent_chat_id.as_deref() != Some(parent) {
+                continue;
+            }
+            let on_cloud = zeron_proto::is_cloud_device(&chat.device_id, "");
+            if (on_cloud && !parent_on_cloud) || !seen.insert(chat.id.as_str()) {
+                continue;
+            }
+            out.push((chat.id.clone(), on_cloud));
+            frontier.push((chat.id.as_str(), on_cloud));
+        }
+    }
+    out
 }
 
 /// An RPC rejection is scoped to the requested capability. Only a broken

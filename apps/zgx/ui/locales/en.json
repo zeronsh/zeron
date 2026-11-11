@@ -2453,6 +2453,10 @@
       "session": {
         "new_session": "New session",
         "will_delete": "“{title}” will be permanently deleted. This can’t be undone.",
+        "will_delete_with": "{will} {also}",
+        "also_deletes_side": "{n, plural, one {This also deletes its side chat.} other {This also deletes its # side chats.}}",
+        "also_deletes_subagents": "{n, plural, one {This also deletes its subagent.} other {This also deletes its # subagents.}}",
+        "also_deletes_both": "This also deletes its {subagents, plural, one {# subagent} other {# subagents}} and {sides, plural, one {# side chat} other {# side chats}}.",
         "delete_title": "Delete session?",
         "couldnt_delete": "Couldn’t delete “{title}”",
         "rename_title": "Rename session",

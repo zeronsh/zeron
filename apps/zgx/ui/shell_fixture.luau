@@ -407,6 +407,10 @@ stub.delete = function(id: string): any
 		end,
 	}
 end
+-- What a delete takes with it, as the host counts it (`tidy_side_chats`).
+stub.deleted_with = function(id: string): any
+	return settle(((model :: any).deleted_with or {})[id] or { subagents = 0, sides = 0 })
+end
 -- (A link as the host makes it: its workspace hashed there.)
 stub.link = function(id: string): any
 	note(`link:{id}`)
@@ -1346,6 +1350,43 @@ ui.command {
 				{ id = "s2", parent = "a1", title = "Write the changelog", device = "mac", updated = NOW - 2 * HOUR, created = NOW - HOUR, agent = "openai" },
 			},
 		}
+		publish()
+	end,
+}
+-- Tidy the tests' side chats, one with a side chat of its own, and a Cloud
+-- delegate (a computer's chat keeps that one when it's deleted): what its
+-- delete says goes with it, as the host counts it (tests/
+-- sidebar_delete_children; the counting is src/sessions.rs `deleted_with`).
+ui.command {
+	id = "tidy_side_chats",
+	title = "Tidy the tests has three side chats",
+	run = function()
+		(model :: any).deleted_with = { a3 = { subagents = 0, sides = 3 } };
+		(model :: any).children = {
+			a3 = {
+				{ id = "t1", parent = "a3", title = "Split the slow suite", device = "mac", updated = NOW - 40, created = NOW - HOUR, agent = "claude" },
+				{ id = "t2", parent = "a3", title = "Drop the dead fixtures", device = "mac", updated = NOW - 50, created = NOW - HOUR, agent = "claude", child_kind = "side" },
+				{ id = "t3", parent = "a3", title = "Run it on Cloud", device = "cloud-t3", updated = NOW - 60, created = NOW - HOUR, agent = "claude", child_kind = "subagent" },
+			},
+			t1 = {
+				{ id = "t4", parent = "t1", title = "Time each test", device = "mac", updated = NOW - 70, created = NOW - HOUR, agent = "claude" },
+			},
+		}
+		publish()
+	end,
+}
+-- And a subagent of its own besides.
+ui.command {
+	id = "tidy_subagent",
+	title = "Tidy the tests has a subagent",
+	run = function()
+		local kids = (model :: any).children or {}
+		kids.a3 = kids.a3 or {}
+		table.insert(kids.a3, { id = "t5", parent = "a3", title = "Find the flaky one", device = "mac", updated = NOW - 80, created = NOW - HOUR, agent = "claude", child_kind = "subagent" })
+		;(model :: any).children = kids
+		local with = (model :: any).deleted_with or {}
+		with.a3 = { subagents = 1, sides = if with.a3 then with.a3.sides else 0 };
+		(model :: any).deleted_with = with
 		publish()
 	end,
 }

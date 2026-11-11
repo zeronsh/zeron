@@ -831,6 +831,12 @@ impl WorkspaceHost {
 
     // ── chat ownership ──────────────────────────────────────────────────────
 
+    /// Whether the chat's row was deleted (on any device). A chat whose row
+    /// hasn't synced in yet is not.
+    pub fn chat_deleted(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_deleted(chat_id))
+    }
+
     /// Writer discipline: the chat's host is its row's `deviceId`. Unknown chats
     /// are claimable — the first run command claims them via [`Self::claim_chat`].
     pub fn is_host(&self, chat_id: &str) -> bool {
@@ -859,6 +865,11 @@ impl WorkspaceHost {
     /// scratch folder either way.
     pub fn claim_chat(&self, chat_id: &str, cwd: Option<&str>) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
+            return Ok(());
+        }
+        // A deleted chat isn't unclaimed: a newer write would bring its row
+        // back (the last words of a run ended by the delete).
+        if self.chat_deleted(chat_id) {
             return Ok(());
         }
         let now = Utc::now();
@@ -994,6 +1005,10 @@ impl WorkspaceHost {
     /// Session-status row upsert (sessions engine transitions land here too, in
     /// addition to the local watch channel).
     pub fn record_session(&self, session: &Session) {
+        // (A deleted chat's run settling: its status row went with the chat.)
+        if self.chat_deleted(&session.chat_id) {
+            return;
+        }
         if let Err(err) = self.mutate(|doc| doc.upsert_session(session)) {
             tracing::warn!(chat = %session.chat_id, error = %err, "registry session write failed");
         }

@@ -28,6 +28,8 @@
 --                          or "offline"; its sessions and projects stay
 --   sessions.rename_project_or_say(id, name)  rename_project, as a promise
 --   sessions.delete(id)    gone for good: a promise
+--   sessions.deleted_with(id)  what its delete takes with it: a promise of
+--                          { subagents, sides } (theirs in turn; archived too)
 --   sessions.link(id)      its Zeron conversation link: a promise
 --   sessions.collapse(id, folded)  a section of yours folded, everywhere
 --   sessions.seen(id)      its finished state seen, on every device
@@ -221,6 +223,10 @@ function M.link(id: string): any
 end
 function M.delete(id: string): any
 	return ui.call("sessions.delete", id)
+end
+
+function M.deleted_with(id: string): any
+	return ui.call("sessions.deleted_with", id)
 end
 
 function M.collapse(id: string, folded: boolean)

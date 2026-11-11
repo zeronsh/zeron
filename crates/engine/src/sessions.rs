@@ -493,6 +493,47 @@ impl SessionsEngine {
         let _ = self.inner.titles.set(titles);
     }
 
+    /// End the live run of every chat whose row leaves the workspace (called
+    /// once at engine assembly). Nobody can message a deleted chat, so a run
+    /// parked after its last turn only held its agent process tree — and that
+    /// tree's MCP servers — until the idle reaper, or longer while background
+    /// work held the reaper off. One follower covers every way a row goes:
+    /// Delete on this device or another, a Cloud parent's children, a deleted
+    /// project's chats, the orphan sweep in `spaces`, voice's empty segments.
+    /// It ends the run with [`Self::terminate`], the Stop's teardown, so held
+    /// questions and subagent bookkeeping settle as they do there.
+    ///
+    /// Only a row seen and then gone counts: a run may start before its row
+    /// syncs in, and that is not a deletion. Archiving keeps the row, so an
+    /// archived chat's run goes on (a send revives an archived chat).
+    pub fn follow_chat_deletions(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
+        let weak = Arc::downgrade(&self.inner);
+        let mut known: std::collections::HashSet<String> =
+            chats.borrow_and_update().iter().map(|c| c.id.clone()).collect();
+        tokio::spawn(async move {
+            while chats.changed().await.is_ok() {
+                let now: std::collections::HashSet<String> =
+                    chats.borrow_and_update().iter().map(|c| c.id.clone()).collect();
+                let Some(inner) = weak.upgrade() else { return };
+                let sessions = SessionsEngine { inner };
+                for gone in known.difference(&now) {
+                    if !sessions.has_run(gone) {
+                        continue;
+                    }
+                    tracing::info!(chat = %gone, "chat deleted; ending its run");
+                    let sessions = sessions.clone();
+                    let chat_id = gone.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = sessions.terminate(&chat_id).await {
+                            tracing::warn!(chat = %chat_id, error = %err, "ending a deleted chat's run failed");
+                        }
+                    });
+                }
+                known = now;
+            }
+        });
+    }
+
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
@@ -1244,6 +1285,16 @@ impl SessionsEngine {
                 .inner
                 .shutting_down
                 .load(std::sync::atomic::Ordering::Acquire);
+        // A deleted chat takes no turn: a message queued behind the run its
+        // delete ended, or a send that crossed the delete. (Checked under the
+        // run lock: a delete after this finds the run below and ends it, see
+        // `follow_chat_deletions`.)
+        let deleted = self.inner.workspace().is_some_and(|ws| ws.chat_deleted(chat_id));
+        if deleted {
+            drop(runs);
+            tracing::info!(chat = %chat_id, "run not started: the chat was deleted");
+            return Ok(String::new());
+        }
         if moved_on || stopped || shutting_down {
             drop(runs);
             if moved_on {

@@ -427,6 +427,37 @@ fn place_of(chat: &Json) -> Place {
     }
 }
 
+/// What deleting `root` takes with it, as the engine's `deleteChat` does:
+/// its subagents and side chats on computers, and theirs in turn, archived
+/// or not; a Cloud chat's children on Cloud too. A computer's chat keeps its
+/// Cloud delegates. `(subagents, side chats)`.
+fn deleted_with(chats: &[Json], root: &str) -> (u32, u32) {
+    let on_cloud = |c: &Json| c["deviceId"].as_str().unwrap_or_default().starts_with("cloud-");
+    let root_cloud = chats.iter().find(|c| c["id"].as_str() == Some(root)).is_some_and(on_cloud);
+    let (mut subagents, mut sides) = (0, 0);
+    let mut seen: HashSet<&str> = HashSet::from([root]);
+    let mut frontier: Vec<(&str, bool)> = vec![(root, root_cloud)];
+    while let Some((parent, parent_cloud)) = frontier.pop() {
+        for c in chats {
+            if c["parentChatId"].as_str() != Some(parent) {
+                continue;
+            }
+            let Some(id) = c["id"].as_str() else { continue };
+            let cloud = on_cloud(c);
+            if (cloud && !parent_cloud) || !seen.insert(id) {
+                continue;
+            }
+            if c["childKind"].as_str() == Some("subagent") {
+                subagents += 1;
+            } else {
+                sides += 1;
+            }
+            frontier.push((id, cloud));
+        }
+    }
+    (subagents, sides)
+}
+
 /// A parent's side chats: their ids in the list's order, their rows newest
 /// first, and how many are under way.
 struct Kids {
@@ -706,12 +737,27 @@ pub(crate) fn delete_action_for_tests(host: &ScriptHost) {
 
 /// `sessions.delete`: a chat gone for good, so never an unkept preview's.
 fn delete_action(host: &ScriptHost, a: Rc<Sessions>) {
+    let s = a.clone();
     host.async_action("sessions.delete", move |id| {
         let a = a.clone();
         let params = json!({ "op": "deleteChat", "chatId": text(&id) });
         async move {
             crate::plugins::preview::refuse("sessions.delete")?;
             a.mutate(params).await.map_err(String::from)
+        }
+    });
+    // What a delete takes with it, for "Delete session?" to say: read from
+    // every chat known, archived ones too (the lists show none of those).
+    host.async_action("sessions.deleted_with", move |id| {
+        let (subagents, sides) = {
+            let chats = s.chats.borrow();
+            deleted_with(chats.as_array().map(Vec::as_slice).unwrap_or_default(), &text(&id))
+        };
+        async move {
+            Ok::<_, String>(Value::record([
+                ("subagents", Value::from(subagents as f64)),
+                ("sides", Value::from(sides as f64)),
+            ]))
         }
     });
 }
@@ -2152,6 +2198,32 @@ pub(crate) fn unix_seconds(stamp: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    /// "Delete session?" counts what the engine's `deleteChat` takes: its
+    /// children on computers and theirs, archived ones too (the lists show
+    /// none of those); a Cloud chat's Cloud children; never a computer's
+    /// Cloud delegate, nor anyone else's chats.
+    #[test]
+    fn a_delete_counts_what_goes_with_it() {
+        let chats = serde_json::json!([
+            { "id": "p", "deviceId": "mac" },
+            { "id": "side", "deviceId": "mac", "parentChatId": "p" },
+            { "id": "own", "deviceId": "mac", "parentChatId": "p", "childKind": "side" },
+            { "id": "sub", "deviceId": "mac", "parentChatId": "p", "childKind": "subagent", "archived": true },
+            { "id": "subsub", "deviceId": "mac", "parentChatId": "sub", "childKind": "subagent" },
+            { "id": "delegate", "deviceId": "cloud-d", "parentChatId": "p", "childKind": "subagent" },
+            { "id": "other", "deviceId": "mac" },
+            { "id": "others", "deviceId": "mac", "parentChatId": "other" },
+            { "id": "c", "deviceId": "cloud-c" },
+            { "id": "c-delegate", "deviceId": "cloud-e", "parentChatId": "c", "childKind": "subagent" },
+            { "id": "c-side", "deviceId": "cloud-c", "parentChatId": "c", "childKind": "side" },
+        ]);
+        let all = chats.as_array().unwrap();
+        assert_eq!(super::deleted_with(all, "p"), (2, 2));
+        assert_eq!(super::deleted_with(all, "c"), (1, 1));
+        assert_eq!(super::deleted_with(all, "others"), (0, 0));
+        assert_eq!(super::deleted_with(all, "gone"), (0, 0));
+    }
+
     /// Settings → Devices says why a device wasn't removed in a word of its
     /// own for each of the engine's refusals (crates/engine rpc.rs
     /// `RemoveDevice`), and an engine from before Remove says it's outdated.

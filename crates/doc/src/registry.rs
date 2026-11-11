@@ -1157,6 +1157,13 @@ impl RegistryDoc {
             .is_some_and(|r| r.deleted)
     }
 
+    /// Whether `chat_id`'s row was deleted — a tombstone, not merely a chat
+    /// whose row hasn't arrived yet. Nothing brings a deleted chat back.
+    pub fn chat_deleted(&self, chat_id: &str) -> bool {
+        self.overlay_row_or_tombstone(KIND_CHATS, chat_id)
+            .is_some_and(|r| r.deleted)
+    }
+
     pub fn read_devices(&self) -> Result<Vec<Device>, DocError> {
         let mut devices: Vec<Device> = self
             .read_kind::<crate::workspace::RawDevice>(KIND_DEVICES)
