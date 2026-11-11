@@ -90,12 +90,11 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 app_root.join(zeron_update::managed_dir(&manifest.version)).display(),
                 manifest.version
             );
-            match zeron_update::restart_service() {
-                Ok(()) => println!("engine service restarted."),
-                Err(err) => println!(
-                    "note: service restart failed ({err:#}) — restart the engine manually to finish."
-                ),
-            }
+            // (No service running: nothing is restarted. One that's installed
+            // but stopped stays stopped; a `zeron headless` run by hand, or the
+            // desktop app's engine, picks the new version up when it next
+            // starts.)
+            println!("no engine service is running: the new version starts the next time the engine does.");
             Ok(())
         }
         InstallKind::MacApp { bundle } => {

@@ -7343,6 +7343,8 @@ version = "0.2.139"
 dependencies = [
  "anyhow",
  "cpal",
+ "libc",
+ "libloading",
  "ort",
  "ort-sys",
  "parakeet-rs",

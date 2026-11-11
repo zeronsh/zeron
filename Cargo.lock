@@ -14191,6 +14191,8 @@ dependencies = [
  "anyhow",
  "cpal 0.17.3",
  "hound",
+ "libc",
+ "libloading",
  "ort",
  "ort-sys",
  "parakeet-rs",

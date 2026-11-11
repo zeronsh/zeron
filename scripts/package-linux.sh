@@ -149,8 +149,16 @@ if [ ! -x "$DEST/zeron" ]; then
   rm -rf "$DEST"
   mv "$STAGE" "$DEST"
 fi
-if ! "$DEST/zeron" --version >/dev/null; then
-  echo "Zeron could not start; see the loader error above. Install the missing runtime libraries (including ALSA, libasound.so.2), then retry." >&2
+# The loader's own error names a library this computer lacks; say which.
+# (Duplicated in edge/src/install.sh, the curl installer; keep the two in sync.)
+if ! start_error="$("$DEST/zeron" --version 2>&1 >/dev/null)"; then
+  printf '%s\n' "$start_error" >&2
+  missing="$(printf '%s\n' "$start_error" | sed -n 's/.*error while loading shared libraries: \([^:]*\):.*/\1/p' | head -n 1)"
+  if [ -n "$missing" ]; then
+    echo "Zeron could not start: this computer is missing $missing. Install the package that provides it, then retry." >&2
+  else
+    echo "Zeron could not start; see the error above." >&2
+  fi
   exit 1
 fi
 ln -sfn "$DEST" "$APP_ROOT/current"

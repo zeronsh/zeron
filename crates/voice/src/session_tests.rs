@@ -292,6 +292,7 @@ fn audio_buffer_still_caps_recording_at_sixty_seconds() {
         1,
         rate,
         &audio,
+        |s| s,
     );
     assert_eq!(audio.samples.lock().unwrap().len(), rate as usize * 60);
     assert!(audio.full.load(Ordering::Acquire));

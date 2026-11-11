@@ -1,6 +1,10 @@
 //! Desktop-local Parakeet v3. No engine, document, RPC or audio persistence.
 use anyhow::{Context, Result, bail};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(target_os = "linux"))]
+use cpal::{
+    Sample as _,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+};
 use parakeet_rs::{ParakeetTDT, Transcriber};
 use sha2::{Digest, Sha256};
 use std::{
@@ -12,6 +16,12 @@ use std::{
     },
 };
 
+// Linux records through ALSA loaded when first used (src/alsa.rs); elsewhere
+// through CPAL.
+#[cfg(target_os = "linux")]
+mod alsa;
+#[cfg(target_os = "linux")]
+pub use alsa::{Capture, default_input_device, input_devices};
 mod resample;
 
 pub const MAX_SECONDS: usize = 60;
@@ -133,10 +143,7 @@ impl Audio {
 }
 /// Loudest RMS since the UI last read it. Non-negative `f32` bit patterns sort
 /// like their values, so `fetch_max` keeps the peak without a lock.
-fn meter<T: cpal::Sample>(data: &[T], channels: usize, level: &AtomicU32)
-where
-    f32: cpal::FromSample<T>,
-{
+fn meter<T: Copy>(data: &[T], channels: usize, level: &AtomicU32, to_f32: impl Fn(T) -> f32) {
     let frames = data.len() / channels.max(1);
     if frames == 0 {
         return;
@@ -144,7 +151,7 @@ where
     let energy = data
         .chunks_exact(channels)
         .map(|frame| {
-            let s = frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32;
+            let s = frame.iter().map(|&s| to_f32(s)).sum::<f32>() / channels as f32;
             s * s
         })
         .sum::<f32>();
@@ -153,17 +160,14 @@ where
         level.fetch_max(rms.to_bits(), Ordering::Relaxed);
     }
 }
-fn append<T: cpal::Sample>(data: &[T], channels: usize, rate: u32, a: &Audio)
-where
-    f32: cpal::FromSample<T>,
-{
+fn append<T: Copy>(data: &[T], channels: usize, rate: u32, a: &Audio, to_f32: impl Fn(T) -> f32) {
     if let Ok(mut samples) = a.samples.try_lock() {
         for frame in data.chunks_exact(channels) {
             if samples.len() >= rate as usize * MAX_SECONDS {
                 a.full.store(true, Ordering::Release);
                 break;
             }
-            samples.push(frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32);
+            samples.push(frame.iter().map(|&s| to_f32(s)).sum::<f32>() / channels as f32);
         }
     }
 }
@@ -176,6 +180,7 @@ pub struct InputDevice {
 
 /// Every input device the default host reports. Enumeration can block on the
 /// audio server, so call it off the UI thread.
+#[cfg(not(target_os = "linux"))]
 pub fn input_devices() -> Vec<InputDevice> {
     let Ok(devices) = cpal::default_host().input_devices() else {
         return Vec::new();
@@ -193,6 +198,7 @@ pub fn input_devices() -> Vec<InputDevice> {
 }
 
 /// The id of the device the system currently records from by default.
+#[cfg(not(target_os = "linux"))]
 pub fn default_input_device() -> Option<String> {
     Some(
         cpal::default_host()
@@ -204,6 +210,7 @@ pub fn default_input_device() -> Option<String> {
 }
 
 /// The chosen device when it is connected, the system default otherwise.
+#[cfg(not(target_os = "linux"))]
 fn input_device(id: Option<&str>) -> Option<cpal::Device> {
     let host = cpal::default_host();
     id.and_then(|id| id.parse::<cpal::DeviceId>().ok())
@@ -211,11 +218,13 @@ fn input_device(id: Option<&str>) -> Option<cpal::Device> {
         .or_else(|| host.default_input_device())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub struct Capture {
     stream: Option<cpal::Stream>,
     audio: Arc<Audio>,
     rate: u32,
 }
+#[cfg(not(target_os = "linux"))]
 impl Capture {
     pub fn start(device: Option<&str>, level: Arc<AtomicU32>) -> Result<Self> {
         let device = input_device(device).context("No microphone available")?;
@@ -233,8 +242,8 @@ impl Capture {
                 device.build_input_stream(
                     &config.into(),
                     move |d: &[$sample], _| {
-                        meter(d, channels, &level);
-                        append(d, channels, rate, &a)
+                        meter(d, channels, &level, |s| s.to_sample::<f32>());
+                        append(d, channels, rate, &a, |s| s.to_sample::<f32>())
                     },
                     err,
                     None,
@@ -530,7 +539,7 @@ pub fn unload() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cpal::Sample;
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn native_sample_formats_preserve_levels_and_downmix_channels() {
         fn check<T: cpal::Sample + cpal::FromSample<f32>>()
@@ -542,13 +551,13 @@ mod tests {
                 .into_iter()
                 .map(|s| s.to_sample::<T>())
                 .collect();
-            append(&input, 2, 16_000, &audio);
+            append(&input, 2, 16_000, &audio, |s| s.to_sample::<f32>());
             assert_eq!(*audio.samples.lock().unwrap(), vec![0.0, 0.5, 0.0]);
             let level = AtomicU32::new(0);
-            meter(&input, 2, &level);
+            meter(&input, 2, &level, |s| s.to_sample::<f32>());
             let rms = f32::from_bits(level.load(Ordering::Relaxed));
             assert!((rms - (0.25_f32 / 3.0).sqrt()).abs() < 0.01, "{rms}");
-            meter(&input[4..], 2, &level);
+            meter(&input[4..], 2, &level, |s| s.to_sample::<f32>());
             assert_eq!(f32::from_bits(level.load(Ordering::Relaxed)), rms);
         }
         check::<i8>();

@@ -244,7 +244,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
     }
     #[cfg(windows)]
     attach_parent_console();
-    let cli = match Cli::from_arg_matches(&command(version).get_matches()) {
+    let cli = match parse(version, std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
@@ -326,6 +326,41 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
             safe_mode: cli.safe_mode,
         },
     }
+}
+
+/// `argv` parsed, as [`run`] takes it. A word in the link's place that isn't a
+/// link (`zeron updte`, or `zeron "plugin list"` quoted as one) is refused as
+/// clap refuses an unknown subcommand, rather than opening the window on it:
+/// on a server or a Cloud machine, with no display, that window could only fail
+/// with the windowing system's own error.
+fn parse(
+    version: &'static str,
+    argv: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
+) -> Result<Cli, clap::Error> {
+    let mut command = command(version);
+    let cli = Cli::from_arg_matches(&command.try_get_matches_from_mut(argv)?)?;
+    if cli.command.is_none()
+        && let Some(word) = cli.open_url.as_deref()
+        && !is_link(word)
+    {
+        return Err(command.error(
+            clap::error::ErrorKind::InvalidSubcommand,
+            format!("unrecognized subcommand '{word}': not a zeron command, nor a link (zeron://…) to open"),
+        ));
+    }
+    Ok(cli)
+}
+
+/// Whether `word` is a link for the window to open: anything with a scheme
+/// (`zeron://open/chat/…`, `zeron://notification/…`, what a launcher hands
+/// over). Which links lead anywhere is the window's to say.
+fn is_link(word: &str) -> bool {
+    word.split_once("://").is_some_and(|(scheme, _)| {
+        !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 impl Command {
@@ -470,6 +505,63 @@ mod tests {
             assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
         }
         assert!(parse(&[]).is_none());
+    }
+
+    /// A word in the link's place that isn't a link is refused, as an unknown
+    /// subcommand is, instead of opening the window on it (which, with no
+    /// display, fails with the windowing system's error).
+    #[test]
+    fn a_word_that_isnt_a_command_or_a_link_is_refused() {
+        for argv in [
+            &["zeron", "updte"][..],
+            &["zeron", "plugin list"],
+            &["zeron", "daemon status"],
+            &["zeron", "--safe-mode", "plugin list"],
+            &["zeron", "://nothing"],
+        ] {
+            let error = parse("0.0.0", argv).err().unwrap_or_else(|| panic!("{argv:?} was taken"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand, "{argv:?}");
+            assert_eq!(error.exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    /// Links still open the window on them, and a bare `zeron` opens it.
+    #[test]
+    fn links_and_a_bare_launch_open_the_window() {
+        for link in [
+            "zeron://open/chat/abc?workspace=local",
+            "zeron://notification/agent-updates",
+            "file:///home/me/notes.md",
+        ] {
+            let cli = parse("0.0.0", ["zeron", link]).unwrap();
+            assert!(cli.command.is_none());
+            assert_eq!(cli.open_url.as_deref(), Some(link));
+        }
+        let cli = parse("0.0.0", ["zeron"]).unwrap();
+        assert!(cli.command.is_none() && cli.open_url.is_none());
+        let cli = parse("0.0.0", ["zeron", "--safe-mode"]).unwrap();
+        assert!(cli.safe_mode && cli.open_url.is_none());
+    }
+
+    /// Every subcommand, its arguments split as a shell splits them, parses
+    /// as itself: none of them is ever taken for a link (and so for a window).
+    #[test]
+    fn subcommands_never_open_the_window() {
+        for argv in [
+            &["zeron", "plugin", "list"][..],
+            &["zeron", "plugin", "--help"],
+            &["zeron", "template", "list"],
+            &["zeron", "update", "--check"],
+            &["zeron", "update"],
+            &["zeron", "daemon", "status"],
+            &["zeron", "headless"],
+            &["zeron", "status"],
+        ] {
+            match parse("0.0.0", argv) {
+                Ok(cli) => assert!(cli.command.is_some() && cli.open_url.is_none(), "{argv:?}"),
+                Err(error) => assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp, "{argv:?}"),
+            }
+        }
     }
 
     /// `--to` reaches the engine as a full path: a relative one is taken

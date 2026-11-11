@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://zeron.sh/install.sh | sh
 #
-# Installs the native binary (requires the system ALSA runtime) to
+# Installs the native binary to
 # ~/.zeron/app, puts `zeron` on PATH, adds a launcher entry and icon under
 # $XDG_DATA_HOME (default ~/.local/share), and runs it as a local-only
 # systemd user service that survives reboots. Signing in is optional and
@@ -59,11 +59,20 @@ else
   tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
 fi
 
-# Probe before changing a working installation or starting its service. The
-# desktop and headless modes share one binary, including CPAL's ALSA linkage.
-if ! "$dest/zeron" --version >/dev/null; then
-  echo "zeron install: the downloaded executable could not start; see the loader error above." >&2
-  echo "Install the missing runtime libraries (including ALSA, libasound.so.2), then rerun this installer." >&2
+# Probe before changing a working installation or starting its service (the
+# desktop and headless modes share one binary). The loader's own error names
+# a library this computer lacks; say which.
+# (Duplicated in scripts/package-linux.sh, the tarball's install.sh; keep the
+# two in sync.)
+if ! start_error="$("$dest/zeron" --version 2>&1 >/dev/null)"; then
+  printf '%s\n' "$start_error" >&2
+  missing="$(printf '%s\n' "$start_error" | sed -n 's/.*error while loading shared libraries: \([^:]*\):.*/\1/p' | head -n 1)"
+  if [ -n "$missing" ]; then
+    echo "zeron install: the downloaded executable could not start: this computer is missing $missing." >&2
+    echo "Install the package that provides it, then rerun this installer." >&2
+  else
+    echo "zeron install: the downloaded executable could not start; see the error above." >&2
+  fi
   exit 1
 fi
 

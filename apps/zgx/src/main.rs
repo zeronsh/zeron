@@ -300,19 +300,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe { std::env::set_var("ZGX_LAYOUT_WARNINGS", "1") };
         }
     }
-    // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
-    // of this interface by someone who finished setup before is the exception:
-    // the intro, then their username and card, once.
-    if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        if welcome_due(finished_setup_before(), welcomed()) {
-            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            screen = Screen::Onboarding;
-            // Setup finished on this Mac before: the main window.
-            if onboarded() {
-                screen = Screen::Main;
-            }
+    // Where a plain launch opens (`launch_screen`). Asking for `intro` still
+    // plays it.
+    if matches!(screen, Screen::Intro) && !asked_for_intro {
+        let signed_in = auth::session_exists();
+        match launch_screen(signed_in, onboarded(), signed_in && welcome_due(finished_setup_before(), welcomed())) {
+            Launched::Welcome => WELCOME.store(true, std::sync::atomic::Ordering::Relaxed),
+            Launched::Intro => {}
+            Launched::Onboarding => screen = Screen::Onboarding,
+            Launched::Main => screen = Screen::Main,
         }
     }
 
@@ -577,6 +573,38 @@ fn welcomed() -> bool {
 /// Whether someone signed in had finished setup, here or in the Zeron app.
 fn finished_setup_before() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
+}
+
+/// Where a plain launch (no launch word) opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Launched {
+    /// The intro, then setup.
+    Intro,
+    /// The intro, then their username and card, once (`welcome_due`).
+    Welcome,
+    /// Setup at once, where sign-in leads (src/auth.rs).
+    Onboarding,
+    /// The main window.
+    Main,
+}
+
+/// Where a plain launch opens. Setup finished on this computer: the main
+/// window, signed in or not (someone who chose to stay signed out isn't walked
+/// through the intro and setup again on every launch; signing out from the
+/// main window still brings setup back, ui/screens/shell). Signed in on an
+/// earlier run without having finished it here: setup at once. The first
+/// launch of this interface by someone signed in who finished setup before
+/// (`welcome`) is the exception: the intro, then their username and card, once.
+fn launch_screen(signed_in: bool, onboarded: bool, welcome: bool) -> Launched {
+    if welcome {
+        Launched::Welcome
+    } else if onboarded {
+        Launched::Main
+    } else if signed_in {
+        Launched::Onboarding
+    } else {
+        Launched::Intro
+    }
 }
 
 /// Whether someone signed in gets the welcome: they'd finished setup before and
@@ -1350,5 +1378,27 @@ mod welcome_tests {
         assert!(super::welcome_due(true, false));
         assert!(!super::welcome_due(true, true));
         assert!(!super::welcome_due(false, false));
+    }
+
+    /// Setup finished here opens the main window whether or not anyone is
+    /// signed in: staying signed out ("Local") doesn't replay the intro and
+    /// setup on every launch.
+    #[test]
+    fn finished_setup_opens_the_main_window_signed_out_too() {
+        use super::{Launched, launch_screen};
+        assert_eq!(launch_screen(false, true, false), Launched::Main);
+        assert_eq!(launch_screen(true, true, false), Launched::Main);
+    }
+
+    /// Before setup is finished here: someone new gets the intro; someone
+    /// signed in on an earlier run goes straight to setup; the welcome (signed
+    /// in, finished setup before, not yet welcomed) comes first of all.
+    #[test]
+    fn unfinished_setup_and_the_welcome_open_as_before() {
+        use super::{Launched, launch_screen};
+        assert_eq!(launch_screen(false, false, false), Launched::Intro);
+        assert_eq!(launch_screen(true, false, false), Launched::Onboarding);
+        assert_eq!(launch_screen(true, false, true), Launched::Welcome);
+        assert_eq!(launch_screen(true, true, true), Launched::Welcome);
     }
 }
