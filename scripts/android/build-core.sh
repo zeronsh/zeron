@@ -38,8 +38,12 @@ if command -v cargo-ndk >/dev/null && [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
   echo "jniLibs: $OUT/jniLibs"
   # With its asserts, each LUAU_ASSERT keeps its Luau source file's path
   # (Luau/Common.h's __FILE__), VM/src/l*.cpp; with NDEBUG, none.
+  # (The ABIs just built: another left in jniLibs from an earlier build isn't
+  # packaged.)
   if [[ "$PROFILE" == "mobile-dist" ]]; then
-    for so in "$OUT/jniLibs/"*/libzeron_mobile.so; do
+    for abi in ${ZERON_ANDROID_ABIS:-arm64-v8a x86_64}; do
+      so="$OUT/jniLibs/$abi/libzeron_mobile.so"
+      [[ -f "$so" ]] || { echo "error: no $so after the build" >&2; exit 1; }
       if LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$so"; then
         echo "error: $so was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG" >&2
         exit 1
