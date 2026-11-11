@@ -703,7 +703,8 @@ local function work_in(
 			end
 			return out
 		end
-		-- Under the projects, together: working in none, and making one.
+		-- Under the projects, together: working in none, and making one. (Not
+		-- none on Cloud: its machine clones a project's repository.)
 		local p = project
 		table.insert(
 			rows,
@@ -712,6 +713,9 @@ local function work_in(
 					icon = "close",
 					on_click = function()
 						p:set(NO_PROJECT)
+					end,
+					shown = function(): boolean
+						return not on_cloud(device, devices)
 					end,
 				}, { label = "ds.composer.project.none_action" }),
 				worded({ icon = "plus", on_click = on_new_project }, { label = "ds.composer.project.new" }),

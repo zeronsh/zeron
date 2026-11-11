@@ -5,11 +5,14 @@
 --
 -- - Devices: your computers, this one first; one whose presence has gone
 --   quiet (no beat in 70 s) is shown, dimmed, with when it was last seen,
---   and can't be picked. Then Cloud, while it's on and can open the
---   project's GitHub repository (account/cloud): the chat runs on a machine
---   of its own that clones the repository, from the ref chosen among
---   GitHub's branches (`ListCloudBranches`). On Cloud, the projects are
---   those Cloud can open, on whichever device.
+--   and can't be picked. Then Cloud, while it's on and can open a
+--   project's GitHub repository (account/cloud), whichever project is chosen
+--   now: the chat runs on a machine of its own that clones the repository,
+--   from the ref chosen among GitHub's branches (`ListCloudBranches`). On
+--   Cloud, the projects are those Cloud can open, on whichever device, and
+--   never none (a Cloud chat needs a repository): picking Cloud keeps the
+--   project if Cloud can open it, else the one last used on Cloud, else the
+--   first.
 -- - Projects: the chosen device's, searchable, "No project" among them.
 --   Picking another device brings that device's projects (the one last used
 --   there, else its first); picking a project on another device moves the
@@ -18,7 +21,8 @@
 -- - Refs: the project's branches from git where it is (`ListRefs`, forwarded
 --   to its device), the current first; the chip shows the one chosen, else
 --   the project's current branch.
--- - Remembered: the last device, and the last project on each device.
+-- - Remembered: the last device (never Cloud: chosen afresh), and the last
+--   project on each device, Cloud's too.
 -- - Sent: a local checkout runs in the project's folder (or, for a ref
 --   checked out in a worktree of its own, in that worktree), the ref named
 --   on the chat; a worktree is made off the ref as the run starts (HEAD if
@@ -182,17 +186,13 @@ function M.bind(c: Choices)
 		end
 		return out
 	end
-	-- Cloud is offered for the project chosen (or, on Cloud already, while
-	-- it can open any).
+	-- Cloud is offered while it can open any project, whichever is chosen
+	-- (picking it brings one it can open).
 	local function cloud_offered(): boolean
 		if not cloud.on() then
 			return false
 		end
-		local p = project_row(c.project:get())
-		if p then
-			return cloud_repo(p) ~= nil
-		end
-		return on_cloud() and #on_device(M.CLOUD) > 0
+		return #on_device(M.CLOUD) > 0
 	end
 
 	-- The devices offered: yours, this one first; one out of reach dimmed,
@@ -350,9 +350,10 @@ function M.bind(c: Choices)
 		device_was = d
 		local chosen = c.project:peek()
 		local here = on_device(d)
+		-- (On Cloud, never none: its machine clones a project's repository.)
 		local function there(id: string?): boolean
 			if id == M.NO_PROJECT then
-				return true
+				return d ~= M.CLOUD
 			end
 			for _, p in here do
 				if p.id == id then
@@ -400,11 +401,23 @@ function M.bind(c: Choices)
 			return
 		end
 		local d, p = c.device:get(), c.project:get()
-		-- (Cloud is chosen afresh each time: its projects are its own.)
-		if not d or not device_row(d) or sessions.state:get() ~= "ready" then
+		if not d or sessions.state:get() ~= "ready" then
 			return
 		end
 		local r = M.remembered:peek()
+		-- (Cloud is chosen afresh each time; the project used there is kept,
+		-- for the next time it's picked.)
+		if d == M.CLOUD then
+			if p and p ~= M.NO_PROJECT and project_row(p) and r.projects[M.CLOUD] ~= p then
+				local next = table.clone(r.projects)
+				next[M.CLOUD] = p
+				M.remembered:set { device = r.device, projects = next }
+			end
+			return
+		end
+		if not device_row(d) then
+			return
+		end
 		local projects = r.projects
 		local keep_project = p ~= nil and (p == M.NO_PROJECT or project_row(p) ~= nil)
 		if r.device == d and (not keep_project or projects[d] == p) then

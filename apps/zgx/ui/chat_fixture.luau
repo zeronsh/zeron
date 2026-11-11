@@ -992,6 +992,17 @@ ui.command {
 		sessions.now:set(now)
 	end,
 }
+-- A second repository Cloud can open: Site (acme/site), on the build box.
+ui.command {
+	id = "fixture.site_project",
+	title = "Fixture: Site, a second repository Cloud can open",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		table.insert(now.projects, { id = "site", name = "Site", device = "box", path = "/srv/site", git = true, github = "acme/site" })
+		sessions.now:set(now)
+	end,
+}
 -- This device's connection as the shell hears it (`connection`).
 for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offline", "offline" }, { "connection_back", nil } } do
 	ui.command {
