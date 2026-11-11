@@ -723,11 +723,15 @@ local function Composer(): Node
 		end
 		local id = session_id:peek()
 		local p = route.project:peek()
-		local target: any = if id then { chat = id } elseif p then { space = p.id, device = p.device } else nil
+		local s = store.session:peek()
+		local target: any = if id
+			then { chat = id, device = if s and s.id == id then s.device else nil }
+			elseif p then { space = p.id, device = p.device }
+			else nil
 		if not target then
 			return
 		end
-		local key = `{id or (p and p.id) or ""}:{t.query}`
+		local key = `{target.device or ""}:{id or (p and p.id) or ""}:{t.query}`
 		if key == searched:peek() then
 			return
 		end

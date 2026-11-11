@@ -581,6 +581,7 @@ local FILES = { "src/chat.rs", "src/main.rs", "ui/screens/chat/composer.luau", "
 local files_stub = files :: any
 files_stub.search = function(target: any, query: string): any
 	note(`search:{target.chat or target.space or "?"}:{query}`)
+	note(`search_on:{target.device or "here"}`)
 	local found = {}
 	for _, path in FILES do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then

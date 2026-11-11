@@ -632,7 +632,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 					local p = project:peek()
 					return if p and p ~= Where.NO_PROJECT then { space = p, device = device:peek() } else nil
 				end
-				return { chat = chat }
+				local s = session:peek()
+				return { chat = chat, device = if s then s.device else nil }
 			end,
 			in_chat = function(): boolean
 				return not unsent()
