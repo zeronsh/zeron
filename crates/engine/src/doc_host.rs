@@ -3402,6 +3402,21 @@ impl DocHost {
         let reset = ResetFlag(in_flight);
         self.spawn_worker(async move {
             let _reset = reset;
+            // A heal the room's stored checkpoint already covers needs no upload: a
+            // host back from a legacy hold that relayed nothing since its last
+            // checkpoint would otherwise send the whole chat again for each old reader.
+            if reason == relay::HEAL_REASON
+                && let Some(state) = &relay_state
+                && let Some(version) = state.heal_claim()
+                && let Ok(bearer) = edge.bearer().await
+            {
+                let answer = crate::chat2_checkpoint::post_heal_claim(&http, &edge.url, &chat_id, &bearer, &version.encode()).await;
+                state.heal_claim_answered(answer, mode_epoch);
+                if answer == crate::chat2_checkpoint::HealClaim::Healed {
+                    tracing::info!(chat = %chat_id, "chat2 heal: the room's checkpoint already covers it; nothing sent");
+                    return;
+                }
+            }
             let store = publication_store.clone();
             let chat = chat_id.clone();
             let prepared = tokio::task::spawn_blocking(move || {
