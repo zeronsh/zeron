@@ -53,6 +53,9 @@ pub(crate) struct ChatPersistence {
     writes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     delta_writes: std::sync::atomic::AtomicUsize,
+    /// Bytes handed to the store, whole saves and deltas.
+    #[cfg(test)]
+    bytes_written: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     before_export: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs between a save's export and its store write.
@@ -89,6 +92,8 @@ impl ChatPersistence {
             writes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             delta_writes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            bytes_written: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             before_export: Mutex::new(None),
             #[cfg(test)]
@@ -271,6 +276,8 @@ impl ChatPersistence {
                     Ok(Some(len)) => {
                         #[cfg(test)]
                         self.delta_writes.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(test)]
+                        self.bytes_written.fetch_add(len, Ordering::Relaxed);
                         state.saved_vv = version;
                         state.bytes += len;
                         state.rows += 1;
@@ -308,6 +315,9 @@ impl ChatPersistence {
                 Ok(base) => {
                     #[cfg(test)]
                     self.writes.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(test)]
+                    self.bytes_written
+                        .fetch_add(self.snapshot_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
                     *delta = Some(DeltaState {
                         base,
                         saved_vv: version,
@@ -992,6 +1002,90 @@ mod tests {
             persistence.delta_writes.load(Ordering::Relaxed)
         );
         drop(runtime);
+    }
+
+    /// Live-like load, before and after: the real 49 MB chat streaming a
+    /// token every 120 ms (an agent writing) beside 14 small chats edited
+    /// every 2 s, through the real 1 s persister, 60 s per mode. "Before"
+    /// refuses deltas, so every save is whole, as it was.
+    #[test]
+    #[ignore = "requires ZERON_DELTA_WHALE; 2 minutes; prints bytes/min and CPU"]
+    fn live_like_bytes_and_cpu_before_and_after() {
+        let path = std::env::var("ZERON_DELTA_WHALE").unwrap();
+        let whale = std::fs::read(&path).unwrap();
+        let cpu = || {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+            let t = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1e6;
+            t(usage.ru_utime) + t(usage.ru_stime)
+        };
+        for deltas in [false, true] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+            if !deltas {
+                store.stop_snapshot_deltas();
+            }
+            let raw = loro::LoroDoc::new();
+            raw.import(&whale).unwrap();
+            let mut docs = vec![Arc::new(SessionDoc::from_doc(raw))];
+            for i in 0..14 {
+                let doc = SessionDoc::init(&format!("small-{i}")).unwrap();
+                doc.doc().get_text("body").insert(0, &"seed text ".repeat(2_000)).unwrap();
+                doc.doc().commit();
+                docs.push(Arc::new(doc));
+            }
+            let persisters: Vec<_> = {
+                let _guard = runtime.enter();
+                docs.iter()
+                    .enumerate()
+                    .map(|(i, doc)| ChatPersistence::new(doc, store.clone(), format!("doc-{i}"), 0))
+                    .collect()
+            };
+            // Everyone's first (whole) save, outside the measured minute.
+            for (doc, persistence) in docs.iter().zip(&persisters) {
+                doc.doc().get_map("load").insert("opened", true).unwrap();
+                doc.doc().commit();
+                persistence.applied(1, true);
+                persistence.flush_sync();
+            }
+            let bytes = |ps: &[Arc<ChatPersistence>]| ps.iter().map(|p| p.bytes_written.load(Ordering::Relaxed)).sum::<usize>();
+            let (bytes0, cpu0, t0) = (bytes(&persisters), cpu(), std::time::Instant::now());
+            let mut cursor = 1;
+            let mut tick = 0u64;
+            while t0.elapsed() < Duration::from_secs(60) {
+                tick += 1;
+                cursor += 1;
+                let text = docs[0].doc().get_text("live-stream");
+                text.insert(text.len_unicode(), &format!("{tick:06} {}", "streamed agent output ".repeat(9))).unwrap();
+                docs[0].doc().commit();
+                persisters[0].applied(cursor, false);
+                if tick % 16 == 0 {
+                    let i = 1 + (tick / 16) as usize % 14;
+                    let text = docs[i].doc().get_text("body");
+                    text.insert(text.len_unicode(), "a status edit ").unwrap();
+                    docs[i].doc().commit();
+                    persisters[i].applied(cursor, false);
+                }
+                std::thread::sleep(Duration::from_millis(120));
+            }
+            let minutes = t0.elapsed().as_secs_f64() / 60.0;
+            let written = (bytes(&persisters) - bytes0) as f64 / minutes;
+            let cpu_share = (cpu() - cpu0) / t0.elapsed().as_secs_f64() * 100.0;
+            let whole: usize = persisters.iter().map(|p| p.writes.load(Ordering::Relaxed)).sum();
+            let delta: usize = persisters.iter().map(|p| p.delta_writes.load(Ordering::Relaxed)).sum();
+            eprintln!(
+                "{}: {:.1} MB/min to the store, {cpu_share:.1}% of a core (incl. the streaming itself), {whole} whole saves, {delta} deltas",
+                if deltas { "AFTER (deltas)" } else { "BEFORE (whole saves)" },
+                written / 1048576.0
+            );
+            drop(persisters);
+            drop(runtime);
+        }
     }
 }
 
