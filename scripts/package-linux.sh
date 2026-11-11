@@ -54,12 +54,20 @@ if [[ -n "$ZGX_VERSION" ]]; then
   # argument.)
   LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
     { echo "the engine predates the shared command line" >&2; exit 1; }
-  # A workspace of its own (its own lock, patches).
-  ZERON_BETA_VERSION="$ZGX_VERSION" cargo build --release --locked --features beta \
-    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target"
+  # A workspace of its own (its own lock, patches). Built from its folder:
+  # cargo reads .cargo/config.toml by where it runs, not by the manifest, and
+  # the build's flags are there (Luau's NDEBUG), as scripts/package-zgx-macos.sh.
+  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$ZGX_VERSION" cargo build --release --locked --features beta \
+    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
   BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
   [[ "$("$BIN" --version)" == "zeron $ZGX_VERSION" ]] ||
     { echo "$BIN isn't the $ZGX_VERSION app (it says '$("$BIN" --version)')" >&2; exit 1; }
+  # Luau without its asserts (a fifth of script time): zgx-script compiles its
+  # warning about them in only when they're on (cfg luau_asserts).
+  if LC_ALL=C grep -aq "Luau was built with its asserts" "$BIN"; then
+    echo "$BIN was built with Luau's asserts: LUAU_CXXFLAGS=-DNDEBUG (apps/zgx/.cargo/config.toml) didn't reach it" >&2
+    exit 1
+  fi
   # Production's only: neither binary may carry staging's edge or sign-in.
   STAGING_MARKS='staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
   for bin in "$BIN" "$ENGINE_BIN"; do
