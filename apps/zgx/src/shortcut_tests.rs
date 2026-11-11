@@ -504,6 +504,21 @@ fn command_slash_opens_the_model_picker() {
     }
 }
 
+/// ⌘/ still finds a composer that replaced another: the new one mounts
+/// before the old one's cleanup runs (ui/tests/chat_actions.test.luau).
+#[test]
+fn command_slash_survives_a_swapped_composer() {
+    let ui = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let report = zgx_script::test_runner::run(&ui, Some("after the composer is swapped"), |outcome| {
+        if let Some(failure) = &outcome.failure {
+            eprintln!("{}: {failure}", outcome.name);
+        }
+    })
+    .expect("chat tests load");
+    assert_eq!(report.outcomes.len(), 1, "{report:?}");
+    assert_eq!(report.failed(), 0, "{report:?}");
+}
+
 /// Holds ⌘ (and `shift`) as the window reports a modifier alone (zgx's
 /// `ui.modifiers`, which `app.keys` never sets: it presses and lets go at
 /// once). ⌘ is what `cmd` shortcuts are pressed with: Command on macOS,

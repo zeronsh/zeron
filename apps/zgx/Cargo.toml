@@ -171,7 +171,7 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788
 # DirectComposition tree of the window's own. The runtime ships with Windows
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["webview2"] }
 
 # zgx's D-Bus (menus, portals) linked in rather than loaded: `zeron` is also
@@ -217,3 +217,8 @@ embed-resource = "3.0.11"
 
 [dev-dependencies]
 tempfile = "3"
+
+# src/terminal.rs's test: the bridge line split as Windows itself splits a
+# command line (CommandLineToArgvW).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }

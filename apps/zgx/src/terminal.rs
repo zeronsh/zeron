@@ -239,9 +239,42 @@ fn await_claim(claim: &std::path::Path, wait: Duration) -> Result<String, String
 /// What an app that stopped waiting leaves in a claim.
 const GONE: &str = "gone";
 
-/// A word for `/bin/sh -c`, quoted.
+/// A word of the bridge's command line, quoted for how zgx's terminal runs
+/// it: through `/bin/sh -c` on Unix; on Windows the whole line is
+/// CreateProcess's command line (zgx-terminal's `shell()`, no shell between),
+/// so its words are read back by the C runtime's rules (CommandLineToArgvW,
+/// Rust's own `args`). A POSIX `'…'` word there names a program whose name
+/// starts with a quote, and the terminal couldn't start ("cannot find the
+/// file specified").
 fn quote(word: &str) -> String {
+    if cfg!(windows) { quote_windows(word) } else { quote_posix(word) }
+}
+
+/// A word for `/bin/sh -c`.
+fn quote_posix(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// A word for a Windows command line: in double quotes, a quote escaped as
+/// `\"`, and the backslashes before a quote (or the closing one) doubled, so
+/// a folder's trailing `\` doesn't escape the closing quote.
+fn quote_windows(word: &str) -> String {
+    let mut quoted = String::with_capacity(word.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for c in word.chars() {
+        if c == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        let escapes = if c == '"' { backslashes * 2 + 1 } else { backslashes };
+        quoted.extend(std::iter::repeat_n('\\', escapes));
+        backslashes = 0;
+        quoted.push(c);
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 /// The bridge's command line for terminal `arg.id` (on `device`, another
@@ -712,7 +745,9 @@ pub fn bridge(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, quote, said};
+    use super::{parse, quote, quote_posix, quote_windows, said};
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     #[test]
     fn a_claim_changes_hands_once_and_a_late_one_is_never_left_with_no_one() {
@@ -747,7 +782,15 @@ mod tests {
 
     #[test]
     fn quotes_and_parses_the_bridge_line() {
-        assert_eq!(quote("a b'c"), "'a b'\\''c'");
+        assert_eq!(quote_posix("a b'c"), "'a b'\\''c'");
+        // Paths with spaces, each platform's way (both checked everywhere).
+        assert_eq!(quote_posix("/Users/Some One/Zeron.app/zeron-zgx"), "'/Users/Some One/Zeron.app/zeron-zgx'");
+        assert_eq!(quote_windows(r"C:\Program Files\Zeron\zeron.exe"), r#""C:\Program Files\Zeron\zeron.exe""#);
+        // A folder's trailing backslash must not escape the closing quote.
+        assert_eq!(quote_windows(r"C:\Users\me\AppData\Local\Zeron\"), r#""C:\Users\me\AppData\Local\Zeron\\""#);
+        assert_eq!(quote_windows(r#"{"chatId":"c1"}"#), r#""{\"chatId\":\"c1\"}""#);
+        assert_eq!(quote_windows(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(quote_windows(""), r#""""#);
         let args: Vec<String> = ["--port", "27897", "--data", "/tmp/d", "--terminal", "t1", "--device", "dev"]
             .iter()
             .map(|s| s.to_string())
@@ -767,5 +810,50 @@ mod tests {
         assert_eq!(parsed.open.unwrap()["chatId"], "c1");
         let args: Vec<String> = ["--port", "1", "--data", "/d", "--open", "{}"].iter().map(|s| s.to_string()).collect();
         assert!(parse(&args).is_err(), "a new one needs somewhere to leave its id");
+    }
+
+    /// The bridge line as Windows itself splits it (CommandLineToArgvW, the
+    /// rules a C runtime or Rust's `args` read a CreateProcess command line
+    /// by): every word comes back whole, the program first, and the bridge's
+    /// own parser reads the rest. Spaces, a trailing backslash, quotes and
+    /// backslashes in the JSON.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reads_the_bridge_line_back_whole() {
+        use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
+        fn split(line: &str) -> Vec<String> {
+            let wide: Vec<u16> = line.encode_utf16().chain([0]).collect();
+            let mut count = 0;
+            // SAFETY: a NUL-terminated line; the array is freed below.
+            let argv = unsafe { CommandLineToArgvW(wide.as_ptr(), &mut count) };
+            assert!(!argv.is_null());
+            let words = (0..count as usize)
+                .map(|i| {
+                    // SAFETY: `count` NUL-terminated strings.
+                    let word = unsafe { *argv.add(i) };
+                    let len = (0..).take_while(|&j| unsafe { *word.add(j) } != 0).count();
+                    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(word, len) })
+                })
+                .collect();
+            // SAFETY: the array CommandLineToArgvW allocated.
+            unsafe { LocalFree(argv.cast()) };
+            words
+        }
+        let exe = r"C:\Users\Some One\AppData\Local\Programs\Zeron\zeron.exe";
+        let data = r"C:\Users\Some One\AppData\Local\Zeron\";
+        let open = r#"{"chatId":"c 1","root":"C:\\work\\a \"b\""}"#;
+        let claim = r"C:\Temp\zeron-zgx-terminals\12-34";
+        let line = format!(
+            "{} terminal-bridge --port 27654 --data {} --open {} --claim {}",
+            quote(exe),
+            quote(data),
+            quote(open),
+            quote(claim)
+        );
+        let words = split(&line);
+        assert_eq!(words, [exe, "terminal-bridge", "--port", "27654", "--data", data, "--open", open, "--claim", claim]);
+        let parsed = parse(&words[2..]).unwrap();
+        assert_eq!(parsed.data, PathBuf::from(data));
+        assert_eq!(parsed.open.unwrap()["root"], r#"C:\work\a "b""#);
     }
 }

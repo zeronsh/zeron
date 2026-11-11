@@ -527,7 +527,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     let packaged_update = staged.with_file_name(PACKAGE).join(BETA).is_dir();
     remove_version_files(directory, version.filter(|_| packaged_update));
     if let Some(version) = version {
-        refresh_installer_version(version);
+        refresh_installer_version(directory, version);
         let _ = std::fs::write(directory.join(VERSION_FILE), version);
     }
     if relaunch {
@@ -563,7 +563,7 @@ pub(super) fn commit_trial(incoming: &Path, directory: &Path, version: &str) -> 
             .context("restoring the previous executable after a failed update")?;
         return Err(err).context("installing the updated executable");
     }
-    refresh_installer_version(version);
+    refresh_installer_version(directory, version);
     std::fs::write(directory.join(VERSION_FILE), version).context("recording the installed version")?;
     Ok(())
 }
@@ -675,25 +675,49 @@ pub fn cleanup_previous_image() {
     }
 }
 
-/// Keep the installer's uninstall entry truthful after an in-app update. A
-/// portable install has no entry, and the open simply fails.
-fn refresh_installer_version(version: &str) {
+/// Keep the installer's uninstall entry truthful after an in-app update of
+/// the installation in `directory`. Only the installer's own installation
+/// may: the entry is per user, not per folder, so a portable copy (or a
+/// test copy) updating elsewhere on the same PC must leave the installed
+/// one's version alone. A portable-only PC has no entry, and the open fails.
+fn refresh_installer_version(directory: &Path, version: &str) {
+    refresh_installer_version_at(UNINSTALL_KEY, directory, version);
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// [`refresh_installer_version`] under `subkey` of HKEY_CURRENT_USER.
+fn refresh_installer_version_at(subkey: &str, directory: &Path, version: &str) {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegOpenKeyExW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey,
+        RegOpenKeyExW, RegSetValueExW,
     };
-    fn wide(value: &str) -> Vec<u16> {
-        value.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-    let path = wide(UNINSTALL_KEY);
+    let path = wide(subkey);
     let mut key: HKEY = std::ptr::null_mut();
-    let opened =
-        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_SET_VALUE, &mut key) };
+    // SAFETY: a NUL-terminated path and an out pointer to a key closed below.
+    let opened = unsafe {
+        RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &mut key)
+    };
     if opened != ERROR_SUCCESS {
+        return;
+    }
+    let location = read_string(key, "InstallLocation");
+    if !installer_owns(location.as_deref(), directory) {
+        tracing::info!(
+            directory = %directory.display(),
+            installer = location.as_deref().unwrap_or(""),
+            "not the installer's installation; its DisplayVersion is left as it is"
+        );
+        // SAFETY: the key opened above.
+        unsafe { RegCloseKey(key) };
         return;
     }
     let name = wide("DisplayVersion");
     let data = wide(version);
+    // SAFETY: `data` is a NUL-terminated UTF-16 string of the length given.
     let status = unsafe {
         RegSetValueExW(
             key,
@@ -704,10 +728,52 @@ fn refresh_installer_version(version: &str) {
             (data.len() * std::mem::size_of::<u16>()) as u32,
         )
     };
+    // SAFETY: the key opened above.
     unsafe { RegCloseKey(key) };
     if status != ERROR_SUCCESS {
         tracing::warn!(status, "could not update the installer's DisplayVersion");
     }
+}
+
+/// A string value of `key`, if it has one.
+fn read_string(key: windows_sys::Win32::System::Registry::HKEY, name: &str) -> Option<String> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
+    let name = wide(name);
+    let mut bytes: u32 = 0;
+    // SAFETY: asks the value's size only (no buffer).
+    let sized = unsafe {
+        RegGetValueW(key, std::ptr::null(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes)
+    };
+    if sized != ERROR_SUCCESS || bytes == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; (bytes as usize).div_ceil(2)];
+    // SAFETY: `buffer` holds `bytes` bytes.
+    let read = unsafe {
+        RegGetValueW(key, std::ptr::null(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut bytes)
+    };
+    if read != ERROR_SUCCESS {
+        return None;
+    }
+    let end = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..end]))
+}
+
+/// Whether the installer's recorded `InstallLocation` is `directory`: the
+/// same folder however it's spelt (case, a trailing separator, `/` or `\`,
+/// or a path that resolves to it). No location: not the installer's.
+fn installer_owns(location: Option<&str>, directory: &Path) -> bool {
+    let Some(location) = location.map(str::trim).filter(|l| !l.is_empty()) else {
+        return false;
+    };
+    let spelt = |path: &Path| {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let text = path.to_string_lossy().replace('/', "\\");
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned();
+        text.trim_end_matches('\\').to_lowercase()
+    };
+    spelt(Path::new(location)) == spelt(directory)
 }
 
 fn remove_own_backup() -> std::io::Result<()> {
@@ -768,6 +834,74 @@ mod tests {
         std::fs::write(&staged, bytes).unwrap();
         std::fs::write(dir.join("sha256"), format!("{:x}", Sha256::digest(bytes))).unwrap();
         staged
+    }
+
+    #[test]
+    fn only_the_installers_own_folder_is_its_installation() {
+        let install = tempfile::tempdir().unwrap();
+        let dir = install.path();
+        let text = dir.to_string_lossy().into_owned();
+        // As Inno Setup records it: a trailing backslash.
+        assert!(installer_owns(Some(&format!("{text}\\")), dir));
+        assert!(installer_owns(Some(&text.to_uppercase()), dir));
+        assert!(installer_owns(Some(&text.replace('\\', "/")), dir));
+        assert!(installer_owns(Some(&format!("  {text}  ")), dir));
+        let other = tempfile::tempdir().unwrap();
+        assert!(!installer_owns(Some(&other.path().to_string_lossy()), dir));
+        // A folder inside the installation is not the installation.
+        let inner = dir.join("beta");
+        std::fs::create_dir(&inner).unwrap();
+        assert!(!installer_owns(Some(&text), &inner));
+        assert!(!installer_owns(None, dir));
+        assert!(!installer_owns(Some(""), dir));
+    }
+
+    /// The real registry path against a volatile key of the test's own: a
+    /// copy elsewhere leaves the entry's version alone; the installer's own
+    /// folder updates it; an entry without a location is never written.
+    #[test]
+    fn a_copy_elsewhere_leaves_the_installers_version_alone() {
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::System::Registry::{
+            HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE, REG_SZ, RegCloseKey,
+            RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegSetValueExW,
+        };
+        let subkey = format!(r"Software\zeron-test-uninstall-{}", std::process::id());
+        let path = wide(&subkey);
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: a volatile key of this test's own, deleted below.
+        let made = unsafe {
+            RegCreateKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, std::ptr::null(), REG_OPTION_VOLATILE, KEY_ALL_ACCESS, std::ptr::null(), &mut key, std::ptr::null_mut())
+        };
+        assert_eq!(made, ERROR_SUCCESS);
+        let set = |name: &str, value: &str| {
+            let (name, data) = (wide(name), wide(value));
+            // SAFETY: NUL-terminated strings of the lengths given.
+            let status = unsafe { RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32) };
+            assert_eq!(status, ERROR_SUCCESS);
+        };
+        let installed = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        set("InstallLocation", &format!("{}\\", installed.path().display()));
+        set("DisplayVersion", "0.2.139-beta.6");
+
+        refresh_installer_version_at(&subkey, elsewhere.path(), "0.2.140");
+        assert_eq!(read_string(key, "DisplayVersion").as_deref(), Some("0.2.139-beta.6"));
+
+        refresh_installer_version_at(&subkey, installed.path(), "0.2.140");
+        assert_eq!(read_string(key, "DisplayVersion").as_deref(), Some("0.2.140"));
+
+        let name = wide("InstallLocation");
+        // SAFETY: our key; a NUL-terminated name.
+        assert_eq!(unsafe { RegDeleteValueW(key, name.as_ptr()) }, ERROR_SUCCESS);
+        refresh_installer_version_at(&subkey, installed.path(), "0.2.141");
+        assert_eq!(read_string(key, "DisplayVersion").as_deref(), Some("0.2.140"));
+
+        // SAFETY: our key, then the tree under our own name.
+        unsafe {
+            RegCloseKey(key);
+            RegDeleteTreeW(HKEY_CURRENT_USER, path.as_ptr());
+        }
     }
 
     #[test]

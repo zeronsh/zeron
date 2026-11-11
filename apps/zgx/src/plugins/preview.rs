@@ -676,7 +676,8 @@ return ui.column {{
     ui.text {{ id = "up", "up" }},
 }}
 "#,
-            own.display()
+            // (In a Luau string: Windows' `\` escaped.)
+            own.display().to_string().replace('\\', "\\\\")
         );
         set(Some(sleek()));
         let mut app = guarded(script, |_| {});

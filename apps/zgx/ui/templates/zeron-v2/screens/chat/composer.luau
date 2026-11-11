@@ -1416,12 +1416,21 @@ local function Composer(): Node
 	-- spring starts where it rests instead of rising into place again.
 	local page_h = ui.state("chat_page_h", 0)
 	local composer_zone = shared.drop_zone("composer")
-	-- There to open the model picker in (the shell's ⌘/), while it is.
+	-- There to open the model picker in (the shell's ⌘/), while it is:
+	-- counted, as Zeron's own composer counts it (a swapped composer mounts
+	-- before the old one's cleanup runs).
+	local counted = false
 	ui.on_mount(function()
-		shared.composer_shown:set(true)
+		if not counted then
+			counted = true
+			shared.composer_mounted()
+		end
 	end)
 	ui.on_cleanup(function()
-		shared.composer_shown:set(false)
+		if counted then
+			counted = false
+			shared.composer_gone()
+		end
 	end)
 	local dock = ui.ref()
 	-- How tall a new chat's composer is with nothing in it (what it's placed

@@ -476,11 +476,26 @@ end
 
 -- The composer's model picker, opened from elsewhere (the shell's ⌘/):
 -- bumped, it opens. `open_model_picker` says whether there was a composer
--- to open it in.
+-- to open it in. `composer_shown` counts the composers mounted now
+-- (screens/chat/composer: a swapped one mounts before the old one goes):
+-- `composer_mounted`/`composer_gone` change it. A template's composer
+-- written before it counted sets true or false, read as one or none (its
+-- `false` on cleanup clears the count whole: a limit of mixing the two,
+-- only while such a composer and a counted one swap).
 M.open_model = ui.shared("chat.composer.open_model", 0)
-M.composer_shown = ui.shared("chat.composer.shown", false)
+M.composer_shown = ui.shared("chat.composer.shown", 0)
+local function composers(): number
+	local n: any = M.composer_shown:peek()
+	return if type(n) == "number" then n elseif n then 1 else 0
+end
+function M.composer_mounted()
+	M.composer_shown:set(composers() + 1)
+end
+function M.composer_gone()
+	M.composer_shown:set(math.max(0, composers() - 1))
+end
 function M.open_model_picker(): boolean
-	if not M.composer_shown:peek() then
+	if composers() <= 0 then
 		return false
 	end
 	M.open_model:set(M.open_model:peek() + 1)
