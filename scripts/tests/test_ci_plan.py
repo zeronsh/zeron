@@ -212,7 +212,7 @@ class WorkflowConsistencyTests(unittest.TestCase):
         "frame_source": ("macos.yml", ["macos-frame-source"]),
         "ios": ("macos.yml", ["ios-core", "ios-tests"]),
         "android": ("android.yml", ["apk"]),
-        "zgx": ("zgx-tests.yml", ["zgx-macos", "zgx-linux"]),
+        "zgx": ("zgx-tests.yml", ["zgx-macos", "zgx-linux", "zgx-windows"]),
     }
 
     def test_job_runners_match(self):
