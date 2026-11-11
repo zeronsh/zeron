@@ -162,6 +162,9 @@ struct Sessions {
     /// Publishes so far (for tests).
     #[cfg(test)]
     published: Cell<u32>,
+    /// What was last published (for tests).
+    #[cfg(test)]
+    last_published: RefCell<Option<Value>>,
 }
 
 /// A chat's row for scripts, and what it was built from besides the chat's
@@ -288,6 +291,10 @@ struct LiveRows {
     changed: HashSet<String>,
     /// Whether the whole list did (a whole frame, or no index to trust).
     all_changed: bool,
+    /// The latest moment a chat was found the same and let go of from
+    /// `changed`: a look at an earlier one (the clock put back) can't
+    /// trust `changed`, and judges all.
+    let_go_at: Option<i64>,
 }
 
 impl LiveRows {
@@ -531,17 +538,20 @@ impl Layout {
         let counts = |layout: &Layout, id: &str| layout.parent_at.get(id).map_or((0, 0), |&i| (layout.kids[i].ids.len(), layout.kids[i].working));
         // Archived, the most recently moved first (Settings → Archived), by
         // when each moved as its row was last built.
+        // (Each entry by its own place: a list naming a chat twice, which
+        // only a whole frame can, shows each as the old build did. The
+        // places by id serve the kept build, which such a list never has.)
         let mut gone: Vec<(i64, &Json)> = Vec::new();
         for c in all {
             let Some(id) = c["id"].as_str() else { continue };
-            match layout.place.get(id) {
-                Some(Place::Top) => {
+            match place_of(c) {
+                Place::Top => {
                     let (side_chats, working) = counts(&layout, id);
                     let value = top_row(rows, c, id, known, live(id), at, side_chats, working);
                     layout.top_at.insert(id.to_owned(), layout.top.len());
                     layout.top.push(value);
                 }
-                Some(Place::Gone) => gone.push((rows.get(id).map_or_else(|| moved(c), |row| row.moved), c)),
+                Place::Gone => gone.push((rows.get(id).map_or_else(|| moved(c), |row| row.moved), c)),
                 _ => {}
             }
         }
@@ -1021,6 +1031,8 @@ impl Sessions {
         #[cfg(test)]
         self.published.set(self.published.get() + 1);
         let value = self.value();
+        #[cfg(test)]
+        self.last_published.replace(Some(value.clone()));
         for (_, shared) in self.shared.borrow().iter() {
             shared.set(value.clone());
         }
@@ -1066,7 +1078,7 @@ impl Sessions {
         let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
         let mut rows = self.live_rows.borrow_mut();
         let shown = self.shown_live.borrow();
-        let since = self.shown_at.get().filter(|&since| since <= now);
+        let since = self.shown_at.get().filter(|&since| since <= now && rows.let_go_at.is_none_or(|t| t <= now));
         let Some(since) = since.filter(|_| !rows.all_changed) else {
             return *shown == rows.states(at);
         };
@@ -1076,7 +1088,9 @@ impl Sessions {
             }
             // (The same now, and it can only turn at a moment of its own
             // from here: no need to look at it again for this change.)
-            rows.changed.remove(&chat);
+            if rows.changed.remove(&chat) {
+                rows.let_go_at = Some(now);
+            }
         }
         true
     }
@@ -1086,7 +1100,8 @@ impl Sessions {
         let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
         let mut rows = self.live_rows.borrow_mut();
         let mut shown = self.shown_live.borrow_mut();
-        match self.shown_at.get().filter(|&since| since <= now && !rows.all_changed) {
+        let trusted = !rows.all_changed && rows.let_go_at.is_none_or(|t| t <= now);
+        match self.shown_at.get().filter(|&since| since <= now && trusted) {
             None => *shown = rows.states(at),
             Some(since) => {
                 for chat in rows.moved_since(since, now) {
@@ -1099,6 +1114,7 @@ impl Sessions {
         }
         rows.changed.clear();
         rows.all_changed = false;
+        rows.let_go_at = None;
         self.shown_at.set(Some(now));
     }
 
@@ -1135,7 +1151,7 @@ impl Sessions {
         let mut wakes = self.wakes.borrow_mut();
         wakes.clear();
         for chat in self.chats.borrow().as_array().into_iter().flatten() {
-            if let (Some(id), Some(at)) = (chat["id"].as_str(), wake_at(chat)) {
+            if let (id, Some(at)) = (chat["id"].as_str().unwrap_or_default(), wake_at(chat)) {
                 wakes.by.entry(id.to_owned()).or_default().push(at);
                 wakes.sorted.insert((at, id.to_owned()));
             }
@@ -1339,6 +1355,8 @@ impl Sessions {
             return lists;
         };
         let layout = layout.as_mut().expect("current");
+        #[cfg(test)]
+        BUILT_KEPT.with(|n| n.set(n.get() + 1));
         // What may have moved: entries and live states changed, states gone
         // stale since, and sleeps (they turn with time).
         let mut dirty: HashSet<String> = dirty;
@@ -2078,8 +2096,9 @@ pub(crate) fn now_seconds() -> i64 {
 thread_local! {
     /// A test's own time (Unix seconds), while it sets one.
     static CLOCK: Cell<Option<i64>> = const { Cell::new(None) };
-    /// How many times the chat lists were built whole.
+    /// How many times the chat lists were built whole, and kept.
     static BUILT_WHOLE: Cell<u32> = const { Cell::new(0) };
+    static BUILT_KEPT: Cell<u32> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2657,18 +2676,55 @@ mod bench {
         }
     }
 
+    /// The engine's list after a frame of changes, as a kept copy reads it
+    /// (`lists::apply_rows`: a changed row where the last of its key is,
+    /// else last; removed keys gone).
+    fn applied(list: &mut Json, key: &str, changes: &Changes) {
+        let rows = list.as_array_mut().unwrap();
+        rows.retain(|r| !r[key].as_str().is_some_and(|k| changes.removed.iter().any(|g| g == k)));
+        for row in &changes.changed {
+            match row[key].as_str().and_then(|k| rows.iter().rposition(|r| r[key].as_str() == Some(k))) {
+                Some(at) => rows[at] = row.clone(),
+                None => rows.push(row.clone()),
+            }
+        }
+    }
+
+    /// What scripts see, from the lists alone (built whole), at the test's
+    /// time.
+    fn built_whole(chats: &Json, live: &Json, devices: &Json, spaces: &Json) -> Value {
+        let fresh = Sessions::default();
+        *fresh.here.borrow_mut() = Some("dev-0".into());
+        fresh.heard(Slot::Spaces, spaces.clone());
+        fresh.set_chats(chats.clone());
+        fresh.set_live(live.clone());
+        *fresh.devices.borrow_mut() = devices.clone();
+        fresh.heard.set(true);
+        fresh.value()
+    }
+
+    /// The devices as scripts would be given them, at `now`.
+    fn devices_shown(devices: &Json, now: i64) -> Value {
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("dev-0".into());
+        *s.devices.borrow_mut() = devices.clone();
+        s.devices_value(now)
+    }
+
     /// What the scripts see, kept a change at a time, is what building it
     /// all from the lists gives, through every kind of change and as time
-    /// passes (states going stale, devices quiet, sleeps ending); and a
-    /// change is published, and looked at again, when the whole lists say.
+    /// passes (states going stale, devices quiet, sleeps ending) or is put
+    /// back; and a change is published, and looked at again, when the
+    /// whole lists say. Compared at every publish and at random moments
+    /// between (heartbeats run on unpublished in between).
     #[test]
     fn kept_a_change_at_a_time_it_reads_as_built_whole() {
         let iso = super::rfc3339;
         let mut now = 1_900_000_000;
         CLOCK.with(|c| c.set(Some(now)));
         let id = |i: u64| format!("chat-{i:05}-aaaaaaaa-bbbb-cccc");
-        let (mut chats, mut live, devices) = lists(40, now);
-        let spaces = json!([{ "id": "sp1", "path": "/a" }, { "id": "sp2", "path": "/b" }]);
+        let (mut chats, mut live, mut devices) = lists(40, now);
+        let mut spaces = json!([{ "id": "sp1", "path": "/a" }, { "id": "sp2", "path": "/b" }]);
         let s = Sessions::default();
         *s.here.borrow_mut() = Some("dev-0".into());
         s.heard(Slot::Spaces, spaces.clone());
@@ -2676,122 +2732,269 @@ mod bench {
         s.heard_list(Slot::Live, &Frame::for_tests(&live, None, "chatId"));
         s.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-        let row_of = |list: &Json, key: &str, k: &str| list.as_array().unwrap().iter().position(|r| r[key] == k);
-        // (How many looks were kept, not built whole.)
-        let mut kept = 0;
-        for step in 0..3000 {
-            // Time passes: a little, or past a state's staleness.
-            match rng.next(10) {
-                0 => now += 40 + rng.next(10) as i64,
-                1..=4 => now += rng.next(4) as i64,
+        let (mut publishes, mut kept, mut looks) = (0, 0, 0);
+        for step in 0..6000 {
+            // Time passes: a little, past a state's staleness, or put back.
+            match rng.next(30) {
+                0..=1 => now += 40 + rng.next(10) as i64,
+                2..=9 => now += rng.next(4) as i64,
+                10 => now -= 1 + rng.next(20) as i64,
                 _ => {}
             }
             CLOCK.with(|c| c.set(Some(now)));
-            let chat = id(rng.next(48));
-            let published = s.published.get();
-            let mut expect_publish = None;
-            match rng.next(9) {
-                // A live state: a heartbeat, a new status, a wait, gone.
-                0..=3 => {
-                    let mut row = json!({ "chatId": chat, "deviceId": "dev-1",
-                        "status": (["working", "awaitingInput", "idle", "errored"][rng.next(4) as usize]),
-                        "updatedAt": iso(now - rng.next(50) as i64), "runningSubagents": rng.next(3),
-                        "lastTurnOutcome": (["completed", "interrupted"][rng.next(2) as usize]), "lastCompletedTurn": format!("t{}", rng.next(3)) });
-                    if rng.next(4) == 0 {
-                        row["waiting"] = json!({ "since": iso(now - 5), "on": [{ "id": "b1", "kind": "process", "label": "cargo test" }] });
-                    }
-                    let gone = rng.next(8) == 0;
-                    let at = row_of(&live, "chatId", &chat);
-                    let changes = match (gone, at) {
-                        (true, Some(at)) => {
-                            live.as_array_mut().unwrap().remove(at);
-                            Changes { changed: vec![], removed: vec![chat.clone()], reordered: false }
-                        }
-                        (true, None) => continue,
-                        (false, Some(at)) => {
-                            live[at] = row.clone();
-                            Changes { changed: vec![row], removed: vec![], reordered: false }
-                        }
-                        (false, None) => {
-                            live.as_array_mut().unwrap().push(row.clone());
-                            Changes { changed: vec![row], removed: vec![], reordered: false }
-                        }
-                    };
-                    // As the whole lists would judge it: published when a
-                    // state shown moves.
-                    let same = *s.shown_live.borrow() == live_states(&live, now)
-                        && s.shown_devices.borrow().as_ref() == Some(&s.devices_value(now));
-                    expect_publish = Some(!same);
-                    s.heard_list(Slot::Live, &Frame::for_tests(&live, Some(&changes), "chatId"));
-                }
-                // A chat's entry: a message, a look, a title, a sleep, a
-                // project, archived, made a side chat; new; gone.
-                4..=7 => {
-                    let at = row_of(&chats, "id", &chat);
-                    let mut c = at.map_or_else(|| json!({ "id": chat, "deviceId": "dev-2", "createdAt": iso(now - 100) }), |at| chats[at].clone());
-                    match rng.next(9) {
-                        0 => c["lastMessageAt"] = json!(iso(now - rng.next(3) as i64)),
-                        1 => c["lastSeenAt"] = json!(iso(now - rng.next(3) as i64)),
-                        2 => c["title"] = json!(format!("T{}", rng.next(5))),
-                        3 => c["sleep"] = json!({ "until": iso(now + rng.next(30) as i64), "at": iso(now - 10) }),
-                        4 => c["sleep"] = if rng.next(2) == 0 { Json::Null } else { json!({ "until": iso(now + 5), "at": iso(now - 10), "wokeAt": iso(now - 1) }) },
-                        5 => c["spaceId"] = json!((["sp1", "sp2", "sp9"][rng.next(3) as usize])),
-                        6 => c["archived"] = json!(rng.next(3) == 0),
-                        7 => c["parentChatId"] = if rng.next(3) == 0 { Json::Null } else { json!(id(rng.next(48))) },
-                        _ => c["config"]["harness"] = json!((["codex", "claude-code"][rng.next(2) as usize])),
-                    }
-                    let gone = rng.next(15) == 0;
-                    let changes = match (gone, at) {
-                        (true, Some(at)) => {
-                            chats.as_array_mut().unwrap().remove(at);
-                            Changes { changed: vec![], removed: vec![chat.clone()], reordered: false }
-                        }
-                        (true, None) => continue,
-                        (false, Some(at)) => {
-                            chats[at] = c.clone();
-                            Changes { changed: vec![c], removed: vec![], reordered: false }
-                        }
-                        (false, None) => {
-                            chats.as_array_mut().unwrap().push(c.clone());
-                            Changes { changed: vec![c], removed: vec![], reordered: false }
-                        }
-                    };
-                    s.heard_list(Slot::Chats, &Frame::for_tests(&chats, Some(&changes), "id"));
-                    expect_publish = Some(true);
-                }
-                // The list in another order, or a whole frame.
-                _ => {
-                    if rng.next(2) == 0 {
-                        chats.as_array_mut().unwrap().rotate_left(1);
-                        let changes = Changes { changed: vec![], removed: vec![], reordered: true };
-                        s.heard_list(Slot::Chats, &Frame::for_tests(&chats, Some(&changes), "id"));
-                    } else {
-                        s.heard_list(Slot::Live, &Frame::for_tests(&live, None, "chatId"));
-                    }
+            // A few chats, none twice.
+            let mut picked: Vec<String> = Vec::new();
+            for _ in 0..1 + rng.next(3) {
+                let chat = id(rng.next(48));
+                if !picked.contains(&chat) {
+                    picked.push(chat);
                 }
             }
-            if let Some(expect) = expect_publish {
-                assert_eq!(s.published.get() > published, expect, "step {step}: published");
+            // Whether the whole lists say a publish is due: a state or a
+            // device shown moving, judged as `shows_the_same` judged it.
+            let shows_new = |s: &Sessions, live: &Json, devices: &Json| {
+                *s.shown_live.borrow() != live_states(live, now) || s.shown_devices.borrow().as_ref() != Some(&devices_shown(devices, now))
+            };
+            let (published, whole, kept_before) = (s.published.get(), BUILT_WHOLE.with(Cell::get), BUILT_KEPT.with(Cell::get));
+            let expect: Option<bool> = match rng.next(20) {
+                // Live states: heartbeats, new statuses, waits, rows gone;
+                // now and then one with no key.
+                0..=7 => {
+                    let mut changes = Changes { changed: vec![], removed: vec![], reordered: false };
+                    for chat in &picked {
+                        if rng.next(8) == 0 {
+                            changes.removed.push(chat.clone());
+                            continue;
+                        }
+                        let mut row = json!({ "chatId": chat, "deviceId": "dev-1",
+                            "status": (["working", "awaitingInput", "idle", "errored"][rng.next(4) as usize]),
+                            "updatedAt": iso(now - rng.next(50) as i64), "runningSubagents": rng.next(3),
+                            "lastTurnOutcome": (["completed", "interrupted"][rng.next(2) as usize]), "lastCompletedTurn": format!("t{}", rng.next(3)) });
+                        if rng.next(4) == 0 {
+                            row["waiting"] = json!({ "since": iso(now - 5), "on": [{ "id": "b1", "kind": "process", "label": "cargo test" }] });
+                        }
+                        // (Rare: it stays till a whole list drops it, and the
+                        // lists are built whole while it does.)
+                        if rng.next(400) == 0 {
+                            row.as_object_mut().unwrap().remove("chatId");
+                        }
+                        changes.changed.push(row);
+                    }
+                    applied(&mut live, "chatId", &changes);
+                    let expect = shows_new(&s, &live, &devices);
+                    s.heard_list(Slot::Live, &Frame::for_tests(&live, Some(&changes), "chatId"));
+                    Some(expect)
+                }
+                // Chats' entries: a message, a look, a title, a sleep, a
+                // project, an agent, archived, made a side chat; new; gone.
+                8..=12 => {
+                    let mut changes = Changes { changed: vec![], removed: vec![], reordered: false };
+                    for chat in &picked {
+                        if rng.next(15) == 0 {
+                            changes.removed.push(chat.clone());
+                            continue;
+                        }
+                        let at = chats.as_array().unwrap().iter().rposition(|r| r["id"] == chat.as_str());
+                        let mut c = at.map_or_else(|| json!({ "id": chat, "deviceId": "dev-2", "createdAt": iso(now - 100) }), |at| chats[at].clone());
+                        // (Mostly what a chat's entry does while it works: a
+                        // message, a look.)
+                        match rng.next(16) {
+                            0 | 9..=12 => c["lastMessageAt"] = json!(iso(now - rng.next(3) as i64)),
+                            13..=15 => c["lastSeenAt"] = json!(iso(now - rng.next(3) as i64)),
+                            1 => c["lastSeenAt"] = json!(iso(now - rng.next(3) as i64)),
+                            2 => c["title"] = json!(format!("T{}", rng.next(5))),
+                            3 => c["sleep"] = json!({ "until": iso(now + rng.next(30) as i64), "at": iso(now - 10) }),
+                            4 => c["sleep"] = if rng.next(2) == 0 { Json::Null } else { json!({ "until": iso(now + 5), "at": iso(now - 10), "wokeAt": iso(now - 1) }) },
+                            5 => c["spaceId"] = json!((["sp1", "sp2", "sp9"][rng.next(3) as usize])),
+                            6 => c["archived"] = json!(rng.next(3) == 0),
+                            7 => c["parentChatId"] = if rng.next(3) == 0 { Json::Null } else { json!(id(rng.next(48))) },
+                            8 => c["config"]["harness"] = json!((["codex", "claude-code", "acp.x"][rng.next(3) as usize])),
+                            _ => unreachable!(),
+                        }
+                        changes.changed.push(c);
+                    }
+                    applied(&mut chats, "id", &changes);
+                    s.heard_list(Slot::Chats, &Frame::for_tests(&chats, Some(&changes), "id"));
+                    Some(true)
+                }
+                // A device beats, goes quiet, or is new.
+                13 => {
+                    let d = format!("dev-{}", rng.next(7));
+                    let row = json!({ "id": d, "name": "D", "lastSeenAt": iso(now - rng.next(120) as i64) });
+                    let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                    applied(&mut devices, "id", &changes);
+                    let expect = shows_new(&s, &live, &devices);
+                    s.heard_list(Slot::Devices, &Frame::for_tests(&devices, Some(&changes), "id"));
+                    Some(expect)
+                }
+                // A project comes or goes.
+                14 => {
+                    let was = spaces.clone();
+                    let rows = spaces.as_array_mut().unwrap();
+                    match rows.iter().position(|p| p["id"] == "sp9") {
+                        Some(at) => drop(rows.remove(at)),
+                        None => rows.push(json!({ "id": "sp9", "path": "/c" })),
+                    }
+                    s.heard(Slot::Spaces, spaces.clone());
+                    Some(spaces != was)
+                }
+                // The registry's icon for an agent changes.
+                15 => {
+                    crate::agents::remember_icons(&[json!({ "id": "acp.x", "icon": format!("<svg>{}</svg>", rng.next(1000)) })]);
+                    Some(false)
+                }
+                // A whole chat list again, now and then naming a chat twice
+                // (once archived) or one with no id.
+                16 => {
+                    let was = chats.clone();
+                    let rows = chats.as_array_mut().unwrap();
+                    // (A list naming a chat twice, or one with no id, is built
+                    // whole while it does: plain again at its next whole
+                    // frame, and so mostly plain.)
+                    let plain = {
+                        let mut seen = HashSet::new();
+                        rows.iter().all(|r| r["id"].as_str().is_some_and(|i| seen.insert(i.to_owned())))
+                    };
+                    match if plain { rng.next(16) } else { 2 } {
+                        0 => {
+                            let mut twice = rows[rng.next(rows.len() as u64) as usize].clone();
+                            twice["archived"] = json!(rng.next(2) == 0);
+                            rows.push(twice);
+                        }
+                        1 => rows.push(json!({ "title": "no id", "deviceId": "dev-2", "sleep": { "until": iso(now + 7), "at": iso(now) } })),
+                        2..=12 => {
+                            // (Each id once again.)
+                            let mut seen = HashSet::new();
+                            rows.retain(|r| r["id"].as_str().is_some_and(|i| seen.insert(i.to_owned())));
+                        }
+                        _ => {}
+                    }
+                    s.heard_list(Slot::Chats, &Frame::for_tests(&chats, None, "id"));
+                    Some(chats != was)
+                }
+                // A whole live list again, now and then with a chat on two
+                // rows (two hosts), or each chat once again.
+                17 => {
+                    let was = live.clone();
+                    let rows = live.as_array_mut().unwrap();
+                    let plain = {
+                        let mut seen = HashSet::new();
+                        rows.iter().all(|r| r["chatId"].as_str().is_some_and(|i| seen.insert(i.to_owned())))
+                    };
+                    if plain && rng.next(6) == 0 {
+                        let mut second = rows[rng.next(rows.len() as u64) as usize].clone();
+                        second["deviceId"] = json!("dev-3");
+                        second["status"] = json!((["working", "idle"][rng.next(2) as usize]));
+                        second["updatedAt"] = json!(iso(now - rng.next(50) as i64));
+                        rows.push(second);
+                    } else {
+                        let mut seen = HashSet::new();
+                        rows.retain(|r| r["chatId"].as_str().is_some_and(|i| seen.insert(i.to_owned())));
+                    }
+                    let expect = live != was && shows_new(&s, &live, &devices);
+                    s.heard_list(Slot::Live, &Frame::for_tests(&live, None, "chatId"));
+                    Some(expect)
+                }
+                // A list in another order.
+                18 => {
+                    live.as_array_mut().unwrap().rotate_left(1);
+                    let expect = shows_new(&s, &live, &devices);
+                    let changes = Changes { changed: vec![], removed: vec![], reordered: true };
+                    s.heard_list(Slot::Live, &Frame::for_tests(&live, Some(&changes), "chatId"));
+                    Some(expect)
+                }
+                _ => {
+                    chats.as_array_mut().unwrap().rotate_left(1);
+                    let changes = Changes { changed: vec![], removed: vec![], reordered: true };
+                    s.heard_list(Slot::Chats, &Frame::for_tests(&chats, Some(&changes), "id"));
+                    Some(true)
+                }
+            };
+            let did = s.published.get() > published;
+            if let Some(expect) = expect {
+                assert_eq!(did, expect, "step {step}: published");
             }
             // The next looks, as the whole lists say.
             assert_eq!(s.live_rows.borrow().stale.next_after(now), next_stale(&live, now), "step {step}: next stale");
             assert_eq!(s.wakes.borrow().next_after(now), next_wake(&chats, now), "step {step}: next wake");
-            // What scripts see, as if built whole.
-            let fresh = Sessions::default();
-            *fresh.here.borrow_mut() = Some("dev-0".into());
-            fresh.heard(Slot::Spaces, spaces.clone());
-            fresh.set_chats(chats.clone());
-            fresh.set_live(live.clone());
-            *fresh.devices.borrow_mut() = devices.clone();
-            fresh.heard.set(true);
-            let want = fresh.value();
-            let whole = BUILT_WHOLE.with(Cell::get);
-            assert_eq!(s.value(), want, "step {step}");
-            kept += u32::from(BUILT_WHOLE.with(Cell::get) == whole);
-            assert_eq!(*s.shown_live.borrow(), live_states(&live, now), "step {step}: states shown");
+            if did {
+                publishes += 1;
+                // (Kept, not built whole, as it was published.)
+                if BUILT_WHOLE.with(Cell::get) == whole && BUILT_KEPT.with(Cell::get) > kept_before {
+                    kept += 1;
+                }
+                let want = built_whole(&chats, &live, &devices, &spaces);
+                assert_eq!(s.last_published.borrow().as_ref(), Some(&want), "step {step}: published");
+                assert_eq!(*s.shown_live.borrow(), live_states(&live, now), "step {step}: states shown");
+            } else if rng.next(6) == 0 {
+                // A look between publishes (a window opening).
+                looks += 1;
+                let want = built_whole(&chats, &live, &devices, &spaces);
+                assert_eq!(s.value(), want, "step {step}: a look");
+            }
         }
         CLOCK.with(|c| c.set(None));
-        assert!(kept > 1500, "only {kept} of 3000 looks were kept a change at a time");
+        eprintln!("{publishes} publishes, {kept} kept, {looks} looks between");
+        // (A quarter at least, ~750 of ~2,400: the rest are built whole,
+        // after a change of shape, projects, icons, a clock put back, or
+        // while a list names a chat twice or has a row with no key.)
+        assert!(kept * 4 > publishes, "only {kept} of {publishes} publishes were kept a change at a time");
+    }
+
+    /// A list naming a chat twice (a whole frame from an engine that
+    /// doesn't key them), once archived: each entry shows where it would
+    /// on its own, as before.
+    #[test]
+    fn a_chat_named_twice_shows_each_entry_where_it_would() {
+        let s = Sessions::default();
+        s.set_chats(json!([
+            { "id": "x", "title": "Open", "createdAt": "2026-11-01T10:00:00Z" },
+            { "id": "x", "title": "Put away", "archived": true, "createdAt": "2026-11-01T10:00:00Z" },
+        ]));
+        let v = s.value();
+        let ids = |list: &str| v.field(list).unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect::<Vec<_>>();
+        assert_eq!(ids("chats"), vec!["x"]);
+        assert_eq!(ids("archived"), vec!["x"]);
+    }
+
+    /// A clock put back: a chat's live change judged the same at a later
+    /// moment (its run already stale) is still published at an earlier
+    /// one, where the run shows, when another chat's heartbeat comes.
+    #[test]
+    fn a_clock_put_back_still_shows_a_live_change() {
+        let mut now = 1_900_000_000;
+        CLOCK.with(|c| c.set(Some(now)));
+        let iso = super::rfc3339;
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("dev-0".into());
+        let chat = |id: &str| json!({ "id": id, "createdAt": iso(now - 1000), "lastMessageAt": iso(now - 900), "lastSeenAt": iso(now - 800) });
+        s.set_chats(json!([chat("a"), chat("b")]));
+        let row = |id: &str, status: &str, at: i64| json!({ "chatId": id, "deviceId": "dev-0", "status": status, "updatedAt": iso(at) });
+        let mut live = json!([row("a", "idle", now - 900), row("b", "idle", now - 900)]);
+        s.set_live(live.clone());
+        s.heard.set(true);
+        s.publish();
+        let heard = |s: &Sessions, live: &Json, at: usize| {
+            let changes = Changes { changed: vec![live[at].clone()], removed: vec![], reordered: false };
+            s.heard_list(Slot::Live, &Frame::for_tests(live, Some(&changes), "chatId"));
+        };
+        // a runs from `now + 40`; heard at `now + 100`, that run is stale:
+        // nothing new shows.
+        let started = now + 40;
+        now += 100;
+        CLOCK.with(|c| c.set(Some(now)));
+        live[0] = row("a", "working", started);
+        let before = s.published.get();
+        heard(&s, &live, 0);
+        assert_eq!(s.published.get(), before, "stale: shows nothing new");
+        // The clock is put back to while a's run is fresh, and b beats.
+        now -= 50;
+        CLOCK.with(|c| c.set(Some(now)));
+        live[1] = row("b", "idle", now - 1);
+        heard(&s, &live, 1);
+        assert_eq!(s.published.get(), before + 1, "a's run shows");
+        assert_eq!(*s.shown_live.borrow(), live_states(&live, now));
+        CLOCK.with(|c| c.set(None));
     }
 
     /// `cargo test --release -p zeron-zgx bench::per_update -- --ignored --nocapture`
