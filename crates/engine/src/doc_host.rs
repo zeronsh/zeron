@@ -2680,8 +2680,12 @@ impl DocHost {
         let host = self.clone();
         let mut token_changes = edge.token_changes();
         self.spawn_sync_worker(cancel.clone(), async move {
-            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone())
-                .with_handle(weak.clone()));
+            let sink = Arc::new(crate::chat2_host::EngineChatSink::for_handle(
+                &doc,
+                store,
+                chat.clone(),
+                weak.clone(),
+            ));
             // The sink holds only a Weak doc ref (a strong one made every
             // chat2 handle read as perma-pinned — LRU eviction dead); this
             // task's own strong ref dies when the join resolves.

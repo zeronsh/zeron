@@ -112,7 +112,9 @@ const MIGRATIONS: &[&str] = &[
      CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
     // Loro updates saved on top of a doc's snapshot row, oldest first (see
     // `append_snapshot_delta`). Each row carries the cursor its state covers
-    // and the `saved_at` of the base it extends. The snapshots row keeps its
+    // and the `saved_at` of the base it extends, and its place (1, 2, ...) in
+    // that base's chain: a missing number is a lost row, even when the rows
+    // after it import cleanly (concurrent ops that don't depend on it). The snapshots row keeps its
     // own bytes and cursor, so a build that predates this table reads a
     // consistent (older) snapshot; if such a build rewrites that row, the
     // deltas' cursors stop counting (their ops still merge: same doc).
@@ -121,7 +123,8 @@ const MIGRATIONS: &[&str] = &[
         doc_id TEXT NOT NULL,
         bytes BLOB NOT NULL,
         cursor INTEGER NOT NULL,
-        base_saved_at INTEGER NOT NULL
+        base_saved_at INTEGER NOT NULL,
+        seq INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX IF NOT EXISTS snapshot_deltas_doc ON snapshot_deltas(doc_id,ordinal);",
 ];
@@ -165,6 +168,9 @@ pub struct DocsStore {
     /// Set before a restart into another version: every save from then on
     /// is a whole snapshot ([`Self::stop_snapshot_deltas`]).
     deltas_stopped: std::sync::atomic::AtomicBool,
+    /// Loads that merged snapshot deltas (diagnostics: each costs a whole
+    /// import and export of the doc).
+    delta_merges: std::sync::atomic::AtomicU64,
     path: PathBuf,
     /// This open found the file damaged and rebuilt the store.
     recovery: Option<crate::store_recovery::Recovery>,
@@ -217,6 +223,7 @@ impl DocsStore {
             bases: Mutex::new(std::collections::HashMap::new()),
             next_base: std::sync::atomic::AtomicU64::new(1),
             deltas_stopped: std::sync::atomic::AtomicBool::new(false),
+            delta_merges: std::sync::atomic::AtomicU64::new(0),
             path,
             recovery,
         })
@@ -445,21 +452,12 @@ impl DocsStore {
     }
 
     fn load_snapshot_blocking(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        let conn = self.conn();
-        let bytes: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT bytes FROM snapshots WHERE doc_id = ?1",
-                params![doc_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(bytes) = bytes else { return Ok(None) };
-        let deltas = load_deltas(&conn, doc_id)?;
-        drop(conn);
-        Ok(Some(match merge_deltas(doc_id, &bytes, &deltas) {
-            Some((merged, _)) => merged,
-            None => bytes,
-        }))
+        Ok(self.load_merged(doc_id)?.map(|(bytes, _, _)| bytes))
+    }
+
+    /// How many loads have merged snapshot deltas so far.
+    pub fn delta_merges(&self) -> u64 {
+        self.delta_merges.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// From now on, refuse deltas: savers write whole snapshots, which every
@@ -496,7 +494,9 @@ impl DocsStore {
             };
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO snapshot_deltas (doc_id, bytes, cursor, base_saved_at) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO snapshot_deltas (doc_id, bytes, cursor, base_saved_at, seq)
+                 VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(seq), 0) + 1 FROM snapshot_deltas
+                                          WHERE doc_id = ?1 AND base_saved_at = ?4))",
                 params![doc_id, bytes, cursor as i64, saved_at],
             )?;
             self.invalidate_failed_publication(&tx, doc_id)?;
@@ -716,6 +716,17 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
+        self.load_merged(doc_id)
+    }
+
+    /// The snapshot row with the clean run of its deltas applied, and the
+    /// cursor that state covers. Bytes and cursor stay a pair: the merged
+    /// state goes with the last APPLIED delta's cursor (and only if it was
+    /// saved on this base: an older build may have rewritten the row), an
+    /// unmergeable one with the base's own. Rows after a stop are moved to
+    /// the doc's parked inbox, which an open replays until nothing waits:
+    /// they may hold ops (relay rows, local ops) nothing else still has.
+    fn load_merged(&self, doc_id: &str) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
         let conn = self.conn();
         let row = conn
             .query_row(
@@ -737,21 +748,41 @@ impl DocsStore {
         if deltas.is_empty() {
             return Ok(Some((bytes, cursor, epoch)));
         }
-        // Bytes and cursor stay a pair: the merged state goes with the last
-        // delta's cursor, an unmergeable one falls back to the base's own.
-        // Deltas over a base something else rewrote (a build without this
-        // table, after a downgrade) still merge, but claim no cursor.
-        // The cursor is the last delta that APPLIED, not the newest saved.
-        Ok(Some(match merge_deltas(doc_id, &bytes, &deltas) {
-            Some((merged, applied)) => {
-                let cursor = match &deltas[applied - 1] {
-                    (_, delta_cursor, base) if *base == saved_at => *delta_cursor,
-                    _ => cursor,
-                };
+        self.delta_merges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let merge = merge_deltas(doc_id, &bytes, &deltas);
+        if let Some((at, kind)) = merge.stop {
+            self.park_delta_tail(doc_id, &deltas[at..], kind)?;
+        }
+        Ok(Some(match merge.merged {
+            Some(merged) => {
+                let last = &deltas[merge.applied - 1];
+                let cursor = if last.base_saved_at == saved_at { last.cursor } else { cursor };
                 (merged, cursor, epoch)
             }
             None => (bytes, cursor, epoch),
         }))
+    }
+
+    /// Move the rows from a merge's stop onward out of the delta chain, into
+    /// the doc's parked inbox (an undecodable row is dropped: nothing can
+    /// read it). One transaction: the chain then ends at its clean run.
+    fn park_delta_tail(&self, doc_id: &str, tail: &[Delta], kind: MergeStop) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let parked = format!("{doc_id}#parked");
+        for (i, delta) in tail.iter().enumerate() {
+            if !(i == 0 && kind == MergeStop::Undecodable) {
+                tx.execute(
+                    "INSERT INTO chat_inbox (doc_id, bytes) VALUES (?1, ?2)",
+                    params![parked, delta.bytes],
+                )?;
+            }
+            tx.execute("DELETE FROM snapshot_deltas WHERE ordinal = ?1", params![delta.ordinal])?;
+        }
+        tx.commit()?;
+        tracing::warn!(doc = doc_id, rows = tail.len(), ?kind, "snapshot deltas after a gap moved to the parked inbox");
+        Ok(())
     }
 
     /// Delete the snapshot row for `doc_id` (destructive schema breaks: the
@@ -922,71 +953,118 @@ impl DocsStore {
     }
 }
 
-/// `doc_id`'s saved deltas, oldest first, with the cursor each one covers.
-fn load_deltas(conn: &Connection, doc_id: &str) -> Result<Vec<(Vec<u8>, u64, i64)>, StoreError> {
+/// One saved delta row.
+#[derive(Debug, Clone)]
+struct Delta {
+    ordinal: i64,
+    bytes: Vec<u8>,
+    cursor: u64,
+    base_saved_at: i64,
+    seq: i64,
+}
+
+/// `doc_id`'s saved deltas, oldest first.
+fn load_deltas(conn: &Connection, doc_id: &str) -> Result<Vec<Delta>, StoreError> {
     let mut q = conn.prepare_cached(
-        "SELECT bytes, cursor, base_saved_at FROM snapshot_deltas WHERE doc_id = ?1 ORDER BY ordinal",
+        "SELECT ordinal, bytes, cursor, base_saved_at, seq FROM snapshot_deltas WHERE doc_id = ?1 ORDER BY ordinal",
     )?;
     let rows = q
         .query_map(params![doc_id], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))
+            Ok(Delta {
+                ordinal: r.get(0)?,
+                bytes: r.get(1)?,
+                cursor: r.get::<_, i64>(2)? as u64,
+                base_saved_at: r.get(3)?,
+                seq: r.get(4)?,
+            })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
+/// Why a merge stopped before the end of the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeStop {
+    /// A number missing from the chain: a lost row.
+    Gap,
+    /// Ops that build on ops the store doesn't hold.
+    Pending,
+    /// Bytes that don't decode.
+    Undecodable,
+}
+
+struct Merge {
+    merged: Option<Vec<u8>>,
+    /// How many deltas, from the first, applied cleanly.
+    applied: usize,
+    /// Where the run stopped, and why.
+    stop: Option<(usize, MergeStop)>,
+}
+
 /// The base with the longest run of its deltas that applies cleanly, in
-/// order, as one snapshot, and how many deltas that run holds. A delta that
-/// fails to decode, or whose ops build on ops the store doesn't hold (a lost
-/// middle row: salvage after damage, a second writer), ends the run there:
-/// Loro would park such ops as pending and an export would drop them, so a
-/// later delta's cursor would mark ops as received that no state holds.
-/// `None` when not one delta applies (the base and its own cursor stand).
-fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[(Vec<u8>, u64, i64)]) -> Option<(Vec<u8>, usize)> {
-    if deltas.is_empty() {
-        return None;
-    }
+/// order. The run ends at a missing chain number (a lost row: rows after it
+/// may import cleanly, being concurrent ops, yet the cursor would then mark
+/// the lost ops received), at a delta whose ops build on ops the store
+/// doesn't hold (Loro parks them and an export drops them), or at one that
+/// doesn't decode. `merged` is `None` when not one delta applies.
+fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[Delta]) -> Merge {
+    let none = |stop| Merge { merged: None, applied: 0, stop };
     let doc = loro::LoroDoc::new();
     if let Err(error) = doc.import(base) {
         tracing::warn!(doc = doc_id, %error, "snapshot base did not decode for its deltas; loading it alone");
-        return None;
+        return none(None);
     }
+    let mut next_seq: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied = 0;
-    let mut stopped = false;
-    for (bytes, _, _) in deltas {
-        match doc.import(bytes) {
-            Ok(status) if status.pending.is_none() => applied += 1,
+    let mut stop = None;
+    for (i, delta) in deltas.iter().enumerate() {
+        let expected = next_seq.entry(delta.base_saved_at).or_insert(1);
+        if delta.seq != *expected {
+            stop = Some((i, MergeStop::Gap));
+            break;
+        }
+        match doc.import(&delta.bytes) {
+            Ok(status) if status.pending.is_none() => {
+                *expected += 1;
+                applied += 1;
+            }
             Ok(_) => {
-                tracing::warn!(doc = doc_id, applied, deltas = deltas.len(), "a snapshot delta builds on ops the store doesn't hold; loading up to the one before it");
-                stopped = true;
+                stop = Some((i, MergeStop::Pending));
                 break;
             }
             Err(error) => {
-                tracing::warn!(doc = doc_id, %error, applied, deltas = deltas.len(), "a snapshot delta did not decode; loading up to the one before it");
-                stopped = true;
+                tracing::warn!(doc = doc_id, %error, "a snapshot delta did not decode");
+                stop = Some((i, MergeStop::Undecodable));
                 break;
             }
         }
     }
+    if let Some((at, kind)) = stop {
+        tracing::warn!(doc = doc_id, applied, at, ?kind, deltas = deltas.len(), "snapshot deltas stop early; loading the clean run");
+    }
     if applied == 0 {
-        return None;
+        return none(stop);
     }
     // A stop may have left parked ops inside `doc`: rebuild from the clean run.
-    let doc = if stopped {
+    let doc = if stop.is_some() {
         let clean = loro::LoroDoc::new();
-        clean.import(base).ok()?;
-        for (bytes, _, _) in &deltas[..applied] {
-            clean.import(bytes).ok()?;
+        if clean.import(base).is_err() {
+            return none(stop);
+        }
+        for delta in &deltas[..applied] {
+            if clean.import(&delta.bytes).is_err() {
+                return none(stop);
+            }
         }
         clean
     } else {
         doc
     };
     match doc.export(loro::ExportMode::Snapshot) {
-        Ok(bytes) => Some((bytes, applied)),
+        Ok(bytes) => Merge { merged: Some(bytes), applied, stop },
         Err(error) => {
             tracing::warn!(doc = doc_id, %error, "merged snapshot did not export; loading the base");
-            None
+            none(stop)
         }
     }
 }
@@ -1240,9 +1318,84 @@ mod tests {
             .unwrap();
         assert_eq!(loaded_text(&store), ("base one".into(), 11));
         assert_eq!(store.snapshot_cursor("chat").unwrap(), 11);
+        // The intact row after the gap waits in the parked inbox.
+        assert_eq!(store.pending_chat_inbox("chat#parked").unwrap().0, vec![deltas[2].clone()]);
+        assert_eq!(store.snapshot_delta_stats("chat").unwrap().0, 1);
         let plain = loro::LoroDoc::new();
         plain.import(&store.load_snapshot("chat").unwrap().unwrap()).unwrap();
         assert_eq!(plain.get_text("t").to_string(), "base one");
+    }
+
+    /// A lost row is not always a causal gap. Row 12 (peer P) is lost; row
+    /// 13 (peer Q, concurrent, not built on P) imports cleanly. The chain
+    /// number shows the loss: the cursor stays at 11, so the room resends
+    /// P's ops, and Q's row waits in the parked inbox.
+    #[test]
+    fn a_lost_row_before_a_concurrent_row_keeps_the_cursor_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        doc.get_text("t").insert(0, "base").unwrap();
+        doc.commit();
+        let base = store
+            .save_base_snapshot("chat", &doc.export(loro::ExportMode::Snapshot).unwrap(), 10, 2)
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("t").insert(4, " one").unwrap();
+        doc.commit();
+        let one = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        let after_one = doc.oplog_vv();
+        let concurrent = |peer: u64, key: &str| {
+            let fork = loro::LoroDoc::new();
+            fork.import(&doc.export(loro::ExportMode::Snapshot).unwrap()).unwrap();
+            fork.set_peer_id(peer).unwrap();
+            fork.get_map("peers").insert(key, "op").unwrap();
+            fork.commit();
+            fork.export(loro::ExportMode::updates(&after_one)).unwrap()
+        };
+        let p = concurrent(2, "p");
+        let q = concurrent(3, "q");
+        // Q doesn't depend on P: on its own it imports with nothing pending.
+        let check = loro::LoroDoc::new();
+        check.import(&doc.export(loro::ExportMode::Snapshot).unwrap()).unwrap();
+        assert!(check.import(&q).unwrap().pending.is_none());
+
+        assert!(store.append_snapshot_delta("chat", base, &one, 11).unwrap());
+        assert!(store.append_snapshot_delta("chat", base, &p, 12).unwrap());
+        assert!(store.append_snapshot_delta("chat", base, &q, 13).unwrap());
+        store.conn().execute("DELETE FROM snapshot_deltas WHERE cursor = 12", []).unwrap();
+
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
+        assert_eq!(cursor, 11, "the cursor passed a lost row");
+        assert_eq!(store.snapshot_cursor("chat").unwrap(), 11);
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!(loaded.get_text("t").to_string(), "base one");
+        assert_eq!(store.pending_chat_inbox("chat#parked").unwrap().0, vec![q]);
+    }
+
+    /// A stop on missing dependencies (with the chain intact: a second
+    /// writer) moves the intact rows to the parked inbox, so the next whole
+    /// save, which clears the delta chain, can't take them with it.
+    #[test]
+    fn rows_after_a_pending_stop_survive_the_next_whole_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let (base, deltas) = chained_deltas(&store);
+        assert!(store.append_snapshot_delta("chat", base, &deltas[0], 11).unwrap());
+        // Skips " two": its ops build on ops no row holds.
+        assert!(store.append_snapshot_delta("chat", base, &deltas[2], 13).unwrap());
+        assert_eq!(loaded_text(&store), ("base one".into(), 11));
+        assert_eq!(store.pending_chat_inbox("chat#parked").unwrap().0, vec![deltas[2].clone()]);
+        let (bytes, _, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
+        store.save_base_snapshot("chat", &bytes, 11, 2).unwrap();
+        assert_eq!(store.snapshot_delta_stats("chat").unwrap(), (0, 0));
+        assert_eq!(
+            store.pending_chat_inbox("chat#parked").unwrap().0,
+            vec![deltas[2].clone()],
+            "the whole save took the parked rows"
+        );
     }
 
     /// One undecodable delta between good ones: the load keeps the good one
