@@ -254,8 +254,9 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
     ahead_of_me = order[:position]
     my_lock = self_.pr if self_ is not None and self_.pr in snapshot.locked else None
 
-    def lock_is_older(pr: int) -> bool:
-        return (snapshot.lock_times.get(pr, ""), pr) < (snapshot.lock_times.get(my_lock, ""), my_lock)
+    def lock_is_older(pr) -> bool:
+        # (Keys are numbers here and `owner/repo#n` from a peer: compared as text on a tie.)
+        return (snapshot.lock_times.get(pr, ""), str(pr)) < (snapshot.lock_times.get(my_lock, ""), str(my_lock))
 
     lock_use = {pr: dict(zero) for pr in snapshot.locked}
     used = dict(zero)
@@ -388,26 +389,75 @@ class Api:
             self.requests += 1
 
 
+def parse_peers(text: str) -> list[tuple[str, str]]:
+    """CI_PEERS: "owner/repo:workflow.yml ..." (spaces or commas), the other
+    repositories whose admitted CI shares this organization's runner pool."""
+    peers = []
+    for item in re.split(r"[\s,]+", text.strip()):
+        repo, _, workflow = item.partition(":")
+        if re.fullmatch(r"[\w.-]+/[\w.-]+", repo) and workflow:
+            peers.append((repo, workflow))
+    return peers
+
+
+def outside_need(jobs: list[dict]) -> dict[str, int]:
+    """What a run admission doesn't schedule holds or is about to take: its jobs
+    running or queued for a runner. (`waiting` is an environment's approval or a
+    timer, which holds no runner.)"""
+    counts = {r: 0 for r in RUNNERS}
+    for job in jobs:
+        if job.get("status") in ("queued", "in_progress"):
+            counts[runner_of(job)] += 1
+    return need_of(counts)
+
+
 class Scheduler:
-    """Builds Snapshots, refetching a run's jobs only when the run changed."""
+    """Builds Snapshots, refetching a run's jobs only when the run changed.
+
+    The organization's hosted runners are one pool for all its repositories.
+    Besides this repository's admitted CI workflow (`workflow_id`), it reads:
+      - `peers`: other repositories' admitted CI workflows (CI_PEERS), which
+        join the same queue: their waiting runs wait in it, their admitted
+        runs hold what they hold, and their ci:priority / ci:lock labels
+        count as this repository's do;
+      - with `outside`, every other run in this repository and the peers
+        (releases, betas, deploys, a peer's CI before it adopts admission):
+        what their jobs run or wait for counts as held. They're never
+        admitted, only seen, so a release's queued jobs get the next runners
+        and admitted CI never takes them.
+    Another repository's runs are read at most every OUTSIDE_REFRESH seconds,
+    to spare the API quota.
+    """
 
     REFRESH = 300  # refetch unchanged runs' jobs at least this often (seconds)
+    OUTSIDE_REFRESH = 120  # ...and runs outside this workflow at most this often
 
-    def __init__(self, api: Api, repo: str, workflow_id: int):
+    def __init__(self, api: Api, repo: str, workflow_id: int,
+                 peers: list[tuple[str, str]] = (), outside: bool = False):
         self.api = api
         self.repo = repo
         self.workflow_id = workflow_id
+        self.peers = list(peers)
+        self.outside = outside
         self.jobs: dict[int, tuple[str, float, list[dict]]] = {}  # run -> (updated_at, fetched, jobs)
+        self.peer_ids: dict[str, int] = {}  # peer repo -> its CI workflow's id
+        self.listed: dict[str, tuple[float, list[dict]]] = {}  # list path -> (fetched, runs)
 
-    def run_jobs(self, run: dict) -> list[dict]:
+    def key(self, repo: str, number: int):
+        """A pull request's key: its number in this repository, `owner/repo#n` in a peer."""
+        return number if repo == self.repo else f"{repo}#{number}"
+
+    def run_jobs(self, run: dict, repo: str | None = None, stale_ok: float = 0) -> list[dict]:
+        repo = repo or self.repo
         cached = self.jobs.get(run["id"])
         now = time.time()
-        if cached and cached[0] == run["updated_at"] and now - cached[1] < self.REFRESH:
+        if cached and ((cached[0] == run["updated_at"] and now - cached[1] < self.REFRESH)
+                       or now - cached[1] < stale_ok):
             return cached[2]
         jobs: list[dict] = []
         page = 1
         while True:
-            data = self.api.get(f"/repos/{self.repo}/actions/runs/{run['id']}/jobs"
+            data = self.api.get(f"/repos/{repo}/actions/runs/{run['id']}/jobs"
                                 f"?filter=latest&per_page=100&page={page}")
             jobs.extend(data["jobs"])
             if len(data["jobs"]) < 100:
@@ -416,60 +466,107 @@ class Scheduler:
         self.jobs[run["id"]] = (run["updated_at"], now, jobs)
         return jobs
 
-    def snapshot(self) -> Snapshot:
+    def list_runs(self, path: str, stale_ok: float = 0) -> list[dict]:
+        cached = self.listed.get(path)
+        if cached and time.time() - cached[0] < stale_ok:
+            return cached[1]
         runs: list[dict] = []
         page = 1
         while True:
-            data = self.api.get(f"/repos/{self.repo}/actions/workflows/{self.workflow_id}/runs"
-                                f"?status=in_progress&per_page=100&page={page}")
+            data = self.api.get(f"{path}&per_page=100&page={page}")
             runs.extend(data["workflow_runs"])
             if len(data["workflow_runs"]) < 100:
                 break
             page += 1
-        live = {run["id"] for run in runs}
-        self.jobs = {k: v for k, v in self.jobs.items() if k in live}
+        self.listed[path] = (time.time(), runs)
+        return runs
 
-        lock_times = self.locks()
-        snap = Snapshot(priority=self.labelled(PRIORITY_LABEL), locked=set(lock_times), lock_times=lock_times)
+    def peer_workflow(self, repo: str, workflow: str) -> int | None:
+        if repo not in self.peer_ids:
+            try:
+                self.peer_ids[repo] = int(self.api.get(f"/repos/{repo}/actions/workflows/{workflow}")["id"])
+            except (OSError, KeyError, ValueError, TypeError):
+                return None  # not there (yet): its runs count as outside ones
+        return self.peer_ids[repo]
+
+    def snapshot(self) -> Snapshot:
+        admitted = [(self.repo, self.workflow_id, 0.0)]
+        for repo, workflow in self.peers:
+            workflow_id = self.peer_workflow(repo, workflow)
+            if workflow_id is not None:
+                admitted.append((repo, workflow_id, self.OUTSIDE_REFRESH))
+        repos = [self.repo] + [repo for repo, _ in self.peers]
+
+        lock_times: dict = {}
+        priority: set = set()
+        for repo in repos:
+            lock_times.update(self.locks(repo))
+            priority |= self.labelled(PRIORITY_LABEL, repo)
+        snap = Snapshot(priority=priority, locked=set(lock_times), lock_times=lock_times)
         special = snap.priority | snap.locked
-        for run in runs:
-            jobs = self.run_jobs(run)
-            admit = next((j for j in jobs if is_admit(j)), None)
-            if admit is None:
-                continue  # still planning: not asking for anything yet
-            declared = parse_reservation(admit["name"])
-            if declared is None:
-                continue
-            pr = self.verified_pr(admit["name"], run, special)
-            if admit["status"] != "completed":
-                snap.waiters.append(Waiter(run["id"], (admit["created_at"], admit["id"]),
-                                           need_of(declared), admit["status"] == "in_progress", pr))
-            elif admit["conclusion"] == "success":
-                since = seconds_since(admit.get("completed_at"))
-                snap.holding.append(Holding(need_of(held(declared, jobs, since)), pr, stalled_for(jobs)))
+
+        live: set[int] = set()
+        for repo, workflow_id, stale_ok in admitted:
+            runs = self.list_runs(f"/repos/{repo}/actions/workflows/{workflow_id}/runs?status=in_progress", stale_ok)
+            for run in runs:
+                live.add(run["id"])
+                jobs = self.run_jobs(run, repo, stale_ok)
+                admit = next((j for j in jobs if is_admit(j)), None)
+                if admit is None:
+                    if repo != self.repo and self.outside:
+                        # A peer's run without admission (its CI before adopting it): seen as is.
+                        snap.holding.append(Holding(outside_need(jobs)))
+                    continue  # still planning: not asking for anything yet
+                declared = parse_reservation(admit["name"])
+                if declared is None:
+                    continue
+                pr = self.verified_pr(admit["name"], run, special, repo)
+                if admit["status"] != "completed":
+                    snap.waiters.append(Waiter(run["id"], (admit["created_at"], admit["id"]),
+                                               need_of(declared), admit["status"] == "in_progress", pr))
+                elif admit["conclusion"] == "success":
+                    since = seconds_since(admit.get("completed_at"))
+                    snap.holding.append(Holding(need_of(held(declared, jobs, since)), pr, stalled_for(jobs)))
+
+        if self.outside:
+            mine = {(repo, workflow_id) for repo, workflow_id, _ in admitted}
+            for repo in repos:
+                stale_ok = 0.0 if repo == self.repo else self.OUTSIDE_REFRESH
+                for status in ("queued", "in_progress"):
+                    for run in self.list_runs(f"/repos/{repo}/actions/runs?status={status}", stale_ok):
+                        if (repo, run.get("workflow_id")) in mine or run["id"] in live:
+                            continue
+                        live.add(run["id"])
+                        need = outside_need(self.run_jobs(run, repo, max(stale_ok, 60.0)))
+                        if need["total"]:
+                            snap.holding.append(Holding(need))
+        self.jobs = {k: v for k, v in self.jobs.items() if k in live}
         return snap
 
-    def labelled(self, label: str) -> set[int]:
-        """Open pull requests carrying `label`."""
-        found: set[int] = set()
+    def labelled(self, label: str, repo: str | None = None) -> set:
+        """Open pull requests carrying `label` (keys: `key`)."""
+        repo = repo or self.repo
+        found: set = set()
         page = 1
         while True:
-            issues = self.api.get(f"/repos/{self.repo}/issues?state=open&labels={quote(label)}"
+            issues = self.api.get(f"/repos/{repo}/issues?state=open&labels={quote(label)}"
                                   f"&per_page=100&page={page}")
-            found |= {i["number"] for i in issues if "pull_request" in i}
+            found |= {self.key(repo, i["number"]) for i in issues if "pull_request" in i}
             if len(issues) < 100:
                 return found
             page += 1
 
-    def locks(self) -> dict[int, str]:
+    def locks(self, repo: str | None = None) -> dict:
         """Pull requests labelled ci:lock less than LOCK_HOURS ago, and when."""
+        repo = repo or self.repo
         hours = float(os.environ.get("CI_LOCK_HOURS") or LOCK_HOURS)
-        locked: dict[int, str] = {}
-        for number in self.labelled(LOCK_LABEL):
+        locked: dict = {}
+        for key in self.labelled(LOCK_LABEL, repo):
+            number = key if isinstance(key, int) else int(str(key).rsplit("#", 1)[1])
             added = None
             page = 1
             while True:
-                events = self.api.get(f"/repos/{self.repo}/issues/{number}/events?per_page=100&page={page}")
+                events = self.api.get(f"/repos/{repo}/issues/{number}/events?per_page=100&page={page}")
                 for event in events:
                     if event.get("event") == "labeled" and event.get("label", {}).get("name") == LOCK_LABEL:
                         added = event["created_at"]
@@ -477,17 +574,21 @@ class Scheduler:
                     break
                 page += 1
             if added and seconds_since(added) < hours * 3600:
-                locked[number] = added
+                locked[key] = added
         return locked
 
-    def verified_pr(self, admit_name: str, run: dict, special: set[int]) -> int | None:
+    def verified_pr(self, admit_name: str, run: dict, special: set, repo: str | None = None):
         """The pull request a run claims, if it matters and the run is really its head."""
+        repo = repo or self.repo
         match = PR_CLAIM.search(admit_name)
-        if not match or int(match.group(1)) not in special or run.get("event") != "pull_request":
+        if not match or run.get("event") != "pull_request":
             return None
         number = int(match.group(1))
-        pull = self.api.get(f"/repos/{self.repo}/pulls/{number}")
-        return number if pull.get("head", {}).get("sha") == run.get("head_sha") else None
+        key = self.key(repo, number)
+        if key not in special:
+            return None
+        pull = self.api.get(f"/repos/{repo}/pulls/{number}")
+        return key if pull.get("head", {}).get("sha") == run.get("head_sha") else None
 
 
 def superseded(api: "Api", repo: str) -> bool:
@@ -559,9 +660,14 @@ def main() -> int:
     except (OSError, RateLimited, KeyError, ValueError) as error:
         print(f"::warning::admission unavailable ({error}); starting at once")
         return 0
-    scheduler = Scheduler(api, repo, workflow_id)
+    # The organization's other repositories with admitted CI on the same runners
+    # (zeronsh/zgx), and every run admission doesn't schedule: seen as holding what
+    # they run and queue.
+    peers = parse_peers(os.environ.get("CI_PEERS", ""))
+    scheduler = Scheduler(api, repo, workflow_id, peers=peers,
+                          outside=os.environ.get("CI_SEE_OUTSIDE", "on").lower() not in ("off", "false", "0"))
 
-    print(f"Reservation {mine}; budget {budget}")
+    print(f"Reservation {mine}; budget {budget}; peers {[p for p, _ in peers] or '-'}")
     failures = 0
     last = None
     admissible_since: dict[int, float] = {}  # mark_unresponsive's memory

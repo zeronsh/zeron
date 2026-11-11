@@ -122,6 +122,11 @@ jobs:
           CI_ADMISSION: ${{ vars.CI_ADMISSION }}
           CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
           CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          # The organization's other repositories with CI on the same runners: one queue, one
+          # budget. (Read with this token: they're public. Their other workflows, and this
+          # one's, count as holding what they run; CI_SEE_OUTSIDE=off ignores them.)
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml' }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
           # The pull request's head as this run tests it: a newer push supersedes the run.
           CI_PR: ${{ needs.plan.outputs.pr }}
           CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
