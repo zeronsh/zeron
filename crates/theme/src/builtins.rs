@@ -29,10 +29,14 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
                 vec![tokyo_light(), tokyo_dark()],
             ),
             family("dracula", "Dracula", vec![dracula()]),
-            family("github", "GitHub", vec![github_light(), github_dark()]),
+            family(
+                "github",
+                "GitHub",
+                vec![github_light(), github_dark(), github_darker()],
+            ),
             family("vercel", "Vercel", vec![vercel_light(), vercel_dark()]),
             family("claude", "Claude", vec![claude_light(), claude_dark()]),
-            family("spotify", "Spotify", vec![spotify_dark()]),
+            family("spotify", "Spotify", vec![spotify_light(), spotify_dark()]),
             family("linear", "Linear", vec![linear_light(), linear_dark()]),
             family("ayu", "Ayu", vec![ayu_light(), ayu_dark(), ayu_mirage()]),
             family("gruvbox", "Gruvbox", vec![gruvbox_light(), gruvbox_dark()]),
@@ -608,6 +612,43 @@ fn github_dark() -> ThemeVariant {
         name: "GitHub Dark",
         appearance: Appearance::Dark,
         treatment: SurfaceTreatment::Opaque,
+        background: "#0d1117",
+        shell: "#010409",
+        raised: "#21262d",
+        card: "#161b22",
+        text: "#e6edf3",
+        muted: "#8b949e",
+        faint: "#6e7681",
+        accent: "#2f81f7",
+        danger: "#f85149",
+        warning: "#d29922",
+        success: "#3fb950",
+        terminal_background: "#0d1117",
+        ansi: [
+            "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
+            "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#f0f6fc",
+        ],
+        syntax: [
+            "#8b949e", "#ff7b72", "#a5d6ff", "#79c0ff", "#ffa657", "#d2a8ff", "#7ee787", "#e6edf3",
+            "#b1bac4", "#7ee787", "#ffa657", "#f85149",
+        ],
+        source: source(
+            "github-dark",
+            "vscode",
+            "https://github.com/primer/github-vscode-theme",
+            "cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf",
+            "MIT",
+        ),
+    })
+}
+
+fn github_darker() -> ThemeVariant {
+    variant(Seeds {
+        id: "github-darker",
+        family_id: "github",
+        name: "GitHub Darker",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
         background: "#010409",
         shell: "#000204",
         raised: "#161b22",
@@ -629,8 +670,8 @@ fn github_dark() -> ThemeVariant {
             "#b1bac4", "#7ee787", "#ffa657", "#f85149",
         ],
         source: source(
-            "github-dark",
-            "vscode",
+            "github-darker",
+            "native",
             "https://github.com/primer/github-vscode-theme",
             "cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf",
             "MIT",
@@ -772,6 +813,40 @@ fn claude_dark() -> ThemeVariant {
             "native",
             "https://tweakcn.com/themes/cmdght103000n04lh3e2ae93r",
             "cmdght103000n04lh3e2ae93r@2025-07-27T22:39:29.615Z",
+            "MIT",
+        ),
+    })
+}
+
+fn spotify_light() -> ThemeVariant {
+    variant(Seeds {
+        id: "spotify-light",
+        family_id: "spotify",
+        name: "Spotify Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#ffffff",
+        shell: "#f7f8f7",
+        raised: "#edf0ed",
+        card: "#ffffff",
+        text: "#191919",
+        muted: "#5e665f",
+        faint: "#747c75",
+        accent: "#087f3e",
+        danger: "#b42336",
+        warning: "#8a6100",
+        success: "#087f3e",
+        terminal_background: "#ffffff",
+        ansi: ANSI_LIGHT,
+        syntax: [
+            "#6f7770", "#7c4aa8", "#087f3e", "#925d00", "#08766a", "#1d64a8", "#087f3e", "#191919",
+            "#5e665f", "#087f3e", "#925d00", "#b42336",
+        ],
+        source: source(
+            "spotify-light",
+            "native",
+            "https://developer.spotify.com/documentation/design",
+            "zeron-curation-v1",
             "MIT",
         ),
     })
@@ -1596,10 +1671,12 @@ mod tests {
     fn adapted_palettes_keep_shared_content_readable_in_interaction_states() {
         for variant in [
             github_dark(),
+            github_darker(),
             vercel_light(),
             vercel_dark(),
             claude_light(),
             claude_dark(),
+            spotify_light(),
             spotify_dark(),
             linear_light(),
             linear_dark(),
@@ -1651,8 +1728,30 @@ mod tests {
     }
 
     #[test]
-    fn github_dark_keeps_near_black_surfaces_with_distinct_elevation() {
-        let variant = github_dark();
+    fn github_darker_is_additive_and_preserves_the_original_dark_palette() {
+        let registry = builtin_registry();
+        let light = registry.variant("github-light").unwrap();
+        let dark = registry.variant("github-dark").unwrap();
+        let darker = registry.variant("github-darker").unwrap();
+
+        assert_eq!(light.name, "GitHub Light");
+        assert_eq!(light.colors.background, Color::WHITE);
+        assert_eq!(dark.name, "GitHub Dark");
+        assert_eq!(dark.colors.background, c("#0d1117"));
+        assert_eq!(dark.colors.shell, c("#010409"));
+        assert_eq!(dark.colors.raised, c("#21262d"));
+        assert_eq!(dark.colors.card, c("#161b22"));
+        assert_eq!(dark.terminal.background, c("#0d1117"));
+        assert_eq!(darker.name, "GitHub Darker");
+        assert_eq!(darker.family_id, dark.family_id);
+        assert_ne!(darker.colors.background, dark.colors.background);
+        assert_eq!(darker.syntax, dark.syntax);
+        assert_eq!(darker.terminal.ansi, dark.terminal.ansi);
+    }
+
+    #[test]
+    fn github_darker_keeps_near_black_surfaces_with_distinct_elevation() {
+        let variant = github_darker();
         let colors = &variant.colors;
         assert!(Color::WHITE.contrast(colors.background) >= 20.0);
         assert!(colors.background.contrast(colors.shell) < 1.1);

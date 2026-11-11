@@ -830,7 +830,7 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 37);
-        assert_eq!(variants * VisualFixture::ALL.len(), 370);
+        assert_eq!(variants, 39);
+        assert_eq!(variants * VisualFixture::ALL.len(), 390);
     }
 }

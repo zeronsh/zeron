@@ -41,17 +41,17 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 `BackdropBlur` implementation; native window Acrylic remains independent.
 The preference remains portable even where a particular surface cannot honor blur.
 
-The built-in registry contains 37 variants across 23 families:
+The built-in registry contains 39 variants across 23 families:
 
 - Zeron Light and Dark
 - VS Code Light+ and Dark+
 - Catppuccin Latte and Mocha
 - Tokyo Night Light and Tokyo Night
 - Dracula
-- GitHub Light and Dark (deepened near-black surfaces)
+- GitHub Light, Dark, and Darker
 - Vercel Light and Dark
 - Claude Light and Dark
-- Spotify Dark
+- Spotify Light and Dark
 - Linear Light and Dark
 - Ayu Light, Dark, and Mirage
 - Gruvbox Light and Dark
@@ -72,6 +72,9 @@ hash of the resolved curated definition. VS Code-derived palettes pin an exact
 upstream revision. The native Vercel, Spotify, and Linear palettes are Zeron-authored
 brand-inspired adaptations, versioned as `zeron-curation-v1`; their MIT license
 covers the checked-in Zeron definitions, not the referenced brands or websites.
+GitHub Light and Dark retain their original palettes and ids. GitHub Darker is
+a separate native adaptation of the pinned GitHub palette with near-black
+surfaces; selecting it is optional and does not change existing selections.
 Claude's light and dark surface, text, and accent colors follow Luis Llanes's
 [Claude + reference](https://tweakcn.com/themes/cmdght103000n04lh3e2ae93r),
 pinned by its theme id and source update timestamp. Its syntax, terminal, and
