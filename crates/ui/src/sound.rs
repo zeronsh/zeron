@@ -3,8 +3,8 @@
 //!
 //! - embedded completion, input-request, attention and Appshot chimes, and
 //!   the start and end of a voice call;
-//! - macOS Appshots use a preloaded native player; other cues write to a
-//!   temp file and use the system player on a
+//! - macOS Appshots use a sound registered once with the System Sound
+//!   server; other cues write to a temp file and use the system player on a
 //!   background thread: the System Sound server (macOS, see
 //!   `macos_system_sound` for why not `afplay`), PowerShell
 //!   `Media.SoundPlayer` (Windows), first of
@@ -70,113 +70,111 @@ pub fn play_appshot() {
         return;
     }
     #[cfg(target_os = "macos")]
-    if macos_appshot::play() {
+    if let Some(appshot) = macos_appshot::sound() {
+        appshot.play();
         return;
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     play_in_background(SOUND_APPSHOT);
 }
 
-/// Load the macOS capture cue before the first capture, without playing it.
+/// Register the macOS capture cue before the first capture, without playing
+/// it, so the first capture sounds as quickly as the rest.
 pub fn prepare_appshot() {
     #[cfg(target_os = "macos")]
     if std::env::var_os(DISABLE_ENV).is_none() {
-        macos_appshot::sender();
+        let _ = std::thread::Builder::new()
+            .name("appshot-audio".into())
+            .spawn(|| {
+                macos_appshot::sound();
+            });
     }
 }
 
+/// The Appshot cue, registered with the System Sound server once and played
+/// from there on every capture (see `macos_system_sound` for why not in-app:
+/// an AVAudioPlayer takes the CoreAudio assertion in our coalition).
 #[cfg(target_os = "macos")]
 mod macos_appshot {
-    use objc::rc::{StrongPtr, autoreleasepool};
-    use objc::runtime::Object;
-    use objc::{class, msg_send, sel, sel_impl};
-    use std::sync::{OnceLock, mpsc};
+    use super::macos_system_sound::{self, SystemSound};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
 
-    #[link(name = "AVFoundation", kind = "framework")]
-    unsafe extern "C" {}
+    pub(super) struct Appshot {
+        sound: SystemSound,
+        path: PathBuf,
+    }
 
-    // Keep native objects on one worker. A bounded mailbox avoids a backlog of
-    // stale confirmations when captures arrive in a burst.
-    pub(super) fn sender() -> Option<&'static mpsc::SyncSender<()>> {
-        static SENDER: OnceLock<Option<mpsc::SyncSender<()>>> = OnceLock::new();
-        SENDER
-            .get_or_init(|| {
-                let (tx, rx) = mpsc::sync_channel(1);
-                std::thread::Builder::new()
-                    .name("appshot-audio".into())
-                    .spawn(move || {
-                        let player = autoreleasepool(load);
-                        while rx.recv().is_ok() {
-                            if std::env::var_os(super::DISABLE_ENV).is_some() {
-                                continue;
-                            }
-                            let started = std::time::Instant::now();
-                            let played = player.as_ref().is_some_and(|player| {
-                                autoreleasepool(|| unsafe {
-                                    // Pause preserves prepared audio resources; stop would discard them.
-                                    let _: () = msg_send![**player, pause];
-                                    let _: () = msg_send![**player, setCurrentTime: 0.0_f64];
-                                    let played: bool = msg_send![**player, play];
-                                    played
-                                })
-                            });
-                            tracing::debug!(
-                                elapsed_ms = started.elapsed().as_millis(),
-                                played,
-                                "Appshot native playback requested"
-                            );
-                            if !played {
-                                super::play_in_background(super::SOUND_APPSHOT);
-                            }
-                        }
-                    })
-                    .ok()
-                    .map(|_| tx)
+    /// The registered cue, registered on first use; `None` if the server
+    /// refused it, and then each capture uses the system player instead.
+    pub(super) fn sound() -> Option<&'static Appshot> {
+        static SOUND: OnceLock<Option<Appshot>> = OnceLock::new();
+        SOUND
+            .get_or_init(|| match register() {
+                Ok(appshot) => Some(appshot),
+                Err(err) => {
+                    tracing::warn!(error = %err, "Could not register the Appshot sound; using system player");
+                    None
+                }
             })
             .as_ref()
     }
 
-    fn load() -> Option<StrongPtr> {
-        let player = decode()?;
-        let ready: bool = unsafe { msg_send![*player, prepareToPlay] };
-        if !ready {
-            tracing::warn!("Could not prepare native Appshot audio; using system player");
-            return None;
-        }
-        Some(player)
+    /// The server reads the file when the sound plays, not only when it is
+    /// registered, so the file stays for as long as the app runs: one per
+    /// user, rewritten at launch, never one per launch.
+    fn register() -> Result<Appshot, String> {
+        let path = std::env::temp_dir().join("zeron-appshot.wav");
+        write(&path)?;
+        let sound = macos_system_sound::register(&path)?;
+        Ok(Appshot { sound, path })
     }
 
-    fn decode() -> Option<StrongPtr> {
-        unsafe {
-            let data: *mut Object = msg_send![class!(NSData),
-                dataWithBytes: super::SOUND_APPSHOT.as_ptr()
-                length: super::SOUND_APPSHOT.len()];
-            let allocated: *mut Object = msg_send![class!(AVAudioPlayer), alloc];
-            let mut error: *mut Object = std::ptr::null_mut();
-            let player: *mut Object = msg_send![allocated, initWithData: data error: &mut error];
-            if player.is_null() {
-                tracing::warn!("Could not decode native Appshot audio; using system player");
-                return None;
+    /// The cue's bytes at `path`, through an exclusive file of its own moved
+    /// over it, so a planted file or a second app's copy is replaced whole.
+    fn write(path: &Path) -> Result<(), String> {
+        let (mut file, tmp) = super::create_temp_file().map_err(|e| e.to_string())?;
+        file.write_all(super::SOUND_APPSHOT).map_err(|e| e.to_string())?;
+        drop(file);
+        std::fs::rename(&tmp.path, path).map_err(|e| e.to_string())
+    }
+
+    impl Appshot {
+        /// Starts the cue and returns at once.
+        pub(super) fn play(&self) {
+            // The system cleans its temp folder now and then; a long-running
+            // app writes the file back rather than playing nothing.
+            if !self.path.exists()
+                && let Err(err) = write(&self.path)
+            {
+                tracing::debug!(error = %err, "could not restore the Appshot sound file");
             }
-            Some(StrongPtr::new(player))
+            let started = std::time::Instant::now();
+            self.sound.play();
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis(),
+                "Appshot system sound requested"
+            );
         }
     }
 
     #[test]
-    fn embedded_appshot_decodes_natively_without_playback() {
-        autoreleasepool(|| {
-            let player = decode().expect("embedded Appshot should decode in AVAudioPlayer");
-            let duration: f64 = unsafe { msg_send![*player, duration] };
-            let playing: bool = unsafe { msg_send![*player, isPlaying] };
-            assert!((duration - 0.67).abs() < 0.001);
-            assert!(!playing);
-        });
+    fn appshot_registers_with_the_system_sound_server_without_playback() {
+        let appshot = register().expect("the Appshot sound should register");
+        assert!(appshot.path.exists());
     }
 
-    pub(super) fn play() -> bool {
-        match sender().map(|tx| tx.try_send(())) {
-            Some(Ok(()) | Err(mpsc::TrySendError::Full(()))) => true,
-            _ => false,
+    // Sounds the cue twice from one registration, for checking by hand who
+    // holds the audio assertion: `log stream --process runningboardd`
+    // should name systemsoundserverd, not this process.
+    #[test]
+    #[ignore = "plays a sound"]
+    fn appshot_plays_twice_from_one_registration() {
+        let appshot = sound().expect("the Appshot sound should register");
+        for _ in 0..2 {
+            appshot.play();
+            std::thread::sleep(std::time::Duration::from_millis(900));
         }
     }
 }
@@ -279,6 +277,7 @@ mod macos_system_sound {
             id: SystemSoundId,
             completion: &block2::Block<dyn Fn()>,
         );
+        fn AudioServicesPlaySystemSound(id: SystemSoundId);
     }
 
     pub(super) struct SystemSound(SystemSoundId);
@@ -288,6 +287,13 @@ mod macos_system_sound {
             unsafe {
                 AudioServicesDisposeSystemSoundID(self.0);
             }
+        }
+    }
+
+    impl SystemSound {
+        /// Starts the sound and returns at once.
+        pub(super) fn play(&self) {
+            unsafe { AudioServicesPlaySystemSound(self.0) };
         }
     }
 
