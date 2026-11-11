@@ -879,8 +879,8 @@ impl Chats {
         let me = self.clone();
         let rpc = rpc.clone();
         engine::get().spawn(async move {
-            if let Ok(answer) = rpc.call("LocalDevice", json!({})).await {
-                *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
+            if let Some(here) = engine::local_device(&rpc).await {
+                *me.here.borrow_mut() = Some(here);
             }
             // The composer's other device's, if it's on one: what an earlier
             // connection was asking is gone with it.
