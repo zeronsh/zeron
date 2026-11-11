@@ -86,6 +86,10 @@ fi
 # `zeron --version`, and a development build is staging's.
 [[ "$("$ZGX_BIN" --version)" == "zeron $BETA_VERSION" ]] ||
   die "$ZGX_BIN isn't the $BETA_VERSION beta (it says '$("$ZGX_BIN" --version)')"
+# Luau without its asserts (a fifth of script time): zgx-script compiles its
+# warning about them in only when they're on (cfg luau_asserts).
+! LC_ALL=C grep -aq "Luau was built with its asserts" "$ZGX_BIN" ||
+  die "$ZGX_BIN was built with Luau's asserts: LUAU_CXXFLAGS=-DNDEBUG (apps/zgx/.cargo/config.toml) didn't reach it"
 # Production's only: neither binary may carry staging's edge or sign-in.
 STAGING_MARKS='staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
 for bin in "$ZGX_BIN" "$ENGINE_BIN"; do
