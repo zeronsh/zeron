@@ -32,7 +32,7 @@ use zeron_doc::{
     CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
-    evaluate_command, join_continuation_entries,
+    evaluate_command,
 };
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
@@ -599,7 +599,8 @@ pub enum FinishQueueEditOutcome {
 /// when the watch coalesces several backfill and live commits.
 #[derive(Clone, Default)]
 pub struct TranscriptSnapshot {
-    pub entries: Arc<Vec<SessionMessageEntry>>,
+    /// Shared with the doc's entry cache: a commit copies none of them.
+    pub entries: Arc<Vec<Arc<SessionMessageEntry>>>,
     pub replay_baseline: Arc<zeron_doc::TranscriptBaseline>,
 }
 
@@ -1092,11 +1093,11 @@ impl ChatDocHandle {
     // Caller holds transcript_import, shared with attach and mirror clearing.
     fn publish_messages_locked(&self) {
         self.mirror_dirty.store(false, Ordering::Release);
-        match self.doc.read_entries() {
+        match self.doc.read_entries_shared() {
             Ok(entries) => {
                 let replay_baseline =
                     lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
-                let joined = join_continuation_entries(entries);
+                let joined = zeron_doc::join_continuation_shared(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
                 // late subscriber's first borrow sees the current transcript.
                 self.messages_tx.send_replace(TranscriptSnapshot {
@@ -6804,6 +6805,69 @@ mod transfer_progress_tests {
             },
         );
         (dir, host)
+    }
+
+    /// A commit in a long, watched chat (a reply streaming in a whale)
+    /// publishes for the entry it changed, not by reading every entry
+    /// again: V3 Release (7,900 entries, 49 MB) paid ~200 ms a commit, more
+    /// than the 120 ms tick, and sends waited behind it.
+    #[tokio::test]
+    async fn a_commit_in_a_watched_whale_costs_what_it_changed() {
+        let (_dir, host) = host();
+        let source = zeron_doc::SessionDoc::init("watched-whale").unwrap();
+        for i in 0..3000 {
+            source
+                .push_message(&zeron_doc::SessionMessageEntry {
+                    id: format!("row-{i}"),
+                    role: zeron_doc::MessageRole::User,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "text".into(),
+                        text: "x".repeat(2048),
+                    }],
+                    created_at: i,
+                    device_id: "remote".into(),
+                    status: None,
+                    continuation_of: None,
+                    duration_ms: None,
+                })
+                .unwrap();
+        }
+        host.inner
+            .store
+            .save_snapshot_with_cursor("watched-whale", &source.export_snapshot().unwrap(), 0, 2)
+            .unwrap();
+        drop(source);
+        let handle = host.open("watched-whale").unwrap();
+        let start = std::time::Instant::now();
+        let rx = handle.watch_messages();
+        let attach = start.elapsed();
+        assert_eq!(rx.borrow().entries.len(), 3000);
+
+        let mut writer = zeron_doc::SegmentWriter::begin(handle.doc(), "reply", "dev-test", 1).unwrap();
+        let mut commits = std::time::Duration::ZERO;
+        for n in 1..=5 {
+            let words = "streamed ".repeat(n);
+            writer
+                .sync(&[zeron_doc::MessagePart::Text { id: "t".into(), text: words.clone() }])
+                .unwrap();
+            let start = std::time::Instant::now();
+            handle.publish_messages_if_watched();
+            commits += start.elapsed();
+            let published = rx.borrow().entries.clone();
+            assert_eq!(published.len(), 3001);
+            assert_eq!(
+                published.last().unwrap().parts,
+                vec![zeron_doc::MessagePart::Text { id: "t".into(), text: words }],
+            );
+        }
+        let commit = commits / 5;
+        eprintln!("watched whale: attach {attach:?}, a commit {commit:?}");
+        assert!(
+            commit * 5 < attach,
+            "a commit ({commit:?}) should cost far less than reading the whole chat ({attach:?})"
+        );
+        let published: Vec<_> = rx.borrow().entries.iter().map(|e| (**e).clone()).collect();
+        assert_eq!(handle.doc().read_entries_whole().unwrap(), published);
     }
 
     #[tokio::test]

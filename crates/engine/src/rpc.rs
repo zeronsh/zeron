@@ -2788,7 +2788,8 @@ async fn windowed_doc_messages_stream(
         (rx, doc, window, None, None, None),
         |(mut rx, doc, window, mut prev, mut prev_info, mut prev_usage)| async move {
             loop {
-                let prev_slice: Option<&Vec<zeron_doc::SessionMessageEntry>> = prev.as_ref();
+                let prev_slice: Option<&Vec<std::sync::Arc<zeron_doc::SessionMessageEntry>>> =
+                    prev.as_ref();
                 if prev_slice.is_some() {
                     rx.changed().await.ok()?;
                 }

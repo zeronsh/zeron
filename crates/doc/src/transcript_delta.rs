@@ -10,6 +10,7 @@
 //! that must not diverge per surface live in one place).
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use crate::parts::MessagePart;
@@ -55,11 +56,12 @@ impl TranscriptBaseline {
         })
     }
 
-    pub fn capture(entries: &[SessionMessageEntry]) -> Self {
+    pub fn capture<E: Borrow<SessionMessageEntry>>(entries: &[E]) -> Self {
         Self {
             entries: entries
                 .iter()
-                .map(|entry| {
+                .map(Borrow::borrow)
+                .map(|entry: &SessionMessageEntry| {
                     let parts = entry
                         .parts
                         .iter()
@@ -154,15 +156,15 @@ impl TranscriptWindow {
         }
     }
 
-    pub fn apply<'a>(
+    pub fn apply<'a, E: Borrow<SessionMessageEntry>>(
         &self,
-        entries: &'a [SessionMessageEntry],
-    ) -> (&'a [SessionMessageEntry], TranscriptWindowInfo) {
+        entries: &'a [E],
+    ) -> (&'a [E], TranscriptWindowInfo) {
         let total = entries.len();
         let floor = self.after.as_ref().map_or(0, |id| {
             entries
                 .iter()
-                .rposition(|e| &e.id == id)
+                .rposition(|e| &e.borrow().id == id)
                 .map_or(total, |at| at + 1)
         });
         let end = total.saturating_sub(self.offset).max(floor);
@@ -178,9 +180,9 @@ impl TranscriptWindow {
     }
 }
 
-fn pending_input(entries: &[SessionMessageEntry]) -> Option<PendingInput> {
+fn pending_input<E: Borrow<SessionMessageEntry>>(entries: &[E]) -> Option<PendingInput> {
     entries.iter().rev().find_map(|entry| {
-        entry.parts.iter().rev().find_map(|part| match part {
+        entry.borrow().parts.iter().rev().find_map(|part| match part {
             MessagePart::Input {
                 request_id,
                 questions,
@@ -264,9 +266,9 @@ pub struct TextAppend {
 }
 
 impl TranscriptFrame {
-    pub fn reset(entries: &[SessionMessageEntry]) -> Self {
+    pub fn reset<E: Borrow<SessionMessageEntry>>(entries: &[E]) -> Self {
         Self::Reset {
-            reset: entries.to_vec(),
+            reset: entries.iter().map(|e| e.borrow().clone()).collect(),
         }
     }
 
@@ -356,24 +358,23 @@ fn try_part_patches(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> O
 /// new, its content changed, or its predecessor changed (a Loro list merge can
 /// interleave a remote entry mid-list). Falls back to `Reset` when the delta
 /// would carry most of the transcript anyway.
-pub fn diff_transcript(
-    prev: &[SessionMessageEntry],
-    next: &[SessionMessageEntry],
-) -> TranscriptFrame {
+pub fn diff_transcript<E: Borrow<SessionMessageEntry>>(prev: &[E], next: &[E]) -> TranscriptFrame {
     diff_transcript_with(prev, next, DiffOptions::default())
 }
 
 /// `diff_transcript`, with what the consumer takes beyond the original
 /// frames (`options`).
-pub fn diff_transcript_with(
-    prev: &[SessionMessageEntry],
-    next: &[SessionMessageEntry],
+pub fn diff_transcript_with<E: Borrow<SessionMessageEntry>>(
+    prev: &[E],
+    next: &[E],
     options: DiffOptions,
 ) -> TranscriptFrame {
+    let prev: Vec<&SessionMessageEntry> = prev.iter().map(Borrow::borrow).collect();
+    let next: Vec<&SessionMessageEntry> = next.iter().map(Borrow::borrow).collect();
     let prev_by_id: std::collections::HashMap<&str, (usize, &SessionMessageEntry)> = prev
         .iter()
         .enumerate()
-        .map(|(i, e)| (e.id.as_str(), (i, e)))
+        .map(|(i, e)| (e.id.as_str(), (i, *e)))
         .collect();
     let next_ids: std::collections::HashSet<&str> = next.iter().map(|e| e.id.as_str()).collect();
 
@@ -386,12 +387,14 @@ pub fn diff_transcript_with(
     let mut upsert = Vec::new();
     let mut append = Vec::new();
     let mut parts = Vec::new();
-    for (i, entry) in next.iter().enumerate() {
+    for (i, entry) in next.iter().copied().enumerate() {
         let after = i.checked_sub(1).map(|p| next[p].id.as_str());
         match prev_by_id.get(entry.id.as_str()) {
             Some((prev_ix, prev_entry)) => {
                 let prev_after = prev_ix.checked_sub(1).map(|p| prev[p].id.as_str());
-                if *prev_entry == entry && prev_after == after {
+                // (The same shared entry is the same without looking.)
+                let same = std::ptr::eq(*prev_entry, entry) || *prev_entry == entry;
+                if same && prev_after == after {
                     continue;
                 }
                 if prev_after == after
@@ -421,7 +424,7 @@ pub fn diff_transcript_with(
 
     // A delta touching most rows serializes like a reset but applies slower.
     if upsert.len() * 2 >= next.len().max(1) && next.len() > 4 {
-        return TranscriptFrame::reset(next);
+        return TranscriptFrame::reset(&next);
     }
     TranscriptFrame::Delta {
         upsert,
@@ -430,6 +433,103 @@ pub fn diff_transcript_with(
         parts,
         count: next.len(),
     }
+}
+
+/// A digest of an entry as JSON, the same in every process and build (the
+/// app keeps one for each entry it holds): FNV-1a over the value, an
+/// object's fields in key order. Two equal values always agree; a different
+/// one almost never does.
+pub fn entry_sum(json: &serde_json::Value) -> u64 {
+    struct Fnv(u64);
+    impl Fnv {
+        fn bytes(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        fn len(&mut self, len: usize) {
+            self.bytes(&(len as u64).to_le_bytes());
+        }
+    }
+    fn feed(json: &serde_json::Value, h: &mut Fnv) {
+        use serde_json::Value;
+        match json {
+            Value::Null => h.bytes(&[0]),
+            Value::Bool(b) => h.bytes(&[1, u8::from(*b)]),
+            Value::Number(n) => {
+                let n = n.to_string();
+                h.bytes(&[2]);
+                h.len(n.len());
+                h.bytes(n.as_bytes());
+            }
+            Value::String(s) => {
+                h.bytes(&[3]);
+                h.len(s.len());
+                h.bytes(s.as_bytes());
+            }
+            Value::Array(items) => {
+                h.bytes(&[4]);
+                h.len(items.len());
+                items.iter().for_each(|item| feed(item, h));
+            }
+            Value::Object(fields) => {
+                h.bytes(&[5]);
+                h.len(fields.len());
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                for key in keys {
+                    h.len(key.len());
+                    h.bytes(key.as_bytes());
+                    feed(&fields[key], h);
+                }
+            }
+        }
+    }
+    let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+    feed(json, &mut h);
+    h.0
+}
+
+/// [`entry_sum`] of an entry as it's sent.
+pub fn entry_sum_of(entry: &SessionMessageEntry) -> u64 {
+    serde_json::to_value(entry).map_or(0, |json| entry_sum(&json))
+}
+
+/// What a reader holding `known` (each entry's id and [`entry_sum`], in
+/// order) needs to have `next`: a delta of the entries that differ (or
+/// moved), not the transcript. A reset when that's most of it.
+pub fn delta_from_known<E: Borrow<SessionMessageEntry>>(
+    known: &[(String, u64)],
+    next: &[E],
+) -> TranscriptFrame {
+    let next: Vec<&SessionMessageEntry> = next.iter().map(Borrow::borrow).collect();
+    let known_at: HashMap<&str, (usize, u64)> = known
+        .iter()
+        .enumerate()
+        .map(|(i, (id, sum))| (id.as_str(), (i, *sum)))
+        .collect();
+    let next_ids: std::collections::HashSet<&str> = next.iter().map(|e| e.id.as_str()).collect();
+    let remove: Vec<String> = known
+        .iter()
+        .filter(|(id, _)| !next_ids.contains(id.as_str()))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut upsert = Vec::new();
+    for (i, entry) in next.iter().copied().enumerate() {
+        let after = i.checked_sub(1).map(|p| next[p].id.as_str());
+        if let Some((at, sum)) = known_at.get(entry.id.as_str()) {
+            let known_after = at.checked_sub(1).map(|p| known[p].0.as_str());
+            if known_after == after && *sum == entry_sum_of(entry) {
+                continue;
+            }
+        }
+        upsert.push(TranscriptUpsert { after: after.map(str::to_string), entry: entry.clone() });
+    }
+    if upsert.len() * 2 >= next.len().max(1) && next.len() > 4 {
+        return TranscriptFrame::reset(&next);
+    }
+    TranscriptFrame::Delta { upsert, append: Vec::new(), remove, parts: Vec::new(), count: next.len() }
 }
 
 /// A frame that could not be applied cleanly — the consumer's copy has
@@ -572,6 +672,58 @@ mod tests {
         let mut current = prev.to_vec();
         apply_transcript_frame(&mut current, frame).unwrap();
         assert_eq!(&current, next);
+    }
+
+    /// A reader that kept a transcript (as the JSON it was sent) and says
+    /// what it holds gets only what changed, and lands on the transcript.
+    #[test]
+    fn a_reader_with_a_kept_copy_gets_what_changed() {
+        let was: Vec<_> = (0..40).map(|i| entry(&format!("e{i}"), &format!("words {i}"))).collect();
+        // As the reader holds it: the wire's JSON, its sums of that.
+        let sent = serde_json::to_value(TranscriptFrame::reset(&was)).unwrap();
+        let known: Vec<(String, u64)> = sent["reset"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["id"].as_str().unwrap().to_owned(), entry_sum(e)))
+            .collect();
+        let mut now = was.clone();
+        now[3] = entry("e3", "words 3, edited");
+        now.remove(10);
+        now.insert(20, entry("new-mid", "landed between"));
+        now.push(entry("new-end", "the newest"));
+        let frame = delta_from_known(&known, &now);
+        let TranscriptFrame::Delta { upsert, remove, .. } = &frame else {
+            panic!("expected a delta, got a reset");
+        };
+        let ids: Vec<&str> = upsert.iter().map(|u| u.entry.id.as_str()).collect();
+        // (e11 is upserted: its predecessor changed.)
+        assert_eq!(ids, ["e3", "e11", "new-mid", "e21", "new-end"]);
+        assert_eq!(remove, &["e10".to_owned()]);
+        let frame: TranscriptFrame =
+            serde_json::from_value(serde_json::to_value(&frame).unwrap()).unwrap();
+        let mut current = was.clone();
+        apply_transcript_frame(&mut current, frame).unwrap();
+        assert_eq!(current, now);
+        // Nothing changed: an empty delta.
+        assert!(delta_from_known(&known, &was).is_empty_delta());
+        // Most of it unknown (another engine's sums): a reset, as before.
+        let strangers: Vec<_> = known.iter().map(|(id, _)| (id.clone(), 7)).collect();
+        assert!(matches!(delta_from_known(&strangers, &now), TranscriptFrame::Reset { .. }));
+    }
+
+    /// `entry_sum` of `{"id":"x","n":1.5,"p":[{"k":"t","v":null}]}`.
+    const PINNED_SUM: u64 = 0xec67_0b99_244f_a276;
+
+    #[test]
+    fn an_entry_sum_ignores_field_order() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"id":"x","n":1.5,"p":[{"k":"t","v":null}]}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"p":[{"v":null,"k":"t"}],"n":1.5,"id":"x"}"#).unwrap();
+        let c: serde_json::Value = serde_json::from_str(r#"{"p":[{"v":null,"k":"u"}],"n":1.5,"id":"x"}"#).unwrap();
+        assert_eq!(entry_sum(&a), entry_sum(&b));
+        assert_ne!(entry_sum(&a), entry_sum(&c));
+        // Pinned: the app (apps/zgx `sum_of`) computes the same.
+        assert_eq!(entry_sum(&a), PINNED_SUM);
     }
 
     #[test]
@@ -806,7 +958,7 @@ mod context_update_tests {
         assert_eq!(update.context_usage, None);
         assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
-            frame: TranscriptFrame::reset(&[]),
+            frame: TranscriptFrame::reset::<SessionMessageEntry>(&[]),
             replay_baseline: Some(TranscriptBaseline::default()),
             context_usage: Some(zeron_proto::ContextUsage {
                 tokens: Some(0),
