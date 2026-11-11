@@ -175,11 +175,11 @@ Results (Nov 11 2026, the same rig), mean absolute error of 255 per channel:
 
 Closer cuts (Nov 11, the same references, no new native windows):
 cat 0.07 (cat 0.03); machines 0.31 above Cloud's row (the reference
-predates Cloud's row losing its sub-line); visuals: its title, legend and
-value labels the same pixels as the verified card's (moved by whole
-points), the 340-wide plot from the same code; its native reference
-(`make-ui.py --card visuals` now lays the visual 340 wide,
-`compose-visuals.py` cuts it) is still to be taken on another machine.
+predates Cloud's row losing its sub-line); visuals 0.54 against a fresh native reference
+(m1, zeron/zgx, the visual 340 wide and alone in its reply:
+zeron/landing-native-refs cc1fe5679): the bars on the same device pixels,
+their edges within 0.15 of one in coverage; the rest text edges and the
+axis labels' face.
 
 Motion, against the real plugin in each card's fixture: every web frame is
 a step of the 120 Hz spring model; the app's layers sit on it in 21,987 of
