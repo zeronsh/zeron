@@ -167,29 +167,57 @@ const WHOLE_TAIL: usize = 32;
 /// A sum of a JSON value, the same for equal values (an object's keys are
 /// sorted: this workspace's serde_json has no `preserve_order`).
 fn sum_of(json: &Json) -> u64 {
-    use std::hash::{Hash, Hasher};
-    fn feed(json: &Json, hasher: &mut std::hash::DefaultHasher) {
+    // The engine's `entry_sum` (crates/doc/src/transcript_delta.rs), byte for
+    // byte: a reopen says what it holds by these, and the engine sends only
+    // the entries whose sums differ. FNV-1a, an object's fields in key order.
+    struct Fnv(u64);
+    impl Fnv {
+        fn bytes(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        fn len(&mut self, len: usize) {
+            self.bytes(&(len as u64).to_le_bytes());
+        }
+    }
+    fn feed(json: &Json, h: &mut Fnv) {
         match json {
-            Json::Null => 0u8.hash(hasher),
-            Json::Bool(b) => b.hash(hasher),
-            Json::Number(n) => n.to_string().hash(hasher),
-            Json::String(s) => s.hash(hasher),
+            Json::Null => h.bytes(&[0]),
+            Json::Bool(b) => h.bytes(&[1, u8::from(*b)]),
+            Json::Number(n) => {
+                let n = n.to_string();
+                h.bytes(&[2]);
+                h.len(n.len());
+                h.bytes(n.as_bytes());
+            }
+            Json::String(s) => {
+                h.bytes(&[3]);
+                h.len(s.len());
+                h.bytes(s.as_bytes());
+            }
             Json::Array(items) => {
-                items.len().hash(hasher);
-                items.iter().for_each(|item| feed(item, hasher));
+                h.bytes(&[4]);
+                h.len(items.len());
+                items.iter().for_each(|item| feed(item, h));
             }
             Json::Object(fields) => {
-                fields.len().hash(hasher);
-                for (key, value) in fields {
-                    key.hash(hasher);
-                    feed(value, hasher);
+                h.bytes(&[5]);
+                h.len(fields.len());
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                for key in keys {
+                    h.len(key.len());
+                    h.bytes(key.as_bytes());
+                    feed(&fields[key], h);
                 }
             }
         }
     }
-    let mut hasher = std::hash::DefaultHasher::new();
-    feed(json, &mut hasher);
-    hasher.finish()
+    let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+    feed(json, &mut h);
+    h.0
 }
 
 /// A settled entry's row as its row holds it out of view: what makes it,
@@ -622,6 +650,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     engine::get().on_connect(move |rpc| {
         if let Some(view) = weak.upgrade() {
             *view.rpc.borrow_mut() = Some(rpc.clone());
+            view.hold_rows();
             view.subscribe();
         }
     });
@@ -786,6 +815,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
     engine::get().on_connect(move |rpc| {
         if let Some(view) = weak.upgrade() {
             *view.rpc.borrow_mut() = Some(rpc.clone());
+            view.hold_rows();
             view.subscribe();
         }
     });
@@ -1674,9 +1704,18 @@ impl View {
         let weak = Rc::downgrade(self);
         // (`partPatches`: a long reply's changed parts alone, `apply`'s
         // `parts`; an engine that doesn't know it sends replies whole.)
+        let mut params = json!({ "chatId": id, "openingTail": true, "partPatches": true });
+        // Its rows kept (opened before): what it holds, each entry's id and
+        // sum, so the engine sends what changed since (a `since` frame), not
+        // the whole transcript. An engine that doesn't know it sends it whole.
+        if let Some(open) = self.open.borrow().as_ref().filter(|o| o.has_whole) {
+            params["known"] = Json::Array(
+                open.entries.iter().filter(|e| !e.id.is_empty()).map(|e| json!([&*e.id, e.sum()])).collect(),
+            );
+        }
         let transcript = rpc.watch(
             "WatchDocMessages",
-            json!({ "chatId": id, "openingTail": true, "partPatches": true }),
+            params,
             move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
@@ -1713,6 +1752,18 @@ impl View {
         }
     }
 
+    /// On a new connection: the rows this view has stay, as a chat opened
+    /// again with its kept rows (`has_whole`), and the engine is told what
+    /// they are (`known`) to send what changed since, not them all again.
+    fn hold_rows(&self) {
+        if let Some(open) = self.open.borrow_mut().as_mut()
+            && open.heard
+            && !open.entries.is_empty()
+        {
+            open.has_whole = true;
+        }
+    }
+
     /// Watches the open chat again from a reset (its copy went out of step).
     fn resubscribe(self: &Rc<Self>) {
         if let Some(open) = self.open.borrow_mut().as_mut() {
@@ -1744,6 +1795,13 @@ impl View {
             // came, a turn being written stood still, its words and calls
             // arriving all at once seconds later (a long chat's whole copy).
             let mut waiting = false;
+            if open.has_whole && frame["since"].as_bool() == Some(true) {
+                // What changed since the rows it kept: they're the whole copy.
+                open.has_whole = false;
+                if std::mem::take(&mut open.rebuild) {
+                    open.built.clear();
+                }
+            }
             if open.has_whole {
                 if frame.get("reset").is_none() {
                     waiting = true;
@@ -7171,6 +7229,60 @@ mod tests {
     /// call arriving, rather than standing still until the whole copy comes
     /// and all of it showing at once. The opening tail is taken into the
     /// rows it holds, the changes after it counted against the tail.
+    /// The app's entry sums are the engine's (`zeron_doc::entry_sum`): a
+    /// reopen says what it holds by them. Pinned in both crates.
+    #[test]
+    fn entry_sums_match_the_engines() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"id":"x","n":1.5,"p":[{"k":"t","v":null}]}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"p":[{"v":null,"k":"t"}],"n":1.5,"id":"x"}"#).unwrap();
+        assert_eq!(super::sum_of(&a), 0xec67_0b99_244f_a276);
+        assert_eq!(super::sum_of(&b), super::sum_of(&a));
+    }
+
+    /// Rows held (opened before, or a new connection): the engine's `since`
+    /// frame is what changed from them, and once applied they're the whole
+    /// copy; nothing is fetched whole.
+    #[test]
+    fn rows_held_take_what_changed_since() {
+        use super::{Entry, Open, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let text = |id: &str, words: &str| json!({ "id": format!("{id}p"), "kind": "text", "text": words });
+        let reply = |id: &str, words: &str| json!({ "id": id, "role": "assistant", "status": "complete", "parts": [text(id, words)], "createdAt": 1_762_000_000_000_i64 });
+        let held: Vec<Entry> = (0..50).map(|i| Entry::new(reply(&format!("a{i}"), "done"))).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
+        // What it holds, as it would tell the engine: ids and the engine's sums.
+        let known: Vec<(String, u64)> = view.open.borrow().as_ref().unwrap().entries.iter().map(|e| (e.id.to_string(), e.sum())).collect();
+        assert_eq!(known.len(), 50);
+        assert_eq!(known[7].1, super::sum_of(&reply("a7", "done")));
+        // The engine's answer: one entry new since.
+        view.heard_frame(json!({ "since": true, "upsert": [{ "after": "a49", "entry": reply("a50", "new since") }], "count": 51 }));
+        {
+            let open = view.open.borrow();
+            let open = open.as_ref().unwrap();
+            assert!(!open.has_whole, "the held rows and what changed are the whole copy");
+            assert_eq!(open.entries.len(), 51);
+        }
+        assert!(rows().contains("new since"), "{}", rows());
+        // A live change after it applies as ever.
+        view.heard_frame(json!({ "upsert": [{ "after": "a50", "entry": reply("a51", "live") }], "count": 52 }));
+        assert_eq!(view.open.borrow().as_ref().unwrap().entries.len(), 52);
+    }
+
     #[test]
     fn a_turn_being_written_goes_on_while_the_whole_copy_is_awaited() {
         use super::{Entry, Open, View, draft_value};

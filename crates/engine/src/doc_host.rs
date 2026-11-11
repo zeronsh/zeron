@@ -1087,7 +1087,7 @@ impl ChatDocHandle {
         Ok(())
     }
 
-    fn publish_messages(&self) {
+    pub(crate) fn publish_messages(&self) {
         let _import = lock(&self.transcript_import);
         self.publish_messages_locked();
     }
