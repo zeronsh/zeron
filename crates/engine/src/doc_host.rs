@@ -6763,6 +6763,16 @@ impl DocHost {
         &self.inner.store
     }
 
+    /// Before a restart into another version: no more snapshot deltas, every
+    /// open chat saved whole (deltas folded in), and the WAL in the file. An
+    /// older version ignores the deltas table, so whatever this leaves there
+    /// it would never see; after this there is nothing.
+    pub fn prepare_for_version_change(&self) {
+        self.inner.store.stop_snapshot_deltas();
+        self.flush_all();
+        self.checkpoint_store();
+    }
+
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
@@ -7249,6 +7259,56 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
 #[cfg(test)]
 mod publication_eviction_tests {
     use super::*;
+
+    /// A clean stop (flush_all: shutdown, Cloud sleep) and the step before a
+    /// restart into another version leave no snapshot deltas: an older
+    /// version ignores that table, so anything left there it would lose.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_clean_stop_leaves_zero_snapshot_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let ids = ["one", "two", "three"];
+        let handles: Vec<_> = ids.iter().map(|id| host.open_local(id).unwrap()).collect();
+        let edit = |round: usize| {
+            for handle in &handles {
+                let text = handle.doc.doc().get_text("body");
+                text.insert(text.len_unicode(), &format!("round {round} ")).unwrap();
+                handle.doc.doc().commit();
+                handle.persistence.as_ref().unwrap().flush_sync();
+            }
+        };
+        let deltas = || ids.iter().map(|id| store.snapshot_delta_stats(id).unwrap().0).sum::<u64>();
+        for round in 0..3 {
+            edit(round);
+        }
+        assert!(deltas() > 0, "the fixture made no deltas");
+        host.flush_all();
+        assert_eq!(deltas(), 0, "a clean stop left deltas behind");
+        for handle in &handles {
+            let (bytes, _, _) = store.load_snapshot_with_cursor(&handle.chat_id).unwrap().unwrap();
+            let loaded = loro::LoroDoc::new();
+            loaded.import(&bytes).unwrap();
+            assert_eq!(loaded.get_deep_value(), handle.doc.doc().get_deep_value());
+        }
+        edit(3);
+        assert!(deltas() > 0, "deltas resume after a clean stop that didn't end the process");
+        host.prepare_for_version_change();
+        assert_eq!(deltas(), 0, "a restart into another version left deltas behind");
+        // Its last moments save whole: nothing new lands in the table.
+        edit(4);
+        edit(5);
+        assert_eq!(deltas(), 0);
+        drop(handles);
+        host.shutdown_workers().await;
+    }
 
     #[tokio::test]
     async fn wakeup_handoff_waits_for_snapshot_persistence() {

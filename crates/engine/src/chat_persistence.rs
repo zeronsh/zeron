@@ -55,6 +55,9 @@ pub(crate) struct ChatPersistence {
     delta_writes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     before_export: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs between a save's export and its store write.
+    #[cfg(test)]
+    after_export: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ChatPersistence {
@@ -88,6 +91,8 @@ impl ChatPersistence {
             delta_writes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             before_export: Mutex::new(None),
+            #[cfg(test)]
+            after_export: Mutex::new(None),
         });
         if let Some(runtime) = runtime {
             runtime.spawn(Self::run(Arc::downgrade(&this), rx));
@@ -253,6 +258,10 @@ impl ChatPersistence {
                     .export(loro::ExportMode::updates(&state.saved_vv))
                     .map_err(|e| e.to_string())
                     .and_then(|bytes| {
+                        #[cfg(test)]
+                        if let Some(hook) = self.after_export.lock().unwrap().take() {
+                            hook();
+                        }
                         self.store
                             .append_snapshot_delta(&self.chat_id, state.base, &bytes, cursor)
                             .map(|written| written.then_some(bytes.len()))
@@ -281,6 +290,10 @@ impl ChatPersistence {
                 .export_snapshot()
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| {
+                    #[cfg(test)]
+                    if let Some(hook) = self.after_export.lock().unwrap().take() {
+                        hook();
+                    }
                     self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
                     self.store
                         .save_base_snapshot(
@@ -844,6 +857,141 @@ mod tests {
         assert_eq!(store.snapshot_delta_stats("whale").unwrap(), (0, 0));
         check("after compaction");
         assert_eq!(store.snapshot_cursor("whale").unwrap(), 301);
+    }
+
+    /// Child of [`dying_between_export_and_commit_keeps_the_last_commit`]:
+    /// streams ops 1.. and aborts the process inside save number
+    /// ZERON_DELTA_ABORT_AT, after its export and before its store write.
+    #[test]
+    fn delta_abort_child() {
+        let (Some(dir), Some(at)) = (
+            std::env::var_os("ZERON_DELTA_CRASH_DIR"),
+            std::env::var("ZERON_DELTA_ABORT_AT").ok().and_then(|v| v.parse::<u64>().ok()),
+        ) else {
+            return;
+        };
+        let store = Arc::new(DocsStore::open(&dir).unwrap());
+        let doc = Arc::new(SessionDoc::init("crash").unwrap());
+        let persistence = ChatPersistence::new(&doc, store, "crash".into(), 0);
+        let text = doc.doc().get_text("ops");
+        for op in 1u64.. {
+            text.insert(text.len_unicode(), &format!("{op},")).unwrap();
+            doc.doc().commit();
+            if op == at {
+                *persistence.after_export.lock().unwrap() = Some(Box::new(|| std::process::abort()));
+            }
+            persistence.applied(op, false);
+        }
+    }
+
+    /// A process that dies after exporting and before committing leaves
+    /// exactly the last committed state: in the first whole save, in a
+    /// delta, and in the whole save that folds 512 deltas.
+    #[cfg(unix)]
+    #[test]
+    fn dying_between_export_and_commit_keeps_the_last_commit() {
+        // Op 1 is the first (whole) save; 2..=513 are deltas; 514 compacts.
+        for at in [1u64, 2, 37, 513, 514, 515] {
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "chat_persistence::tests::delta_abort_child", "--nocapture"])
+                .env("ZERON_DELTA_CRASH_DIR", dir.path())
+                .env("ZERON_DELTA_ABORT_AT", at.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "op {at}: the child should have died");
+            let store = DocsStore::open(dir.path()).unwrap();
+            let Some((bytes, cursor, _)) = store.load_snapshot_with_cursor("crash").unwrap() else {
+                assert_eq!(at, 1, "op {at}: nothing on disk");
+                continue;
+            };
+            assert_eq!(cursor, at - 1, "op {at}: the cursor isn't the last committed save's");
+            let doc = loro::LoroDoc::new();
+            doc.import(&bytes).unwrap();
+            let expected: String = (1..at).map(|op| format!("{op},")).collect();
+            assert_eq!(doc.get_text("ops").to_string(), expected, "op {at}");
+        }
+    }
+
+    /// Ops stream on one thread, the persister saves on its own worker, and
+    /// another thread forces saves (eviction, urgent paths) meanwhile. Every
+    /// state on disk holds ops 1..=k with no gap or repeat, and never fewer
+    /// than its cursor claims.
+    #[test]
+    fn deltas_stay_whole_while_the_cursor_advances_concurrently() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("race").unwrap());
+        let persistence = {
+            let _guard = runtime.enter();
+            ChatPersistence::new(&doc, store.clone(), "race".into(), 0)
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (doc, persistence, stop) = (doc.clone(), persistence.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let text = doc.doc().get_text("ops");
+                let mut op = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    op += 1;
+                    text.insert(text.len_unicode(), &format!("{op},")).unwrap();
+                    doc.doc().commit();
+                    persistence.applied(op, op % 7 == 0);
+                }
+                op
+            })
+        };
+        let forcer = {
+            let (persistence, stop) = (persistence.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    persistence.flush_sync();
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+            })
+        };
+        let check = |label: &str| {
+            let Some((bytes, cursor, _)) = store.load_snapshot_with_cursor("race").unwrap() else {
+                return;
+            };
+            let loaded = loro::LoroDoc::new();
+            loaded.import(&bytes).unwrap();
+            let text = loaded.get_text("ops").to_string();
+            let ops: Vec<u64> = text.split_terminator(',').map(|op| op.parse().unwrap()).collect();
+            assert!(ops.iter().copied().eq(1..=ops.len() as u64), "{label}: gap or repeat");
+            assert!(ops.len() as u64 >= cursor, "{label}: cursor {cursor} past {} ops", ops.len());
+        };
+        let deadline = std::time::Instant::now() + Duration::from_millis(2_500);
+        let mut checks = 0;
+        while std::time::Instant::now() < deadline {
+            check("mid-stream");
+            checks += 1;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let last = writer.join().unwrap();
+        forcer.join().unwrap();
+        persistence.flush_sync();
+        check("after the last save");
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("race").unwrap().unwrap();
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, last);
+        assert!(persistence.delta_writes.load(Ordering::Relaxed) > 0, "no deltas exercised");
+        eprintln!(
+            "{last} ops, {checks} reloads checked, {} whole saves, {} deltas",
+            persistence.writes.load(Ordering::Relaxed),
+            persistence.delta_writes.load(Ordering::Relaxed)
+        );
+        drop(runtime);
     }
 }
 

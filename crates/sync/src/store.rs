@@ -162,6 +162,9 @@ pub struct DocsStore {
     /// Token and `saved_at` of each doc's current base.
     bases: Mutex<std::collections::HashMap<String, (u64, i64)>>,
     next_base: std::sync::atomic::AtomicU64,
+    /// Set before a restart into another version: every save from then on
+    /// is a whole snapshot ([`Self::stop_snapshot_deltas`]).
+    deltas_stopped: std::sync::atomic::AtomicBool,
     path: PathBuf,
     /// This open found the file damaged and rebuilt the store.
     recovery: Option<crate::store_recovery::Recovery>,
@@ -213,6 +216,7 @@ impl DocsStore {
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             bases: Mutex::new(std::collections::HashMap::new()),
             next_base: std::sync::atomic::AtomicU64::new(1),
+            deltas_stopped: std::sync::atomic::AtomicBool::new(false),
             path,
             recovery,
         })
@@ -458,6 +462,14 @@ impl DocsStore {
         }))
     }
 
+    /// From now on, refuse deltas: savers write whole snapshots, which every
+    /// version of Zeron reads. For the last moments before a restart into
+    /// another version (which may be an older one).
+    pub fn stop_snapshot_deltas(&self) {
+        self.deltas_stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Save Loro updates on top of `doc_id`'s snapshot, with the cursor the
     /// doc's state covers once they are applied. `base` is the token the
     /// caller's last full save returned ([`Self::save_base_snapshot`]); any
@@ -472,6 +484,9 @@ impl DocsStore {
         cursor: u64,
     ) -> Result<bool, StoreError> {
         store_blocking(|| {
+            if self.deltas_stopped.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(false);
+            }
             let mut conn = self.conn();
             // From memory, not the row: `saved_at` sits after the blob, and
             // reading it walks the whole snapshot's overflow pages.
@@ -1356,6 +1371,45 @@ mod publication_tests {
 #[cfg(test)]
 mod publication_failure_tests {
     use super::*;
+
+    /// A relay chat whose outbox write failed must replay its operations
+    /// unless a save made them durable. A delta is such a save: it clears the
+    /// replay obligation in its own transaction, and only if it commits.
+    #[test]
+    fn a_delta_save_retires_a_failed_publication_only_when_it_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        doc.get_text("t").insert(0, "base").unwrap();
+        doc.commit();
+        let vv = doc.oplog_vv();
+        let base = store
+            .save_base_snapshot("chat", &doc.export(loro::ExportMode::Snapshot).unwrap(), 42, 2)
+            .unwrap();
+        store.initialize_chat_outbox("chat", &[]).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER fail_publication BEFORE INSERT ON chat_outbox BEGIN SELECT RAISE(FAIL, 'injected disk failure'); END;").unwrap();
+        assert!(store.enqueue_chat_update("chat", "batch", b"op").is_err());
+        doc.get_text("t").insert(4, " + op").unwrap();
+        doc.commit();
+        let update = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+
+        // The delta's own write fails: the obligation stays.
+        store.conn().execute_batch("CREATE TRIGGER fail_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(FAIL, 'injected disk failure'); END;").unwrap();
+        assert!(store.append_snapshot_delta("chat", base, &update, 43).is_err());
+        assert!(store.chat_outbox_initialized("chat").unwrap());
+        assert_eq!(store.snapshot_cursor("chat").unwrap(), 42);
+
+        // It commits: obligation and delta go together.
+        store.conn().execute_batch("DROP TRIGGER fail_delta;").unwrap();
+        assert!(store.append_snapshot_delta("chat", base, &update, 43).unwrap());
+        drop(store);
+        let reopened = DocsStore::open(dir.path()).unwrap();
+        assert!(!reopened.chat_outbox_initialized("chat").unwrap());
+        let (bytes, cursor, _) = reopened.load_snapshot_with_cursor("chat").unwrap().unwrap();
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!((loaded.get_text("t").to_string(), cursor), ("base + op".into(), 43));
+    }
     #[test]
     fn cursor_save_after_failed_outbox_write_keeps_a_durable_replay_obligation() {
         for cursor_save in [false, true] {
