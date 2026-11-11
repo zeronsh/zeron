@@ -1897,37 +1897,12 @@ return function(props: Props): Node
 	-- box of its last height. Inside a run each block is drawn once and kept
 	-- while its table is the same, so the one being written rebuilds alone.
 	local window = props.window
-	-- Each run's judge, by its place (registered as it's made): a scroll
-	-- runs them in order, once, rather than a timer for every run. Each
-	-- says whether its box starts past the view's foot (and the overscan),
-	-- and whether it's built now. (A run past the foot that isn't built
-	-- needs no judging until the view comes near.)
-	local judges: { [number]: () -> (boolean, boolean) } = {}
-	-- Each run's box's foot (nil until laid out), and the runs built now:
-	-- what lets a pass skip the runs wholly above the view that are held.
-	local bottoms: { [number]: () -> number? } = {}
-	local built: { [number]: true } = {}
-	-- The windowed text's pass over its runs (set once its runs are).
-	local judge_runs: (() -> ())? = nil
-	-- Its runs judged a tick on (once laid out), all at once: as runs mount
-	-- and resize, one timer for the text, not one a run.
-	local looking = false
-	local function look_soon()
-		if looking then
-			return
-		end
-		looking = true
-		ui.after(0, function()
-			looking = false
-			if judge_runs then
-				judge_runs()
-			else
-				for _, j in judges do
-					j()
-				end
-			end
-		end)
-	end
+	-- Each run's judge, by its place (registered as it's made): the text's
+	-- runs judged again all at once when what holds one built changes (a
+	-- find's current match, the text's writing, its runs), and each judging
+	-- itself as it comes near the view or goes. Each says whether it's
+	-- built now.
+	local judges: { [number]: () -> boolean } = {}
 	local function windowed(run: State<{ MarkdownBlock }>, at: number, after: () -> number): Node
 		local w = window :: {
 			key: string,
@@ -1962,25 +1937,23 @@ return function(props: Props): Node
 		-- Only then does the scroll make up the difference; a rewrap of a
 		-- run already built is the reading place's to keep (ds/transcript).
 		local returning = false
-		-- Near the view: its box within OVERSCAN of the view's, judged as the
-		-- view scrolls (a tick on, once the scroll has laid out) and as it's
-		-- laid out. (zgx's visibility event looks again only when layout
-		-- changes, not as a scroll alone moves what shows.)
-		local function judge(): (boolean, boolean)
-			local el, view = r:peek(), w.view:peek()
-			if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
-				return false, near:peek()
+		-- Near the view: its box within OVERSCAN of the view's, as zgx tells
+		-- it (`on_visible`, its box grown by `visible_margin`): heard only as
+		-- it comes near or goes, at its first layout and as layout or a
+		-- scroll moves it across, so a scroll's frames run nothing here.
+		-- Nil until then.
+		local seen: boolean? = nil
+		local function judge(): boolean
+			if seen == nil then
+				return near:peek()
 			end
-			local y, top = el.y :: number, view.y :: number
 			-- (While the text is written its last run is always built: where
 			-- the words arrive, and the end the view holds to.)
 			local live = w.live
 			-- (And the run holding a find's current match, so it can show.)
 			local c = if find then find.current() else nil
 			local holds = c ~= nil and find ~= nil and c.key == w.key and (c.block - 1) // CHUNK + 1 == at
-			local shows = (live ~= nil and live() and last())
-				or holds
-				or (y < top + (view.height :: number) + OVERSCAN and y + (el.height :: number) > top - OVERSCAN)
+			local shows = (live ~= nil and live() and last()) or holds or seen :: boolean
 			if NEAR.get(k) ~= shows then
 				NEAR.set(k, shows)
 			end
@@ -1988,28 +1961,19 @@ return function(props: Props): Node
 				returning = shows
 				near:set(shows)
 			end
-			built[at] = if shows then true else nil
-			return y >= top + (view.height :: number) + OVERSCAN, shows
+			return shows
 		end
 		judges[at] = judge
-		bottoms[at] = function(): number?
-			local el = r:peek()
-			if not el or el.y == nil or el.height == nil then
-				return nil
-			end
-			return (el.y :: number) + (el.height :: number)
-		end
-		if near:peek() then
-			built[at] = true
-		end
-		local look = look_soon
 		return ui.div {
 			ref = r,
 			w_full = true,
 			min_w = 0,
-			on_mount = look,
+			visible_margin = OVERSCAN,
+			on_visible = function(visible: boolean)
+				seen = visible
+				judge()
+			end,
 			on_resize = function(size: { w: number, h: number })
-				look()
 				-- (Heard even when it was just judged away: it was laid out
 				-- built, and this is the height to hold it at. Held, it's the
 				-- height it already has.)
@@ -2154,99 +2118,28 @@ return function(props: Props): Node
 		end)
 		if window then
 			local runs = items
-			-- As the view scrolls (a tick on, once the scroll has laid out): the
-			-- runs judged from the top, stopping at the first past the view's
-			-- foot once none further on is built.
-			local w = window :: { offset: State<number> }
-			-- All the runs judged, from the top, stopping at the first past the
-			-- view's foot once none further on is built.
-			local judged_at = -math.huge
-			local function judge_all()
-				judged_at = ui.now()
-				local count = runs:len()
-				-- (A find's current match further on: its run is judged,
-				-- so it's built, however far past the view it is.)
-				local c = if find then find.current() else nil
-				local target = if c and c.key == (window :: any).key then (c.block - 1) // CHUNK + 1 else 0
-				-- The runs wholly above the view's reach (its top less the
-				-- overscan) come first, their boxes in order: found by
-				-- halving, they're judged only if they can show or are built
-				-- (to be let go). Judged all, a reply streaming in at the
-				-- view's foot judged every run above it with each word.
-				local view = (window :: any).view:peek()
-				local reach = if view and view.y ~= nil then (view.y :: number) - OVERSCAN else nil
-				local first = 1
-				if reach then
-					local past = count + 1
-					while first < past do
-						local mid = (first + past) // 2
-						local foot = if bottoms[mid] then bottoms[mid]() else nil
-						if foot ~= nil and foot <= reach then
-							first = mid + 1
-						else
-							past = mid
-						end
-					end
-				end
-				if first > 1 then
-					local some: { number } = {}
-					for at in built do
-						if at < first then
-							table.insert(some, at)
-						end
-					end
-					-- (The match's run, and the last: written into, it shows.)
-					if target >= 1 and target < first then
-						table.insert(some, target)
-					end
-					if count < first then
-						table.insert(some, count)
-					end
-					for _, at in some do
-						local j = judges[at]
-						if j then
-							j()
-						end
-					end
-				end
-				for at = first, count do
-					local j = judges[at]
-					if j then
-						local below = j()
-						if below and at >= target then
-							local more = false
-							for later = at + 1, count do
-								if NEAR.get(`{(window :: any).key}:{later}`) ~= false then
-									more = true
-									break
-								end
-							end
-							if not more then
-								break
-							end
-						end
-					end
-				end
-			end
+			-- The runs judged again, all of them, as what holds one built
+			-- changes: a find stepping to another match (its run is built,
+			-- however far from the view), the text's writing ending (its last
+			-- run let go if away), its runs coming or going. Not as the view
+			-- scrolls: each run hears itself come near or go (`on_visible`),
+			-- so a scroll runs nothing here. (What it hears read here, not
+			-- left to the judges: a run not laid out yet reads none of it.)
+			local live = (window :: any).live :: (() -> boolean)?
 			ui.effect(function()
-				w.offset:get()
-				-- (A find stepping to another match: its run may need building.)
 				if find then
 					find.current()
 				end
-				-- While the view moves every frame (a wheel's fling, its momentum),
-				-- each move runs this again before the tick below comes, and that
-				-- tick goes with it: judged only once the view stopped, the runs
-				-- coming in stayed held and the transcript showed blank through a
-				-- fling. So a pass now as well, a frame apart at most (the boxes as
-				-- last laid out, a frame behind: well within OVERSCAN), and the tick
-				-- for where the view comes to rest.
-				if ui.now() - judged_at >= 8 then
-					judge_all()
+				if live then
+					live()
 				end
-				ui.after(0, judge_all)
+				for at = 1, runs:len() do
+					local j = judges[at]
+					if j then
+						j()
+					end
+				end
 			end)
-			judge_runs = judge_all
 			column[1] = ui.each(runs, function(run: any, _i: any, row: State<any>)
 				return windowed(ui.computed(function(): { MarkdownBlock }
 					return row:get().blocks
