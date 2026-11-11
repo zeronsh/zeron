@@ -431,7 +431,7 @@ return ui.component(function(props: Props): Node
 		local together = label .. " " .. string.lower(hint)
 		local from, to = string.find(together, q, 1, true)
 		while from do
-			if from <= #label and to > #label + 1 then
+			if from <= #label and (to :: number) > #label + 1 then
 				return true
 			end
 			from, to = string.find(together, q, from + 1, true)
