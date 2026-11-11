@@ -1251,9 +1251,18 @@ impl Engine {
         // Whatever restarts this engine into another version (an update, a
         // newer install, a channel switch's update), the store it leaves is
         // one every version reads.
-        let version_change_docs = core.doc_host.clone();
-        let version_change_registry = core.workspace.clone();
+        // (Held weakly: the hook is process-wide and outlives this graph;
+        // a strong hold kept a shut-down engine's whole graph alive.)
+        let version_change_docs = core.doc_host.downgrade();
+        let version_change_registry = core.workspace.downgrade();
         zeron_update::set_before_restart(move || {
+            // Only this process's live engine restarts it: with its graph
+            // gone there is nothing left to prepare.
+            let (Some(version_change_docs), Some(version_change_registry)) =
+                (version_change_docs.upgrade(), version_change_registry.upgrade())
+            else {
+                return;
+            };
             // No more deltas from here (a debounced registry save is whole
             // too), the registry saved whole (older builds don't read row
             // deltas), then every chat saved whole and the WAL folded in.

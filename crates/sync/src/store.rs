@@ -545,6 +545,11 @@ impl DocsStore {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    /// Whether [`Self::stop_snapshot_deltas`] has been called.
+    pub fn snapshot_deltas_stopped(&self) -> bool {
+        self.deltas_stopped.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Save Loro updates on top of `doc_id`'s snapshot, with the cursor the
     /// doc's state covers once they are applied. `base` is the token the
     /// caller's last full save returned ([`Self::save_base_snapshot`]); any
