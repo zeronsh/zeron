@@ -242,6 +242,20 @@ export class ChatRoom implements DurableObject {
     if (!owner) setMeta(sql, "owner", userId);
     else if (owner !== userId) return json({ error: "forbidden" }, 403);
 
+    // A heal without the upload: the host that stopped relaying names the version it
+    // holds, and if the stored checkpoint already includes it, that checkpoint is the
+    // heal. Nothing relayed is missing from it, so a stored row can't park on a reader.
+    // Anything else is 409 and the host sends the full checkpoint, as before.
+    if (url.pathname === "/heal" && request.method === "POST") {
+      const claimed = decodeVersion(decodeBase64(request.headers.get("x-chat2-version") ?? "") ?? new Uint8Array(0));
+      if (!claimed || claimed.size === 0) return json({ error: "bad_version" }, 400);
+      const held = this.blobs.get(FRONTIER_BLOB);
+      const stored = held && held.byteLength > 0 ? decodeVersion(held) : null;
+      if (!stored || !versionIncludes(stored, claimed)) return json({ error: "not_covered" }, 409);
+      this.healed();
+      return json({ ok: true });
+    }
+
     if (url.pathname === "/checkpoint-part" && request.method === "POST") {
       // One piece of a checkpoint too large for one request, at `offset` in
       // it: appended to the room's staged checkpoint (offset 0 starts it
