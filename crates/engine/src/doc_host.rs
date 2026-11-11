@@ -7312,12 +7312,16 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 }
                 let Some(handle) = weak.upgrade() else { break };
                 let publishing = handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
+                // The watch's publish runs beside the drains, not before them:
+                // a send's command (or a queued row) is taken at once, never
+                // behind a long chat's publish. The next pass waits for it.
+                let published = tokio::task::spawn_blocking(move || {
                     publishing.publish_messages_if_watched();
                     publishing.publish_queue();
-                }).await;
+                });
                 host.drain_commands(&handle).await;
                 host.drain_queue(&handle).await;
+                let _ = published.await;
                 if save_deadline.is_none() {
                     save_deadline = Some(
                         tokio::time::Instant::now()
