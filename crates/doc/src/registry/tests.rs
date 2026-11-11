@@ -2951,3 +2951,36 @@ fn an_unreadable_look_never_loses_a_project_row() {
     assert_eq!(doc.read_spaces().unwrap().len(), 1);
     assert_eq!(shown_emoji(&doc, "sp-a"), None);
 }
+
+/// The publish path reconciles pins against the chats `read_all` already
+/// read: same outcome as the self-reading form, and the lists `read_all`
+/// returns are the same before and after (pins live in other rows).
+#[test]
+fn sidebar_reconcile_with_read_chats_matches_and_leaves_lists_alone() {
+    let build = || {
+        let mut doc = RegistryDoc::new("desktop");
+        pin_sessions(&mut doc, &["live", "archived", "deleted"]);
+        let mut archived = chat("archived", "desktop");
+        archived.archived = true;
+        doc.upsert_chat(&archived).unwrap();
+        doc.delete_chat("deleted").unwrap();
+        doc
+    };
+    let mut reference = build();
+    let mut publishing = build();
+    let before = publishing.read_all().unwrap();
+    for authoritative in [false, true, true] {
+        let expected = reference.reconcile_sidebar_pins(authoritative).unwrap();
+        let state = publishing.read_all().unwrap();
+        let got = publishing
+            .reconcile_sidebar_pins_with(authoritative, state.chats.iter().map(|c| c.id.as_str()))
+            .unwrap();
+        assert_eq!(got, expected);
+        assert_eq!(publishing.sidebar_preferences(), reference.sidebar_preferences());
+    }
+    assert_eq!(
+        publishing.sidebar_preferences().unwrap().pinned_session_ids,
+        ["live", "archived"]
+    );
+    assert_eq!(publishing.read_all().unwrap(), before);
+}

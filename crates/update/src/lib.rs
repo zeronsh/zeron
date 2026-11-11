@@ -1331,6 +1331,29 @@ fn stage_is_abandoned(rest: &str) -> bool {
     }
 }
 
+type BeforeRestart = std::sync::Arc<dyn Fn() + Send + Sync>;
+static BEFORE_RESTART: std::sync::Mutex<Option<BeforeRestart>> = std::sync::Mutex::new(None);
+
+/// Runs just before this process asks to be restarted into another version
+/// ([`restart_service`]): the engine leaves its stores in the form every
+/// version reads (snapshot deltas folded in), so a stop that is cut short,
+/// or a later move back to an older version, finds nothing it can't read.
+/// The newest call wins.
+pub fn set_before_restart(prepare: impl Fn() + Send + Sync + 'static) {
+    *BEFORE_RESTART.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(std::sync::Arc::new(prepare));
+}
+
+fn before_restart() {
+    let prepare = BEFORE_RESTART
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(prepare) = prepare {
+        prepare();
+    }
+}
+
 type ManagedRestart = Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
 
 static MANAGED_RESTART: std::sync::OnceLock<ManagedRestart> = std::sync::OnceLock::new();
@@ -1465,6 +1488,7 @@ pub fn systemctl_query(unit: &str) -> std::process::Command {
 /// picks up the new binary. Only queues the restart: the caller may be the
 /// service itself, which must stay responsive to the stop signal that follows.
 pub fn restart_service() -> anyhow::Result<()> {
+    before_restart();
     if let Some(restart) = MANAGED_RESTART.get() {
         return restart();
     }

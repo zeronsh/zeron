@@ -1940,6 +1940,8 @@ impl DocHost {
                 None => SessionDoc::init(chat_id)?,
             }
         };
+        // Parked rows replayed in full: retire them after a save covers them.
+        let mut parked_retirement: Option<(String, i64)> = None;
         // Recover committed outgoing operations even when the snapshot debounce
         // did not run before a crash. Imported updates do not echo as local writes.
         if room_gen >= 2 {
@@ -1967,8 +1969,10 @@ impl DocHost {
                         Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a parked update"),
                     }
                 }
+                // Retired only once a save holds them (below): until then
+                // these ops are in memory only, and the rows their one copy.
                 if !waiting {
-                    self.inner.store.retire_chat_inbox(&parked_key, newest)?;
+                    parked_retirement = Some((parked_key, newest));
                 }
             }
         }
@@ -1981,6 +1985,21 @@ impl DocHost {
                 chat2_cursor,
             )
         });
+        if let Some((parked_key, newest)) = parked_retirement {
+            // Imports at open precede the change subscription, so nothing
+            // marks the doc dirty: save now, and let the rows go only if that
+            // save landed (else they replay again at the next open).
+            match &persistence {
+                Some(persistence) => {
+                    persistence.dirty(true);
+                    persistence.flush_sync();
+                    if persistence.is_clean() {
+                        self.inner.store.retire_chat_inbox(&parked_key, newest)?;
+                    }
+                }
+                None => tracing::info!(chat = %chat_id, "parked updates replayed; kept until a chat2 save holds them"),
+            }
+        }
         let changed_persistence = persistence.clone();
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
@@ -2692,8 +2711,12 @@ impl DocHost {
         let host = self.clone();
         let mut token_changes = edge.token_changes();
         self.spawn_sync_worker(cancel.clone(), async move {
-            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone())
-                .with_handle(weak.clone()));
+            let sink = Arc::new(crate::chat2_host::EngineChatSink::for_handle(
+                &doc,
+                store,
+                chat.clone(),
+                weak.clone(),
+            ));
             // The sink holds only a Weak doc ref (a strong one made every
             // chat2 handle read as perma-pinned — LRU eviction dead); this
             // task's own strong ref dies when the join resolves.
@@ -3452,6 +3475,21 @@ impl DocHost {
         let reset = ResetFlag(in_flight);
         self.spawn_worker(async move {
             let _reset = reset;
+            // A heal the room's stored checkpoint already covers needs no upload: a
+            // host back from a legacy hold that relayed nothing since its last
+            // checkpoint would otherwise send the whole chat again for each old reader.
+            if reason == relay::HEAL_REASON
+                && let Some(state) = &relay_state
+                && let Some(version) = state.heal_claim()
+                && let Ok(bearer) = edge.bearer().await
+            {
+                let answer = crate::chat2_checkpoint::post_heal_claim(&http, &edge.url, &chat_id, &bearer, &version.encode()).await;
+                state.heal_claim_answered(answer, mode_epoch);
+                if answer == crate::chat2_checkpoint::HealClaim::Healed {
+                    tracing::info!(chat = %chat_id, "chat2 heal: the room's checkpoint already covers it; nothing sent");
+                    return;
+                }
+            }
             let store = publication_store.clone();
             let chat = chat_id.clone();
             let prepared = tokio::task::spawn_blocking(move || {
@@ -3581,7 +3619,7 @@ impl DocHost {
             if let Some(handle) = evicted {
                 // Final flush outside the map lock; ≤1s of changes could be
                 // pending in the snapshot debounce.
-                self.save_snapshot(&handle);
+                self.save_snapshot_compacted(&handle);
                 tracing::debug!(chat = %handle.chat_id, "doc evicted (LRU)");
             }
         }
@@ -6711,6 +6749,16 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        self.persist(handle, false);
+    }
+
+    /// Save with any snapshot deltas folded in: the handle is going away
+    /// (eviction, shutdown), so the next open reads one blob.
+    fn save_snapshot_compacted(&self, handle: &ChatDocHandle) {
+        self.persist(handle, true);
+    }
+
+    fn persist(&self, handle: &ChatDocHandle, compact: bool) {
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -6718,16 +6766,21 @@ impl DocHost {
             // race) means this doc is its transcript's only copy — skipping
             // the save turned an app quit into total loss (2026-08-11);
             // persist it, and let the adopt path convert it on reopen.
+            // The epoch column alone: no blob read or delta merge.
             let thin_on_disk = matches!(
-                self.inner.store.load_snapshot_with_cursor(&handle.chat_id),
-                Ok(Some((_, _, epoch))) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
+                self.inner.store.snapshot_epoch(&handle.chat_id),
+                Ok(epoch) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
             );
             if thin_on_disk {
                 return;
             }
         }
         if let Some(persistence) = &handle.persistence {
-            persistence.flush_sync();
+            if compact {
+                persistence.compact_sync();
+            } else {
+                persistence.flush_sync();
+            }
             return;
         }
         match handle.doc.export_snapshot() {
@@ -6763,10 +6816,20 @@ impl DocHost {
         &self.inner.store
     }
 
+    /// Before a restart into another version: no more snapshot deltas, every
+    /// open chat saved whole (deltas folded in), and the WAL in the file. An
+    /// older version ignores the deltas table, so whatever this leaves there
+    /// it would never see; after this there is nothing.
+    pub fn prepare_for_version_change(&self) {
+        self.inner.store.stop_snapshot_deltas();
+        self.flush_all();
+        self.checkpoint_store();
+    }
+
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
-            self.save_snapshot(&handle);
+            self.save_snapshot_compacted(&handle);
         }
     }
 
@@ -7410,6 +7473,56 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
 #[cfg(test)]
 mod publication_eviction_tests {
     use super::*;
+
+    /// A clean stop (flush_all: shutdown, Cloud sleep) and the step before a
+    /// restart into another version leave no snapshot deltas: an older
+    /// version ignores that table, so anything left there it would lose.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_clean_stop_leaves_zero_snapshot_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let ids = ["one", "two", "three"];
+        let handles: Vec<_> = ids.iter().map(|id| host.open_local(id).unwrap()).collect();
+        let edit = |round: usize| {
+            for handle in &handles {
+                let text = handle.doc.doc().get_text("body");
+                text.insert(text.len_unicode(), &format!("round {round} ")).unwrap();
+                handle.doc.doc().commit();
+                handle.persistence.as_ref().unwrap().flush_sync();
+            }
+        };
+        let deltas = || ids.iter().map(|id| store.snapshot_delta_stats(id).unwrap().0).sum::<u64>();
+        for round in 0..3 {
+            edit(round);
+        }
+        assert!(deltas() > 0, "the fixture made no deltas");
+        host.flush_all();
+        assert_eq!(deltas(), 0, "a clean stop left deltas behind");
+        for handle in &handles {
+            let (bytes, _, _) = store.load_snapshot_with_cursor(&handle.chat_id).unwrap().unwrap();
+            let loaded = loro::LoroDoc::new();
+            loaded.import(&bytes).unwrap();
+            assert_eq!(loaded.get_deep_value(), handle.doc.doc().get_deep_value());
+        }
+        edit(3);
+        assert!(deltas() > 0, "deltas resume after a clean stop that didn't end the process");
+        host.prepare_for_version_change();
+        assert_eq!(deltas(), 0, "a restart into another version left deltas behind");
+        // Its last moments save whole: nothing new lands in the table.
+        edit(4);
+        edit(5);
+        assert_eq!(deltas(), 0);
+        drop(handles);
+        host.shutdown_workers().await;
+    }
 
     #[tokio::test]
     async fn wakeup_handoff_waits_for_snapshot_persistence() {

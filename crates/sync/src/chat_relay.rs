@@ -47,6 +47,10 @@ const MAX_STALLS: u32 = 3;
 const MAX_DELIVERED_IDS: usize = 100;
 /// Frames queued toward the room before later ones are dropped. They heal.
 pub const PATH_QUEUE: usize = 256;
+/// Frames waiting for room in that queue, in order, before any is given up.
+const HELD_MAX: usize = 1024;
+/// How soon frames held back are offered again.
+const HELD_RETRY: Duration = Duration::from_millis(100);
 /// A queue read the room's full channel refused is asked again after this.
 const QUEUE_REQ_RETRY: Duration = Duration::from_millis(200);
 
@@ -91,6 +95,8 @@ enum Input {
 struct Counters {
     room_frames_sent: AtomicU64,
     room_frames_received: AtomicU64,
+    /// Frames that never reached the room: it had gone, or too many were waiting.
+    room_frames_dropped: AtomicU64,
     sync_rounds: AtomicU64,
     /// Queue reads asked for and answered, for catch-up to wait on.
     queue_reads_asked: AtomicU64,
@@ -116,6 +122,7 @@ struct Counters {
 pub struct RelayStats {
     pub room_frames_sent: u64,
     pub room_frames_received: u64,
+    pub room_frames_dropped: u64,
     pub sync_rounds: u64,
 }
 
@@ -141,6 +148,7 @@ impl RelayHandle {
             policy,
             host: None,
             room: None,
+            held: std::collections::VecDeque::new(),
             peers: HashMap::new(),
             want: None,
             round: None,
@@ -272,6 +280,7 @@ impl RelayHandle {
         RelayStats {
             room_frames_sent: self.counters.room_frames_sent.load(Relaxed),
             room_frames_received: self.counters.room_frames_received.load(Relaxed),
+            room_frames_dropped: self.counters.room_frames_dropped.load(Relaxed),
             sync_rounds: self.counters.sync_rounds.load(Relaxed),
         }
     }
@@ -292,6 +301,10 @@ struct Driver {
     policy: RelayPolicy,
     host: Option<String>,
     room: Option<mpsc::Sender<Vec<u8>>>,
+    /// Frames the room's queue had no space for yet, oldest first. A frame is never
+    /// skipped: a lost update parks every one after it on the peers, and a lost sync
+    /// frame left a round waiting out [`SYNC_STALL`].
+    held: std::collections::VecDeque<Vec<u8>>,
     /// Each peer's last announced version.
     peers: HashMap<String, Vec<u8>>,
     want: Option<(String, Instant)>,
@@ -340,6 +353,7 @@ impl Driver {
         [
             self.want.as_ref().filter(|_| self.round.is_none()).map(|(_, at)| *at),
             self.round.as_ref().map(|r| r.last_progress + SYNC_STALL),
+            (!self.held.is_empty()).then(|| Instant::now() + HELD_RETRY),
             self.announce_soon,
             self.announce_settle,
             (!self.unconfirmed.is_empty() && self.room_open())
@@ -362,6 +376,8 @@ impl Driver {
             Input::RoomUp(tx) => {
                 tracing::debug!(round = ?self.round.as_ref().map(|r| &r.peer), want = ?self.want.as_ref().map(|w| &w.0), "chat relay: room up");
                 self.room = Some(tx);
+                // Held for the session that ended: what they were for starts over below.
+                self.held.clear();
                 // A round over the old socket won't finish, and waiting out its
                 // stall would turn a brief drop into a minute's delay.
                 self.round = None;
@@ -403,6 +419,7 @@ impl Driver {
     }
 
     fn tick(&mut self, now: Instant) {
+        self.flush_held(now);
         if self.round.as_ref().is_some_and(|r| now >= r.last_progress + SYNC_STALL) {
             let round = self.round.take().expect("just checked");
             self.stalls += 1;
@@ -750,14 +767,78 @@ impl Driver {
         tracing::debug!(kind, to, sent, "chat relay: direct");
     }
 
+    /// Send a frame, or hold it until the room's queue has space. False only when it
+    /// can't go at all: no room, a room that has gone, or too many already waiting.
     fn to_room(&mut self, frame: Vec<u8>) -> bool {
-        if let Some(room) = &self.room
-            && room.try_send(frame).is_ok()
-        {
-            self.counters.room_frames_sent.fetch_add(1, Relaxed);
-            return true;
+        if !self.room_open() {
+            if self.room.is_some() {
+                self.dropped(&frame, "the room has gone");
+            }
+            return false;
         }
-        false
+        if self.held.is_empty() {
+            match self.room.as_ref().expect("open").try_send(frame) {
+                Ok(()) => {
+                    self.counters.room_frames_sent.fetch_add(1, Relaxed);
+                    return true;
+                }
+                Err(mpsc::error::TrySendError::Full(frame)) => self.held.push_back(frame),
+                Err(mpsc::error::TrySendError::Closed(frame)) => {
+                    self.dropped(&frame, "the room has gone");
+                    return false;
+                }
+            }
+        } else if self.held.len() >= HELD_MAX {
+            self.dropped(&frame, "too many frames waiting");
+            return false;
+        } else {
+            self.held.push_back(frame);
+        }
+        true
+    }
+
+    /// Offer what's held again, oldest first, as far as the queue has space.
+    fn flush_held(&mut self, now: Instant) {
+        while let Some(frame) = self.held.pop_front() {
+            let Some(room) = self.room.as_ref() else {
+                self.held.clear();
+                return;
+            };
+            match room.try_send(frame) {
+                Ok(()) => {
+                    self.counters.room_frames_sent.fetch_add(1, Relaxed);
+                }
+                Err(mpsc::error::TrySendError::Full(frame)) => {
+                    self.held.push_front(frame);
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(frame)) => {
+                    self.dropped(&frame, "the room has gone");
+                    let lost = self.held.len();
+                    self.held.clear();
+                    self.counters.room_frames_dropped.fetch_add(lost as u64, Relaxed);
+                    self.restart_lost_round(now);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn dropped(&mut self, frame: &[u8], why: &str) {
+        self.counters.room_frames_dropped.fetch_add(1, Relaxed);
+        let kind = frame.first().copied().unwrap_or_default();
+        tracing::info!(kind, why, "chat relay: a frame didn't reach the room");
+        if kind == frame_type::SYNC_REQ {
+            self.restart_lost_round(Instant::now());
+        }
+    }
+
+    /// This device's request never went out: ask again soon, not after
+    /// [`SYNC_STALL`]. A room that comes back starts a round of its own.
+    fn restart_lost_round(&mut self, now: Instant) {
+        if let Some(round) = self.round.take() {
+            self.want_soon(round.peer, now + GAP_GRACE);
+        }
     }
 }
 

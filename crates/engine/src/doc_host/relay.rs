@@ -114,6 +114,12 @@ pub(crate) struct ChatRelayState {
     /// The room refused a checkpoint as too big, and it would again.
     too_large: AtomicBool,
     journal: Mutex<Journal>,
+    /// What the heal this host owes must cover: its doc's version when it stopped
+    /// relaying, which holds every op it relayed. What it commits after that goes
+    /// to stored rows.
+    heal_version: Mutex<Option<loro::VersionVector>>,
+    /// The edge takes heal claims. Off once it says it doesn't know them.
+    heal_claims: AtomicBool,
 }
 
 impl ChatRelayState {
@@ -135,6 +141,8 @@ impl ChatRelayState {
             relayed_here: AtomicBool::new(false),
             too_large: AtomicBool::new(false),
             journal: Mutex::new(Journal::default()),
+            heal_version: Mutex::new(None),
+            heal_claims: AtomicBool::new(true),
         })
     }
 
@@ -256,6 +264,28 @@ impl ChatRelayState {
         if reason == HEAL_REASON && epoch == self.mode_epoch() && !self.relaying() {
             self.heal_owed.store(false, Ordering::Release);
             self.healed.store(true, Ordering::Release);
+        }
+    }
+
+    /// The version a heal claim names, if the edge takes claims.
+    pub(super) fn heal_claim(&self) -> Option<loro::VersionVector> {
+        if !self.heal_claims.load(Ordering::Acquire) {
+            return None;
+        }
+        lock(&self.heal_version).clone()
+    }
+
+    /// The room's answer to a heal claim. `epoch`: as for [`Self::checkpoint_landed`],
+    /// sampled before the claim; a host that has relayed since owes a new heal.
+    pub(super) fn heal_claim_answered(&self, answer: crate::chat2_checkpoint::HealClaim, epoch: u64) {
+        use crate::chat2_checkpoint::HealClaim;
+        match answer {
+            HealClaim::Healed if epoch == self.mode_epoch() && !self.relaying() => {
+                self.heal_owed.store(false, Ordering::Release);
+                self.healed.store(true, Ordering::Release);
+            }
+            HealClaim::Unsupported => self.heal_claims.store(false, Ordering::Release),
+            _ => {}
         }
     }
 
@@ -482,17 +512,23 @@ impl DocHost {
         // a restarted host can't know what it relayed before.
         if state.relaying.swap(relaying, Ordering::AcqRel) && !relaying {
             state.mode_epoch.fetch_add(1, Ordering::AcqRel);
+            // Read after the mode changed: every commit relayed is in it.
+            *lock(&state.heal_version) = Some(handle.doc.doc().oplog_vv());
         }
         state.relay.set_hello(generation >= RELAY_ROOM_GEN, relaying);
         if relaying {
             state.relayed_here.store(true, Ordering::Release);
             state.healed.store(false, Ordering::Release);
             state.heal_owed.store(false, Ordering::Release);
+            *lock(&state.heal_version) = None;
         } else if is_host
             && (generation >= RELAY_ROOM_GEN || room_dirty || state.relayed_here.load(Ordering::Acquire))
             && !state.healed.load(Ordering::Acquire)
         {
             tracing::info!(chat = %chat_id, "chat relay: storing; a checkpoint is owed");
+            // Not relayed in this process (a restart): what this host may have relayed
+            // before is all in its doc now.
+            lock(&state.heal_version).get_or_insert_with(|| handle.doc.doc().oplog_vv());
             state.heal_owed.store(true, Ordering::Release);
             self.spawn_chat2_checkpoint(handle, HEAL_REASON);
         }
@@ -1254,5 +1290,168 @@ mod tests {
         assert!(seen.refused.is_empty(), "no relay frame reached a room that never offered: {:?}", seen.refused);
         assert!(seen.hellos.iter().all(|hello| hello.get("relaying").is_none_or(|v| v.is_null())));
         assert!(seen.hellos.iter().all(|hello| hello.get("gen").is_none_or(|v| v.is_null())));
+    }
+
+    /// An edge that answers heal claims with `heal` and counts them, and takes every
+    /// checkpoint upload, counting those too.
+    async fn edge_answering_heals(heal: u16) -> (String, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let (claims, uploads) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let (claimed, uploaded) = (claims.clone(), uploads.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (claimed, uploaded) = (claimed.clone(), uploaded.clone());
+                tokio::spawn(async move {
+                    let mut buffer = vec![0; 256 * 1024];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let status = if head.starts_with("POST") && head.contains("/heal") {
+                        assert!(head.to_ascii_lowercase().contains("x-chat2-version:"), "a claim names its version");
+                        claimed.fetch_add(1, Ordering::SeqCst);
+                        heal
+                    } else {
+                        if head.starts_with("POST") && head.contains("/checkpoint") {
+                            uploaded.fetch_add(1, Ordering::SeqCst);
+                        }
+                        200
+                    };
+                    let body = "{\"ok\":true}";
+                    let reply = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (url, claims, uploads)
+    }
+
+    /// A host that has just stopped relaying and owes its heal.
+    fn owing_heal(handle: &ChatDocHandle) -> Arc<ChatRelayState> {
+        let state = state();
+        state.hosting.store(true, Ordering::Release);
+        state.caught_up.store(true, Ordering::Release);
+        state.heal_owed.store(true, Ordering::Release);
+        *lock(&state.heal_version) = Some(handle.doc.doc().oplog_vv());
+        state
+    }
+
+    async fn settle(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_heal_the_rooms_checkpoint_already_covers_sends_no_snapshot() {
+        let (url, claims, uploads) = edge_answering_heals(200).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let state = owing_heal(&handle);
+        *lock(&handle.relay) = Some(state.clone());
+        host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+        settle("the heal", || state.healed.load(Ordering::Acquire)).await;
+        assert_eq!(claims.load(Ordering::SeqCst), 1);
+        assert!(!state.heal_owed.load(Ordering::Acquire));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(uploads.load(Ordering::SeqCst), 0, "the room already holds it all: nothing uploaded");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_heal_the_rooms_checkpoint_doesnt_cover_uploads_the_snapshot() {
+        let (url, claims, uploads) = edge_answering_heals(409).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let state = owing_heal(&handle);
+        *lock(&handle.relay) = Some(state.clone());
+        host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+        settle("the heal", || state.healed.load(Ordering::Acquire)).await;
+        assert_eq!(claims.load(Ordering::SeqCst), 1);
+        assert_eq!(uploads.load(Ordering::SeqCst), 1, "the full heal, as before");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_edge_without_heal_claims_gets_the_snapshot_and_no_more_claims() {
+        let (url, claims, uploads) = edge_answering_heals(404).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let state = owing_heal(&handle);
+        *lock(&handle.relay) = Some(state.clone());
+        host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+        settle("the heal", || state.healed.load(Ordering::Acquire)).await;
+        assert_eq!(uploads.load(Ordering::SeqCst), 1);
+        // The next heal goes straight to the upload.
+        state.healed.store(false, Ordering::Release);
+        state.heal_owed.store(true, Ordering::Release);
+        settle("the in-flight flag", || !handle.checkpointing.load(Ordering::Acquire)).await;
+        host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+        settle("the second heal", || uploads.load(Ordering::SeqCst) == 2).await;
+        assert_eq!(claims.load(Ordering::SeqCst), 1, "asked once");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_claim_answered_after_relaying_again_settles_nothing() {
+        let (url, _claims, _uploads) = edge_answering_heals(200).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, _store) = host_on(&url, dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let state = owing_heal(&handle);
+        let epoch = state.mode_epoch();
+        // It relayed again, then stopped: that stop owes a heal of its own.
+        state.mode_epoch.fetch_add(1, Ordering::AcqRel);
+        state.heal_claim_answered(crate::chat2_checkpoint::HealClaim::Healed, epoch);
+        assert!(!state.healed.load(Ordering::Acquire));
+        assert!(state.heal_owed.load(Ordering::Acquire));
+        state.relaying.store(true, Ordering::Release);
+        state.heal_claim_answered(crate::chat2_checkpoint::HealClaim::Healed, state.mode_epoch());
+        assert!(!state.healed.load(Ordering::Acquire), "relaying: nothing to heal yet");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_relaying_records_what_the_heal_must_cover() {
+        let (url, _claims, _uploads) = edge_answering_heals(409).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (host, store) = host_on(&url, dir.path());
+        let workspace = crate::workspace_host::WorkspaceHost::open(
+            store.clone(),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "host".into(),
+                device_name: "host".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace.create_chat("chat", None, Some("host"), None, None).unwrap();
+        let mut row = workspace.chat("chat").unwrap().unwrap();
+        row.room_gen = Some(RELAY_ROOM_GEN);
+        workspace.import_chat_row(&row).unwrap();
+        host.set_workspace(workspace);
+        let handle = host.open_local("chat").unwrap();
+        handle.doc.doc().get_text("body").insert(0, "relayed").unwrap();
+        handle.doc.doc().commit();
+        let relayed = handle.doc.doc().oplog_vv();
+        let state = state();
+        state.relaying.store(true, Ordering::Release);
+        // No answer from a room yet, so the last one stands: the room has said no.
+        state.room_offered.store(false, Ordering::Release);
+        host.refresh_relay_mode(&handle, &state);
+        assert!(!state.relaying());
+        assert!(state.heal_owed.load(Ordering::Acquire));
+        assert_eq!(lock(&state.heal_version).clone(), Some(relayed), "everything relayed");
+        // Relaying again forgets it: the next stop records its own.
+        state.room_offered.store(true, Ordering::Release);
+        state.relaying.store(true, Ordering::Release);
+        *lock(&state.heal_version) = None;
+        assert_eq!(state.heal_claim(), None);
     }
 }
