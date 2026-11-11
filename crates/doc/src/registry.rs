@@ -22,7 +22,7 @@
 //! typed API mirrors the old `WorkspaceDoc` surface so `WorkspaceHost` is a
 //! drop-in swap.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,7 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
 mod repository_looks;
+mod row_cache;
 mod sidebar_pins;
 mod sidebar_sections;
 
@@ -461,6 +462,22 @@ struct PersistedState {
     pending: Vec<PendingBatch>,
 }
 
+/// What a save of the changes since the previous one holds (see
+/// [`RegistryDoc::delta_bytes`]): the header, the authoritative rows that
+/// changed, and the whole pending queue (small: unsent writes, coalesced).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedDelta {
+    v: u32,
+    resync_epoch: u32,
+    server_seq: u64,
+    gc_floor: u64,
+    clock: HlcClock,
+    local_writes: bool,
+    rows: Vec<RegistryRow>,
+    pending: Vec<PendingBatch>,
+}
+
 /// The local registry replica. Pure data — no I/O, no async; the transport
 /// (`zeron_sync::RegistryClient`) and the engine host drive it under a lock.
 pub struct RegistryDoc {
@@ -483,6 +500,13 @@ pub struct RegistryDoc {
     /// Bumped on every mutation (local or applied) — the engine host converts
     /// this into watch-channel publishes and snapshot debounces.
     generation: u64,
+    /// Parsed typed lists, kept up to date row by row (see `row_cache`).
+    cache: std::sync::Mutex<row_cache::RowCache>,
+    /// Authoritative rows changed since the last save; `None` after a change
+    /// to every row (a full replace), which only a whole save records.
+    unsaved: Option<HashSet<(String, String)>>,
+    /// Rows parsed by typed reads so far (diagnostics and tests).
+    rows_parsed: std::sync::atomic::AtomicU64,
 }
 
 impl RegistryDoc {
@@ -497,7 +521,58 @@ impl RegistryDoc {
             local_only: false,
             local_writes: false,
             generation: 0,
+            cache: std::sync::Mutex::new(row_cache::RowCache::default()),
+            unsaved: Some(HashSet::new()),
+            rows_parsed: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    // ── change tracking ─────────────────────────────────────────────────────
+
+    fn cache_mut(&mut self) -> &mut row_cache::RowCache {
+        self.cache.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// An authoritative row changed: its overlay, and what a save owes.
+    fn touch_row(&mut self, kind: &str, id: &str) {
+        self.cache_mut().touch(kind, id);
+        if let Some(unsaved) = &mut self.unsaved {
+            unsaved.insert((kind.to_owned(), id.to_owned()));
+        }
+    }
+
+    /// Pending ops on a row changed: its overlay (pending is saved whole).
+    fn touch_overlay(&mut self, kind: &str, id: &str) {
+        self.cache_mut().touch(kind, id);
+    }
+
+    fn touch_ops<'a>(&mut self, ops: impl IntoIterator<Item = &'a RowOp>) {
+        let keys: Vec<(String, String)> =
+            ops.into_iter().map(|op| (op.kind.clone(), op.id.clone())).collect();
+        for (kind, id) in keys {
+            self.touch_overlay(&kind, &id);
+        }
+    }
+
+    /// Every row may have changed.
+    fn touch_everything(&mut self) {
+        self.cache_mut().touch_all();
+        self.unsaved = None;
+    }
+
+    /// Changes whenever a row of `kind` may have changed: a publisher skips
+    /// rebuilding lists whose kind is unchanged.
+    pub fn kind_version(&self, kind: &str) -> u64 {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .version(kind)
+    }
+
+    /// Rows parsed by typed reads so far (each read re-parses only rows that
+    /// changed since the previous one).
+    pub fn rows_parsed(&self) -> u64 {
+        self.rows_parsed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn device_id(&self) -> &str {
@@ -537,6 +612,7 @@ impl RegistryDoc {
             if pending.is_empty() {
                 return;
             }
+            self.touch_ops(pending.iter().flat_map(|b| &b.ops));
             let ops: usize = pending.iter().map(|b| b.ops.len()).sum();
             tracing::info!(
                 batches = pending.len(),
@@ -595,8 +671,110 @@ impl RegistryDoc {
         Ok(serde_json::to_vec(&state)?)
     }
 
+    // ── incremental saves ───────────────────────────────────────────────────
+
+    /// The changes since the last save ([`Self::mark_saved`]), to store after
+    /// the last whole snapshot; `None` when only a whole snapshot can record
+    /// them (a full replace changed every row). A local session-status write
+    /// becomes one row here instead of the whole registry.
+    pub fn delta_bytes(&self) -> Result<Option<Vec<u8>>, DocError> {
+        let Some(unsaved) = &self.unsaved else {
+            return Ok(None);
+        };
+        let rows = unsaved
+            .iter()
+            .filter_map(|(kind, id)| self.authoritative.get(kind)?.get(id).cloned())
+            .collect();
+        let delta = PersistedDelta {
+            v: 1,
+            resync_epoch: CURRENT_RESYNC_EPOCH,
+            server_seq: self.server_seq,
+            gc_floor: self.gc_floor,
+            clock: self.clock.clone(),
+            local_writes: self.local_writes,
+            rows,
+            pending: self.pending.clone(),
+        };
+        Ok(Some(serde_json::to_vec(&delta)?))
+    }
+
+    /// A save (whole or delta) recorded everything up to now.
+    pub fn mark_saved(&mut self) {
+        self.unsaved = Some(HashSet::new());
+    }
+
+    /// The replica a whole snapshot plus its saved deltas hold. `chain` is
+    /// the contiguous run of deltas (applied in order; the first that doesn't
+    /// decode ends it), `tail` any rows after a break. Only the tail's
+    /// pending writes are kept (they are local writes nothing else holds;
+    /// replaying one is an idempotent LWW push); its rows and cursor are
+    /// not, so the room resends what the cursor doesn't cover. Returns the
+    /// replica and whether the whole chain applied (else the next save
+    /// should be whole, to start a clean chain).
+    pub fn from_saved(
+        base: &[u8],
+        chain: &[Vec<u8>],
+        tail: &[Vec<u8>],
+        device_id: &str,
+    ) -> Result<(Self, bool), DocError> {
+        let state: PersistedState = serde_json::from_slice(base)?;
+        let mut doc = Self::from_state(state, device_id)?;
+        // Rows after a break: past an undecodable delta, plus the store's tail.
+        let mut after_break: Vec<&Vec<u8>> = Vec::new();
+        for (i, bytes) in chain.iter().enumerate() {
+            match serde_json::from_slice::<PersistedDelta>(bytes) {
+                Ok(delta) if delta.v == 1 => doc.apply_delta(delta),
+                _ => {
+                    tracing::warn!(at = i, deltas = chain.len(), "registry delta did not decode; loading up to the one before it");
+                    after_break.extend(&chain[i + 1..]);
+                    after_break.push(bytes); // counted as a break, not kept
+                    break;
+                }
+            }
+        }
+        after_break.extend(tail);
+        let clean = after_break.is_empty();
+        if !clean {
+            let mut known: HashSet<String> = doc.pending.iter().map(|b| b.batch.clone()).collect();
+            for bytes in after_break {
+                if let Ok(delta) = serde_json::from_slice::<PersistedDelta>(bytes) {
+                    for batch in delta.pending {
+                        if known.insert(batch.batch.clone()) {
+                            doc.pending.push(batch);
+                        }
+                    }
+                }
+            }
+        }
+        doc.coalesce_loaded();
+        doc.unsaved = Some(HashSet::new());
+        Ok((doc, clean))
+    }
+
+    fn apply_delta(&mut self, delta: PersistedDelta) {
+        self.server_seq = if delta.resync_epoch < CURRENT_RESYNC_EPOCH {
+            0
+        } else {
+            delta.server_seq
+        };
+        self.gc_floor = delta.gc_floor;
+        self.clock = delta.clock;
+        self.local_writes = delta.local_writes;
+        self.pending = delta.pending;
+        for row in delta.rows {
+            self.put_authoritative(row);
+        }
+        self.cache_mut().touch_all();
+    }
+
     pub fn from_bytes(bytes: &[u8], device_id: &str) -> Result<Self, DocError> {
         let state: PersistedState = serde_json::from_slice(bytes)?;
+        let mut doc = Self::from_state(state, device_id)?;
+        doc.coalesce_loaded();
+        Ok(doc)
+    }
+
+    fn from_state(state: PersistedState, device_id: &str) -> Result<Self, DocError> {
         if state.v != 1 {
             return Err(DocError::Schema(format!(
                 "unknown registry snapshot version {}",
@@ -625,19 +803,22 @@ impl RegistryDoc {
                 .or_default()
                 .insert(row.id.clone(), row);
         }
-        // Nothing is in flight after a load, so the whole queue coalesces —
-        // this shrinks snapshots bloated before coalescing existed (178k
-        // batches → one op per touched row). The host persists the result.
-        let before = doc.pending_ops_len();
-        if doc.coalesce_unsent() > 0 {
+        Ok(doc)
+    }
+
+    /// Nothing is in flight after a load, so the whole queue coalesces —
+    /// this shrinks snapshots bloated before coalescing existed (178k
+    /// batches → one op per touched row). The host persists the result.
+    fn coalesce_loaded(&mut self) {
+        let before = self.pending_ops_len();
+        if self.coalesce_unsent() > 0 {
             tracing::info!(
                 before,
-                after = doc.pending_ops_len(),
-                batches = doc.pending.len(),
+                after = self.pending_ops_len(),
+                batches = self.pending.len(),
                 "registry: compacted queued writes on load"
             );
         }
-        Ok(doc)
     }
 
     // ── server frames ───────────────────────────────────────────────────────
@@ -696,6 +877,7 @@ impl RegistryDoc {
             }
         }
         self.authoritative = incoming;
+        self.touch_everything();
         self.server_seq = seq;
         self.gc_floor = gc_floor;
         if seed.is_empty() {
@@ -742,7 +924,14 @@ impl RegistryDoc {
     /// re-pulling our own batch is an idempotent LWW no-op.
     pub fn ack_batch(&mut self, batch: &str, _seq: u64) -> bool {
         let before = self.pending.len();
+        let acked: Vec<RowOp> = self
+            .pending
+            .iter()
+            .filter(|b| b.batch == batch)
+            .flat_map(|b| b.ops.iter().cloned())
+            .collect();
         self.pending.retain(|b| b.batch != batch);
+        self.touch_ops(&acked);
         if self.pending.len() != before {
             self.generation += 1;
             true
@@ -771,6 +960,7 @@ impl RegistryDoc {
     }
 
     fn put_authoritative(&mut self, row: RegistryRow) {
+        self.touch_row(&row.kind, &row.id);
         self.authoritative
             .entry(row.kind.clone())
             .or_default()
@@ -792,6 +982,7 @@ impl RegistryDoc {
         if ops.is_empty() {
             return;
         }
+        self.touch_ops(&ops);
         if self.local_only {
             self.generation += 1;
             self.local_writes = true;
@@ -869,6 +1060,10 @@ impl RegistryDoc {
         if self.pending.len().saturating_sub(start) < 2 {
             return 0;
         }
+        let tail_ops: Vec<RowOp> = self.pending[start..]
+            .iter()
+            .flat_map(|b| b.ops.iter().cloned())
+            .collect();
         let mut tail: Vec<(String, Vec<Option<RowOp>>, bool)> = self
             .pending
             .split_off(start)
@@ -950,6 +1145,9 @@ impl RegistryDoc {
                 in_flight: false,
             });
         }
+        // Merged ops replay to the same rows, but say so for every row the
+        // tail held rather than rely on that.
+        self.touch_ops(&tail_ops);
         self.generation += 1;
         folded
     }
@@ -1061,18 +1259,78 @@ impl RegistryDoc {
             .collect()
     }
 
-    fn read_kind<T: serde::de::DeserializeOwned>(&self, kind: &str) -> Vec<T> {
-        let mut out = Vec::new();
-        for row in self.overlay_rows(kind) {
-            let value = Value::Object(row.fields.clone().into_iter().collect());
-            match serde_json::from_value::<T>(value) {
-                Ok(parsed) => out.push(parsed),
-                Err(err) => {
-                    tracing::warn!(kind, row = %row.id, error = %err, "skipping malformed registry row");
-                }
+    /// One row's typed value (`None` when it doesn't parse: skipped, as a
+    /// malformed row always was).
+    fn parse_row<R: serde::de::DeserializeOwned, T>(
+        &self,
+        kind: &str,
+        row: &RegistryRow,
+        convert: fn(R) -> T,
+    ) -> Option<T> {
+        self.rows_parsed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let value = Value::Object(row.fields.clone().into_iter().collect());
+        match serde_json::from_value::<R>(value) {
+            Ok(parsed) => Some(convert(parsed)),
+            Err(err) => {
+                tracing::warn!(kind, row = %row.id, error = %err, "skipping malformed registry row");
+                None
             }
         }
-        out
+    }
+
+    /// Every live row of `kind` as `T`, in no particular order. Only rows
+    /// whose overlay changed since the previous read of this list are parsed
+    /// again (`row_cache`); the first read, and one after a full replace,
+    /// parse them all.
+    fn read_cached<R, T>(&self, kind: &str, convert: fn(R) -> T) -> Vec<T>
+    where
+        R: serde::de::DeserializeOwned + 'static,
+        T: Clone + Send + std::fmt::Debug + 'static,
+    {
+        let values = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .read(
+                kind,
+                std::any::TypeId::of::<(R, T)>(),
+                || {
+                    self.overlay_rows(kind)
+                        .iter()
+                        .filter_map(|row| {
+                            self.parse_row(kind, row, convert).map(|v| (row.id.clone(), v))
+                        })
+                        .collect()
+                },
+                |id| {
+                    self.overlay_row(kind, id)
+                        .and_then(|row| self.parse_row(kind, &row, convert))
+                },
+            );
+        // Tests check the cache against a full read, so a mutation that
+        // forgot to say which rows it touched fails loudly.
+        #[cfg(test)]
+        {
+            let mut fresh: Vec<String> = self
+                .overlay_rows(kind)
+                .iter()
+                .filter_map(|row| {
+                    let value = Value::Object(row.fields.clone().into_iter().collect());
+                    serde_json::from_value::<R>(value)
+                        .ok()
+                        .map(|parsed| format!("{:?}", convert(parsed)))
+                })
+                .collect();
+            let mut cached: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
+            fresh.sort();
+            cached.sort();
+            assert!(
+                fresh == cached,
+                "registry read cache for {kind} is stale: a mutation didn't record its rows"
+            );
+        }
+        values
     }
 
     fn row_exists(&self, kind: &str, id: &str) -> bool {
@@ -1166,10 +1424,7 @@ impl RegistryDoc {
 
     pub fn read_devices(&self) -> Result<Vec<Device>, DocError> {
         let mut devices: Vec<Device> = self
-            .read_kind::<crate::workspace::RawDevice>(KIND_DEVICES)
-            .into_iter()
-            .map(Device::from)
-            .collect();
+            .read_cached::<crate::workspace::RawDevice, Device>(KIND_DEVICES, Device::from);
         devices.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(devices)
     }
@@ -1439,10 +1694,7 @@ impl RegistryDoc {
 
     pub fn read_chats(&self) -> Result<Vec<Chat>, DocError> {
         let mut chats: Vec<Chat> = self
-            .read_kind::<crate::workspace::RawChat>(KIND_CHATS)
-            .into_iter()
-            .map(Chat::from)
-            .collect();
+            .read_cached::<crate::workspace::RawChat, Chat>(KIND_CHATS, Chat::from);
         chats.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(chats)
     }
@@ -1709,10 +1961,7 @@ impl RegistryDoc {
 
     pub fn read_sessions(&self) -> Result<Vec<Session>, DocError> {
         let mut sessions: Vec<Session> = self
-            .read_kind::<crate::workspace::RawSession>(KIND_SESSIONS)
-            .into_iter()
-            .map(Session::from)
-            .collect();
+            .read_cached::<crate::workspace::RawSession, Session>(KIND_SESSIONS, Session::from);
         sessions.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         Ok(sessions)
     }

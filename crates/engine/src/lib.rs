@@ -1173,17 +1173,18 @@ impl Engine {
             }
             core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
         }
-        let preview_workspace = core.workspace.clone();
+        // The chats as last published (the list every view watches), not a
+        // fresh parse of every chat row on each scan.
+        let preview_chats = core.workspace.watch_chats();
         let preview_device = core.device_id.clone();
         let preview_terminals = core.terminals.clone();
         let preview_sessions = core.sessions.clone();
         let projects = Arc::new(move || zeron_preview::Scope {
-            chats: preview_workspace
-                .read_chats()
-                .unwrap_or_default()
-                .into_iter()
+            chats: preview_chats
+                .borrow()
+                .iter()
                 .filter(|chat| chat.device_id == preview_device)
-                .filter_map(|chat| Some((chat.id, std::path::PathBuf::from(chat.cwd?))))
+                .filter_map(|chat| Some((chat.id.clone(), std::path::PathBuf::from(chat.cwd.clone()?))))
                 .collect(),
             terminals: preview_terminals.chats(),
             reserved_ports: zeron_harness::agent_ports::reserved(),
@@ -1251,7 +1252,15 @@ impl Engine {
         // newer install, a channel switch's update), the store it leaves is
         // one every version reads.
         let version_change_docs = core.doc_host.clone();
-        zeron_update::set_before_restart(move || version_change_docs.prepare_for_version_change());
+        let version_change_registry = core.workspace.clone();
+        zeron_update::set_before_restart(move || {
+            // No more deltas from here (a debounced registry save is whole
+            // too), the registry saved whole (older builds don't read row
+            // deltas), then every chat saved whole and the WAL folded in.
+            version_change_docs.store().stop_snapshot_deltas();
+            version_change_registry.flush();
+            version_change_docs.prepare_for_version_change();
+        });
         // (Not on a Cloud machine: every boot's first token would start a
         // release check, and possibly a download, as the message starts its run.
         // Its checks keep their own schedule; its token is never a recovery.)
