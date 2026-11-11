@@ -70,6 +70,43 @@ pub(crate) async fn post_chat2_checkpoint(
     send(http.post(url).header("x-chat2-frontier", frontier)).await
 }
 
+/// The room's answer to a heal claim (`POST /chat2/{id}/heal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HealClaim {
+    /// Its stored checkpoint holds the version claimed: that is the heal.
+    Healed,
+    /// It doesn't: send the checkpoint.
+    NotCovered,
+    /// An edge from before the claim: send the checkpoint, and don't ask it again.
+    Unsupported,
+    Failed,
+}
+
+/// Ask the room to count its stored checkpoint as this host's heal, which it does
+/// only if that checkpoint already holds `version`: every op the host relayed.
+/// Costs a request with no body, where the heal it replaces sends the whole chat.
+pub(crate) async fn post_heal_claim(
+    http: &reqwest::Client,
+    edge_url: &str,
+    chat_id: &str,
+    bearer: &str,
+    version: &[u8],
+) -> HealClaim {
+    let url = format!("{}/chat2/{}/heal", edge_url.trim_end_matches('/'), chat_id);
+    let version = base64::engine::general_purpose::STANDARD.encode(version);
+    let request = http
+        .post(url)
+        .header("x-chat2-version", version)
+        .timeout(std::time::Duration::from_secs(30))
+        .bearer_auth(bearer);
+    match request.send().await {
+        Ok(res) if res.status().is_success() => HealClaim::Healed,
+        Ok(res) if res.status().as_u16() == 409 => HealClaim::NotCovered,
+        Ok(res) if matches!(res.status().as_u16(), 404 | 405) => HealClaim::Unsupported,
+        Ok(_) | Err(_) => HealClaim::Failed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
