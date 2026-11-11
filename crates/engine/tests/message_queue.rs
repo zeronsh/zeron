@@ -1431,6 +1431,71 @@ async fn an_acquired_edit_blocks_turn_end_and_commit_sends_the_new_text() {
     core.shutdown().await;
 }
 
+/// 2026-11-11, work-laptop: the person tapped Edit on a queued message on
+/// the Mac hosting the chat and was told it was "being edited on another
+/// device". The lease was their own: the same window asking again (its
+/// Acquired reply lost to a dropped app socket, or the chat reopened) must
+/// take its lease over. Any other editor, even on the same device, is still
+/// locked out until the lease ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_editor_asking_again_takes_its_own_lease_over() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "opening turn",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "mine", Vec::new())
+        .expect("queue row");
+
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: first, ..
+    } = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("first begin")
+    else {
+        panic!("first edit must be acquired");
+    };
+    let again = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("second begin");
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: second,
+        text,
+        ..
+    } = again
+    else {
+        panic!("the same editor must get its own lease back, got {again:?}");
+    };
+    assert_ne!(first, second, "a fresh lease generation");
+    assert_eq!(text, "mine");
+
+    // Another window on the same device, and another device, stay locked.
+    for (device, instance) in [("laptop", "window-2"), ("phone", "window-1")] {
+        let outcome = core
+            .doc_host
+            .begin_queued_message_edit(CHAT, &id, device, instance)
+            .await
+            .expect("other begin");
+        assert!(
+            matches!(&outcome, BeginQueueEditOutcome::Locked { owner_device_id, .. } if owner_device_id == "laptop"),
+            "{device}/{instance} must be locked out, got {outcome:?}"
+        );
+    }
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_one_editor_wins_and_an_expired_edit_requires_review() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
