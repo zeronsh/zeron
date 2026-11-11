@@ -214,15 +214,7 @@ function M.bind(c: Choices)
 			})
 		end
 		if cloud_offered() then
-			local repo = cloud_repo(project_row(c.project:get()))
-			table.insert(out, {
-				value = M.CLOUD,
-				label = "Cloud",
-				cloud = true,
-				description = if repo
-					then ui.t("chat.where.device.cloud_from", { repo = repo.name }):get()
-					else ui.t("chat.where.device.cloud"):get(),
-			})
+			table.insert(out, { value = M.CLOUD, label = "Cloud", cloud = true })
 		end
 		return out
 	end)

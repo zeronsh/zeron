@@ -251,8 +251,13 @@ impl zgx_script::Unfold for FoldedEntry {
 /// and to open, as a scroll does. (LZ4 makes them in a quarter of the time deflate's
 /// fastest level does and opens them in a twelfth, for rows a quarter larger, measured
 /// on 16,271 rows of real chats; deflate spends most of its time on a table per row.)
+///
+/// Held at its own length: LZ4 writes into a buffer made for its worst case
+/// (about the input's size), and a shrinking realloc keeps a block where it
+/// is when it loses less than half, so a row kept nearly its uncompressed
+/// size (30.7 MB for a 15,443-row chat whose rows compress to 20.4 MB).
 fn compressed(bytes: &[u8]) -> Box<[u8]> {
-    lz4_flex::block::compress_prepend_size(bytes).into_boxed_slice()
+    Box::from(lz4_flex::block::compress_prepend_size(bytes).as_slice())
 }
 
 /// An entry's row, as a view keeps it: its subagents apart, as the transcript
@@ -6069,6 +6074,33 @@ mod tests {
         assert_eq!(there.row.as_ref().unwrap().to_json(), here.row.as_ref().unwrap().to_json());
         assert_eq!(there.subagents.as_ref().map(|s| s[0].to_json()), here.subagents.as_ref().map(|s| s[0].to_json()));
         assert_eq!(open.entries[0].sum, super::sum_of(&entry));
+    }
+
+    /// A folded row's bytes take their own length, not LZ4's worst-case
+    /// buffer: rows compressing as real ones do (about a third smaller) kept
+    /// that buffer, as a shrinking realloc left it where it was.
+    #[test]
+    fn a_folded_rows_bytes_take_their_own_length() {
+        unsafe extern "C" {
+            // mimalloc's own, the program's allocator (zgx-desktop's `mimalloc`).
+            fn mi_usable_size(p: *const std::ffi::c_void) -> usize;
+        }
+        // Words drawn from a small vocabulary, as a transcript's are: they
+        // compress, but not by half.
+        let words = ["the", "row", "tool", "output", "src/chat.rs", "cargo", "test", "fold", "error", "warning", "fn", "let"];
+        let (mut seed, mut text) = (7u32, String::new());
+        for _ in 0..400 {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            text.push_str(words[(seed >> 16) as usize % words.len()]);
+            text.push(if seed & 0x100 == 0 { ' ' } else { '\n' });
+            text.push_str(&((seed >> 8) % 1000).to_string());
+        }
+        let raw = serde_json::to_vec(&serde_json::json!({ "id": "e1", "role": "assistant", "text": text })).unwrap();
+        let folded = super::compressed(&raw);
+        assert!(folded.len() > raw.len() / 2 && folded.len() < raw.len(), "a ratio like real rows': {} of {}", folded.len(), raw.len());
+        // SAFETY: mimalloc reports the size of the block it gave the box.
+        let held = unsafe { mi_usable_size(folded.as_ptr().cast()) };
+        assert!(held <= folded.len() + folded.len() / 8 + 16, "held {held} for {} bytes ({} raw)", folded.len(), raw.len());
     }
 
     /// A row out of view holds what makes it, not itself: what it opens to is
