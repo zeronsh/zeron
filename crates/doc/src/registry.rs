@@ -1728,10 +1728,24 @@ impl RegistryDoc {
         if !authoritative {
             return Ok(false);
         }
+        let chats = self.read_chats()?;
+        self.reconcile_sidebar_pins_with(authoritative, chats.iter().map(|c| c.id.as_str()))
+    }
+
+    /// [`Self::reconcile_sidebar_pins`] with the chats already read from
+    /// this doc (`read_chats`, under the same lock): a publish reads them
+    /// for its lists anyway, and each read decodes every chat row.
+    pub fn reconcile_sidebar_pins_with<'a>(
+        &mut self,
+        authoritative: bool,
+        chat_ids: impl Iterator<Item = &'a str>,
+    ) -> Result<bool, DocError> {
+        if !authoritative {
+            return Ok(false);
+        }
         let initialized = self.sidebar_pins_initialized();
         self.initialize_sidebar_pins();
-        let known: std::collections::HashSet<_> =
-            self.read_chats()?.into_iter().map(|c| c.id).collect();
+        let known: std::collections::HashSet<String> = chat_ids.map(str::to_owned).collect();
         let removed: Vec<_> = self
             .ordered_sidebar_pins()
             .into_iter()
