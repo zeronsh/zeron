@@ -128,17 +128,17 @@ jobs:
           path: ~/Library/Caches/zgx-ghostty
           key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
           restore-keys: zgx-ghostty-
-      # (The root workspace too only for the engine's plugin tests: two keys, so
-      # neither cache is restored or saved half the time.)
+      # (The root workspace too only for the engine's plugin tests, rare on the
+      # fast tier: that variant reads the shared caches but saves none, so the
+      # repository's 10 GB keep room for the ones used on every run.)
       - if: inputs.engine-plugins
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: zgx-tests-engine
+          key: zgx-tests
           workspaces: |
             . -> target
             apps/zgx -> target
-          save-if: ${{ env.SAVE_CACHES == 'true' }}
-          cache-on-failure: true
+          save-if: false
       - if: ${{ !inputs.engine-plugins }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -214,12 +214,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # Read only: it runs for Windows-specific changes alone, and its ~1 GB would
+      # cost a cache used on every run its place in the 10 GB (docs/reference/ci.md).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: zgx-tests
           workspaces: apps/zgx -> target
-          save-if: ${{ env.SAVE_CACHES == 'true' }}
-          cache-on-failure: true
+          save-if: false
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx Windows tests
