@@ -111,14 +111,17 @@ const MIGRATIONS: &[&str] = &[
      ) STRICT;
      CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
     // Loro updates saved on top of a doc's snapshot row, oldest first (see
-    // `append_snapshot_delta`). Each row carries the cursor its state covers.
-    // The snapshots row keeps its own bytes and cursor, so a build that
-    // predates this table reads a consistent (older) snapshot.
+    // `append_snapshot_delta`). Each row carries the cursor its state covers
+    // and the `saved_at` of the base it extends. The snapshots row keeps its
+    // own bytes and cursor, so a build that predates this table reads a
+    // consistent (older) snapshot; if such a build rewrites that row, the
+    // deltas' cursors stop counting (their ops still merge: same doc).
     "CREATE TABLE IF NOT EXISTS snapshot_deltas (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
         doc_id TEXT NOT NULL,
         bytes BLOB NOT NULL,
-        cursor INTEGER NOT NULL
+        cursor INTEGER NOT NULL,
+        base_saved_at INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX IF NOT EXISTS snapshot_deltas_doc ON snapshot_deltas(doc_id,ordinal);",
 ];
@@ -156,7 +159,8 @@ pub struct DocsStore {
     /// A token per doc, new with every full snapshot write. A delta is only
     /// accepted on top of the base it was taken against. Only one process
     /// opens a store (the engine's instance lock), so memory is enough.
-    bases: Mutex<std::collections::HashMap<String, u64>>,
+    /// Token and `saved_at` of each doc's current base.
+    bases: Mutex<std::collections::HashMap<String, (u64, i64)>>,
     next_base: std::sync::atomic::AtomicU64,
     path: PathBuf,
     /// This open found the file damaged and rebuilt the store.
@@ -469,13 +473,16 @@ impl DocsStore {
     ) -> Result<bool, StoreError> {
         store_blocking(|| {
             let mut conn = self.conn();
-            if self.bases.lock().unwrap_or_else(PoisonError::into_inner).get(doc_id) != Some(&base) {
-                return Ok(false);
-            }
+            // From memory, not the row: `saved_at` sits after the blob, and
+            // reading it walks the whole snapshot's overflow pages.
+            let saved_at = match self.bases.lock().unwrap_or_else(PoisonError::into_inner).get(doc_id) {
+                Some(&(token, saved_at)) if token == base => saved_at,
+                _ => return Ok(false),
+            };
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO snapshot_deltas (doc_id, bytes, cursor) VALUES (?1, ?2, ?3)",
-                params![doc_id, bytes, cursor as i64],
+                "INSERT INTO snapshot_deltas (doc_id, bytes, cursor, base_saved_at) VALUES (?1, ?2, ?3, ?4)",
+                params![doc_id, bytes, cursor as i64, saved_at],
             )?;
             self.invalidate_failed_publication(&tx, doc_id)?;
             tx.commit()?;
@@ -516,14 +523,14 @@ impl DocsStore {
     }
 
     /// Called after the full write commits, with the connection still held.
-    fn new_base(&self, doc_id: &str) -> u64 {
+    fn new_base(&self, doc_id: &str, saved_at: i64) -> u64 {
         let token = self
             .next_base
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.bases
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(doc_id.to_owned(), token);
+            .insert(doc_id.to_owned(), (token, saved_at));
         token
     }
 
@@ -534,16 +541,17 @@ impl DocsStore {
 
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut conn = self.conn();
+        let saved_at = now_ms();
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
-            params![doc_id, bytes, now_ms()],
+            params![doc_id, bytes, saved_at],
         )?;
         self.replace_base(&tx, doc_id)?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
-        self.new_base(doc_id);
+        self.new_base(doc_id, saved_at);
         Ok(())
     }
 
@@ -568,17 +576,18 @@ impl DocsStore {
         epoch: u32,
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
+        let saved_at = now_ms();
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
                  cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 0",
-            params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
+            params![doc_id, bytes, saved_at, cursor as i64, epoch as i64],
         )?;
         self.replace_base(&tx, doc_id)?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
-        self.new_base(doc_id);
+        self.new_base(doc_id, saved_at);
         Ok(())
     }
 
@@ -603,17 +612,18 @@ impl DocsStore {
         epoch: u32,
     ) -> Result<u64, StoreError> {
         let mut conn = self.conn();
+        let saved_at = now_ms();
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
                  cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 1",
-            params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
+            params![doc_id, bytes, saved_at, cursor as i64, epoch as i64],
         )?;
         self.replace_base(&tx, doc_id)?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
-        Ok(self.new_base(doc_id))
+        Ok(self.new_base(doc_id, saved_at))
     }
 
     /// The cursor of the newest saved state: the last delta's when there are
@@ -624,7 +634,8 @@ impl DocsStore {
                 .conn()
                 .query_row(
                     "SELECT COALESCE(
-                        (SELECT cursor FROM snapshot_deltas WHERE doc_id = ?1 ORDER BY ordinal DESC LIMIT 1),
+                        (SELECT d.cursor FROM snapshot_deltas d WHERE d.doc_id = ?1
+                           AND d.base_saved_at = snapshots.saved_at ORDER BY d.ordinal DESC LIMIT 1),
                         cursor, 0) FROM snapshots WHERE doc_id = ?1",
                     params![doc_id],
                     |row| row.get::<_, i64>(0),
@@ -681,24 +692,31 @@ impl DocsStore {
         let conn = self.conn();
         let row = conn
             .query_row(
-                "SELECT bytes, cursor, epoch FROM snapshots WHERE doc_id = ?1",
+                "SELECT bytes, cursor, epoch, saved_at FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
                 |row| {
                     Ok((
                         row.get::<_, Vec<u8>>(0)?,
                         row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64,
                         row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u32,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((bytes, cursor, epoch)) = row else { return Ok(None) };
+        let Some((bytes, cursor, epoch, saved_at)) = row else { return Ok(None) };
         let deltas = load_deltas(&conn, doc_id)?;
         drop(conn);
+        if deltas.is_empty() {
+            return Ok(Some((bytes, cursor, epoch)));
+        }
         // Bytes and cursor stay a pair: the merged state goes with the last
         // delta's cursor, an unmergeable one falls back to the base's own.
-        let Some(last_cursor) = deltas.last().map(|(_, cursor)| *cursor) else {
-            return Ok(Some((bytes, cursor, epoch)));
+        // Deltas over a base something else rewrote (a build without this
+        // table, after a downgrade) still merge, but claim no cursor.
+        let last_cursor = match deltas.last() {
+            Some((_, cursor, base)) if *base == saved_at => *cursor,
+            _ => cursor,
         };
         Ok(Some(match merge_deltas(doc_id, &bytes, &deltas) {
             Some(merged) => (merged, last_cursor, epoch),
@@ -875,13 +893,13 @@ impl DocsStore {
 }
 
 /// `doc_id`'s saved deltas, oldest first, with the cursor each one covers.
-fn load_deltas(conn: &Connection, doc_id: &str) -> Result<Vec<(Vec<u8>, u64)>, StoreError> {
+fn load_deltas(conn: &Connection, doc_id: &str) -> Result<Vec<(Vec<u8>, u64, i64)>, StoreError> {
     let mut q = conn.prepare_cached(
-        "SELECT bytes, cursor FROM snapshot_deltas WHERE doc_id = ?1 ORDER BY ordinal",
+        "SELECT bytes, cursor, base_saved_at FROM snapshot_deltas WHERE doc_id = ?1 ORDER BY ordinal",
     )?;
     let rows = q
         .query_map(params![doc_id], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -890,7 +908,7 @@ fn load_deltas(conn: &Connection, doc_id: &str) -> Result<Vec<(Vec<u8>, u64)>, S
 /// The base snapshot with its deltas applied, as one snapshot. `None` when
 /// there are no deltas, or when they don't apply (then the base and its own
 /// cursor are the honest pair, and the room backfills the rest).
-fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[(Vec<u8>, u64)]) -> Option<Vec<u8>> {
+fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[(Vec<u8>, u64, i64)]) -> Option<Vec<u8>> {
     if deltas.is_empty() {
         return None;
     }
@@ -899,7 +917,7 @@ fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[(Vec<u8>, u64)]) -> Option<
         .import(base)
         .map_err(|e| e.to_string())
         .and_then(|_| {
-            let updates: Vec<Vec<u8>> = deltas.iter().map(|(bytes, _)| bytes.clone()).collect();
+            let updates: Vec<Vec<u8>> = deltas.iter().map(|(bytes, _, _)| bytes.clone()).collect();
             doc.import_batch(&updates).map_err(|e| e.to_string())
         })
         .and_then(|_| doc.export(loro::ExportMode::Snapshot).map_err(|e| e.to_string()));
@@ -1072,6 +1090,47 @@ mod tests {
         assert_eq!(store.snapshot_delta_stats("chat").unwrap(), (0, 0));
         store.delete_snapshot("chat").unwrap();
         assert!(store.load_snapshot("chat").unwrap().is_none());
+    }
+
+    /// beta → stable → beta: a build without `snapshot_deltas` rewrites the
+    /// snapshots row (here after a room reset, with a LOWER cursor) and
+    /// leaves the deltas behind. Back on this build, their ops still merge
+    /// (same doc), but their older-room cursor must not be believed.
+    #[test]
+    fn a_downgrade_rewrite_strips_stale_deltas_of_their_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        doc.get_text("t").insert(0, "base").unwrap();
+        doc.commit();
+        let base_vv = doc.oplog_vv();
+        let base = store
+            .save_base_snapshot("chat", &doc.export(loro::ExportMode::Snapshot).unwrap(), 900, 2)
+            .unwrap();
+        doc.get_text("t").insert(4, " +delta").unwrap();
+        doc.commit();
+        let update = doc.export(loro::ExportMode::updates(&base_vv)).unwrap();
+        assert!(store.append_snapshot_delta("chat", base, &update, 950).unwrap());
+
+        // The older build: plain upsert of the row, nothing else.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let stable = loro::LoroDoc::new();
+        stable.get_text("other").insert(0, "stable's own edit").unwrap();
+        stable.commit();
+        store
+            .conn()
+            .execute(
+                "UPDATE snapshots SET bytes = ?1, cursor = 12, saved_at = ?2 WHERE doc_id = 'chat'",
+                params![stable.export(loro::ExportMode::Snapshot).unwrap(), now_ms()],
+            )
+            .unwrap();
+
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
+        assert_eq!(cursor, 12, "a stale delta claimed a cursor from another base");
+        assert_eq!(store.snapshot_cursor("chat").unwrap(), 12);
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!(loaded.get_text("other").to_string(), "stable's own edit");
     }
 
     /// Deltas that don't apply leave the base and ITS cursor, not the
