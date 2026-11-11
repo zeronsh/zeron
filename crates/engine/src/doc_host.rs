@@ -7652,10 +7652,11 @@ fn note_rejected_run(handle: &ChatDocHandle, entry: &SessionCommandEntry, why: &
     let SessionCommandPayload::Run { message_id, request } = &entry.payload else {
         return;
     };
-    // (Idempotent by id: a message that already landed stays as it is.)
-    if let Err(err) =
-        handle.write_user_message(message_id, &request.prompt, entry.issued_at.min(now_ms()))
-    {
+    // (Idempotent by id: a message that already landed stays as it is.) Its
+    // words, without the references to files that never resolved here
+    // (`pending://…`): nothing could show those.
+    let words = without_pending_refs(&request.prompt);
+    if let Err(err) = handle.write_user_message(message_id, &words, entry.issued_at.min(now_ms())) {
         tracing::warn!(chat = %handle.chat_id, error = %err, "writing a run that didn't start failed");
         return;
     }
@@ -7671,6 +7672,23 @@ fn note_rejected_run(handle: &ChatDocHandle, entry: &SessionCommandEntry, why: &
     if let Err(err) = handle.note_turn_failure(message_id, &note) {
         tracing::warn!(chat = %handle.chat_id, error = %err, "noting a run that didn't start failed");
     }
+}
+
+/// `prompt` without the lines that only name an upload that never resolved.
+fn without_pending_refs(prompt: &str) -> String {
+    prompt
+        .lines()
+        .filter(|line| {
+            !line
+                .trim()
+                .trim_start_matches(['-', '*', ' '])
+                .split_whitespace()
+                .any(crate::uploads::is_pending_ref)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -7741,6 +7759,13 @@ mod rejected_run_tests {
             MessagePart::Error { message, .. } if message == "Couldn't start this turn: no such agent here")));
         drop(handle);
         host.shutdown_workers().await;
+    }
+
+    #[test]
+    fn unresolved_file_references_are_left_out_of_the_message() {
+        let prompt = "look at this\n\nAttached files:\n- pending://up-1/shot.png\nthanks";
+        assert_eq!(without_pending_refs(prompt), "look at this\n\nAttached files:\nthanks");
+        assert_eq!(without_pending_refs("plain words"), "plain words");
     }
 
     /// A message that already had a reply (a re-issued attempt turned away)

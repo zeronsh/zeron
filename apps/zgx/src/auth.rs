@@ -544,6 +544,12 @@ impl Auth {
         }
         if now_signed_in {
             self.failure.set(None);
+            // Signed in (setup, or Settings after choosing Local): a later
+            // launch without the session is an account's, asked to sign in
+            // again, not Local's main window (src/main.rs `stayed_local`).
+            if !was_signed_in {
+                crate::remember_stayed_local(false);
+            }
         } else if was_signed_in && self.failure.get().is_none() && !self.signed_out_here.get() {
             // Signed out, not by asking here: the session was refused.
             eprintln!("zeron-zgx: account: the session ended");

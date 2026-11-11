@@ -170,20 +170,20 @@ fn service_state() -> String {
 }
 
 /// Whether a service not up (see [`service_running`]) is restarted after the
-/// swap: when it broke (failed, or caught restarting itself), yes; stopped
-/// (inactive) or not installed (inactive too, or no answer), no.
+/// swap: when it broke (failed, or caught restarting itself), yes; stopped,
+/// being stopped, or not installed (inactive too, or no answer), no.
 fn restarts_after_swap(state: &str) -> bool {
-    matches!(state, "failed" | "activating" | "deactivating" | "reloading")
+    matches!(state, "failed" | "activating" | "reloading")
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn only_a_broken_service_is_restarted_after_the_swap() {
-        for state in ["failed", "activating", "deactivating", "reloading"] {
+        for state in ["failed", "activating", "reloading"] {
             assert!(super::restarts_after_swap(state), "{state}");
         }
-        for state in ["inactive", "", "maintenance", "unknown"] {
+        for state in ["inactive", "deactivating", "", "maintenance", "unknown"] {
             assert!(!super::restarts_after_swap(state), "{state}");
         }
     }

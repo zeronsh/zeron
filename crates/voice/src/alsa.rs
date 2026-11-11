@@ -36,6 +36,7 @@ const DEFAULT_DEVICE: &str = "default";
 const SND_PCM_STREAM_PLAYBACK: c_int = 0;
 const SND_PCM_STREAM_CAPTURE: c_int = 1;
 const SND_PCM_NONBLOCK: c_int = 1;
+const SND_PCM_STATE_PREPARED: c_int = 2;
 const EAGAIN: c_long = 11;
 const SND_PCM_ACCESS_RW_INTERLEAVED: c_int = 3;
 const SND_PCM_FORMAT_S16_LE: c_int = 2;
@@ -70,6 +71,7 @@ struct Api {
         unsafe extern "C" fn(*mut Pcm, *mut HwParams, *mut c_uint, *mut c_int) -> c_int,
     hw_params: unsafe extern "C" fn(*mut Pcm, *mut HwParams) -> c_int,
     pcm_start: unsafe extern "C" fn(*mut Pcm) -> c_int,
+    pcm_state: unsafe extern "C" fn(*mut Pcm) -> c_int,
     pcm_wait: unsafe extern "C" fn(*mut Pcm, c_int) -> c_int,
     pcm_readi: unsafe extern "C" fn(*mut Pcm, *mut c_void, c_ulong) -> c_long,
     pcm_recover: unsafe extern "C" fn(*mut Pcm, c_int, c_int) -> c_int,
@@ -131,6 +133,7 @@ fn load() -> Result<Api, String> {
         hw_params_set_rate_near: symbol!("snd_pcm_hw_params_set_rate_near"),
         hw_params: symbol!("snd_pcm_hw_params"),
         pcm_start: symbol!("snd_pcm_start"),
+        pcm_state: symbol!("snd_pcm_state"),
         pcm_wait: symbol!("snd_pcm_wait"),
         pcm_readi: symbol!("snd_pcm_readi"),
         pcm_recover: symbol!("snd_pcm_recover"),
@@ -538,11 +541,17 @@ impl Device {
     fn read_until(&self, setup: &Setup, stop: &AtomicBool, level: &AtomicU32, audio: &Audio) -> bool {
         let frame_bytes = setup.channels * setup.format.bytes();
         let mut buffer = vec![0_u8; CHUNK_FRAMES * frame_bytes];
-        // An overrun or a suspend: prepared and started again, and read on.
-        // Anything else (unplugged): the recording ends, failed.
+        // An overrun or a suspend: recovered, started again when that left
+        // it prepared (an overrun does; a resume from suspend leaves it
+        // running), and read on. Anything else (unplugged): the recording
+        // ends, failed.
         let recover = |error: c_int| {
             // SAFETY: the open PCM and the error it just gave.
-            unsafe { (self.api.pcm_recover)(self.pcm, error, 1) >= 0 && (self.api.pcm_start)(self.pcm) >= 0 }
+            unsafe {
+                (self.api.pcm_recover)(self.pcm, error, 1) >= 0
+                    && ((self.api.pcm_state)(self.pcm) != SND_PCM_STATE_PREPARED
+                        || (self.api.pcm_start)(self.pcm) >= 0)
+            }
         };
         while !stop.load(Ordering::Acquire) && !audio.full.load(Ordering::Acquire) {
             // SAFETY: the open PCM; returns at the latest after WAIT_MS.
