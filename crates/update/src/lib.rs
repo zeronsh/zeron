@@ -61,6 +61,17 @@ pub const fn current_version() -> &'static str {
 
 static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// Set by the zgx app, the Zeron app on every platform: its updater follows
+/// the channel on record ([`InstallKind::follows_channels`]). Not by an
+/// engine, whose process runs this crate too.
+static APP_FOLLOWS_CHANNELS: AtomicBool = AtomicBool::new(false);
+
+/// This process is the zgx app (see [`APP_FOLLOWS_CHANNELS`]). Called first
+/// thing in its `main`.
+pub fn set_app_follows_channels() {
+    APP_FOLLOWS_CHANNELS.store(true, Ordering::SeqCst);
+}
+
 /// The app's own version when it isn't this crate's: a beta interface built
 /// apart from the workspace (`0.2.136-beta.1`). Set once, before the desktop
 /// checker starts.
@@ -597,14 +608,20 @@ impl InstallKind {
     }
 
     /// Whether this install's updater follows `update-channel.json`: a macOS
-    /// app always; on Windows and the Linux desktop a beta build alone, so
-    /// stable builds there (and every engine, which is a stable build) stay on
-    /// stable and a tester can still leave beta.
+    /// app always; on Windows and the Linux desktop the zgx app
+    /// ([`set_app_follows_channels`]) and any beta build, so that a beta
+    /// download stays on the beta channel through the stable releases it
+    /// carries, and a tester can still leave beta. The old app's stable
+    /// builds there, and engines that aren't betas, stay on stable.
     pub fn follows_channels(&self) -> bool {
         match self {
             Self::MacApp { .. } => true,
             Self::Unmanaged => false,
-            _ => self.supports_desktop_update() && Channel::of_version(app_version()) == Channel::Beta,
+            _ => {
+                self.supports_desktop_update()
+                    && (APP_FOLLOWS_CHANNELS.load(Ordering::SeqCst)
+                        || Channel::of_version(app_version()) == Channel::Beta)
+            }
         }
     }
 

@@ -29,15 +29,16 @@ const VERSION_FILE: &str = "zeron-version";
 /// Inno Setup's `_is1` suffix). Settings → Apps reads `DisplayVersion` here.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1";
 /// The zgx app's own files beside `zeron.exe`, by version:
-/// `<folder>\<version>\ui`, `plugins-builtin` and `engine\zeron.exe` (a
-/// whole Zeron executable run as `zeron.exe engine`). The folder is `beta`
-/// for a beta's and `app` for a stable release's ([`files_folder`]). Such an
-/// app can't update by swapping one file, so it updates from the package
+/// `beta\<version>\ui`, `plugins-builtin` and `engine\zeron.exe` (a whole
+/// Zeron executable run as `zeron.exe engine`), for a stable release as for a
+/// beta. (Named for the betas that came first. Every beta in the field checks
+/// a package for `beta\<version>` before it installs it, and the beta channel
+/// carries stable releases too, so the one name stays.) Such an app can't
+/// update by swapping one file, so it updates from the package
 /// (`zeron-<version>-windows-<arch>.zip`); nothing already there is replaced,
 /// which a running engine would prevent. The old app (one self-contained
-/// `zeron.exe`) reads neither folder.
+/// `zeron.exe`) reads no such folder.
 const BETA: &str = "beta";
-const APP: &str = "app";
 /// Where a staged package unpacks, beside the staged `zeron.exe`.
 const PACKAGE: &str = "package";
 /// Held while one process completes an install ([`complete_install`]), so a
@@ -57,17 +58,9 @@ fn packaged() -> bool {
     PACKAGED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// The folder beside `zeron.exe` that holds `version`'s own files.
-pub fn files_folder(version: &str) -> &'static str {
-    match super::Channel::of_version(version) {
-        super::Channel::Beta => BETA,
-        super::Channel::Stable => APP,
-    }
-}
-
 /// `version`'s own files in the installation at `directory`.
 pub fn version_files(directory: &Path, version: &str) -> PathBuf {
-    directory.join(files_folder(version)).join(version)
+    directory.join(BETA).join(version)
 }
 
 #[derive(serde::Deserialize)]
@@ -184,8 +177,7 @@ async fn stage_package(
     std::fs::remove_file(&archive)?;
     ensure!(
         version_files(&unpacked, &manifest.version).join("engine").join("zeron.exe").is_file(),
-        "the package has no {}\\{}\\engine\\zeron.exe",
-        files_folder(&manifest.version),
+        "the package has no {BETA}\\{}\\engine\\zeron.exe",
         manifest.version
     );
     let staged = temporary.path().join("zeron.exe");
@@ -197,24 +189,35 @@ async fn stage_package(
     Ok(staged)
 }
 
-/// A staged package's own folders into place: under their version, so they
-/// replace nothing in use. (Left behind if the swap then fails; the next try
-/// replaces them, and the next launch removes them.)
+/// A staged package's own folder into place: under its version, so it
+/// replaces nothing in use. (Left behind if the swap then fails; the next try
+/// replaces it, and the next launch removes it.) And the package's feed
+/// (`zeron-update.json`): an installation the old app's updater brought here
+/// still names that app's, and from its first package on it follows the
+/// release's.
 fn install_version_files(staged: &Path, directory: &Path) -> anyhow::Result<()> {
-    for folder in [BETA, APP] {
-        let incoming = staged.with_file_name(PACKAGE).join(folder);
-        if !incoming.is_dir() {
-            continue;
-        }
-        let installed = directory.join(folder);
-        std::fs::create_dir_all(&installed)?;
-        for entry in std::fs::read_dir(&incoming)? {
-            let entry = entry?;
-            let target = installed.join(entry.file_name());
-            let _ = std::fs::remove_dir_all(&target);
-            std::fs::rename(entry.path(), &target)
-                .with_context(|| format!("moving {} into place", target.display()))?;
-        }
+    let package = staged.with_file_name(PACKAGE);
+    let incoming = package.join(BETA);
+    if !incoming.is_dir() {
+        return Ok(());
+    }
+    let installed = directory.join(BETA);
+    std::fs::create_dir_all(&installed)?;
+    for entry in std::fs::read_dir(&incoming)? {
+        let entry = entry?;
+        let target = installed.join(entry.file_name());
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::rename(entry.path(), &target)
+            .with_context(|| format!("moving {} into place", target.display()))?;
+    }
+    let feed = package.join(CONFIG);
+    if feed.is_file() {
+        // Only a feed this build would accept replaces the one there.
+        let config: Config = serde_json::from_slice(&std::fs::read(&feed)?).context("reading the package's update configuration")?;
+        super::validate_release_override(&config.releases_url)?;
+        std::fs::copy(&feed, directory.join(format!(".{CONFIG}.new")))?;
+        std::fs::rename(directory.join(format!(".{CONFIG}.new")), directory.join(CONFIG))
+            .context("installing the package's update configuration")?;
     }
     Ok(())
 }
@@ -222,19 +225,16 @@ fn install_version_files(staged: &Path, directory: &Path) -> anyhow::Result<()> 
 /// Remove every version's folder but `keep`'s, best-effort: an engine that's
 /// still running keeps its own executable until it stops.
 fn remove_version_files(directory: &Path, keep: Option<&str>) {
-    for folder in [BETA, APP] {
-        let installed = directory.join(folder);
-        let Ok(entries) = std::fs::read_dir(&installed) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let kept = keep.is_some_and(|keep| folder == files_folder(keep) && entry.file_name() == keep);
-            if !kept {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
+    let installed = directory.join(BETA);
+    let Ok(entries) = std::fs::read_dir(&installed) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if keep.is_none_or(|keep| entry.file_name() != keep) {
+            let _ = std::fs::remove_dir_all(entry.path());
         }
-        let _ = std::fs::remove_dir(&installed);
     }
+    let _ = std::fs::remove_dir(&installed);
 }
 
 /// Download next to the installation, verifying its mandatory checksum.
@@ -720,24 +720,35 @@ mod tests {
     }
 
     #[test]
-    fn a_stable_release_s_files_live_in_app_and_replace_a_beta_s() {
-        assert_eq!(files_folder("0.2.139"), APP);
-        assert_eq!(files_folder("0.2.139-beta.6"), BETA);
+    fn a_stable_release_s_files_replace_a_beta_s_and_its_feed_comes_along() {
         let install = tempfile::tempdir().unwrap();
+        std::fs::write(install.path().join(CONFIG), r#"{"releases_url":"https://github.com/zeronsh/zeron/releases/latest/download"}"#).unwrap();
         let beta = version_files(install.path(), "0.2.139-beta.6");
         std::fs::create_dir_all(beta.join("ui")).unwrap();
         let stage = tempfile::tempdir().unwrap();
         let staged = stage.path().join("zeron.exe");
-        let incoming = stage.path().join(PACKAGE).join(APP).join("0.2.139");
+        let incoming = stage.path().join(PACKAGE).join(BETA).join("0.2.139");
         std::fs::create_dir_all(incoming.join("engine")).unwrap();
         std::fs::write(incoming.join("engine").join("zeron.exe"), "").unwrap();
+        std::fs::write(stage.path().join(PACKAGE).join(CONFIG), r#"{"releases_url":"https://zeron.sh/releases"}"#).unwrap();
         install_version_files(&staged, install.path()).unwrap();
         let stable = version_files(install.path(), "0.2.139");
         assert!(stable.join("engine").join("zeron.exe").is_file());
-        // A beta's folder of the same name isn't the stable one's.
+        assert!(std::fs::read_to_string(install.path().join(CONFIG)).unwrap().contains("https://zeron.sh/releases"));
         remove_version_files(install.path(), Some("0.2.139"));
-        assert!(!install.path().join(BETA).exists());
+        assert!(!beta.exists());
         assert!(stable.is_dir());
+    }
+
+    #[test]
+    fn a_package_s_feed_must_be_one_this_build_accepts() {
+        let install = tempfile::tempdir().unwrap();
+        std::fs::write(install.path().join(CONFIG), r#"{"releases_url":"https://zeron.sh/releases"}"#).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join(PACKAGE).join(BETA).join("0.2.139")).unwrap();
+        std::fs::write(stage.path().join(PACKAGE).join(CONFIG), r#"{"releases_url":"http://evil.example"}"#).unwrap();
+        assert!(install_version_files(&stage.path().join("zeron.exe"), install.path()).is_err());
+        assert!(std::fs::read_to_string(install.path().join(CONFIG)).unwrap().contains("https://zeron.sh/releases"));
     }
 
     #[test]

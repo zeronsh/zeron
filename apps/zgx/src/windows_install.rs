@@ -3,7 +3,7 @@
 //! Zeron before this app was one self-contained `zeron.exe`, and its updater
 //! (still running on every PC that hasn't updated) installs a release by
 //! swapping that one file (`zeron-<version>-windows-<arch>.exe`). This app
-//! also needs its version's folder beside it (`app\<version>\`: scripts,
+//! also needs its version's folder beside it (`beta\<version>\`: scripts,
 //! plugins, the engine). So before anything else, a `zeron.exe` that finds
 //! its folder missing brings it in from the release feed, as an update would
 //! (crates/update `windows::complete_install`), whether it was started as the

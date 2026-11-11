@@ -229,6 +229,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
+    // The Zeron app's updater follows the channel on record on every
+    // platform, a stable build's too (crates/update `follows_channels`).
+    #[cfg(feature = "beta")]
+    zeron_update::set_app_follows_channels();
     // On Windows this app's engine is a whole Zeron `zeron.exe`, in this
     // version's folder (scripts/package-windows.ps1), which an older updater
     // may not have brought: bring it in first (src/windows_install.rs).
@@ -1298,8 +1302,8 @@ fn ui_dir() -> PathBuf {
 
 /// The packaged scripts of the install this executable runs from, if any:
 /// `Contents/Resources/ui` of a macOS bundle, `ui` beside it on Linux (the
-/// tarball's, scripts/package-linux.sh), `<app|beta>\<version>\ui` beside it
-/// on Windows (scripts/package-windows.ps1).
+/// tarball's, scripts/package-linux.sh), `beta\<version>\ui` beside it on
+/// Windows (scripts/package-windows.ps1).
 fn bundled_ui() -> Option<PathBuf> {
     static BUNDLED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     BUNDLED

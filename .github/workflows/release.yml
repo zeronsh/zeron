@@ -73,8 +73,10 @@ jobs:
     with:
       version: ${{ needs.version.outputs.version }}
       platforms: ${{ github.event_name == 'push' && 'macos linux windows' || inputs.platforms }}
-      # The GitHub release marked latest, as every stable Windows install's.
-      windows-feed: https://github.com/${{ github.repository }}/releases/latest/download
+      # The edge's, as the betas': stable at its root, the beta channel in its
+      # `beta/`. (The old app's installs name the GitHub release marked
+      # latest; their first package moves them here.)
+      windows-feed: https://zeron.sh/releases
 
   # The old app (apps/zeron), when a release has to go back to it.
   linux:
@@ -260,6 +262,8 @@ jobs:
           # after a failed R2 upload gets past this step.
           overwrite_files: false
       - name: upload to R2 (zeron.sh/releases/*)
+        env:
+          APP: ${{ needs.version.outputs.app }}
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
           # The Cloudflare API returns the odd 502; retry each object.
@@ -280,3 +284,30 @@ jobs:
           put manifest.json manifest.json
           printf '%s' "$VERSION" > latest.txt
           put latest.txt latest.txt
+          # The beta channel carries every release of the zgx app: a beta
+          # download (the website's) gets each stable release too, unless a
+          # newer beta is already there, and stays on beta (crates/update
+          # `follows_channels`). The same files under beta/, the manifest last.
+          if [ "$APP" = zgx ]; then
+            beta="$(curl -fsS --retry 3 https://zeron.sh/releases/beta/manifest.json | jq -r .version || true)"
+            if python3 - "$VERSION" "$beta" <<'PY'
+          import re, sys
+          def key(v):
+              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?", v.strip())
+              if not m:
+                  return None
+              major, minor, patch, beta = m.groups()
+              # A release outranks its betas.
+              return (int(major), int(minor), int(patch), beta is None, int(beta or 0))
+          new, old = key(sys.argv[1]), key(sys.argv[2])
+          sys.exit(0 if new and (old is None or new > old) else 1)
+          PY
+            then
+              for f in dist/*; do
+                put "beta/$(basename "$f")" "$f"
+              done
+              put beta/manifest.json manifest.json
+            else
+              echo "the beta channel's $beta is newer than $VERSION: left as it is"
+            fi
+          fi

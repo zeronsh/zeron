@@ -1,8 +1,8 @@
 # The zgx app (release.yml's stable, zgx-beta.yml's beta), with -ZgxVersion
 # and -ZgxEngine: the zgx interface (apps/zgx, its `beta` feature) as
-# zeron.exe, and beside it app\<version>\ (a beta's: beta\<version>\) with
-# its scripts, plugins and the zeron.exe it's given, built from the same
-# commit, as engine\zeron.exe (a Windows release has no separate engine: it
+# zeron.exe, and beside it beta\<version>\ (the name for every release:
+# crates/update/src/windows.rs `BETA`) with its scripts, plugins and the
+# zeron.exe it's given, built from the same commit, as engine\zeron.exe (a Windows release has no separate engine: it
 # runs as `zeron.exe engine`). Users keep their data and device.
 #
 # A stable release also gets the standalone .exe, which is all the old app's
@@ -133,10 +133,8 @@ try {
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
     Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
     Copy-Item -LiteralPath 'crates/voice/NOTICE.md' -Destination (Join-Path $stage 'licenses/parakeet-v3.txt')
-    # crates/update `windows::files_folder`: by the version's channel.
-    $folder = if ($beta) { 'beta' } else { 'app' }
     if ($ZgxVersion) {
-        $files = Join-Path $stage "$folder/$version"
+        $files = Join-Path $stage "beta/$version"
         Copy-Scripts 'apps/zgx/ui' (Join-Path $files 'ui')
         Remove-Item -LiteralPath (Join-Path $files 'ui/tests') -Recurse -Force
         Copy-Scripts 'apps/zgx/plugins-builtin' (Join-Path $files 'plugins-builtin')
@@ -155,7 +153,7 @@ try {
     # The per-user installer wraps the same staged directory (zeron-update.json
     # included), so installed copies update in place like the portable zip.
     $iscc = Find-InnoSetupCompiler
-    $zgxDefines = if ($ZgxVersion) { @("/DFilesFolder=$folder", "/DFileVersion=$(($version -split '-')[0])") } else { @() }
+    $zgxDefines = if ($ZgxVersion) { @('/DZgx=1', "/DFileVersion=$(($version -split '-')[0])") } else { @() }
     & $iscc /Qp "/DAppVersion=$version" "/DArch=$arch" @zgxDefines `
         "/DPackageDir=$([IO.Path]::GetFullPath($stage))" `
         "/DOutputDir=$([IO.Path]::GetFullPath($out))" `

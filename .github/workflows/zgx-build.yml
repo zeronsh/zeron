@@ -245,7 +245,7 @@ jobs:
           $interface = (& "$dir/zeron.exe" --version | Out-String).Trim()
           if ($interface -ne "zeron $env:ZGX_VERSION") { throw "the interface says '$interface'" }
           $beta = $env:ZGX_VERSION -match '-beta\.\d+$'
-          $files = "$dir/$(if ($beta) { 'beta' } else { 'app' })/$env:ZGX_VERSION"
+          $files = "$dir/beta/$env:ZGX_VERSION"
           $engine = (& "$files/engine/zeron.exe" --version | Out-String).Trim()
           if ($engine -ne "zeron $env:ZGX_VERSION") { throw "the engine says '$engine'" }
           foreach ($path in @("$files/ui/app.luau", "$files/plugins-builtin", "$dir/zeron-update.json")) {
