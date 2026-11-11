@@ -6,12 +6,14 @@
 //! mock room now behaves as the DO does (no echo), and can drop every
 //! socket at once.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use zeron_doc::RegistryDoc;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_proto::HarnessId;
 use zeron_sync::registry::mock_server::MockRegistryServer;
+use zeron_sync::{RegistryClient, RegistryEvent};
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -28,11 +30,65 @@ async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
     }
 }
 
+fn doc(device: &str) -> Arc<Mutex<RegistryDoc>> {
+    Arc::new(Mutex::new(RegistryDoc::new(device)))
+}
+
 fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     std::fs::create_dir_all(dir).expect("data dir");
     std::fs::write(dir.join("device-id"), device_id).expect("device id");
     EngineCore::assemble(dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None)
         .expect("engine assembles")
+}
+
+/// The client: after every socket drops, peers see a fresh beat without the
+/// host's next tick, and the sender's own view of its beat moves too.
+#[tokio::test]
+async fn presence_resumes_after_every_socket_drops_at_once() {
+    let server = MockRegistryServer::start().await;
+    let a = RegistryClient::connect(&server.url(), doc("dev-a"), "dev-a")
+        .await
+        .expect("a connects");
+    let b = RegistryClient::connect(&server.url(), doc("dev-b"), "dev-b")
+        .await
+        .expect("b connects");
+    a.set_presence(1_000);
+    wait_for(|| b.presence().get("dev-a") == Some(&1_000), "b to hear a").await;
+    wait_for(|| a.own_presence() == Some(1_000), "a's own beat").await;
+    // The room never sends a device its own beat.
+    assert_eq!(a.presence().get("dev-a"), None);
+
+    let before = now_ms();
+    let mut events = a.events();
+    server.drop_all_connections();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(events.recv().await, Ok(RegistryEvent::Disconnected)) {}
+    })
+    .await
+    .expect("a sees the drop");
+    wait_for(
+        || server.presence_of("dev-a").is_some_and(|at| at >= before),
+        "the room to hold a fresh beat from a",
+    )
+    .await;
+    wait_for(
+        || b.presence().get("dev-a").is_some_and(|at| *at >= before),
+        "b to hear a again",
+    )
+    .await;
+    wait_for(
+        || a.own_presence().is_some_and(|at| at >= before),
+        "a's own beat to move past the drop",
+    )
+    .await;
+
+    // The steady heartbeat keeps moving the self view afterwards.
+    let later = now_ms() + 60_000;
+    a.set_presence(later);
+    wait_for(|| a.own_presence() == Some(later), "a's next beat").await;
+    wait_for(|| b.presence().get("dev-a") == Some(&later), "b to hear it").await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 /// The engine: its own device row's `lastSeenAt` moves past the drop, here
