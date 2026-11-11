@@ -290,7 +290,7 @@ impl ChatDocSink for EngineChatSink {
         if vv.is_empty() {
             return doc.export_snapshot().ok();
         }
-        doc.doc().export(loro::ExportMode::updates(&vv)).ok()
+        doc.export(loro::ExportMode::updates(&vv)).ok()
     }
 
     fn relay_import(&self, bytes: &[u8], history: bool) -> zeron_sync::chat_relay::RelayImport {
@@ -340,7 +340,7 @@ impl ChatDocSink for EngineChatSink {
             if let Some(handle) = self.handle.upgrade()
                 && handle.republishes_imports()
                 && doc.doc().oplog_vv() != before
-                && let Ok(delta) = doc.doc().export(loro::ExportMode::updates(&before))
+                && let Ok(delta) = doc.export(loro::ExportMode::updates(&before))
             {
                 handle.republish(delta);
             }

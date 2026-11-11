@@ -1451,9 +1451,15 @@ impl SessionDoc {
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
-        self.doc
-            .export(ExportMode::Snapshot)
+        self.export(ExportMode::Snapshot)
             .map_err(|e| DocError::Schema(e.to_string()))
+    }
+
+    /// [`LoroDoc::export`], under the change lock: an export commits what's
+    /// pending first, and that commit's events are delivered under it too.
+    pub fn export(&self, mode: ExportMode<'_>) -> Result<Vec<u8>, loro::LoroEncodeError> {
+        let _change = self.change.lock();
+        self.doc.export(mode)
     }
 }
 

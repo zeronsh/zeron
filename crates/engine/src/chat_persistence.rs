@@ -279,7 +279,6 @@ impl ChatPersistence {
                 && state.rows < DELTA_ROW_LIMIT
             {
                 let appended = doc
-                    .doc()
                     .export(loro::ExportMode::updates(&state.saved_vv))
                     .map_err(|e| e.to_string())
                     .and_then(|bytes| {
