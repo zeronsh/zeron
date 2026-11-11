@@ -143,6 +143,18 @@ const MIGRATIONS: &[&str] = &[
     // lost row, even when the rows after it import cleanly. Rows that predate
     // it (0) end the chain, and go to the parked inbox.
     "ADD COLUMN IF MISSING snapshot_deltas seq INTEGER NOT NULL DEFAULT 0",
+    // Opaque row-level deltas over a non-Loro snapshot (the registry's JSON
+    // replica): each holds what changed since the save before it, chained
+    // (seq 1, 2, ...) on the base whose saved_at it names. A whole save of
+    // the doc clears them; a build without this table reads the base alone.
+    "CREATE TABLE IF NOT EXISTS row_deltas (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id TEXT NOT NULL,
+        bytes BLOB NOT NULL,
+        base_saved_at INTEGER NOT NULL,
+        seq INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX IF NOT EXISTS row_deltas_doc ON row_deltas(doc_id,ordinal);",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -610,6 +622,7 @@ impl DocsStore {
     /// transaction, and earlier base tokens stop matching.
     fn replace_base(&self, tx: &rusqlite::Transaction<'_>, doc_id: &str) -> Result<(), StoreError> {
         tx.execute("DELETE FROM snapshot_deltas WHERE doc_id = ?1", params![doc_id])?;
+        tx.execute("DELETE FROM row_deltas WHERE doc_id = ?1", params![doc_id])?;
         Ok(())
     }
 
@@ -635,6 +648,108 @@ impl DocsStore {
     }
 
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.save_snapshot_inner(doc_id, bytes).map(drop)
+    }
+
+    /// Like [`Self::save_snapshot`], and returns the base token row deltas
+    /// on top of this snapshot must name ([`Self::append_row_delta`]).
+    pub fn save_snapshot_base(&self, doc_id: &str, bytes: &[u8]) -> Result<u64, StoreError> {
+        store_blocking(|| self.save_snapshot_inner(doc_id, bytes))
+    }
+
+    /// Store what changed since the last save of `doc_id`, after its whole
+    /// snapshot. `base` is the token that snapshot's save returned; any full
+    /// write since (another writer, a delete), or a coming version change
+    /// ([`Self::stop_snapshot_deltas`]), refuses with `Ok(false)` and the
+    /// caller saves whole.
+    pub fn append_row_delta(&self, doc_id: &str, base: u64, bytes: &[u8]) -> Result<bool, StoreError> {
+        store_blocking(|| {
+            if self.deltas_stopped.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(false);
+            }
+            let mut conn = self.snap_conn();
+            let saved_at = match self.bases.lock().unwrap_or_else(PoisonError::into_inner).get(doc_id) {
+                Some(&(token, saved_at)) if token == base => saved_at,
+                _ => return Ok(false),
+            };
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // The base on disk must still be the one the token names: another
+            // process writing the same file (an older build) may have replaced
+            // it, and deltas on a stale base would never load. (Row-delta docs
+            // are small JSON replicas: reading past their blob is cheap.)
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT saved_at FROM snapshots WHERE doc_id = ?1",
+                    params![doc_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if current != Some(saved_at) {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO row_deltas (doc_id, bytes, base_saved_at, seq)
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM row_deltas
+                                      WHERE doc_id = ?1 AND base_saved_at = ?3))",
+                params![doc_id, bytes, saved_at],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// `doc_id`'s whole snapshot and the row deltas saved on it: the chain
+    /// (contiguous from seq 1, oldest first) and any rows after a break
+    /// (a lost row). Deltas on a base something else rewrote (a build
+    /// without this table) are left out. One read transaction.
+    #[allow(clippy::type_complexity)]
+    pub fn load_row_deltas(
+        &self,
+        doc_id: &str,
+    ) -> Result<Option<(Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)>, StoreError> {
+        store_blocking(|| {
+            let mut conn = self.snap_conn();
+            let read = conn.transaction()?;
+            let row: Option<(Vec<u8>, i64)> = read
+                .query_row(
+                    "SELECT bytes, saved_at FROM snapshots WHERE doc_id = ?1",
+                    params![doc_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((base, saved_at)) = row else { return Ok(None) };
+            let deltas: Vec<(i64, Vec<u8>)> = read
+                .prepare(
+                    "SELECT seq, bytes FROM row_deltas WHERE doc_id = ?1 AND base_saved_at = ?2 ORDER BY ordinal",
+                )?
+                .query_map(params![doc_id, saved_at], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            read.commit()?;
+            let mut chain = Vec::new();
+            let mut tail = Vec::new();
+            for (seq, bytes) in deltas {
+                if tail.is_empty() && seq == chain.len() as i64 + 1 {
+                    chain.push(bytes);
+                } else {
+                    tail.push(bytes);
+                }
+            }
+            Ok(Some((base, chain, tail)))
+        })
+    }
+
+    /// (rows, bytes) of row deltas saved for `doc_id` (diagnostics, tests).
+    pub fn row_delta_stats(&self, doc_id: &str) -> Result<(u64, u64), StoreError> {
+        store_blocking(|| {
+            Ok(self.snap_conn().query_row(
+                "SELECT count(*), COALESCE(sum(length(bytes)), 0) FROM row_deltas WHERE doc_id = ?1",
+                params![doc_id],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )?)
+        })
+    }
+
+    fn save_snapshot_inner(&self, doc_id: &str, bytes: &[u8]) -> Result<u64, StoreError> {
         let mut conn = self.snap_conn();
         let saved_at = now_ms();
         let tx = conn.transaction()?;
@@ -646,8 +761,7 @@ impl DocsStore {
         self.replace_base(&tx, doc_id)?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
-        self.new_base(doc_id, saved_at);
-        Ok(())
+        Ok(self.new_base(doc_id, saved_at))
     }
 
     /// Save the snapshot together with its chat2 room cursor and doc epoch —
@@ -1535,7 +1649,7 @@ mod tests {
                 conn.execute_batch(&format!(
                     "DROP TABLE snapshot_deltas;
                      CREATE TABLE snapshot_deltas ({columns}) STRICT;
-                     DELETE FROM schema_migrations WHERE version > (SELECT MAX(version) - 2 FROM schema_migrations);"
+                     DELETE FROM schema_migrations WHERE version > (SELECT MAX(version) - 3 FROM schema_migrations);"
                 ))
                 .unwrap();
                 let fields = match shape {
