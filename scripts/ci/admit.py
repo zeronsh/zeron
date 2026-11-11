@@ -490,6 +490,24 @@ class Scheduler:
         return number if pull.get("head", {}).get("sha") == run.get("head_sha") else None
 
 
+def superseded(api: "Api", repo: str) -> bool:
+    """Whether this pull request run is moot: the pull request was closed, or a
+    newer push moved its head off the commit this run tests (CI_PR, CI_PR_HEAD).
+
+    ci-supersede.yml force-cancels such runs, but its job queues for a runner
+    like any other; this stops a waiting run without one. (Each run is in a
+    concurrency group of its own: the next push's doesn't cancel it. ci.yml.)
+    """
+    pr, head = os.environ.get("CI_PR", "").strip(), os.environ.get("CI_PR_HEAD", "").strip()
+    if not pr.isdigit() or not head:
+        return False
+    try:
+        pull = api.get(f"/repos/{repo}/pulls/{pr}")
+    except (OSError, RateLimited, KeyError, ValueError):
+        return False
+    return pull.get("state") == "closed" or pull.get("head", {}).get("sha") not in (None, head)
+
+
 def env_int(name: str, default: int) -> int:
     value = os.environ.get(name, "").strip()
     return int(value) if value.isdigit() else default
@@ -531,8 +549,8 @@ def main() -> int:
     started = time.time()
 
     if debounce:
-        # A newer push to the same pull request cancels this run (ci.yml's concurrency group):
-        # pushes in quick succession only start the last one.
+        # A newer push to the same pull request supersedes this run (ci-supersede.yml cancels it,
+        # and `superseded` below stops it): pushes in quick succession only start the last one.
         print(f"Waiting {debounce}s for further pushes")
         time.sleep(debounce)
 
@@ -568,6 +586,10 @@ def main() -> int:
             time.sleep(30)
             continue
 
+        if superseded(api, repo):
+            summary("::error::A newer push to the pull request (or its closing) superseded this run: "
+                    "not starting it.")
+            return 1
         mark_unresponsive(me, snap, budget, admissible_since, time.time())
         decision = decide(me, mine, snap, budget)
         ignored = sorted(w.run_id for w in snap.waiters if w.ignored)

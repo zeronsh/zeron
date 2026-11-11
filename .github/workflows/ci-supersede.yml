@@ -1,0 +1,57 @@
+name: CI supersede
+
+# A pull request's CI runs that a newer push (or closing it) made pointless,
+# stopped: force-cancelled, which also skips their `CI result` job.
+#
+# ci.yml gives each pull request run a concurrency group of its own, so a new
+# push never waits for an older run to finish. It did, in one group per pull
+# request: the older run, cancelled, still had to run its `CI result` job
+# (`if: always()`), which waited in the runner queue like any job, and the
+# new run waited behind it ("waiting for CI #610 to complete"). Here the older
+# runs end at once, with no job of theirs left to run, and the new one never
+# waits on them. (A superseded commit's result check doesn't matter: the pull
+# request's head is the new one.)
+#
+# pull_request_target, so the token can cancel runs for a pull request from a
+# fork too (a fork's own runs get a read-only one). It runs this branch's copy
+# of the workflow and never checks out the pull request's code: it only
+# reads and cancels runs through the API.
+#
+# If this job is slow to get a runner, nothing waits on it: an older run that
+# is still waiting for admission stops by itself once it sees its commit is
+# no longer the pull request's head (scripts/ci/admit.py).
+
+on:
+  pull_request_target:
+    types: [synchronize, reopened, closed]
+
+permissions:
+  actions: write  # cancel runs
+
+concurrency:
+  group: ci-supersede-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  supersede:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # Closed: every run of the pull request is moot. Otherwise those not
+          # on its head.
+          KEEP_SHA: ${{ github.event.action != 'closed' && github.event.pull_request.head.sha || '' }}
+        run: |
+          set -euo pipefail
+          # A fork's runs don't list their pull request (GitHub leaves
+          # `pull_requests` empty for them): matched by head repository and branch.
+          for status in requested waiting pending action_required queued in_progress; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&status=$status&branch=$(printf %s "$HEAD_REF" | jq -sRr @uri)&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_repository.full_name == \"$HEAD_REPO\" and .head_branch == \"$HEAD_REF\" and .head_sha != \"$KEEP_SHA\") | .id"
+          done | sort -u | while read -r run; do
+            echo "force-cancelling run $run"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/force-cancel" >/dev/null || echo "::warning::could not cancel run $run"
+          done

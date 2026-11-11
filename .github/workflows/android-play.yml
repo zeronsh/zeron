@@ -1,0 +1,98 @@
+name: Android Play upload
+
+# Main's Android bundle to a Google Play testing track, after CI has passed on
+# that push. android.yml builds and signs it inside ci.yml (`android-aab`);
+# this uploads it from that run.
+#
+# Its own workflow, not a job of ci.yml: the upload waits for a reviewer
+# (the `google-play` environment), and a job waiting there kept ci.yml's run
+# open, and with it main's concurrency group. From Nov 5 to Nov 11 one wait
+# held every later main run and nightly, which were cancelled unstarted, and
+# main saved no caches or passes all that time. A wait here holds nothing else.
+#
+# Only the newest build waits: a newer one cancels the older run still waiting
+# for its approval, so there is never a backlog of stale uploads to approve.
+#
+# Armed by the repository variable PLAY_UPLOAD_ENABLED=true, as before. Track
+# and status: PLAY_TRACK (beta) and PLAY_RELEASE_STATUS (draft). A run by hand
+# with other choices is android.yml's (Upload this build to Google Play).
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read  # the bundle, from the CI run's artifacts
+
+concurrency:
+  group: android-google-play
+  cancel-in-progress: true
+
+jobs:
+  # Without the environment, so no reviewer is asked about a run with nothing
+  # to upload: one that reused Android's pass (nothing it reads changed)
+  # built no bundle.
+  bundle:
+    if: >-
+      vars.PLAY_UPLOAD_ENABLED == 'true' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      built: ${{ steps.built.outputs.built }}
+    steps:
+      - id: built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?name=android-aab" --jq '.total_count')
+          echo "built=$([ "${count:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          [ "${count:-0}" -gt 0 ] || echo "::notice::CI run $RUN_ID built no Android bundle (Android reused its pass): nothing to upload."
+
+  play:
+    name: Upload to Google Play testing
+    needs: bundle
+    if: needs.bundle.outputs.built == 'true'
+    runs-on: ubuntu-latest
+    environment: google-play
+    timeout-minutes: 20
+    env:
+      PLAY_TRACK: ${{ vars.PLAY_TRACK || 'beta' }}
+      PLAY_STATUS: ${{ vars.PLAY_RELEASE_STATUS || 'draft' }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-aab
+          path: out/android
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - id: bundle
+        name: check the bundle and the Play configuration
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        working-directory: out/android
+        run: |
+          test -f release-signed || { echo 'This bundle was signed with a debug key: Play needs the release key.' >&2; exit 1; }
+          test -n "$PLAY_SERVICE_ACCOUNT_JSON" || { echo 'Set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON in the google-play environment.' >&2; exit 1; }
+          case "$PLAY_TRACK" in beta|internal) ;; *) echo 'Only testing tracks are supported.' >&2; exit 1;; esac
+          case "$PLAY_STATUS" in draft|completed) ;; *) echo 'Use draft or completed for PLAY_RELEASE_STATUS.' >&2; exit 1;; esac
+          sha256sum -c ./*.aab.sha256
+          # zeron-<version>-<build>-android-arm64.aab (android.yml's `package`).
+          name=$(basename ./*.aab .aab)
+          rest=${name#zeron-}; rest=${rest%-android-arm64}
+          echo "release=${rest%-*} (${rest##*-})" >> "$GITHUB_OUTPUT"
+      - name: upload signed bundle
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: sh.zeron.android
+          releaseFiles: out/android/*.aab
+          releaseName: ${{ steps.bundle.outputs.release }}
+          tracks: ${{ env.PLAY_TRACK }}
+          status: ${{ env.PLAY_STATUS }}
