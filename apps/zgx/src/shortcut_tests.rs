@@ -207,12 +207,14 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
             press(&mut w, "ctrl+tab", "shell.next_session", false, &|w| w.route() != session);
             press(&mut w, "ctrl+shift+tab", "shell.previous_session", true, &|w| w.route() == session);
         }
-        // ⌘N a new chat, then ⌘[ back, ⌘] forward and ⌘[ back again from
-        // where focus went (putting it back would move the history).
+        // ⌘N a new chat, then back, forward and back again from where
+        // focus went (putting it back would move the history): ⌘[ ⌘] on a
+        // Mac, Alt+←/→ elsewhere (zgx's router's keys there).
+        let (back, forward) = if cfg!(target_os = "macos") { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
         press(&mut w, "cmd+n", "shell.new_chat", false, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
-        press(&mut w, "cmd+]", "router.forward", true, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
+        press(&mut w, forward, "router.forward", true, &|w| w.route() == "/");
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

@@ -21,7 +21,9 @@ case "${1:-}" in
     skips=()
     while IFS= read -r name; do skips+=(--skip "$name"); done < <(listed rust)
     cd "$root/apps/zgx"
-    exec cargo test --locked --bin zeron-zgx -- --exact "${skips[@]}"
+    # (`${a[@]+…}`: an empty list under `set -u`, which macOS's bash 3.2
+    # calls unbound.)
+    exec cargo test --locked --bin zeron-zgx -- --exact ${skips[@]+"${skips[@]}"}
     ;;
   ui)
     zgx="${2:-zgx}"

@@ -501,7 +501,8 @@ test("About says which Zeron this is, and that this app isn't what updates", fun
 	-- Copied for a bug report.
 	app:click(`{PAGE} >> role:button "Copy"`)
 	app:frames(6)
-	expect(app:tree()).to_contain("Version info copied")
+	-- (Found where it is: the whole tree's first 200 lines are the page's.)
+	expect(app:has('"Version info copied"')).to_be(true)
 	-- The links open in the browser, the notes at this version's.
 	app:scroll(PAGE, 2000)
 	app:frames(4)
@@ -1051,8 +1052,8 @@ test("the pages are one tab list: the open one selected, the arrows between them
 	app:frames(4)
 	-- (Out of the pages' list: on to the foot's you and settings.)
 	expect(app:tree(`{NAV} >> role:tablist "Settings pages"`)).never.to_contain("focused")
-	-- ⌘F, said once.
-	expect(app:has(`{NAV} >> #settings-search >> "Command F"`)).to_be(true)
+	-- ⌘F, said once (Ctrl+F off a Mac, said as such).
+	expect(app:has(`{NAV} >> #settings-search >> "Command F"`) or app:has(`{NAV} >> #settings-search >> "Ctrl F"`)).to_be(true)
 end)
 
 test("Shortcuts shows the Appshot hotkey while Appshots are on, as set, and sends you to change it", function()
@@ -1061,11 +1062,12 @@ test("Shortcuts shows the Appshot hotkey while Appshots are on, as set, and send
 	app:set_state("appshots_enabled", true)
 	app:frames(10)
 	expect(shows(app, PAGE, "Capture Appshot")).to_be(true)
-	expect(app:has(`{PAGE} >> "Control Option Space"`)).to_be(true)
+	-- (As this platform says the keys: macOS's names, or Ctrl, Alt elsewhere.)
+	expect(app:has(`{PAGE} >> "Control Option Space"`) or app:has(`{PAGE} >> "Ctrl Alt Space"`)).to_be(true)
 	app:set_state("appshots_shortcut", "cmd+shift+2")
 	app:frames(10)
-	-- (Said in the order macOS writes them: ⇧⌘2.)
-	expect(app:has(`{PAGE} >> "Shift Command 2"`)).to_be(true)
+	-- (Said in the order macOS writes them: ⇧⌘2; elsewhere Ctrl+Shift+2.)
+	expect(app:has(`{PAGE} >> "Shift Command 2"`) or app:has(`{PAGE} >> "Ctrl Shift 2"`)).to_be(true)
 	-- (The wheel over the page's heading: its middle is past the window's foot.)
 	app:scroll(`{PAGE} >> role:heading "Shortcuts"`, 3000)
 	app:frames(4)
