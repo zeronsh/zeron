@@ -6076,9 +6076,6 @@ mod tests {
         assert_eq!(open.entries[0].sum, super::sum_of(&entry));
     }
 
-    /// A row out of view holds what makes it, not itself: what it opens to is
-    /// the row it would have been, and a row with subagents still lists them.
-    #[test]
     /// A folded row's bytes take their own length, not LZ4's worst-case
     /// buffer: rows compressing as real ones do (about a third smaller) kept
     /// that buffer, as a shrinking realloc left it where it was.
@@ -6106,6 +6103,9 @@ mod tests {
         assert!(held <= folded.len() + folded.len() / 8 + 16, "held {held} for {} bytes ({} raw)", folded.len(), raw.len());
     }
 
+    /// A row out of view holds what makes it, not itself: what it opens to is
+    /// the row it would have been, and a row with subagents still lists them.
+    #[test]
     fn a_folded_row_opens_to_the_row_it_was() {
         let entry = serde_json::json!({
             "id": "e1", "role": "assistant", "status": "complete", "createdAt": 1000.0,
