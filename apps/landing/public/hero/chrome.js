@@ -561,9 +561,9 @@ export function drawPopups(ctx, s) {
   row(ctx, s, X + 5, Y + 189, 270, { icon: "git-branch", label: "fix/flaky-tests" });
   row(ctx, s, X + 5, Y + 219, 270, { icon: "git-branch", label: "feat/cache-builds" });
 
-  // The Device menu (260×213 at 646, 481).
+  // The Device menu (260×189 at 646, 481).
   X = 646; Y = 481;
-  panel(ctx, s, X, Y, 260, 213);
+  panel(ctx, s, X, Y, 260, 189);
   search(ctx, s, X + 1, Y + 1, "Search devices…", true);
   rule(ctx, s, X + 1, Y + 37, 258);
   rrect(ctx, s, X + 5, Y + 42, 250, 28, 3, `rgb(${SELECTED.map(Math.round).join(",")})`);
@@ -575,10 +575,8 @@ export function drawPopups(ctx, s) {
   text(ctx, s, "Mac mini", X + 39, Y + 110, 13, 500, inkOn(dim, PANEL), { line: 18 });
   text(ctx, s, "Offline · last seen 3 h ago", X + 39, Y + 130, 12, 400, inkOn((107 / 255) * dim, PANEL), { line: 16 });
   icon(ctx, s, "wifi-off", X + 235, Y + 122, 12, overF([250, 204, 21], dim, PANEL));
-  // Cloud.
-  icon(ctx, s, "cloud", X + 14, Y + 165, 16, inkOn(0.6, PANEL));
-  text(ctx, s, "Cloud", X + 39, Y + 164, 13, 500, inkOn(1, PANEL), { line: 18 });
-  text(ctx, s, "A machine of its own, from acme/site", X + 39, Y + 184, 12, 400, inkOn(107 / 255, PANEL), { line: 16 });
+  // Cloud: just its name (zeron/zgx f1790518c).
+  row(ctx, s, X + 5, Y + 156, 250, { icon: "cloud", label: "Cloud" });
 }
 
 // ---------------------------------------------------------------- a reply

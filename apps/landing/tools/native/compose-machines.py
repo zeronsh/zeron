@@ -24,7 +24,7 @@ out.mkdir(parents=True, exist_ok=True)
 open_window = Image.open(opened / "rest-open.png").convert("RGBA")
 k = open_window.size[0] / 1176
 popups = []
-for m in re.finditer(r"popup @(\d+) (-?[\d.]+),(-?[\d.]+) ", (opened / "rest-windows.txt").read_text()):
+for m in re.finditer(r"popup @(\d+) (-?[\d.]+),(-?[\d.]+) ", ((opened / "open-windows.txt") if (opened / "open-windows.txt").exists() else (opened / "rest-windows.txt")).read_text()):
     popups.append((Image.open(opened / f"rest-popup-{m.group(1)}.png").convert("RGBA"), float(m.group(2)), float(m.group(3))))
 assert len(popups) == 2, f"expected both popups, got {len(popups)}"
 x, y, w, h = CHIP

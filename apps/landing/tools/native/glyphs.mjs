@@ -14,7 +14,7 @@ const out = fileURLToPath(new URL("../../public/hero/glyphs.js", import.meta.url
 export const RUNS = {
   400: ["Search", "No sessions yet", "Ask anything, @ to mention…", "N", "K",
     "MacBook Pro", "site", "Worktree", "Search branches…", "main", "fix/flaky-tests", "feat/cache-builds", "Current",
-    "Search devices…", "devbox", "You", "Offline · last seen 3 h ago", "A machine of its own, from acme/site",
+    "Search devices…", "devbox", "You", "Offline · last seen 3 h ago",
     "Compile is still the biggest share, but it has dropped since August,", "when the workspace was split. Here are the last six months, by", "step:",
     "Compile", "Link", "Test"],
   500: ["New chat", "Sessions", "Star on GitHub", "Local", "Full access", "MacBook Pro", "hello-world", "No ref", "Opus 5.5", "High",

@@ -155,7 +155,7 @@ try:
         if path:
             shutil.copy(path, out / f"{name}.png")
             # (The window alone too, before any popup is laid over it.)
-            if os.environ.get("POPUPS"):
+            if os.environ.get("POPUPS") and not (out / f"{name}-open.png").exists():
                 shutil.copy(path, out / f"{name}-open.png")
         else:
             print("snapshot:", str(r)[:400])
@@ -163,7 +163,8 @@ try:
         # snapshotted too, and laid over the picture where it stands.
         if os.environ.get("POPUPS") and path:
             ws = cmd({"cmd": "windows"})
-            (out / f"{name}-windows.txt").write_text(ws.get("text", ""))
+            if "popup" in ws.get("text", "") or not (out / f"{name}-windows.txt").exists():
+                (out / f"{name}-windows.txt").write_text(ws.get("text", ""))
             from PIL import Image
             base = Image.open(out / f"{name}.png").convert("RGBA")
             import re
