@@ -390,6 +390,14 @@ pub async fn complete_install(
         return Ok(Completion::Complete);
     }
     tracing::info!(version, "completing the install: this version's files aren't here");
+    // A trial started from where an update staged it has its package beside
+    // it, verified when it was staged: no second download.
+    if let Ok(exe) = std::env::current_exe()
+        && files_complete(&version_files(&exe.with_file_name(PACKAGE), version))
+    {
+        install_version_files(&exe, directory)?;
+        return Ok(Completion::Installed);
+    }
     // This version's own package first, wherever the feed keeps one release's
     // files: what `latest` says can be older (a release withdrawn) or newer.
     match pinned_release(edge_url, version).await {
@@ -475,6 +483,19 @@ async fn pinned_release(edge_url: &str, version: &str) -> Option<(String, super:
     }
     manifest.channel = channel;
     Some((base, manifest))
+}
+
+/// The completion lock if no one holds it, without waiting.
+fn try_lock_completion(directory: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(directory.join(COMPLETING))
+        .ok()
 }
 
 /// Exclusive use of the completion lock, waiting up to ten minutes for
@@ -696,6 +717,11 @@ pub fn cleanup_previous_image() {
     };
     if is_managed(&exe) {
         let _ = remove_own_backup();
+        // Not while another start completes this installation: a folder it
+        // just put in place may not be running anything yet.
+        let Some(_lock) = exe.parent().and_then(try_lock_completion) else {
+            return;
+        };
         if let Some(directory) = exe.parent() {
             let own = super::app_version();
             let beta = super::Channel::of_version(own) == super::Channel::Beta;
