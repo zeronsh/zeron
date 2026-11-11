@@ -1237,15 +1237,22 @@ mod tests {
             assert!(error.contains(why), "{path:?}: {error}");
         }
 
-        // A folder reached through a link of its own (`/tmp` on macOS)
-        // serves its images by either name.
+        // A folder behind links (its own, or an ancestor's: `/tmp` and
+        // `/var` on macOS) serves its images by the name the chat knows it
+        // by and by its real one, the links resolved.
         #[cfg(unix)]
         {
+            let real = std::fs::canonicalize(&inside).unwrap();
             let via = elsewhere.path().join("chat-folder");
             std::os::unix::fs::symlink(folder.path(), &via).unwrap();
-            for path in [via.join("shots").join("before.png"), inside.clone()] {
-                let chunk = read_chat_image_chunk(path.to_str().unwrap(), 0, &via)
-                    .unwrap_or_else(|e| panic!("{path:?}: {e}"));
+            for (root, path) in [
+                (folder.path(), inside.clone()),
+                (folder.path(), real.clone()),
+                (via.as_path(), via.join("shots").join("before.png")),
+                (via.as_path(), real.clone()),
+            ] {
+                let chunk = read_chat_image_chunk(path.to_str().unwrap(), 0, root)
+                    .unwrap_or_else(|e| panic!("{path:?} in {root:?}: {e}"));
                 assert_eq!(BASE64.decode(&chunk.data).unwrap(), png);
             }
         }
