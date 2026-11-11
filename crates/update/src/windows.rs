@@ -417,7 +417,7 @@ pub async fn complete_install(
     let manifest = super::fetch_latest_on(edge_url, super::Channel::of_version(version))
         .await
         .with_context(|| {
-            format!("reading the release feed (neither this version's manifest, manifest-{version}.json, nor the latest one)")
+            format!("reading the release feed (neither this version's own manifest nor the latest one could be read)")
         })?;
     let latest = manifest.version.trim().to_owned();
     if latest != version && !super::version_newer(&latest, version) {
@@ -445,7 +445,8 @@ pub async fn complete_install(
         result?;
         return Ok(Completion::Installed);
     }
-    apply(&staged, directory, false)?;
+    // (The lock is this call's already.)
+    apply_locked(&staged, directory, false)?;
     Ok(Completion::Updated(latest))
 }
 
@@ -498,6 +499,22 @@ fn try_lock_completion(directory: &Path) -> Option<std::fs::File> {
         .share_mode(0)
         .open(directory.join(COMPLETING))
         .ok()
+}
+
+/// [`try_lock_completion`], waiting up to `wait` for a holder (a cleanup is
+/// brief; a completion can take a download) to let go.
+fn lock_completion_blocking(directory: &Path, wait: std::time::Duration) -> anyhow::Result<std::fs::File> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(file) = try_lock_completion(directory) {
+            return Ok(file);
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "another start of Zeron is completing this installation; try again in a moment"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 /// Exclusive use of the completion lock, waiting up to ten minutes for
@@ -563,6 +580,14 @@ fn digest(path: &Path) -> anyhow::Result<String> {
 /// and [`Self::recover_from_backup`] cover the leftovers of a hard crash
 /// between the two renames.
 pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<()> {
+    // From the new version's folder going in to the swap, no start's cleanup
+    // may take that folder for an old one (nothing runs from it yet).
+    let _lock = lock_completion_blocking(directory, std::time::Duration::from_secs(30))?;
+    apply_locked(staged, directory, relaunch)
+}
+
+/// [`apply`], the completion lock held already.
+fn apply_locked(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<()> {
     let installed = directory.join("zeron.exe");
     ensure!(
         std::env::current_exe()?.canonicalize()? == installed.canonicalize()?,
