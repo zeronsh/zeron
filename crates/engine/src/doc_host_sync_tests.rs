@@ -1413,3 +1413,35 @@ async fn cold_jobs_get_a_real_timed_turn_without_any_writer_ending() {
     assert_eq!(writers.len(), ACTIVE_SYNC_CAP);
     host.shutdown_workers().await;
 }
+
+/// A wake's receipt is written once. After complete_sync_job deletes the row,
+/// the scheduler must stop re-checking it: each check reads the whole command
+/// ledger (59–127 ms on real 3–7k-command chats) and forces a snapshot export,
+/// and the scheduler ticks every 100 ms for as long as the chat syncs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completed_wake_is_not_rechecked_every_tick() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay(Hold::Hello).await;
+    relay.release.send_replace(true);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    store.initialize_chat_outbox("busy", &[]).unwrap();
+    let host = host(store.clone(), &relay);
+    let busy = host.open("busy").unwrap();
+    until(|| lock(&busy.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    host.enqueue_wakeup("busy").unwrap();
+    until(|| store.sync_job_version("busy", "wake").unwrap().is_none()).await;
+    assert!(busy.sync_started.load(Ordering::Acquire), "the chat must still sync");
+    let before = host.inner.wake_checks.load(Ordering::Relaxed);
+    // Ten scheduler ticks with the chat open and syncing, and no new wake.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    busy.touch();
+    assert!(busy.sync_started.load(Ordering::Acquire), "the chat must still sync");
+    let rechecks = host.inner.wake_checks.load(Ordering::Relaxed) - before;
+    assert!(rechecks <= 1, "a completed wake was re-checked {rechecks} times in 1 s");
+    // A newer wake is still seen and retired.
+    host.enqueue_wakeup("busy").unwrap();
+    until(|| store.sync_job_version("busy", "wake").unwrap().is_none()).await;
+    drop(busy);
+    host.shutdown_workers().await;
+}
