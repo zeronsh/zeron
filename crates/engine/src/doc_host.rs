@@ -3381,9 +3381,12 @@ impl DocHost {
                     .await;
             });
         }
-        // Threshold checkpoint (rowBytes > 512KB || rows > 200), one in
-        // flight at a time (review H1).
-        if stats.row_bytes <= 512 * 1024 && stats.row_count <= 200 {
+        // Threshold checkpoint, one in flight at a time (review H1).
+        let snapshot = handle
+            .snapshot_bytes
+            .load(Ordering::Relaxed)
+            .max(handle.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
+        if !threshold_checkpoint_due(stats.row_bytes, stats.row_count, snapshot as u64) {
             return;
         }
         self.spawn_chat2_checkpoint(handle, "threshold");
@@ -6777,6 +6780,56 @@ impl DocHost {
             lock(&handle.chat2).take();
             // Retain the durable subscription through agent shutdown cleanup.
         }
+    }
+}
+
+/// When a chat2 room's row log has grown enough to replace it with a full
+/// checkpoint (docs/chat2-sync.md C3). Small chats keep the original bound:
+/// 512 KB or 200 rows. A big chat's checkpoint is its whole snapshot (47 MB
+/// for the largest live one), and posting it every 200 rows uploaded about
+/// 250× the rows it pruned. So the bound grows with the snapshot, to a
+/// sixteenth of it in bytes and one row per 64 KB, capped at the room's
+/// alert line (2 MB of rows) and 2,000 rows. A cold reader then replays at
+/// most that many rows on top of the checkpoint it downloads anyway.
+fn threshold_checkpoint_due(row_bytes: u64, row_count: u64, snapshot_bytes: u64) -> bool {
+    const BASE_ROW_BYTES: u64 = 512 * 1024;
+    const BASE_ROWS: u64 = 200;
+    const MAX_ROW_BYTES: u64 = 2 * 1024 * 1024;
+    const MAX_ROWS: u64 = 2_000;
+    let byte_bound = (snapshot_bytes / 16).clamp(BASE_ROW_BYTES, MAX_ROW_BYTES);
+    let row_bound = (snapshot_bytes / (64 * 1024)).clamp(BASE_ROWS, MAX_ROWS);
+    row_bytes > byte_bound || row_count > row_bound
+}
+
+#[cfg(test)]
+mod threshold_checkpoint_tests {
+    use super::threshold_checkpoint_due as due;
+    const MB: u64 = 1024 * 1024;
+
+    #[test]
+    fn small_chats_keep_the_original_bound() {
+        for snapshot in [0, 100 * 1024, 4 * MB, 8 * MB] {
+            assert!(!due(512 * 1024, 200, snapshot));
+            assert!(due(512 * 1024 + 1, 0, snapshot));
+            assert!(due(0, 201, snapshot));
+        }
+    }
+
+    #[test]
+    fn a_big_chat_waits_for_rows_worth_its_upload() {
+        let whale = 47 * MB;
+        // The live 47 MB chat checkpointed at 201 rows (~100 KB of rows).
+        assert!(!due(100 * 1024, 201, whale));
+        assert!(!due(2 * MB, 752, whale));
+        assert!(due(0, 753, whale));
+        assert!(due(2 * MB + 1, 0, whale));
+    }
+
+    #[test]
+    fn bounds_never_pass_the_rooms_alert_line() {
+        assert!(due(2 * MB + 1, 0, 4096 * MB));
+        assert!(due(0, 2_001, 4096 * MB));
+        assert!(!due(2 * MB, 2_000, 4096 * MB));
     }
 }
 

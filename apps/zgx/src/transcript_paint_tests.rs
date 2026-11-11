@@ -36,6 +36,13 @@ fn drawn_against_whole_then(command: &str, then: Option<&str>, back: bool) -> Ve
     // tests read each other's frames, as zgx-gpu's own pixel tests say.)
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _gpu = GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // (Both on one clock, the test's, a frame's time a refresh: what moves by
+    // `ui.now()` (a glide, a fold, words fading in) stands at the same point
+    // in both, however far apart in wall time their frames ran. On the wall
+    // clock a loaded machine could draw them at different points of an
+    // animation, and they'd differ with no paint at fault.)
+    let clock = zgx::clock::VirtualClock::new();
+    let mut at = std::time::Duration::ZERO;
     let fixture = ui().join("chat_fixture.luau");
     let mut apps: Vec<TestApp> = (0..2)
         .map(|_| {
@@ -49,6 +56,8 @@ fn drawn_against_whole_then(command: &str, then: Option<&str>, back: bool) -> Ve
     let mut whole = GpuRenderer::new_with_context(W, H, &drawn.context()).unwrap();
     let mut misses = Vec::new();
     let mut refresh = |apps: &mut Vec<TestApp>, what: String| {
+        at += std::time::Duration::from_secs_f64(1. / 60.);
+        clock.advance(at, || {});
         for app in apps.iter() {
             app.spend_spare_time();
             app.frame();
