@@ -4,38 +4,43 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 const source = readFileSync(new URL('./public/downloads.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('./public/index.html', import.meta.url), 'utf8');
-async function load(navigator, version = '0.2.98', fail = false) {
+async function load(navigator, version = '0.2.139-beta.7', fail = false) {
   const links = Object.fromEntries(['nav-download', 'hero-download', 'closing-download'].map(id => [id, { href: '#downloads', setAttribute() {} }]));
+  const fetched = [];
   const choices = ['macos', 'windows', 'windows-portable', 'linux', 'linux-arm'].map(platformDownload => ({ dataset: { platformDownload } }));
-  runInNewContext(source, { navigator, document: { getElementById: id => links[id], querySelectorAll: () => choices }, fetch: () => fail ? Promise.reject() : Promise.resolve({ ok: true, text: () => Promise.resolve(version) }) });
+  runInNewContext(source, { navigator, document: { getElementById: id => links[id], querySelectorAll: () => choices }, fetch: url => { fetched.push(url); return fail ? Promise.reject() : Promise.resolve({ ok: true, json: () => Promise.resolve(typeof version === 'string' ? { version } : version) }); } });
   await new Promise(resolve => setImmediate(resolve));
-  return { links, choices };
+  return { links, choices, fetched };
 }
 for (const [platform, userAgent, file] of [
   ['MacIntel', 'Macintosh', 'macos-arm64.dmg'], ['Win32', 'Windows NT', 'windows-x86_64-setup.exe'],
   ['Linux x86_64', 'Linux', 'linux-x86_64.tar.gz'], ['Linux aarch64', 'Linux', 'linux-aarch64.tar.gz'],
 ]) test(`desktop download: ${platform}`, async () => {
   const { links, choices } = await load({ platform, userAgent });
-  for (const id of ['nav-download', 'hero-download', 'closing-download']) assert.equal(links[id].href, `https://zeron.sh/releases/zeron-0.2.98-${file}`);
+  for (const id of ['nav-download', 'hero-download', 'closing-download']) assert.equal(links[id].href, `https://zeron.sh/releases/beta/zeron-0.2.139-beta.7-${file}`);
   assert.equal(choices.length, 5);
-  for (const choice of choices) assert.match(choice.href, /^https:\/\/zeron.sh\/releases\/zeron-0.2.98-/);
+  for (const choice of choices) assert.match(choice.href, /^https:\/\/zeron.sh\/releases\/beta\/zeron-0.2.139-beta.7-/);
 });
 for (const navigator of [{ platform: 'Linux armv8l', userAgent: 'Mozilla/5.0 (Linux; Android 16; Pixel 9)' }, { platform: 'Linux', userAgent: 'Android' }]) test(`android download: ${JSON.stringify(navigator)}`, async () => {
   const { links, choices } = await load(navigator);
   for (const id of ['nav-download', 'hero-download', 'closing-download']) assert.equal(links[id].href, 'https://zeron.sh/releases/zeron-android-arm64.apk');
   // The desktop rows keep their own builds.
-  for (const choice of choices) assert.match(choice.href, /^https:\/\/zeron.sh\/releases\/zeron-0.2.98-/);
+  for (const choice of choices) assert.match(choice.href, /^https:\/\/zeron.sh\/releases\/beta\/zeron-0.2.139-beta.7-/);
 });
 for (const navigator of [{ platform: 'MacIntel', maxTouchPoints: 5 }, { platform: 'iPhone' }, {}]) test(`mobile/unknown stays at chooser: ${JSON.stringify(navigator)}`, async () => {
   const { links } = await load(navigator);
   assert.equal(links['hero-download'].href, '#downloads');
 });
-for (const [version, fail] of [['<script>alert(1)</script>', false], ['0.2.96', false], ['', true]]) test(`safe fallback: ${version}`, async () => {
+for (const [version, fail] of [['<script>alert(1)</script>', false], ['0.2.139-beta.5', false], ['0.2.140', false], [{}, false], [null, false], ['', true]]) test(`safe fallback: ${JSON.stringify(version)}`, async () => {
   const { links } = await load({ platform: 'Win32' }, version, fail);
-  assert.equal(links['hero-download'].href, 'https://zeron.sh/releases/zeron-0.2.97-windows-x86_64-setup.exe');
+  assert.equal(links['hero-download'].href, 'https://zeron.sh/releases/beta/zeron-0.2.139-beta.6-windows-x86_64-setup.exe');
+});
+test('reads the beta manifest', async () => {
+  const { fetched } = await load({ platform: 'MacIntel' });
+  assert.deepEqual(fetched, ['https://zeron.sh/releases/beta/manifest.json']);
 });
 test('HTML retains all five explicit downloads without JavaScript', () => {
-  for (const file of ['macos-arm64.dmg', 'windows-x86_64-setup.exe', 'windows-x86_64.zip', 'linux-x86_64.tar.gz', 'linux-aarch64.tar.gz']) assert.ok(html.includes(`https://zeron.sh/releases/zeron-0.2.97-${file}`));
+  for (const file of ['macos-arm64.dmg', 'windows-x86_64-setup.exe', 'windows-x86_64.zip', 'linux-x86_64.tar.gz', 'linux-aarch64.tar.gz']) assert.ok(html.includes(`https://zeron.sh/releases/beta/zeron-0.2.139-beta.6-${file}`));
   assert.ok(html.includes('id="downloads"'));
   assert.ok(html.includes('href="https://zeron.sh/releases/zeron-android-arm64.apk"'));
   assert.ok(html.includes('href="#downloads">All downloads'));

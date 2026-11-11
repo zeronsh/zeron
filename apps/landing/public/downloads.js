@@ -2,6 +2,9 @@
   const base = "https://zeron.sh/releases/";
   // Android builds publish on every change under one stable name.
   const android = `${base}zeron-android-arm64.apk`;
+  // Desktop downloads are the new app, published on the beta channel. A beta
+  // install follows the beta channel, so it keeps itself up to date.
+  const desktop = `${base}beta/`;
   const releases = {
     macos: ["macos-arm64.dmg", "Download for macOS", "Apple silicon"],
     windows: ["windows-x86_64-setup.exe", "Download for Windows", "Windows x64 · Installer"],
@@ -32,29 +35,29 @@
   const apply = (version) => {
     for (const link of document.querySelectorAll("[data-platform-download]")) {
       const release = releases[link.dataset.platformDownload];
-      if (release) link.href = `${base}zeron-${version}-${release[0]}`;
+      if (release) link.href = `${desktop}zeron-${version}-${release[0]}`;
     }
     for (const id of ["nav-download", "hero-download", "closing-download"]) {
       const link = document.getElementById(id);
       if (!link || !os) continue;
       const [file, label, detail] = releases[os];
-      link.href = `${base}zeron-${version}-${file}`;
+      link.href = `${desktop}zeron-${version}-${file}`;
       link.textContent = id === "nav-download" ? "Download" : label;
       link.setAttribute("data-download-os", os);
       link.setAttribute("aria-label", `${label} (${detail})`);
       link.title = detail;
     }
   };
-  // A published fallback keeps downloads usable without the version endpoint.
-  // 0.2.97 is the first release with the Windows installer.
-  const fallback = "0.2.97";
+  // A published fallback keeps downloads usable without the manifest.
+  const fallback = "0.2.139-beta.6";
+  const parts = (version) => version.match(/^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$/)?.slice(1).map(Number);
   apply(fallback);
-  fetch(`${base}latest.txt`, { credentials: "omit" })
-    .then((r) => r.ok ? r.text() : Promise.reject())
-    .then((text) => {
-      const version = text.trim();
-      if (!/^\d+\.\d+\.\d+$/.test(version)) return;
-      const a = version.split(".").map(Number), b = fallback.split(".").map(Number);
+  fetch(`${desktop}manifest.json`, { credentials: "omit" })
+    .then((r) => r.ok ? r.json() : Promise.reject())
+    .then((manifest) => {
+      const version = typeof manifest?.version === "string" ? manifest.version.trim() : "";
+      const a = parts(version), b = parts(fallback);
+      if (!a) return;
       const first = a.findIndex((value, i) => value !== b[i]);
       if (first !== -1 && a[first] < b[first]) return;
       apply(version);
