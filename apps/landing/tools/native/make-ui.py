@@ -143,7 +143,8 @@ require("@app/screens/settings/prefs").conversation_width:set(440)
 local VISUAL = [[
 local months = { "Jun", "Jul", "Aug", "Sep", "Oct", "Nov" }
 return function()
-  return ui.column { gap = 12,
+  -- (340 wide: a column of that width in a row, as the card shows it.)
+  return ui.row { ui.column { width = 340, gap = 12,
     ui.text { "Where the build's time goes", size = "lg", weight = "semibold" },
     ui.chart { type = "bar", height = 150, x = months, unit = "s",
       series = {
@@ -151,7 +152,7 @@ return function()
         { name = "Link", values = { 12, 14, 11, 16, 9, 8 } },
         { name = "Test", values = { 20, 22, 19, 25, 18, 21 } },
       } },
-  }
+  } }
 end
 ]]
 table.insert(model.chats, { id = "c1", title = "CI time by step", project = "hello", device = "mac", updated = os.time() - 60, created = os.time() - 600, agent = "claude" })

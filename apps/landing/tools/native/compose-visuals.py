@@ -17,8 +17,13 @@ import sys
 from pathlib import Path
 from PIL import Image
 
-CROP = (308, 110, 560, 388)
-PIECE = (336, 128, 504, 352)
+# The card (public/hero/cards.js): the visual, 340 wide, its title's top at
+# 356, 235 on the session page (the paragraph above it, the conversation
+# 440 wide), cut out with 20 around it and laid with its title at 78, 106
+# (whole points: the same device-pixel phases) on the ground.
+CROP = (30, 62, 436, 436 * 388 / 560)
+SHIFT = (278, 129)
+PIECE = (58, 86, 380, 254)
 RADIUS = 12
 SHADOW = (0, 12, 32, 0.4)
 
@@ -64,7 +69,8 @@ for j in range(H):
 for name in names:
     ground = Image.open(ground_dir / f"{name}.png").convert("RGB")
     g = ground.crop((round(cx * k), round(cy * k), round((cx + cw) * k), round((cy + ch) * k)))
-    p = page.crop((round(cx * k), round(cy * k), round((cx + cw) * k), round((cy + ch) * k)))
+    sx, sy = SHIFT
+    p = page.crop((round((cx + sx) * k), round((cy + sy) * k), round((cx + sx) * k) + W, round((cy + sy) * k) + H))
     gp, pp = g.load(), p.load()
     res = Image.new("RGB", (W, H))
     rp = res.load()

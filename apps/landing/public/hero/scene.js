@@ -26,8 +26,10 @@
 //   sprites: [{ id, draw(ctx, s), box: [x, y, w, h], origin }]  drawn once
 //            or a pixel-art sprite: { id, frames: { name: image }, grid:
 //            [w, h], pixel (points a sprite pixel), at: [x, y] } — sampled
-//            nearest, a whole number of device pixels a sprite pixel, its
-//            corner on the device grid
+//            nearest, a whole number of device pixels a sprite pixel,
+//            standing on its foot (the bottom's middle) on the device grid
+//   maxScale                device pixels a point at most (default 2, the
+//                           app's own; a zoomed-in card allows more)
 //   animate(now) → { poses: { [id]: { rotate, alpha, frame } }, busy }  (optional)
 //   ready()                 a promise, before the first draw (icons, art)
 // }
@@ -120,8 +122,9 @@ export async function mountScene(container, spec, options = {}) {
   function resize() {
     const dpr = options.dpr ?? window.devicePixelRatio ?? 1;
     const css = container.clientWidth || cwPt;
-    // (At most the app's own 2x: past it the browser scales the canvas.)
-    scale = Math.min((css / cwPt) * dpr, 2);
+    // (At most the app's own 2x, or the spec's own cap for a zoomed-in
+    // card: past it the browser scales the canvas.)
+    scale = Math.min((css / cwPt) * dpr, spec.maxScale || 2);
     const w = Math.round(cwPt * scale), h = Math.round(chPt * scale);
     if (w === cw && h === ch) return;
     cw = w; ch = h;
@@ -168,10 +171,14 @@ export async function mountScene(container, spec, options = {}) {
       if (p.alpha === 0) continue;
       if (sp.textures) {
         // A pixel-art sprite: a whole number of device pixels a sprite
-        // pixel, its corner on a whole device pixel.
+        // pixel, so at most scales it is a little larger or smaller than
+        // exact; it stands on its foot (the bottom's middle, on a whole
+        // device pixel), so it stays seated where the plugin seats it.
         const k = Math.max(1, Math.round(sp.pixel * scale));
-        const x = Math.round((sp.at[0] - cx) * scale), y = Math.round((sp.at[1] - cy) * scale);
-        renderer.drawSprite(sp.textures[p.frame || "idle"], cw, ch, x, y, sp.grid[0] * k, sp.grid[1] * k);
+        const sw = sp.grid[0] * k, sh = sp.grid[1] * k;
+        const footX = sp.at[0] + (sp.grid[0] * sp.pixel) / 2, footY = sp.at[1] + sp.grid[1] * sp.pixel;
+        const x = Math.round((footX - cx) * scale - sw / 2), y = Math.round((footY - cy) * scale) - sh;
+        renderer.drawSprite(sp.textures[p.frame || "idle"], cw, ch, x, y, sw, sh);
         continue;
       }
       const [x, y] = sp.box;

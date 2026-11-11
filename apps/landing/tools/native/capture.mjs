@@ -23,9 +23,11 @@ try {
   const page = await browser.newPage();
   page.on("console", (m) => console.log("page:", m.text()));
   page.on("pageerror", (e) => console.log("page error:", e.message));
-  // CARD=<name>: a gallery card (560×388) instead of the hero.
+  // CARD=<name>: a gallery card (560×388) instead of the hero; WIDTH=<points>
+  // lays it that wide (a zoomed-in card at its crop's width: the app's 2x).
   const card = process.env.CARD;
-  await page.setViewport(card ? { width: 560, height: 388, deviceScaleFactor: scale } : { width: 1176, height: 768, deviceScaleFactor: scale });
+  const cw = Number(process.env.WIDTH || 560);
+  await page.setViewport(card ? { width: cw, height: Math.round((cw * 388) / 560), deviceScaleFactor: scale } : { width: 1176, height: 768, deviceScaleFactor: scale });
   for (const shot of shots) {
     const [name, xy] = shot.split("=");
     const [x, y] = xy.split(":").map(Number);

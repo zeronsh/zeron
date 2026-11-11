@@ -16,14 +16,17 @@ const SCENES = {
 };
 const scene = (slug) => ({ slug, layers: SCENES[slug] });
 
-// A card: 560×388 points of the window (the gallery's 907×627 shape).
+// A card: 560×388 points of the window (the gallery's 907×627 shape), or
+// a closer cut of the same shape (zoomed in: more device pixels a point,
+// so it stays as sharp).
 const W = 560, H = 388;
+const zoomed = (x, y, w) => ({ crop: [x, y, w, (w * H) / W], maxScale: (2 * W) / w });
 // zeron/zgx's wallpaper: its layer is the art's box, the window's width
 // from the page's right edge (6 + 1164 − 1176 = −6), under the page card's
 // clip (the card inside its edge, radius 11), drawn through that branch's
 // ASCII.
 const ART_BOX = [NODE[0] + NODE[2] - WINDOW.w, NODE[1], WINDOW.w, NODE[3]];
-const base = (slug, crop) => ({
+const base = (slug, crop = [0, 0, W, H]) => ({
   window: WINDOW,
   crop,
   scene: scene(slug),
@@ -72,7 +75,10 @@ function catCard() {
     wake?.();
   }
   return {
-    ...base("wheat", [436, 150, W, H]),
+    // (Closer in: the composer's right half, its cat, the model chip, and
+    // the field above; cut only where the composer is empty.)
+    ...base("wheat"),
+    ...zoomed(620, 219, 380),
     label: "A pixel-art cat sitting on the Zeron message box over a golden wheat field drawn in characters",
     over: drawOver,
     sprites: [sprite],
@@ -105,7 +111,11 @@ function machinesCard() {
   const place = { device: "MacBook Pro", project: "site", branch: "main", open: true };
   const over = (ctx, s) => { drawOver(ctx, s, { place }); drawPopups(ctx, s); };
   return {
-    ...base("icebergs", [356, 360, W, H]),
+    // (Closer in: the device list whole, beside the Work in panel's right
+    // edge (its chevrons, the current branch's tag) and under the
+    // composer's foot with the model chip; cut where there's no text.)
+    ...base("icebergs"),
+    ...zoomed(564, 412, 420),
     label: "The Zeron composer's Work in menu open on a list of machines: this MacBook Pro, a Linux devbox, a Mac mini that's offline, and Cloud, over icebergs drawn in characters",
     over,
     ready: () => iconsReady([drawUnder, over]),
@@ -114,11 +124,16 @@ function machinesCard() {
 
 // ---------------------------------------------------------------- visuals
 
-// A session's reply with its visual, cut out of the session page (a session
-// has no wallpaper: the cut-out laid on the new chat's, Aurora), rounded as
-// the page card is (12) and shadowed as the composer is (0 12 32 #00000066).
-// tools/native/compose-visuals.py makes the native reference the same way.
-const PIECE = [336, 128, 504, 352];
+// A reply's visual alone (show_visual: a title, a legend, a grouped bar
+// chart; the visual 340 wide, a column of that width in a row), cut out of
+// the session page with 20 around it (a session has no wallpaper: the
+// cut-out laid on the new chat's, Aurora, up in the sky, clear of the
+// page's ask), rounded as the page card is (12) and shadowed as the
+// composer is (0 12 32 #00000066). Whole points from the app's layout, so
+// its text falls on the same device-pixel phases.
+const CROP_V = zoomed(30, 62, 436);
+const VISUAL = { x: 78, y: 106, width: 340, paragraph: false };
+const PIECE = [VISUAL.x - 20, VISUAL.y - 20, VISUAL.width + 40, 64 + 150 + 40];
 function visualsCard() {
   const over = (ctx, s) => {
     const [x, y, w, h] = PIECE;
@@ -129,12 +144,13 @@ function visualsCard() {
     ctx.clip();
     ctx.fillStyle = "rgb(22,22,24)";
     ctx.fillRect(x * s, y * s, w * s, h * s);
-    drawReply(ctx, s);
+    drawReply(ctx, s, VISUAL);
     ctx.restore();
   };
   return {
-    ...base("aurora", [308, 110, W, H]),
-    label: "A Zeron chat reply with a grouped bar chart the app drew itself, compile, link and test time over six months, over an aurora drawn in characters",
+    ...base("aurora"),
+    ...CROP_V,
+    label: "A grouped bar chart the Zeron app drew itself in a chat reply, compile, link and test time over six months, over an aurora drawn in characters",
     over,
     ready: () => iconsReady([drawUnder]),
   };

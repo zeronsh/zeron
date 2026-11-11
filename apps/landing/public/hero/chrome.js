@@ -591,29 +591,35 @@ const CARD_GROUND = [22, 22, 24];
 const SERIES = [["Compile", [146, 119, 176], [42, 38, 51, 47, 33, 29]], ["Link", [88, 194, 178], [12, 14, 11, 16, 9, 8]], ["Test", [233, 166, 75], [20, 22, 19, 25, 18, 21]]];
 const MONTHS = ["Jun", "Jul", "Aug", "Sep", "Oct", "Nov"];
 
-export function drawReply(ctx, s) {
-  const X = 356;
+// A reply's visual (show_visual): its title, legend and grouped bar chart,
+// as the app lays them. `x`, `y`: the column's left and the title's top;
+// `width`: the visual's (a column of that width in a row: the chart's
+// canvas spans it); `paragraph`: the reply's text above it too (15/24,
+// broken as the app breaks it at 464).
+export function drawReply(ctx, s, { x: X = 356, y: Y = 235, width: CW = 464, paragraph = true } = {}) {
   const primary = "rgb(237,237,239)";
-  // The paragraph: Geist 15/24, its lines as the app breaks them at 464.
-  ["Compile is still the biggest share, but it has dropped since August,", "when the workspace was split. Here are the last six months, by", "step:"]
-    .forEach((line, i) => text(ctx, s, line, X, 151 + 24 * i, 15, 400, primary, { line: 24 }));
+  if (paragraph) {
+    ["Compile is still the biggest share, but it has dropped since August,", "when the workspace was split. Here are the last six months, by", "step:"]
+      .forEach((line, i) => text(ctx, s, line, X, Y - 84 + 24 * i, 15, 400, primary, { line: 24 }));
+  }
   // The visual: its title (SemiBold 16/24), 12 below it the legend (8-point
   // dots, Geist 13/20 in text.secondary, 6 from the dot, 16 between).
-  text(ctx, s, "Where the build's time goes", X, 235, 16, 600, primary, { line: 24 });
+  text(ctx, s, "Where the build's time goes", X, Y, 16, 600, primary, { line: 24 });
   let lx = X;
   for (const [name, rgb] of SERIES) {
     ctx.beginPath();
-    ctx.arc((lx + 4) * s, 281 * s, 4 * s, 0, Math.PI * 2);
+    ctx.arc((lx + 4) * s, (Y + 46) * s, 4 * s, 0, Math.PI * 2);
     ctx.fillStyle = `rgb(${rgb.join(",")})`;
     ctx.fill();
     const w = Math.round(advanceOf(ctx, s, name, 13, 400));
-    text(ctx, s, name, lx + 14, 271, 13, 400, overF(T, 153 / 255, CARD_GROUND), { line: 20 });
+    text(ctx, s, name, lx + 14, Y + 36, 13, 400, overF(T, 153 / 255, CARD_GROUND), { line: 20 });
     lx += 14 + w + 16;
   }
-  // The plot (a canvas 464×150 at 356, 299): insets top 8, right 6, bottom
-  // 22, left the widest label + 8 (32.93: the app's label face measured);
-  // ticks 0..60 by 10 (nice_ticks over 0..51).
-  const top = 299 + 8, left = X + 32.93, pw = 464 - 32.93 - 6, ph = 120;
+  // The plot (a canvas CW×150, 64 under the title's top): insets top 8,
+  // right 6, bottom 22, left the widest label + 8 (32.93: the app's label
+  // face measured); ticks 0..60 by 10 (nice_ticks over 0..51, about 4: the
+  // same at any size).
+  const top = Y + 64 + 8, left = X + 32.93, pw = CW - 32.93 - 6, ph = 120;
   const vy = (v) => top + ph - (v / 60) * ph;
   for (let t = 0; t <= 60; t += 10) {
     ctx.fillStyle = over([255, 255, 255], t === 0 ? 18 : 10, CARD_GROUND);

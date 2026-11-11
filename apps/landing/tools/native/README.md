@@ -131,8 +131,11 @@ What's left, and why it can't go:
 
 ## The gallery's cards
 
-Three cut-outs of the app (`public/hero/cards.js`), each 560×388 points of
-the window, each over its own scene of the Parallax scenes plugin. They're
+Three cut-outs of the app (`public/hero/cards.js`), each in the gallery's
+560×388 shape, cut close (380 to 436 points of the window wide, drawn at up
+to 2.67–2.95 device pixels a point so they stay sharp), each over its own
+scene of the Parallax scenes plugin. `capture.mjs` with `WIDTH=<crop width>`
+takes a card at the app's 2x, to diff against the native crop. They're
 drawn from **zeron/zgx** (what the beta ships), not main: that branch's
 wallpaper effects were rewritten (linear light, a paper, a new ASCII ramp
 ` .:-=+*#@` at 1.1-point font pixels, the fade in the shader, the layer the
@@ -144,9 +147,9 @@ glyph stroke): against that branch's native hero (`--card hero`), MAE
 
 | card | scene | what it shows |
 |---|---|---|
-| visuals | Aurora | a session's reply with a grouped bar chart the app's host draws (show_visual), cut out of the session page and laid on the new chat's wallpaper (a session has none) |
-| cat | Wheat | the composer with the Composer cat plugin (`apps/zgx/plugins-dev/composer-cat`, zeron/composer-cat): a 28×24 pixel-art sprite, 2 points a pixel, sampled nearest in both |
-| machines | Icebergs | the composer's Work in picker open from its place chip, its Device row's machines beside it: this Mac, a Linux devbox, a Mac mini away, Cloud |
+| visuals | Aurora | a reply's visual alone (show_visual: title, legend, grouped bar chart, the visual 340 wide), cut out of the session page and laid on the new chat's wallpaper in the sky (a session has none) |
+| cat | Wheat | the composer's right half with the Composer cat plugin (`apps/zgx/plugins-dev/composer-cat`, zeron/composer-cat): a 28×24 pixel-art sprite, 2 points a pixel, sampled nearest in both, standing on its foot |
+| machines | Icebergs | the Device submenu of the composer's Work in picker, whole, beside that panel's right edge and under the composer's foot: this Mac, a Linux devbox, a Mac mini away, Cloud |
 
 Native references: a build of zeron/composer-cat with debug assertions on
 (`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo build --release`), so it
@@ -169,6 +172,14 @@ Results (Nov 11 2026, the same rig), mean absolute error of 255 per channel:
 | visuals | 0.75 | 0.75 | 0.75 | text edges; the chart's axis labels (below) |
 | cat | 0.07 | 0.07 | 0.07 | the composer's text edges (the cat 0.02, the wallpaper 0.00) |
 | machines | 0.37 | 0.37 | 0.37 | the panels' text and icon edges (wallpaper 0.00) |
+
+Closer cuts (Nov 11, the same references, no new native windows):
+cat 0.07 (cat 0.03); machines 0.31 above Cloud's row (the reference
+predates Cloud's row losing its sub-line); visuals: its title, legend and
+value labels the same pixels as the verified card's (moved by whole
+points), the 340-wide plot from the same code; its native reference
+(`make-ui.py --card visuals` now lays the visual 340 wide,
+`compose-visuals.py` cuts it) is still to be taken on another machine.
 
 Motion, against the real plugin in each card's fixture: every web frame is
 a step of the 120 Hz spring model; the app's layers sit on it in 21,987 of

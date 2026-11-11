@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from PIL import Image
 
-CROPS = {"cat": (436, 150, 560, 388), "machines": (356, 360, 560, 388), "visuals": (308, 110, 560, 388)}
+CROPS = {"cat": (620, 219, 380, 380 * 388 / 560), "machines": (564, 412, 420, 420 * 388 / 560), "visuals": (30, 62, 436, 436 * 388 / 560)}
 src, out, card = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 names = sys.argv[4].split(",") if len(sys.argv) > 4 else [p.stem for p in src.glob("*.png") if "-" not in p.stem]
 out.mkdir(parents=True, exist_ok=True)
