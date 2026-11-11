@@ -187,6 +187,18 @@ pub fn selected() -> Channel {
     choice_for(data_dir().and_then(recorded), app_version.as_deref())
 }
 
+/// Whether Stable is a choice on record: the only thing that takes a beta
+/// build back to an older stable (crates/update `offer`). Every record saying
+/// stable is one: a claim only ever says beta, and a claim's release is
+/// written by a stable build.
+pub fn stable_on_record() -> bool {
+    data_dir().is_some_and(stable_on_record_in)
+}
+
+fn stable_on_record_in(dir: &Path) -> bool {
+    recorded(dir).is_some_and(|record| record.channel == Channel::Stable)
+}
+
 /// What's recorded, when there's a record to read.
 fn recorded(dir: &Path) -> Option<ChannelRecord> {
     serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
@@ -357,6 +369,18 @@ mod tests {
         select(dir.path(), Channel::Stable).unwrap();
         assert!(!release_claim_for_stable_build(dir.path()).unwrap());
         assert_eq!(read(dir.path()).channel, Channel::Stable);
+    }
+
+    #[test]
+    fn only_a_record_saying_stable_is_a_choice_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!stable_on_record_in(dir.path()), "no record");
+        claim_for_beta_build(dir.path(), "0.2.139-beta.6").unwrap();
+        assert!(!stable_on_record_in(dir.path()), "a claim");
+        select(dir.path(), Channel::Stable).unwrap();
+        assert!(stable_on_record_in(dir.path()), "turned off in a beta build");
+        std::fs::write(dir.path().join(FILE), br#"{"channel":"stable"}"#).unwrap();
+        assert!(stable_on_record_in(dir.path()), "the old app's choice");
     }
 
     #[test]

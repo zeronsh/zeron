@@ -319,6 +319,11 @@ impl Offer {
 ///   stable's engine is older than the one the beta brought (it would run on
 ///   data a newer engine wrote): then it waits until stable catches up.
 /// - A release needing a newer macOS than this one is held.
+///
+/// Leaving beta for an older stable takes a person's choice of Stable on
+/// record ([`channel::stable_on_record`]): a beta build that only reads
+/// stable because it doesn't follow channels (one run from where it was
+/// unpacked, an engine) is never offered an older release.
 pub fn offer(
     manifest: &Manifest,
     running: &str,
@@ -326,11 +331,24 @@ pub fn offer(
     running_engine: Option<&str>,
     macos: Option<&str>,
 ) -> Offer {
+    offer_given(manifest, running, selected, running_engine, macos, channel::stable_on_record())
+}
+
+/// [`offer`], told whether Stable is the choice on record.
+fn offer_given(
+    manifest: &Manifest,
+    running: &str,
+    selected: Channel,
+    running_engine: Option<&str>,
+    macos: Option<&str>,
+    stable_chosen: bool,
+) -> Offer {
     let latest = manifest.version.as_str();
     if parse_version(latest).is_none() || latest.trim() == running.trim() {
         return Offer::Current;
     }
-    let leaving_beta = Channel::of_version(running) == Channel::Beta && selected == Channel::Stable;
+    let leaving_beta =
+        Channel::of_version(running) == Channel::Beta && selected == Channel::Stable && stable_chosen;
     if !leaving_beta && !version_newer(latest, running) {
         return Offer::Current;
     }
@@ -3896,20 +3914,40 @@ mod tests {
     #[test]
     fn leaving_beta_installs_stable_even_when_older() {
         let stable = manifest_of("0.2.135", Channel::Stable);
-        assert_eq!(offer(&stable, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None), Offer::Switch);
+        assert_eq!(offer_given(&stable, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None, true), Offer::Switch);
         // A stable that caught up is simply newer.
         let caught_up = manifest_of("0.2.136", Channel::Stable);
-        assert_eq!(offer(&caught_up, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None), Offer::Newer);
+        assert_eq!(offer_given(&caught_up, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None, true), Offer::Newer);
+    }
+
+    /// An unpacked Linux tarball of a beta, run where it lies (unmanaged, so
+    /// it reads stable), was offered the older stable. Without Stable chosen
+    /// on record, a beta build is offered only what's newer.
+    #[test]
+    fn a_beta_never_goes_back_to_an_older_stable_unless_stable_was_chosen() {
+        let older = manifest_of("0.2.138", Channel::Stable);
+        assert_eq!(offer_given(&older, "0.2.139-beta.6", Channel::Stable, None, None, false), Offer::Current);
+        assert_eq!(offer_given(&older, "0.2.139-beta.6", Channel::Stable, None, None, true), Offer::Switch);
+        // Stable catching up is newer either way.
+        let caught_up = manifest_of("0.2.139", Channel::Stable);
+        assert_eq!(offer_given(&caught_up, "0.2.139-beta.6", Channel::Stable, None, None, false), Offer::Newer);
+        #[cfg(target_os = "linux")]
+        {
+            let unpacked = std::path::Path::new("/home/someone/Downloads/zeron-0.2.139-beta.6-linux-x86_64/zeron");
+            let home = std::path::Path::new("/home/someone");
+            assert_eq!(detect_install_from(unpacked, Some(home)), InstallKind::Unmanaged);
+            assert!(!InstallKind::Unmanaged.follows_channels());
+        }
     }
 
     #[test]
     fn leaving_beta_waits_when_stable_s_engine_is_older_than_the_beta_s() {
         let stable = manifest_of("0.2.135", Channel::Stable);
-        let held = offer(&stable, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None);
+        let held = offer_given(&stable, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None, true);
         assert!(matches!(&held, Offer::Held(why) if why.contains("catches up")), "{held:?}");
         // A manifest naming its engine is weighed by that.
         let named = Manifest { engine_version: Some("0.2.136".into()), ..stable };
-        assert_eq!(offer(&named, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None), Offer::Switch);
+        assert_eq!(offer_given(&named, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None, true), Offer::Switch);
     }
 
     #[test]
