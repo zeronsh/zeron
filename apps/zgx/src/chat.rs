@@ -119,11 +119,12 @@ struct Chats {
     /// (`settle_remote`): its catalog stands complete with what it has, and
     /// answers still to come fill it in without its going back to looking.
     remote_settled: Cell<u64>,
-    /// The chat a view has just let go of, kept a moment: a chat on its own
-    /// that becomes a split is opened again at once, in its pane, and has
-    /// what it had rather than reading and building it all again.
-    let_go: RefCell<Option<LetGo>>,
-    let_go_turn: Cell<u64>,
+    /// The chats views have let go of lately, the most recent last
+    /// (`LET_GO_MOST`, `LET_GO_KEPT`): one opened again (switched back to,
+    /// or a chat on its own becoming a split) shows its rows at once, from
+    /// the first frame, rather than a skeleton while it's read and built
+    /// again; the engine's copy then brings what changed.
+    let_go: RefCell<Vec<LetGo>>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -370,6 +371,8 @@ fn folding(entries: Vec<(usize, String, Json)>, context: &RowContext) -> Folding
 
 /// What a view's chat had read and built, as it let it go.
 struct LetGo {
+    /// When it was let go of.
+    at: std::time::Instant,
     id: String,
     entries: Vec<Entry>,
     older_todo: Option<(usize, Json)>,
@@ -379,8 +382,18 @@ struct LetGo {
     context_usage: (Option<f64>, Option<f64>),
 }
 
-/// How long a chat let go of is kept for another view to take it.
-const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a chat let go of is kept for a view to open again, and how many
+/// are kept at most (a long chat's rows are its whole transcript, built).
+const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
+const LET_GO_MOST: usize = 6;
+
+/// The chats let go of that are still kept: none older than `LET_GO_KEPT`,
+/// and the newest `LET_GO_MOST`.
+fn prune_let_go(kept: &mut Vec<LetGo>) {
+    kept.retain(|held| held.at.elapsed() < LET_GO_KEPT);
+    let over = kept.len().saturating_sub(LET_GO_MOST);
+    kept.drain(..over);
+}
 
 /// How long after connecting other devices' catalogs start being looked at.
 const LOOK_AHEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
@@ -963,32 +976,25 @@ impl Chats {
         self.views.borrow().iter().filter_map(Weak::upgrade).collect()
     }
 
-    /// Keeps what a view's chat had for a moment (`LET_GO_KEPT`), for another
-    /// view that's about to open it.
+    /// Keeps what a view's chat had (`let_go`), for a view that opens it
+    /// again: the most recent `LET_GO_MOST`, for `LET_GO_KEPT`.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
         // (Not while its rows are on a worker: it has only the ones they left.)
         let Some(old) = old.filter(|o| o.heard && !o.stepping) else { return };
         let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
-        *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context, context_usage });
-        let turn = self.let_go_turn.get() + 1;
-        self.let_go_turn.set(turn);
-        let me = self.clone();
-        engine::get().spawn(async move {
-            zgx::timer::sleep(LET_GO_KEPT).await;
-            if me.let_go_turn.get() == turn {
-                me.let_go.borrow_mut().take();
-            }
-        });
+        let mut kept = self.let_go.borrow_mut();
+        kept.retain(|held| held.id != id);
+        kept.push(LetGo { at: std::time::Instant::now(), id, entries, older_todo, built, built_model, context, context_usage });
+        prune_let_go(&mut kept);
     }
 
-    /// What a view let go of just now, if it was this chat: an `Open` that
-    /// has its rows.
+    /// What a view let go of lately, if it was this chat: an `Open` that has
+    /// its rows.
     fn take_let_go(&self, id: &str) -> Option<Open> {
-        let mut slot = self.let_go.borrow_mut();
-        if slot.as_ref()?.id != id {
-            return None;
-        }
-        let held = slot.take()?;
+        let mut kept = self.let_go.borrow_mut();
+        prune_let_go(&mut kept);
+        let at = kept.iter().position(|held| held.id == id)?;
+        let held = kept.remove(at);
         Some(Open {
             id: held.id,
             entries: held.entries,
@@ -1826,7 +1832,7 @@ impl View {
     fn share_built(&self, open: &mut Open) {
         let chats = CHATS.with(Rc::clone);
         let let_go = chats.let_go.borrow();
-        if let Some(held) = let_go.as_ref().filter(|h| h.id == open.id) {
+        if let Some(held) = let_go.iter().find(|h| h.id == open.id) {
             reuse_built(open, &held.entries, &held.built, &held.built_model);
         }
         for view in chats.views() {
@@ -5236,9 +5242,13 @@ fn chat_offline(no_connection: bool, unreachable: bool) -> bool {
 
 fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let chat = chats.chat(&open.id);
-    // Ready once its transcript has come and the chat itself (its config)
-    // is known: the composer takes its model from it.
-    let state = if open.heard && chat.is_some() {
+    // Ready once its transcript has come (this device's copy, read first,
+    // whatever its host's state): its rows show at once, and the chat itself
+    // (its config, the composer's model) fills in as the chats list brings
+    // it. Waiting on that list as well, a chat kept here stood as a skeleton
+    // until the whole list came. Missing only when the list is known, hasn't
+    // it, and nothing of it is here.
+    let state = if open.heard && (chat.is_some() || !open.entries.is_empty() || !chats.chats_heard.get()) {
         "ready"
     } else if chats.chats_heard.get() && chat.is_none() {
         "missing"
@@ -7211,5 +7221,64 @@ mod tests {
         view.heard_frame(json!({ "reset": [prompt("u0"), reply("a0"), prompt("u1"), reply("a1")] }));
         assert!(!view.open.borrow().as_ref().unwrap().has_whole);
         assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
+    }
+
+    /// A chat opened shows its rows once its transcript has come (this
+    /// device's copy, read first whatever its host's state), not once the
+    /// chats list has it too; "missing" only when the list is known, hasn't
+    /// it, and nothing of it came; loading only while nothing has.
+    #[test]
+    fn a_chat_with_its_transcript_here_is_ready_before_the_chats_list_knows_it() {
+        use super::{Chats, Entry, Open, session_value, text};
+        use serde_json::json;
+        let chats = Chats::default();
+        let state = |chats: &Chats, open: &Open| session_value(chats, open, false).field("state").map(text).unwrap_or_default();
+        let rows = vec![Entry::new(json!({ "id": "u0", "role": "user", "parts": [] }))];
+        let mut open = Open { id: "c".into(), ..Open::default() };
+        assert_eq!(state(&chats, &open), "loading", "nothing come yet");
+        open.heard = true;
+        open.entries = rows;
+        // The chats list not come yet (a launch, the list large): its rows show.
+        assert_eq!(state(&chats, &open), "ready");
+        // The list come, without it (its host gone quiet, another device's):
+        // its rows still show.
+        chats.chats_heard.set(true);
+        assert_eq!(state(&chats, &open), "ready");
+        // Nothing of it here, and the list hasn't it: missing.
+        open.entries.clear();
+        assert_eq!(state(&chats, &open), "missing");
+        // Listed: ready.
+        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "config": {} }));
+        assert_eq!(state(&chats, &open), "ready");
+    }
+
+    /// The chats views let go of lately are kept, the most recent few, so
+    /// one opened again shows its rows at once (not a skeleton while it's
+    /// read and built again), then takes what changed from the engine.
+    #[test]
+    fn chats_let_go_of_are_kept_to_open_again_with_their_rows() {
+        use super::{Chats, Entry, LET_GO_MOST, Open};
+        use serde_json::json;
+        use std::rc::Rc;
+        let chats = Rc::new(Chats::default());
+        let open = |id: &str| Open {
+            id: id.into(),
+            entries: vec![Entry::new(json!({ "id": format!("{id}-m"), "role": "user", "parts": [] }))],
+            heard: true,
+            ..Open::default()
+        };
+        for id in ["a", "b", "c"] {
+            chats.keep_let_go(Some(open(id)));
+        }
+        let b = chats.take_let_go("b").expect("b kept, though two were let go after it");
+        assert!(b.heard && b.has_whole && b.entries.len() == 1);
+        assert!(chats.take_let_go("b").is_none(), "taken once");
+        assert!(chats.take_let_go("a").is_some());
+        // The most recent few only.
+        for i in 0..LET_GO_MOST + 2 {
+            chats.keep_let_go(Some(open(&format!("x{i}"))));
+        }
+        assert!(chats.take_let_go("x0").is_none());
+        assert!(chats.take_let_go(&format!("x{}", LET_GO_MOST + 1)).is_some());
     }
 }

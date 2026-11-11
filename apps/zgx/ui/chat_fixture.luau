@@ -218,6 +218,16 @@ ui.command {
 		SLOW_OPEN:set(true)
 	end,
 }
+-- `never_open`: a chat that isn't here at all (never read on this device):
+-- the session stays loading, nothing comes.
+local NEVER_OPEN = ui.state("fixture_never_open", false)
+ui.command {
+	id = "never_open",
+	title = "Chats open and never arrive",
+	run = function()
+		NEVER_OPEN:set(true)
+	end,
+}
 local pending_history: { any }? = nil
 ui.command {
 	id = "history",
@@ -257,6 +267,14 @@ stub.open = function(id: string?)
 	-- `slow_open`: as the host opens a chat it no longer holds, the
 	-- transcript emptied and the session loading at once, the chat a moment
 	-- later.
+	if NEVER_OPEN:peek() then
+		ui.batch(function()
+			store.messages:set({})
+			store.draft:set { id = "", text = "" }
+			publish(id, { state = "loading" })
+		end)
+		return
+	end
 	if SLOW_OPEN:peek() then
 		ui.batch(function()
 			store.messages:set({})
