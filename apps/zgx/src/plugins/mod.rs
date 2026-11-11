@@ -552,8 +552,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     // did (macOS's FSEvents, Windows' directory change notifications), so
     // an idle window doesn't wake for them; elsewhere, looked at every
     // `TEMPLATES_LOOK`. (On Windows the timed look cost about 6% of a core
-    // at idle: each look's `publish_templates` walks every template's files
-    // on the UI thread.)
+    // at idle: each look's `publish_page` → `elements_report` walks, reads
+    // and scans every script on the UI thread.) Where Windows may not hear a
+    // change (a folder it can't read, a reader that stopped), it looks on the
+    // timer too until it can.
     let weak = Rc::downgrade(&bridge);
     #[cfg(any(target_os = "macos", windows))]
     let events = file_events::FileEvents::new();
@@ -573,7 +575,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                     events.watch(files, dirs);
                     b.look();
                 }
-                if !events.changed().await {
+                #[cfg(windows)]
+                let more = events.changed_or_every(TEMPLATES_LOOK).await;
+                #[cfg(target_os = "macos")]
+                let more = events.changed().await;
+                if !more {
                     return;
                 }
             }

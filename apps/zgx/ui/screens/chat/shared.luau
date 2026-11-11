@@ -479,7 +479,9 @@ end
 -- to open it in. `composer_shown` counts the composers mounted now
 -- (screens/chat/composer: a swapped one mounts before the old one goes):
 -- `composer_mounted`/`composer_gone` change it. A template's composer
--- written before it counted sets true or false, read as one or none.
+-- written before it counted sets true or false, read as one or none (its
+-- `false` on cleanup clears the count whole: a limit of mixing the two,
+-- only while such a composer and a counted one swap).
 M.open_model = ui.shared("chat.composer.open_model", 0)
 M.composer_shown = ui.shared("chat.composer.shown", 0)
 local function composers(): number
