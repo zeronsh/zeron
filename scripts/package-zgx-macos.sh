@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
-# Zeron.app's beta: the zgx interface (apps/zgx, built with its `beta`
-# feature) as the Zeron app itself — the same bundle id, name, signing,
+# Zeron.app, stable or beta: the zgx interface (apps/zgx, built with its
+# `beta` feature, which makes it the Zeron app) as the Zeron app itself —
+# the same bundle id, name, signing,
 # entitlements and `zeron://` scheme as scripts/package-macos.sh's — with
 # the engine it's given inside, built from the same commit, so a tester keeps
 # Zeron.app's data and device:
 #
-#   target/package-beta/Zeron.app
+#   target/package-zgx/Zeron.app
 #     Contents/MacOS/zeron           the zgx interface and `zeron`'s command
 #                                    line (crates/cli; the engine's commands
 #                                    run in the helper beside it)
 #     Contents/MacOS/Zeron Engine    the engine, signed here
 #     Contents/Resources/ui, plugins-builtin, zeron.icns, licenses
-#   target/package-beta/zeron-<beta>-macos-<arch>.dmg
-#   target/package-beta/zeron-<beta>-macos-<arch>-app.tar.gz  (the updater's)
+#   target/package-zgx/zeron-<version>-macos-<arch>.dmg
+#   target/package-zgx/zeron-<version>-macos-<arch>-app.tar.gz  (the updater's)
 #
-# Usage: BETA_VERSION=0.2.136-beta.1 ZGX_BETA_ENGINE=<engine> scripts/package-zgx-beta.sh
-#   BETA_VERSION        `<workspace version>-beta.<n>`; the workspace version
-#                       is the next release's (newer than the stable whose
-#                       engine goes in)
-#   ZGX_BETA_ENGINE     the engine: a built binary, a Zeron.app, its app tarball, or
+# Usage: ZGX_VERSION=0.2.139 ZGX_ENGINE=<engine> scripts/package-zgx-macos.sh
+#   ZGX_VERSION         the workspace version (a stable release, release.yml)
+#                       or `<workspace version>-beta.<n>` (a beta of the next
+#                       release, zgx-beta.yml)
+#   ZGX_ENGINE          the engine: a built binary, a Zeron.app, its app tarball, or
 #                       its `Zeron Engine` binary
-#   ZGX_BETA_ZGX_BIN    the interface, built already (with --features beta and
-#                       ZERON_BETA_VERSION); otherwise built here
+#   ZGX_BIN             the interface, built already (with --features beta and
+#                       ZERON_BETA_VERSION=<ZGX_VERSION>); otherwise built here
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)
-#   ZGX_BETA_DMG=0      no dmg
+#   ZGX_DMG=0           no dmg
 #   CARGO_FLAGS         extra cargo flags (CI: --locked)
 # Signing and notarization are scripts/package-macos.sh's: CODESIGN_IDENTITY,
 # NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID.
@@ -35,24 +36,24 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 die() { echo "$*" >&2; exit 1; }
 
 WORKSPACE="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
-BETA_VERSION="${BETA_VERSION:-}"
-[[ "$BETA_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]] ||
-  die "BETA_VERSION must be <x.y.z>-beta.<n>, not '$BETA_VERSION'"
+VERSION="${ZGX_VERSION:-}"
+[[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-beta\.([0-9]+))?$ ]] ||
+  die "ZGX_VERSION must be <x.y.z> or <x.y.z>-beta.<n>, not '$VERSION'"
 CORE="${BASH_REMATCH[1]}"
-NUMBER="${BASH_REMATCH[2]}"
-[[ "$CORE" == "$WORKSPACE" ]] || die "BETA_VERSION $BETA_VERSION isn't a beta of the workspace's $WORKSPACE"
+NUMBER="${BASH_REMATCH[3]}"
+[[ "$CORE" == "$WORKSPACE" ]] || die "ZGX_VERSION $VERSION isn't the workspace's $WORKSPACE or a beta of it"
 ARCH="$(uname -m)"
-OUT_DIR="$ROOT/target/package-beta"
+OUT_DIR="$ROOT/target/package-zgx"
 APP="$OUT_DIR/Zeron.app"
-DMG="$OUT_DIR/zeron-$BETA_VERSION-macos-$ARCH.dmg"
-APP_TARBALL="$OUT_DIR/zeron-$BETA_VERSION-macos-$ARCH-app.tar.gz"
+DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
+APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 ENTITLEMENTS="$ROOT/dist/macos/Zeron.entitlements"
 read -r -a CARGO_EXTRA <<<"${CARGO_FLAGS:-}"
 mkdir -p "$OUT_DIR"
 
 # The engine: the binary given, or the one in a bundle or tarball.
-ENGINE_SRC="${ZGX_BETA_ENGINE:-}"
-[[ -n "$ENGINE_SRC" ]] || die "ZGX_BETA_ENGINE: a built engine, a Zeron.app, its app tarball or its Zeron Engine"
+ENGINE_SRC="${ZGX_ENGINE:-}"
+[[ -n "$ENGINE_SRC" ]] || die "ZGX_ENGINE: a built engine, a Zeron.app, its app tarball or its Zeron Engine"
 ENGINE_BIN="$ENGINE_SRC"
 if [[ "$ENGINE_SRC" == *.tar.gz ]]; then
   UNPACK="$OUT_DIR/.stable"
@@ -69,23 +70,23 @@ ENGINE_VERSION="$("$ENGINE_BIN" --version | sed -n 's/^zeron-engine //p')"
 # line (crates/cli). An engine from before that runs the background engine
 # for any argument instead. (Read, not run: running an old one starts it.)
 LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
-  die "the $ENGINE_VERSION engine predates the shared command line: the beta needs a stable release with it"
+  die "the $ENGINE_VERSION engine predates the shared command line"
 
 # The interface: apps/zgx is a workspace of its own (its own lock, patches).
-ZGX_BIN="${ZGX_BETA_ZGX_BIN:-}"
+ZGX_BIN="${ZGX_BIN:-}"
 if [[ -z "$ZGX_BIN" ]]; then
   target_dir="${ZGX_TARGET_DIR:-$ROOT/apps/zgx/target}"
   [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
   # (From its folder: cargo reads .cargo/config.toml by where it runs, not by
   # the manifest, and the build's flags are there.)
-  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
+  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$VERSION" cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
     --features beta --target-dir "$target_dir")
   ZGX_BIN="$target_dir/release/zeron-zgx"
 fi
-# Only a beta build of this version may go in: the updater stages it by
+# Only an app build of this version may go in: the updater stages it by
 # `zeron --version`, and a development build is staging's.
-[[ "$("$ZGX_BIN" --version)" == "zeron $BETA_VERSION" ]] ||
-  die "$ZGX_BIN isn't the $BETA_VERSION beta (it says '$("$ZGX_BIN" --version)')"
+[[ "$("$ZGX_BIN" --version)" == "zeron $VERSION" ]] ||
+  die "$ZGX_BIN isn't the $VERSION app (it says '$("$ZGX_BIN" --version)')"
 # Production's only: neither binary may carry staging's edge or sign-in.
 STAGING_MARKS='staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
 for bin in "$ZGX_BIN" "$ENGINE_BIN"; do
@@ -100,15 +101,15 @@ rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ZGX_BIN" "$APP/Contents/MacOS/zeron"
 install -m 755 "$ENGINE_BIN" "$APP/Contents/MacOS/Zeron Engine"
-# Zeron.app's Info.plist, as the stable app's, with the beta's versions: the
-# short version stays numeric (the next release's), the bundle version is
-# its build, the engine its own (crates/update `bundle_engine_version`), and
-# zgx's floor macOS 13 (Ghostty's).
+# Zeron.app's Info.plist, as the old app's, with this one's versions: the
+# short version stays numeric (a beta's is the next release's), the bundle
+# version is a beta's build, the engine its own (crates/update
+# `bundle_engine_version`), and zgx's floor macOS 13 (Ghostty's).
 PLIST="$APP/Contents/Info.plist"
 sed "s/__VERSION__/$CORE/" "$ROOT/dist/macos/Info.plist" >"$PLIST"
-plutil -replace CFBundleVersion -string "$CORE.$NUMBER" "$PLIST"
+plutil -replace CFBundleVersion -string "$CORE${NUMBER:+.$NUMBER}" "$PLIST"
 plutil -replace ZeronEngineVersion -string "$ENGINE_VERSION" "$PLIST"
-plutil -replace ZeronVersion -string "$BETA_VERSION" "$PLIST"
+plutil -replace ZeronVersion -string "$VERSION" "$PLIST"
 plutil -replace LSMinimumSystemVersion -string "13.0" "$PLIST"
 plutil -convert xml1 "$PLIST"
 plutil -lint "$PLIST" >/dev/null
@@ -165,7 +166,7 @@ tar -czf "$APP_TARBALL" -C "$OUT_DIR" Zeron.app
 echo "packaged: $APP_TARBALL"
 echo "size: $(du -sh "$APP" | cut -f1) ($(du -sk "$APP" | cut -f1) KB) · interface $(du -h "$APP/Contents/MacOS/zeron" | cut -f1) · engine $(du -h "$APP/Contents/MacOS/Zeron Engine" | cut -f1)"
 
-if [[ "${ZGX_BETA_DMG:-1}" == "0" ]]; then
+if [[ "${ZGX_DMG:-1}" == "0" ]]; then
   exit 0
 fi
 
@@ -177,14 +178,14 @@ BG_TIFF="$OUT_DIR/dmg-background.tiff"
 tiffutil -cathidpicheck "$ROOT/dist/macos/dmg-background.png" \
   "$ROOT/dist/macos/dmg-background@2x.png" -out "$BG_TIFF" >/dev/null 2>&1
 
-APP="$APP" DMG="$DMG" BG_TIFF="$BG_TIFF" python3 - <<'PY'
+VOLUME="Zeron${NUMBER:+ Beta}" APP="$APP" DMG="$DMG" BG_TIFF="$BG_TIFF" python3 - <<'PY'
 import os
 import dmgbuild
 
 app = os.environ["APP"]
 dmgbuild.build_dmg(
     filename=os.environ["DMG"],
-    volume_name="Zeron Beta",
+    volume_name=os.environ["VOLUME"],
     settings={
         "format": "UDZO",
         "files": [app],

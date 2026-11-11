@@ -23,7 +23,9 @@
 #ifndef OutputDir
   #define OutputDir "."
 #endif
-; The file version must be numeric; a beta's AppVersion (x.y.z-beta.n) isn't.
+; The zgx app (scripts/package-windows.ps1 -ZgxVersion) brings its version's
+; folder, by channel: /DFilesFolder=app (stable) or beta. The file version
+; must be numeric; a beta's AppVersion (x.y.z-beta.n) isn't.
 #ifndef FileVersion
   #define FileVersion AppVersion
 #endif
@@ -77,9 +79,9 @@ Source: "{#PackageDir}\zeron-update.json"; DestDir: "{app}"; Flags: ignoreversio
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
-#ifdef Beta
-; The beta's scripts, plugins and the stable release's engine, by version.
-Source: "{#PackageDir}\beta\*"; DestDir: "{app}\beta"; Flags: ignoreversion recursesubdirs createallsubdirs
+#ifdef FilesFolder
+; The zgx app's scripts, plugins and engine, by version.
+Source: "{#PackageDir}\{#FilesFolder}\*"; DestDir: "{app}\{#FilesFolder}"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 
 [Icons]
@@ -102,6 +104,8 @@ Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: now
 Type: files; Name: "{app}\zeron.exe.old"
 Type: files; Name: "{app}\.zeron-update-incoming.exe"
 Type: filesandordirs; Name: "{app}\.zeron-update-*"
-#ifdef Beta
+Type: files; Name: "{app}\.zeron-completing.lock"
+Type: files; Name: "{app}\zeron-version"
+; The zgx app's folders, by channel, whichever an update brought.
 Type: filesandordirs; Name: "{app}\beta"
-#endif
+Type: filesandordirs; Name: "{app}\app"

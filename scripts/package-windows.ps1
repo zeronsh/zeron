@@ -1,19 +1,28 @@
-# The beta (.github/workflows/zgx-beta.yml), with -BetaVersion and -BetaEngine:
-# the zgx interface (apps/zgx, its `beta` feature) as zeron.exe, and beside it
-# beta\<version>\ with its scripts, plugins and the zeron.exe it's given, built
-# from the same commit, as engine\zeron.exe (a Windows release has no separate
-# engine: it runs as `zeron.exe engine`). A tester keeps their data and device.
-# No standalone .exe: this interface can't run without that folder.
+# The zgx app (release.yml's stable, zgx-beta.yml's beta), with -ZgxVersion
+# and -ZgxEngine: the zgx interface (apps/zgx, its `beta` feature) as
+# zeron.exe, and beside it app\<version>\ (a beta's: beta\<version>\) with
+# its scripts, plugins and the zeron.exe it's given, built from the same
+# commit, as engine\zeron.exe (a Windows release has no separate engine: it
+# runs as `zeron.exe engine`). Users keep their data and device.
+#
+# A stable release also gets the standalone .exe, which is all the old app's
+# updater installs: that zeron.exe brings in its folder from the zip when it
+# first runs (apps/zgx/src/windows_install.rs). A beta has none.
+#
+# Without -ZgxVersion: the old app (apps/zeron), one self-contained zeron.exe,
+# kept for a release that has to go back to it.
 param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
-    [string]$BetaVersion,
-    [string]$BetaEngine
+    [string]$ZgxVersion,
+    [string]$ZgxEngine
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
-if ($BetaVersion -and -not (Test-Path -LiteralPath $BetaEngine -PathType Leaf)) {
-    throw "-BetaEngine: the engine's zeron.exe"
+if ($ZgxVersion -and -not (Test-Path -LiteralPath $ZgxEngine -PathType Leaf)) {
+    throw "-ZgxEngine: the engine's zeron.exe"
 }
+$beta = $ZgxVersion -match '-beta\.\d+$'
+
 $root = Split-Path $PSScriptRoot -Parent
 
 function Find-InnoSetupCompiler {
@@ -86,9 +95,9 @@ function Copy-Scripts([string]$From, [string]$To) {
 
 Push-Location $root
 try {
-    if ($BetaVersion) {
+    if ($ZgxVersion) {
         # A workspace of its own (its own lock, patches).
-        $env:ZERON_BETA_VERSION = $BetaVersion
+        $env:ZERON_BETA_VERSION = $ZgxVersion
         cargo build --release --locked --features beta --manifest-path apps/zgx/Cargo.toml --target-dir apps/zgx/target
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './apps/zgx/target/release/zeron-zgx.exe').Path
@@ -98,15 +107,15 @@ try {
         $built = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
     }
     $version = Get-ZeronVersion $built
-    if ($BetaVersion) {
-        if ($version -ne $BetaVersion) { throw "$built isn't the $BetaVersion beta (it says $version)" }
+    if ($ZgxVersion) {
+        if ($version -ne $ZgxVersion) { throw "$built isn't the $ZgxVersion app (it says $version)" }
         # Production's only, and an engine with the shared command line, as
-        # scripts/package-zgx-beta.sh requires of macOS's.
+        # scripts/package-zgx-macos.sh requires of macOS's.
         $stagingMarks = 'staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
-        foreach ($binary in @($built, $BetaEngine)) {
+        foreach ($binary in @($built, $ZgxEngine)) {
             $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($binary))
             if ($text -match $stagingMarks) { throw "$binary carries staging's edge or sign-in client: $($Matches[0])" }
-            if ($binary -eq $BetaEngine -and -not $text.Contains('Multi-device controller for coding agents')) {
+            if ($binary -eq $ZgxEngine -and -not $text.Contains('Multi-device controller for coding agents')) {
                 throw 'The engine predates the shared command line'
             }
         }
@@ -124,35 +133,37 @@ try {
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
     Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
     Copy-Item -LiteralPath 'crates/voice/NOTICE.md' -Destination (Join-Path $stage 'licenses/parakeet-v3.txt')
-    if ($BetaVersion) {
-        $beta = Join-Path $stage "beta/$version"
-        Copy-Scripts 'apps/zgx/ui' (Join-Path $beta 'ui')
-        Remove-Item -LiteralPath (Join-Path $beta 'ui/tests') -Recurse -Force
-        Copy-Scripts 'apps/zgx/plugins-builtin' (Join-Path $beta 'plugins-builtin')
-        # Each ships the canonical SDK, as scripts/package-zgx-beta.sh.
-        foreach ($dir in Get-ChildItem -Directory -LiteralPath (Join-Path $beta 'plugins-builtin')) {
+    # crates/update `windows::files_folder`: by the version's channel.
+    $folder = if ($beta) { 'beta' } else { 'app' }
+    if ($ZgxVersion) {
+        $files = Join-Path $stage "$folder/$version"
+        Copy-Scripts 'apps/zgx/ui' (Join-Path $files 'ui')
+        Remove-Item -LiteralPath (Join-Path $files 'ui/tests') -Recurse -Force
+        Copy-Scripts 'apps/zgx/plugins-builtin' (Join-Path $files 'plugins-builtin')
+        # Each ships the canonical SDK, as scripts/package-zgx-macos.sh.
+        foreach ($dir in Get-ChildItem -Directory -LiteralPath (Join-Path $files 'plugins-builtin')) {
             Copy-Item -LiteralPath 'apps/zgx/plugins-sdk/zeron.luau' -Destination (Join-Path $dir.FullName 'zeron.luau') -Force
         }
-        New-Item -ItemType Directory -Force -Path (Join-Path $beta 'engine') | Out-Null
-        Copy-Item -LiteralPath $BetaEngine -Destination (Join-Path $beta 'engine/zeron.exe')
+        New-Item -ItemType Directory -Force -Path (Join-Path $files 'engine') | Out-Null
+        Copy-Item -LiteralPath $ZgxEngine -Destination (Join-Path $files 'engine/zeron.exe')
         Copy-Item -Path 'apps/zgx/fonts/*-OFL.txt' -Destination $licenses
     }
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
-    if (-not $BetaVersion) {
+    if (-not $beta) {
         Copy-Item -LiteralPath $built -Destination "$stage.exe"
     }
     # The per-user installer wraps the same staged directory (zeron-update.json
     # included), so installed copies update in place like the portable zip.
     $iscc = Find-InnoSetupCompiler
-    $betaDefines = if ($BetaVersion) { @('/DBeta=1', "/DFileVersion=$(($version -split '-')[0])") } else { @() }
-    & $iscc /Qp "/DAppVersion=$version" "/DArch=$arch" @betaDefines `
+    $zgxDefines = if ($ZgxVersion) { @("/DFilesFolder=$folder", "/DFileVersion=$(($version -split '-')[0])") } else { @() }
+    & $iscc /Qp "/DAppVersion=$version" "/DArch=$arch" @zgxDefines `
         "/DPackageDir=$([IO.Path]::GetFullPath($stage))" `
         "/DOutputDir=$([IO.Path]::GetFullPath($out))" `
         ([IO.Path]::GetFullPath((Join-Path $root 'dist/windows/zeron.iss')))
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
     $setup = Join-Path $out "zeron-$version-windows-$arch-setup.exe"
     if (-not (Test-Path -LiteralPath $setup)) { throw "Installer not produced: $setup" }
-    if (-not $BetaVersion) {
+    if (-not $beta) {
         $file = Split-Path "$stage.exe" -Leaf
         $hash = (Get-FileHash -LiteralPath "$stage.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
         @{ version = $version; files = @{ $file = @{ sha256 = $hash } } } |

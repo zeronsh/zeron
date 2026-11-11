@@ -1,13 +1,20 @@
 name: release
 
-# Build release artifacts and publish them:
-#   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
-#   - macOS dmg (Apple silicon) via scripts/package-macos.sh
-#   - Windows per-user installer, portable zip, and updater exe (x86_64) via
-#     scripts/package-windows.ps1
+# Build release artifacts and publish them. The app is the zgx one
+# (apps/zgx), built by zgx-build.yml as betas are:
+#   - Linux tarballs (x86_64 + aarch64): the app, its engine, scripts
+#   - macOS dmg and the updater's app tarball (Apple silicon, macOS 13+)
+#   - Windows per-user installer, portable zip, and the standalone exe that
+#     the old app's updater installs (it completes itself from the zip)
 # then create a GitHub Release AND upload everything to the
 # `comet-native-releases` R2 bucket (served at zeron.sh/releases/* for
 # `curl -fsSL https://zeron.sh/install.sh | sh`), bumping latest.txt.
+#
+# Every shipped Zeron installs these (crates/update at v0.2.138 reads the same
+# names, checksums and `--version` answers), so a release can move to the old
+# app (apps/zeron, the jobs below) and back: the `app` input of a run by hand,
+# or the repository variable STABLE_APP=gpui for a tag. That's the way back
+# if the zgx app has to be withdrawn: a newer version of the old app.
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
@@ -17,15 +24,62 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      app:
+        description: Which app to build.
+        type: choice
+        options: [zgx, gpui]
+        default: zgx
+      platforms:
+        description: Which to build (the zgx app).
+        type: string
+        default: macos linux windows
 
 permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      app: ${{ steps.version.outputs.app }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: version (the workspace's; a tag's must be it) and app
+        id: version
+        env:
+          APP: ${{ inputs.app || vars.STABLE_APP || 'zgx' }}
+        run: |
+          workspace="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "${GITHUB_REF_NAME#v}" != "$workspace" ]; then
+            echo "tag $GITHUB_REF_NAME isn't the workspace's v$workspace"; exit 1
+          fi
+          case "$APP" in
+            zgx|gpui) ;;
+            *) echo "app '$APP' is neither zgx nor gpui"; exit 1 ;;
+          esac
+          echo "version=$workspace" >>"$GITHUB_OUTPUT"
+          echo "app=$APP" >>"$GITHUB_OUTPUT"
+
   cursor-compatibility:
     uses: ./.github/workflows/cursor-compatibility.yml
 
+  zgx:
+    needs: version
+    if: needs.version.outputs.app == 'zgx'
+    uses: ./.github/workflows/zgx-build.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platforms: ${{ github.event_name == 'push' && 'macos linux windows' || inputs.platforms }}
+      # The GitHub release marked latest, as every stable Windows install's.
+      windows-feed: https://github.com/${{ github.repository }}/releases/latest/download
+
+  # The old app (apps/zeron), when a release has to go back to it.
   linux:
+    needs: version
+    if: needs.version.outputs.app == 'gpui'
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +121,8 @@ jobs:
   # main may use: a run from any other branch gets no environment, so no
   # credentials, and builds ad-hoc-signed.
   macos:
+    needs: version
+    if: needs.version.outputs.app == 'gpui'
     runs-on: macos-latest # Apple silicon
     environment: ${{ (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main') && 'apple-release' || '' }}
     env:
@@ -120,6 +176,8 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: version
+    if: needs.version.outputs.app == 'gpui'
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:
@@ -147,8 +205,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [cursor-compatibility, linux, macos, windows]
+    # One app's jobs run and the other's are skipped: none may have failed.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !failure() && !cancelled()
+    needs: [version, cursor-compatibility, zgx, linux, macos, windows]
     runs-on: ubuntu-latest
     environment: cloudflare
     env:
@@ -173,8 +232,17 @@ jobs:
           done
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
+        env:
+          APP: ${{ needs.version.outputs.app }}
         run: |
-          manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
+          # The zgx app needs macOS 13 (Ghostty's floor); the old app's 12. A
+          # Mac below it is held on the release it has, and told why
+          # (crates/update `offer`, in every Zeron since 0.2.136).
+          if [ "$APP" = zgx ]; then
+            manifest=$(jq -n --arg version "$VERSION" '{version: $version, minimumMacOS: "13.0", files: {}}')
+          else
+            manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
+          fi
           for f in dist/*; do
             sha=$(sha256sum "$f" | cut -d' ' -f1)
             manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
