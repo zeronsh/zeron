@@ -23,7 +23,7 @@ from PIL import Image
 # its title's top stands on the session page (from the tree).
 import os
 CROP = (30, 62, 436, 436 * 388 / 560)
-TX, TY = (float(v) for v in os.environ.get("TITLE", "356,235").split(","))
+TX, TY = (float(v) for v in os.environ.get("TITLE", "356,151").split(","))
 SHIFT = (TX - 78, TY - 106)
 PIECE = (58, 86, 380, 254)
 RADIUS = 12
