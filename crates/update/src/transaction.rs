@@ -838,7 +838,8 @@ pub fn starts_here(data_dir: &Path) -> bool {
     std::env::current_exe().is_ok_and(|exe| starts_from(data_dir, &exe))
 }
 
-fn starts_from(data_dir: &Path, exe: &Path) -> bool {
+/// [`starts_here`], for the executable at `exe`.
+pub fn starts_from(data_dir: &Path, exe: &Path) -> bool {
     read(data_dir).is_some_and(|transaction| {
         transaction
             .layout
