@@ -1,0 +1,48 @@
+name: CI caches
+
+# Keeps the repository's 10 GB of Actions cache for the caches CI restores on
+# every run (scripts/ci/caches.py `janitor`, docs/reference/ci.md#caches). It
+# deletes, across every ref (main, zeron/zgx, pull requests, tags):
+#   - entries no family in scripts/ci/caches.py declares;
+#   - entries saved from a ref their family doesn't allow (pass records may
+#     come from any);
+#   - older generations: only the newest of a family per ref stays;
+#   - while the rest is over the 9.5 GB budget, the lowest-priority families.
+# The step summary lists what it kept and deleted, with sizes.
+#
+# Scheduled workflows run from the default branch only: this runs from main
+# and covers every ref's entries. Run it by hand with dry-run to see what it
+# would delete.
+
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List what would be deleted; delete nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write  # list and delete caches
+
+concurrency:
+  group: ci-caches
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    if: github.repository == 'zeronsh/zeron'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - name: Delete the caches the policy doesn't keep
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
+        run: python3 -I scripts/ci/caches.py janitor $DRY_RUN

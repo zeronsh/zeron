@@ -21,6 +21,12 @@ inputs:
   apt-cache:
     description: Name of the cached .deb directory for apt-packages (one per package list).
     default: ''
+  save-apt-cache:
+    description: >-
+      Whether this job may save the .deb directory (apt-cache) when it runs on
+      main. Give it to exactly one job per apt-cache, and declare the cache in
+      scripts/ci/caches.py. Others only restore it.
+    default: 'false'
   apt-recommends:
     description: Install recommended packages too ('true' or 'false').
     default: 'false'
@@ -34,7 +40,8 @@ runs:
 
     # apt mirrors on hosted runners occasionally stall for minutes; apt-install.sh
     # bounds and retries the download and uses a directory of .debs that main
-    # saves to the cache (pull requests only restore it).
+    # saves to the cache from the job given save-apt-cache (everything else
+    # only restores it).
     - name: Restore apt packages
       id: apt-cache
       if: inputs.apt-packages != ''
@@ -52,7 +59,7 @@ runs:
         # shellcheck disable=SC2086 # the package list is word-split on purpose
         bash scripts/ci/apt-install.sh $APT_PACKAGES
     - name: Save apt packages
-      if: inputs.apt-packages != '' && github.ref == 'refs/heads/main' && steps.apt-cache.outputs.cache-hit != 'true'
+      if: inputs.apt-packages != '' && inputs.save-apt-cache == 'true' && github.ref == 'refs/heads/main' && steps.apt-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/apt-debs/*.deb
