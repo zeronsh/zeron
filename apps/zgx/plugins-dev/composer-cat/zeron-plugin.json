@@ -1,0 +1,8 @@
+{
+  "id": "composer-cat",
+  "name": "Composer cat",
+  "version": "1.0.0",
+  "description": "A cat sits on the message box. Now and then it blinks, or flicks its tail.",
+  "entry": "init.luau",
+  "permissions": ["ui.add"]
+}
