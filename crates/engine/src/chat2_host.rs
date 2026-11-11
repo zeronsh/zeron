@@ -67,6 +67,30 @@ impl EngineChatSink {
         }
     }
 
+    /// The sink for an open handle: it shares the handle's persister, which
+    /// was seeded with the cursor its load returned. [`Self::new`] would
+    /// read that cursor again (with snapshot deltas on disk, a second merge
+    /// of the whole doc) and start a persister only to drop it.
+    pub(crate) fn for_handle(
+        doc: &Arc<SessionDoc>,
+        store: Arc<DocsStore>,
+        chat_id: impl Into<String>,
+        handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
+    ) -> Self {
+        let chat_id = chat_id.into();
+        let persistence = handle.upgrade().and_then(|owner| owner.persistence.clone());
+        match persistence {
+            Some(persistence) => Self {
+                doc: Arc::downgrade(doc),
+                store,
+                chat_id,
+                persistence,
+                handle,
+            },
+            None => Self::new(doc, store, chat_id).with_handle(handle),
+        }
+    }
+
     pub(crate) fn with_handle(
         mut self,
         handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
@@ -911,5 +935,88 @@ mod own_ops_order_tests {
         let (doc, mut order, hooks) = three_commits();
         let published: Vec<Vec<u8>> = hooks.iter().flat_map(|h| order.order(&doc, h)).collect();
         assert_eq!(published, hooks);
+    }
+}
+
+#[cfg(test)]
+mod open_with_deltas_tests {
+    use super::*;
+    use crate::doc_host::{DocHost, DocHostConfig};
+    use zeron_proto::HarnessId;
+
+    /// A chat whose delta chain lost a row (peer P's ops) before a row of
+    /// independent, concurrent ops (peer Q's). Opening it: the cursor stays
+    /// before the lost row (the room resends P), Q's ops come back from the
+    /// parked inbox, and the sync sink reuses the open's persister: one
+    /// merge per open, not two.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_chat_after_a_lost_delta_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = SessionDoc::init("lost").unwrap();
+        let raw = doc.doc();
+        raw.set_peer_id(1).unwrap();
+        raw.get_text("t").insert(0, "base").unwrap();
+        raw.commit();
+        let base = store
+            .save_base_snapshot("lost", &doc.export_snapshot().unwrap(), 10, CHAT2_DOC_EPOCH)
+            .unwrap();
+        let vv = raw.oplog_vv();
+        raw.get_text("t").insert(4, " one").unwrap();
+        raw.commit();
+        let one = raw.export(loro::ExportMode::updates(&vv)).unwrap();
+        let after_one = raw.oplog_vv();
+        let concurrent = |peer: u64, key: &str| {
+            let fork = loro::LoroDoc::new();
+            fork.import(&raw.export(loro::ExportMode::Snapshot).unwrap()).unwrap();
+            fork.set_peer_id(peer).unwrap();
+            fork.get_map("peers").insert(key, "op").unwrap();
+            fork.commit();
+            fork.export(loro::ExportMode::updates(&after_one)).unwrap()
+        };
+        let (p, q) = (concurrent(2, "p"), concurrent(3, "q"));
+        assert!(store.append_snapshot_delta("lost", base, &one, 11).unwrap());
+        assert!(store.append_snapshot_delta("lost", base, &p, 12).unwrap());
+        assert!(store.append_snapshot_delta("lost", base, &q, 13).unwrap());
+        drop(store);
+        {
+            let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+            db.execute("DELETE FROM snapshot_deltas WHERE cursor = 12", []).unwrap();
+        }
+
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig { device_id: "host".into(), default_harness: HarnessId::Mock, edge: None },
+        );
+        let handle = host.open_local("lost").unwrap();
+        let persistence = handle.persistence.clone().expect("chat2 persister");
+        assert_eq!(persistence.cursor(), 11, "the cursor passed the lost row");
+        let peers = handle.doc().doc().get_map("peers");
+        assert!(peers.get("q").is_some(), "Q's ops didn't come back from the parked inbox");
+        assert!(peers.get("p").is_none());
+        assert!(store.pending_chat_inbox(&parked_inbox("lost")).unwrap().0.is_empty(), "nothing waits, so it retires");
+        // Retired only because a save already holds Q's ops: with no change
+        // since the open, what's on disk (an eviction, a stopped process)
+        // still has them.
+        {
+            let on_disk = DocsStore::open(dir.path()).unwrap();
+            let (bytes, _, _) = on_disk.load_snapshot_with_cursor("lost").unwrap().unwrap();
+            let reloaded = loro::LoroDoc::new();
+            reloaded.import(&bytes).unwrap();
+            assert!(
+                reloaded.get_map("peers").get("q").is_some(),
+                "the parked ops were retired before any save held them"
+            );
+        }
+
+        let merges = store.delta_merges();
+        let sink = EngineChatSink::for_handle(&handle.doc_arc(), store.clone(), "lost", Arc::downgrade(&handle));
+        assert_eq!(store.delta_merges(), merges, "the sink merged the doc again");
+        assert!(Arc::ptr_eq(&sink.persistence, &persistence));
+        drop(sink);
+        drop(persistence);
+        drop(handle);
+        host.shutdown_workers().await;
     }
 }

@@ -1207,6 +1207,11 @@ impl Engine {
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        // Whatever restarts this engine into another version (an update, a
+        // newer install, a channel switch's update), the store it leaves is
+        // one every version reads.
+        let version_change_docs = core.doc_host.clone();
+        zeron_update::set_before_restart(move || version_change_docs.prepare_for_version_change());
         // (Not on a Cloud machine: every boot's first token would start a
         // release check, and possibly a download, as the message starts its run.
         // Its checks keep their own schedule; its token is never a recovery.)
