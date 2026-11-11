@@ -817,7 +817,7 @@ mod tests {
             let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
             db.execute_batch(
                 "DROP TABLE snapshot_deltas;
-                 DELETE FROM schema_migrations WHERE version = (SELECT MAX(version) FROM schema_migrations);",
+                 DELETE FROM schema_migrations WHERE version > (SELECT MAX(version) - 3 FROM schema_migrations);",
             )
             .unwrap();
         }

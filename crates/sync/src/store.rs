@@ -111,22 +111,25 @@ const MIGRATIONS: &[&str] = &[
      ) STRICT;
      CREATE INDEX IF NOT EXISTS chat_inbox_doc ON chat_inbox(doc_id,ordinal);",
     // Loro updates saved on top of a doc's snapshot row, oldest first (see
-    // `append_snapshot_delta`). Each row carries the cursor its state covers
-    // and the `saved_at` of the base it extends, and its place (1, 2, ...) in
-    // that base's chain: a missing number is a lost row, even when the rows
-    // after it import cleanly (concurrent ops that don't depend on it). The snapshots row keeps its
-    // own bytes and cursor, so a build that predates this table reads a
-    // consistent (older) snapshot; if such a build rewrites that row, the
-    // deltas' cursors stop counting (their ops still merge: same doc).
+    // `append_snapshot_delta`). Each row carries the cursor its state covers.
+    // The snapshots row keeps its own bytes and cursor, so a build that
+    // predates this table reads a consistent (older) snapshot.
     "CREATE TABLE IF NOT EXISTS snapshot_deltas (
         ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
         doc_id TEXT NOT NULL,
         bytes BLOB NOT NULL,
-        cursor INTEGER NOT NULL,
-        base_saved_at INTEGER NOT NULL,
-        seq INTEGER NOT NULL
+        cursor INTEGER NOT NULL
      ) STRICT;
      CREATE INDEX IF NOT EXISTS snapshot_deltas_doc ON snapshot_deltas(doc_id,ordinal);",
+    // The `saved_at` of the base a delta extends: a delta claims its cursor
+    // only while that base is the row on disk (an older build may rewrite it).
+    // Pre-release builds created the table with this column already; rows
+    // that predate it (0) never match a base.
+    "ADD COLUMN IF MISSING snapshot_deltas base_saved_at INTEGER NOT NULL DEFAULT 0",
+    // A delta's place (1, 2, ...) in its base's chain: a missing number is a
+    // lost row, even when the rows after it import cleanly. Rows that predate
+    // it (0) end the chain, and go to the parked inbox.
+    "ADD COLUMN IF MISSING snapshot_deltas seq INTEGER NOT NULL DEFAULT 0",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1087,7 +1090,27 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             continue;
         }
         let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
+        if let Some(column) = sql.strip_prefix("ADD COLUMN IF MISSING ") {
+            // `table column declaration`: an earlier build may have the
+            // column already (pre-release schemas were edited in place).
+            let mut parts = column.splitn(3, ' ');
+            let (Some(table), Some(name), Some(declaration)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                unreachable!("malformed migration: {sql}");
+            };
+            let present = tx
+                .prepare(&format!("PRAGMA table_info(\"{table}\")"))?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|column| column == name);
+            if !present {
+                tx.execute_batch(&format!("ALTER TABLE \"{table}\" ADD COLUMN {name} {declaration}"))?;
+            }
+        } else {
+            tx.execute_batch(sql)?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
             params![version, now_ms()],
@@ -1324,6 +1347,91 @@ mod tests {
         let plain = loro::LoroDoc::new();
         plain.import(&store.load_snapshot("chat").unwrap().unwrap()).unwrap();
         assert_eq!(plain.get_text("t").to_string(), "base one");
+    }
+
+    /// Pre-release builds created snapshot_deltas without base_saved_at, or
+    /// without seq, or with both under one migration. Each store opens, its
+    /// old rows can't claim a cursor (they go to the parked inbox), and new
+    /// deltas work.
+    #[test]
+    fn stores_from_earlier_delta_schemas_open_and_work() {
+        let shapes = [
+            "ordinal INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT NOT NULL, bytes BLOB NOT NULL, cursor INTEGER NOT NULL",
+            "ordinal INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT NOT NULL, bytes BLOB NOT NULL, cursor INTEGER NOT NULL, base_saved_at INTEGER NOT NULL",
+            "ordinal INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT NOT NULL, bytes BLOB NOT NULL, cursor INTEGER NOT NULL, base_saved_at INTEGER NOT NULL, seq INTEGER NOT NULL",
+        ];
+        for (shape, columns) in shapes.into_iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let (base_bytes, old_delta, new_delta) = {
+                let doc = loro::LoroDoc::new();
+                doc.get_text("t").insert(0, "base").unwrap();
+                doc.commit();
+                let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+                let vv = doc.oplog_vv();
+                doc.get_text("t").insert(4, " old").unwrap();
+                doc.commit();
+                let old = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+                let vv = doc.oplog_vv();
+                doc.get_text("t").insert(8, " new").unwrap();
+                doc.commit();
+                (base, old, doc.export(loro::ExportMode::updates(&vv)).unwrap())
+            };
+            {
+                // The earlier build: its table, its rows, its migration count.
+                let store = DocsStore::open(dir.path()).unwrap();
+                store.save_verified_snapshot_with_cursor("chat", &base_bytes, 10, 2).unwrap();
+                let conn = store.conn();
+                conn.execute_batch(&format!(
+                    "DROP TABLE snapshot_deltas;
+                     CREATE TABLE snapshot_deltas ({columns}) STRICT;
+                     DELETE FROM schema_migrations WHERE version > (SELECT MAX(version) - 2 FROM schema_migrations);"
+                ))
+                .unwrap();
+                let fields = match shape {
+                    0 => "doc_id, bytes, cursor",
+                    1 => "doc_id, bytes, cursor, base_saved_at",
+                    _ => "doc_id, bytes, cursor, base_saved_at, seq",
+                };
+                let values = match shape {
+                    0 => "'chat', ?1, 11",
+                    1 => "'chat', ?1, 11, 0",
+                    _ => "'chat', ?1, 11, 0, 1",
+                };
+                conn.execute(
+                    &format!("INSERT INTO snapshot_deltas ({fields}) VALUES ({values})"),
+                    params![old_delta],
+                )
+                .unwrap();
+            }
+            let store = DocsStore::open(dir.path()).unwrap();
+            let (bytes, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
+            assert_eq!(cursor, 10, "shape {shape}: an old row claimed a cursor");
+            let loaded = loro::LoroDoc::new();
+            loaded.import(&bytes).unwrap();
+            let text = loaded.get_text("t").to_string();
+            // Shape 2's old row is a clean chain start on a stale base: its
+            // ops merge, its cursor doesn't count. The others park it.
+            assert!(text == "base" || text == "base old", "shape {shape}: {text}");
+            // New deltas on a fresh base work.
+            let reloaded = loro::LoroDoc::new();
+            reloaded.import(&bytes).unwrap();
+            for parked in store.pending_chat_inbox("chat#parked").unwrap().0 {
+                reloaded.import(&parked).unwrap();
+            }
+            let vv = reloaded.oplog_vv();
+            let base = store
+                .save_base_snapshot("chat", &reloaded.export(loro::ExportMode::Snapshot).unwrap(), 11, 2)
+                .unwrap();
+            let doc = loro::LoroDoc::new();
+            doc.import(&reloaded.export(loro::ExportMode::Snapshot).unwrap()).unwrap();
+            doc.import(&new_delta).unwrap();
+            let update = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+            assert!(store.append_snapshot_delta("chat", base, &update, 12).unwrap());
+            let (bytes, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
+            let loaded = loro::LoroDoc::new();
+            loaded.import(&bytes).unwrap();
+            assert_eq!((loaded.get_text("t").to_string(), cursor), ("base old new".into(), 12), "shape {shape}");
+        }
     }
 
     /// A lost row is not always a causal gap. Row 12 (peer P) is lost; row

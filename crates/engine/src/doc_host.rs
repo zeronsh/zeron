@@ -1930,6 +1930,8 @@ impl DocHost {
                 None => SessionDoc::init(chat_id)?,
             }
         };
+        // Parked rows replayed in full: retire them after a save covers them.
+        let mut parked_retirement: Option<(String, i64)> = None;
         // Recover committed outgoing operations even when the snapshot debounce
         // did not run before a crash. Imported updates do not echo as local writes.
         if room_gen >= 2 {
@@ -1958,8 +1960,10 @@ impl DocHost {
                         Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a parked update"),
                     }
                 }
+                // Retired only once a save holds them (below): until then
+                // these ops are in memory only, and the rows their one copy.
                 if !waiting {
-                    self.inner.store.retire_chat_inbox(&parked_key, newest)?;
+                    parked_retirement = Some((parked_key, newest));
                 }
             }
         }
@@ -1972,6 +1976,21 @@ impl DocHost {
                 chat2_cursor,
             )
         });
+        if let Some((parked_key, newest)) = parked_retirement {
+            // Imports at open precede the change subscription, so nothing
+            // marks the doc dirty: save now, and let the rows go only if that
+            // save landed (else they replay again at the next open).
+            match &persistence {
+                Some(persistence) => {
+                    persistence.dirty(true);
+                    persistence.flush_sync();
+                    if persistence.is_clean() {
+                        self.inner.store.retire_chat_inbox(&parked_key, newest)?;
+                    }
+                }
+                None => tracing::info!(chat = %chat_id, "parked updates replayed; kept until a chat2 save holds them"),
+            }
+        }
         let changed_persistence = persistence.clone();
 
         let (changed_tx, changed_rx) = watch::channel(0u64);

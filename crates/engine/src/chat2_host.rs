@@ -996,6 +996,19 @@ mod open_with_deltas_tests {
         assert!(peers.get("q").is_some(), "Q's ops didn't come back from the parked inbox");
         assert!(peers.get("p").is_none());
         assert!(store.pending_chat_inbox(&parked_inbox("lost")).unwrap().0.is_empty(), "nothing waits, so it retires");
+        // Retired only because a save already holds Q's ops: with no change
+        // since the open, what's on disk (an eviction, a stopped process)
+        // still has them.
+        {
+            let on_disk = DocsStore::open(dir.path()).unwrap();
+            let (bytes, _, _) = on_disk.load_snapshot_with_cursor("lost").unwrap().unwrap();
+            let reloaded = loro::LoroDoc::new();
+            reloaded.import(&bytes).unwrap();
+            assert!(
+                reloaded.get_map("peers").get("q").is_some(),
+                "the parked ops were retired before any save held them"
+            );
+        }
 
         let merges = store.delta_merges();
         let sink = EngineChatSink::for_handle(&handle.doc_arc(), store.clone(), "lost", Arc::downgrade(&handle));
