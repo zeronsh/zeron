@@ -359,6 +359,7 @@ impl Harness for PiHarness {
     }
     fn fallback_models(&self) -> Vec<Model> {
         vec![Model {
+            default: false,
             id: "default".into(),
             label: "Pi default".into(),
             description: Some("Model configured in Pi".into()),

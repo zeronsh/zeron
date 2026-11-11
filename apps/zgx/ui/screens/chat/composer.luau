@@ -28,6 +28,9 @@ local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
+local CloudTray = require("@app/screens/chat/cloud_tray")
+local Held = require("@app/screens/chat/held")
+local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
 local Asks = require("@app/screens/chat/asks")
@@ -80,6 +83,22 @@ local WHERE = { "checkout", "device", "project", "branch" }
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
+-- An agent's default model: the row its catalog marks, else its first
+-- (harness nil: the first agent listed's).
+local function default_of(models: { any }, harness: string?): any
+	local first = nil
+	for _, m in models do
+		local h = harness or m.harness
+		harness = h
+		if m.harness == h then
+			if m.default then
+				return m
+			end
+			first = first or m
+		end
+	end
+	return first
+end
 local function equal(a: any, b: any): boolean
 	if type(a) == "table" or type(b) == "table" then
 		local x: { [string]: any } = if type(a) == "table" then a else {}
@@ -430,7 +449,7 @@ local function Composer(): Node
 				return
 			end
 		end
-		local first = cat.models[1]
+		local first = default_of(cat.models)
 		if first then
 			model:set(first.value)
 			if first.effort then
@@ -526,6 +545,125 @@ local function Composer(): Node
 			own_notice:set(nil)
 		end
 	end)
+	-- Its Cloud machine, on a chat that has one: its state and its alert.
+	local machine = CloudTray.bind {
+		chat = function(): string?
+			return session_id:get()
+		end,
+		device = function(): string?
+			local s = open()
+			return s and s.device
+		end,
+		running = function(): boolean
+			return running:get()
+		end,
+		queue = function(): { any }
+			return queue:get()
+		end,
+		waiting = function(): { any }?
+			local s = open()
+			return s and s.waiting
+		end,
+		retry = function(message: string?)
+			local id = session_id:peek()
+			if id and message then
+				store.retry(id, message)
+			end
+		end,
+	}
+	-- This device's outbox for the chat (#1256): sends uploading or stopped,
+	-- each removable where the engine can take one back. Whether it can is
+	-- asked once a chat has one, by taking out a send that isn't there (an
+	-- engine from before it refuses "unsupported"; then no Remove).
+	local outbox = ui.computed(function(): { any }?
+		local s = open()
+		return s and s.waiting
+	end)
+	local removes_held = ui.state("chat_removes_held", nil :: { chat: string, can: boolean }?)
+	ui.effect(function()
+		local chat = session_id:get()
+		if not chat or not CloudMachine.has_outbox(outbox:get()) then
+			return
+		end
+		local known = removes_held:peek()
+		if known and known.chat == chat then
+			return
+		end
+		removes_held:set({ chat = chat, can = false })
+		store.remove_held(chat, "zgx-asks-whether-it-can"):after(function()
+			if session_id:peek() == chat then
+				removes_held:set({ chat = chat, can = true })
+			end
+		end, function(err: any)
+			local m = if type(err) == "table" and err.message then tostring(err.message) else tostring(err)
+			-- (Unsure, not refused: asked again next time.)
+			if m ~= "unsupported" and session_id:peek() == chat then
+				removes_held:set(nil)
+			end
+		end)
+	end)
+	local function can_remove_held(): boolean
+		local known = removes_held:get()
+		return known ~= nil and known.chat == session_id:get() and known.can
+	end
+	-- The queue it shows: its own (one that waited long says how long), then
+	-- what's held back for its machine (screens/chat/held), each removable,
+	-- then this device's outbox.
+	local shown_queue = ui.computed(function(): { any }
+		local out: { any } = {}
+		local now = machine.now()
+		for _, q in queue:get() do
+			if q.at and now - q.at > CloudMachine.LONG_WAIT then
+				local row = table.clone(q)
+				row.age = CloudMachine.age_words(now - q.at)
+				table.insert(out, row)
+			else
+				table.insert(out, q)
+			end
+		end
+		local reason = machine.hold_reason()
+		for _, h in Held.of(session_id:get()) do
+			table.insert(out, {
+				id = Held.PREFIX .. h.id,
+				text = h.text,
+				-- (Refused, and its machine can take it: the person's to send.)
+				waiting = if h.refused and not reason then nil else CloudMachine.held_label(reason),
+			})
+		end
+		for _, row in CloudMachine.outbox_rows(outbox:get(), can_remove_held()) do
+			table.insert(out, row)
+		end
+		return out
+	end)
+	-- A held message sent: out of the hold, to the chat. Refused, it's back in
+	-- its place, marked so it doesn't only go again at once (and again): its
+	-- row's Send sends it, Edit takes its words back, and the composer says
+	-- it didn't send. Never lost: only Remove lets it go.
+	local function release(chat: string, id: string)
+		local e = Held.remove(chat, id)
+		if not e then
+			return
+		end
+		store.send(e.req :: any):after(function() end, function()
+			local back = table.clone(e)
+			back.refused = true
+			Held.add(chat, back)
+			own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+		end)
+	end
+	-- The machine can take them now (a size picked, a fresh machine): what's
+	-- held goes, in order, however long it waited.
+	ui.effect(function()
+		local chat = session_id:get()
+		if not chat or machine.hold_reason() ~= nil or machine.session() == nil then
+			return
+		end
+		for _, e in Held.of(chat) do
+			if not e.refused then
+				release(chat, e.id)
+			end
+		end
+	end)
 	local notice = ui.computed(function(): any
 		local mine = own_notice:get()
 		if mine then
@@ -557,6 +695,7 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = sessions.connection:get(),
+			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -572,15 +711,16 @@ local function Composer(): Node
 			store.load_catalog()
 		end
 	end)
-	-- A new chat with no model yet: the catalog's first. (Never a session's:
+	-- A new chat with no model yet: the first agent's default. (Never a session's:
 	-- its model is its own.) Whenever that's so: the catalog come, or the
 	-- new page come back to with none chosen there, so what shows is what a
 	-- reload shows too.
 	ui.effect(function()
 		local c = store.catalog:get()
 		if session_id:get() == nil and c.state == "ready" and model:get() == nil and #c.models > 0 then
-			model:set(c.models[1].value)
-			effort:set(c.models[1].effort)
+			local first = default_of(c.models)
+			model:set(first.value)
+			effort:set(first.effort)
 		end
 	end)
 
@@ -769,6 +909,11 @@ local function Composer(): Node
 					-- Its files too, before any added since.
 					shared.restore_cargo_of(id, carried)
 				end)
+			end
+			-- Its machine can't take it yet: kept, in the queue, till it can.
+			if machine.hold_reason() then
+				Held.add(id, { id = store.new_id(), at = os.time(), text = words, req = req })
+				return
 			end
 			if running:peek() then
 				deliver(nil)
@@ -1020,12 +1165,8 @@ local function Composer(): Node
 				if not s or s.model ~= nil or s.harness == nil then
 					return nil
 				end
-				for _, m in store.catalog:get().models do
-					if m.harness == s.harness then
-						return m.value
-					end
-				end
-				return nil
+				local m = default_of(store.catalog:get().models, s.harness)
+				return m and m.value
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
@@ -1102,16 +1243,75 @@ local function Composer(): Node
 				return prefs.send_with:get()
 			end,
 			on_escape = store.escape,
-			queue = queue,
+			queue = shown_queue,
 			can_steer = function(): boolean
 				return running:get()
 			end,
-			on_queue_send = asks.on_queue_send,
-			on_queue_edit = edits.on_queue_edit,
+			-- (A held row is the hold's: it goes on its own, or is let go.)
+			-- (A held row goes on its own; one refused, by its Send.)
+			on_queue_send = function(row: string)
+				local held, chat = Held.id_of(row), session_id:peek()
+				if CloudMachine.outbox_id(row) then
+					return
+				elseif not held then
+					asks.on_queue_send(row)
+				elseif chat and not machine.hold_reason() then
+					release(chat, held)
+				end
+			end,
+			-- (A refused held row's Edit: its words back in the composer,
+			-- after what's there.)
+			on_queue_edit = function(row: string)
+				local held, chat = Held.id_of(row), session_id:peek()
+				if CloudMachine.outbox_id(row) then
+					return
+				elseif not held then
+					edits.on_queue_edit(row)
+					return
+				end
+				local e = if chat then Held.remove(chat, held) else nil
+				if e then
+					local words, draft = e.req.text or e.text, shared.text:peek()
+					shared.text:set(if draft == "" then words else `{draft}\n\n{words}`)
+				end
+			end,
 			on_queue_save = edits.on_queue_save,
 			on_queue_cancel = edits.on_queue_cancel,
-			on_queue_remove = asks.on_queue_remove,
-			on_queue_reorder = asks.on_queue_reorder,
+			on_queue_remove = function(row: string)
+				local held, chat = Held.id_of(row), session_id:peek()
+				if held then
+					if chat then
+						Held.remove(chat, held)
+					end
+					return
+				end
+				-- An outbox send: out for good, and its prompt with it. (Gone
+				-- already, it went out or was taken out elsewhere; the list
+				-- says so as it changes.)
+				local sent = CloudMachine.outbox_id(row)
+				if sent then
+					if chat and can_remove_held() then
+						local message = nil
+						for _, w in outbox:peek() or {} do
+							if w.id == sent then
+								message = w.message
+							end
+						end
+						store.remove_held(chat, sent, message):after(function() end, function()
+							own_notice:set { tone = "danger", key = "chat.composer.didnt_remove", dismissable = true }
+						end)
+					end
+					return
+				end
+				asks.on_queue_remove(row)
+			end,
+			-- (Held rows stay after the queue's own: only those move.)
+			on_queue_reorder = function(from: number, to: number)
+				local own = #queue:peek()
+				if from <= own and to <= own then
+					asks.on_queue_reorder(from, to)
+				end
+			end,
 			todos = asks.todos,
 			tasks = tasks,
 			-- A subagent's row opens it, a tab of the session's panel.
@@ -1146,6 +1346,11 @@ local function Composer(): Node
 			on_dismiss_notice = function()
 				own_notice:set(nil)
 			end,
+			-- (The only notice with an action: a sleeping machine's Wake.)
+			on_notice_action = machine.wake,
+			alerts = machine.alerts,
+			on_alert_action = machine.on_alert,
+			on_dismiss_alert = machine.dismiss,
 			disabled = function(): boolean
 				local s = store.session:get()
 				local id = session_id:get()

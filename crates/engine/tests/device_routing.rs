@@ -2651,3 +2651,184 @@ async fn updating_a_device_that_cannot_be_reached_says_so_plainly() {
     assert!(error.to_string().contains("can't be reached"), "{error}");
     assert!(error.to_string().contains("didn't start"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// DeviceStats: another device's machine stats, through its relay
+// ---------------------------------------------------------------------------
+
+/// A device on the account, as the workspace doc lists it.
+fn device_row(id: &str, version: &str, seen_hours_ago: i64) -> zeron_proto::Device {
+    zeron_proto::Device {
+        id: id.into(),
+        name: format!("{id}-name"),
+        platform: "linux".into(),
+        last_seen_at: Some(chrono::Utc::now() - chrono::Duration::hours(seen_hours_ago)),
+        created_at: None,
+        version: Some(version.into()),
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    }
+}
+
+/// A peer that answers the link's readiness probe, then either knows
+/// nothing of `DeviceStats` (an older Zeron) or never answers it.
+struct StatsPeer {
+    silent: bool,
+}
+
+#[async_trait]
+impl RpcService for StatsPeer {
+    async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        match method {
+            methods::LIST_HARNESSES => RpcReply::value(&serde_json::json!([])),
+            methods::DEVICE_STATS if self.silent => futures::future::pending().await,
+            other => Err(RpcError::UnknownMethod(other.into())),
+        }
+    }
+}
+
+fn spawn_stats_peer(relay_url: &str, device: &str, silent: bool) -> HostRelay {
+    HostRelay::spawn(
+        HostRelayConfig::new(relay_url, device, Arc::new(StaticToken("test-user".into()))),
+        Arc::new(StatsPeer { silent }),
+        Arc::new(|_| true),
+    )
+}
+
+/// Until the peer's host has joined its room: a forwarded call that it
+/// answers (an empty harness catalog).
+async fn wait_for_link(client: &zeron_rpc::RpcClient, device: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let asked = client
+            .call(methods::LIST_HARNESSES, serde_json::json!({ "targetDeviceId": device }))
+            .await;
+        if asked.is_ok() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{device} never joined: {asked:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn asker(dir: &std::path::Path, relay_url: &str) -> EngineCore {
+    let core = assemble(dir, "asking-device");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url.to_string(), Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(2);
+    core.set_links(LinkCache::new(link_config));
+    core
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn device_stats_come_from_the_named_device_through_its_relay() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let a = asker(&dirs.path().join("a"), &relay_url);
+    let b = assemble(&dirs.path().join("b"), "device-b");
+    let _host = b.start_host_relay(&relay_url);
+    a.workspace.upsert_device_row(&device_row("device-b", env!("CARGO_PKG_VERSION"), 0));
+    let client = zeron_rpc::memory_client(a.rpc_service());
+
+    // This device's own report, without a target or with its own id.
+    let local = client.call(methods::DEVICE_STATS, serde_json::json!({})).await.unwrap();
+    assert_eq!(local["zeron"]["engineVersion"], env!("CARGO_PKG_VERSION"));
+    let own = client
+        .call(methods::DEVICE_STATS, serde_json::json!({ "targetDeviceId": "asking-device" }))
+        .await
+        .unwrap();
+    assert_eq!(own["zeron"], local["zeron"]);
+
+    // Device B's, once its host is in the room.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let remote = loop {
+        match client
+            .call(methods::DEVICE_STATS, serde_json::json!({ "targetDeviceId": "device-b" }))
+            .await
+        {
+            Ok(remote) => break remote,
+            Err(error) => {
+                assert!(tokio::time::Instant::now() < deadline, "device-b never answered: {error}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+    assert_eq!(remote["zeron"]["engineVersion"], env!("CARGO_PKG_VERSION"));
+    assert!(remote["storage"]["volumes"].is_array(), "{remote}");
+    assert!(remote["storage"]["zeronData"]["totalBytes"].as_u64().is_some_and(|t| t > 0), "{remote}");
+    // No folder of B's own makes it out, only mount points.
+    assert!(!remote.to_string().contains(&*dirs.path().to_string_lossy()), "{remote}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_stats_refuse_a_device_that_isnt_the_accounts() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let a = asker(&dirs.path().join("a"), &relay_url);
+    // Someone else's device may well be in a room; this account doesn't list it.
+    let _stranger = spawn_stats_peer(&relay_url, "stranger", false);
+    let client = zeron_rpc::memory_client(a.rpc_service());
+    let started = std::time::Instant::now();
+    let error = client
+        .call(methods::DEVICE_STATS, serde_json::json!({ "targetDeviceId": "stranger" }))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("isn't one of this account's devices"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(1), "refused without asking");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_stats_of_an_offline_device_say_so_within_the_deadline() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let a = asker(&dirs.path().join("a"), &relay_url);
+    // Listed on the account, nothing in its room.
+    a.workspace.upsert_device_row(&device_row("sleeper", "0.2.139", 30));
+    let client = zeron_rpc::memory_client(a.rpc_service());
+    let started = std::time::Instant::now();
+    let error = client
+        .call(methods::DEVICE_STATS, serde_json::json!({ "targetDeviceId": "sleeper" }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(started.elapsed() < Duration::from_secs(7), "took {:?}", started.elapsed());
+    assert!(error.starts_with("sleeper-name"), "{error}");
+    assert!(error.contains("offline") && error.contains("last seen") && error.contains("1 day ago"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_stats_of_an_older_zeron_say_it_is_too_old() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let a = asker(&dirs.path().join("a"), &relay_url);
+    a.workspace.upsert_device_row(&device_row("old-device", "0.2.100", 0));
+    let _peer = spawn_stats_peer(&relay_url, "old-device", false);
+    let client = zeron_rpc::memory_client(a.rpc_service());
+    wait_for_link(&client, "old-device").await;
+    let error = client
+        .call(methods::DEVICE_STATS, serde_json::json!({ "targetDeviceId": "old-device" }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "old-device-name's Zeron (0.2.100) is too old to report stats. Update Zeron there.");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_stats_of_a_device_that_never_answers_stop_at_the_deadline() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let a = asker(&dirs.path().join("a"), &relay_url);
+    a.workspace.upsert_device_row(&device_row("stuck", "0.2.139", 0));
+    let _peer = spawn_stats_peer(&relay_url, "stuck", true);
+    let client = zeron_rpc::memory_client(a.rpc_service());
+    wait_for_link(&client, "stuck").await;
+    let started = std::time::Instant::now();
+    let error = client
+        .call(methods::DEVICE_STATS, serde_json::json!({ "targetDeviceId": "stuck" }))
+        .await
+        .unwrap_err()
+        .to_string();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(4900) && took < Duration::from_secs(7), "took {took:?}");
+    assert!(error.contains("stuck-name didn't answer within 5 s") && error.contains("last seen"), "{error}");
+}

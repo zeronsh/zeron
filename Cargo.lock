@@ -13697,6 +13697,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "core-foundation 0.10.1",
  "dunce",
  "fff-search",
  "flate2",
@@ -13717,6 +13718,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sysinfo",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
@@ -13942,6 +13944,7 @@ dependencies = [
 name = "zeron-sync"
 version = "0.2.139"
 dependencies = [
+ "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
  "futures",
@@ -13951,10 +13954,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "uuid",
  "zeron-doc",

@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { authenticate } from "../../src/auth";
 import { handleAuthRoute } from "../../src/auth-routes";
 import { QUIESCE_ENGINE_COMMAND, START_ENGINE_COMMAND, STOP_ENGINE_COMMAND } from "../../src/cloud/install-script";
-import { listLedger, listSandboxes, listUsage } from "../../src/cloud/metering";
-import { cloudAccountName } from "../../src/cloud/policy";
+import { dayKey, dayStart, listLedger, listSandboxes, listUsage, upsertUsage } from "../../src/cloud/metering";
+import { MACHINES, cloudAccountName } from "../../src/cloud/policy";
 import type { Env } from "../../src/env";
 import {
   boatControl,
@@ -50,7 +50,7 @@ const registryRows = async (u: TestUser) =>
 describe("account", () => {
   it("reports off + available for a new user and refuses another org", async () => {
     const u = newUser();
-    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0 });
+    expect(await status(u)).toEqual({ state: "off", awakeSessions: 0, maxAwakeSessions: 2, available: true, credits: 0, machines: MACHINES, machine: "default" });
     expect((await call("GET", "/cloud/other-org", userBearer(u))).status).toBe(403);
     expect((await call("GET", "/cloud/org1")).status).toBe(401);
   });
@@ -281,6 +281,76 @@ describe("credits", () => {
     expect(["stopping", "sleeping"]).toContain((await session(u, "chat-spend"))?.state);
     const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
     expect(ledger.some((e) => e.event === "sleep" && e.detail === "out of credits")).toBe(true);
+  });
+
+  it("runs out at the new rate, but not before the cutover day", async () => {
+    const u = newUser();
+    const project = await enableCloud(u); // 1000 starting credits
+    const today = dayKey(Date.now());
+    await readySession(u, "chat-rate", project);
+    // Earlier today: 600 credits at 60 seconds a credit, 1200 at 30.
+    await runInDurableObject(accountStub(u), (_instance, state) =>
+      upsertUsage(state.storage.sql, {
+        day: today,
+        provider: "boat",
+        sandboxId: "bx_earlier",
+        sandboxType: "default",
+        seconds: 36_000,
+        dollars: 0,
+        running: false,
+        reconciledAt: Date.now(),
+        closed: true
+      })
+    );
+    const reconcileAt = (from: string) =>
+      runInDurableObject(accountStub(u), async (instance) => {
+        const self = instance as unknown as { env: Env; reconcile(now?: number, full?: boolean): Promise<boolean> };
+        self.env = { ...self.env, CLOUD_CREDIT_SECONDS: "30", CLOUD_CREDIT_RATE_FROM: from };
+        await self.reconcile(Date.now(), true);
+      });
+
+    await reconcileAt("SET-AT-DEPLOY");
+    expect((await session(u, "chat-rate"))?.state).toBe("ready");
+    await reconcileAt(dayKey(dayStart(today) + 86_400_000));
+    expect((await session(u, "chat-rate"))?.state).toBe("ready");
+    expect((await status(u)).credits).toBeGreaterThan(0);
+
+    await reconcileAt(today);
+    expect(["stopping", "sleeping"]).toContain((await session(u, "chat-rate"))?.state);
+    const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
+    expect(ledger.some((e) => e.event === "sleep" && e.detail === "out of credits")).toBe(true);
+    expect((await status(u)).credits).toBeLessThanOrEqual(0);
+    const refused = await createSession(u, "chat-rate-2", project.spaceId);
+    expect(refused.status).toBe(402);
+    expect(await refused.json()).toMatchObject({ error: "no_credits" });
+  });
+
+  it("estimates a running machine at each day's rate across the cutover", async () => {
+    const u = newUser();
+    await readySession(u, "chat-live", await enableCloud(u));
+    const midnight = dayStart(dayKey(Date.now()));
+    const half = 30 * 60_000;
+    const spent = (from: string) =>
+      runInDurableObject(accountStub(u), (instance) => {
+        const self = instance as unknown as {
+          env: Env;
+          sessions: Map<string, SessionInternals>;
+          acct: { lastReconcileAt?: number };
+          balance(now?: number): number;
+        };
+        self.env = { ...self.env, CLOUD_CREDIT_SECONDS: "30", CLOUD_CREDIT_RATE_FROM: from };
+        self.acct.lastReconcileAt = 0;
+        const s = self.sessions.get("chat-live")!;
+        s.awakeSince = midnight - half;
+        const after = self.balance(midnight + half);
+        s.awakeSince = midnight + half;
+        return self.balance(midnight + half) - after;
+      });
+    // A default machine: half an hour at 60 seconds a credit, then at 30.
+    expect(await spent(dayKey(midnight))).toBeCloseTo(90);
+    // Unchanged with the cutover ahead or unset.
+    expect(await spent(dayKey(midnight + 86_400_000))).toBeCloseTo(60);
+    expect(await spent("SET-AT-DEPLOY")).toBeCloseTo(60);
   });
 
   it("caps how many Cloud chats one account keeps", async () => {
@@ -519,6 +589,12 @@ describe("idle sleep, waking on sends and the awake cap", () => {
     await runDurableObjectAlarm(accountStub(u));
     expect((await session(u, chatId))?.state).toBe("ready"); // busy
 
+    // A parked chat's subagents still running hold it awake too.
+    expect((await call("POST", "/runner/heartbeat", bearer, { activeRuns: 0, clients: 0, backgroundRuns: 1 })).status).toBe(200);
+    await backdate();
+    await runDurableObjectAlarm(accountStub(u));
+    expect((await session(u, chatId))?.state).toBe("ready");
+
     expect((await call("POST", "/runner/heartbeat", bearer, { activeRuns: 0, clients: 0 })).status).toBe(200);
     await backdate();
     await runDurableObjectAlarm(accountStub(u));
@@ -579,6 +655,157 @@ describe("idle sleep, waking on sends and the awake cap", () => {
     await waitForSession(u, "chat-1", "sleeping");
     expect((await session(u, "chat-2"))?.state).toBe("ready");
     expect((await status(u)).awakeSessions).toBe(2);
+  });
+
+  describe("a wake's timeline", () => {
+    const admin = { authorization: "Bearer test-admin-token" };
+    interface Wake {
+      chatId: string;
+      at: Record<string, number>;
+      spans: Record<string, number>;
+      requestedAt: number;
+      asleepMs?: number;
+      engineExit?: number | null;
+      engineRetried?: boolean;
+    }
+    const wakesOf = async (u: TestUser) =>
+      ((await (await SELF.fetch(`https://edge.test/admin/cloud/wakes?orgId=${u.orgId}&userId=${u.userId}`, { headers: admin })).json()) as { wakes: Wake[] }).wakes;
+    const sleepThenSend = async (u: TestUser, chatId: string, deviceId: string) => {
+      expect((await call("POST", `/cloud/org1/sessions/${chatId}/sleep`, userBearer(u), {})).status).toBe(200);
+      await waitForSession(u, chatId, "sleeping");
+      await call("POST", `/device/${deviceId}/nudge`, userBearer(u), { chatId });
+      await waitForSession(u, chatId, "starting");
+    };
+
+    it("is there for an operator from the moment the machine is up, and completed by its engine's report", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      await waitForSession(u, chatId, "ready");
+
+      const [up] = await wakesOf(u);
+      expect(up).toMatchObject({ chatId, engineExit: 0 });
+      expect(up!.asleepMs).toBeGreaterThanOrEqual(0);
+      for (const stage of ["requested", "workflowStarted", "resumed", "ready", "engineStarted", "online"]) {
+        expect(up!.at[stage], stage).toBeGreaterThanOrEqual(0);
+      }
+      expect(up!.at.firstOutput).toBeUndefined();
+
+      // Only the machine's own runner reports, and only sensible times.
+      expect((await call("POST", "/runner/wake-timing", userBearer(u), { token: 1 })).status).toBe(403);
+      expect((await call("POST", "/runner/wake-timing", bearer, { token: "soon" })).status).toBe(400);
+
+      const reported = up!.requestedAt + 4_000;
+      expect((await call("POST", "/runner/wake-timing", bearer, { sent: up!.requestedAt - 100, firstOutput: reported, bogus: 1 })).status).toBe(200);
+      const wakes = await wakesOf(u);
+      expect(wakes).toHaveLength(1); // the fuller entry replaces the first
+      expect(wakes[0]!.at).toMatchObject({ sent: -100, firstOutput: 4_000 });
+      expect(wakes[0]!.spans.sentToFirstOutput).toBe(4_100);
+      expect(wakes[0]!.at).not.toHaveProperty("bogus");
+
+      // A wake is reported once: a second report (a runner's own, or a stolen
+      // token's) writes nothing.
+      expect((await call("POST", "/runner/wake-timing", bearer, { firstOutput: reported + 1 })).status).toBe(200);
+      expect((await wakesOf(u))[0]!.at.firstOutput).toBe(4_000);
+    });
+
+    it("keeps an engine's report that beats the workflow to its end", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      // No token yet, so the workflow is still waiting on the engine.
+      const runner = { orgId: u.orgId, userId: u.userId, deviceId };
+      await accountStub(u).wakeTimingReport(runner, { firstOutput: Date.now() + 5_000 });
+      await runnerToken(u, deviceId, key);
+      await waitForSession(u, chatId, "ready");
+      const wakes = await wakesOf(u);
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]!.at.firstOutput).toBeGreaterThan(0);
+      expect(wakes[0]!.at.resumed).toBeGreaterThanOrEqual(0);
+    });
+
+    it("tells the app a longer wake is updating, until the engine says otherwise", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      await waitForSession(u, chatId, "ready");
+      expect((await session(u, chatId)) as unknown as { stage?: string }).not.toHaveProperty("stage");
+
+      expect((await call("POST", "/runner/wake-stage", userBearer(u), { stage: "updating" })).status).toBe(403);
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: "anything" })).status).toBe(400);
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: "updating" })).status).toBe(200);
+      expect(((await session(u, chatId)) as unknown as { stage?: string }).stage).toBe("updating");
+
+      // One nobody clears (the engine died mid-update) stops showing.
+      await withSession(u, chatId, (s) => {
+        (s as unknown as { wakeStage: { at: number } }).wakeStage.at = Date.now() - 11 * 60_000;
+      });
+      expect((await session(u, chatId)) as unknown as { stage?: string }).not.toHaveProperty("stage");
+
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: "updating" })).status).toBe(200);
+      expect((await call("POST", "/runner/wake-stage", bearer, { stage: null })).status).toBe(200);
+      expect((await session(u, chatId)) as unknown as { stage?: string }).not.toHaveProperty("stage");
+    });
+
+    it("records which version answered, across an update's restart", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key } = await readySession(u);
+      await sleepThenSend(u, chatId, deviceId);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      await waitForSession(u, chatId, "ready");
+      const [up] = await wakesOf(u);
+      const body = {
+        updateStarted: up!.requestedAt + 1_000,
+        updateRestart: up!.requestedAt + 13_000,
+        resumed: up!.requestedAt + 15_000,
+        released: up!.requestedAt + 23_000,
+        version: "0.2.140",
+        updatedFrom: "0.2.139",
+        updatedTo: "0.2.140",
+        updateResult: "updated"
+      };
+      expect((await call("POST", "/runner/wake-timing", bearer, body)).status).toBe(200);
+      const [wake] = (await wakesOf(u)) as unknown as (Wake & { version: string; updateResult: string })[];
+      expect(wake).toMatchObject({ version: "0.2.140", updateResult: "updated" });
+      expect(wake!.spans.updateStartedToReleased).toBe(22_000);
+    });
+
+    it("writes nothing for a machine that wasn't woken", async () => {
+      const u = newUser();
+      const { deviceId, key } = await readySession(u);
+      const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+      expect((await call("POST", "/runner/wake-timing", bearer, { firstOutput: Date.now() })).status).toBe(200);
+      expect(await wakesOf(u)).toEqual([]);
+    });
+
+    it("is an operator's alone", async () => {
+      const u = newUser();
+      expect((await SELF.fetch(`https://edge.test/admin/cloud/wakes?orgId=${u.orgId}&userId=${u.userId}`)).status).toBe(401);
+      expect((await SELF.fetch(`https://edge.test/admin/cloud/wakes?orgId=${u.orgId}&userId=${u.userId}`, { headers: { authorization: userBearer(u) } })).status).toBe(401);
+      expect((await SELF.fetch("https://edge.test/admin/cloud/wakes?orgId=a'b&userId=c", { headers: admin })).status).toBe(400);
+    });
+
+    it("runs the start again when it can't be sent during the resume, and says so", async () => {
+      const u = newUser();
+      const { chatId, deviceId, key, sandboxId } = await readySession(u);
+      await boatControl("__fail", { sandboxId, op: "commands", status: 403, code: "api_key_action_forbidden", action: "exec", times: 1 });
+      expect((await call("POST", `/cloud/org1/sessions/${chatId}/sleep`, userBearer(u), {})).status).toBe(200);
+      await waitForSession(u, chatId, "sleeping");
+      // (The injected refusal was the sleep's quiesce; inject another for the wake.)
+      await boatControl("__fail", { sandboxId, op: "commands", status: 403, code: "api_key_action_forbidden", action: "exec", times: 1 });
+      await call("POST", `/device/${deviceId}/nudge`, userBearer(u), { chatId });
+      await waitForSession(u, chatId, "starting");
+      await expect
+        .poll(async () => (await boatState()).calls.filter((c) => c.sandboxId === sandboxId && c.path.endsWith("/commands") && c.body?.command === START_ENGINE_COMMAND).length, { timeout: 15_000 })
+        .toBeGreaterThanOrEqual(2);
+      await runnerToken(u, deviceId, key);
+      await waitForSession(u, chatId, "ready");
+      const [wake] = await wakesOf(u);
+      expect(wake!.engineExit).toBeNull();
+      expect(wake!.engineRetried).toBe(true);
+    });
   });
 
   it("surfaces a Boat key that cannot resume as a configuration error, and retries the exact action", async () => {

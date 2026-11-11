@@ -150,6 +150,18 @@ pub mod methods {
     /// list): current set first, then a fresh snapshot per landed chunk —
     /// the sending thumbnail's percent-ring feed. No params; IPC-only.
     pub const WATCH_TRANSFERS: &str = "WatchTransfers";
+    /// Sends waiting for their attachment bytes to reach the edge's store
+    /// (`zeron_proto::HeldSendStatus` list): current set first, then every
+    /// change. No params; IPC-only.
+    pub const WATCH_HELD_SENDS: &str = "WatchHeldSends";
+    /// One chat's messages not yet taken by its agent
+    /// (`zeron_proto::WaitingMessage` list), `{chatId}`: current set first, then
+    /// every change. IPC-only.
+    pub const WATCH_WAITING_MESSAGES: &str = "WatchWaitingMessages";
+    /// Remove a send from this device's outbox, failed or still uploading:
+    /// `{chatId, id}` (the id `WatchHeldSends` / `WatchWaitingMessages` give)
+    /// → `{removed}`. `false`: it already went out, or was already removed.
+    pub const REMOVE_HELD_SEND: &str = "RemoveHeldSend";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
@@ -158,13 +170,19 @@ pub mod methods {
     pub const WATCH_SPACES: &str = "WatchSpaces";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|
-    /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
+    /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|removeDevice|
+    /// markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";
     /// This engine runtime's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
+    /// What a device's machine can say about itself (OS, CPU, memory,
+    /// storage, GPU, load, battery, Zeron's version): `{targetDeviceId?}` →
+    /// `DeviceStats`. Another of the account's devices answers through its
+    /// relay within a few seconds, or the call says it's offline or too old.
+    pub const DEVICE_STATS: &str = "DeviceStats";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -365,10 +383,18 @@ pub mod methods {
     pub const CLOUD_DELETE: &str = "CloudDelete";
     /// `{}` → `CloudSessions`.
     pub const CLOUD_SESSIONS: &str = "CloudSessions";
-    /// `{chatId}` → `CloudSession`. Wake/sleep one session's sandbox; sending
-    /// to a sleeping session wakes it on its own (the host nudge).
+    /// `{machine}` → `CloudStatus`. The size new sessions start on.
+    pub const CLOUD_SET_MACHINE: &str = "CloudSetMachine";
+    /// `{chatId, machine?, wake?}` → `CloudSession`. Wake one session's sandbox
+    /// (on `machine`, when given; `wake: false` only records the size for its
+    /// next wake); sending to a sleeping session wakes it on its own (the host
+    /// nudge). A size its disk doesn't fit is refused.
     pub const CLOUD_SESSION_WAKE: &str = "CloudSessionWake";
+    /// `{chatId}` → `CloudSession`.
     pub const CLOUD_SESSION_SLEEP: &str = "CloudSessionSleep";
+    /// `{chatId, machine?}` → `CloudSession`. Retry a failed lifecycle; on a
+    /// session whose data expired, a fresh machine on the same repo and branch.
+    pub const CLOUD_SESSION_RETRY: &str = "CloudSessionRetry";
     /// `{chatId}` → `CloudSession` (`Deleting`). Deletes the sandbox and
     /// anything uncommitted in it; the transcript stays.
     pub const CLOUD_SESSION_DELETE: &str = "CloudSessionDelete";
@@ -429,9 +455,16 @@ pub mod methods {
     pub const GITHUB_CONNECT_START: &str = "GithubConnectStart";
     /// `{flowId}` → `GithubConnectProgress`.
     pub const GITHUB_CONNECT_POLL: &str = "GithubConnectPoll";
-    /// Repositories the account's vault-held GitHub connection can see,
+    /// The GitHub logins connected for Cloud: `{}` → `{accounts: VaultAccount[]}`.
+    pub const GITHUB_ACCOUNTS: &str = "GithubAccounts";
+    /// Disconnect one login, leaving the others: `{slot}` → `{accounts}`. Its
+    /// sessions stay on it, and say so, until it's connected again.
+    pub const GITHUB_ACCOUNT_FORGET: &str = "GithubAccountForget";
+    /// The login new sessions try first: `{slot}` → `{accounts}`.
+    pub const GITHUB_ACCOUNT_ACTIVATE: &str = "GithubAccountActivate";
+    /// Repositories the account's vault-held GitHub logins can see, merged,
     /// newest push first: `{query?}` → `{repos: GithubRepo[]}`. Answered via
-    /// the edge (the vault calls GitHub; the token never leaves it), so any
+    /// the edge (the vault calls GitHub; the tokens never leave it), so any
     /// signed-in device can list them; a Cloud session device answers with
     /// its own grant. Fails with a `github_not_connected:`-prefixed message
     /// when GitHub isn't connected.
@@ -742,6 +775,7 @@ pub fn agent_allowed(method: &str) -> bool {
         methods::ENGINE_INFO
             | methods::LOCAL_DEVICE
             | methods::WATCH_DEVICES
+            | methods::DEVICE_STATS
             | methods::WATCH_SPACES
             | methods::WATCH_CHATS
             | methods::WATCH_SESSIONS

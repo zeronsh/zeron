@@ -46,8 +46,47 @@ export const FRAME = {
   /** `{headSeq}` — probe answer. */
   probeOk: 0x0a,
   /** `{code, message}` — recoverable rejection (socket stays open). */
-  error: 0x0b
+  error: 0x0b,
+
+  // relay layer (docs/design/relay-layer.md): only with CHAT_RELAY_LAYER on,
+  // and only to sockets whose `hello` said `relay: 1`.
+  /** `{}` + update, to live peers; `{device, queued?, batchId?}` from them.
+   * Never stored. `queued` marks a row held in the offline queue. */
+  relay: 0x0c,
+  /** `{hello?}` + version vector. `hello` asks peers to answer if it's behind. */
+  announce: 0x0d,
+  /** `{to, xfer?, offset?}` + version vector. Forwarded to `to` only. */
+  syncReq: 0x0e,
+  /** `{to, xfer, offset, total}` + a fragment of one update blob. Forwarded to `to` only. */
+  syncData: 0x0f,
+  /** `{batchId}` + update, held in the offline queue until the host has it. */
+  enqueue: 0x10,
+  /** `{batchId, dup}` — the queued row is durable. */
+  queued: 0x11,
+  /** `{}` — read the offline queue, answered by `relay` frames and `queueDone`. */
+  queueReq: 0x12,
+  /** `{count}` — end of the queue backlog. */
+  queueDone: 0x13,
+  /** `{batchIds}` — the host has saved these. Delete them. */
+  delivered: 0x14,
+  /** `{device}` — a reader here can't take relay frames: the host must store. */
+  legacyPeer: 0x15
 } as const;
+
+/** Frames that exist only with the relay layer on. With it off they're answered
+ * exactly as an unknown type byte is. */
+export const RELAY_FRAME_TYPES: ReadonlySet<number> = new Set([
+  FRAME.relay,
+  FRAME.announce,
+  FRAME.syncReq,
+  FRAME.syncData,
+  FRAME.enqueue,
+  FRAME.queued,
+  FRAME.queueReq,
+  FRAME.queueDone,
+  FRAME.delivered,
+  FRAME.legacyPeer
+]);
 
 export type FrameType = (typeof FRAME)[keyof typeof FRAME];
 

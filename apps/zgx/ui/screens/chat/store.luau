@@ -173,6 +173,13 @@ function M.paste_image(): any
 	return ui.call("chat.paste_image", nil)
 end
 
+-- A send in this device's outbox (still uploading, or stopped) taken out for
+-- good, with its prompt shown as on its way: a promise of whether it was
+-- still there. An engine from before it can refuses it "unsupported".
+function M.remove_held(id: string, item: string, message: string?): any
+	return ui.call("chat.remove_held", { id = id, item = item, message = message })
+end
+
 -- A prompt that wasn't delivered, sent again.
 function M.retry(id: string, message: string)
 	quietly(ui.call("chat.retry", { id = id, message = message }))

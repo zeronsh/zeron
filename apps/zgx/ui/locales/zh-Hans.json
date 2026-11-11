@@ -1615,7 +1615,7 @@
     },
     "devices": {
       "title": "设备",
-      "terms": "设备 电脑远程 此设备 其他设备 重命名 machines computers remote this device other devices rename",
+      "terms": "设备 电脑远程 此设备 其他设备 重命名 移除 删除 machines computers remote this device other devices rename remove delete forget",
       "yours": {
         "label": "你的设备",
         "terms": "在线 上次在线 版本 系统 online last seen version system"
@@ -1634,13 +1634,68 @@
       "empty_body": "登录以在设备间同步会话。",
       "this_device": "此设备",
       "rename": "重命名",
-      "rename_name": "重命名 {name}",
-      "dialog": {
-        "title": "重命名设备",
-        "here": "此电脑在其他设备上显示的名称。",
-        "other": "此设备在所有设备上显示的名称。",
-        "field": "设备名称"
-      }
+      "remove_one": {
+        "label": "移除设备",
+        "terms": "移除 删除 忘记 旧电脑 remove delete forget old computer"
+      },
+      "more_for": "{name}的更多选项",
+      "name_of": "{name}的名称",
+      "remove": "移除…",
+      "remove_online": "当前在线。请先在该设备上退出 Zeron。",
+      "remove_title": "移除“{name}”？",
+      "remove_body": "它会从你所有设备的列表中消失。它的会话和项目会保留，你仍可查看，该电脑上的任何内容都不会被删除。如果再次在它上面打开 Zeron，它会重新出现。",
+      "remove_confirm": "移除设备",
+      "couldnt_remove": "无法移除",
+      "online_now": "它当前在线。请在该设备上退出 Zeron 后重试。",
+      "offline_title": "无法显示你的设备"
+    },
+    "projects": {
+      "title": "项目",
+      "description": "你的会话所在的文件夹，按设备列出。",
+      "terms": "项目 文件夹 仓库 重命名 移除 删除 访达 projects folders repositories repos rename remove delete forget finder 图标 表情 颜色 icon emoji color picture",
+      "yours": {
+        "label": "你的项目",
+        "terms": "文件夹 路径 设备 会话 folders paths devices sessions"
+      },
+      "rename_one": {
+        "label": "重命名项目",
+        "terms": "名称 重命名 name rename call"
+      },
+      "remove_one": {
+        "label": "移除项目",
+        "terms": "移除 删除 remove delete forget"
+      },
+      "find": "查找项目",
+      "add": "添加项目",
+      "cloud": "Cloud",
+      "device_gone": "已移除的设备",
+      "its_device": "其设备",
+      "sessions": "{n, plural, other {# 个会话}}",
+      "no_sessions": "没有会话",
+      "more_for": "{name}的更多选项",
+      "name_of": "{name}的名称",
+      "rename": "重命名",
+      "icon_of": "更改{name}的图标",
+      "change_icon": "更改图标…",
+      "change_icon_tip": "更改图标",
+      "show": "在访达中显示",
+      "remove": "移除…",
+      "remove_title": "移除“{name}”？",
+      "remove_sessions": "{n, plural, other {它的 # 个会话将在所有设备上被永久删除。}}",
+      "remove_none": "它没有会话。",
+      "remove_running": "{n, plural, other {其中 # 个正在运行，会先被停止。}}",
+      "remove_running_only": "它正在运行，会先被停止。",
+      "remove_keeps_folder": "文件夹 {path} 及其中所有文件会保留在 {device} 上，Zeron 只是不再记录它。",
+      "remove_keeps_repo": "它在 GitHub 上的仓库不受影响。",
+      "remove_confirm": "移除项目",
+      "couldnt_remove": "无法移除项目",
+      "couldnt_rename": "无法重命名",
+      "couldnt_show": "无法显示该文件夹",
+      "empty_title": "暂无项目",
+      "empty_body": "在你的某台设备上添加一个文件夹，即可在其中开始会话。",
+      "nothing_found": "没有匹配的项目",
+      "nothing_found_body": "试试其他名称或文件夹。",
+      "offline_title": "无法显示你的项目"
     },
     "members": {
       "title": "成员",
@@ -1883,7 +1938,7 @@
       "usage": {
         "title": "用量",
         "terms": "额度 已使用 消耗 分钟 图表 天 范围 credits used spent minutes chart days range",
-        "description": "Cloud 对话使用的额度。1 额度相当于标准机器运行 1 分钟。",
+        "description": "Cloud 对话使用的额度。1 额度相当于小型机器运行 1 分钟。",
         "used": "已使用 {credits}",
         "reading": "正在读取用量…",
         "failed": "无法读取用量。Zeron 连接到 Cloud 后将显示。",
@@ -1892,8 +1947,23 @@
         "range_name": "用量范围"
       },
       "github": {
-        "terms": "连接 断开连接 账户 克隆 推送 connect disconnect account clone push",
-        "description": "Cloud 对话通过 GitHub 克隆你的仓库并推送其分支。"
+        "terms": "连接 断开连接 账户 克隆 推送 connect disconnect account clone push 其他账户 重新连接 组织 another reconnect organization login",
+        "description": "Cloud 对话通过 GitHub 克隆你的仓库并推送其分支。",
+        "connected": "已连接",
+        "needs_reconnect": "需要重新连接",
+        "needs_reconnect_description": "使用此账户的对话在重新连接前无法推送。",
+        "reconnect": "重新连接",
+        "disconnect": "断开连接",
+        "another": "其他 GitHub 账户",
+        "another_description": "例如工作账户和个人账户。每个账户都会带来它能访问的仓库。",
+        "another_action": "连接其他账户",
+        "another_hint": "GitHub 会连接浏览器当前登录的账户。如需连接其他账户，请先在 github.com 上切换账户。",
+        "already_title": "{login} 已连接",
+        "already_body": "GitHub 连接了浏览器当前登录的账户。请在 github.com 上切换账户后再次连接。",
+        "install": "其他账户或组织",
+        "install_description": "在那里安装 Zeron 应用，或更改它可访问的仓库。GitHub 会列出浏览器当前账户可以安装的位置。",
+        "forget_title": "断开 {login} 的连接？",
+        "forget_body": "使用此账户的对话会停止并显示提示，直到你重新连接它。其他对话继续使用各自的账户。新对话将使用其余账户。"
       },
       "repos": {
         "title": "仓库",
@@ -1915,13 +1985,19 @@
       "attention": {
         "title": "Cloud 需要处理",
         "failed": "Cloud 出错了。"
+      },
+      "machine": {
+        "title": "默认机器",
+        "terms": "machine size vcpu memory disk credits rate xlarge large small standard 机器 规格 内存 磁盘 额度",
+        "description": "新 Cloud 对话使用的规格。更大的机器消耗额度更快。",
+        "failed": "无法更改默认机器。请稍后再试。"
       }
     },
     "billing": {
       "title": "账单",
       "terms": "账单 付款 额度 套餐 订阅 购买 发票 billing payment stripe credits plan subscription purchase invoice",
       "description": "额度用于运行你的 Cloud 对话。",
-      "hours": "约 {n} 小时",
+      "hours": "小型机器约 {n} 小时",
       "try_later": "请稍后重试。",
       "changed": {
         "plan": "你使用的是 {plan}：每月 {credits}",
@@ -1939,7 +2015,7 @@
       "credits": {
         "title": "额度",
         "terms": "余额 剩余 每月 额外 小时 balance left remaining monthly extra hours",
-        "description": "Cloud 对话可使用的额度。1 额度相当于标准机器运行 1 分钟。",
+        "description": "Cloud 对话可使用的额度。1 额度相当于小型机器运行 1 分钟。",
         "none": "选择套餐或购买额度以运行 Cloud 对话。",
         "unit": "{n, plural, other {额度}}",
         "split": "套餐额度 {plan}，额外额度 {extra}",
@@ -2369,7 +2445,8 @@
             "save": "无法保存项目，请重试。",
             "save_outdated": "这台电脑上的 Zeron 需要更新才能保存项目图标。更新后再保存。",
             "save_gone": "此项目已在另一台设备上被移除。",
-            "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。"
+            "save_offline": "这台电脑上的 Zeron 没有响应，请稍后再试。",
+            "unavailable": "你的账户暂时还不能使用图片图标。请先选择表情符号或颜色。"
           }
         }
       },
@@ -2851,6 +2928,7 @@
       "edit_conflict": "队列中的消息已更改：你的编辑未保存",
       "edit_not_saved": "你的编辑未保存",
       "didnt_send": "消息未发送",
+      "didnt_remove": "无法移除这条消息",
       "starting_cloud": "正在启动 Cloud 设备…",
       "starting": "正在开始对话…",
       "didnt_start": "对话未能开始",
@@ -2882,6 +2960,92 @@
       "no_speech": "未识别到语音。草稿未更改。",
       "transcribing": "正在转写…",
       "starting": "正在启动…"
+    },
+    "cloud_machine": {
+      "specs": "{vcpu} vCPU · {memory} GB 内存 · {disk} GB 磁盘",
+      "stage_clone": "正在克隆仓库",
+      "stage_branch": "正在检出分支",
+      "stage_start": "正在启动",
+      "asleep": "Cloud 机器已休眠——发送消息时会唤醒",
+      "wake": "唤醒",
+      "waking_stage": "正在唤醒 Cloud 机器——{stage}…",
+      "provisioning": "正在启动 Cloud 机器…",
+      "waking": "正在唤醒 Cloud 机器…",
+      "updating": "正在更新 Cloud 机器…",
+      "slow": "唤醒 Cloud 机器的时间比平常长…",
+      "restored_title": "此对话已从服务器副本恢复",
+      "restored_summary": "它的机器重建了对话副本",
+      "restored_body": "此对话的机器发现自己的对话副本已损坏，已从服务器副本重建。",
+      "stopping": "Cloud 机器正在休眠…",
+      "deleting": "正在删除 Cloud 机器…",
+      "too_small": "这个规格放不下此对话的文件。请选择更大的规格。",
+      "offline": "你已离线。恢复连接后再试。",
+      "outdated": "此版本的 Zeron 无法唤醒 Cloud 机器。请在“关于”中更新。",
+      "wake_failed_title": "机器未能唤醒",
+      "wake_failed_body": "机器未能唤醒。请稍后再试。",
+      "expired_title": "机器上的文件已删除",
+      "expired_summary": "对话已保留",
+      "expired_body_on": "此对话的机器休眠过久，文件已被删除。对话已保留。新机器将从 {repo} 的同一分支重新开始，已推送的内容会一并恢复。",
+      "expired_body": "此对话的机器休眠过久，文件已被删除。对话已保留。新机器将从其仓库的同一分支重新开始，已推送的内容会一并恢复。",
+      "fresh": "启动新机器",
+      "blocked_title": "机器无法唤醒",
+      "blocked_summary": "需要 {needed} GB 磁盘",
+      "blocked_body": "此对话的机器无法唤醒：它需要 {needed} GB 磁盘。选择能容纳的规格，它就会在上面唤醒。",
+      "failed_title": "机器出错",
+      "failed_unknown": "机器上出了点问题。",
+      "retry": "重试",
+      "disk_title": "磁盘已用 {percent}%",
+      "disk_summary": "此对话的机器已用 {used} GB，共 {capacity} GB",
+      "disk_body": "此对话的机器已用 {used} GB，共 {capacity} GB。更大的规格能在用完之前留出空间。",
+      "disk_body_critical": "此对话的机器已用 {used} GB，共 {capacity} GB，用满后可能出错。更大的规格能留出空间。",
+      "expiring_title": "机器已休眠",
+      "expiring_summary": "文件将在 {days} 天后删除",
+      "expiring_body": "此对话的机器已休眠一段时间。除非唤醒，文件将在 {days} 天后删除；对话都会保留。",
+      "wake_now": "立即唤醒",
+      "holds": "容量 {gb} GB",
+      "current": "当前",
+      "after_turn": "本轮结束后",
+      "rate": "{rate} 额度",
+      "none_fit": "没有机器能容纳此对话需要的 {needs} GB。你可以在新对话中从已推送的内容继续；此对话及其文件保持不变。",
+      "none_bigger": "这已是最大的机器。删除文件才能腾出空间。",
+      "restart_note": "选择规格后，机器会连同文件在新规格上重启。",
+      "blocked_body_none": "此对话的机器无法唤醒：它需要 {needs} GB 磁盘。",
+      "new_chat": "开始新对话",
+      "wake_here": "在此唤醒",
+      "move_here": "迁移到此",
+      "cell_vcpu": "{n} vCPU",
+      "cell_memory": "{n} GB 内存",
+      "cell_disk": "{n} GB 磁盘",
+      "held_size_short": "等待选择规格",
+      "held_fresh_short": "等待新机器",
+      "held_size": "{n, plural, other {选择规格后将发送你的 # 条消息}}",
+      "held_fresh": "{n, plural, other {新机器启动后将发送你的 # 条消息}}",
+      "ago_minutes": "{n, plural, other {# 分钟前}}",
+      "ago_hours": "{n, plural, other {# 小时前}}",
+      "ago_days": "{n, plural, other {# 天前}}",
+      "queued_old_title": "{n, plural, other {# 条排队消息将在唤醒时发送}}",
+      "queued_old_summary": "排队于{ago}",
+      "queued_old_body": "排队于{ago}，此对话的机器一唤醒就会发送。不再需要的请先从队列中移除。",
+      "send_failed_title": "有一条消息未发送",
+      "store_full": "等待 Cloud 机器取走的文件太多。等其中一台取走后再试。",
+      "held_sending": "正在发送…",
+      "outbox_uploading": "正在上传…",
+      "outbox_failed": "未发送"
+    },
+    "turn_state": {
+      "interrupted": "已中断",
+      "waking": "正在唤醒 Cloud 机器…",
+      "updating": "正在更新 Cloud 机器…",
+      "expired": "已中断——Cloud 机器上的文件已删除",
+      "blocked": "已中断——Cloud 机器无法唤醒",
+      "failed": "已中断——Cloud 机器出错",
+      "asleep": "已中断——Cloud 机器已休眠",
+      "resuming": "正在恢复——唤醒 Cloud 机器…",
+      "resuming_updating": "正在恢复——更新 Cloud 机器…",
+      "slow": "唤醒 Cloud 机器的时间比平常长…",
+      "resuming_slow": "正在恢复——唤醒 Cloud 机器的时间比平常长…",
+      "the_host": "它的电脑",
+      "unreachable": "已中断——无法连接到{host}"
     }
   },
   "panel": {

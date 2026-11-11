@@ -154,6 +154,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             match edge_bytes("PUT", "/auth/me/images".into(), png, "image/png").await? {
                 (200, body) => body["url"].as_str().map(Value::from).ok_or_else(|| "failed".to_string()),
                 (413, _) => Err("too_large".into()),
+                // An edge without images of yours yet (production, before
+                // its deploy): said plainly, so an emoji or a color is chosen.
+                (404 | 405, _) => Err("unavailable".into()),
                 (status, body) => Err(outcome(status, &body).into()),
             }
         }

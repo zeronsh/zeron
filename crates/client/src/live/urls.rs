@@ -38,7 +38,15 @@ pub(crate) fn registry_ws(edge: &str, org_id: &str, token: &str, device_id: &str
     )
 }
 
-pub(crate) fn registry_rows(edge: &str, org_id: &str, device_id: &str, since: u64) -> String {
+/// `relay`: this client runs the relay layer. A beat without it marks the device as
+/// one that can't follow, and holds the whole account's chats on stored rows.
+pub(crate) fn registry_rows(
+    edge: &str,
+    org_id: &str,
+    device_id: &str,
+    since: u64,
+    relay: bool,
+) -> String {
     let mut url = format!(
         "{}/registry/{}/rows?device={}&beat=1",
         edge.trim_end_matches('/'),
@@ -47,6 +55,9 @@ pub(crate) fn registry_rows(edge: &str, org_id: &str, device_id: &str, since: u6
     );
     if since > 0 {
         url.push_str(&format!("&since={since}"));
+    }
+    if relay {
+        url.push_str("&relay=1");
     }
     url
 }
@@ -88,9 +99,31 @@ pub(crate) fn chat_checkpoint(edge: &str, chat_id: &str) -> String {
     )
 }
 
-pub(crate) fn chat_rows(edge: &str, chat_id: &str, after: u64, device_id: &str) -> String {
+/// How a chat pull describes its reader to the room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PullReader {
+    /// No relay layer: what shipped phones send. The room treats it as an old reader.
+    Stored,
+    /// Runs the layer, and this pull is only a head start on its socket.
+    Relay,
+    /// Runs the layer, but sockets don't work here: it needs stored rows.
+    Socketless,
+}
+
+pub(crate) fn chat_rows(
+    edge: &str,
+    chat_id: &str,
+    after: u64,
+    device_id: &str,
+    reader: PullReader,
+) -> String {
+    let query = match reader {
+        PullReader::Stored => "",
+        PullReader::Relay => "&relay=1",
+        PullReader::Socketless => "&relay=1&fallback=1",
+    };
     format!(
-        "{}/chat2/{}/rows?after={after}&device={}",
+        "{}/chat2/{}/rows?after={after}&device={}{query}",
         edge.trim_end_matches('/'),
         encode(chat_id),
         encode(device_id)
@@ -136,8 +169,25 @@ mod tests {
             "wss://e.sh/chat2/c1/ws?token=t%40o&device=ios-1"
         );
         assert_eq!(
-            registry_rows("https://e.sh", "o", "d", 0),
+            registry_rows("https://e.sh", "o", "d", 0, false),
             "https://e.sh/registry/o/rows?device=d&beat=1"
+        );
+        assert_eq!(
+            registry_rows("https://e.sh", "o", "d", 7, true),
+            "https://e.sh/registry/o/rows?device=d&beat=1&since=7&relay=1"
+        );
+        assert_eq!(
+            chat_rows("https://e.sh", "c", 3, "d", PullReader::Stored),
+            "https://e.sh/chat2/c/rows?after=3&device=d",
+            "a client without the layer sends what shipped phones send"
+        );
+        assert_eq!(
+            chat_rows("https://e.sh", "c", 3, "d", PullReader::Relay),
+            "https://e.sh/chat2/c/rows?after=3&device=d&relay=1"
+        );
+        assert_eq!(
+            chat_rows("https://e.sh", "c", 3, "d", PullReader::Socketless),
+            "https://e.sh/chat2/c/rows?after=3&device=d&relay=1&fallback=1"
         );
         assert_eq!(
             registry_push_target("https://e.sh/", "org_1", "ios-1"),

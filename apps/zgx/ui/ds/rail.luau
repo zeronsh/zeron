@@ -53,6 +53,8 @@ local SIDE = 2
 local END = 4
 local MIN = 24
 local LINGER, FADE = 1400, 260
+-- How often a scroll under way is looked at, to tell when it has rested.
+local POLL = 50
 -- How long a view is taken to place itself once it mounts, its offset's
 -- changes meanwhile no scroll.
 local SETTLE = 600
@@ -105,25 +107,42 @@ return ui.component(function(props: Props): Node
 		settling = nil
 		settled = true
 	end)
-	local cancel: (() -> ())? = nil
+	-- Only a scroll's first move is heard: while the rail shows, a poll
+	-- every POLL ms sees whether the view has moved since (the effect then
+	-- reads nothing, so a scroll's frames run nothing here), and it goes
+	-- once the view has rested LINGER.
+	local seen, moved_at = offset:peek(), 0
+	local function poll()
+		-- (Next look a poll on, or when it will have rested, if sooner.)
+		ui.after(math.max(0, math.min(POLL, moved_at + LINGER - ui.now())), function()
+			local at = offset:peek()
+			if at ~= seen then
+				seen, moved_at = at, ui.now()
+			end
+			if ui.now() - moved_at >= LINGER then
+				recent:set(false)
+			else
+				poll()
+			end
+		end)
+	end
 	ui.effect(function()
-		offset:get()
+		if recent:get() then
+			-- (This run's: it goes as the next does, once at rest.)
+			poll()
+			return
+		end
+		local at = offset:get()
+		if at == seen then
+			return
+		end
+		seen, moved_at = at, ui.now()
 		if not settled then
 			return
 		end
 		recent:set(true)
-		if cancel then
-			cancel()
-		end
-		cancel = ui.after(LINGER, function()
-			cancel = nil
-			recent:set(false)
-		end)
 	end)
 	ui.on_cleanup(function()
-		if cancel then
-			cancel()
-		end
 		if settling then
 			settling()
 		end

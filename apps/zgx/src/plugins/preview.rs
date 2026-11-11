@@ -74,6 +74,7 @@ pub const BLOCKED: &[&str] = &[
     "chat.queue_edit",
     "chat.queue_finish",
     "chat.retry",
+    "chat.remove_held",
     // (Only one that says what an agent may do unasked: `chat.configure`.)
     "chat.configure",
     "agents.install",
@@ -87,11 +88,17 @@ pub const BLOCKED: &[&str] = &[
     "home.run_action",
     "home.save_action",
     "sessions.delete",
+    "sessions.remove_device",
     "projects.clone",
     "projects.delete",
     "github.disconnect",
     "engine.restart",
     "billing.checkout",
+    // (Each runs a machine, or says which one new chats run on: credits.)
+    "cloud.wake",
+    "cloud.sleep",
+    "cloud.retry",
+    "cloud.set_machine",
 ];
 
 pub fn blocked(action: &str) -> bool {

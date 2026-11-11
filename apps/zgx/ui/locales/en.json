@@ -1615,7 +1615,7 @@
     },
     "devices": {
       "title": "Devices",
-      "terms": "machines computers remote this device other devices rename",
+      "terms": "machines computers remote this device other devices rename remove delete forget",
       "yours": {
         "label": "Your devices",
         "terms": "online last seen version system"
@@ -1634,13 +1634,68 @@
       "empty_body": "Sign in to sync your sessions across your devices.",
       "this_device": "This device",
       "rename": "Rename",
-      "rename_name": "Rename {name}",
-      "dialog": {
-        "title": "Rename device",
-        "here": "This computer, as your other devices list it.",
-        "other": "As every one of your devices lists it.",
-        "field": "Device name"
-      }
+      "remove_one": {
+        "label": "Remove a device",
+        "terms": "remove delete forget old computer"
+      },
+      "more_for": "More for {name}",
+      "name_of": "Name for {name}",
+      "remove": "Remove…",
+      "remove_online": "Online now. Quit Zeron on it first.",
+      "remove_title": "Remove “{name}”?",
+      "remove_body": "It disappears from your devices everywhere. Its sessions and projects stay, so you can still read them, and nothing on the computer itself is deleted. If Zeron opens on it again, it comes back.",
+      "remove_confirm": "Remove device",
+      "couldnt_remove": "Couldn't remove it",
+      "online_now": "It's online now. Quit Zeron on it, then try again.",
+      "offline_title": "Can't show your devices"
+    },
+    "projects": {
+      "title": "Projects",
+      "description": "The folders your sessions work in, on each of your devices.",
+      "terms": "projects folders repositories repos rename remove delete forget finder icon emoji color picture",
+      "yours": {
+        "label": "Your projects",
+        "terms": "folders paths devices sessions"
+      },
+      "rename_one": {
+        "label": "Rename a project",
+        "terms": "name rename call"
+      },
+      "remove_one": {
+        "label": "Remove a project",
+        "terms": "remove delete forget"
+      },
+      "find": "Find a project",
+      "add": "Add project",
+      "cloud": "Cloud",
+      "device_gone": "A removed device",
+      "its_device": "its device",
+      "sessions": "{n, plural, one {# session} other {# sessions}}",
+      "no_sessions": "No sessions",
+      "more_for": "More for {name}",
+      "name_of": "Name for {name}",
+      "rename": "Rename",
+      "icon_of": "Change icon for {name}",
+      "change_icon": "Change icon…",
+      "change_icon_tip": "Change icon",
+      "show": "Show in Finder",
+      "remove": "Remove…",
+      "remove_title": "Remove “{name}”?",
+      "remove_sessions": "{n, plural, one {Its session is deleted for good, on every device.} other {Its # sessions are deleted for good, on every device.}}",
+      "remove_none": "It has no sessions.",
+      "remove_running": "{n, plural, one {One of them is running now and is stopped first.} other {# of them are running now and are stopped first.}}",
+      "remove_running_only": "It's running now and is stopped first.",
+      "remove_keeps_folder": "The folder {path} stays on {device} with all its files. Zeron just forgets it.",
+      "remove_keeps_repo": "Its repository on GitHub isn't touched.",
+      "remove_confirm": "Remove project",
+      "couldnt_remove": "Couldn't remove the project",
+      "couldnt_rename": "Couldn't rename it",
+      "couldnt_show": "Couldn't show the folder",
+      "empty_title": "No projects yet",
+      "empty_body": "Add a folder on one of your devices to start sessions in it.",
+      "nothing_found": "No projects match",
+      "nothing_found_body": "Try another name or folder.",
+      "offline_title": "Can't show your projects"
     },
     "members": {
       "title": "Members",
@@ -1883,7 +1938,7 @@
       "usage": {
         "title": "Usage",
         "terms": "credits used spent minutes chart days range",
-        "description": "Credits Cloud chats used. A credit is a minute of a standard machine.",
+        "description": "Credits Cloud chats used. A credit is a minute of a small machine.",
         "used": "{credits} used",
         "reading": "Reading usage…",
         "failed": "Couldn't read usage. It shows once Zeron can reach Cloud.",
@@ -1892,8 +1947,23 @@
         "range_name": "Usage range"
       },
       "github": {
-        "terms": "connect disconnect account clone push",
-        "description": "Cloud chats clone your repositories and push their branches through GitHub."
+        "terms": "connect disconnect account clone push another reconnect organization login",
+        "description": "Cloud chats clone your repositories and push their branches through GitHub.",
+        "connected": "Connected",
+        "needs_reconnect": "Needs reconnecting",
+        "needs_reconnect_description": "Chats using it can't push until you do.",
+        "reconnect": "Reconnect",
+        "disconnect": "Disconnect",
+        "another": "Another GitHub account",
+        "another_description": "A work and a personal login, say. Each brings the repositories it reaches.",
+        "another_action": "Connect another",
+        "another_hint": "GitHub connects whichever account your browser is signed in to. To connect a different one, switch accounts on github.com first.",
+        "already_title": "{login} is already connected",
+        "already_body": "GitHub connected the account your browser is signed in to. Switch accounts on github.com, then connect again.",
+        "install": "Another account or organization",
+        "install_description": "Install the Zeron app there, or change which repositories it covers. GitHub offers what your browser's account can install on.",
+        "forget_title": "Disconnect {login}?",
+        "forget_body": "Chats using this account stop with a message until you connect it again. Others keep their accounts. New chats use the accounts that are left."
       },
       "repos": {
         "title": "Repositories",
@@ -1915,13 +1985,19 @@
       "attention": {
         "title": "Cloud needs attention",
         "failed": "Something went wrong with Cloud."
+      },
+      "machine": {
+        "title": "Default machine",
+        "terms": "machine size vcpu memory disk credits rate xlarge large small standard",
+        "description": "The size new Cloud chats start on. Bigger machines use credits faster.",
+        "failed": "Couldn't change the default machine. Try again in a moment."
       }
     },
     "billing": {
       "title": "Billing",
       "terms": "billing payment stripe credits plan subscription purchase invoice",
       "description": "Credits run your Cloud chats.",
-      "hours": "about {n} hours",
+      "hours": "about {n} small-machine hours",
       "try_later": "Try again in a moment.",
       "changed": {
         "plan": "You're on {plan}: {credits} a month",
@@ -1939,7 +2015,7 @@
       "credits": {
         "title": "Credits",
         "terms": "balance left remaining monthly extra hours",
-        "description": "What Cloud chats can spend. A credit is a minute of a standard machine.",
+        "description": "What Cloud chats can spend. A credit is a minute of a small machine.",
         "none": "Choose a plan or buy credits to run Cloud chats.",
         "unit": "{n, plural, one {credit} other {credits}}",
         "split": "{plan} plan credits, {extra} extra",
@@ -2369,7 +2445,8 @@
             "save": "Couldn't save the project. Try again.",
             "save_outdated": "Zeron on this computer needs an update to save project icons. Update it, then save again.",
             "save_gone": "This project was removed on another device.",
-            "save_offline": "Zeron on this computer isn't responding. Try again in a moment."
+            "save_offline": "Zeron on this computer isn't responding. Try again in a moment.",
+            "unavailable": "Image icons aren't available for your account yet. Choose an emoji or a color instead."
           }
         }
       },
@@ -2851,6 +2928,7 @@
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",
       "edit_not_saved": "Your edit wasn't saved",
       "didnt_send": "Your message didn't send",
+      "didnt_remove": "Couldn't remove that message",
       "starting_cloud": "Starting a Cloud machine…",
       "starting": "Starting the chat…",
       "didnt_start": "The chat didn't start",
@@ -2882,6 +2960,92 @@
       "no_speech": "No speech recognized. Your draft is unchanged.",
       "transcribing": "Transcribing…",
       "starting": "Starting…"
+    },
+    "cloud_machine": {
+      "specs": "{vcpu} vCPU · {memory} GB memory · {disk} GB disk",
+      "stage_clone": "cloning the repository",
+      "stage_branch": "checking out the branch",
+      "stage_start": "starting up",
+      "asleep": "Cloud machine asleep — it wakes when you send",
+      "wake": "Wake",
+      "waking_stage": "Waking its Cloud machine — {stage}…",
+      "provisioning": "Starting a Cloud machine…",
+      "waking": "Waking its Cloud machine…",
+      "updating": "Updating its Cloud machine…",
+      "slow": "Waking its Cloud machine is taking longer than usual…",
+      "restored_title": "This chat was restored from its server copy",
+      "restored_summary": "Its machine rebuilt its copy of the chat",
+      "restored_body": "This chat's machine found its own copy of the conversation damaged and rebuilt it from the server copy.",
+      "stopping": "Its Cloud machine is going to sleep…",
+      "deleting": "Deleting its Cloud machine…",
+      "too_small": "That size can't hold this chat's files. Pick a bigger one.",
+      "offline": "You're offline. Try again once you're back.",
+      "outdated": "This version of Zeron can't wake Cloud machines. Update it in About.",
+      "wake_failed_title": "Machine didn't wake",
+      "wake_failed_body": "The machine didn't wake. Try again in a moment.",
+      "expired_title": "Machine's files are gone",
+      "expired_summary": "The conversation is kept",
+      "expired_body_on": "This chat's machine slept too long and its files were deleted. The conversation is kept. A fresh machine starts over from {repo}, on the same branch; what was pushed comes back with it.",
+      "expired_body": "This chat's machine slept too long and its files were deleted. The conversation is kept. A fresh machine starts over from its repository, on the same branch; what was pushed comes back with it.",
+      "fresh": "Start a fresh machine",
+      "blocked_title": "Machine can't wake",
+      "blocked_summary": "It needs {needed} GB of disk",
+      "blocked_body": "This chat's machine can't wake: it needs {needed} GB of disk. Pick a size that holds it, and it wakes there.",
+      "failed_title": "Machine failed",
+      "failed_unknown": "Something went wrong on its machine.",
+      "retry": "Try again",
+      "disk_title": "Disk {percent}% full",
+      "disk_summary": "{used} of {capacity} GB on this chat's machine",
+      "disk_body": "This chat's machine has used {used} of its {capacity} GB. A bigger size gives it room before it runs out.",
+      "disk_body_critical": "This chat's machine has used {used} of its {capacity} GB and can fail once it's full. A bigger size gives it room.",
+      "expiring_title": "Machine asleep",
+      "expiring_summary": "Its files are deleted in {days, plural, one {# day} other {# days}}",
+      "expiring_body": "This chat's machine has been asleep a while. Its files are deleted in {days, plural, one {# day} other {# days}} unless it wakes; the conversation is kept either way.",
+      "wake_now": "Wake it now",
+      "holds": "holds {gb} GB",
+      "current": "Current",
+      "after_turn": "after this turn",
+      "rate": "{rate} credits",
+      "none_fit": "No machine holds the {needs} GB this chat needs. You can carry on in a new chat from what's pushed; this chat and its files stay as they are.",
+      "none_bigger": "This is the biggest machine there is. Removing files is the way to free up room.",
+      "restart_note": "Picking a size restarts the machine on it, with its files.",
+      "blocked_body_none": "This chat's machine can't wake: it needs {needs} GB of disk.",
+      "new_chat": "Start a new chat",
+      "wake_here": "Wake here",
+      "move_here": "Move here",
+      "cell_vcpu": "{n} vCPU",
+      "cell_memory": "{n} GB memory",
+      "cell_disk": "{n} GB disk",
+      "held_size_short": "Waits for a size",
+      "held_fresh_short": "Waits for a fresh machine",
+      "held_size": "{n, plural, one {Your message will send once you pick a size} other {Your # messages will send once you pick a size}}",
+      "held_fresh": "{n, plural, one {Your message will send once a fresh machine starts} other {Your # messages will send once a fresh machine starts}}",
+      "ago_minutes": "{n, plural, one {# minute ago} other {# minutes ago}}",
+      "ago_hours": "{n, plural, one {# hour ago} other {# hours ago}}",
+      "ago_days": "{n, plural, one {# day ago} other {# days ago}}",
+      "queued_old_title": "{n, plural, one {A queued message sends when it wakes} other {# queued messages send when it wakes}}",
+      "queued_old_summary": "Queued {ago}",
+      "queued_old_body": "Queued {ago}, they send as soon as this chat's machine wakes. Remove any you no longer want from the queue first.",
+      "send_failed_title": "A message didn't send",
+      "store_full": "Too many files are waiting for Cloud machines to collect them. Try again once one has.",
+      "held_sending": "Sending…",
+      "outbox_uploading": "Uploading…",
+      "outbox_failed": "Didn't send"
+    },
+    "turn_state": {
+      "interrupted": "Interrupted",
+      "waking": "Waking its Cloud machine…",
+      "updating": "Updating its Cloud machine…",
+      "expired": "Interrupted — its Cloud machine's files are gone",
+      "blocked": "Interrupted — its Cloud machine can't wake",
+      "failed": "Interrupted — its Cloud machine failed",
+      "asleep": "Interrupted — its Cloud machine went to sleep",
+      "resuming": "Resuming — waking its Cloud machine…",
+      "resuming_updating": "Resuming — updating its Cloud machine…",
+      "slow": "Waking its Cloud machine is taking longer than usual…",
+      "resuming_slow": "Resuming — its Cloud machine is taking longer than usual to wake…",
+      "the_host": "its computer",
+      "unreachable": "Interrupted — can't reach {host}"
     }
   },
   "panel": {

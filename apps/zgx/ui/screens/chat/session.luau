@@ -15,6 +15,7 @@ local route = require("@app/screens/shell/route")
 -- Its side chats and subagents, in a card at the top right (the title
 -- bar's "Show session details").
 local lanes = require("@app/screens/chat/lanes")
+local TurnGlue = require("@app/screens/chat/turn_glue")
 local shared = require("@app/screens/chat/shared")
 local prefs = require("@app/screens/settings/prefs")
 local ReplyImages = require("@app/screens/chat/reply_images")
@@ -280,6 +281,11 @@ local function Session(id: Id?): Node
 									lanes.open(s, { kind = "side_chat", id = chat, title = title })
 								end
 							end,
+							-- An unfinished turn whose host is gone says so, not
+							-- its working word (screens/chat/turn_state).
+							turn_state = TurnGlue.of(function(): any
+								return store.session:get()
+							end),
 							on_retry = function(message: string)
 								local s = which()
 								if s then

@@ -38,7 +38,8 @@ export type Choice = { id: string, label: string }
 -- the one it starts on (by id).
 export type Option = { id: string, label: string, default: string, choices: { Choice } }
 -- A model: its agent, its reasoning levels (low to high) and the one it
--- starts on, whether it offers Fast mode, and its other options.
+-- starts on, whether it offers Fast mode, its other options, and whether
+-- it's its agent's default (what a chat that names no model runs).
 export type Model = {
 	value: string,
 	label: string,
@@ -47,6 +48,7 @@ export type Model = {
 	effort: string?,
 	fast: boolean?,
 	options: { Option }?,
+	default: boolean?,
 }
 -- An account of an agent: how much of its plan it has used (what the ring
 -- and the row say; nil: nothing reported), its windows said in words (or why
@@ -853,6 +855,9 @@ return ui.component(function(props: Props): Node
 			mb = if bottom_up then nil else ui.raw(-4, "the tab bar meets the rule"),
 			fade_x = { 20, 20 },
 			fade_overflow = true,
+			-- A mouse wheel without a sideways axis scrolls them too, once
+			-- the pointer has moved onto them (Shift + wheel always does).
+			wheel_across = true,
 			ui.row {
 				h = 36,
 				gap = "$zeron.space.hair",

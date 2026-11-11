@@ -37,7 +37,8 @@
 //! count to check against; byte lengths), `WatchSessions` and `WatchChats`
 //! (whole lists), `WatchQueue`; runs, interrupts and answers through
 //! `QueueCommand`; config through `Mutate setChatConfig`; uploads through
-//! `UploadChunk` / `UploadCommit`. `ZERON_ZGX_MOCK=1` offers the engine's
+//! `UploadChunk` / `UploadCommit` (for a chat on a Cloud machine, staged here
+//! and sent by the engine through the edge's store: `WatchHeldSends`). `ZERON_ZGX_MOCK=1` offers the engine's
 //! mock agent, for trying a turn without a paid one.
 
 use std::{
@@ -74,6 +75,9 @@ thread_local! {
 /// the agents and their models.
 #[derive(Default)]
 struct Chats {
+    /// The engine's outbox (`WatchHeldSends`): sends waiting for their files
+    /// to reach the edge's store.
+    held: RefCell<Vec<Json>>,
     chats: RefCell<HashMap<String, Json>>,
     chats_heard: Cell<bool>,
     sessions: RefCell<HashMap<String, Json>>,
@@ -86,6 +90,8 @@ struct Chats {
     views: RefCell<Vec<Weak<View>>>,
     /// The engine's live session and chat lists, heard as changes.
     listening: RefCell<Vec<engine::lists::Listening>>,
+    /// The engine's outbox, on the connection there is.
+    held_watch: RefCell<Option<Watch>>,
     /// Chats this window made that the engine's list may not have yet
     /// (`made`): its next list replaces them, or lets them go.
     made_here: RefCell<Vec<String>>,
@@ -128,11 +134,15 @@ struct Entry {
     json: Option<Json>,
     /// `sum_of` its json, once that's gone.
     sum: u64,
+    /// Since its row was last built, only these of its parts changed (each
+    /// by a part patch): the rest are as they were built. None: not known
+    /// (it came whole, or grew a text).
+    patched: Option<std::collections::HashSet<String>>,
 }
 
 impl Entry {
     fn new(json: Json) -> Self {
-        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0 }
+        Self { id: json["id"].as_str().unwrap_or_default().into(), json: Some(json), sum: 0, patched: None }
     }
 
     /// What it is now, to tell it from another copy of it.
@@ -457,6 +467,12 @@ struct Pending {
     retry: Option<Json>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
+    /// In the engine's outbox: the engine says how it stands, and retries it.
+    held: bool,
+    /// Becomes a queue row when it leaves the outbox, and shows there.
+    row: bool,
+    /// The files the engine delivers for it, for a run sent again.
+    transfers: Vec<Json>,
 }
 
 impl Pending {
@@ -518,6 +534,9 @@ struct Open {
     /// and the window's size (either may be missing), for the ring's card.
     context_usage: (Option<f64>, Option<f64>),
     queue: Vec<Json>,
+    /// Its messages on their way and not yet taken by its agent, as the engine's
+    /// `WatchWaitingMessages` lists them (none from an engine without it).
+    waiting: Vec<Json>,
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
@@ -630,6 +649,17 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             lanes.borrow().values().find(|l| l.open_id().as_deref() == Some(id.as_str())).cloned().unwrap_or_else(|| main.clone())
         }
     };
+    // Settings' compact transcript, on or off (`chat.compact`, set by
+    // screens/settings/prefs): a reply being written is laid out compact too
+    // only while it's on, so each of its changes builds what shows. Turned
+    // on, those replies are built again with it. (Kept as long as the
+    // window's runtime: one watch a window.)
+    let compact = host.shared("chat.compact", Value::Bool(false)).signal();
+    let c = chats.clone();
+    std::mem::forget(_cx.ui.runtime.effect(move || {
+        let on = compact.get().truthy();
+        c.compact_shown(on);
+    }));
     let c = chats.clone();
     host.action("chat.catalog", move |_| {
         let c = c.clone();
@@ -683,6 +713,14 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.retry", move |args| {
         let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
+    });
+    // A send in this device's outbox (still uploading, or stopped) taken out
+    // for good: `{ id, item, message? }` → whether it was there to take
+    // ("unsupported": an engine from before it can).
+    let pick = which.clone();
+    host.async_action("chat.remove_held", move |args| {
+        let v = pick(&args);
+        async move { crate::plugins::preview::refuse("chat.remove_held")?; v.remove_held(args).await.map_err(String::from) }
     });
     let pick = which.clone();
     host.async_action("chat.queue_edit", move |args| {
@@ -826,6 +864,16 @@ impl Chats {
             me.publish_views();
         }));
         *self.listening.borrow_mut() = listening;
+        let weak = Rc::downgrade(self);
+        // (An engine without an outbox ends this at once, and nothing's held.)
+        *self.held_watch.borrow_mut() = Some(rpc.watch("WatchHeldSends", json!({}), move |item| {
+            let Some(me) = weak.upgrade() else { return };
+            let held = item.as_array().cloned().unwrap_or_default();
+            *me.held.borrow_mut() = held.clone();
+            for view in me.views() {
+                view.follow_held(&held);
+            }
+        }));
         *self.rpc.borrow_mut() = Some(rpc.clone());
         self.ask_looks.borrow_mut().clear();
         let me = self.clone();
@@ -1031,6 +1079,29 @@ impl Chats {
         }
     }
 
+    /// Settings' compact transcript turned on or off (`chat.compact`): the
+    /// replies being written are built again, with or without its layout.
+    fn compact_shown(&self, on: bool) {
+        if COMPACT_SHOWN.replace(on) == on {
+            return;
+        }
+        for view in self.views() {
+            let rebuilt = {
+                let mut slot = view.open.borrow_mut();
+                let Some(open) = slot.as_mut() else { continue };
+                let Open { entries, built, .. } = open;
+                let mut any = false;
+                for e in entries.iter().filter(|e| e["status"].as_str() == Some("streaming")) {
+                    any |= built.remove(&e.id).is_some();
+                }
+                any
+            };
+            if rebuilt {
+                view.publish_messages();
+            }
+        }
+    }
+
     fn publish_catalog(&self) {
         let value = self.catalog_value();
         for shared in self.catalog.borrow().iter() {
@@ -1138,17 +1209,7 @@ impl Chats {
                 }
             }
         };
-        let harnesses: Vec<Json> = list
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|h| {
-                h["id"].as_str() != Some("mock")
-                    && h["installed"].as_bool() != Some(false)
-                    && h["enabled"].as_bool() != Some(false)
-            })
-            .cloned()
-            .collect();
+        let harnesses: Vec<Json> = list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect();
         let ids: Vec<String> = harnesses.iter().filter_map(|h| h["id"].as_str().map(Into::into)).collect();
         if let Some(r) = self.remote.borrow_mut().as_mut() {
             crate::agents::remember_icons(&harnesses);
@@ -1222,17 +1283,7 @@ impl Chats {
             }
             let params = json!({ "targetDeviceId": device, "includeRegistry": true });
             let Ok(list) = engine::get().call("ListHarnesses", params).await else { continue };
-            let harnesses: Vec<Json> = list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|h| {
-                    h["id"].as_str() != Some("mock")
-                        && h["installed"].as_bool() != Some(false)
-                        && h["enabled"].as_bool() != Some(false)
-                })
-                .cloned()
-                .collect();
+            let harnesses: Vec<Json> = list.as_array().into_iter().flatten().filter(|h| offered(h, &device)).cloned().collect();
             let mut models = HashMap::new();
             let mut whole = true;
             for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
@@ -1453,6 +1504,10 @@ fn model_value(harness: &str, m: &Json) -> Value {
     if !options.is_empty() {
         fields.push(("options", Value::List(options.into())));
     }
+    // The agent's own default (Claude lists best-first, not default-first).
+    if m["default"].as_bool() == Some(true) {
+        fields.push(("default", Value::Bool(true)));
+    }
     Value::record(fields)
 }
 
@@ -1547,6 +1602,8 @@ impl View {
         }
         self.draft.set(draft_value("", ""));
         self.subscribe();
+        let held = chats.held.borrow().clone();
+        self.follow_held(&held);
         self.publish_messages();
         self.publish_session();
         // Its finished state seen, as the shipping app marks it: only while
@@ -1609,9 +1666,11 @@ impl View {
         let Some(id) = self.open_id() else { return };
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
+        // (`partPatches`: a long reply's changed parts alone, `apply`'s
+        // `parts`; an engine that doesn't know it sends replies whole.)
         let transcript = rpc.watch(
             "WatchDocMessages",
-            json!({ "chatId": id, "openingTail": true }),
+            json!({ "chatId": id, "openingTail": true, "partPatches": true }),
             move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
@@ -1631,8 +1690,20 @@ impl View {
                 view.publish_session();
             }
         });
+        // (An engine from before it ends the watch at once: nothing waits, as before.)
+        let weak = Rc::downgrade(self);
+        let waiting = rpc.watch("WatchWaitingMessages", json!({ "chatId": id }), move |item| {
+            if let Some(view) = weak.upgrade()
+                && view.generation.get() == generation
+            {
+                if let Some(open) = view.open.borrow_mut().as_mut() {
+                    open.waiting = item["items"].as_array().cloned().unwrap_or_default();
+                }
+                view.publish_session();
+            }
+        });
         if let Some(open) = self.open.borrow_mut().as_mut() {
-            open.watches = vec![transcript, queue];
+            open.watches = vec![transcript, queue, waiting];
         }
     }
 
@@ -1683,7 +1754,7 @@ impl View {
             } else if result.is_err() {
                 open.built.clear();
             } else {
-                for key in ["upsert", "append"] {
+                for key in ["upsert", "append", "parts"] {
                     for item in frame[key].as_array().into_iter().flatten() {
                         let id = if key == "upsert" { &item["entry"]["id"] } else { &item["entry"] };
                         if let Some(id) = id.as_str() {
@@ -1905,8 +1976,12 @@ impl View {
                 let row = match (built.get(&e.id), &e.json) {
                     (Some(row), _) => row.clone(),
                     (None, Some(json)) => {
-                        let row = built_for(json, &context, at < whole_from);
+                        // Changed by part patches alone: its other parts are as
+                        // they were built, and aren't looked at again.
+                        let patched = e.patched.take();
+                        let row = trusting(patched.as_ref(), || built_for(json, &context, at < whole_from));
                         built.insert(e.id.clone(), row.clone());
+                        e.patched = Some(std::collections::HashSet::new());
                         row
                     }
                     (None, None) => Built::default(),
@@ -2015,6 +2090,9 @@ impl View {
             waiting: "sending",
             retry: None,
             at: stamp(now_seconds()),
+            held: false,
+            row: false,
+            transfers: Vec::new(),
         });
         self.publish_messages();
         // What it carries, uploaded to the chat's host.
@@ -2023,6 +2101,9 @@ impl View {
         // (Each file here, by what it was sent as: an Appshot's context names
         // its picture by the path the agent has.)
         let mut sent_as: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // (Asked once, when there's a file to send: `store_takes_files`.)
+        let mut through_store = None;
+        let mut transfers: Vec<Json> = Vec::new();
         for a in req.field("attachments").map(Value::list).unwrap_or_default() {
             let path = a.field("path").map(text).unwrap_or_default();
             let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
@@ -2038,7 +2119,23 @@ impl View {
                 paths.push(path);
                 continue;
             }
-            match upload(&path, &name, target.as_deref()).await {
+            let store = match through_store {
+                Some(store) => store,
+                None => {
+                    let store = goes_through_store(target.as_deref()).await;
+                    through_store = Some(store);
+                    store
+                }
+            };
+            let uploaded = if store {
+                stage(&path, &name).await.map(|(reference, transfer)| {
+                    transfers.push(transfer);
+                    reference
+                })
+            } else {
+                upload(&path, &name, target.as_deref()).await
+            };
+            match uploaded {
                 Ok(at) => {
                     sent_as.insert(path.clone(), at.clone());
                     paths.push(at)
@@ -2079,6 +2176,9 @@ impl View {
             let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
             if !paths.is_empty() {
                 params["attachments"] = json!(paths);
+            }
+            if !transfers.is_empty() {
+                params["transfers"] = json!(transfers);
             }
             return engine::get()
                 .call("QueueMessage", params)
@@ -2138,9 +2238,14 @@ impl View {
             });
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
-        let sent = command(&id, run.clone()).await;
+        let sent = command_with(&id, run.clone(), &transfers).await;
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
+            if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
+                && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
+            {
+                p.transfers = transfers;
+            }
             self.mark_failed(&id, &message_id, Some(run));
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
@@ -2161,6 +2266,67 @@ impl View {
         }
         self.publish_messages();
         sent
+    }
+
+    /// The engine's outbox changed. What's in it shows as a prompt however it
+    /// was sent, even from before a restart: sending, or failed with a retry.
+    /// What left it is in the chat now, or (a row) in the queue, which shows it.
+    fn follow_held(&self, held: &[Json]) {
+        let mut changed = false;
+        {
+            let mut pending = self.pending.borrow_mut();
+            let message_of = |send: &Json| send["messageId"].as_str().map(str::to_owned);
+            let still_held =
+                |id: &str| held.iter().any(|send| send["messageId"].as_str() == Some(id));
+            pending.retain(|_, prompts| {
+                prompts.retain_mut(|p| {
+                    if !p.held || still_held(&p.id) {
+                        return true;
+                    }
+                    changed = true;
+                    p.held = false;
+                    p.waiting = "sending";
+                    !p.row
+                });
+                !prompts.is_empty()
+            });
+            for send in held {
+                let (Some(chat), Some(message)) = (send["chatId"].as_str(), message_of(send)) else {
+                    continue;
+                };
+                let waiting = if send["failure"].is_string() { "failed" } else { "sending" };
+                let row = send["queueRow"].as_bool() == Some(true);
+                let prompts = pending.entry(chat.to_owned()).or_default();
+                match prompts.iter_mut().find(|p| p.id == message) {
+                    Some(p) => {
+                        changed |= !p.held || p.waiting != waiting;
+                        p.held = true;
+                        p.row = row;
+                        p.waiting = waiting;
+                        p.retry = None;
+                    }
+                    None => {
+                        let (words, paths) =
+                            split_attachments(send["prompt"].as_str().unwrap_or_default());
+                        prompts.push(Pending {
+                            id: message,
+                            words,
+                            paths,
+                            waiting,
+                            retry: None,
+                            at: stamp(send["createdAt"].as_i64().unwrap_or(0) / 1000),
+                            held: true,
+                            row,
+                            transfers: Vec::new(),
+                        });
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.publish_messages();
+        }
     }
 
     /// A pending prompt that didn't go: failed, with the command that sends
@@ -2185,6 +2351,23 @@ impl View {
         }
     }
 
+    /// A send taken out of this device's outbox (`RemoveHeldSend`, #1256): it
+    /// never goes out. Its prompt shown here as on its way goes with it.
+    async fn remove_held(self: &Rc<Self>, args: Value) -> Result<Value, Outcome> {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let item = args.field("item").map(text).unwrap_or_default();
+        let reply = engine::get()
+            .call("RemoveHeldSend", json!({ "chatId": id, "id": item }))
+            .await
+            .map_err(|e| held_removal_failure(&e))?;
+        let removed = reply["removed"].as_bool() == Some(true);
+        if removed && let Some(message) = args.field("message").map(text).filter(|m| !m.is_empty()) {
+            self.forget_pending(&id, &message);
+            self.publish_messages();
+        }
+        Ok(Value::Bool(removed))
+    }
+
     /// A failed prompt sent again (its run as it was), sending meanwhile.
     async fn retry(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
         let id = args.field("id").map(text).unwrap_or_default();
@@ -2192,14 +2375,22 @@ impl View {
         if self.open_id().as_deref() != Some(&id) {
             return Err("missing");
         }
-        let run = {
+        let (run, transfers, held) = {
             let mut pending = self.pending.borrow_mut();
             let prompts = pending.get_mut(&id).ok_or("missing")?;
             let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
-            p.retry.clone()
+            (p.retry.clone(), p.transfers.clone(), p.held)
         };
         self.publish_messages();
+        // In the engine's outbox: the engine has what it takes to send it.
+        if held {
+            return engine::get()
+                .call("RetryDelivery", json!({ "chatId": id }))
+                .await
+                .map(|_| ())
+                .map_err(|e| engine::outcome(&e));
+        }
         let Some(run) = run else {
             // It never got as far as a run (an upload failed): the composer
             // has the words; the row goes.
@@ -2207,7 +2398,7 @@ impl View {
             self.publish_messages();
             return Err("failed");
         };
-        let sent = command(&id, run.clone()).await;
+        let sent = command_with(&id, run.clone(), &transfers).await;
         if sent.is_err() {
             self.mark_failed(&id, &message_id, Some(run));
         }
@@ -2568,8 +2759,17 @@ async fn stop_waiting(id: String) -> Result<Value, Outcome> {
 }
 
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
+    command_with(chat, command, &[]).await
+}
+
+/// [`command`], with the files the engine delivers for it.
+async fn command_with(chat: &str, command: Json, transfers: &[Json]) -> Result<(), Outcome> {
+    let mut params = json!({ "chatId": chat, "command": command });
+    if !transfers.is_empty() {
+        params["transfers"] = json!(transfers);
+    }
     engine::get()
-        .call("QueueCommand", json!({ "chatId": chat, "command": command }))
+        .call("QueueCommand", params)
         .await
         .map(|_| ())
         .map_err(|e| {
@@ -2593,7 +2793,65 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
+/// An engine that holds a Cloud chat's message until its files are in the edge's
+/// store (crates/proto `capabilities::ATTACHMENT_STORE_V1`).
+const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
+
+/// Whether a chat's files go through the edge's store: its machine may be
+/// asleep, so they can't wait on reaching it. Any other chat, or an engine
+/// that doesn't know the store, uploads straight to the host.
+fn store_takes_files(target: Option<&str>, capabilities: &Json) -> bool {
+    target.is_some_and(|device| zeron_proto::is_cloud_device(device, ""))
+        && capabilities
+            .as_array()
+            .is_some_and(|list| list.iter().any(|c| c.as_str() == Some(ATTACHMENT_STORE_V1)))
+}
+
+async fn goes_through_store(target: Option<&str>) -> bool {
+    if !target.is_some_and(|device| zeron_proto::is_cloud_device(device, "")) {
+        return false;
+    }
+    match engine::get().call("EngineInfo", json!({})).await {
+        Ok(info) => store_takes_files(target, &info["capabilities"]),
+        Err(_) => false,
+    }
+}
+
+/// A file's name as a chat names it: no folders.
+fn base_name(name: &str) -> &str {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(name)
+}
+
+/// How a run names a file the engine delivers, and what tells it to.
+fn stored_file(upload_id: &str, name: &str) -> (String, Json) {
+    let file_name = base_name(name);
+    (
+        format!("pending://{upload_id}/{file_name}"),
+        json!({ "uploadId": upload_id, "fileName": file_name }),
+    )
+}
+
+/// A file committed to this device's engine, which takes it on from there:
+/// how the prompt names it, and what the send tells the engine to deliver.
+async fn stage(path: &str, name: &str) -> Result<(String, Json), Outcome> {
+    let upload_id = new_id();
+    upload_as(&upload_id, path, name, None).await?;
+    Ok(stored_file(&upload_id, name))
+}
+
 async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, Outcome> {
+    upload_as(&new_id(), path, name, target).await
+}
+
+async fn upload_as(
+    upload_id: &str,
+    path: &str,
+    name: &str,
+    target: Option<&str>,
+) -> Result<String, Outcome> {
     // Read and encoded off the window's thread, and no larger than the cap.
     let owned = path.to_owned();
     let encoded = off_thread(move || -> Result<String, Outcome> {
@@ -2609,7 +2867,6 @@ async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, 
     })
     .await
     .ok_or("failed")??;
-    let upload_id = new_id();
     let routed = |mut p: Json| {
         if let Some(t) = target {
             p["targetDeviceId"] = json!(t);
@@ -2630,10 +2887,7 @@ async fn upload(path: &str, name: &str, target: Option<&str>) -> Result<String, 
         seq += 1;
         at = end;
     }
-    let file_name = std::path::Path::new(name)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(name);
+    let file_name = base_name(name);
     let committed = engine::get()
         .call("UploadCommit", routed(json!({ "uploadId": upload_id, "fileName": file_name })))
         .await
@@ -3176,18 +3430,32 @@ fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
 }
 
 /// An entry as its row reads it.
-pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
+pub(crate) fn built_entry(
+    entry: &Json,
+    doc: &str,
+    device: Option<&str>,
+    model: Option<&str>,
+) -> Option<Value> {
     // (One still being written is built again with its next change.)
     let settled = entry["status"].as_str() != Some("streaming");
     if settled {
         ROW_BUILD.set(Some(RowBuild::default()));
     } else {
-        LIVE_PASS.set(Some(HashMap::new()));
+        LIVE_PASS.set(Some(Default::default()));
+        // Changed in its last group's calls alone, as it was last built:
+        // only those built again (`LiveRow`).
+        if let Some(row) = live_row_patched(entry, model) {
+            LIVE_PASS.set(None);
+            return Some(row);
+        }
     }
     let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
         None => message(entry, model),
     };
+    if !settled && let Some(row) = &row {
+        live_row_keep(entry, row, model);
+    }
     LIVE_PASS.set(None);
     if let Some(mut build) = ROW_BUILD.take()
         && let Some(row) = &mut row
@@ -3195,6 +3463,286 @@ pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: 
         share_parts(row, &mut build.seen);
     }
     row
+}
+
+/// A reply being written, as it was last built (`built_entry`), for a change
+/// to the calls of its last group alone (a call arriving, one finishing, by
+/// part patches): its row made again from the parts that changed, not from
+/// all of them. What it keeps is what the whole build makes of the parts no
+/// patch touched: those are trusted to be as they were (`PATCHED`).
+struct LiveRow {
+    /// Its parts' ids, in order, and where each is.
+    ids: Vec<Rc<str>>,
+    at: rustc_hash::FxHashMap<Rc<str>, usize>,
+    /// Where its last group starts: every part from there is a plain call
+    /// or thought (`plain_part`), all of them the group.
+    tail: usize,
+    /// What each part of the group adds to its line, and their sum.
+    tallies: Vec<Tally>,
+    group: GroupTally,
+    /// Its row's `tools`, those of the last group at their end, in order.
+    tools: Vec<Value>,
+    /// Its blocks before the last group's.
+    head: Vec<Value>,
+    text: Value,
+    started: f64,
+    /// Its last text part, if any (before the last group: none is in it), as
+    /// `draft_of` looks for it.
+    last_text: Option<usize>,
+}
+thread_local! {
+    /// Replies being written (`LiveRow`), by id; a few at once.
+    static LIVE_ROWS: RefCell<rustc_hash::FxHashMap<String, LiveRow>> = RefCell::default();
+    /// While a row is built whole for a test (`built_whole`): `LIVE_ROWS`
+    /// neither read nor kept.
+    static LIVE_ROWS_OFF: Cell<bool> = const { Cell::new(false) };
+    /// Rows made from their kept ones (`live_row_patched`), for tests.
+    static LIVE_ROW_HITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// `build`, its rows built whole: `LIVE_ROWS` untouched (a test's reference).
+#[cfg(test)]
+pub(crate) fn built_whole<T>(build: impl FnOnce() -> T) -> T {
+    LIVE_ROWS_OFF.set(true);
+    let made = build();
+    LIVE_ROWS_OFF.set(false);
+    made
+}
+
+/// How many rows were made from their kept ones so far (`live_row_patched`).
+#[cfg(test)]
+pub(crate) fn live_row_hits() -> u64 {
+    LIVE_ROW_HITS.get()
+}
+/// The most replies `LIVE_ROWS` keeps before it starts again.
+const LIVE_ROWS_MOST: usize = 16;
+
+/// A part a last group's change may be made from alone: a call that isn't a
+/// display's nor a subagent's, nor cut short (`with_host`), or a thought
+/// with words. Each is a row of the group and of `tools`, in its place.
+fn plain_part(p: &Json) -> bool {
+    match p["kind"].as_str() {
+        Some("tool") => {
+            !display_tool(p) && !is_agent(p) && p["outputTruncated"].as_bool() != Some(true)
+        }
+        Some("reasoning") => !p["text"].as_str().unwrap_or_default().trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// The last group's block, from its parts' tools (`tools`, the group's at the
+/// end) and its tally: as `blocks_of` makes it while the reply is written.
+fn live_group_block(
+    parts: &[Json],
+    tail: usize,
+    tools: &[Value],
+    group: &GroupTally,
+) -> Option<Value> {
+    let n = parts.len() - tail;
+    let mut shown: Vec<Value> = tools[tools.len() - n..].to_vec();
+    // (The part being written: its own value.)
+    let last = shown.last_mut()?;
+    *last = tool_live(parts.last()?, true)?;
+    let first = parts[tail]["id"].as_str().unwrap_or_default();
+    Some(Value::record([
+        ("id", Value::from(format!("g:{first}").as_str())),
+        ("kind", Value::from("tools")),
+        ("summary", Value::from(group.text().as_str())),
+        ("live", Value::Bool(true)),
+        ("tools", Value::List(shown.into())),
+    ]))
+}
+
+/// A reply's row as `message` makes it while it's written, from its parts
+/// (`text`, `tools` and `blocks` given).
+fn live_row_value(
+    entry: &Json,
+    text: Value,
+    tools: Vec<Value>,
+    blocks: Vec<Value>,
+    started: f64,
+    model: Option<&str>,
+) -> Value {
+    let mut fields = vec![
+        ("id", Value::from(entry["id"].as_str().unwrap_or_default())),
+        ("role", Value::from("assistant")),
+        ("text", text),
+        ("tools", Value::List(tools.into())),
+        ("blocks", Value::List(blocks.into())),
+        ("streaming", Value::Bool(true)),
+        ("started", Value::Num(started)),
+    ];
+    if let Some(model) = model {
+        fields.push(("model", Value::from(model)));
+    }
+    if let Some(ms) = entry["durationMs"].as_f64() {
+        fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
+    }
+    Value::record(fields)
+}
+
+/// Keep `row`, just built in whole from `entry` (a reply being written), for
+/// its next change (`live_row_patched`), if its last group is made of plain
+/// parts and making it from them gives the very block the build did.
+fn live_row_keep(entry: &Json, row: &Value, model: Option<&str>) {
+    let Some(id) = entry["id"].as_str() else {
+        return;
+    };
+    if LIVE_ROWS_OFF.get() {
+        return;
+    }
+    LIVE_ROWS.with_borrow_mut(|rows| {
+        rows.remove(id);
+    });
+    // (Laid out compact as well, it's built in whole each time.)
+    if COMPACT_SHOWN.get() || entry["role"].as_str() != Some("assistant") {
+        return;
+    }
+    let Some(parts) = entry["parts"].as_array() else {
+        return;
+    };
+    let tail = parts
+        .iter()
+        .rposition(|p| !plain_part(p))
+        .map_or(0, |at| at + 1);
+    if tail == parts.len() {
+        return;
+    }
+    let (Some(Value::List(tools)), Some(Value::List(blocks))) =
+        (row.field("tools").cloned(), row.field("blocks").cloned())
+    else {
+        return;
+    };
+    let n = parts.len() - tail;
+    if tools.len() < n || blocks.is_empty() {
+        return;
+    }
+    let tallies: Vec<Tally> = parts[tail..].iter().map(Tally::of).collect();
+    let mut group = GroupTally::default();
+    for t in &tallies {
+        group.add(t);
+    }
+    // The group as the parts make it, against what the build made: anything
+    // the build saw that this doesn't (a display call before the run, joining
+    // it) and it isn't kept.
+    let made = live_group_block(parts, tail, &tools, &group);
+    if made.as_ref() != blocks.last() {
+        return;
+    }
+    let ids: Vec<Rc<str>> = parts
+        .iter()
+        .map(|p| Rc::from(p["id"].as_str().unwrap_or_default()))
+        .collect();
+    let at = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i))
+        .collect();
+    let kept = LiveRow {
+        ids,
+        at,
+        tail,
+        tallies,
+        group,
+        tools: tools.to_vec(),
+        head: blocks[..blocks.len() - 1].to_vec(),
+        text: row.field("text").cloned().unwrap_or(Value::Nil),
+        started: row
+            .field("started")
+            .and_then(|v| {
+                if let Value::Num(n) = v {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.),
+        last_text: parts[..tail]
+            .iter()
+            .rposition(|p| p["kind"].as_str() == Some("text")),
+    };
+    let _ = model;
+    LIVE_ROWS.with_borrow_mut(|rows| {
+        if rows.len() >= LIVE_ROWS_MOST {
+            rows.clear();
+        }
+        rows.insert(id.to_owned(), kept);
+    });
+}
+
+/// `entry`'s row from its kept one (`LiveRow`), if only part patches changed
+/// it since and only in its last group: plain parts changed in it or added at
+/// its end. `None` for anything else, built in whole.
+fn live_row_patched(entry: &Json, model: Option<&str>) -> Option<Value> {
+    if COMPACT_SHOWN.get() || LIVE_ROWS_OFF.get() {
+        return None;
+    }
+    let id = entry["id"].as_str()?;
+    let parts = entry["parts"].as_array()?;
+    let patched: Vec<String> =
+        PATCHED.with_borrow(|p| p.as_ref().map(|p| p.iter().cloned().collect()))?;
+    LIVE_ROWS.with_borrow_mut(|rows| {
+        let row = rows.get_mut(id)?;
+        let was = row.ids.len();
+        if parts.len() < was {
+            return None;
+        }
+        // Each part patched: in the last group or after it, a plain one, the
+        // one that was there; every part added, patched.
+        let mut changed: Vec<usize> = Vec::with_capacity(patched.len());
+        for pid in &patched {
+            let at = match row.at.get(pid.as_str()) {
+                Some(&at) => at,
+                None => {
+                    was + parts[was..]
+                        .iter()
+                        .position(|p| p["id"].as_str() == Some(pid.as_str()))?
+                }
+            };
+            if at < row.tail
+                || parts[at]["id"].as_str() != Some(pid.as_str())
+                || !plain_part(&parts[at])
+            {
+                return None;
+            }
+            changed.push(at);
+        }
+        if (was..parts.len()).any(|at| !changed.contains(&at)) {
+            return None;
+        }
+        changed.sort_unstable();
+        let first_tool = row.tools.len() - (was - row.tail);
+        // The part written before (its row no longer the one being written).
+        for &at in &changed {
+            let tally = Tally::of(&parts[at]);
+            let value = tool_live(&parts[at], false)?;
+            let j = at - row.tail;
+            if at < was {
+                row.group.remove(&row.tallies[j]);
+                row.tallies[j] = tally.clone();
+                row.tools[first_tool + j] = value;
+            } else {
+                let pid: Rc<str> = Rc::from(parts[at]["id"].as_str().unwrap_or_default());
+                row.at.insert(pid.clone(), at);
+                row.ids.push(pid);
+                row.tallies.push(tally.clone());
+                row.tools.push(value);
+            }
+            row.group.add(&tally);
+        }
+        let block = live_group_block(parts, row.tail, &row.tools, &row.group)?;
+        let mut blocks = row.head.clone();
+        blocks.push(block);
+        LIVE_ROW_HITS.set(LIVE_ROW_HITS.get() + 1);
+        Some(live_row_value(
+            entry,
+            row.text.clone(),
+            row.tools.clone(),
+            blocks,
+            row.started,
+            model,
+        ))
+    })
 }
 
 /// The newest plan in these entries, newest first.
@@ -3259,12 +3807,27 @@ thread_local! {
     /// The calls of replies being written, each as last built, by its id and
     /// whether it was the part being written: its part as it was, and its
     /// value (`tool_live`).
-    static LIVE_TOOLS: RefCell<HashMap<String, [Option<(Json, Option<Value>)>; 2]>> = RefCell::default();
+    static LIVE_TOOLS: RefCell<rustc_hash::FxHashMap<String, [Option<(Json, Option<Value>)>; 2]>> = RefCell::default();
     /// The reply being written as it's built (`built_entry`): each of its
     /// parts' tool by where the part is, as `LIVE_TOOLS` gave it, so the
     /// layouts that show a part (its tools, its blocks, compact) look it up
     /// once.
-    static LIVE_PASS: RefCell<Option<HashMap<(*const Json, bool), Option<Value>>>> = const { RefCell::new(None) };
+    static LIVE_PASS: RefCell<Option<rustc_hash::FxHashMap<(*const Json, bool), Option<Value>>>> = const { RefCell::new(None) };
+    /// While an entry changed by part patches alone is built (`trusting`):
+    /// the parts that changed. Every other part is as `LIVE_TOOLS` last built
+    /// it, its value taken without looking at the part again.
+    static PATCHED: RefCell<Option<rustc_hash::FxHashSet<String>>> = const { RefCell::new(None) };
+    /// Settings' compact transcript is on (`chat.compact`).
+    static COMPACT_SHOWN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `build`, with `patched` (the parts changed since the entry's row was last
+/// built, if only those) trusted to be all that changed.
+pub(crate) fn trusting<T>(patched: Option<&std::collections::HashSet<String>>, build: impl FnOnce() -> T) -> T {
+    PATCHED.set(patched.map(|patched| patched.iter().cloned().collect()));
+    let made = build();
+    PATCHED.set(None);
+    made
 }
 
 /// The most calls `LIVE_TOOLS` keeps before it starts again.
@@ -3410,6 +3973,7 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
             .find(|e| add["entry"].as_str() == Some(&*e.id))
             .ok_or(())?;
         // (A settled entry growing again: its whole copy is the engine's.)
+        entry.patched = None;
         let entry = entry.json.as_mut().ok_or(())?;
         let streaming = entry["status"].as_str() == Some("streaming");
         let part = entry["parts"]
@@ -3449,6 +4013,30 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
             "reasoning" if streaming => words_changed = true,
             _ => {}
         }
+    }
+    // Parts of an entry replaced or added (`partPatches`): the entry otherwise
+    // as it was, its other parts too (`Entry::patched`).
+    for patch in frame["parts"].as_array().into_iter().flatten() {
+        let entry = entries.iter_mut().find(|e| patch["entry"].as_str() == Some(&*e.id)).ok_or(())?;
+        let at = patch["at"].as_u64().ok_or(())? as usize;
+        let part = &patch["part"];
+        let id = part["id"].as_str().ok_or(())?.to_owned();
+        let json = entry.json.as_mut().ok_or(())?;
+        let parts = json["parts"].as_array_mut().ok_or(())?;
+        if at < parts.len() && parts[at]["id"].as_str() == Some(&id) {
+            parts[at] = part.clone();
+        } else if at == parts.len() {
+            parts.push(part.clone());
+        } else {
+            return Err(());
+        }
+        if patch["len"].as_u64().is_some_and(|len| (len as usize) < parts.len()) {
+            return Err(());
+        }
+        if let Some(patched) = &mut entry.patched {
+            patched.insert(id);
+        }
+        rows = true;
     }
     if frame["count"].as_u64().is_some_and(|n| n as usize != entries.len()) {
         return Err(());
@@ -3644,8 +4232,12 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if let Some(ms) = entry["durationMs"].as_f64() {
                 fields.push(("worked", Value::Num((ms / 1000.).round().max(1.))));
             }
-            // The same reply laid out for Settings' compact transcript.
-            if let Some(compact) = compact_blocks(entry) {
+            // The same reply laid out for Settings' compact transcript (one
+            // being written, only while that shows: built with each of its
+            // changes, it'd cost each the whole reply again).
+            if (!streaming || COMPACT_SHOWN.get())
+                && let Some(compact) = compact_blocks(entry)
+            {
                 fields.push(("compact", compact));
             }
             Some(Value::record(fields))
@@ -4084,76 +4676,192 @@ fn is_agent(part: &Json) -> bool {
 /// `tool_group_summary` over crates/proto view.rs's): its thinking, then
 /// what its tools did, then how many failed; the first letter raised.
 fn group_summary(group: &[&Json]) -> String {
-    let thoughts = group.iter().filter(|p| p["kind"].as_str() == Some("reasoning")).count();
-    let calls: Vec<&&Json> = group.iter().filter(|p| p["kind"].as_str() == Some("tool")).collect();
-    let mut segments: Vec<String> = Vec::new();
-    match thoughts {
-        0 => {}
-        1 => segments.push("thought process".into()),
-        n => segments.push(format!("thought {n} times")),
+    let mut tally = GroupTally::default();
+    for p in group {
+        tally.add(&Tally::of(p));
     }
-    if !calls.is_empty() {
-        let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut other, mut failed) =
-            (0, 0, 0, 0, 0, 0, 0);
-        // (Each file once, however often it was edited: a set, so a long
-        // run of edits isn't counted against every one before it.)
-        let mut edited: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for p in &calls {
-            if p["isError"].as_bool() == Some(true) {
-                failed += 1;
-            }
-            let call = &p["call"];
-            match call["kind"].as_str().unwrap_or_default() {
-                "exec" => commands += 1,
-                "writeFile" | "editFile" => {
-                    edited.insert(call["path"].as_str().unwrap_or_default().to_owned());
+    tally.text()
+}
+
+/// What one part of a group adds to its line (`group_summary`): a thought,
+/// a call of a kind (and the file it edited), or nothing.
+#[derive(Clone, PartialEq, Debug)]
+enum Tally {
+    None,
+    Thought,
+    Call {
+        kind: CallKind,
+        failed: bool,
+        edited: Option<String>,
+    },
+}
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CallKind {
+    Command,
+    Edit,
+    Read,
+    Search,
+    Fetch,
+    Todo,
+    Other,
+}
+impl Tally {
+    fn of(p: &Json) -> Tally {
+        match p["kind"].as_str() {
+            Some("reasoning") => Tally::Thought,
+            Some("tool") => {
+                let failed = p["isError"].as_bool() == Some(true);
+                let call = &p["call"];
+                let (kind, edited) = match call["kind"].as_str().unwrap_or_default() {
+                    "exec" => (CallKind::Command, None),
+                    "writeFile" | "editFile" => (
+                        CallKind::Edit,
+                        Some(call["path"].as_str().unwrap_or_default().to_owned()),
+                    ),
+                    "applyPatch" => (
+                        CallKind::Edit,
+                        Some(call["path"].as_str().unwrap_or("patch").to_owned()),
+                    ),
+                    "readFile" => (CallKind::Read, None),
+                    "search" | "glob" | "webSearch" => (CallKind::Search, None),
+                    "webFetch" => (CallKind::Fetch, None),
+                    "todo" => (CallKind::Todo, None),
+                    _ => (CallKind::Other, None),
+                };
+                Tally::Call {
+                    kind,
+                    failed,
+                    edited,
                 }
-                "applyPatch" => {
-                    edited.insert(call["path"].as_str().unwrap_or("patch").to_owned());
+            }
+            _ => Tally::None,
+        }
+    }
+}
+/// A group's parts, counted for its line: kept as parts come, change and go
+/// (a reply being written: `LiveRow`), so the line is made without looking
+/// at the group's other parts again.
+#[derive(Default, Clone)]
+struct GroupTally {
+    thoughts: usize,
+    calls: usize,
+    commands: usize,
+    reads: usize,
+    searches: usize,
+    fetches: usize,
+    todos: usize,
+    other: usize,
+    failed: usize,
+    /// Each file once, however often it was edited: how many edits each.
+    edited: HashMap<String, usize>,
+}
+impl GroupTally {
+    fn add(&mut self, tally: &Tally) {
+        self.count(tally, true);
+    }
+    fn remove(&mut self, tally: &Tally) {
+        self.count(tally, false);
+    }
+    fn count(&mut self, tally: &Tally, add: bool) {
+        let step = |n: &mut usize| {
+            if add {
+                *n += 1;
+            } else {
+                *n -= 1;
+            }
+        };
+        match tally {
+            Tally::None => {}
+            Tally::Thought => step(&mut self.thoughts),
+            Tally::Call {
+                kind,
+                failed,
+                edited,
+            } => {
+                step(&mut self.calls);
+                if *failed {
+                    step(&mut self.failed);
                 }
-                "readFile" => reads += 1,
-                "search" | "glob" | "webSearch" => searches += 1,
-                "webFetch" => fetches += 1,
-                "todo" => todos += 1,
-                _ => other += 1,
+                match kind {
+                    CallKind::Command => step(&mut self.commands),
+                    CallKind::Read => step(&mut self.reads),
+                    CallKind::Search => step(&mut self.searches),
+                    CallKind::Fetch => step(&mut self.fetches),
+                    CallKind::Todo => step(&mut self.todos),
+                    CallKind::Other => step(&mut self.other),
+                    CallKind::Edit => {
+                        let path = edited.clone().unwrap_or_default();
+                        if add {
+                            *self.edited.entry(path).or_default() += 1;
+                        } else if let Some(n) = self.edited.get_mut(&path) {
+                            *n -= 1;
+                            if *n == 0 {
+                                self.edited.remove(&path);
+                            }
+                        }
+                    }
+                }
             }
         }
-        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-        let mut tools: Vec<String> = Vec::new();
-        if commands > 0 {
-            tools.push(format!("ran {}", plural(commands, "command", "commands")));
-        }
-        if !edited.is_empty() {
-            tools.push(format!("edited {}", plural(edited.len(), "file", "files")));
-        }
-        if reads > 0 {
-            tools.push(format!("read {}", plural(reads, "file", "files")));
-        }
-        if searches > 0 {
-            tools.push(format!("searched {}", plural(searches, "time", "times")));
-        }
-        if fetches > 0 {
-            tools.push(format!("fetched {}", plural(fetches, "page", "pages")));
-        }
-        if todos > 0 {
-            tools.push("updated todos".into());
-        }
-        if other > 0 {
-            tools.push(format!("called {}", plural(other, "tool", "tools")));
-        }
-        if tools.is_empty() {
-            tools.push(plural(calls.len(), "tool", "tools"));
-        }
-        if failed > 0 {
-            tools.push(format!("{failed} failed"));
-        }
-        segments.push(tools.join(" · "));
     }
-    let mut summary = segments.join(" · ");
-    if let Some(first) = summary.get_mut(..1) {
-        first.make_ascii_uppercase();
+    /// The line: its thinking, then what its tools did, then how many failed;
+    /// the first letter raised.
+    fn text(&self) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        match self.thoughts {
+            0 => {}
+            1 => segments.push("thought process".into()),
+            n => segments.push(format!("thought {n} times")),
+        }
+        if self.calls > 0 {
+            let plural = |n: usize, one: &str, many: &str| {
+                format!("{n} {}", if n == 1 { one } else { many })
+            };
+            let mut tools: Vec<String> = Vec::new();
+            if self.commands > 0 {
+                tools.push(format!(
+                    "ran {}",
+                    plural(self.commands, "command", "commands")
+                ));
+            }
+            if !self.edited.is_empty() {
+                tools.push(format!(
+                    "edited {}",
+                    plural(self.edited.len(), "file", "files")
+                ));
+            }
+            if self.reads > 0 {
+                tools.push(format!("read {}", plural(self.reads, "file", "files")));
+            }
+            if self.searches > 0 {
+                tools.push(format!(
+                    "searched {}",
+                    plural(self.searches, "time", "times")
+                ));
+            }
+            if self.fetches > 0 {
+                tools.push(format!("fetched {}", plural(self.fetches, "page", "pages")));
+            }
+            if self.todos > 0 {
+                tools.push("updated todos".into());
+            }
+            if self.other > 0 {
+                tools.push(format!("called {}", plural(self.other, "tool", "tools")));
+            }
+            if tools.is_empty() {
+                tools.push(plural(self.calls, "tool", "tools"));
+            }
+            if self.failed > 0 {
+                tools.push(format!("{} failed", self.failed));
+            }
+            segments.push(tools.join(" · "));
+        }
+        let mut summary = segments.join(" · ");
+        if let Some(first) = summary.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        summary
     }
-    summary
 }
 
 /// A part as ds/activity's tool: its kind, what it did, to what.
@@ -4207,8 +4915,10 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
 /// The tool of a part of a reply being written: as `LIVE_TOOLS` has it if
 /// the part is as it was, else built and kept.
 fn live_tool(id: &str, part: &Json, live: bool) -> Option<Value> {
+    // (A part no patch touched is the one built: not compared again.)
+    let unchanged = PATCHED.with_borrow(|patched| patched.as_ref().is_some_and(|patched| !patched.contains(id)));
     let kept = LIVE_TOOLS.with_borrow(|kept| {
-        kept.get(id)?[usize::from(live)].as_ref().filter(|(was, _)| was == part).map(|(_, built)| built.clone())
+        kept.get(id)?[usize::from(live)].as_ref().filter(|(was, _)| unchanged || was == part).map(|(_, built)| built.clone())
     });
     if let Some(built) = kept {
         return built;
@@ -4536,6 +5246,11 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         .iter()
         .map(|q| {
             let mut fields = vec![("id", s(&q["id"])), ("text", s(&q["text"]))];
+            // When it was queued (seconds): one that waited long is said so
+            // before it goes.
+            if let Some(ms) = q["issuedAt"].as_f64() {
+                fields.push(("at", Value::Num(ms / 1000.)));
+            }
             let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
@@ -4572,6 +5287,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),
         ("ask", ask),
         ("queue", Value::List(queue.into())),
+        ("waiting", waiting_value(&open.waiting)),
         ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
     ];
@@ -4666,16 +5382,47 @@ pub(crate) fn draft_of(e: &Json) -> Value {
     if e["status"].as_str() != Some("streaming") {
         return draft_value("", "");
     }
-    let tail = e["parts"].as_array().and_then(|parts| parts.iter().rev().find(|p| p["kind"].as_str() == Some("text")));
     let id = e["id"].as_str().unwrap_or_default();
+    // Its row kept as it is now (`LiveRow`): where its last text is, without
+    // looking back through the calls after it.
+    let kept = e["parts"]
+        .as_array()
+        .filter(|_| !LIVE_ROWS_OFF.get())
+        .and_then(|parts| {
+            LIVE_ROWS.with_borrow(|rows| {
+                let row = rows.get(id)?;
+                let last = parts.last()?["id"].as_str()?;
+                (row.ids.len() == parts.len() && row.ids.last().is_some_and(|l| **l == *last))
+                    .then_some(row.last_text)
+            })
+        });
+    if let Some(None) = kept
+        && let Some(Value::Str(text)) =
+            LIVE_ROWS.with_borrow(|rows| rows.get(id).map(|row| row.text.clone()))
+    {
+        return with_thought(draft_value(id, &text), e["parts"].as_array());
+    }
+    let tail = e["parts"].as_array().and_then(|parts| match kept {
+        Some(Some(at)) => parts.get(at).filter(|p| p["kind"].as_str() == Some("text")),
+        _ => parts
+            .iter()
+            .rev()
+            .find(|p| p["kind"].as_str() == Some("text")),
+    });
     let words = match tail {
         // (`text`, the tail's words too: the page reads the block's, and of
         // `text` only whether any are yet.)
         Some(tail) => Value::record([
             ("id", Value::from(id)),
-            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
+            (
+                "text",
+                Value::from(tail["text"].as_str().unwrap_or_default()),
+            ),
             ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
-            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
+            (
+                "part_text",
+                Value::from(tail["text"].as_str().unwrap_or_default()),
+            ),
         ]),
         None => draft_value(id, &entry_text(e)),
     };
@@ -4735,6 +5482,61 @@ fn seconds(value: &Json) -> Option<i64> {
         out -= sign * (oh * 3600 + om * 60);
     }
     Some(out)
+}
+
+/// Why `RemoveHeldSend` didn't answer: "unsupported" from an engine from before
+/// it (which can't take a send back), else as any call's.
+fn held_removal_failure(error: &str) -> Outcome {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("unknown method") || lower.contains("unknownmethod") {
+        "unsupported"
+    } else {
+        engine::outcome(error)
+    }
+}
+
+/// A chat's messages not yet taken by its agent: each its id, the message it
+/// becomes, its words (without the attachments' trailer: the files' names,
+/// when there are no words), when it went out and when it stops being run
+/// (seconds, as the scripts' times are), whether it's still in this device's
+/// outbox, and why it stopped trying, if it did.
+fn waiting_value(items: &[Json]) -> Value {
+    let secs = |v: &Json| v.as_f64().map_or(Value::Nil, |ms| Value::Num(ms / 1000.));
+    let s = |v: &Json| v.as_str().filter(|t| !t.is_empty()).map_or(Value::Nil, Value::from);
+    let words = |v: &Json| {
+        let (words, paths) = split_attachments(v.as_str().unwrap_or_default());
+        let names = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect::<Vec<_>>().join(", ");
+        let shown = if words.trim().is_empty() { names } else { words };
+        if shown.is_empty() { Value::Nil } else { Value::from(shown.as_str()) }
+    };
+    Value::List(
+        items
+            .iter()
+            .map(|w| {
+                Value::record([
+                    ("id", s(&w["id"])),
+                    ("message", s(&w["messageId"])),
+                    ("text", words(&w["prompt"])),
+                    ("sent", secs(&w["sentAt"])),
+                    ("expires", secs(&w["expiresAt"])),
+                    ("held", Value::Bool(w["held"].as_bool() == Some(true))),
+                    ("failure", s(&w["failure"])),
+                ])
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// Whether a device's agent is one its composer offers. On a Cloud session's
+/// machine, one Cloud has no account for still is: the chat already runs it, so
+/// its model must read as itself (a new chat on Cloud, picked by the logical
+/// device, still offers only those it can run).
+fn offered(h: &Json, device: &str) -> bool {
+    let session_machine = device.starts_with("cloud-");
+    h["id"].as_str() != Some("mock")
+        && h["installed"].as_bool() != Some(false)
+        && (session_machine || h["enabled"].as_bool() != Some(false))
 }
 
 fn stale(updated: &Json) -> bool {
@@ -5888,6 +6690,10 @@ mod tests {
         let claude = json!({ "id": "opus", "options": [{ "id": "fastMode", "label": "Fast", "defaultChoice": "off", "choices": [{ "id": "off", "label": "Off" }, { "id": "on", "label": "On" }] }] });
         assert_eq!(fast_option(&claude), Some(("fastMode".into(), "on".into(), "off".into())));
         assert!(model_value("claude-code", &claude).field("options").is_none());
+        // The agent's default rides along when marked, and only then.
+        assert!(model_value("claude-code", &claude).field("default").is_none());
+        let marked = json!({ "id": "claude-opus-5-5", "default": true });
+        assert!(matches!(model_value("claude-code", &marked).field("default"), Some(Value::Bool(true))));
     }
 
     #[test]
@@ -6212,6 +7018,59 @@ mod tests {
         // Failed, then shown on another try: the stumble isn't drawn.
         let retried = blocks(&reply(vec![mcp("s1", true), mcp("s2", false), image("i1", "a.png")]));
         assert_eq!(kinds(&retried), ["images"]);
+    }
+
+    #[test]
+    fn waiting_messages_read_in_seconds_with_their_failure() {
+        let items = vec![
+            json!({ "id": "c1", "chatId": "s2", "messageId": "m1", "prompt": "Ship it", "issuedBy": "mac",
+                "sentAt": 1_800_000_000_000_i64, "expiresAt": 1_800_604_800_000_i64 }),
+            json!({ "id": "o1", "chatId": "s2", "prompt": "With files", "issuedBy": "mac", "sentAt": 1_800_000_000_000_i64,
+                "held": true, "failure": "too many files are waiting for Cloud machines to collect them; retry once one has" }),
+        ];
+        let out: Json = serde_json::from_str(&super::waiting_value(&items).to_json()).unwrap();
+        assert_eq!(out[0]["text"], "Ship it");
+        assert_eq!(out[0]["message"], "m1");
+        assert_eq!(out[0]["sent"], 1_800_000_000.0);
+        assert_eq!(out[0]["expires"], 1_800_604_800.0);
+        assert_eq!(out[0]["held"], false);
+        assert!(out[0]["failure"].is_null());
+        assert_eq!(out[1]["held"], true);
+        assert!(out[1]["expires"].is_null());
+        assert!(out[1]["failure"].as_str().unwrap().starts_with("too many files"));
+    }
+
+    #[test]
+    fn an_outbox_send_reads_as_its_words_or_its_files() {
+        let trailer = "\n\nAttached images (local files — open them to view):\n- /tmp/up/a.png\n- /tmp/up/b.pdf";
+        let items = vec![
+            json!({ "id": "o1", "prompt": format!("Look at these{trailer}"), "held": true }),
+            json!({ "id": "o2", "prompt": format!("See the attached image(s).{trailer}"), "held": true }),
+        ];
+        let out: Json = serde_json::from_str(&super::waiting_value(&items).to_json()).unwrap();
+        assert_eq!(out[0]["text"], "Look at these");
+        assert_eq!(out[1]["text"], "a.png, b.pdf");
+    }
+
+    #[test]
+    fn an_engine_without_removal_says_so() {
+        assert_eq!(super::held_removal_failure("unknown method: RemoveHeldSend"), "unsupported");
+        assert_eq!(super::held_removal_failure("offline"), "offline");
+        assert_eq!(super::held_removal_failure("chat not found"), "failed");
+    }
+
+    #[test]
+    fn a_cloud_chats_own_agent_stays_offered_without_an_account() {
+        let codex = json!({ "id": "codex", "installed": true, "enabled": false });
+        // On the chat's own machine: listed, so its model reads as itself.
+        assert!(super::offered(&codex, "cloud-s-chat-1"));
+        // Anywhere else (a computer, the logical Cloud device a new chat picks
+        // from): only what can run there.
+        assert!(!super::offered(&codex, "cloud"));
+        assert!(!super::offered(&codex, "mac"));
+        assert!(!super::offered(&json!({ "id": "mock" }), "cloud-s-chat-1"));
+        assert!(!super::offered(&json!({ "id": "claude-code", "installed": false }), "cloud-s-chat-1"));
+        assert!(super::offered(&json!({ "id": "claude-code" }), "mac"));
     }
 
     #[test]

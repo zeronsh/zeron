@@ -16,11 +16,16 @@
  *   DELETE /cloud/{orgId}/projects/{spaceId}       remove a project + its sessions (user)
  *   GET    /cloud/{orgId}/sessions                 sessions (user)
  *   POST   /cloud/{orgId}/sessions                 {chatId, spaceId}: a machine for a new chat (user)
- *   POST   /cloud/{orgId}/sessions/{chatId}/wake|sleep|retry (user)
+ *   PUT    /cloud/{orgId}/machine                  {machine}: the default for new sessions (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/wake   {machine?, wake?}: wake, or pick its size asleep (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/retry  {machine?}: retry; a fresh machine once its data expired (user)
+ *   POST   /cloud/{orgId}/sessions/{chatId}/sleep  (user)
  *   DELETE /cloud/{orgId}/sessions/{chatId}        delete that session's machine (user)
  *   POST   /runner/enroll                  pre-bearer: one-time code → key
  *   POST   /runner/token                   pre-bearer: signed ts → runner JWT
  *   POST   /runner/heartbeat               runner bearer
+ *   POST   /runner/wake-timing             runner bearer: a wake's engine side
+ *   POST   /runner/wake-stage              runner bearer: how far a wake has got
  *
  * Every route lands on the caller's OWN CloudAccount DO (`cloud1/{org}/{user}`,
  * org/user from the verified bearer — or, for the two pre-bearer runner
@@ -31,15 +36,17 @@ import type { Verified } from "../auth";
 import type { Env } from "../env";
 import { json, jsonError, readJsonBody } from "../http";
 import type { CloudResult, RepoInput } from "./cloud-account";
+import type { SandboxMachine } from "./sandbox-provider";
 import { isEdgeOrigin } from "./install-script";
 import { DAY_MS, dayKey, isDayKey } from "./metering";
 import { CLOUD_MODELS } from "./models";
 
 /** The longest range a usage read covers. */
 const MAX_USAGE_DAYS = 366;
-import { CLOUD_DEVICE_PREFIX, cloudAccountName } from "./policy";
+import { CLOUD_DEVICE_PREFIX, MACHINES, cloudAccountName, machineName, parseMachine } from "./policy";
 import { MAX_PACKS, billingAvailable, parseEvent, planById, verifySignature, type StripeEnv } from "./stripe";
 import { sandboxProvider, type ProviderEnv } from "./providers";
+import { parseEngineTiming, parseWakeStage } from "./wake";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const CLOUD_ID_RE = /^cloud-[A-Za-z0-9-]{1,100}$/;
@@ -68,8 +75,36 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const unavailable = () => jsonError(503, "unavailable", "Cloud is not available on this server.");
 
+/**
+ * What a client names here it can parse. An engine's `CloudState` is a closed
+ * enum, so one state it has never heard of fails its whole session list: shipped
+ * engines must never receive `data_expired`. A client that sends nothing gets the
+ * nearest state it knows, plus a field for anything newer reading it.
+ */
+const CLOUD_STATES_HEADER = "x-zeron-cloud-states";
+
+const understandsDataExpired = (request: Request): boolean =>
+  (request.headers.get(CLOUD_STATES_HEADER) ?? "")
+    .split(",")
+    .some((state) => state.trim() === "data_expired");
+
+type SessionLike = { readonly state?: unknown };
+
+/** A session as a client that doesn't name `data_expired` can read it: `error`,
+ * with the message saying what happened. Its Retry reaches a typed refusal. */
+const sessionForOlderClient = <T extends SessionLike>(session: T): T | (Omit<T, "state"> & { state: "error" }) =>
+  session.state === "data_expired" ? { ...session, state: "error", failedAction: "wake", dataExpired: true } : session;
+
+/** One session, or `{sessions}`, as this client can read it. */
+const forClient = <T>(request: Request, value: T): T => {
+  if (understandsDataExpired(request)) return value;
+  const body = value as { sessions?: SessionLike[] } & SessionLike;
+  if (Array.isArray(body?.sessions)) return { ...body, sessions: body.sessions.map(sessionForOlderClient) } as T;
+  return sessionForOlderClient(body) as T;
+};
+
 const reply = <T>(result: CloudResult<T>): Response =>
-  result.ok ? json(result.value) : jsonError(result.status, result.error, result.message);
+  result.ok ? json(result.value) : json({ ...result.details, error: result.error, message: result.message }, result.status);
 
 const accountStub = (ns: NonNullable<Env["CLOUD_ACCOUNTS"]>, orgId: string, userId: string) =>
   ns.get(ns.idFromName(cloudAccountName(orgId, userId)));
@@ -209,6 +244,19 @@ export const handleRunnerPublicRoute = async (
 const count = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_COUNT ? value : undefined;
 
+const byteCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+/** An optional `{machine}` body: no body at all is fine, a size it doesn't
+ * name isn't. */
+const machineOfBody = (body: unknown): { readonly machine?: SandboxMachine } | "bad" => {
+  if (!isObject(body) || body.machine === undefined) return {};
+  const machine = machineName(body.machine);
+  return machine ? { machine } : "bad";
+};
+
+const BAD_MACHINE = `Expected machine: ${MACHINES.map((m) => m.id).join(" | ")}.`;
+
 /** `/cloud/*` (user bearer) and `/runner/heartbeat` (runner bearer). */
 export const handleCloudRoute = async (
   request: Request,
@@ -230,8 +278,54 @@ export const handleCloudRoute = async (
     if (activeRuns === undefined || clients === undefined) {
       return jsonError(400, "bad_request", "Expected {activeRuns, clients}.");
     }
+    // Newer engines also report background work (a parked chat's subagents)
+    // and runs waiting on an answer; older ones send neither.
+    const backgroundRuns = count(body.backgroundRuns) ?? 0;
+    const waitingRuns = Math.min(count(body.waitingRuns) ?? 0, activeRuns);
+    const diskUsedBytes = byteCount(body.diskUsedBytes);
+    // How often it beats from here on (newer engines): how late a beat may be
+    // before the machine counts as gone.
+    const every = count(body.everySecs);
+    const everySecs = every !== undefined && every >= 1 && every <= 3600 ? every : undefined;
+    const storeRecoveredAt = byteCount(body.storeRecoveredAt);
     const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
-    return rpc(() => accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, { activeRuns, clients }));
+    return rpc(() =>
+      accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, {
+        activeRuns,
+        clients,
+        backgroundRuns,
+        waitingRuns,
+        ...(diskUsedBytes === undefined ? {} : { diskUsedBytes }),
+        ...(everySecs === undefined ? {} : { everySecs }),
+        ...(storeRecoveredAt === undefined ? {} : { storeRecoveredAt })
+      })
+    );
+  }
+
+  if (url.pathname === "/runner/wake-stage") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const parsed = parseWakeStage(await readJsonBody(request, MAX_RUNNER_BODY));
+    if (!parsed) return jsonError(400, "bad_request", "Expected {stage}.");
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).wakeStage(runner, parsed.stage));
+  }
+
+  if (url.pathname === "/runner/wake-timing") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const timing = parseEngineTiming(await readJsonBody(request, MAX_RUNNER_BODY), Date.now());
+    if (!timing) return jsonError(400, "bad_request", "Expected stage times in Unix milliseconds.");
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).wakeTimingReport(runner, timing));
   }
 
   const parts = url.pathname.split("/").filter(Boolean);
@@ -261,7 +355,9 @@ export const handleCloudRoute = async (
   if (rest.length === 0 && request.method === "GET") {
     // An unconfigured deployment still answers status, so the UI can hide
     // the enable button instead of erroring.
-    if (!ns) return json({ state: "off", awakeSessions: 0, maxAwakeSessions: 0, available: false });
+    if (!ns) {
+      return json({ state: "off", awakeSessions: 0, maxAwakeSessions: 0, available: false, machines: MACHINES, machine: parseMachine(undefined) });
+    }
     const available = cloudAvailable(env);
     return rpc(async () => {
       const status = await accountStub(ns, orgId, auth.userId).status(caller);
@@ -340,9 +436,20 @@ export const handleCloudRoute = async (
     if (!cloudAvailable(env)) return unavailable();
     return rpc(() => stub.enable(caller));
   }
+  if (rest.length === 1 && rest[0] === "machine" && request.method === "PUT") {
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    const machine = isObject(body) ? machineName(body.machine) : undefined;
+    if (!machine) return jsonError(400, "bad_request", BAD_MACHINE);
+    return rpc(() => stub.setDefaultMachine(caller, machine));
+  }
 
   if (rest[0] === "sessions") {
-    if (rest.length === 1 && request.method === "GET") return rpc(async () => stub.listSessions(caller));
+    const sessionRpc = <T>(run: () => Promise<CloudResult<T>>) =>
+      rpc(async () => {
+        const result = await run();
+        return result.ok ? { ok: true as const, value: forClient(request, result.value) } : result;
+      });
+    if (rest.length === 1 && request.method === "GET") return sessionRpc(async () => stub.listSessions(caller));
     if (rest.length === 1 && request.method === "POST") {
       if (!cloudAvailable(env)) return unavailable();
       if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
@@ -360,7 +467,7 @@ export const handleCloudRoute = async (
         if (config !== undefined && !isChildConfig(config)) {
           return jsonError(400, "bad_request", "Expected config {harness: codex | claude-code, …}.");
         }
-        return rpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
+        return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
       }
       const { chatId, spaceId, repo, branch } = body;
       if (typeof chatId !== "string" || !ID_RE.test(chatId)) return jsonError(400, "bad_request", "Bad chatId.");
@@ -371,17 +478,25 @@ export const handleCloudRoute = async (
       if (branch !== undefined && (typeof branch !== "string" || branch.length > 255)) {
         return jsonError(400, "bad_request", "Bad branch.");
       }
-      return rpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch));
+      return sessionRpc(() => stub.createSession(caller, chatId, spaceId, repo as unknown as RepoInput, edgeUrl, branch));
     }
     const chatId = rest[1];
     if (!chatId || !ID_RE.test(chatId)) return jsonError(404, "not_found", "Not found.");
-    if (rest.length === 2 && request.method === "DELETE") return rpc(() => stub.deleteSession(caller, chatId));
+    if (rest.length === 2 && request.method === "DELETE") return sessionRpc(() => stub.deleteSession(caller, chatId));
     if (rest.length === 3 && request.method === "POST") {
-      if (rest[2] === "wake") return rpc(() => stub.wakeSession(caller, chatId));
-      if (rest[2] === "sleep") return rpc(() => stub.sleepSession(caller, chatId));
+      if (rest[2] === "wake") {
+        const body = await readJsonBody(request, MAX_RUNNER_BODY);
+        const picked = machineOfBody(body);
+        if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
+        const options = { ...picked, ...(isObject(body) && body.wake === false ? { wake: false } : {}) };
+        return sessionRpc(() => stub.wakeSession(caller, chatId, options));
+      }
+      if (rest[2] === "sleep") return sessionRpc(() => stub.sleepSession(caller, chatId));
       if (rest[2] === "retry") {
         if (!isEdgeOrigin(edgeUrl)) return jsonError(500, "misconfigured", "Bad CLOUD_EDGE_URL.");
-        return rpc(() => stub.retrySession(caller, chatId, edgeUrl));
+        const picked = machineOfBody(await readJsonBody(request, MAX_RUNNER_BODY));
+        if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
+        return sessionRpc(() => stub.retrySession(caller, chatId, edgeUrl, picked.machine));
       }
     }
   }
@@ -395,21 +510,32 @@ export const handleCloudRoute = async (
  * (nudges queue in the DeviceRoom and replay once the engine is back). Only
  * sends wake a session; dials (viewing a chat) never do. The DO is the
  * caller's own, so another user's device id is simply not found there.
+ *
+ * A Cloud machine's runner wakes a session too, but only one it started (its
+ * delegate): the agent there sent work to a side chat on a machine that went
+ * to sleep. The account DO checks the parentage, as it does for every other
+ * session action a runner takes.
  */
 export const autoWakeCloudDevice = (
   env: Pick<Env, "CLOUD_ACCOUNTS" | "CLOUD_ACCESS" | "AUTH_MODE">,
   ctx: Pick<ExecutionContext, "waitUntil">,
   auth: Verified,
-  deviceId: string
+  deviceId: string,
+  /** Where a machine that never finished provisioning reports, if it retries. */
+  edgeUrl?: string
 ): void => {
   const ns = env.CLOUD_ACCOUNTS;
-  if (!ns || auth.kind !== "user" || !auth.orgId || !deviceId.startsWith(CLOUD_DEVICE_PREFIX)) return;
+  if (!ns || !auth.orgId || !deviceId.startsWith(CLOUD_DEVICE_PREFIX)) return;
+  if (auth.kind === "runner" && !auth.deviceId) return;
   // Off the beta list: nothing wakes (their machines stay asleep until deleted).
   if (!cloudOffered(env, auth)) return;
-  const caller = { orgId: auth.orgId, userId: auth.userId };
+  const caller =
+    auth.kind === "runner"
+      ? { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId }
+      : { orgId: auth.orgId, userId: auth.userId };
   ctx.waitUntil(
     accountStub(ns, caller.orgId, caller.userId)
-      .autoWake(caller, deviceId)
+      .autoWake(caller, deviceId, edgeUrl)
       .then(() => undefined)
       .catch((e: unknown) => console.warn("cloud auto-wake failed", String(e)))
   );

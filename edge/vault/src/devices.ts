@@ -48,7 +48,8 @@ export type AuditEvent =
   | "refresh"
   | "refresh_failed"
   | "github_connect"
-  | "github_installation_token";
+  | "github_installation_token"
+  | "github_revoke";
 
 export interface AuditEntry {
   readonly event: AuditEvent;

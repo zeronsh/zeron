@@ -84,6 +84,9 @@ export type Notice = {
 	spinner: boolean?,
 	action: string?,
 	dismissable: boolean?,
+	-- Worth knowing, not worth raising: read with the deck's alerts once
+	-- they're open, never putting up the pill on its own.
+	quiet: boolean?,
 }
 export type Answer = { values: { string }, text: string }
 -- Where an existing chat works (`branch_fixed`).
@@ -2366,6 +2369,7 @@ return ui.component(function(props: Props): Node
 					action = n.action,
 					spinner = n.spinner,
 					dismissable = n.dismissable == true,
+					quiet = n.quiet == true,
 				})
 			end
 			if props.alerts then

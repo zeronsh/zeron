@@ -652,7 +652,7 @@ local function save()
 		end, function(err: any)
 			busy:set(false)
 			local word = if type(err) == "table" then err.message elseif type(err) == "string" then err else nil
-			failed:set(if word == "offline" or word == "signed_out" or word == "too_large" then word else "upload")
+			failed:set(if word == "offline" or word == "signed_out" or word == "too_large" or word == "unavailable" then word else "upload")
 		end)
 		return
 	end

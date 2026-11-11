@@ -966,6 +966,35 @@ impl RegistryDoc {
         }]);
     }
 
+    /// An `update` carrying only the fields whose value differs from what
+    /// the row already shows (overlay included), and nothing when none do.
+    /// Every write the room applies costs it a stored row and a broadcast to
+    /// every device, and host stamps (harness session, branch, source
+    /// context) repeat on every turn while rarely changing. A missing field
+    /// equals `null`. `same` decides equality per field.
+    fn update_changed(
+        &mut self,
+        kind: &str,
+        id: &str,
+        set: BTreeMap<String, Value>,
+        same: impl Fn(&str, &Value, &Value) -> bool,
+    ) {
+        let current = self.overlay_row(kind, id);
+        let set: BTreeMap<String, Value> = set
+            .into_iter()
+            .filter(|(key, value)| {
+                let now = current
+                    .as_ref()
+                    .and_then(|row| row.fields.get(key))
+                    .unwrap_or(&Value::Null);
+                !same(key, now, value)
+            })
+            .collect();
+        if !set.is_empty() {
+            self.write(kind, id, OpKind::Update, set);
+        }
+    }
+
     fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
         let hlc = self.next_hlc();
         let ops = keys
@@ -1083,6 +1112,21 @@ impl RegistryDoc {
             OpKind::Update,
             fields([("name", json!(name))]),
         );
+        Ok(true)
+    }
+
+    /// A device removed from the account (Settings → Devices, from any other
+    /// device): its row tombstoned, as the edge retires a deleted Cloud
+    /// session's machine. Nothing lists or dials it after (`device_deleted`);
+    /// its chats and spaces keep their rows. The device's own engine revives
+    /// the row at its next boot (`upsert_device` is a newer write), so a
+    /// computer still signed in comes back the next time Zeron opens on it.
+    /// `false` when no such row (already gone, or never heard of).
+    pub fn delete_device(&mut self, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_DEVICES, device_id) {
+            return Ok(false);
+        }
+        self.delete_row_ops(&[(KIND_DEVICES, device_id)]);
         Ok(true)
     }
 
@@ -1422,6 +1466,43 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// The chat's activity times, and nothing else on its row.
+    pub fn set_chat_activity(
+        &mut self,
+        chat_id: &str,
+        last_message_at: Option<i64>,
+        created_at: Option<i64>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        let mut set = BTreeMap::new();
+        if let Some(ms) = last_message_at {
+            set.insert("lastMessageAt".to_string(), json!(ms));
+        }
+        if let Some(ms) = created_at {
+            set.insert("createdAt".to_string(), json!(ms));
+        }
+        if !set.is_empty() {
+            self.write(KIND_CHATS, chat_id, OpKind::Update, set);
+        }
+        Ok(true)
+    }
+
+    /// Re-home a chat, and nothing else on its row.
+    pub fn set_chat_host(&mut self, chat_id: &str, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("deviceId", json!(device_id))]),
+        );
+        Ok(true)
+    }
+
     /// Flip the chat's sync room generation (docs/chat2-sync.md M2). The
     /// host calls this in the same breath as seeding the chat2 checkpoint;
     /// LWW per-field like every registry write, so the flip is per-chat and
@@ -1430,11 +1511,11 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
+        self.update_changed(
             KIND_CHATS,
             chat_id,
-            OpKind::Update,
             fields([("roomGen", json!(room_gen))]),
+            same_value,
         );
         Ok(true)
     }
@@ -1443,11 +1524,11 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
+        self.update_changed(
             KIND_CHATS,
             chat_id,
-            OpKind::Update,
             fields([("branch", json!(branch))]),
+            same_value,
         );
         Ok(true)
     }
@@ -1460,15 +1541,30 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
+        // Captured before every fresh dispatch: unchanged unless the
+        // checkout moved. `observedAt` alone moving is not a change (nothing
+        // reads it back).
+        self.update_changed(
             KIND_CHATS,
             chat_id,
-            OpKind::Update,
             fields([
                 ("sourceContext", serde_json::to_value(context)?),
                 ("branch", json!(context.branch)),
                 ("checkoutId", json!(context.checkout_id)),
             ]),
+            |key, now, next| {
+                if key != "sourceContext" {
+                    return now == next;
+                }
+                let observed = |value: &Value| {
+                    let mut value = value.clone();
+                    if let Some(map) = value.as_object_mut() {
+                        map.remove("observedAt");
+                    }
+                    value
+                };
+                observed(now) == observed(next)
+            },
         );
         Ok(true)
     }
@@ -1480,12 +1576,7 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([("cwd", json!(cwd))]),
-        );
+        self.update_changed(KIND_CHATS, chat_id, fields([("cwd", json!(cwd))]), same_value);
         Ok(true)
     }
 
@@ -1497,11 +1588,11 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
+        self.update_changed(
             KIND_CHATS,
             chat_id,
-            OpKind::Update,
             fields([("checkoutId", json!(checkout_id))]),
+            same_value,
         );
         Ok(true)
     }
@@ -1536,15 +1627,17 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
+        // Stamped at every SessionStarted and Done, while one session
+        // usually spans many turns.
+        self.update_changed(
             KIND_CHATS,
             chat_id,
-            OpKind::Update,
             fields([
                 ("harnessSessionId", json!(session_id)),
                 ("harnessSessionCwd", json!(cwd)),
                 ("harnessSessionHarness", opt_str(harness)),
             ]),
+            same_value,
         );
         Ok(true)
     }
@@ -1834,6 +1927,11 @@ fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect()
+}
+
+/// Plain JSON equality, for [`RegistryDoc::update_changed`].
+fn same_value(_key: &str, now: &Value, next: &Value) -> bool {
+    now == next
 }
 
 fn opt_str(value: Option<&str>) -> Value {

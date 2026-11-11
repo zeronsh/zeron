@@ -252,7 +252,7 @@ local model = {
 	devices = {
 		{ id = "mac", name = "MacBook Pro", platform = "macos", here = true },
 		{ id = "box", name = "devbox", platform = "linux", here = false },
-	},
+	} :: { any },
 	projects = {
 		{ id = "atlas", name = "Atlas", device = "mac", path = "/work/atlas", git = true },
 		{ id = "borealis", name = "Borealis", device = "box", path = "/srv/borealis", git = true },
@@ -272,6 +272,8 @@ local model = {
 
 -- (`fixture.sessions_loading`: an engine that hasn't answered yet, nothing heard.)
 local unheard = false
+-- (`fixture.engine_offline`: no engine to ask, nothing heard.)
+local no_engine = false
 local function publish()
 	local chats = {}
 	for _, c in model.chats do
@@ -286,7 +288,7 @@ local function publish()
 		table.insert(sections, { id = s.id, name = s.name, sessions = table.clone(s.sessions), collapsed = s.collapsed == true })
 	end
 	sessions.now:set({
-		state = if unheard then "loading" else "ready",
+		state = if no_engine then "offline" elseif unheard then "loading" else "ready",
 		here = model.here,
 		devices = model.devices,
 		projects = model.projects,
@@ -677,6 +679,10 @@ projects_stub.upload_icon = function(path: string, crop: any): any
 	if string.find(path, "offline", 1, true) then
 		return answer({ refused = { message = "offline" } })
 	end
+	-- (An edge without images of yours, as production's before its deploy.)
+	if string.find(path, "unavailable", 1, true) then
+		return answer({ refused = { message = "unavailable" } })
+	end
 	local url = `https://edge.test/auth/avatars/{string.rep("a", 32)}`
 	uploaded[url] = path
 	return answer(url)
@@ -703,6 +709,121 @@ projects_stub.delete = function(id: string): any
 	publish()
 	return answer(nil)
 end
+-- Settings → Devices' Remove and Projects' rename, as the engine answers:
+-- this device and one online refused, in the host's words.
+stub.remove_device = function(id: string): any
+	note(`remove_device:{id}`)
+	for i, d in model.devices do
+		if d.id == id then
+			if d.here then
+				return answer({ refused = "here" })
+			elseif d.online then
+				return answer({ refused = "online" })
+			end
+			table.remove(model.devices, i)
+			break
+		end
+	end
+	publish()
+	return answer(nil)
+end
+stub.rename_project_or_say = function(id: string, name: string): any
+	stub.rename_project(id, name)
+	return answer(nil)
+end
+-- (Settings → Projects' Show in Finder.)
+files_api.reveal = function(target: any, path: string): any
+	note(`reveal:{target.space or target.chat or ""}:{target.root or ""}:{path}`)
+	return settle(nil)
+end
+-- A session's turn stopped (Remove project stops those running first).
+stub.stop = function(id: string): any
+	note(`stop:{id}`)
+	local c = find(id)
+	if c then
+		c.status = nil
+	end
+	publish()
+	return answer(nil)
+end
+ui.command {
+	id = "fixture.engine_offline",
+	title = "Fixture: no engine to ask",
+	run = function()
+		no_engine = true
+		model.devices = {}
+		model.projects = {}
+		model.chats = {}
+		publish()
+	end,
+}
+-- Sessions running in projects: two of Atlas's, and Solo's only one.
+ui.command {
+	id = "fixture.running_projects",
+	title = "Fixture: Atlas busy twice, and Solo's one session running",
+	run = function()
+		local c = find("a2")
+		if c then
+			c.status = "working"
+		end
+		table.insert(model.projects, { id = "solo", name = "Solo", device = "mac", path = "/work/solo", git = true })
+		table.insert(model.chats, { id = "s1", title = "Only one", project = "solo", device = "mac", status = "working", updated = NOW - 60, created = NOW - HOUR, agent = "claude" })
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.nothing_heard",
+	title = "Fixture: an engine that hasn't answered, nothing heard at all",
+	run = function()
+		unheard = true
+		model.devices = {}
+		model.projects = {}
+		model.chats = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_devices",
+	title = "Fixture: an engine that answered, with no devices",
+	run = function()
+		model.devices = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.box_online",
+	title = "Fixture: devbox online now",
+	run = function()
+		for _, d in model.devices do
+			if d.id == "box" then
+				d.online = true
+			end
+		end
+		publish()
+	end,
+}
+-- More computers, as a long-lived account has: an old laptop not seen in
+-- weeks, and a desktop on today; and a project on each.
+ui.command {
+	id = "fixture.more_devices",
+	title = "Fixture: an old laptop and a desktop too",
+	run = function()
+		for _, d in model.devices do
+			if d.id == "mac" then
+				d.version = "0.2.140"
+			elseif d.id == "box" then
+				d.version = "0.2.139"
+				d.seen = NOW - 3 * HOUR
+			end
+		end
+		table.insert(model.devices, { id = "studio", name = "Mac Studio", platform = "macos", here = false, online = true, version = "0.2.140" })
+		table.insert(model.devices, { id = "air", name = "Old MacBook Air", platform = "macos", here = false, seen = NOW - 41 * DAY, version = "0.2.88" })
+		table.insert(model.projects, { id = "cartography", name = "Cartography", device = "studio", path = "/Users/ada/src/cartography", git = true })
+		table.insert(model.projects, { id = "notes", name = "notes", device = "mac", path = "/Users/ada/Documents/notes", git = false })
+		table.insert(model.projects, { id = "thesis", name = "Thesis", device = "air", path = "/Users/ada/thesis", git = true })
+		publish()
+	end,
+}
 
 -- What opens tabs in the panel, as plugins, links and the panel home do:
 -- each its own tab (a PR from the GitHub plugin's board, a file, a page, a
@@ -1469,5 +1590,8 @@ ui.effect(function()
 		require("@app/screens/plugins")
 	end
 end)
+-- The theme, for captures (as ui/chat_fixture.luau's).
+ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
+ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
 local shell = require("@app/screens/shell")
 return shell()

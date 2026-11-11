@@ -171,8 +171,6 @@
     // monthly — and STRIPE_PRICE_CREDITS ($10, one-off: one 12,000-credit
     // pack). Enable plan switching and cancellation in the Stripe customer
     // portal settings. Billing reads as unavailable until all are set.
-    // CLOUD_CREDIT_SECONDS: provider billable seconds per credit (default
-    // 60) — what the provider bills for one minute of CLOUD_MACHINE.
     // Optional var CLOUD_EDGE_URL overrides the origin session engines are
     // pointed at (default: the origin of the request that created the session).
     // Optional CLOUD_TEMPLATE names a provider snapshot (engine pre-installed,
@@ -197,6 +195,17 @@
     "BOAT_API_BASE": "https://boat.dev/api/v1",
     // New accounts start with no free credits (for now).
     "CLOUD_STARTING_CREDITS": "0",
+    // A credit is a minute of a small machine: 30 of the provider's billable
+    // seconds, charged from the UTC day in CLOUD_CREDIT_RATE_FROM on. Usage on
+    // earlier days stays at 60 seconds a credit, so balances don't move.
+    //
+    // CLOUD_CREDIT_RATE_FROM is a placeholder until the deployer sets it to a
+    // real YYYY-MM-DD; until then every day stays at 60. Pick a whole UTC day
+    // AFTER the day of the deploy, so that no day is charged at both rates.
+    // Once that day has come, leave it alone: moving or removing it re-prices
+    // the days in between.
+    "CLOUD_CREDIT_SECONDS": "30",
+    "CLOUD_CREDIT_RATE_FROM": "SET-AT-DEPLOY",
     // Where session engines reach the edge when no request names it (a wake
     // that re-provisions a session whose first provision failed).
     "CLOUD_EDGE_URL": "https://edge.zeron.sh",
@@ -252,6 +261,9 @@
       "vars": {
         "WORKOS_CLIENT_ID": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
         "AUTH_MODE": "workos",
+        // The hosted model list at /models/v1.json (src/model-list.ts).
+        // Production sets none yet: engines there use their built-in lists.
+        "MODEL_LIST": "staging",
         "SANDBOX_PROVIDER": "boat",
         "CLOUD_TTL_SECONDS": "7200",
         "CLOUD_IDLE_MINUTES": "10",
@@ -259,6 +271,9 @@
         "CLOUD_MACHINE": "default",
         "CLOUD_TEMPLATE": "zeron-cloud-dev",
         "CLOUD_STARTING_CREDITS": "600",
+        // As production's: set the day at deploy, a whole UTC day after it.
+        "CLOUD_CREDIT_SECONDS": "30",
+        "CLOUD_CREDIT_RATE_FROM": "SET-AT-DEPLOY",
         // Staging's Cloud shares production's Boat account: only Wing's
         // staging account (production's list is a secret).
         "CLOUD_ACCESS": "user_01KWD6G6ZPW9HT4SW6D89HB5FB",
