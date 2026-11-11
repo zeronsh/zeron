@@ -125,6 +125,9 @@ struct Chats {
     /// the first frame, rather than a skeleton while it's read and built
     /// again; the engine's copy then brings what changed.
     let_go: RefCell<Vec<LetGo>>,
+    /// Moves with each chat let go of: only the last one's look at the
+    /// footprint, once the app has rested, counts.
+    let_go_turn: Cell<u64>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -423,6 +426,9 @@ struct LetGo {
 /// are kept at most (a long chat's rows are its whole transcript, built).
 const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
 const LET_GO_MOST: usize = 6;
+/// How long after a chat is let go of the app is taken to have rested, its
+/// footprint then looked at (`room_to_keep`).
+const LET_GO_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// And at most about this much of them, the oldest going first: a long
 /// chat's kept rows (7,900 entries, 18 MB as JSON) cost some 14 MB, and the
 /// app rests near 265 MB of its 300 MB: one long chat, or a few others.
@@ -1089,13 +1095,7 @@ impl Chats {
         let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
         let bytes = let_go_weight(&entries, &built);
         kept.retain(|held| held.id != id);
-        // (The app past its footprint: nothing kept, and what was goes. Too
-        // big on its own to keep: not kept, and what is kept stays.)
-        if !room_to_keep() {
-            kept.clear();
-            eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint is past its mark)");
-            return;
-        }
+        // (Too big on its own to keep: not kept, and what is kept stays.)
         if keeping_chats() && bytes > LET_GO_BYTES {
             return;
         }
@@ -1106,6 +1106,21 @@ impl Chats {
             kept.len(),
             kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e6
         );
+        drop(kept);
+        // The app's footprint once it has come to rest after the switch (as
+        // it lets a chat go it's opening the next, drawing it, its GPU
+        // memory counted too: past any mark at nearly every switch): past
+        // its mark then, what's kept goes.
+        let turn = self.let_go_turn.get().wrapping_add(1);
+        self.let_go_turn.set(turn);
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(LET_GO_SETTLE).await;
+            if me.let_go_turn.get() == turn && !room_to_keep() && !me.let_go.borrow().is_empty() {
+                me.let_go.borrow_mut().clear();
+                eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint at rest is past its mark)");
+            }
+        });
     }
 
     /// What a view let go of lately, if it was this chat: an `Open` that has
