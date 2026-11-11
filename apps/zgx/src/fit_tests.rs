@@ -557,13 +557,14 @@ fn the_panel_opening_never_closes_the_sidebar_for_its_tree() {
     assert!(1150. - side_after - panel >= CHAT_PANEL_MIN - 0.5, "the chat has {}", 1150. - side_after - panel);
 }
 
-/// A panel width you chose (its edge dragged) holds only until the panel's
-/// next toggle, as Zeron's `right_pane_width` does: the window resized, it
-/// stays where it was dragged; closed and opened again, it comes back at its
-/// share. And while it's opening, its edge is out of reach: a drag there does
+/// A panel width you chose (its edge dragged) holds: the window resized, it
+/// stays where it was dragged; closed and opened again, it comes back at that
+/// width, not at its share (Zeron's `right_pane_width` forgot it on the
+/// toggle, so a panel dragged narrow came back at half the window each time).
+/// And while it's opening, its edge is out of reach: a drag there does
 /// nothing (Zeron's handle is gone while the panel moves).
 #[test]
-fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
+fn a_dragged_panel_width_holds_when_the_panel_is_closed_and_opened() {
     let mut app = mount();
     app.ui.scene.borrow_mut().resize(1500., 800.);
     app.frames(30);
@@ -592,9 +593,11 @@ fn a_dragged_panel_width_holds_until_the_panel_is_toggled() {
         drag(&mut app, "\"Resize files\"", 120.);
         app.frames(60);
         let reopened = app.bounds("#shell-files").width;
-        let share = share_of(1400., side);
-        assert!((reopened - share).abs() < 0.5, "reopened at {reopened}, its share is {share} (dragged to {dragged})");
+        assert!((reopened - held).abs() < 0.5, "reopened at {reopened}, it was dragged to {held}");
     }
+    // (Its share is somewhere else: the test above shows the width it was given.)
+    let share = share_of(1400., side);
+    assert!((held - share).abs() > 60., "the dragged width {held} is distinct from its share {share}");
 }
 
 /// Where a seam takes the pointer: its handle `label`, `by` points from its

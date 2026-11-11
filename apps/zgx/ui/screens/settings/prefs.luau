@@ -37,8 +37,10 @@ M.dictation = ui.persist("settings_dictation", false)
 M.dictation_input = ui.persist("settings_dictation_input", "system")
 M.escape_stops = ui.persist("settings_escape_stops", false)
 -- Whether closing a panel's last tab closes the panel too (off: it stays
--- open on its home). On by default: an empty panel is one nobody's using.
-M.close_panel_with_last_tab = ui.persist("settings_close_panel_with_last_tab", true)
+-- open on its home, where the next tab is picked). Off by default: closing
+-- a tab is about the tab, and the panel closing with it (its width gone
+-- with it) surprised people who'd opened it to keep using it.
+M.close_panel_with_last_tab = ui.persist("settings_close_panel_with_last_tab", false)
 M.compact_transcript = ui.persist("settings_compact_transcript", false)
 -- (Told to the host, which lays a reply being written out compact only while
 -- the transcript shows it so: src/chat.rs `compact_shown`.)

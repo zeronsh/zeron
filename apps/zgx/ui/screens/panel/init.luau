@@ -734,12 +734,13 @@ M.Panel = ui.component(function(props: Props): Node
 	local function close_now(k: string, id: string)
 		local tab = state.find(k, id)
 		state.close(k, id)
-		-- Its last tab gone, the panel closes for this session (as the
-		-- shipping app's `collapse_surfaces_if_empty`), leaving expanded with
-		-- it, easing shut as the title bar's toggle closes it; opened again,
-		-- it shows its empty page. Settings → General can keep it open on its
-		-- home instead (on by default). Only a person's close comes here:
-		-- switching sessions or tearing the panel down closes no tab.
+		-- Its last tab gone, it stays open on its home (Settings → General's
+		-- "Close the panel with its last tab", off by default). With that on,
+		-- the panel closes for this session (as the shipping app's
+		-- `collapse_surfaces_if_empty`), leaving expanded with it, easing shut
+		-- as the title bar's toggle closes it; opened again, it shows its
+		-- empty page. Only a person's close comes here: switching sessions or
+		-- tearing the panel down closes no tab.
 		local close_with_last = require("@app/screens/settings/prefs").close_panel_with_last_tab:peek() == true
 		if not tab then
 			return
