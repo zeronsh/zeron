@@ -64,6 +64,9 @@ pub(crate) struct ChatPersistence {
     /// Runs between a save's export and its store write.
     #[cfg(test)]
     after_export: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs between a save's version read and its export.
+    #[cfg(test)]
+    after_version: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ChatPersistence {
@@ -105,6 +108,8 @@ impl ChatPersistence {
             before_export: Mutex::new(None),
             #[cfg(test)]
             after_export: Mutex::new(None),
+            #[cfg(test)]
+            after_version: Mutex::new(None),
         });
         if let Some(runtime) = runtime {
             runtime.spawn(Self::run(Arc::downgrade(&this), rx));
@@ -263,6 +268,10 @@ impl ChatPersistence {
             // unsaved, so the next delta repeats it (imports are idempotent)
             // rather than skipping it.
             let version = doc.doc().oplog_vv();
+            #[cfg(test)]
+            if let Some(hook) = self.after_version.lock().unwrap().take() {
+                hook();
+            }
             let budget = delta_budget(self.snapshot_bytes.load(Ordering::Relaxed));
             if !compact
                 && let Some(state) = delta.as_mut()
@@ -1131,6 +1140,72 @@ mod tests {
         loaded.import(&bytes).unwrap();
         assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
         assert_eq!(cursor, 4);
+    }
+
+    /// On a DELTA save (not the first whole one), an op that lands between
+    /// the version read and the export is in this delta and still counted
+    /// unsaved: the next delta repeats it, and the reload holds it once.
+    #[test]
+    fn an_op_racing_a_delta_save_is_neither_lost_nor_doubled() {
+        let (_dir, doc, store, persistence) = saved_whale(16);
+        stream(&doc, &persistence, 2, "before ");
+        assert_eq!(persistence.delta_writes.load(Ordering::Relaxed), 1);
+        let racer = doc.clone();
+        *persistence.after_version.lock().unwrap() = Some(Box::new(move || {
+            let text = racer.doc().get_text("transcript");
+            text.insert(text.len_unicode(), "RACER ").unwrap();
+            racer.doc().commit();
+        }));
+        stream(&doc, &persistence, 3, "during ");
+        assert_eq!(persistence.writes.load(Ordering::Relaxed), 1, "still on the delta path");
+        let (loaded, cursor) = reopened(&store);
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value(), "the racing op wasn't saved");
+        assert_eq!(cursor, 3);
+        // The next delta repeats it (counted unsaved); the reload holds it once.
+        stream(&doc, &persistence, 4, "after ");
+        let (loaded, _) = reopened(&store);
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(loaded.get_text("transcript").to_string().matches("RACER").count(), 1);
+
+        // Later still: an op after the export, before the write. Not in this
+        // delta, and NOT counted saved (the version was read first), so the
+        // next delta carries it. Reading the version after the export would
+        // lose it.
+        let late = doc.clone();
+        *persistence.after_export.lock().unwrap() = Some(Box::new(move || {
+            let text = late.doc().get_text("transcript");
+            text.insert(text.len_unicode(), "LATE ").unwrap();
+            late.doc().commit();
+        }));
+        stream(&doc, &persistence, 5, "then ");
+        stream(&doc, &persistence, 6, "next ");
+        let (loaded, cursor) = reopened(&store);
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value(), "an op after the export was lost");
+        assert_eq!(loaded.get_text("transcript").to_string().matches("LATE").count(), 1);
+        assert_eq!(cursor, 6);
+        assert_eq!(persistence.writes.load(Ordering::Relaxed), 1, "all on the delta path");
+    }
+
+    /// A delta write that fails (INSERT INTO snapshot_deltas refused) leaves
+    /// the save unclean and the disk as it was; the retry writes it.
+    #[test]
+    fn a_failed_delta_write_stays_unsaved_until_a_retry_lands() {
+        let (dir, doc, store, persistence) = saved_whale(16);
+        stream(&doc, &persistence, 2, "first ");
+        let before = reopened(&store);
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER no_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(FAIL, 'disk full'); END;").unwrap();
+        stream(&doc, &persistence, 3, "refused ");
+        assert!(!persistence.is_clean(), "a failed write counted as saved");
+        let after_failure = reopened(&store);
+        assert_eq!(after_failure.0.get_deep_value(), before.0.get_deep_value());
+        assert_eq!(after_failure.1, 2);
+        db.execute_batch("DROP TRIGGER no_delta;").unwrap();
+        persistence.flush_sync();
+        assert!(persistence.is_clean());
+        let (loaded, cursor) = reopened(&store);
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 3);
     }
 }
 
