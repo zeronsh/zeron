@@ -840,12 +840,21 @@ pub fn starts_here(data_dir: &Path) -> bool {
 
 /// [`starts_here`], for the executable at `exe`.
 pub fn starts_from(data_dir: &Path, exe: &Path) -> bool {
-    read(data_dir).is_some_and(|transaction| {
-        transaction
-            .layout
-            .whoami_of(exe, &transaction)
-            .is_some_and(|who| step_for(&transaction, &who) == Step::StartTrial)
-    })
+    step_from(data_dir, exe) == Some(Step::StartTrial)
+}
+
+/// A newer version was installed by other means (the app updated itself)
+/// since the update recorded in `data_dir` was asked for, as seen from the
+/// executable at `exe`. The next start's [`boot`] settles that record, so a
+/// restart to follow the newer version needn't wait for it.
+pub fn superseded_from(data_dir: &Path, exe: &Path) -> bool {
+    step_from(data_dir, exe) == Some(Step::Superseded)
+}
+
+fn step_from(data_dir: &Path, exe: &Path) -> Option<Step> {
+    let transaction = read(data_dir)?;
+    let who = transaction.layout.whoami_of(exe, &transaction)?;
+    Some(step_for(&transaction, &who))
 }
 
 /// The version folder this executable runs from, and the one `current` names.
@@ -1900,6 +1909,17 @@ mod tests {
         write(data.path(), &update).unwrap();
         assert!(starts_from(data.path(), &earlier));
         assert!(!starts_from(data.path(), &beside), "a build beside the app leaves it alone");
+        assert!(!superseded_from(data.path(), &earlier));
+        // The app installed 3.0.0 by itself meanwhile.
+        let Layout::MacBundle { bundle, .. } = &update.layout else { unreachable!() };
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            "<plist><key>ZeronVersion</key><string>3.0.0</string></plist>",
+        )
+        .unwrap();
+        assert!(!starts_from(data.path(), &earlier));
+        assert!(superseded_from(data.path(), &earlier));
+        assert!(!superseded_from(data.path(), &beside));
         let mut done = update.clone();
         done.phase = Phase::Failed;
         write(data.path(), &done).unwrap();

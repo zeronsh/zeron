@@ -308,23 +308,31 @@ impl Engine {
         // update asked of it happens here, in this one, with the data directory
         // let go. Without an update this does nothing. (Elsewhere a relaunch has
         // already started the process that does this on its way up.)
+        // Only a stop through `stop_rx` carries an update out: one by signal or
+        // sign-out stays a stop, and the next start settles any record.
         #[cfg(target_os = "macos")]
         {
-            let booted = crate::update_trial::boot(&config.data_dir);
+            let booted = if stop_requested {
+                crate::update_trial::boot(&config.data_dir)
+            } else {
+                Ok(())
+            };
             // Still here after stopping for an update: nothing was handed over
-            // and, the app closed, nothing would start an engine again. Fail
-            // the update and become the installed engine instead — the same
-            // process, so macOS still attributes it to the app.
+            // and, the app closed, nothing would start an engine again. Become
+            // the installed engine instead — the same process, so macOS still
+            // attributes it to the app.
             let for_update = stopped_for_update.load(std::sync::atomic::Ordering::SeqCst);
             if comes_back(for_update, stop_requested) {
                 if let Err(err) = &booted {
                     tracing::error!(error = %format!("{err:#}"), "the update couldn't start");
                 }
-                if fail_update_if_ours(&config.data_dir) {
-                    return Err(exec_installed().into());
+                match after_a_failed_update(&config.data_dir) {
+                    AfterFailedUpdate::Exec => return Err(exec_installed().into()),
+                    AfterFailedUpdate::LeaveIt => {
+                        tracing::info!("another engine has the update in hand; leaving it");
+                        return outcome;
+                    }
                 }
-                tracing::info!("another engine has the data directory; leaving the update to it");
-                return outcome;
             }
             booted?;
         }
@@ -353,10 +361,20 @@ fn managed_restart(
     move || {
         if cfg!(target_os = "macos") {
             if transaction::read(&data_dir).is_some_and(|update| update.in_progress()) {
-                let starts = exe().is_some_and(|exe| transaction::starts_from(&data_dir, &exe));
-                stop_for_update(starts)?;
-                stopped_for_update.store(true, std::sync::atomic::Ordering::SeqCst);
-                tracing::info!("restarting into the update: this engine becomes the new one");
+                let exe = exe();
+                let here = |step: fn(&Path, &Path) -> bool| {
+                    exe.as_deref().is_some_and(|exe| step(&data_dir, exe))
+                };
+                if here(transaction::superseded_from) {
+                    // The app installed a newer version since the update was
+                    // asked for: follow it as below; the next start's boot
+                    // settles the record.
+                    tracing::info!("restarting into a newer app: the app starts the new engine");
+                } else {
+                    stop_for_update(here(transaction::starts_from))?;
+                    stopped_for_update.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tracing::info!("restarting into the update: this engine becomes the new one");
+                }
             } else {
                 // Not flagged: the app starts the new engine, and a backstop
                 // here would race it for the data directory and the port.
@@ -387,26 +405,67 @@ fn stop_for_update(starts_here: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// After an update this engine stopped for didn't start: with the data
-/// directory ours, mark a request still waiting failed and say so. Held by
-/// another engine (the app started one, maybe mid-backup for this very
-/// update), the record is that engine's business and it's up: `false`.
+/// What an engine does when an update it stopped for didn't start.
 #[cfg(target_os = "macos")]
-fn fail_update_if_ours(data_dir: &Path) -> bool {
-    use zeron_update::transaction;
-    let Ok(lock) = InstanceLock::acquire(data_dir) else {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterFailedUpdate {
+    /// Become the installed engine.
+    Exec,
+    /// Exit: another engine has the data directory or the update in hand.
+    LeaveIt,
+}
+
+/// After an update this engine stopped for didn't start.
+///
+/// - The data directory is free: a request still waiting is failed (and
+///   checked to be) or the record is already finished, and this engine comes
+///   back. A trial or restore in progress belongs to another process: leave it.
+/// - It's held, stamped with this process's pid: this engine's own lock,
+///   kept by something of its core still alive after shutdown (flock is per
+///   open file, so it blocks its owner too). Come back without touching the
+///   record: the exec closes that close-on-exec file, freeing the lock, and
+///   the fresh start's boot carries the update out.
+/// - Held by another engine (the app started one, maybe mid-backup for this
+///   very update): that engine is up and the record is its business.
+#[cfg(target_os = "macos")]
+fn after_a_failed_update(data_dir: &Path) -> AfterFailedUpdate {
+    use zeron_update::transaction::{self, Phase};
+    let lock = match InstanceLock::acquire(data_dir) {
+        Ok(lock) => lock,
+        Err(_) if stamped_by_this_process(data_dir) => {
+            tracing::warn!("this engine still holds its own data-directory lock; coming back");
+            return AfterFailedUpdate::Exec;
+        }
+        Err(_) => return AfterFailedUpdate::LeaveIt,
     };
-    tracing::error!("the update didn't start; coming back on the installed version");
-    if let Some(update) = transaction::read(data_dir).filter(|update| update.in_progress()) {
-        transaction::fail_request(
-            data_dir,
-            &update.id,
-            "Zeron couldn't start the new version, so it stayed on this one.".into(),
-        );
+    let after = match transaction::read(data_dir) {
+        None => AfterFailedUpdate::Exec,
+        Some(update) if !update.in_progress() => AfterFailedUpdate::Exec,
+        Some(update) if update.phase == Phase::Requested => {
+            transaction::fail_request(
+                data_dir,
+                &update.id,
+                "Zeron couldn't start the new version, so it stayed on this one.".into(),
+            );
+            let failed = transaction::read(data_dir)
+                .is_some_and(|now| now.id == update.id && now.phase == Phase::Failed);
+            if failed { AfterFailedUpdate::Exec } else { AfterFailedUpdate::LeaveIt }
+        }
+        Some(_) => AfterFailedUpdate::LeaveIt,
+    };
+    if after == AfterFailedUpdate::Exec {
+        tracing::error!("the update didn't start; coming back on the installed version");
     }
     drop(lock);
-    true
+    after
+}
+
+/// The data directory's lock file names this process as its holder (every
+/// engine stamps its pid on taking the lock).
+#[cfg(target_os = "macos")]
+fn stamped_by_this_process(data_dir: &Path) -> bool {
+    std::fs::read_to_string(data_dir.join("engine.lock"))
+        .is_ok_and(|holder| holder.trim() == std::process::id().to_string())
 }
 
 /// Become the installed engine with the same arguments: the same process, so
@@ -568,11 +627,69 @@ mod tests {
         let install = MacInstall::new();
         install.request_update();
         let other = InstanceLock::acquire(&install.data).unwrap();
-        assert!(!fail_update_if_ours(&install.data));
+        // Another engine's stamp (a lock held here stands in for its flock).
+        std::fs::write(install.data.join("engine.lock"), "999999").unwrap();
+        assert_eq!(after_a_failed_update(&install.data), AfterFailedUpdate::LeaveIt);
         assert_eq!(transaction::read(&install.data).unwrap().phase, Phase::Requested);
         drop(other);
-        assert!(fail_update_if_ours(&install.data));
+        assert_eq!(after_a_failed_update(&install.data), AfterFailedUpdate::Exec);
         assert_eq!(transaction::read(&install.data).unwrap().phase, Phase::Failed);
+    }
+
+    /// Second review of #1345: the engine's own lock, still held after
+    /// shutdown by something of its core, blocks it like another engine's
+    /// (flock is per open file). It still comes back — the exec frees that
+    /// lock — and leaves the record for the fresh start to carry out.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leaked_lock_of_its_own_still_comes_back() {
+        use zeron_update::transaction::{self, Phase};
+        let install = MacInstall::new();
+        install.request_update();
+        let leaked = InstanceLock::acquire(&install.data).unwrap();
+        assert_eq!(after_a_failed_update(&install.data), AfterFailedUpdate::Exec);
+        assert_eq!(transaction::read(&install.data).unwrap().phase, Phase::Requested);
+        drop(leaked);
+    }
+
+    /// A trial or restore under way belongs to another process (its
+    /// watchdog's to settle): the data directory free or not, it isn't
+    /// overwritten and this engine doesn't come back over it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn another_process_trial_is_left_alone() {
+        use zeron_update::transaction::{self, Phase};
+        let install = MacInstall::new();
+        install.request_update();
+        for phase in [Phase::Trial, Phase::Restoring] {
+            let mut record = transaction::read(&install.data).unwrap();
+            record.phase = phase;
+            record.trial_pid = Some(1);
+            std::fs::write(
+                install.data.join("update-transaction.json"),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(after_a_failed_update(&install.data), AfterFailedUpdate::LeaveIt);
+            assert_eq!(transaction::read(&install.data).unwrap().phase, phase);
+        }
+    }
+
+    /// Second review of #1345: the app installed a newer version itself
+    /// while an update was recorded. Following it (`SupersededRestart`, which
+    /// doesn't try a version twice) must stop the engine, unflagged — the app
+    /// starts the new one and its boot settles the record.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_newer_app_installed_during_an_update_still_stops_the_engine() {
+        let install = MacInstall::new();
+        install.request_update();
+        std::fs::write(
+            install.bundle.join("Contents/Info.plist"),
+            "<plist><key>ZeronVersion</key><string>3.0.0</string></plist>",
+        )
+        .unwrap();
+        assert_eq!(install.restart_from(&install.engine), (true, true, false));
     }
 
     /// A signal or a sign-out that wins the race against the update's own
