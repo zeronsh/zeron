@@ -7239,6 +7239,54 @@ mod tests {
     /// call arriving, rather than standing still until the whole copy comes
     /// and all of it showing at once. The opening tail is taken into the
     /// rows it holds, the changes after it counted against the tail.
+    /// A real long chat's whole copy, taken in on the main thread: how long
+    /// each frame holds it. Set ZERON_RESET_FRAME to a frame file (a
+    /// `TranscriptUpdate` reset) to run it.
+    #[test]
+    fn a_long_chats_whole_copy_on_the_main_thread() {
+        use super::{Entry, Open, View, draft_value};
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let Ok(path) = std::env::var("ZERON_RESET_FRAME") else { return };
+        let bytes = std::fs::read(&path).unwrap();
+        let start = std::time::Instant::now();
+        let whole: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        eprintln!("parsing the frame ({} MB, the network thread's work): {:?}", bytes.len() / 1_000_000, start.elapsed());
+        let n = whole["reset"].as_array().unwrap().len();
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let view = |open: Open| {
+            Rc::new(View {
+                session: app.host.shared("t.session", Value::Nil),
+                messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+                subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+                draft: app.host.shared("t.draft", draft_value("", "")),
+                rpc: RefCell::default(),
+                open: RefCell::new(Some(open)),
+                pending: RefCell::default(),
+                generation: Cell::new(0),
+                snapshot: Cell::new(false),
+            })
+        };
+        let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
+            let start = std::time::Instant::now();
+            view.heard_frame(frame);
+            eprintln!("{label}: {:?}", start.elapsed());
+        };
+        // Cold: the tail, then the whole copy.
+        let cold = view(Open { id: "c".into(), ..Open::default() });
+        let tail: Vec<_> = whole["reset"].as_array().unwrap()[n - 49..].to_vec();
+        time("cold open, tail frame (49)", &cold, serde_json::json!({ "reset": tail, "historyPending": true }));
+        time(&format!("cold open, whole copy ({n})"), &cold, whole.clone());
+        // Held rows (a reopen on an engine without `known`): the whole copy again.
+        let held: Vec<Entry> = whole["reset"].as_array().unwrap().iter().cloned().map(Entry::new).collect();
+        let warm = view(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() });
+        time(&format!("held rows, whole copy again ({n})"), &warm, whole.clone());
+        let start = std::time::Instant::now();
+        drop(whole);
+        eprintln!("dropping the frame's JSON: {:?}", start.elapsed());
+    }
+
     /// The app's entry sums are the engine's (`zeron_doc::entry_sum`): a
     /// reopen says what it holds by them. Pinned in both crates.
     #[test]
