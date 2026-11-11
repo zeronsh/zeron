@@ -99,6 +99,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './apps/zgx/target/release/zeron-zgx.exe').Path
     } else {
+        # Luau (the engine's visuals and plugin services) without its asserts.
+        $env:LUAU_CXXFLAGS = '-DNDEBUG'
         cargo build --release --locked -p zeron
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
@@ -123,6 +125,16 @@ try {
         }
         $text = $null
     }
+    # The engine's Luau (visuals, plugin services) without its asserts: with
+    # them, each LUAU_ASSERT keeps its Luau source file's path (Luau/Common.h's
+    # __FILE__), VM\src\l*.cpp; with NDEBUG, none. A beta's engine is the
+    # zeron.exe it's given; a release's is the zeron.exe built here.
+    $engine = if ($BetaVersion) { $BetaEngine } else { $built }
+    $engineText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($engine))
+    if ($engineText -match 'VM[\\/]src[\\/]l[a-z]+\.cpp') {
+        throw "$engine was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG"
+    }
+    $engineText = $null
     $out = Join-Path $root 'target/package'
     $arch = Get-WindowsPackageArch $built
     $stage = Join-Path $out "zeron-$version-windows-$arch"
