@@ -232,8 +232,59 @@ struct WorkspaceHostInner {
     room_joined_at: std::sync::atomic::AtomicI64,
     /// A local write since the last snapshot save: only this device holds it.
     local_unsaved: AtomicBool,
+    /// The registry's last whole save and the row deltas on top of it.
+    registry_base: Mutex<Option<RegistryBase>>,
+    /// Kind versions the lists were last published at (see `publish_lists`).
+    published: Mutex<Option<PublishedVersions>>,
     #[cfg(test)]
     snapshot_saves: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    whole_saves: std::sync::atomic::AtomicUsize,
+}
+
+/// The registry's last whole save in this process, and the row deltas saved
+/// on it since (`persist`).
+struct RegistryBase {
+    token: u64,
+    base_bytes: usize,
+    delta_bytes: usize,
+    delta_rows: usize,
+}
+
+/// Row deltas stay on a whole save until they pass its size (at least this
+/// much) or [`REGISTRY_DELTA_ROWS`] rows; the next save is then whole. (A load
+/// replays them: a few MB of JSON rows at most.)
+const REGISTRY_DELTA_MIN_BUDGET: usize = 1024 * 1024;
+const REGISTRY_DELTA_ROWS: usize = 512;
+/// Row deltas are folded into a whole save once the registry has been quiet
+/// this long, and at the latest this long after the oldest of them: a build
+/// without row deltas (a downgrade after a crash) reads the whole save alone,
+/// so what it can miss stays bounded in time.
+const REGISTRY_COMPACT_WHEN_QUIET: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 30 });
+const REGISTRY_COMPACT_AT_MOST_EVERY: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 5 } else { 300 });
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PublishedVersions {
+    chats: u64,
+    sessions: u64,
+    devices: u64,
+    spaces: u64,
+}
+
+/// The registry replica a store holds: its whole snapshot plus the row
+/// deltas saved on it. `None` when the store has no registry.
+pub(crate) fn load_registry(store: &DocsStore, device_id: &str) -> Result<Option<RegistryDoc>, EngineError> {
+    let Some((base, chain, tail)) = store.load_row_deltas(REGISTRY_DOC_ID)? else {
+        return Ok(None);
+    };
+    let (doc, clean) = RegistryDoc::from_saved(&base, &chain, &tail, device_id)
+        .map_err(|e| EngineError::Other(format!("registry snapshot load failed: {e}")))?;
+    if !clean {
+        tracing::warn!("registry deltas stop early; the next save is whole");
+    }
+    Ok(Some(doc))
 }
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
@@ -264,10 +315,9 @@ impl WorkspaceHost {
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
-        let stored = store.load_snapshot(REGISTRY_DOC_ID)?;
+        let stored = load_registry(&store, &config.device_id)?;
         let mut doc = match stored {
-            Some(bytes) => RegistryDoc::from_bytes(&bytes, &config.device_id)
-                .map_err(|e| EngineError::Other(format!("registry snapshot load failed: {e}")))?,
+            Some(doc) => doc,
             None => {
                 // MIGRATION (instant, one-time): seed from the legacy Loro
                 // workspace snapshot when one exists. Seeds are pending upserts
@@ -387,14 +437,18 @@ impl WorkspaceHost {
                 presence_watch: Mutex::new(PresenceWatch::default()),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
                 local_unsaved: AtomicBool::new(false),
+                registry_base: Mutex::new(None),
+                published: Mutex::new(None),
                 #[cfg(test)]
                 snapshot_saves: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                whole_saves: std::sync::atomic::AtomicUsize::new(0),
             }),
         };
         // Persist immediately: after this boot the migration source is never
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
-        if let Err(error) = host.inner.persist_snapshot() {
+        if let Err(error) = host.inner.persist(true) {
             tracing::warn!(%error, "registry snapshot save failed");
         }
         // Reclaim free pages (a bloated store, or the pages a one-time
@@ -773,8 +827,9 @@ impl WorkspaceHost {
                 change: zeron_proto::SidebarSectionChange::Import { .. }
             }
         ) {
-            // The UI removes its legacy copy only after this acknowledgement.
-            self.inner.persist_snapshot()?;
+            // The UI removes its legacy copy only after this acknowledgement:
+            // a whole save, which every build reads.
+            self.inner.persist(true)?;
         }
         Ok(())
     }
@@ -1475,9 +1530,10 @@ impl WorkspaceHost {
 
     // ── persistence / teardown ──────────────────────────────────────────────
 
-    /// Persist the snapshot now (shutdown path; bypasses the debounce).
+    /// Persist the snapshot now (shutdown path; bypasses the debounce),
+    /// whole: a build without row deltas then reads all of it.
     pub fn flush(&self) {
-        self.inner.save_snapshot();
+        self.inner.save_compacted();
     }
 
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides
@@ -1488,7 +1544,7 @@ impl WorkspaceHost {
         if let Err(err) = self.mutate(|doc| doc.set_device_last_seen(&device_id, now)) {
             tracing::warn!(error = %err, "device lastSeenAt stamp failed");
         }
-        self.inner.save_snapshot();
+        self.inner.save_compacted();
     }
 }
 
@@ -1552,54 +1608,102 @@ impl WorkspaceHostInner {
         // the edge refuses its writes to rows it doesn't own: reconciling here
         // would rewrite the missing preferences row after every refused push.
         let owns_sidebar = self.config.platform != zeron_proto::CLOUD_PLATFORM;
-        let snapshot = {
-            let mut doc = lock(&self.reg);
-            // Read the lists first and reconcile pins against these chats:
-            // pin writes touch only preference/pin rows, which the lists
-            // don't read, and reading chats twice per publish was ~40% of it.
-            let state = doc.read_all();
-            let reconciled = match &state {
-                Ok(state) => doc.reconcile_sidebar_pins_with(
-                    registry_synced && owns_sidebar,
-                    state.chats.iter().map(|c| c.id.as_str()),
-                ),
-                Err(_) => doc.reconcile_sidebar_pins(registry_synced && owns_sidebar),
-            };
-            match reconciled {
-                Ok(true) => {
-                    // Persist and transmit cleanup just like a user mutation.
-                    self.local_unsaved.store(true, Ordering::Release);
-                    self.bump_changed();
-                    if let Some(room) = lock(&self.room).as_ref() {
-                        room.nudge();
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
-            }
-            self.publish_sidebar_preferences(&doc, registry_synced);
-            state
+        let mut published = lock(&self.published);
+        let mut doc = lock(&self.reg);
+        // Each list is rebuilt only when a row of its kind changed since it
+        // was last published; reads re-parse only the rows that changed
+        // (`RegistryDoc` keeps them parsed). On a 5-device account the
+        // registry changes ~twice a second, mostly session rows: a full read
+        // of every list for each change was most of the engine's CPU.
+        let now = PublishedVersions {
+            chats: doc.kind_version(zeron_doc::KIND_CHATS),
+            sessions: doc.kind_version(zeron_doc::KIND_SESSIONS),
+            devices: doc.kind_version(zeron_doc::KIND_DEVICES),
+            spaces: doc.kind_version(zeron_doc::KIND_SPACES)
+                .wrapping_add(doc.kind_version(zeron_doc::KIND_REPOSITORY_LOOKS)),
         };
-        match snapshot {
-            Ok(mut state) => {
-                self.overlay_presence(&mut state.devices);
-                // Retain the latest value even with no subscribers, but don't
-                // wake every list for unrelated registry/presence changes.
-                publish_if_changed(&self.chats_tx, state.chats);
+        let last = *published;
+        let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
+        let chats = changed(|v| v.chats).then(|| doc.read_chats());
+        let sessions = changed(|v| v.sessions).then(|| doc.read_sessions());
+        let devices = (clock_tick || changed(|v| v.devices)).then(|| doc.read_devices());
+        let spaces = changed(|v| v.spaces).then(|| doc.read_spaces());
+        // Pins reconcile against the chats as they read now: just read, or
+        // (unchanged) as last published.
+        let reconciled = match &chats {
+            Some(Ok(chats)) => doc.reconcile_sidebar_pins_with(
+                registry_synced && owns_sidebar,
+                chats.iter().map(|c| c.id.as_str()),
+            ),
+            Some(Err(_)) => doc.reconcile_sidebar_pins(registry_synced && owns_sidebar),
+            None => {
+                let current = self.chats_tx.borrow();
+                doc.reconcile_sidebar_pins_with(
+                    registry_synced && owns_sidebar,
+                    current.iter().map(|c| c.id.as_str()),
+                )
+            }
+        };
+        match reconciled {
+            Ok(true) => {
+                // Persist and transmit cleanup just like a user mutation.
+                self.local_unsaved.store(true, Ordering::Release);
+                self.bump_changed();
+                if let Some(room) = lock(&self.room).as_ref() {
+                    room.nudge();
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
+        }
+        self.publish_sidebar_preferences(&doc, registry_synced);
+        drop(doc);
+        let mut failed = false;
+        // Retain the latest value even with no subscribers, but don't wake
+        // every list for unrelated registry/presence changes.
+        match chats {
+            Some(Ok(chats)) => publish_if_changed(&self.chats_tx, chats),
+            Some(Err(err)) => {
+                failed = true;
+                tracing::warn!(error = %err, "registry read failed");
+            }
+            None => {}
+        }
+        match devices {
+            Some(Ok(mut devices)) => {
+                self.overlay_presence(&mut devices);
                 // The periodic presence tick also drives time-based expiry.
                 // Unrelated registry writes need no synthetic device event.
                 if clock_tick {
-                    self.devices_tx.send_replace(state.devices);
+                    self.devices_tx.send_replace(devices);
                 } else {
-                    publish_if_changed(&self.devices_tx, state.devices);
+                    publish_if_changed(&self.devices_tx, devices);
                 }
-                publish_if_changed(&self.sessions_tx, state.sessions);
-                publish_if_changed(&self.spaces_tx, state.spaces);
             }
-            Err(err) => {
+            Some(Err(err)) => {
+                failed = true;
                 tracing::warn!(error = %err, "registry read failed");
             }
+            None => {}
         }
+        match sessions {
+            Some(Ok(sessions)) => publish_if_changed(&self.sessions_tx, sessions),
+            Some(Err(err)) => {
+                failed = true;
+                tracing::warn!(error = %err, "registry read failed");
+            }
+            None => {}
+        }
+        match spaces {
+            Some(Ok(spaces)) => publish_if_changed(&self.spaces_tx, spaces),
+            Some(Err(err)) => {
+                failed = true;
+                tracing::warn!(error = %err, "registry read failed");
+            }
+            None => {}
+        }
+        // A failed read retries every list on the next publish.
+        *published = (!failed).then_some(now);
     }
 
     /// Called under the registry lock so publications cannot overtake one another.
@@ -1747,26 +1851,74 @@ impl WorkspaceHostInner {
     }
 
     fn save_snapshot(&self) {
-        if let Err(error) = self.persist_snapshot() {
+        if let Err(error) = self.persist(false) {
             tracing::warn!(%error, "registry snapshot save failed");
         }
     }
 
-    /// Returns the snapshot's size in bytes.
-    fn persist_snapshot(&self) -> Result<usize, EngineError> {
+    /// Row deltas wait on the last whole save (see `persist`).
+    fn row_deltas_outstanding(&self) -> bool {
+        lock(&self.registry_base).as_ref().is_some_and(|base| base.delta_rows > 0)
+    }
+
+    fn save_compacted(&self) {
+        if let Err(error) = self.persist(true) {
+            tracing::warn!(%error, "registry snapshot save failed");
+        }
+    }
+
+    /// Save what changed since the last save: a row delta on the last whole
+    /// save while the deltas stay under budget, else (and when `compact`:
+    /// shutdown, flush) the whole replica. Returns the bytes written.
+    ///
+    /// A local session-status write changes one row; saving the whole
+    /// replica (2.56 MB on a 5-device account) for each was ~all of the
+    /// store's writes.
+    fn persist(&self, compact: bool) -> Result<usize, EngineError> {
         // Keep export and disk write serialized: an older background snapshot
         // must not overwrite an acknowledged migration's durable snapshot.
-        let doc = lock(&self.reg);
+        let mut doc = lock(&self.reg);
         // Cleared before the export: a write after this point is a new one.
         let had_local = self.local_unsaved.swap(false, Ordering::AcqRel);
-        let saved = doc.to_bytes().map_err(EngineError::from).and_then(|bytes| {
-            self.store
-                .save_snapshot(REGISTRY_DOC_ID, &bytes)
-                .map(|()| bytes.len())
-                .map_err(|error| {
-                    EngineError::Other(format!("registry snapshot save failed: {error}"))
-                })
-        });
+        let mut base = lock(&self.registry_base);
+        let failed = |error: zeron_sync::StoreError| {
+            EngineError::Other(format!("registry snapshot save failed: {error}"))
+        };
+        let saved = (|| -> Result<usize, EngineError> {
+            if !compact
+                && let Some(state) = base.as_mut()
+                && state.delta_bytes < state.base_bytes.max(REGISTRY_DELTA_MIN_BUDGET)
+                && state.delta_rows < REGISTRY_DELTA_ROWS
+                && let Some(delta) = doc.delta_bytes()?
+            {
+                if self
+                    .store
+                    .append_row_delta(REGISTRY_DOC_ID, state.token, &delta)
+                    .map_err(failed)?
+                {
+                    state.delta_bytes += delta.len();
+                    state.delta_rows += 1;
+                    doc.mark_saved();
+                    return Ok(delta.len());
+                }
+                // Another full write replaced the base: save whole.
+            }
+            let bytes = doc.to_bytes()?;
+            let token = self
+                .store
+                .save_snapshot_base(REGISTRY_DOC_ID, &bytes)
+                .map_err(failed)?;
+            *base = Some(RegistryBase {
+                token,
+                base_bytes: bytes.len(),
+                delta_bytes: 0,
+                delta_rows: 0,
+            });
+            doc.mark_saved();
+            #[cfg(test)]
+            self.whole_saves.fetch_add(1, Ordering::Relaxed);
+            Ok(bytes.len())
+        })();
         if saved.is_err() && had_local {
             self.local_unsaved.store(true, Ordering::Release);
         }
@@ -1904,8 +2056,10 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
                 refreshed = true;
             }
         }
+        // Presence changed, not a row: republish the devices (a plain publish
+        // skips lists whose rows didn't change).
         if refreshed && let Some(inner) = weak.upgrade() {
-            inner.publish();
+            inner.publish_presence();
         }
     }
 }
@@ -1920,13 +2074,20 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
     presence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     presence.tick().await; // consume the immediate first tick
     let mut save_deadline: Option<tokio::time::Instant> = None;
+    let mut last_change = tokio::time::Instant::now();
+    // When the oldest row delta not yet in a whole save was written.
+    let mut oldest_delta: Option<tokio::time::Instant> = None;
     loop {
         let sleep_until = save_deadline.unwrap_or_else(tokio::time::Instant::now);
+        let compact_at = oldest_delta.map(|oldest| {
+            (last_change + REGISTRY_COMPACT_WHEN_QUIET).min(oldest + REGISTRY_COMPACT_AT_MOST_EVERY)
+        });
         tokio::select! {
             changed = changed_rx.changed() => {
                 if changed.is_err() {
                     break; // host (and its change sender) is gone
                 }
+                last_change = tokio::time::Instant::now();
                 let Some(inner) = weak.upgrade() else { break };
                 inner.publish();
                 // Local writes (and queued ops a re-seed made) are only on
@@ -1940,8 +2101,24 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
                 let Some(inner) = weak.upgrade() else { break };
-                if let Err(error) = tokio::task::spawn_blocking(move || inner.save_snapshot()).await {
+                let saving = inner.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || saving.save_snapshot()).await {
                     tracing::warn!(%error, "registry snapshot worker failed");
+                }
+                oldest_delta = match (oldest_delta, inner.row_deltas_outstanding()) {
+                    (_, false) => None,
+                    (Some(oldest), true) => Some(oldest),
+                    (None, true) => Some(tokio::time::Instant::now()),
+                };
+            }
+            _ = tokio::time::sleep_until(compact_at.unwrap_or_else(tokio::time::Instant::now)), if compact_at.is_some() && save_deadline.is_none() => {
+                let Some(inner) = weak.upgrade() else { break };
+                let saving = inner.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || saving.save_compacted()).await {
+                    tracing::warn!(%error, "registry compaction failed");
+                }
+                if !inner.row_deltas_outstanding() {
+                    oldest_delta = None;
                 }
             }
             _ = presence.tick() => {
@@ -2184,9 +2361,9 @@ mod tests {
         )
         .unwrap();
         let on_disk = || {
+            // As a reopen reads it: the whole save plus its row deltas.
             let store = DocsStore::open(dir.path()).unwrap();
-            let bytes = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
-            RegistryDoc::from_bytes(&bytes, "test-device").unwrap().read_all().unwrap()
+            load_registry(&store, "test-device").unwrap().unwrap().read_all().unwrap()
         };
         tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
 
@@ -2210,6 +2387,126 @@ mod tests {
             on_disk().spaces.iter().find(|space| space.id == "kept").unwrap().name.as_deref(),
             Some("Renamed")
         );
+    }
+
+    /// Row deltas don't wait on disk indefinitely: once the registry has
+    /// been quiet (and at the latest after a fixed time) they fold into a
+    /// whole save, which a build without row deltas reads in full.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn row_deltas_fold_into_a_whole_save_once_the_registry_is_quiet() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        host.create_space("space", "test-device", "/project", None, false).unwrap();
+        // The debounced save (1 s) writes a row delta...
+        tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+        assert!(store.row_delta_stats(REGISTRY_DOC_ID).unwrap().0 > 0, "no row delta was written");
+        // ...and a quiet registry folds it into a whole save.
+        tokio::time::sleep(REGISTRY_COMPACT_WHEN_QUIET + std::time::Duration::from_millis(1_000)).await;
+        assert_eq!(store.row_delta_stats(REGISTRY_DOC_ID).unwrap(), (0, 0), "row deltas never folded in");
+        let loaded = load_registry(&store, "test-device").unwrap().unwrap();
+        assert_eq!(loaded.read_spaces().unwrap()[0].id, "space");
+        // A busy registry still folds them in at the latest bound.
+        let whole = host.inner.whole_saves.load(std::sync::atomic::Ordering::Relaxed);
+        for i in 0..10 {
+            host.rename_space("space", Some(&format!("n{i}"))).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        }
+        assert!(
+            host.inner.whole_saves.load(std::sync::atomic::Ordering::Relaxed) > whole,
+            "a busy registry never folded its deltas"
+        );
+    }
+
+    /// A steady stream of session-status changes (every agent turn writes
+    /// one): each change saves as one small row delta, never the whole
+    /// registry, and republishes the session list alone, re-parsing only the
+    /// session that changed. The store then loads back the same replica,
+    /// and a flush folds the deltas into one whole save.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_status_stream_saves_and_publishes_only_what_changed() {
+        use super::*;
+        use zeron_proto::SessionStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let session = |chat: &str, status| Session {
+            last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            chat_id: chat.into(),
+            device_id: "test-device".into(),
+            status,
+            started_at: None,
+            updated_at: Utc::now(),
+            waiting: None,
+        };
+        for i in 0..300 {
+            let id = format!("chat-{i:03}");
+            host.create_chat(&id, None, Some("test-device"), None, Some(format!("/work/{i}"))).unwrap();
+            host.record_session(&session(&id, SessionStatus::Idle));
+        }
+        host.flush();
+        host.inner.publish();
+        let whole = || host.inner.whole_saves.load(std::sync::atomic::Ordering::Relaxed);
+        let parsed = || lock(&host.inner.reg).rows_parsed();
+        let (whole_before, parsed_before) = (whole(), parsed());
+        let mut chats = host.watch_chats();
+        chats.mark_unchanged();
+        let mut sessions = host.watch_session_rows();
+        sessions.mark_unchanged();
+        let statuses = [SessionStatus::Working, SessionStatus::Idle];
+        for turn in 0..100 {
+            host.record_session(&session(&format!("chat-{:03}", turn % 5), statuses[turn % 2]));
+            host.inner.publish();
+            let written = host.inner.persist(false).unwrap();
+            assert!(written < 4_096, "change {turn} saved {written} B");
+        }
+        assert_eq!(whole(), whole_before, "a whole registry save during a session-status stream");
+        assert_eq!(store.row_delta_stats(REGISTRY_DOC_ID).unwrap().0, 100);
+        let reparsed = parsed() - parsed_before;
+        assert!(reparsed <= 100, "{reparsed} rows parsed for 100 one-row changes");
+        assert!(!chats.has_changed().unwrap(), "the chat list republished for session changes");
+        assert!(sessions.has_changed().unwrap());
+
+        // What's on disk loads back the same.
+        let loaded = load_registry(&store, "test-device").unwrap().unwrap();
+        assert_eq!(loaded.read_sessions().unwrap(), host.read_sessions().unwrap());
+        assert_eq!(loaded.read_chats().unwrap(), host.read_chats().unwrap());
+        // A flush (shutdown, a version change) folds them into a whole save.
+        host.flush();
+        assert_eq!(store.row_delta_stats(REGISTRY_DOC_ID).unwrap(), (0, 0));
+        assert_eq!(whole(), whole_before + 1);
+        let loaded = load_registry(&store, "test-device").unwrap().unwrap();
+        assert_eq!(loaded.read_sessions().unwrap(), host.read_sessions().unwrap());
     }
 
     /// Server rows come back from the room after a restart; local writes
