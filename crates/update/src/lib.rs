@@ -3927,6 +3927,22 @@ mod tests {
         assert_eq!(offer_given(&caught_up, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None, true), Offer::Newer);
     }
 
+    /// 0.3.0, the first zgx stable, after 0.2.138 and the 0.2.139 betas: newer
+    /// than all of them, by a shipped updater's rules as by these.
+    #[test]
+    fn a_minor_version_is_newer_than_the_last_and_its_betas() {
+        for older in ["0.2.138", "0.2.139-beta.6", "0.2.139-beta.7", "0.2.999"] {
+            assert!(version_newer("0.3.0", older), "{older}");
+            assert!(!version_newer(older, "0.3.0"), "{older}");
+        }
+        assert!(version_newer("0.3.1", "0.3.0") && version_newer("0.3.1-beta.1", "0.3.0"));
+        let stable = manifest_of("0.3.0", Channel::Stable);
+        assert_eq!(offer_given(&stable, "0.2.138", Channel::Stable, Some("0.2.138"), None, false), Offer::Newer);
+        let beta_feed = manifest_of("0.3.0", Channel::Beta);
+        assert_eq!(offer_given(&beta_feed, "0.2.139-beta.6", Channel::Beta, Some("0.2.139-beta.6"), None, false), Offer::Newer);
+        assert_eq!(managed_dir("0.3.0"), "0.3.0");
+    }
+
     /// An unpacked Linux tarball of a beta, run where it lies (unmanaged, so
     /// it reads stable), was offered the older stable. Without Stable chosen
     /// on record, a beta build is offered only what's newer.
