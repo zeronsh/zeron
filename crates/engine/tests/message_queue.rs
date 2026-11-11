@@ -2127,62 +2127,49 @@ async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
     core.shutdown().await;
 }
 
-/// A send reaches the agent as fast in a long, watched chat as in a new one:
-/// it never waits behind the open transcript's publish (a long chat's whole
-/// transcript read per change, before the drain, was V3 Release's
-/// "sending…").
+/// A send reaches the agent while the open chat's transcript publish is
+/// still going: the publish runs beside the drains, never before them (a
+/// long chat's whole transcript read per change, before the drain, was V3
+/// Release's "sending…"). The publish is held where it hands the transcript
+/// to its watchers (a held read of the watch holds its `send_replace`), so
+/// the test needs no clock: with the publish before the drain, the send
+/// can't reach the agent until the hold ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn send_to_delivered_stays_flat_as_the_chat_grows() {
+async fn a_send_reaches_the_agent_while_the_open_chats_publish_is_held() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
     let handle = core.doc_host.open(CHAT).unwrap();
     // Watched, as the app watches the open chat.
-    let _watch = handle.watch_messages();
-    let send = |text: &str| {
-        let text = text.to_owned();
-        let core = &core;
-        let prompts = prompts.clone();
-        let harness = harness.clone();
-        async move {
-            let start = std::time::Instant::now();
-            core.doc_host.queue_message(CHAT, &text, Vec::new()).expect("queue message");
-            wait_for(|| prompts.lock().unwrap().iter().any(|p| *p == text), "the send to reach the agent").await;
-            let took = start.elapsed();
-            let _ = harness.finish.send(());
-            wait_for(|| queue_texts(core).is_empty(), "the queue to empty").await;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            took
-        }
-    };
-    let small = [send("small 1").await, send("small 2").await].into_iter().min().unwrap();
-    for i in 0..3000 {
-        handle
-            .doc()
-            .push_message(&SessionMessageEntry {
-                id: format!("old-{i}"),
-                role: MessageRole::Assistant,
-                // (Shaped like a real reply: many parts, as a turn's calls and words.)
-                parts: (0..12)
-                    .map(|p| MessagePart::Text { id: format!("t{p}"), text: "x".repeat(160) })
-                    .collect(),
-                created_at: i,
-                device_id: "dev".into(),
-                status: None,
-                continuation_of: None,
-                duration_ms: None,
-            })
-            .unwrap();
+    let watch = handle.watch_messages();
+    {
+        let held = watch.borrow();
+        // (Off this thread: anything on the send's own path that published
+        // would wait on `held` and must fail the wait below, not hang here.)
+        let doc_host = core.doc_host.clone();
+        let queued = tokio::task::spawn_blocking(move || {
+            doc_host.queue_message(CHAT, "sent while publishing", Vec::new())
+        });
+        wait_for(
+            || prompts.lock().unwrap().iter().any(|p| p == "sent while publishing"),
+            "the send to reach the agent while the publish is held",
+        )
+        .await;
+        drop(held);
+        queued.await.unwrap().expect("queue message");
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let big = [send("big 1").await, send("big 2").await].into_iter().min().unwrap();
-    let whole = {
-        let start = std::time::Instant::now();
-        let _ = handle.doc().read_entries_whole().unwrap();
-        start.elapsed()
-    };
-    eprintln!("send to delivered: new chat {small:?}, 3,000-entry chat {big:?} (a whole read: {whole:?})");
-    assert!(
-        big < small + whole / 2 + Duration::from_millis(50),
-        "a send in a long chat ({big:?}) waited behind its transcript (new chat {small:?}, a whole read {whole:?})"
-    );
+    // Released, publishing goes on: the watcher sees the send (in the
+    // publish after the held one, which read the chat before the drain).
+    wait_for(
+        || {
+            watch.borrow().entries.iter().any(|e| {
+                e.role == MessageRole::User
+                    && e.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Text { text, .. } if text == "sent while publishing")
+                    })
+            })
+        },
+        "the publish to land once released",
+    )
+    .await;
+    let _ = harness.finish.send(());
     core.shutdown().await;
 }
