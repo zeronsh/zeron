@@ -107,6 +107,34 @@ workspace version and the workspace packages' versions in the lockfile) selects
 nothing, and is left out of the reuse fingerprints. Changes to CI itself run
 everything.
 
+### The zgx interface (zeron/zgx)
+
+`zeron/zgx` is to the zgx interface's work what `main` is to the rest
+(`INTEGRATION` in `plan.py`): CI runs on its pushes too, on the pull request
+tier, so each merge costs what its pull request did. Its passes and caches
+serve the pull requests into it, which reuse its passes as well as `main`'s.
+Its zgx caches (`zgx-tests`, the zgx CLI, Ghostty) are saved from there only.
+
+The `zgx` suite (`zgx-tests.yml`):
+
+| Job | Runs on a pull request |
+|---|---|
+| `zgx-linux`: unit tests and Luau UI tests | every zgx change |
+| `zgx-macos`: the same on macOS | the app's macOS code, its lockfile or patches, or a platform change in a crate it builds |
+| ...with the engine's plugin tests (`engine-plugins`) | the plugin host's own code (core-tests runs them on Linux every time) |
+| `zgx-windows`: unit tests, and `scripts/ci/zgx-windows-tests.txt` | the same, for Windows |
+
+Each job is skipped on its own once it passed on the same inputs. Known
+failures are in `scripts/ci/zgx-known-failures.txt`, Windows' under
+`rust-windows:` (16 headless layout and path tests that fail only there).
+Windows-specific regressions go in `zgx-windows-tests.txt`, not a workflow of
+their own, so they run under plan and admission.
+
+Betas (`zgx-beta.yml`) build each platform's engine and interface in parallel
+jobs, then package. On macOS only the signing job waits for `apple-release`'s
+approval, so it can be approved while the builds run. Betas save no GitHub
+caches: a tag run can't read another tag's, and theirs evicted `main`'s.
+
 ### Scheduled runs
 
 - **Nightly** (`ci.yml`, schedule): every suite, job and fixture, nothing
