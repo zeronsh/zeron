@@ -2077,6 +2077,57 @@ mod tests {
         }
     }
 
+    /// A crash loses nothing local: what is on disk 1.5 s after a local
+    /// write holds it, even while server changes keep arriving (their long
+    /// debounce never delays a local write's save). Read through a second
+    /// store on the same files while the host still runs: exactly what a
+    /// crash at that moment leaves behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_crash_after_a_local_write_loses_nothing_local() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let on_disk = || {
+            let store = DocsStore::open(dir.path()).unwrap();
+            let bytes = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+            RegistryDoc::from_bytes(&bytes, "test-device").unwrap().read_all().unwrap()
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+        // A server change arrives first and starts its long debounce.
+        host.inner.bump_changed();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        host.create_space("kept", "test-device", "/project", None, false).unwrap();
+        // Server changes keep coming while the local write waits to save.
+        for _ in 0..7 {
+            host.inner.bump_changed();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        let state = on_disk();
+        assert!(
+            state.spaces.iter().any(|space| space.id == "kept"),
+            "a local write was missing from disk 1.4 s later"
+        );
+        host.rename_space("kept", Some("Renamed")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        assert_eq!(
+            on_disk().spaces.iter().find(|space| space.id == "kept").unwrap().name.as_deref(),
+            Some("Renamed")
+        );
+    }
+
     /// Server rows come back from the room after a restart; local writes
     /// exist only here. So a server frame doesn't save the 2.5 MB snapshot
     /// within the second, a local write still does, and flush saves at once.
