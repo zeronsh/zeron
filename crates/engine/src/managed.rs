@@ -12,7 +12,10 @@
 //! connection drops). After an app update it restarts into the new version
 //! once nothing is running — on macOS only while the app runs, by stopping
 //! so the app starts the new one as its child; elsewhere by relaunching
-//! itself.
+//! itself. An update asked of it (`ApplyUpdate`, from any device) it carries
+//! out itself, app or no app: on macOS it stops, then becomes the new
+//! version in the same process. It only stops when it will, and if the new
+//! version still doesn't start it becomes the installed one again.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -250,20 +253,31 @@ impl Engine {
         };
 
         let restart_stop = stop_tx.clone();
+        let stopped_for_update = Arc::new(std::sync::atomic::AtomicBool::new(false));
         // macOS: the new version is only ever started by the app (see
         // `app_starts_engine`), so the restart waits for the app to run and
         // this engine keeps serving the old version until then.
         #[cfg(target_os = "macos")]
         zeron_update::set_managed_restart_ready(app_starts_engine);
-        zeron_update::set_managed_restart(move || {
-            if cfg!(target_os = "macos") {
-                tracing::info!("restarting into the update: the app starts the new engine");
-            } else {
-                relaunch_self()?;
-            }
-            let _ = restart_stop.send(());
-            Ok(())
-        });
+        {
+            let data_dir = config.data_dir.clone();
+            let stopped_for_update = stopped_for_update.clone();
+            zeron_update::set_managed_restart(move || {
+                if cfg!(target_os = "macos") {
+                    // This process becomes the new version once stopped (the
+                    // `boot` after shutdown below); the app may well be closed.
+                    // If it wouldn't, stopping strands the device: refuse, and
+                    // the update is reported failed with this engine serving.
+                    stop_for_update(zeron_update::transaction::starts_here(&data_dir))?;
+                    tracing::info!("restarting into the update: this engine becomes the new one");
+                } else {
+                    relaunch_self()?;
+                }
+                stopped_for_update.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = restart_stop.send(());
+                Ok(())
+            });
+        }
         let uninstalled_stop = stop_tx.clone();
         // Signed in with no organization chosen, there's no profile to open
         // (maybe for a long while), and so nothing a trial could migrate:
@@ -326,9 +340,53 @@ impl Engine {
         // let go. Without an update this does nothing. (Elsewhere a relaunch has
         // already started the process that does this on its way up.)
         #[cfg(target_os = "macos")]
-        crate::update_trial::boot(&config.data_dir)?;
+        {
+            let booted = crate::update_trial::boot(&config.data_dir);
+            // Still here after stopping for an update: nothing was handed over
+            // and, the app closed, nothing would start an engine again. Fail
+            // the update and become the installed engine instead — the same
+            // process, so macOS still attributes it to the app.
+            if stopped_for_update.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Err(err) = &booted {
+                    tracing::error!(error = %format!("{err:#}"), "the update couldn't start");
+                }
+                return Err(come_back_after_update(&config.data_dir).into());
+            }
+            booted?;
+        }
         outcome
     }
+}
+
+/// Stop for an update only when this engine carries it out once stopped.
+fn stop_for_update(starts_here: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        starts_here,
+        "this engine can't start the new version itself, so it kept running the current one"
+    );
+    Ok(())
+}
+
+/// After an update this engine stopped for didn't start: mark it failed and
+/// exec the installed engine with the same arguments. Returns only if that
+/// couldn't start.
+#[cfg(target_os = "macos")]
+fn come_back_after_update(data_dir: &Path) -> std::io::Error {
+    use std::os::unix::process::CommandExt as _;
+    use zeron_update::transaction;
+    tracing::error!("the update didn't start; coming back on the installed version");
+    if let Some(update) = transaction::read(data_dir).filter(|update| update.in_progress()) {
+        transaction::fail_request(
+            data_dir,
+            &update.id,
+            "Zeron couldn't start the new version, so it stayed on this one.".into(),
+        );
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => installed_executable(&exe, &zeron_update::detect_install()),
+        Err(err) => return err,
+    };
+    Command::new(exe).args(std::env::args_os().skip(1)).exec()
 }
 
 #[cfg(test)]
@@ -360,6 +418,15 @@ mod tests {
             installed_executable(exe, &zeron_update::InstallKind::Unmanaged),
             exe.to_path_buf()
         );
+    }
+
+    /// An engine that wouldn't start the new version once stopped refuses to
+    /// stop for it: the update fails and the engine keeps serving.
+    #[test]
+    fn an_update_this_engine_cant_start_never_stops_it() {
+        assert!(stop_for_update(true).is_ok());
+        let refused = stop_for_update(false).unwrap_err().to_string();
+        assert!(refused.contains("kept running"), "{refused}");
     }
 
     /// The app is found by where it runs from — its bundle's `Contents/MacOS`
