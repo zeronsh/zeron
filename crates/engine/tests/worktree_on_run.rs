@@ -651,11 +651,9 @@ async fn a_repository_with_no_commit_runs_in_its_folder() {
         .expect("createChat");
     core.workspace.rename_chat(CHAT, "Pre-titled").expect("rename chat");
 
-    // As zgx asks for a new chat's worktree: off HEAD.
-    let mut payload = run_payload("msg-fresh-1", &repo_path, Some("space-fresh"));
-    if let SessionCommandPayload::Run { request, .. } = &mut payload {
-        request.worktree.as_mut().unwrap().base = "HEAD".into();
-    }
+    // As zgx asks for a new chat's worktree in it: off the branch it's on,
+    // unborn like HEAD.
+    let payload = run_payload("msg-fresh-1", &repo_path, Some("space-fresh"));
     core.doc_host.queue_command(CHAT, payload).expect("queue run command");
     wait_for(|| complete_assistant_count(&core) == 1, "the turn in the folder").await;
 
@@ -674,6 +672,64 @@ async fn a_repository_with_no_commit_runs_in_its_folder() {
         .output()
         .unwrap();
     assert!(!head.status.success(), "a commit was made: {}", String::from_utf8_lossy(&head.stdout));
+
+    core.shutdown().await;
+}
+
+/// HEAD unborn but the base asked for has commits (an orphan branch checked
+/// out, `main` behind it): the chat still gets its worktree off that base.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unborn_head_with_a_base_that_has_commits_still_gets_a_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().canonicalize().unwrap();
+    let worktrees_root = tmp_path.join("worktrees");
+    let repo_dir = tmp_path.join("orphaned");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git(&repo_dir, &["init", "-b", "main"]);
+    git(&repo_dir, &["config", "user.email", "t@example.com"]);
+    git(&repo_dir, &["config", "user.name", "Test"]);
+    std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
+    git(&repo_dir, &["add", "."]);
+    git(&repo_dir, &["commit", "-m", "init"]);
+    git(&repo_dir, &["checkout", "--orphan", "dev"]);
+    let repo_path = repo_dir.to_string_lossy().to_string();
+
+    let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RecordingHarness { cwds: cwds.clone() }));
+    let core = EngineCore::assemble(&tmp_path.join("data"), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-orphan", &core.device_id, &repo_path, Some("Orphan".into()), true)
+        .expect("create project");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::SET_WORKTREE_SETTINGS,
+            serde_json::json!({ "useCustomDirectory": true, "customDirectory": worktrees_root }),
+        )
+        .await
+        .expect("choose worktree directory");
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": CHAT, "deviceId": core.device_id, "spaceId": "space-orphan",
+            }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace.rename_chat(CHAT, "Pre-titled").expect("rename chat");
+
+    // Off `main` (run_payload's base), which has the commit.
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-orphan-1", &repo_path, Some("space-orphan")))
+        .expect("queue run command");
+    wait_for(|| complete_assistant_count(&core) == 1, "the turn in a worktree").await;
+
+    let cwd = cwds.lock().unwrap().first().cloned().expect("run recorded");
+    assert_ne!(cwd, repo_path, "ran in the project's folder, not a worktree");
+    assert!(PathBuf::from(&cwd).starts_with(&worktrees_root), "{cwd}");
 
     core.shutdown().await;
 }

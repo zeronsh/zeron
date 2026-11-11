@@ -6867,7 +6867,15 @@ impl DocHost {
         // checkout) and as a host that predates the spec does; nothing is
         // committed for the person. (Its later sends stay there, as any chat
         // keeps its checkout.)
-        if let Ok(false) = repos.has_commits(std::path::Path::new(&spec.repo_path)).await {
+        // (Neither the base it asks for nor HEAD: a repository whose HEAD
+        // is unborn but whose base has commits, an orphan branch checked
+        // out, still gets its worktree off that base. Anything else that
+        // fails, a mistyped base, fails as before.)
+        let repo = std::path::Path::new(&spec.repo_path);
+        if let (Ok(false), Ok(false)) = (
+            repos.resolves_to_commit(repo, &spec.base).await,
+            repos.resolves_to_commit(repo, "HEAD").await,
+        ) {
             tracing::info!(chat = %chat_id, repo = %spec.repo_path,
                 "worktree spec: the repository has no commit yet; running in its folder");
             return Ok((spec.repo_path.clone(), None));

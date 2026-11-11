@@ -1412,12 +1412,15 @@ impl Repos {
 
     // ── worktrees ───────────────────────────────────────────────────────────
 
-    /// Whether the repository at `repo_path` has a commit at HEAD. A fresh
-    /// `git init` doesn't (an unborn HEAD), and git can't add a worktree off
-    /// it ("invalid reference: HEAD").
-    pub async fn has_commits(&self, repo_path: &Path) -> Result<bool, EngineError> {
+    /// Whether `rev` (a branch, `HEAD`, a commit) names a commit in the
+    /// repository at `repo_path`. In a fresh `git init` nothing does: HEAD is
+    /// unborn, and so is the branch it names ("invalid reference: HEAD").
+    pub async fn resolves_to_commit(&self, repo_path: &Path, rev: &str) -> Result<bool, EngineError> {
         Ok(self
-            .git_probe(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], Some(repo_path))
+            .git_probe(
+                &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")],
+                Some(repo_path),
+            )
             .await?
             .is_some())
     }
