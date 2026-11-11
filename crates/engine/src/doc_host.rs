@@ -6145,7 +6145,13 @@ impl DocHost {
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
                         Ok(outcome) => outcome,
-                        Err(err) => (SessionCommandStatus::Rejected, Some(err.to_string())),
+                        Err(err) => {
+                            let why = err.to_string();
+                            tracing::warn!(chat = %handle.chat_id, command = %entry.id,
+                                error = %why, "command rejected");
+                            note_rejected_run(handle, &entry, &why);
+                            (SessionCommandStatus::Rejected, Some(why))
+                        }
                     };
                     self.resolve_command(handle, &entry.id, status, resolution.as_deref());
                 }
@@ -7631,6 +7637,29 @@ mod queued_message_prompt_tests {
             queued_message_prompt("", &paths),
             format!("{ATTACHMENT_ONLY_PROMPT}\n\n{ATTACHMENT_PROMPT_HEADER}\n- /tmp/image.png")
         );
+    }
+}
+
+/// A run that failed to start after its message reached the transcript (an
+/// agent this device doesn't have, a session that wouldn't open): nothing
+/// else would say so, and the chat stopped at the message with no reply and
+/// no error. Its failure is written under it, as a turn that never ran.
+/// (A message that never landed is left alone: the send stays undelivered
+/// and its Retry re-issues it, `retry_delivery`.)
+fn note_rejected_run(handle: &ChatDocHandle, entry: &SessionCommandEntry, why: &str) {
+    let SessionCommandPayload::Run { message_id, .. } = &entry.payload else {
+        return;
+    };
+    let Ok(entries) = handle.doc.read_entries_shared() else {
+        return;
+    };
+    // Landed, and the last entry: no reply or failure followed it.
+    if entries.last().map(|e| e.id.as_str()) != Some(message_id.as_str()) {
+        return;
+    }
+    let note = format!("Couldn't start this turn: {why}");
+    if let Err(err) = handle.note_turn_failure(message_id, &note) {
+        tracing::warn!(chat = %handle.chat_id, error = %err, "noting a run that didn't start failed");
     }
 }
 
