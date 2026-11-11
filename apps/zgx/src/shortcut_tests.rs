@@ -605,9 +605,12 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     let recorder = "#settings-page >> role:button ~\"Change Toggle terminal\"";
     w.app.click(recorder);
     w.app.frames(5);
-    w.app.keys("ctrl+alt+t");
+    // (A key besides the command key: Control on a Mac, Super elsewhere,
+    // where Ctrl is the command key.)
+    let other = if cfg!(target_os = "macos") { "ctrl+alt+t" } else { "meta+alt+t" };
+    w.app.keys(other);
     w.app.frames(10);
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "rebound at once");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "rebound at once");
     assert!(w.app.texts().iter().any(|t| t.contains("Reset")), "a rebound row offers Reset");
 
     // ⌘B is Toggle sidebar's: recorded (the recorder takes every key while
@@ -615,7 +618,7 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     w.app.click(recorder);
     w.app.frames(5);
     assert_eq!(w.press("cmd+b"), None, "⌘B goes to the recorder, not its command");
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "a taken key is refused");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "a taken key is refused");
     assert_eq!(published(&w, "shell.toggle_sidebar").as_deref(), Some("cmd+b"));
     let said = w.app.texts();
     assert!(

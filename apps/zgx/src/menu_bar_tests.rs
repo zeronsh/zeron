@@ -329,7 +329,9 @@ fn two_plugins_with_one_key_the_first_keeps_it() {
     let desktop = Desktop::new();
     let bar = desktop.bar();
     let first = plugin(&dir, "first", r#"ui.command { id = "go", title = "Go", menu = "First", key = "cmd+shift+y", run = function() end }"#);
-    let second = plugin(&dir, "second", r#"ui.command { id = "go", title = "Go too", menu = "Second", key = "meta+shift+y", run = function() end }"#);
+    // (The same key spelled the platform's other way: `meta` on a Mac, `ctrl` elsewhere.)
+    let theirs = alias("cmd+shift+y");
+    let second = plugin(&dir, "second", &format!(r#"ui.command {{ id = "go", title = "Go too", menu = "Second", key = "{theirs}", run = function() end }}"#));
     let mut w = shell(&bar, vec![first, second]);
     let expected = zerons(&w);
     assert!(desktop.refusals.borrow().is_empty(), "refused: {:?}", desktop.refusals.borrow());
@@ -340,7 +342,8 @@ fn two_plugins_with_one_key_the_first_keeps_it() {
     assert_eq!(lost.len(), 1, "{lost:?}");
     assert_eq!(lost[0].why, crate::menu_bar::Why::Plugins("first".into()));
     let notice = crate::plugins::shortcut_notice(&lost, |id| if id == "first" { "First".into() } else { id.into() });
-    assert!(notice.starts_with("Its ⇧⌘Y for “Go too” is already First's"), "{notice}");
+    let words = crate::plugins::shortcut_words(&theirs);
+    assert!(notice.starts_with(&format!("Its {words} for “Go too” is already First's")), "{notice}");
 }
 
 /// R27: a shortcut that's a key alone, from a function: the command stays,
