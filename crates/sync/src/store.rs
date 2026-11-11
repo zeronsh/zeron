@@ -9,6 +9,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// A doc's state on disk as a load found it, which a saver may adopt as
+/// the base for its deltas ([`DocsStore::adopt_loaded_base`]).
+#[derive(Debug, Clone)]
+pub struct LoadedBase {
+    pub token: u64,
+    pub version: loro::VersionVector,
+    pub delta_rows: usize,
+    pub delta_bytes: usize,
+    pub base_bytes: usize,
+}
+
 /// Errors surfaced by [`DocsStore`].
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -159,6 +170,10 @@ const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// that gives command execution mark-BEFORE-execute idempotence.
 pub struct DocsStore {
     conn: Mutex<Connection>,
+    /// Snapshot reads and writes: a whole-snapshot write no longer holds the
+    /// connection every commit's outbox write needs. SQLite still runs one
+    /// writer at a time, so those writes are kept small (deltas).
+    snap_conn: Mutex<Connection>,
     failed_publications: Mutex<HashSet<String>>,
     /// Snapshot jobs wait here asynchronously before entering the blocking pool.
     pub snapshot_writer: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -171,6 +186,8 @@ pub struct DocsStore {
     /// Set before a restart into another version: every save from then on
     /// is a whole snapshot ([`Self::stop_snapshot_deltas`]).
     deltas_stopped: std::sync::atomic::AtomicBool,
+    /// What a load found on disk, for a saver to adopt as its delta base.
+    loaded: Mutex<std::collections::HashMap<String, LoadedBase>>,
     /// Loads that merged snapshot deltas (diagnostics: each costs a whole
     /// import and export of the doc).
     delta_merges: std::sync::atomic::AtomicU64,
@@ -219,13 +236,19 @@ impl DocsStore {
             );
             crate::store_recovery::Recovery { reason, kept_at, salvaged_rows, damaged_tables }
         });
+        let snap_conn = Connection::open(&path)?;
+        snap_conn.pragma_update(None, "synchronous", "NORMAL")?;
+        snap_conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+        snap_conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            snap_conn: Mutex::new(snap_conn),
             failed_publications: Mutex::new(HashSet::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             bases: Mutex::new(std::collections::HashMap::new()),
             next_base: std::sync::atomic::AtomicU64::new(1),
             deltas_stopped: std::sync::atomic::AtomicBool::new(false),
+            loaded: Mutex::new(std::collections::HashMap::new()),
             delta_merges: std::sync::atomic::AtomicU64::new(0),
             path,
             recovery,
@@ -488,7 +511,7 @@ impl DocsStore {
             if self.deltas_stopped.load(std::sync::atomic::Ordering::Acquire) {
                 return Ok(false);
             }
-            let mut conn = self.conn();
+            let mut conn = self.snap_conn();
             // From memory, not the row: `saved_at` sits after the blob, and
             // reading it walks the whole snapshot's overflow pages.
             let saved_at = match self.bases.lock().unwrap_or_else(PoisonError::into_inner).get(doc_id) {
@@ -496,6 +519,15 @@ impl DocsStore {
                 _ => return Ok(false),
             };
             let tx = conn.transaction()?;
+            // The primary key alone: no read of the blob.
+            let has_base: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM snapshots WHERE doc_id = ?1)",
+                params![doc_id],
+                |row| row.get(0),
+            )?;
+            if !has_base {
+                return Ok(false);
+            }
             tx.execute(
                 "INSERT INTO snapshot_deltas (doc_id, bytes, cursor, base_saved_at, seq)
                  VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(seq), 0) + 1 FROM snapshot_deltas
@@ -525,7 +557,7 @@ impl DocsStore {
     /// (rows, bytes) of saved deltas, for diagnostics and tests.
     pub fn snapshot_delta_stats(&self, doc_id: &str) -> Result<(u64, u64), StoreError> {
         store_blocking(|| {
-            Ok(self.conn().query_row(
+            Ok(self.snap_conn().query_row(
                 "SELECT count(*), COALESCE(sum(length(bytes)), 0) FROM snapshot_deltas WHERE doc_id = ?1",
                 params![doc_id],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
@@ -542,6 +574,10 @@ impl DocsStore {
 
     /// Called after the full write commits, with the connection still held.
     fn new_base(&self, doc_id: &str, saved_at: i64) -> u64 {
+        self.loaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(doc_id);
         let token = self
             .next_base
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -558,7 +594,7 @@ impl DocsStore {
     }
 
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        let mut conn = self.conn();
+        let mut conn = self.snap_conn();
         let saved_at = now_ms();
         let tx = conn.transaction()?;
         tx.execute(
@@ -593,7 +629,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
-        let mut conn = self.conn();
+        let mut conn = self.snap_conn();
         let saved_at = now_ms();
         let tx = conn.transaction()?;
         tx.execute(
@@ -629,7 +665,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<u64, StoreError> {
-        let mut conn = self.conn();
+        let mut conn = self.snap_conn();
         let saved_at = now_ms();
         let tx = conn.transaction()?;
         tx.execute(
@@ -730,7 +766,7 @@ impl DocsStore {
     /// the doc's parked inbox, which an open replays until nothing waits:
     /// they may hold ops (relay rows, local ops) nothing else still has.
     fn load_merged(&self, doc_id: &str) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.snap_conn();
         let row = conn
             .query_row(
                 "SELECT bytes, cursor, epoch, saved_at FROM snapshots WHERE doc_id = ?1",
@@ -749,6 +785,9 @@ impl DocsStore {
         let deltas = load_deltas(&conn, doc_id)?;
         drop(conn);
         if deltas.is_empty() {
+            if let Ok(meta) = loro::LoroDoc::decode_import_blob_meta(&bytes, false) {
+                self.offer_base(doc_id, saved_at, meta.partial_end_vv, 0, 0, bytes.len());
+            }
             return Ok(Some((bytes, cursor, epoch)));
         }
         self.delta_merges
@@ -756,6 +795,15 @@ impl DocsStore {
         let merge = merge_deltas(doc_id, &bytes, &deltas);
         if let Some((at, kind)) = merge.stop {
             self.park_delta_tail(doc_id, &deltas[at..], kind)?;
+        }
+        // New deltas may follow these only if the whole chain merged and
+        // all of it extends this base; else the next save is whole.
+        if merge.stop.is_none()
+            && let Some(version) = &merge.version
+            && deltas.iter().all(|delta| delta.base_saved_at == saved_at)
+        {
+            let delta_bytes = deltas.iter().map(|delta| delta.bytes.len()).sum();
+            self.offer_base(doc_id, saved_at, version.clone(), deltas.len(), delta_bytes, bytes.len());
         }
         Ok(Some(match merge.merged {
             Some(merged) => {
@@ -767,11 +815,58 @@ impl DocsStore {
         }))
     }
 
+    /// Record a loaded state as a delta base, unless this process already
+    /// tracks a base for the doc (a live saver's, or a newer full write):
+    /// never displace one.
+    fn offer_base(
+        &self,
+        doc_id: &str,
+        saved_at: i64,
+        version: loro::VersionVector,
+        delta_rows: usize,
+        delta_bytes: usize,
+        base_bytes: usize,
+    ) {
+        let mut bases = self.bases.lock().unwrap_or_else(PoisonError::into_inner);
+        if bases.contains_key(doc_id) {
+            return;
+        }
+        let token = self
+            .next_base
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        bases.insert(doc_id.to_owned(), (token, saved_at));
+        self.loaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                doc_id.to_owned(),
+                LoadedBase { token, version, delta_rows, delta_bytes, base_bytes },
+            );
+    }
+
+    /// The state a load of `doc_id` found on disk, if it is still the doc's
+    /// current base: a saver that adopts it writes deltas from there instead
+    /// of a whole first save. Taken once.
+    pub fn adopt_loaded_base(&self, doc_id: &str) -> Option<LoadedBase> {
+        let loaded = self
+            .loaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(doc_id)?;
+        let current = self
+            .bases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(doc_id)
+            .map(|(token, _)| *token);
+        (current == Some(loaded.token)).then_some(loaded)
+    }
+
     /// Move the rows from a merge's stop onward out of the delta chain, into
     /// the doc's parked inbox (an undecodable row is dropped: nothing can
     /// read it). One transaction: the chain then ends at its clean run.
     fn park_delta_tail(&self, doc_id: &str, tail: &[Delta], kind: MergeStop) -> Result<(), StoreError> {
-        let mut conn = self.conn();
+        let mut conn = self.snap_conn();
         let tx = conn.transaction()?;
         let parked = format!("{doc_id}#parked");
         for (i, delta) in tail.iter().enumerate() {
@@ -814,6 +909,10 @@ impl DocsStore {
         )?;
         tx.commit()?;
         self.bases
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(doc_id);
+        self.loaded
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(doc_id);
@@ -949,6 +1048,10 @@ impl DocsStore {
         });
     }
 
+    fn snap_conn(&self) -> MutexGuard<'_, Connection> {
+        self.snap_conn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         // A poisoned lock only means another thread panicked mid-query; the
         // connection itself is still usable.
@@ -998,6 +1101,8 @@ enum MergeStop {
 
 struct Merge {
     merged: Option<Vec<u8>>,
+    /// The merged state's version.
+    version: Option<loro::VersionVector>,
     /// How many deltas, from the first, applied cleanly.
     applied: usize,
     /// Where the run stopped, and why.
@@ -1011,7 +1116,7 @@ struct Merge {
 /// doesn't hold (Loro parks them and an export drops them), or at one that
 /// doesn't decode. `merged` is `None` when not one delta applies.
 fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[Delta]) -> Merge {
-    let none = |stop| Merge { merged: None, applied: 0, stop };
+    let none = |stop| Merge { merged: None, version: None, applied: 0, stop };
     let doc = loro::LoroDoc::new();
     if let Err(error) = doc.import(base) {
         tracing::warn!(doc = doc_id, %error, "snapshot base did not decode for its deltas; loading it alone");
@@ -1064,7 +1169,7 @@ fn merge_deltas(doc_id: &str, base: &[u8], deltas: &[Delta]) -> Merge {
         doc
     };
     match doc.export(loro::ExportMode::Snapshot) {
-        Ok(bytes) => Merge { merged: Some(bytes), applied, stop },
+        Ok(bytes) => Merge { merged: Some(bytes), version: Some(doc.oplog_vv()), applied, stop },
         Err(error) => {
             tracing::warn!(doc = doc_id, %error, "merged snapshot did not export; loading the base");
             none(stop)
@@ -1743,6 +1848,69 @@ mod publication_tests {
 #[cfg(test)]
 mod publication_failure_tests {
     use super::*;
+
+    /// Outbox writes (every commit's, inside the commit callback) while a
+    /// 50 MB whole snapshot is saved on another thread: their latency.
+    /// Returns (max, p99) in ms over the save's duration.
+    fn outbox_latency_during_a_whole_save(store: std::sync::Arc<DocsStore>) -> (f64, f64, f64) {
+        outbox_latency_with_saver(store.clone(), store)
+    }
+
+    fn outbox_latency_with_saver(store: std::sync::Arc<DocsStore>, saver_store: std::sync::Arc<DocsStore>) -> (f64, f64, f64) {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let blob: Vec<u8> = (0..50 * 1024 * 1024 / 8)
+            .flat_map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed.to_le_bytes()
+            })
+            .collect();
+        // Warm: the row exists, as for a chat saved before.
+        store.save_snapshot_with_cursor("whale", &blob, 1, 2).unwrap();
+        store.initialize_chat_outbox("busy", &[]).unwrap();
+        let saving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let saver = {
+            let (store, saving) = (saver_store, saving.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                for cursor in 2..5 {
+                    store.save_snapshot_with_cursor("whale", &blob, cursor, 2).unwrap();
+                }
+                saving.store(false, std::sync::atomic::Ordering::Release);
+                started.elapsed().as_secs_f64() * 1000.0 / 3.0
+            })
+        };
+        let mut latencies = Vec::new();
+        let mut batch = 0;
+        while saving.load(std::sync::atomic::Ordering::Acquire) {
+            batch += 1;
+            let started = Instant::now();
+            store
+                .enqueue_chat_update("busy", &format!("batch-{batch}"), b"a streamed token")
+                .unwrap();
+            latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let save_ms = saver.join().unwrap();
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let max = *latencies.last().unwrap();
+        let p99 = latencies[(latencies.len() * 99 / 100).min(latencies.len() - 1)];
+        (max, p99, save_ms)
+    }
+
+    #[test]
+    fn outbox_writes_stay_fast_while_a_whole_snapshot_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(DocsStore::open(dir.path()).unwrap());
+        let (max, p99, save_ms) = outbox_latency_during_a_whole_save(store);
+        eprintln!("outbox write during a 50 MB whole save: max {max:.1} ms, p99 {p99:.1} ms (save {save_ms:.0} ms)");
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(DocsStore::open(dir.path()).unwrap());
+        let other = std::sync::Arc::new(DocsStore::open(dir.path()).unwrap());
+        let (max, p99, save_ms) = outbox_latency_with_saver(store, other);
+        eprintln!("same, saver on its own connection: max {max:.1} ms, p99 {p99:.1} ms (save {save_ms:.0} ms)");
+    }
 
     /// A relay chat whose outbox write failed must replay its operations
     /// unless a save made them durable. A delta is such a save: it clears the

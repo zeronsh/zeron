@@ -77,9 +77,14 @@ impl ChatPersistence {
         cursor: u64,
     ) -> Arc<Self> {
         let verified = store.snapshot_cursor_verified(&chat_id).unwrap_or(false);
-        let inherited = store
-            .snapshot_delta_stats(&chat_id)
-            .is_ok_and(|(rows, _)| rows > 0);
+        // The state a load just found on disk, when it still is the doc's
+        // base: deltas continue from it, so reopening a chat costs no whole
+        // save (47 MB for the largest; one per hot chat per engine start).
+        let adopted = store.adopt_loaded_base(&chat_id);
+        let inherited = adopted.is_none()
+            && store
+                .snapshot_delta_stats(&chat_id)
+                .is_ok_and(|(rows, _)| rows > 0);
         let runtime = tokio::runtime::Handle::try_current().ok();
         let (tx, rx) = mpsc::channel(1);
         let this = Arc::new(Self {
@@ -91,9 +96,14 @@ impl ChatPersistence {
             cursor: AtomicU64::new(if verified { cursor } else { 0 }),
             generation: AtomicU64::new(0),
             saved: AtomicU64::new(0),
-            snapshot_bytes: AtomicUsize::new(0),
+            snapshot_bytes: AtomicUsize::new(adopted.as_ref().map_or(0, |loaded| loaded.base_bytes)),
             urgent: AtomicBool::new(false),
-            delta: Mutex::new(None),
+            delta: Mutex::new(adopted.as_ref().map(|loaded| DeltaState {
+                base: loaded.token,
+                saved_vv: loaded.version.clone(),
+                bytes: loaded.delta_bytes,
+                rows: loaded.delta_rows,
+            })),
             inherited_deltas: AtomicBool::new(inherited),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
@@ -834,7 +844,8 @@ mod tests {
         doc.doc().get_text("t").insert(0, "! ").unwrap();
         doc.doc().commit();
         persistence.applied(44, false);
-        assert_eq!(store.snapshot_delta_stats("old").unwrap().0, 1);
+        // The migrated snapshot was loaded, so both saves continue from it.
+        assert_eq!(store.snapshot_delta_stats("old").unwrap().0, 2);
         let (bytes, cursor, _) = store.load_snapshot_with_cursor("old").unwrap().unwrap();
         let loaded = loro::LoroDoc::new();
         loaded.import(&bytes).unwrap();
@@ -1206,6 +1217,87 @@ mod tests {
         let (loaded, cursor) = reopened(&store);
         assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
         assert_eq!(cursor, 3);
+    }
+
+    /// A first run saves a chat whole and then in deltas; returns its dir.
+    fn saved_in_an_earlier_run(deltas: u64) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("reopen").unwrap());
+        let persistence = ChatPersistence::new(&doc, store, "reopen".into(), 0);
+        for cursor in 1..=(1 + deltas) {
+            doc.doc().get_text("t").insert(0, &format!("{cursor} ")).unwrap();
+            doc.doc().commit();
+            persistence.applied(cursor, false);
+        }
+        dir
+    }
+
+    /// This run: open the store, load the chat as an open does.
+    fn reopened_run(dir: &std::path::Path) -> (Arc<DocsStore>, Arc<SessionDoc>, u64) {
+        let store = Arc::new(DocsStore::open(dir).unwrap());
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("reopen").unwrap().unwrap();
+        let raw = loro::LoroDoc::new();
+        raw.import(&bytes).unwrap();
+        (store, Arc::new(SessionDoc::from_doc(raw)), cursor)
+    }
+
+    /// Reopening a chat after a restart costs no whole save: the persister
+    /// adopts what the load found on disk and writes deltas from there.
+    #[test]
+    fn a_reopened_chat_saves_a_delta_not_the_whole_doc() {
+        for earlier_deltas in [0, 3] {
+            let dir = saved_in_an_earlier_run(earlier_deltas);
+            let (store, doc, cursor) = reopened_run(dir.path());
+            assert_eq!(cursor, 1 + earlier_deltas);
+            let persistence = ChatPersistence::new(&doc, store.clone(), "reopen".into(), cursor);
+            doc.doc().get_text("t").insert(0, "after the restart ").unwrap();
+            doc.doc().commit();
+            persistence.applied(cursor + 1, false);
+            assert_eq!(persistence.writes.load(Ordering::Relaxed), 0, "a whole save after reopening");
+            assert_eq!(persistence.delta_writes.load(Ordering::Relaxed), 1);
+            let (_, again, again_cursor) = reopened_run(dir.path());
+            assert_eq!(again.doc().get_deep_value(), doc.doc().get_deep_value());
+            assert_eq!(again_cursor, cursor + 1);
+            // Inherited deltas still count toward compaction.
+            persistence.compact_sync();
+            assert_eq!(store.snapshot_delta_stats("reopen").unwrap(), (0, 0));
+        }
+    }
+
+    /// No adopting when the load stopped at a bad delta (new deltas after it
+    /// would never be read back), nor when a full write came in between.
+    #[test]
+    fn a_reopened_chat_saves_whole_when_its_disk_state_is_not_a_clean_base() {
+        let dir = saved_in_an_earlier_run(2);
+        {
+            let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+            db.execute(
+                "INSERT INTO snapshot_deltas (doc_id, bytes, cursor, base_saved_at, seq)
+                 SELECT doc_id, x'00ff', 99, saved_at,
+                        (SELECT COALESCE(MAX(seq), 0) + 1 FROM snapshot_deltas WHERE doc_id = 'reopen')
+                 FROM snapshots WHERE doc_id = 'reopen'",
+                [],
+            )
+            .unwrap();
+        }
+        let (store, doc, cursor) = reopened_run(dir.path());
+        assert_eq!(cursor, 3, "the load stops before the bad delta");
+        let persistence = ChatPersistence::new(&doc, store.clone(), "reopen".into(), cursor);
+        doc.doc().get_text("t").insert(0, "x").unwrap();
+        doc.doc().commit();
+        persistence.applied(4, false);
+        assert_eq!(persistence.writes.load(Ordering::Relaxed), 1, "must save whole past a bad delta");
+        assert_eq!(store.snapshot_delta_stats("reopen").unwrap(), (0, 0));
+
+        let dir = saved_in_an_earlier_run(1);
+        let (store, doc, cursor) = reopened_run(dir.path());
+        store.save_snapshot_with_cursor("reopen", &doc.export_snapshot().unwrap(), cursor, 2).unwrap();
+        let persistence = ChatPersistence::new(&doc, store.clone(), "reopen".into(), cursor);
+        doc.doc().get_text("t").insert(0, "y").unwrap();
+        doc.doc().commit();
+        persistence.applied(cursor + 1, false);
+        assert_eq!(persistence.writes.load(Ordering::Relaxed), 1, "a full write replaced the loaded base");
     }
 }
 
