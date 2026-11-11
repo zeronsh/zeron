@@ -424,8 +424,40 @@ struct LetGo {
 const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
 const LET_GO_MOST: usize = 6;
 /// And at most about this much of them, the oldest going first: a long
-/// chat's kept rows (7,900 entries, 18 MB as JSON) cost some 14 MB.
-const LET_GO_BYTES: usize = 48 << 20;
+/// chat's kept rows (7,900 entries, 18 MB as JSON) cost some 14 MB, and the
+/// app rests near 265 MB of its 300 MB: one long chat, or a few others.
+const LET_GO_BYTES: usize = 20 << 20;
+/// Nothing kept while the app's footprint (what Activity Monitor shows) is
+/// past this: what's kept is the first to go when memory is short.
+#[cfg(target_os = "macos")]
+const LET_GO_FOOTPRINT: u64 = 280 << 20;
+
+/// The process's footprint in bytes, as Activity Monitor shows it.
+#[cfg(target_os = "macos")]
+fn footprint() -> Option<u64> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a rusage_info_v4 the call fills in, as RUSAGE_INFO_V4 asks.
+    let read = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, (&mut info as *mut libc::rusage_info_v4).cast()) };
+    (read == 0).then_some(info.ri_phys_footprint)
+}
+
+/// Whether the app has room to keep a chat let go of.
+fn room_to_keep() -> bool {
+    #[cfg(target_os = "macos")]
+    if footprint().is_some_and(|bytes| bytes > LET_GO_FOOTPRINT) {
+        return false;
+    }
+    true
+}
+
+/// `ZERON_ZGX_KEEP_CHATS=0`: chats let go of are kept as they were before
+/// (one, two seconds, for a split taking it), to compare what keeping costs.
+fn keeping_chats() -> bool {
+    thread_local! {
+        static ON: bool = std::env::var("ZERON_ZGX_KEEP_CHATS").map_or(true, |v| v != "0");
+    }
+    ON.with(|on| *on)
+}
 /// What each entry costs beyond its folded bytes (its id, sum, row slots).
 const LET_GO_PER_ENTRY: usize = 512;
 
@@ -445,11 +477,12 @@ fn let_go_weight(entries: &[Entry], built: &HashMap<Rc<str>, Built>) -> usize {
 /// The chats let go of that are still kept: none older than `LET_GO_KEPT`,
 /// and the newest `LET_GO_MOST`.
 fn prune_let_go(kept: &mut Vec<LetGo>) {
-    kept.retain(|held| held.at.elapsed() < LET_GO_KEPT);
-    let over = kept.len().saturating_sub(LET_GO_MOST);
+    let (most, kept_for) = if keeping_chats() { (LET_GO_MOST, LET_GO_KEPT) } else { (1, std::time::Duration::from_secs(2)) };
+    kept.retain(|held| held.at.elapsed() < kept_for);
+    let over = kept.len().saturating_sub(most);
     kept.drain(..over);
     // (The oldest first, until what's kept fits.)
-    while kept.iter().map(|held| held.bytes).sum::<usize>() > LET_GO_BYTES {
+    while keeping_chats() && kept.iter().map(|held| held.bytes).sum::<usize>() > LET_GO_BYTES {
         kept.remove(0);
     }
 }
@@ -1056,12 +1089,23 @@ impl Chats {
         let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
         let bytes = let_go_weight(&entries, &built);
         kept.retain(|held| held.id != id);
-        // (Too big on its own to keep: not kept, and what is kept stays.)
-        if bytes > LET_GO_BYTES {
+        // (The app past its footprint: nothing kept, and what was goes. Too
+        // big on its own to keep: not kept, and what is kept stays.)
+        if !room_to_keep() {
+            kept.clear();
+            eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint is past its mark)");
+            return;
+        }
+        if keeping_chats() && bytes > LET_GO_BYTES {
             return;
         }
         kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context, context_usage });
         prune_let_go(&mut kept);
+        eprintln!(
+            "zeron-zgx: chat: kept chats let go of: {}, {:.1} MB",
+            kept.len(),
+            kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e6
+        );
     }
 
     /// What a view let go of lately, if it was this chat: an `Open` that has
@@ -7651,6 +7695,29 @@ mod tests {
         let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: Some("Opus".into()) });
         let base = footprint_mb();
         println!("KEPT base {base:.1} MB");
+        // One built as a view builds it and let go of with nothing kept: what a
+        // long chat opened at all leaves, cache or not.
+        let build = |c: usize| {
+            let list = chat(c);
+            let whole_from = list.len().saturating_sub(WHOLE_TAIL);
+            let mut entries: Vec<Entry> = Vec::with_capacity(list.len());
+            let mut built = std::collections::HashMap::new();
+            let mut older_todo = None;
+            for (at, e) in list.into_iter().enumerate() {
+                let row = built_for(&e, &context, at < whole_from);
+                let mut entry = Entry::new(e);
+                built.insert(entry.id.clone(), row);
+                if at < whole_from {
+                    settle(&mut entry, at, &mut older_todo);
+                }
+                entries.push(entry);
+            }
+            Open { id: format!("c{c}"), entries, built, older_todo, heard: true, ..Open::default() }
+        };
+        drop(build(99));
+        println!("KEPT one opened and let go, none kept: {:.1} MB (+{:.1})", footprint_mb(), footprint_mb() - base);
+        zgx_desktop::release_thread_heap();
+        println!("KEPT and the heap released: {:.1} MB (+{:.1})", footprint_mb(), footprint_mb() - base);
         for c in 0..6 {
             let list = chat(c);
             let json_mb = list.iter().map(|e| serde_json::to_vec(e).map_or(0, |b| b.len())).sum::<usize>() as f64 / 1e6;
