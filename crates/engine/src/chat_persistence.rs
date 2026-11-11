@@ -43,6 +43,9 @@ pub(crate) struct ChatPersistence {
     urgent: AtomicBool,
     /// Guarded by `write` in practice; its own lock keeps that obvious.
     delta: Mutex<Option<DeltaState>>,
+    /// Deltas already on disk when this persister started (left by a crash):
+    /// a compaction folds them even if the chat never changes.
+    inherited_deltas: AtomicBool,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
     /// Seeded from the store, then set by the first verified write: cursor
@@ -71,6 +74,9 @@ impl ChatPersistence {
         cursor: u64,
     ) -> Arc<Self> {
         let verified = store.snapshot_cursor_verified(&chat_id).unwrap_or(false);
+        let inherited = store
+            .snapshot_delta_stats(&chat_id)
+            .is_ok_and(|(rows, _)| rows > 0);
         let runtime = tokio::runtime::Handle::try_current().ok();
         let (tx, rx) = mpsc::channel(1);
         let this = Arc::new(Self {
@@ -85,6 +91,7 @@ impl ChatPersistence {
             snapshot_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
             delta: Mutex::new(None),
+            inherited_deltas: AtomicBool::new(inherited),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             cursor_verified: AtomicBool::new(verified),
@@ -233,7 +240,11 @@ impl ChatPersistence {
             let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
             let mut delta = self.delta.lock().unwrap_or_else(|e| e.into_inner());
             let generation = self.generation.load(Ordering::Acquire);
-            let folds_deltas = compact && delta.as_ref().is_some_and(|d| d.rows > 0);
+            let folds_deltas = compact
+                && match delta.as_ref() {
+                    Some(state) => state.rows > 0,
+                    None => self.inherited_deltas.load(Ordering::Acquire),
+                };
             if generation == self.saved.load(Ordering::Acquire) && !folds_deltas {
                 return;
             }
@@ -318,6 +329,8 @@ impl ChatPersistence {
                     #[cfg(test)]
                     self.bytes_written
                         .fetch_add(self.snapshot_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+                    // A whole save replaces every delta on disk.
+                    self.inherited_deltas.store(false, Ordering::Release);
                     *delta = Some(DeltaState {
                         base,
                         saved_vv: version,
@@ -1086,6 +1099,38 @@ mod tests {
             drop(persisters);
             drop(runtime);
         }
+    }
+
+    /// Deltas a crash left behind fold at the next compaction (eviction,
+    /// shutdown) even if the chat never changes again in this process.
+    #[test]
+    fn deltas_left_by_a_crash_fold_at_the_next_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+            let doc = Arc::new(SessionDoc::init("left").unwrap());
+            let persistence = ChatPersistence::new(&doc, store.clone(), "left".into(), 0);
+            for cursor in 1..=4u64 {
+                doc.doc().get_text("t").insert(0, "x").unwrap();
+                doc.doc().commit();
+                persistence.applied(cursor, false);
+            }
+            assert_eq!(store.snapshot_delta_stats("left").unwrap().0, 3);
+            // Crash: no compaction, no shutdown.
+        }
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let raw = loro::LoroDoc::new();
+        raw.import(&store.load_snapshot("left").unwrap().unwrap()).unwrap();
+        let doc = Arc::new(SessionDoc::from_doc(raw));
+        let persistence = ChatPersistence::new(&doc, store.clone(), "left".into(), 4);
+        persistence.compact_sync();
+        assert_eq!(store.snapshot_delta_stats("left").unwrap(), (0, 0));
+        assert_eq!(persistence.writes.load(Ordering::Relaxed), 1);
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("left").unwrap().unwrap();
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&bytes).unwrap();
+        assert_eq!(loaded.get_deep_value(), doc.doc().get_deep_value());
+        assert_eq!(cursor, 4);
     }
 }
 
