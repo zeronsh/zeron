@@ -15,7 +15,10 @@
 #   BETA_VERSION=<workspace version>-beta.<n>
 #   ZGX_BETA_ENGINE=<a zeron-engine binary, or a release's linux tarball>
 # The engine must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below), which
-# a stable release from before that isn't.
+# a stable release from before that isn't. Optionally:
+#   ZGX_BETA_ZGX_BIN=<the interface, built already as below: from apps/zgx,
+#                     --features beta, ZERON_BETA_VERSION>; otherwise built here
+# (checked as one built here is).
 
 set -euo pipefail
 
@@ -52,12 +55,16 @@ if [[ -n "$BETA_VERSION" ]]; then
   # argument.)
   LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
     { echo "the stable engine predates the shared command line" >&2; exit 1; }
-  # A workspace of its own (its own lock, patches). Built from its folder:
-  # cargo reads .cargo/config.toml by where it runs, not by the manifest, and
-  # the build's flags are there (Luau's NDEBUG), as scripts/package-zgx-beta.sh.
-  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release --locked --features beta \
-    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
-  BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
+  BIN="${ZGX_BETA_ZGX_BIN:-}"
+  if [[ -z "$BIN" ]]; then
+    # A workspace of its own (its own lock, patches). Built from its folder:
+    # cargo reads .cargo/config.toml by where it runs, not by the manifest, and
+    # the build's flags are there (Luau's NDEBUG), as scripts/package-zgx-beta.sh.
+    (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release --locked --features beta \
+      --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
+    BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
+  fi
+  [[ -x "$BIN" ]] || { echo "no interface at $BIN" >&2; exit 1; }
   [[ "$("$BIN" --version)" == "zeron $BETA_VERSION" ]] ||
     { echo "$BIN isn't the $BETA_VERSION beta (it says '$("$BIN" --version)')" >&2; exit 1; }
   # Luau without its asserts (a fifth of script time): zgx-script compiles its

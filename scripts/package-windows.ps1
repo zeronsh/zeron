@@ -4,11 +4,15 @@
 # from the same commit, as engine\zeron.exe (a Windows release has no separate
 # engine: it runs as `zeron.exe engine`). A tester keeps their data and device.
 # No standalone .exe: this interface can't run without that folder. The engine
-# must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below).
+# must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below). -BetaInterface,
+# optional: the interface's zeron-zgx.exe, built already as below (from
+# apps/zgx, --features beta, ZERON_BETA_VERSION) and checked as one built here
+# is; otherwise it's built here.
 param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
     [string]$BetaVersion,
-    [string]$BetaEngine
+    [string]$BetaEngine,
+    [string]$BetaInterface
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
@@ -87,7 +91,9 @@ function Copy-Scripts([string]$From, [string]$To) {
 
 Push-Location $root
 try {
-    if ($BetaVersion) {
+    if ($BetaVersion -and $BetaInterface) {
+        $built = (Resolve-Path -LiteralPath $BetaInterface).Path
+    } elseif ($BetaVersion) {
         # A workspace of its own (its own lock, patches). Built from its
         # folder: cargo reads .cargo/config.toml by where it runs, not by the
         # manifest, and the build's flags are there (Luau's NDEBUG), as
