@@ -258,6 +258,9 @@ struct DocHostInner {
     quiesced: AtomicBool,
     /// Bumped per quiesce: only the newest one's lease lifts it.
     quiesce_generation: AtomicU64,
+    /// How many times the sync scheduler ran [`DocHost::wakeup_is_durable`].
+    #[cfg(test)]
+    wake_checks: AtomicUsize,
     /// Drains between their quiesce check and the end of their dispatch (a
     /// run they start is registered — and Working — by then).
     dispatching: Arc<AtomicUsize>,
@@ -1057,6 +1060,8 @@ impl DocHost {
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
                 quiesce_generation: AtomicU64::new(0),
+                #[cfg(test)]
+                wake_checks: AtomicUsize::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
@@ -2136,7 +2141,15 @@ impl DocHost {
                             captured = version;
                         }
                     }
+                    // Only a wake still on disk at the captured version is
+                    // owed a receipt. Once complete_sync_job deletes the row,
+                    // `captured` keeps its old value; without this check every
+                    // 100 ms tick re-read the whole command ledger and forced
+                    // a full snapshot export for as long as the chat synced
+                    // (84% of a live engine's CPU, Nov 10). A newer wake has a
+                    // different version and is captured above.
                     let wake_read_complete = captured != 0
+                        && pending_wake == Some(captured)
                         && lock(&handle.chat2).as_ref().is_some_and(|c|
                             c.catch_up_completed(handle.sync_wake_ticket.load(Ordering::Acquire)));
                     if wake_read_complete && host.wakeup_is_durable(handle)
@@ -2348,6 +2361,8 @@ impl DocHost {
     /// Catch-up alone is not a durable handoff: a crash before the snapshot
     /// debounce/command drain would otherwise lose the only discovery receipt.
     fn wakeup_is_durable(&self, handle: &ChatDocHandle) -> bool {
+        #[cfg(test)]
+        self.inner.wake_checks.fetch_add(1, Ordering::Relaxed);
         if handle.publication_failed.load(Ordering::Acquire) {
             return false;
         }
