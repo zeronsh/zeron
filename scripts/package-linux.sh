@@ -15,6 +15,8 @@
 # commit:
 #   ZGX_VERSION=<workspace version>, or <workspace version>-beta.<n>
 #   ZGX_ENGINE=<a zeron-engine binary, or a release's linux tarball>
+# The engine must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below), which
+# a stable release from before that isn't.
 # Without them: the old app (apps/zeron), kept for a release that has to go
 # back to it.
 

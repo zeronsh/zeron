@@ -20,7 +20,8 @@
 #                       or `<workspace version>-beta.<n>` (a beta of the next
 #                       release, zgx-beta.yml)
 #   ZGX_ENGINE          the engine: a built binary, a Zeron.app, its app tarball, or
-#                       its `Zeron Engine` binary
+#                       its `Zeron Engine` binary; built with LUAU_CXXFLAGS=-DNDEBUG
+#                       (checked), which a stable release from before that isn't
 #   ZGX_BIN             the interface, built already (with --features beta and
 #                       ZERON_BETA_VERSION=<ZGX_VERSION>); otherwise built here
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)

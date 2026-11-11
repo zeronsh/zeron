@@ -3,7 +3,8 @@
 # zeron.exe, and beside it beta\<version>\ (the name for every release:
 # crates/update/src/windows.rs `BETA`) with its scripts, plugins and the
 # zeron.exe it's given, built from the same commit, as engine\zeron.exe (a Windows release has no separate engine: it
-# runs as `zeron.exe engine`). Users keep their data and device.
+# runs as `zeron.exe engine`). Users keep their data and device. The engine
+# must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below).
 #
 # A stable release also gets the standalone .exe, which is all the old app's
 # updater installs: that zeron.exe brings in its folder from the zip when it
