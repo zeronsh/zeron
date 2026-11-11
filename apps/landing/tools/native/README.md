@@ -137,7 +137,10 @@ drawn from **zeron/zgx** (what the beta ships), not main: that branch's
 wallpaper effects were rewritten (linear light, a paper, a new ASCII ramp
 ` .:-=+*#@` at 1.1-point font pixels, the fade in the shader, the layer the
 art's own box), and the cards port that ASCII (`FS_ASCII2` in
-`public/hero/wallpaper.js`). The hero still draws main's.
+`public/hero/wallpaper.js`). The hero draws zeron/zgx's look too (its
+ASCII, its title strip: the row on a 20-point line, 21-point arrows in the
+glyph stroke): against that branch's native hero (`--card hero`), MAE
+0.03/255 at rest (title strip 0.02, wallpaper 0.03, composer 0.21).
 
 | card | scene | what it shows |
 |---|---|---|

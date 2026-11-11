@@ -76,7 +76,13 @@ const C = {
 // ---------------------------------------------------------------- icons
 
 // ds/icon_svgs.luau, as the app draws them (currentColor is the tint).
+// (A title bar's back and forward, as zeron/zgx draws them: 21 across, their
+// lines in the theme's glyph stroke, 1.1667 points: ds/icon.luau
+// `in_glyph_stroke`.)
+const BAR_STROKE = (1.1667 * 24) / 21;
 const ICONS = {
+  "bar-left": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${BAR_STROKE}" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m5.5-5.5L5 12l5.5 5.5"/></svg>`,
+  "bar-right": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${BAR_STROKE}" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-5.5-5.5L19 12l-5.5 5.5"/></svg>`,
   monitor: '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 10c0-3.771 0-5.657 1.172-6.828S6.229 2 10 2h4c3.771 0 5.657 0 6.828 1.172S22 6.229 22 10v1c0 2.828 0 4.243-.879 5.121C20.243 17 18.828 17 16 17H8c-2.828 0-4.243 0-5.121-.879C2 15.243 2 13.828 2 11z"/><path stroke-linecap="round" d="M16 22H8m4-5v5m10-9H2"/></g></svg>',
   cloud: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><path d="M7.25 18.5h10.1a4.15 4.15 0 0 0 .45-8.27A6.25 6.25 0 0 0 5.9 8.85a4.85 4.85 0 0 0 1.35 9.65Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   "git-branch": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8.5v7M6 12h10a2 2 0 0 0 2-2V8.5"/><circle cx="6" cy="6.25" r="2.25"/><circle cx="6" cy="17.75" r="2.25"/><circle cx="18" cy="6.25" r="2.25"/></svg>',
@@ -326,11 +332,12 @@ function avatar(ctx, s, x, y, size) {
 }
 
 // macOS's window controls (native in the app: not in its own pictures):
-// 14-point lights centred 21 in and 23 apart (ds/title_bar.luau).
+// 14-point lights centred 21 in and 23 apart, on the bar's line, 20 down
+// (ds/title_bar.luau's LIGHTS_LINE on zeron/zgx).
 function trafficLights(ctx, s) {
   const lights = [["#ff5f57", "#e0443e"], ["#febc2e", "#dea123"], ["#28c840", "#1aab29"]];
   lights.forEach(([fill, edge], i) => {
-    const cx = 21 + i * 23, cy = 21;
+    const cx = 21 + i * 23, cy = 20;
     ctx.beginPath();
     ctx.arc(cx * s, cy * s, 7 * s, 0, Math.PI * 2);
     ctx.fillStyle = fill;
@@ -353,12 +360,14 @@ export function drawUnder(ctx, s, { lights = true } = {}) {
 
   // The title strip's controls (ds/title_bar.luau): 24-point buttons on
   // the line 21 down, their 16-point glyphs inside.
-  // (The sidebar's view options, "…", go with the sidebar.)
-  sidebarGlyph(ctx, s, 92, 13, "left", SIDEBAR_OPEN, ink(SECONDARY, "window"));
-  icon(ctx, s, "arrow-left", 124, 13, 16, ink(DISABLED, "window"));
-  icon(ctx, s, "arrow-right", 150, 13, 16, ink(DISABLED, "window"));
-  if (SIDEBAR_OPEN) icon(ctx, s, "more-horizontal", 182, 13, 16, ink(SECONDARY, "window"));
-  sidebarGlyph(ctx, s, W - 30, 13, "right", false, ink(SECONDARY, "window"));
+  // (zeron/zgx: the row on the lights' line, 20 down; the bar's ink
+  // #949496; back and forward 21 across in the glyph stroke. The sidebar's
+  // view options, "…", go with the sidebar.)
+  sidebarGlyph(ctx, s, 92, 12, "left", SIDEBAR_OPEN, ink(SECONDARY, "window"));
+  icon(ctx, s, "bar-left", 121.5, 9.5, 21, ink(DISABLED, "window"));
+  icon(ctx, s, "bar-right", 147.5, 9.5, 21, ink(DISABLED, "window"));
+  if (SIDEBAR_OPEN) icon(ctx, s, "more-horizontal", 182, 12, 16, ink(SECONDARY, "window"));
+  sidebarGlyph(ctx, s, W - 30, 12, "right", false, ink(SECONDARY, "window"));
 
   if (SIDEBAR_OPEN) sidebar(ctx, s);
 

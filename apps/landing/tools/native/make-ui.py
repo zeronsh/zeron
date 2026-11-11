@@ -18,7 +18,8 @@ build that reads ZERON_ZGX_DEV_PLUGINS: the Parallax scenes plugin runs
 there as itself (no scene copied in), its scene set through its settings;
 `landing_<card>_fixture.luau` adds each card's state.
 
-usage: make-ui.py <repo> <out> [--card cat|machines|visuals|visualsbg]
+usage: make-ui.py <repo> <out> [--card cat|machines|visuals|visualsbg|hero]
+(hero: the hero's state on the cards' branch, Blossom through the real plugin)
 (visualsbg: the visuals card's ground, a new chat on Aurora with no chat open)
 """
 import re
@@ -91,7 +92,7 @@ ui.after(400, function()
 	require("@app/screens/shell/fit").toggle_sidebar()
 end)
 '''
-SCENES = {"cat": "wheat", "machines": "icebergs", "visuals": "aurora", "visualsbg": "aurora"}
+SCENES = {"cat": "wheat", "machines": "icebergs", "visuals": "aurora", "visualsbg": "aurora", "hero": "blossom"}
 if card:
     tail += f'''
 -- landing ({card}): the Parallax scenes plugin, loaded as itself
