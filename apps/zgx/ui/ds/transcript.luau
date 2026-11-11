@@ -1224,22 +1224,27 @@ local function Transcript(props: Props): Node
 	-- stood: set as the list mounts, put right as soon as that row is laid
 	-- out (its own `on_resize`, the frame it lands), not on the clock.
 	local returning: { id: string, dy: number }? = nil
-	local function put_back(id: string): boolean
-		local back = returning
-		if not back or back.id ~= id then
-			return false
-		end
-		local r = rows[id]
+	-- The view moved by however far message `at.id` stands from `at.dy` below
+	-- its top, where it's laid out. False if it isn't laid out.
+	local function hold_on(at: { id: string, dy: number }): boolean
+		local r = rows[at.id]
 		local row_el = r and r.outer:peek()
 		local list_el = list:peek()
 		if not row_el or not list_el or row_el.y == nil or list_el.y == nil then
 			return false
 		end
-		local off = ((row_el.y :: number) - (list_el.y :: number)) - back.dy
+		local off = ((row_el.y :: number) - (list_el.y :: number)) - at.dy
 		if math.abs(off) >= 0.5 then
 			offset:set(math.max(0, offset:peek() + off))
 		end
 		return true
+	end
+	local function put_back(id: string): boolean
+		local back = returning
+		if not back or back.id ~= id then
+			return false
+		end
+		return hold_on(back)
 	end
 	-- The view put back on message `at.id`, `at.dy` from its top as it was.
 	-- Rows above it not measured yet stand at an estimate, so the row can
@@ -1299,7 +1304,24 @@ local function Transcript(props: Props): Node
 			waiting = nil
 			go_back(w)
 		elseif index ~= target.index and not at_end:peek() and not gliding:peek() then
-			go_back(target)
+			-- The list keeps the rows in view where they are as rows come or
+			-- go above them (it anchors on its rows' keys), so the view stays,
+			-- and is only moved by however far the message stands off its
+			-- place once laid out (at the list's very top nothing anchors).
+			-- One no longer laid out is gone back to. (Scrolled to it first,
+			-- by rows above it not measured yet, the view showed older rows
+			-- for the frames until the correction: a chat's history arriving
+			-- after its newest rows, as one is opened.)
+			local at = { id = target.id, dy = target.dy }
+			here = { id = target.id, dy = target.dy, index = index }
+			ui.after(0, function()
+				if here == nil or here.id ~= at.id or at_end:peek() or gliding:peek() then
+					return
+				end
+				if not hold_on(at) then
+					go_back(at)
+				end
+			end)
 		end
 	end)
 	-- The message under the pointer, its lane shown ("" for none), by id:

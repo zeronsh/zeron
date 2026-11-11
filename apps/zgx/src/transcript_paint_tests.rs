@@ -26,9 +26,12 @@ fn ui() -> PathBuf {
 /// (only where damaged, scroll copies reused), one drawn whole each frame.
 /// Their pixels after each frame, and where they differ.
 fn drawn_against_whole(command: &str) -> Vec<String> {
-    drawn_against_whole_then(command, None)
+    drawn_against_whole_then(command, None, false)
 }
-fn drawn_against_whole_then(command: &str, then: Option<&str>) -> Vec<String> {
+/// `then`: a command run once it has opened (rows coming whole). `back`:
+/// once scrolled up into it, the chat left for another and come back to, as
+/// the session page puts the view back on the message it was on.
+fn drawn_against_whole_then(command: &str, then: Option<&str>, back: bool) -> Vec<String> {
     // (One test drawing at a time: renderers on one device in parallel
     // tests read each other's frames, as zgx-gpu's own pixel tests say.)
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -104,6 +107,23 @@ fn drawn_against_whole_then(command: &str, then: Option<&str>) -> Vec<String> {
         }
         refresh(&mut apps, format!("up {step}"));
     }
+    if back {
+        for step in 0..20 {
+            refresh(&mut apps, format!("resting {step}"));
+        }
+        for app in &apps {
+            assert!(app.host.run_command("go_s2"));
+        }
+        for step in 0..20 {
+            refresh(&mut apps, format!("away {step}"));
+        }
+        for app in &apps {
+            assert!(app.host.run_command("go_s7"));
+        }
+        for step in 0..60 {
+            refresh(&mut apps, format!("back {step}"));
+        }
+    }
     for app in &apps {
         assert_eq!(app.error(), None);
     }
@@ -114,6 +134,14 @@ fn drawn_against_whole_then(command: &str, then: Option<&str>) -> Vec<String> {
 fn a_long_chat_opened_and_scrolled_draws_what_a_whole_repaint_draws() {
     let misses = drawn_against_whole("long_chat");
     assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+#[test]
+fn a_long_chat_come_back_to_mid_scroll_draws_what_a_whole_repaint_draws() {
+    for command in ["long_chat", "long_chat_cross"] {
+        let misses = drawn_against_whole_then(command, None, true);
+        assert!(misses.is_empty(), "{command}: {}", misses.join("\n"));
+    }
 }
 
 #[test]
@@ -222,6 +250,7 @@ fn a_long_chat_of_other_chats_messages_keeps_its_rows_apart() {
 #[test]
 fn rows_that_come_whole_after_they_show_stay_apart_and_drawn() {
     rows_kept_apart_then("long_chat_cross_late", Some("long_chat_cross_fill"));
-    let misses = drawn_against_whole_then("long_chat_cross_late", Some("long_chat_cross_fill"));
+    let misses =
+        drawn_against_whole_then("long_chat_cross_late", Some("long_chat_cross_fill"), false);
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
