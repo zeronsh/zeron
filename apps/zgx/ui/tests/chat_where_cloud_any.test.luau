@@ -71,7 +71,7 @@ test("Cloud is offered with No project chosen, and with a project it can't open"
 	no_project(app)
 	open_row(app, "Device")
 	expect(app:has('role:option ~"Cloud"')).to_be(true)
-	expect(app:has('role:option ~"A machine of its own"')).to_be(true)
+	expect(app:has('role:option ~"machine of its own"')).to_be(false)
 	close(app)
 	pick_in(app, "Project", "Notes")
 	expect(app:state("chat_project")).to_be("notes")
@@ -92,10 +92,11 @@ test("picking Cloud with No project picks a project it can open, and lists only 
 	expect(app:has('role:option ~"Notes"')).to_be(false)
 	expect(app:has('role:option ~"Borealis"')).to_be(false)
 	expect(showing(app, `role:button "Don't work in a project"`)).to_be(false)
-	-- Its row says which repository.
+	-- Its row is just its name, with no line under it.
 	close(app)
 	open_row(app, "Device")
-	expect(app:has('role:option ~"A machine of its own, from acme/atlas"')).to_be(true)
+	expect(app:has('role:option ~"Cloud"')).to_be(true)
+	expect(app:has('role:option ~"machine of its own"')).to_be(false)
 end)
 
 test("picking a computer again brings its projects back, and Cloud keeps the project last used there", function()

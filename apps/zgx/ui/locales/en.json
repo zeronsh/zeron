@@ -2894,9 +2894,7 @@
       },
       "device": {
         "offline": "Offline",
-        "offline_seen": "Offline · last seen {ago}",
-        "cloud_from": "A machine of its own, from {repo}",
-        "cloud": "A machine of its own"
+        "offline_seen": "Offline · last seen {ago}"
       },
       "project": {
         "missing": "Missing project",
