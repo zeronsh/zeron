@@ -4677,7 +4677,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
                 id: group.id.clone(),
                 label: group.label.to_owned(),
                 // variant descriptions only restate their thinking level
-                provider: None,
+                provider: first.provider.clone(),
                 description: None,
                 reasoning_levels: group.variants.iter().map(|(level, _)| *level).collect(),
                 options: first.options.clone(),

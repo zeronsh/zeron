@@ -124,6 +124,15 @@ test("a search finds models by their provider, and says it on each row", functio
 	expect(app:has('role:option "Big Pickle"')).to_be(true)
 	expect(app:has('role:option ~"Big Pickle" >> "OpenCode"')).to_be(false)
 
+	-- A provider is found from a word's start, not inside one ("pen" is
+	-- in OpenCode, but starts none of its words); "code" starts its second.
+	app:fill('role:textbox "Search"', "pen")
+	settle(app)
+	expect(app:count("role:option")).to_be(0)
+	app:fill('role:textbox "Search"', "code")
+	settle(app)
+	expect(app:has('role:option "Big Pickle OpenCode"')).to_be(true)
+
 	-- An agent with no providers is searched by name alone.
 	app:click('role:tab "Claude"')
 	app:fill('role:textbox "Search"', "codex")
@@ -179,6 +188,31 @@ test("the keys pick a namesake by its provider", function()
 	app:key("ArrowDown")
 	app:key("Enter")
 	settle(app)
-	expect(app:state("test_picker_model")).never.to_be("pi/opencode/gpt-5.5")
+	expect(app:state("test_picker_model")).to_be("pi/openai-codex/gpt-5.5-mini")
+	expect(app:error()).to_be(nil)
+end)
+
+test("a row gains its provider in place as the catalog names it", function()
+	local app = mount("picker_sources_fixture.luau")
+	app:resize(600, 700)
+	-- An older engine's catalog first: no providers.
+	local models = app:state("test_picker_models") :: { any }
+	local bare = {}
+	for _, m in models do
+		local c = table.clone(m)
+		c.provider = nil
+		table.insert(bare, c)
+	end
+	app:set_state("test_picker_models", bare)
+	settle(app)
+	open(app)
+	expect(app:has('role:option "GPT-5.5"')).to_be(true)
+	expect(app:has('role:option ~"GPT-5.5" >> "Codex"')).to_be(false)
+	-- Then one naming them, the panel open: the namesakes say which.
+	app:set_state("test_picker_models", models)
+	settle(app)
+	expect(app:has('role:option "GPT-5.5 Codex" >> "Codex"')).to_be(true)
+	expect(app:has('role:option "GPT-5.5 OpenCode" >> "OpenCode"')).to_be(true)
+	expect(app:has('role:option "Big Pickle"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)

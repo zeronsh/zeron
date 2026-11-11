@@ -394,8 +394,23 @@ return ui.component(function(props: Props): Node
 		return control.text(props.placeholder) or locale.s("ds.dropdown.placeholder")
 	end
 
-	-- Whether a search finds an item: by its name, else by its hint (or its
-	-- name and hint read together: "gpt codex").
+	-- Whether a search finds an item: by its name, else by its hint from the
+	-- start of one of its words ("code" finds OpenCode's, "ai" not OpenAI's),
+	-- or by its name and hint read together ("gpt-5.5 codex").
+	local function word_start(text: string, q: string): boolean
+		local low = string.lower(text)
+		local at = string.find(low, q, 1, true)
+		while at do
+			local before = if at > 1 then string.sub(text, at - 1, at - 1) else " "
+			-- A word starts after a space or a mark, or at a capital inside
+			-- one (Open|Code).
+			if not string.match(before, "%w") or (string.match(before, "%l") and string.match(string.sub(text, at, at), "%u")) then
+				return true
+			end
+			at = string.find(low, q, at + 1, true)
+		end
+		return false
+	end
 	local function by_name(item: Item, q: string): boolean
 		return q == "" or string.find(string.lower(item.label), q, 1, true) ~= nil
 	end
@@ -403,11 +418,25 @@ return ui.component(function(props: Props): Node
 		if by_name(item, q) then
 			return true
 		end
-		if not item.hint then
+		local hint = item.hint
+		if not hint then
 			return false
 		end
-		local hint = string.lower(item.hint)
-		return string.find(hint, q, 1, true) ~= nil or string.find(string.lower(item.label) .. " " .. hint, q, 1, true) ~= nil
+		if word_start(hint, q) then
+			return true
+		end
+		-- Read together, the search runs from the name on into the hint,
+		-- reaching it at a word's start (its first).
+		local label = string.lower(item.label)
+		local together = label .. " " .. string.lower(hint)
+		local from, to = string.find(together, q, 1, true)
+		while from do
+			if from <= #label and to > #label + 1 then
+				return true
+			end
+			from, to = string.find(together, q, from + 1, true)
+		end
+		return false
 	end
 	-- Whether an item's hint shows now (`hint_when_found`: while a search
 	-- found it by its hint, not its name).
@@ -1271,8 +1300,10 @@ return ui.component(function(props: Props): Node
 							r,
 						}
 					end, {
+						-- (A row gaining or losing its hint is built again, with
+						-- or without the hint's place.)
 						key = function(item: Item)
-							return item.value
+							return if item.hint then `{item.value}\0hint` else item.value
 						end,
 						w_full = true,
 					})

@@ -38,7 +38,7 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
             default: false,
             id: format!("{provider}/{id}"),
             label: model["name"].as_str().unwrap_or(id).into(),
-            provider: Some(ModelProvider {
+            provider: (!provider.is_empty()).then(|| ModelProvider {
                 id: provider.into(),
                 name: provider_name(provider),
             }),
