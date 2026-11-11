@@ -472,8 +472,6 @@ impl Terminals {
             let mut cmd = CommandBuilder::new(&shell);
             if !cfg!(windows) {
                 cmd.arg("-l"); // login shell — the user's real PATH/profile
-            } else if is_powershell(&shell) {
-                cmd.arg("-NoLogo"); // its prompt alone, as cmd's
             }
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
