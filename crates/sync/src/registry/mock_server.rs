@@ -35,32 +35,64 @@ pub struct MockRegistryServer {
     addr: std::net::SocketAddr,
     state: Arc<Mutex<Shared>>,
     task: tokio::task::JoinHandle<()>,
+    /// Bumped to cut every open socket at once (no close handshake).
+    drop_all: tokio::sync::watch::Sender<u64>,
 }
+
+/// A broadcast frame and the connection it must skip (the DO never echoes
+/// a presence beat back to the socket that sent it).
+type Frame = (Option<u64>, String);
 
 impl MockRegistryServer {
     pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let state = Arc::new(Mutex::new(Shared::default()));
-        let (tx, _) = broadcast::channel(1024);
+        let (tx, _) = broadcast::channel::<Frame>(1024);
+        let (drop_all, drop_rx) = tokio::sync::watch::channel(0u64);
         let accept_state = state.clone();
         let accept_tx = tx.clone();
         let task = tokio::spawn(async move {
+            let mut next_conn = 0u64;
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
                 };
+                next_conn += 1;
+                let conn = next_conn;
                 let state = accept_state.clone();
                 let bcast = accept_tx.clone();
+                let mut cut = drop_rx.clone();
+                cut.mark_unchanged();
                 tokio::spawn(async move {
                     let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
                         return;
                     };
-                    serve(ws, state, bcast).await;
+                    tokio::select! {
+                        () = serve(ws, state, bcast, conn) => {}
+                        _ = cut.changed() => {}
+                    }
                 });
             }
         });
-        Self { addr, state, task }
+        Self {
+            addr,
+            state,
+            task,
+            drop_all,
+        }
+    }
+
+    /// Cut every open socket at once without a close handshake, as an edge
+    /// deploy or network reset does (2026-11-11 03:55 incident). Presence is
+    /// memory-only on the DO and survives in this mock the same way.
+    pub fn drop_all_connections(&self) {
+        self.drop_all.send_modify(|n| *n += 1);
+    }
+
+    /// Latest presence beat the room holds for `device` (epoch ms).
+    pub fn presence_of(&self, device: &str) -> Option<i64> {
+        lock(&self.state).presence.get(device).copied()
     }
 
     pub fn url(&self) -> String {
@@ -109,7 +141,8 @@ impl Drop for MockRegistryServer {
 async fn serve(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     state: Arc<Mutex<Shared>>,
-    bcast: broadcast::Sender<String>,
+    bcast: broadcast::Sender<Frame>,
+    conn: u64,
 ) {
     let (mut sink, mut stream) = ws.split();
     let mut rx = bcast.subscribe();
@@ -224,11 +257,14 @@ async fn serve(
                         // Same ordering as the DO: rows to everyone (this
                         // socket included, via the broadcast), then the ack.
                         if let Some(rows) = rows_frame {
-                            let _ = bcast.send(rows);
+                            let _ = bcast.send((None, rows));
                             // Drain our own broadcast copy first so ordering
                             // matches (rows before ack) on this socket too.
-                            while let Ok(text) = rx.try_recv() {
-                                if sink.send(WsMessage::Text(text)).await.is_err() {
+                            while let Ok((skip, text)) = rx.try_recv() {
+                                if skip == Some(conn) {
+                                    continue;
+                                }
+                                if sink.send(WsMessage::Text(text.into())).await.is_err() {
                                     return;
                                 }
                             }
@@ -240,9 +276,11 @@ async fn serve(
                     Some("presence") if ready => {
                         let at = frame.get("at").and_then(Value::as_i64).unwrap_or(0);
                         lock(&state).presence.insert(device.clone(), at);
-                        let _ = bcast.send(
+                        // Every OTHER socket, as the DO's handlePresence.
+                        let _ = bcast.send((
+                            Some(conn),
                             json!({"t":"presence","device":device,"at":at}).to_string(),
-                        );
+                        ));
                     }
                     Some("probe") => {
                         let seq = lock(&state).seq;
@@ -268,8 +306,11 @@ async fn serve(
             }
             text = rx.recv() => {
                 match text {
-                    Ok(text) => {
-                        if ready && sink.send(WsMessage::Text(text)).await.is_err() {
+                    Ok((skip, text)) => {
+                        if skip == Some(conn) {
+                            continue;
+                        }
+                        if ready && sink.send(WsMessage::Text(text.into())).await.is_err() {
                             return;
                         }
                     }
