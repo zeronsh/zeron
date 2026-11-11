@@ -41,7 +41,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # zeron/zgx: the zgx interface's integration branch (plan.py INTEGRATION), on the
+    # pull request tier: its passes and caches serve the pull requests into it.
+    branches: [main, zeron/zgx]
   merge_group:
   workflow_dispatch:
   # Nightly: every suite and job in full (slow tests and fixtures included), nothing reused.
@@ -243,6 +245,8 @@ jobs:
     uses: ./.github/workflows/zgx-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).zgx || fromJSON('[]')) }}
+      engine-plugins: ${{ contains(fromJSON(needs.plan.outputs.flags).zgx || fromJSON('[]'), 'engine-plugins') }}
 
   result:
     name: CI result

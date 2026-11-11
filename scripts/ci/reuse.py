@@ -79,7 +79,9 @@ SUITE_INPUTS: dict[str, list[str]] = {
                 "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**"],
     # apps/zgx is a workspace of its own: all of it (sources, lockfile, Luau UI
     # and tests, plugins, SDK) is an input; its path dependencies are in SUITE_PACKAGES.
-    "zgx": [".github/workflows/zgx-tests.yml", "apps/zgx/**"] + NEXTEST,
+    "zgx": [".github/workflows/zgx-tests.yml", "apps/zgx/**", "scripts/ci/test-zgx.sh",
+            "scripts/ci/zgx-known-failures.txt", "scripts/ci/zgx-windows-tests.txt",
+            "scripts/ci/apt-install.sh"] + NEXTEST,
 }
 
 # The workspace packages each suite builds and tests (their dependencies are added).

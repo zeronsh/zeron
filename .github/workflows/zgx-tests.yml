@@ -3,15 +3,26 @@ name: zgx tests
 # Called by ci.yml (the `zgx` suite, scripts/ci/plan.py) when apps/zgx or a
 # crate it or the engine's plugin host builds changes. zgx-beta.yml only builds.
 #
-#   apps/zgx's unit tests (`cargo test --bin zeron-zgx`: src/plugins/*_tests.rs
-#   among them) and its Luau UI tests (`zgx test ui`, the zgx CLI at the rev
-#   apps/zgx/Cargo.toml pins), on macOS and Linux, the known failures let
-#   through (scripts/ci/test-zgx.sh, scripts/ci/zgx-known-failures.txt);
-#   and on macOS the engine's plugin tests (its lib's `plugins::` tests and
-#   tests/plugin_services.rs), which core-tests runs on Linux.
+#   zgx-linux    apps/zgx's unit tests (`cargo test --bin zeron-zgx`:
+#                src/plugins/*_tests.rs among them) and its Luau UI tests
+#                (`zgx test ui`, the zgx CLI at the rev apps/zgx/Cargo.toml
+#                pins), the known failures let through (scripts/ci/test-zgx.sh,
+#                scripts/ci/zgx-known-failures.txt). Every zgx change.
+#   zgx-macos    the same on macOS, and with `engine-plugins` the engine's
+#                plugin tests (its lib's `plugins::` tests and
+#                tests/plugin_services.rs), which core-tests runs on Linux on
+#                every change: a whole root-workspace build, so on pull requests
+#                only for the plugin host's own code.
+#   zgx-windows  the unit tests on Windows (their Windows known failures), and
+#                the Windows tests scripts/ci/zgx-windows-tests.txt names. The
+#                Luau UI tests aren't run there: they have never passed on
+#                Windows (about 84 failures, none listed yet).
+# On pull requests (and zeron/zgx pushes) the macOS and Windows jobs run only
+# when the change looks specific to them (plan.py ZGX_PLATFORM_JOBS).
 #
-# Not on Windows yet: zgx-beta.yml builds apps/zgx there, but its tests have
-# never been run on Windows, so there's no known-failures list for it.
+# Caches: written from zeron/zgx only (the integration branch these pull
+# requests go into; main never runs this suite), read by everything. A pull
+# request's own entries would only evict the shared ones (docs/reference/ci.md).
 on:
   workflow_call:
     inputs:
@@ -19,6 +30,14 @@ on:
         description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
         type: string
         default: ''
+      skip:
+        description: JSON list of jobs that already passed on the same inputs, or that this change doesn't need.
+        type: string
+        default: '[]'
+      engine-plugins:
+        description: Also the engine's plugin tests on macOS.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -28,83 +47,14 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   # The zgx CLI without Luau's asserts (they slow scripts by about a fifth).
   LUAU_CXXFLAGS: -DNDEBUG
+  # Who may write the shared caches: the integration branch.
+  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' }}
 
 jobs:
-  zgx-macos:
-    runs-on: macos-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Rust toolchain
-        run: |
-          rustup update stable --no-self-update
-          rustup show active-toolchain || rustup toolchain install
-      # zgx's terminals are Ghostty's on macOS, built with Zig 0.16 (zgx-ghostty-sys).
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.16.0
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/Library/Caches/zgx-ghostty
-          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
-          restore-keys: zgx-ghostty-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-tests
-          workspaces: |
-            . -> target
-            apps/zgx -> target
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-      - name: Install cargo-nextest
-        run: |
-          # macos.yml's: pinned release, verified against a checksum.
-          version=0.9.146
-          sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
-          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$RUNNER_TEMP/nextest.tar.gz" \
-            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-universal-apple-darwin.tar.gz"
-          echo "$sha256  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
-          bin="$RUNNER_TEMP/nextest-bin"
-          mkdir -p "$bin"
-          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
-          echo "$bin" >> "$GITHUB_PATH"
-      - id: zgx-rev
-        name: The zgx rev apps/zgx pins
-        run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - id: zgx-cli
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/zgx-cli
-          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
-      - name: zgx CLI
-        if: steps.zgx-cli.outputs.cache-hit != 'true'
-        env:
-          REV: ${{ steps.zgx-rev.outputs.rev }}
-        run: |
-          test -n "$REV"
-          CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
-            --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
-      - name: apps/zgx unit tests
-        run: scripts/ci/test-zgx.sh rust
-      - name: apps/zgx Luau UI tests
-        if: ${{ !cancelled() }}
-        run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
-      - name: Engine plugin tests
-        if: ${{ !cancelled() }}
-        run: |
-          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
-            -p zeron-engine --lib --test plugin_services \
-            -E 'binary(plugin_services) | test(/plugins::/)'
-      - name: Record the pass (CI skips this job while its inputs stay the same)
-        if: inputs.pass-key != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: rust-toolchain.toml
-          key: ${{ inputs.pass-key }}-zgx-macos
-
   zgx-linux:
+    if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'zgx-linux') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: System packages (zgx-beta.yml's)
@@ -123,13 +73,13 @@ jobs:
         with:
           key: zgx-tests
           workspaces: apps/zgx -> target
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ env.SAVE_CACHES == 'true' }}
           cache-on-failure: true
       - id: zgx-rev
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
           key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
@@ -141,6 +91,11 @@ jobs:
           test -n "$REV"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
             --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      - if: steps.zgx-cli.outputs.cache-hit != 'true' && env.SAVE_CACHES == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx Luau UI tests
@@ -152,3 +107,127 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-zgx-linux
+
+  zgx-macos:
+    if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'zgx-macos') }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup show active-toolchain || rustup toolchain install
+      # zgx's terminals are Ghostty's on macOS, built with Zig 0.16 (zgx-ghostty-sys).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - id: ghostty
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
+          restore-keys: zgx-ghostty-
+      # (The root workspace too only for the engine's plugin tests: two keys, so
+      # neither cache is restored or saved half the time.)
+      - if: inputs.engine-plugins
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-tests-engine
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+          save-if: ${{ env.SAVE_CACHES == 'true' }}
+          cache-on-failure: true
+      - if: ${{ !inputs.engine-plugins }}
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-tests
+          workspaces: apps/zgx -> target
+          save-if: ${{ env.SAVE_CACHES == 'true' }}
+          cache-on-failure: true
+      - name: Install cargo-nextest
+        if: inputs.engine-plugins
+        run: |
+          # macos.yml's: pinned release, verified against a checksum.
+          version=0.9.146
+          sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$RUNNER_TEMP/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-universal-apple-darwin.tar.gz"
+          echo "$sha256  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
+          bin="$RUNNER_TEMP/nextest-bin"
+          mkdir -p "$bin"
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
+          echo "$bin" >> "$GITHUB_PATH"
+      - id: zgx-rev
+        name: The zgx rev apps/zgx pins
+        run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - id: zgx-cli
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+      - name: zgx CLI
+        if: steps.zgx-cli.outputs.cache-hit != 'true'
+        env:
+          REV: ${{ steps.zgx-rev.outputs.rev }}
+        run: |
+          test -n "$REV"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
+            --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      - if: steps.zgx-cli.outputs.cache-hit != 'true' && env.SAVE_CACHES == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+      - name: apps/zgx unit tests
+        run: scripts/ci/test-zgx.sh rust
+      - if: steps.ghostty.outputs.cache-hit != 'true' && env.SAVE_CACHES == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
+      - name: apps/zgx Luau UI tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
+      - name: Engine plugin tests
+        if: ${{ !cancelled() && inputs.engine-plugins }}
+        run: |
+          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
+            -p zeron-engine --lib --test plugin_services \
+            -E 'binary(plugin_services) | test(/plugins::/)'
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-zgx-macos
+
+  zgx-windows:
+    if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'zgx-windows') }}
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-tests
+          workspaces: apps/zgx -> target
+          save-if: ${{ env.SAVE_CACHES == 'true' }}
+          cache-on-failure: true
+      - name: apps/zgx unit tests
+        run: scripts/ci/test-zgx.sh rust
+      - name: apps/zgx Windows tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh windows
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-zgx-windows

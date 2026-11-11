@@ -44,7 +44,11 @@ class ReservationTests(unittest.TestCase):
         import plan
         everything = plan.reservation(plan.jobs_to_run({s: True for s in plan.SUITE_JOBS}), "push",
                                       "refs/heads/main")
-        self.assertEqual(everything, admit.MAX_RESERVATION)
+        # The cap is shared by every branch and repository in the queue: this branch's
+        # largest plan fits under it, and it isn't loose by more than a job per runner type.
+        for r in admit.RUNNERS:
+            self.assertLessEqual(everything[r], admit.MAX_RESERVATION[r], r)
+            self.assertLessEqual(admit.MAX_RESERVATION[r] - everything[r], 1, r)
 
     def test_held_releases_finished_jobs(self):
         declared = {"linux": 3, "windows": 2, "macos": 1}
@@ -314,7 +318,8 @@ class PriorityAndLockTests(unittest.TestCase):
         # The older lock keeps its runners until it is released; then the newer one goes.
         snap.waiters = [w for w in snap.waiters if w.run_id == 2]
         snap.locked, snap.lock_times = {91}, {91: "2026-10-27T10:05:00Z"}
-        snap.holding = [held_(pr=90, linux=2)]
+        # (One job left of the older lock's run: a full run, 19 runners, still fits in 20.)
+        snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
 
     def test_an_unverified_claim_is_an_ordinary_run(self):

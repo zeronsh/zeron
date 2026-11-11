@@ -64,7 +64,7 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "frame_source": [("macos-frame-source", "macos")],  # macos.yml
     "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
     "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
-    "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux")],  # zgx-tests.yml
+    "zgx": [("zgx-linux", "linux"), ("zgx-macos", "macos"), ("zgx-windows", "windows")],  # zgx-tests.yml
 }
 # Run only nightly, manually or with `ci:full` (see the module docstring): voice
 # (the AEC3 audio stack and the packaged Windows media runtime; no failures of
@@ -74,7 +74,13 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
 NIGHTLY_SUITES = ("voice",)
 NIGHTLY_FLAGS = (("ui", "browser"),)
 # Suites whose jobs are independent, so one can be skipped while another runs.
-SPLITTABLE = ("voice", "windows")
+SPLITTABLE = ("voice", "windows", "zgx")
+
+# Integration branches: what main is to the rest, zeron/zgx is to the zgx
+# interface's work (pull requests into it, the zgx betas cut from it). A push
+# to one records its suites' passes and saves their caches; a pull request
+# into one reuses its passes (and main's).
+INTEGRATION = ("refs/heads/main", "refs/heads/zeron/zgx")
 
 CARGO = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 CI_SELF = [
@@ -183,7 +189,22 @@ FLAG_PATHS: dict[tuple[str, str], list[str]] = {
                                     "crates/ui/examples/preview-fixture*", "crates/preview/**", "edge/**",
                                     "scripts/run-macos-browser-fixture.sh", "scripts/test-browser-storage.py",
                                     "scripts/ci/run-macos-fixture.sh", ".github/workflows/macos.yml"],
+    # The engine's plugin host on macOS (core-tests runs it on Linux on every
+    # change): a whole root-workspace build in the zgx-macos job, so only for
+    # the plugin host's own code.
+    ("zgx", "engine-plugins"): CARGO + ["crates/engine/src/plugins/**", "crates/engine/src/plugins.rs",
+                                        "crates/engine/tests/plugin_services.rs", "crates/plugin-guard/**",
+                                        "crates/engine/Cargo.toml", ".github/workflows/zgx-tests.yml"],
 }
+
+# Fast tier: the zgx suite's macOS and Windows jobs, for the files that always
+# need them; otherwise only for a change that looks platform specific (as the
+# Windows and macOS suites: platform_specific, here also over apps/zgx). Its
+# Linux job runs for every zgx change.
+ZGX_PLATFORM_JOBS = {"zgx-macos": "macos", "zgx-windows": "windows"}
+ZGX_PLATFORM_PATHS = ["apps/zgx/Cargo.toml", "apps/zgx/Cargo.lock", "apps/zgx/.cargo/**", "apps/zgx/build.rs",
+                      "apps/zgx/patches/**", ".github/workflows/zgx-tests.yml", "scripts/ci/test-zgx.sh",
+                      "scripts/ci/zgx-known-failures.txt"]
 
 # A version bump (workspace version in Cargo.toml and the workspace packages'
 # versions in Cargo.lock) changes no code: it selects nothing and is left out of
@@ -226,10 +247,10 @@ def changed_code(patch: str) -> str:
     return "\n".join(lines)
 
 
-def platform_specific(platform: str, files: list[dict]) -> bool:
+def platform_specific(platform: str, files: list[dict], roots: tuple[str, ...] = ("crates/",)) -> bool:
     for f in files:
         path = f["filename"]
-        if not path.startswith("crates/"):
+        if not path.startswith(roots):
             continue
         if PLATFORM_PATHS[platform].search(path):
             return True
@@ -318,6 +339,11 @@ def gated(files: list[dict] | None, tier: str, suites: dict[str, bool],
     for (suite, job), patterns in JOB_PATHS.items():
         if suites.get(suite) and not everything and not any(matches(p, patterns) for p in paths):
             off.setdefault(suite, []).append(job)
+    if suites.get("zgx") and not everything:
+        for job, platform in ZGX_PLATFORM_JOBS.items():
+            if not (any(matches(p, ZGX_PLATFORM_PATHS) for p in paths)
+                    or platform_specific(platform, files, ("crates/", "apps/zgx/"))):
+                off.setdefault("zgx", []).append(job)
     for (suite, flag), patterns in FLAG_PATHS.items():
         if (suite, flag) in NIGHTLY_FLAGS and not nightly:
             continue
@@ -430,14 +456,22 @@ def main() -> int:
                 head_repo = (pr.get("head", {}).get("repo") or {}).get("full_name")
                 fork = head_repo != repo
                 own = not fork or os.environ.get("CI_FORK_REUSE", "") == "own"
-                trusted = {ref, "refs/heads/main"} if own else {"refs/heads/main"}
+                # Main's passes, and those of the integration branch it goes into (zeron/zgx).
+                base = f"refs/heads/{(pr.get('base') or {}).get('ref', '')}"
+                integration = {"refs/heads/main"} | ({base} if base in INTEGRATION else set())
+                trusted = ({ref} | integration) if own else integration
                 if os.environ.get("CI_PR_TIER", "fast") == "full":
                     why = "CI_PR_TIER=full"
                 else:
                     tier = "fast"
             files = pull_request_files(repo, pr["number"], pr.get("changed_files", 0))
         elif event == "push":
-            trusted = {"refs/heads/main"}
+            trusted = {ref} if ref in INTEGRATION else {"refs/heads/main"}
+            # zeron/zgx: the pull request rules (platform suites only for platform
+            # changes), so each merge costs what its pull request did; its passes
+            # and caches serve the next pull requests into it. Main stays full.
+            if ref != "refs/heads/main" and os.environ.get("CI_INTEGRATION_TIER", "fast") == "fast":
+                tier = "fast"
             files = compare_files(repo, payload.get("before", ""), payload.get("after", ""))
         elif event == "merge_group":
             # The last gate before main: run everything selected, reuse nothing.

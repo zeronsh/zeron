@@ -1,0 +1,8 @@
+# The Windows tests zgx-tests.yml's zgx-windows job runs (scripts/ci/test-zgx.sh
+# windows), besides the unit tests:
+#   test <name>      apps/zgx/tests/<name>.rs, built with --features beta (the
+#                    Windows beta: its GUI subsystem, WebView2 tabs)
+#   package <crate>  that crate's tests, in apps/zgx's workspace (a vendored patch)
+# Windows-specific regressions go here rather than in a workflow of their own, so
+# they run under ci.yml's plan and admission, only when a change needs them, and
+# record their pass.

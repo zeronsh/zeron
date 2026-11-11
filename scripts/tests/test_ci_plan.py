@@ -105,6 +105,35 @@ class PlanTests(unittest.TestCase):
         # Without the workspace's closure: the static list.
         self.assertIn("zgx", selected(plan.plan(files("crates/visual/src/lib.rs"), "fast")))
 
+    def test_zgx_platform_jobs_only_for_platform_changes(self):
+        def off(change, tier="fast"):
+            suites = plan.plan(change, tier)
+            return plan.gated(change, tier, suites)[0].get("zgx", [])
+
+        # Luau and platform-neutral Rust: Linux only.
+        self.assertEqual(off(files("apps/zgx/ui/app.luau")), ["zgx-macos", "zgx-windows"])
+        self.assertEqual(off(files("apps/zgx/src/chat.rs", patch="+    let x = 1;\n")),
+                         ["zgx-macos", "zgx-windows"])
+        # Windows code in the app: its Windows job too.
+        self.assertEqual(off(files("apps/zgx/src/terminal.rs", patch="+#[cfg(windows)]\n+fn f() {}\n")),
+                         ["zgx-macos"])
+        # A platform conditional decides what both compile.
+        self.assertEqual(off(files("apps/zgx/src/main.rs", patch='+    if cfg!(target_os = "macos") {}\n')), [])
+        # The app's lockfile and its vendored patches: every platform.
+        self.assertEqual(off(files("apps/zgx/Cargo.lock")), [])
+        self.assertEqual(off(files("apps/zgx/patches/zgx-terminal/src/paint.rs", patch="+x\n")), [])
+        # The full tier (main, ci:full): everything.
+        self.assertEqual(off(files("apps/zgx/ui/app.luau"), "full"), [])
+
+    def test_zgx_engine_plugin_tests_on_macos_only_for_the_plugin_host(self):
+        def flags(change, tier="fast"):
+            suites = plan.plan(change, tier)
+            return plan.gated(change, tier, suites)[1].get("zgx", [])
+
+        self.assertEqual(flags(files("apps/zgx/ui/app.luau")), [])
+        self.assertEqual(flags(files("crates/engine/src/plugins/host.rs")), ["engine-plugins"])
+        self.assertEqual(flags(files("apps/zgx/ui/app.luau"), "full"), ["engine-plugins"])
+
     def test_edge_and_installer(self):
         self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
         self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer"})
@@ -153,15 +182,15 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + ui + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
-        # native + ios-tests + zgx-macos
-        self.assertEqual(counts, {"linux": 8, "windows": 3, "macos": 3})
+        # result + core + ui + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2
+        # + zgx-windows; native + ios-tests + zgx-macos
+        self.assertEqual(counts, {"linux": 8, "windows": 4, "macos": 3})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
         self.assertEqual(main["linux"], 9)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=3 macos=3")
+        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=4 macos=3")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
-        self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
+        self.assertEqual(daytime, {"linux": 8, "windows": 3, "macos": 3})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
