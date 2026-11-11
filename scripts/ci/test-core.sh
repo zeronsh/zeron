@@ -40,8 +40,9 @@ for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.
   [[ "$skip" == *" $name "* ]] || tests+=(--test "$name")
 done
 # `misc` (harness, engine and preview): the small suites, one binary each.
-# The orb geometry tests live in zeron-orb's `geometry`.
-for t in misc geometry session_publication restart_resume side_chats message_queue voice_runtime device_routing device_room plugin_services; do
+# The orb geometry tests live in zeron-orb's `geometry`. `restart_hook`
+# stays a binary of its own: the hook it checks is process-wide.
+for t in misc geometry session_publication restart_resume side_chats message_queue voice_runtime device_routing device_room plugin_services restart_hook; do
   tests+=(--test "$t")
 done
 
