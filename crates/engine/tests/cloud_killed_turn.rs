@@ -273,6 +273,7 @@ impl Disk {
         }));
         let core = EngineCore::assemble(&self.dir, Arc::new(registry), HarnessId::Mock, None)
             .expect("an engine over a damaged store still assembles");
+        core.sessions.set_no_ipc_port();
         (core, requests)
     }
 
@@ -290,6 +291,10 @@ impl Disk {
         set_up(&registry);
         let core = EngineCore::assemble(&self.dir, Arc::new(registry), HarnessId::Mock, None)
             .expect("engine core assembles");
+        // No port here: a turn revived on boot goes on at once rather than
+        // waiting out `ipc_port_ready`'s limit for one. (A real machine's
+        // boot records its port; no test here reads the tools a port adds.)
+        core.sessions.set_no_ipc_port();
         (core, requests)
     }
 }
@@ -471,6 +476,7 @@ async fn a_reboot_says_it_only_once() {
     drop(core);
     let registry = HarnessRegistry::new();
     let core = EngineCore::assemble(&disk.dir, Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.sessions.set_no_ipc_port();
     settle().await;
     assert_eq!(error_notes(&core).len(), 1);
     core.shutdown().await;
@@ -507,6 +513,7 @@ async fn a_resume_that_cant_start_says_so() {
         None,
     )
     .unwrap();
+    core.sessions.set_no_ipc_port();
     wait_for(
         || {
             error_notes(&core)
