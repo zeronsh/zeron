@@ -34,6 +34,7 @@
 local sessions = require("@account/sessions")
 local cloud = require("@account/cloud")
 local route = require("@app/screens/shell/route")
+local cloud_projects = require("@app/screens/shell/cloud_projects")
 local store = require("@app/screens/chat/store")
 
 local M = {}
@@ -230,11 +231,44 @@ function M.bind(c: Choices)
 	-- longer there, stays named (warned, dimmed) so the choice reads as it is.
 	local projects = ui.computed(function(): { any }
 		local out = {}
-		for _, p in on_device(c.device:get()) do
+		local chosen = c.project:get()
+		local list = on_device(c.device:get())
+		-- On Cloud, Cloud's machines' copies of a repository once (each Cloud
+		-- chat's machine has its own): where the first stands, reading as
+		-- screens/shell/cloud_projects says, the one chosen kept chosen.
+		local copies: { [string]: { sessions.Project } } = {}
+		if c.device:get() == M.CLOUD then
+			for _, p in list do
+				if lives_on_cloud(p) then
+					local key = cloud_projects.key(p)
+					copies[key] = copies[key] or {}
+					table.insert(copies[key], p)
+				end
+			end
+		end
+		local listed: { [string]: boolean } = {}
+		for _, p in list do
+			local key = if lives_on_cloud(p) then cloud_projects.key(p) else nil
+			local group = if key then copies[key] else nil
+			if group then
+				if listed[key :: string] then
+					continue
+				end
+				listed[key :: string] = true
+				local lead = cloud_projects.lead(group)
+				local value = lead.id
+				for _, q in group do
+					if q.id == chosen then
+						value = q.id
+					end
+				end
+				local l = route.look(lead.id) or { hue = route.hue(lead.id) }
+				table.insert(out, { value = value, label = lead.name, hue = l.hue, src = l.src, emoji = l.emoji, project = lead.id, plain = not lead.git or nil })
+				continue
+			end
 			local l = route.look(p.id) or { hue = route.hue(p.id) }
 			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id, plain = not p.git or nil })
 		end
-		local chosen = c.project:get()
 		if chosen and chosen ~= M.NO_PROJECT then
 			local found = false
 			for _, p in out do
