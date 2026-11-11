@@ -17,12 +17,14 @@ import sys
 from pathlib import Path
 from PIL import Image
 
-# The card (public/hero/cards.js): the visual, 340 wide, its title's top at
-# 356, 235 on the session page (the paragraph above it, the conversation
-# 440 wide), cut out with 20 around it and laid with its title at 78, 106
-# (whole points: the same device-pixel phases) on the ground.
+# The card (public/hero/cards.js): the visual, 340 wide, alone in its reply,
+# cut out with 20 around it and laid with its title at 78, 106 (whole
+# points: the same device-pixel phases) on the ground. TITLE="x,y": where
+# its title's top stands on the session page (from the tree).
+import os
 CROP = (30, 62, 436, 436 * 388 / 560)
-SHIFT = (278, 129)
+TX, TY = (float(v) for v in os.environ.get("TITLE", "356,235").split(","))
+SHIFT = (TX - 78, TY - 106)
 PIECE = (58, 86, 380, 254)
 RADIUS = 12
 SHADOW = (0, 12, 32, 0.4)

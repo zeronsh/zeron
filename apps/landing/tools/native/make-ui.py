@@ -160,7 +160,6 @@ publish()
 fixture_chats:set({ c1 = { session = { id = "c1", state = "ready" }, messages = {
 	{ id = "c1-u", role = "user", text = "Where does our CI time go lately?" },
 	{ id = "c1-a", role = "assistant", text = "", blocks = {
-		{ id = "c1-a-t", kind = "text", text = "Compile is still the biggest share, but it has dropped since August, when the workspace was split. Here are the last six months, by step:" },
 		{ id = "c1-a-v", kind = "visual", source = VISUAL, title = "Build time by step" },
 	} },
 } } })
