@@ -128,3 +128,64 @@ What's left, and why it can't go:
   glyph (8-bit texels, GPU filtering), mostly in the faded lower half.
 - The traffic lights are native in the app (not in its snapshots); the page
   draws macOS's at their place and size.
+
+## The gallery's cards
+
+Three cut-outs of the app (`public/hero/cards.js`), each 560×388 points of
+the window, each over its own scene of the Parallax scenes plugin. They're
+drawn from **zeron/zgx** (what the beta ships), not main: that branch's
+wallpaper effects were rewritten (linear light, a paper, a new ASCII ramp
+` .:-=+*#@` at 1.1-point font pixels, the fade in the shader, the layer the
+art's own box), and the cards port that ASCII (`FS_ASCII2` in
+`public/hero/wallpaper.js`). The hero still draws main's.
+
+| card | scene | what it shows |
+|---|---|---|
+| visuals | Aurora | a session's reply with a grouped bar chart the app's host draws (show_visual), cut out of the session page and laid on the new chat's wallpaper (a session has none) |
+| cat | Wheat | the composer with the Composer cat plugin (`apps/zgx/plugins-dev/composer-cat`, zeron/composer-cat): a 28×24 pixel-art sprite, 2 points a pixel, sampled nearest in both |
+| machines | Icebergs | the composer's Work in picker open from its place chip, its Device row's machines beside it: this Mac, a Linux devbox, a Mac mini away, Cloud |
+
+Native references: a build of zeron/composer-cat with debug assertions on
+(`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo build --release`), so it
+reads `ZERON_ZGX_DEV_PLUGINS`: the Parallax scenes and Composer cat plugins
+run as themselves. `make-ui.py --card cat|machines|visuals|visualsbg`, then
+`reference.py` with `FIXTURE=landing_<card>_fixture.luau` and the plugins;
+`crop.py` crops to the card. The machines card's popups open only while the
+fixture window is frontmost (just after launch): `cards/machines.py` opens
+them in one pass at launch (`SCRIPT`, `POPUPS=1`), the poses are taken with
+nothing open, and `compose-machines.py` lays the popups and the open chip
+(both opaque, the same at every pose) over each. The visuals card's
+reference is `compose-visuals.py`: the app's session page cut out (rounded
+12, the composer's shadow) over the app's new chat on Aurora with no project
+(`visualsbg`: nothing in front of the wallpaper).
+
+Results (Nov 11 2026, the same rig), mean absolute error of 255 per channel:
+
+| card | rest | top-left | bottom-right | where the rest is |
+|---|---|---|---|---|
+| visuals | 0.75 | 0.75 | 0.75 | text edges; the chart's axis labels (below) |
+| cat | 0.07 | 0.07 | 0.07 | the composer's text edges (the cat 0.02, the wallpaper 0.00) |
+| machines | 0.37 | 0.37 | 0.37 | the panels' text and icon edges (wallpaper 0.00) |
+
+Motion, against the real plugin in each card's fixture: every web frame is
+a step of the 120 Hz spring model; the app's layers sit on it in 21,987 of
+22,044 readings (cat), 5,793 of 5,824 (machines), 29,309 of 30,132
+(visuals). (Cut at 1.1 s: a real pointer reaching the fixture window after
+that sends its layers home.)
+
+What's left, besides glyph edges:
+- The chart's axis labels are the canvas's default face (SF on a Mac, at its
+  17-point optical size in the app). The web's system face is SF Text here
+  (a canvas can't set the optical size), elsewhere whatever the system has;
+  each label is placed where the app lays it.
+- The popups' own shadow reaches past their windows in the app only as far
+  as the snapshot's box (its corners); a window shadow macOS might add isn't
+  in any snapshot.
+- The search field's caret blinks in the app (650 ms on, 350 off); the card
+  shows it on.
+- On a phone the cat's pixels are a whole number of device pixels (crisp),
+  so it can be a few percent larger than exact.
+
+Shaping: the app shapes a word at a time (cosmic-text splits a run at its
+line-break opportunities), so no kerning reaches across a space, "/" or
+"-": `glyphs.mjs` does the same.

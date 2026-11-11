@@ -12,10 +12,16 @@ const fonts = fileURLToPath(new URL("../../../zgx/fonts/", import.meta.url));
 const out = fileURLToPath(new URL("../../public/hero/glyphs.js", import.meta.url));
 
 export const RUNS = {
-  400: ["Search", "No sessions yet", "Ask anything, @ to mention…", "N", "K"],
-  500: ["New chat", "Sessions", "Star on GitHub", "Local", "Full access", "MacBook Pro", "hello-world", "No ref", "Opus 5.5", "High"],
+  400: ["Search", "No sessions yet", "Ask anything, @ to mention…", "N", "K",
+    "MacBook Pro", "site", "Worktree", "Search branches…", "main", "fix/flaky-tests", "feat/cache-builds", "Current",
+    "Search devices…", "devbox", "You", "Offline · last seen 3 h ago", "A machine of its own, from acme/site",
+    "Compile is still the biggest share, but it has dropped since August,", "when the workspace was split. Here are the last six months, by", "step:",
+    "Compile", "Link", "Test"],
+  500: ["New chat", "Sessions", "Star on GitHub", "Local", "Full access", "MacBook Pro", "hello-world", "No ref", "Opus 5.5", "High",
+    "site", "main", "Work in", "Mac mini", "Cloud"],
+  600: ["S", "Where the build's time goes"],
 };
-const FILES = { 400: "Geist.ttf", 500: "Geist-Medium.ttf" };
+const FILES = { 400: "Geist.ttf", 500: "Geist-Medium.ttf", 600: "Geist-SemiBold.ttf" };
 
 const round = (v) => Math.round(v * 100) / 100;
 const data = { upm: 0, glyphs: {}, runs: {} };
@@ -23,9 +29,15 @@ for (const [weight, texts] of Object.entries(RUNS)) {
   const font = fontkit.openSync(fonts + FILES[weight]);
   data.upm = font.unitsPerEm;
   for (const text of texts) {
-    const run = font.layout(text);
+    // Shaped a word at a time, as cosmic-text shapes: the run split at its
+    // line-break opportunities (after a space, "/" or "-"), so no kerning
+    // or ligature reaches across one (the app's pixels: "fix/flaky" keeps
+    // its "x/" gap).
+    const words = text.match(/[^ /-]*[ /-]*/g).filter(Boolean);
     let x = 0;
     const placed = [];
+    for (const word of words) {
+    const run = font.layout(word);
     run.glyphs.forEach((g, i) => {
       const p = run.positions[i];
       const key = `${weight}:${g.id}`;
@@ -36,6 +48,7 @@ for (const [weight, texts] of Object.entries(RUNS)) {
       placed.push([key, round(x + p.xOffset), round(p.yOffset)]);
       x += p.xAdvance;
     });
+    }
     data.runs[`${weight}|${text}`] = { glyphs: placed, advance: round(x) };
   }
 }

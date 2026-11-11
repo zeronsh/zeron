@@ -43,9 +43,15 @@ env = {
     "ZERON_ZGX_UI": str(ui),
     "ZGX_CHECK": "0",
     "ZGX_RENDER_WHEN_COVERED": "1",
+    # (A build with debug assertions shows lint findings as a toast: none.)
+    "ZGX_LINT": "0",
 }
+# The cards' build reads dev plugins (folders, ':'-separated).
+if os.environ.get("ZERON_ZGX_DEV_PLUGINS"):
+    env["ZERON_ZGX_DEV_PLUGINS"] = os.environ["ZERON_ZGX_DEV_PLUGINS"]
+fixture = os.environ.get("FIXTURE", "landing_hero_fixture.luau")
 log = open(out / "app.log", "w")
-proc = subprocess.Popen([str(binary), "fixture=landing_hero_fixture.luau", "--inspect"], env=env, stdout=log, stderr=log, cwd=str(scratch))
+proc = subprocess.Popen([str(binary), f"fixture={fixture}", "--inspect"], env=env, stdout=log, stderr=log, cwd=str(scratch))
 
 
 def sock_path():
@@ -96,6 +102,17 @@ try:
                 n = line["n"]
                 nodes[n] = cmd({"cmd": "node", "target": f"@{n}"}).get("data")
             (out / "nodes.json").write_text(json.dumps(nodes, indent=1))
+    # SCRIPT=<file>: Python run here with `cmd`, `wait` and `out` (a picker
+    # opened, a submenu hovered: one quick pass, as popups close once the
+    # window loses focus).
+    if os.environ.get("SCRIPT"):
+        exec(Path(os.environ["SCRIPT"]).read_text(), {"cmd": cmd, "wait": wait, "out": out, "json": json})
+    # CMDS='[{...}, ...]': inspect commands run first (a click opening a
+    # picker), each followed by WAIT_MS.
+    for c in json.loads(os.environ.get("CMDS", "[]")):
+        r = cmd(c)
+        print("cmd", c.get("cmd"), str(r.get("text", r))[:160])
+        wait(float(os.environ.get("WAIT_MS", "600")) / 1000)
     # SETS="name=json;name=json": states set before the shots.
     for item in filter(None, os.environ.get("SETS", "").split(";")):
         k, v = item.split("=", 1)
@@ -129,12 +146,39 @@ try:
             if "set" not in str(r.get("text", "")):
                 print("set:", r)
         wait(float(os.environ.get("SETTLE", "2.5")))
+        # SCRIPT_EACH=<file>: run before each snapshot (popups close once the
+        # window loses focus, so a picker is opened again for each).
+        if os.environ.get("SCRIPT_EACH"):
+            exec(Path(os.environ["SCRIPT_EACH"]).read_text(), {"cmd": cmd, "wait": wait, "out": out, "json": json})
         r = cmd({"cmd": "snapshot", "target": "@1"})
         path = (r.get("data") or {}).get("path") if isinstance(r, dict) else None
         if path:
             shutil.copy(path, out / f"{name}.png")
+            # (The window alone too, before any popup is laid over it.)
+            if os.environ.get("POPUPS"):
+                shutil.copy(path, out / f"{name}-open.png")
         else:
             print("snapshot:", str(r)[:400])
+        # POPUPS=1: each popup window (a menu, a picker: windows of their own)
+        # snapshotted too, and laid over the picture where it stands.
+        if os.environ.get("POPUPS") and path:
+            ws = cmd({"cmd": "windows"})
+            (out / f"{name}-windows.txt").write_text(ws.get("text", ""))
+            from PIL import Image
+            base = Image.open(out / f"{name}.png").convert("RGBA")
+            import re
+            for m in re.finditer(r"popup @(\d+) (-?[\d.]+),(-?[\d.]+) ", ws.get("text", "")):
+                wid, x, y = m.group(1), float(m.group(2)), float(m.group(3))
+                pr = cmd({"cmd": "snapshot", "target": f"@{wid}"})
+                pp = (pr.get("data") or {}).get("path")
+                if not pp:
+                    print("popup snapshot:", str(pr)[:200])
+                    continue
+                pop = Image.open(pp).convert("RGBA")
+                shutil.copy(pp, out / f"{name}-popup-{wid}.png")
+                k = base.size[0] / 1176
+                base.alpha_composite(pop, (round(x * k), round(y * k)))
+            base.save(out / f"{name}.png")
         print(name, "done")
 finally:
     proc.send_signal(signal.SIGTERM)

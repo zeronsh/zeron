@@ -53,6 +53,10 @@ const GROUND = {
 };
 // text.secondary, .tertiary, .disabled: alpha(primary, 0.6 / 0.42 / 0.28).
 const ink = (byte, ground) => over(TEXT, byte, GROUND[ground]);
+// A colour at alpha `a` (0..1, unrounded: a product of alphas) over a ground
+// given as floats, rounded once at the end.
+const overF = (rgb, a, ground) => `rgb(${rgb.map((v, i) => Math.round(ground[i] + (v - ground[i]) * a)).join(",")})`;
+const mixF = (rgb, a, ground) => rgb.map((v, i) => ground[i] + (v - ground[i]) * a);
 const SECONDARY = 153, TERTIARY = 107, DISABLED = 71;
 const C = {
   window: "rgb(14,14,16)",
@@ -73,6 +77,11 @@ const C = {
 
 // ds/icon_svgs.luau, as the app draws them (currentColor is the tint).
 const ICONS = {
+  monitor: '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 10c0-3.771 0-5.657 1.172-6.828S6.229 2 10 2h4c3.771 0 5.657 0 6.828 1.172S22 6.229 22 10v1c0 2.828 0 4.243-.879 5.121C20.243 17 18.828 17 16 17H8c-2.828 0-4.243 0-5.121-.879C2 15.243 2 13.828 2 11z"/><path stroke-linecap="round" d="M16 22H8m4-5v5m10-9H2"/></g></svg>',
+  cloud: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><path d="M7.25 18.5h10.1a4.15 4.15 0 0 0 .45-8.27A6.25 6.25 0 0 0 5.9 8.85a4.85 4.85 0 0 0 1.35 9.65Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  "git-branch": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8.5v7M6 12h10a2 2 0 0 0 2-2V8.5"/><circle cx="6" cy="6.25" r="2.25"/><circle cx="6" cy="17.75" r="2.25"/><circle cx="18" cy="6.25" r="2.25"/></svg>',
+  "alt-arrow-right": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5L15 12L9 19"/></svg>',
+  "wifi-off": '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 8.82a15.91 15.91 0 0 1 4.7-3.01M10.66 5.08A15.94 15.94 0 0 1 22 8.82"/><path d="M5.5 12.53a11.02 11.02 0 0 1 2.76-1.87m5.4-1.03a10.96 10.96 0 0 1 4.84 2.9"/><path d="M8.53 16.11A6.48 6.48 0 0 1 12 15c1.7 0 3.26.65 4.42 1.72"/><path d="M12 19.5h.01"/><path d="M3 3l18 18"/></g></svg>',
   plus: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>',
   search: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>',
   "arrow-left": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m5.5-5.5L5 12l5.5 5.5"/></svg>',
@@ -106,13 +115,12 @@ function iconImage(name, color) {
 // drawn once to note them (`wanted`), then each decoded.
 const decoded = new Map();
 let wanted = null;
-export function iconsReady() {
+export function iconsReady(draws = [drawUnder, drawOver]) {
   wanted = new Set();
   const c = document.createElement("canvas");
   c.width = c.height = 1;
   const ctx = c.getContext("2d");
-  drawUnder(ctx, 1);
-  drawOver(ctx, 1);
+  for (const draw of draws) draw(ctx, 1);
   const all = [...wanted];
   wanted = null;
   return Promise.all(all.map((key) => {
@@ -225,10 +233,12 @@ function text(ctx, s, str, x, top, size, weight, color, { right = false, line = 
   if (run) {
     const k = size / GLYPHS.upm;
     const bin = s < 2 ? 1 : 4;
+    // (On whatever the context is translated by: a card's crop.)
+    const at = ctx.getTransform();
     for (const [key, gx, gy] of run.glyphs) {
       const gxp = left * s + Math.round(gx * k * s * bin) / bin;
       ctx.save();
-      ctx.setTransform(s * k, 0, 0, -s * k, gxp, baseline - gy * k * s);
+      ctx.setTransform(at.multiply(new DOMMatrix([s * k, 0, 0, -s * k, gxp, baseline - gy * k * s])));
       ctx.fill(glyphPath(key));
       ctx.restore();
     }
@@ -406,7 +416,9 @@ function usageRing(ctx, s, x, y, used) {
 
 // The composer, over the wallpaper (UI/ds/composer.luau; a new chat with
 // the wallpaper showing: the pill, the tray behind its footer).
-export function drawOver(ctx, s) {
+// `place`: what the place chip says, and whether its picker is open (the
+// chip washed `hover` then). Default: a first-time user's new chat.
+export function drawOver(ctx, s, { place = { device: "MacBook Pro", project: "hello-world", branch: "No ref", open: false } } = {}) {
   const pane = NODE;
   const cw = Math.min(pane[2] - 64, 660);
   const cx = pane[0] + 32 + (pane[2] - 64 - cw) / 2;
@@ -440,16 +452,25 @@ export function drawOver(ctx, s) {
   label("Full access", cx + 36);
   // MacBook Pro › hello-world › No ref. (Each name a FadeText whose box,
   // the app's pixels show, takes its run's advance to the whole point.)
+  const words = [place.device, place.project, place.branch].map((w) => Math.round(advanceOf(ctx, s, w, 12, 500)));
+  if (place.open) {
+    // Open: the chip washed as under the pointer (over the tray, the pill's
+    // shadow on it: the wash's alpha laid on what's drawn).
+    const w = 6 + 12 + 6 + words[0] + 4 + 10 + 6 + words[1] + 6 + 10 + 4 + words[2] + 6;
+    rrect(ctx, s, cx + 109, ty, w, 24, 8, "rgba(255,255,255,0.051)");
+  }
   let x = cx + 109 + 6;
   icon(ctx, s, "worktree", x, ty + 6, 12, ink(TERTIARY, "composer"));
   x += 18;
-  x += Math.round(label("MacBook Pro", x)) + 4;
+  label(place.device, x);
+  x += words[0] + 4;
   icon(ctx, s, "alt-arrow-right-bold", x, ty + 7, 10, ink(DISABLED, "composer"));
   x += 10 + 6;
-  x += Math.round(label("hello-world", x)) + 6;
+  label(place.project, x);
+  x += words[1] + 6;
   icon(ctx, s, "alt-arrow-right-bold", x, ty + 7, 10, ink(DISABLED, "composer"));
   x += 14;
-  label("No ref", x);
+  label(place.branch, x);
   // The model (ds/model_picker.luau, a chip): Claude's mark in its own
   // colour, the model, its effort (the detail, a step quieter), the usage
   // ring; 6 apart and 6 in. (Its words' boxes to the whole point, as the
@@ -461,4 +482,157 @@ export function drawOver(ctx, s) {
   label("Opus 5.5", chip + 24);
   text(ctx, s, "High", chip + 24 + model + 6, ty + 2.5, 12, 500, ink(DISABLED, "composer"));
   usageRing(ctx, s, chip + 24 + model + 6 + effort + 6, ty + 6, USED);
+}
+
+// ---------------------------------------------------------------- popups
+
+// The composer's Work in picker open, and its Device row's machines beside
+// it (UI/ds/composer.luau `work_in`, `submenu`; ds/dropdown.luau; ds/menu.luau):
+// two popup windows, each a menu panel (zeron.menu.solid #1c1c1f, a 1-point
+// border #ffffff12 inside its edge, radius 8, its own shadow 0 20 56
+// #00000052, which the window's box cuts: only its corners show it).
+const PANEL = [28, 28, 31];
+const HOVER = mixF([255, 255, 255], 13 / 255, PANEL); // #ffffff0d
+const SELECTED = mixF([235, 235, 235], 23 / 255, PANEL); // zeron.menu.selected #ebebeb17
+const T = TEXT;
+const inkOn = (a, ground) => overF(T, a, ground);
+
+function panel(ctx, s, x, y, w, h) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x * s, y * s, w * s, h * s);
+  ctx.clip();
+  shadow(ctx, s, x, y, w, h, 8, 0, 20, 56, [0, 0, 0, 82 / 255]);
+  ctx.restore();
+  rrect(ctx, s, x, y, w, h, 8, "rgb(28,28,31)");
+  ring(ctx, s, x, y, w, h, 8, 1, over([255, 255, 255], 18, PANEL));
+}
+
+// A row's glyph (16 in an 18 box at x+8), label (Geist 13, line 19) and
+// what's at its end; `ground` what it lies on, `a` its opacity.
+function row(ctx, s, x, y, w, { icon: name, tile, label, tag, chevron, ground = PANEL, a = 1 }) {
+  if (name) icon(ctx, s, name, x + 9, y + 6, 16, inkOn(0.6 * a, ground));
+  if (tile) {
+    rrect(ctx, s, x + 8, y + 5, 18, 18, 4, "rgb(24,170,153)");
+    const lw = advanceOf(ctx, s, tile, 11, 600);
+    text(ctx, s, tile, x + 8 + (18 - lw) / 2, y + 6, 11, 600, "rgb(239,250,247)");
+  }
+  text(ctx, s, label, x + 34, y + 4.5, 13, 400, inkOn(a, ground));
+  if (tag) text(ctx, s, tag, x + w - 8, y + 6, 11, 400, inkOn((107 / 255) * a, ground), { right: true });
+  if (chevron) icon(ctx, s, "alt-arrow-right", x + w - 22, y + 7, 14, inkOn(107 / 255, ground));
+}
+
+// A search field's row: its glyph, its placeholder, and (focused) the caret,
+// 1 by 19 points at the text's start, shown (it blinks 650/350 ms).
+function search(ctx, s, x, y, words, focused) {
+  icon(ctx, s, "search", x + 12, y + 11, 14, inkOn(107 / 255, PANEL));
+  text(ctx, s, words, x + 34, y + 8.5, 13, 400, inkOn(107 / 255, PANEL));
+  if (focused) {
+    ctx.fillStyle = inkOn(107 / 255, PANEL);
+    ctx.fillRect((x + 34) * s, (y + 8.5) * s, 1 * s, 19 * s);
+  }
+}
+
+const rule = (ctx, s, x, y, w) => { ctx.fillStyle = over([255, 255, 255], 10, PANEL); ctx.fillRect(x * s, y * s, w * s, 1 * s); };
+
+export function drawPopups(ctx, s) {
+  // Work in (280×252 at 367, 452).
+  let X = 367, Y = 452;
+  panel(ctx, s, X, Y, 280, 252);
+  text(ctx, s, "Work in", X + 13, Y + 9, 11, 500, inkOn(107 / 255, PANEL));
+  rrect(ctx, s, X + 5, Y + 29, 270, 28, 3, `rgb(${HOVER.map(Math.round).join(",")})`);
+  row(ctx, s, X + 5, Y + 29, 270, { icon: "monitor", label: "MacBook Pro", chevron: true, ground: HOVER });
+  row(ctx, s, X + 5, Y + 57, 270, { tile: "S", label: "site", chevron: true });
+  row(ctx, s, X + 5, Y + 85, 270, { icon: "worktree", label: "Worktree", chevron: true });
+  rule(ctx, s, X + 1, Y + 117, 278);
+  search(ctx, s, X + 1, Y + 118, "Search branches…", false);
+  rule(ctx, s, X + 1, Y + 154, 278);
+  rrect(ctx, s, X + 5, Y + 159, 270, 28, 3, `rgb(${SELECTED.map(Math.round).join(",")})`);
+  row(ctx, s, X + 5, Y + 159, 270, { icon: "git-branch", label: "main", tag: "Current", ground: SELECTED });
+  row(ctx, s, X + 5, Y + 189, 270, { icon: "git-branch", label: "fix/flaky-tests" });
+  row(ctx, s, X + 5, Y + 219, 270, { icon: "git-branch", label: "feat/cache-builds" });
+
+  // The Device menu (260×213 at 646, 481).
+  X = 646; Y = 481;
+  panel(ctx, s, X, Y, 260, 213);
+  search(ctx, s, X + 1, Y + 1, "Search devices…", true);
+  rule(ctx, s, X + 1, Y + 37, 258);
+  rrect(ctx, s, X + 5, Y + 42, 250, 28, 3, `rgb(${SELECTED.map(Math.round).join(",")})`);
+  row(ctx, s, X + 5, Y + 42, 250, { icon: "monitor", label: "MacBook Pro", tag: "You", ground: SELECTED });
+  row(ctx, s, X + 5, Y + 72, 250, { icon: "monitor", label: "devbox" });
+  // Mac mini, offline: the whole row at 0.45, its two lines, the warning.
+  const dim = 0.45;
+  icon(ctx, s, "monitor", X + 14, Y + 111, 16, inkOn(0.6 * dim, PANEL));
+  text(ctx, s, "Mac mini", X + 39, Y + 110, 13, 500, inkOn(dim, PANEL), { line: 18 });
+  text(ctx, s, "Offline · last seen 3 h ago", X + 39, Y + 130, 12, 400, inkOn((107 / 255) * dim, PANEL), { line: 16 });
+  icon(ctx, s, "wifi-off", X + 235, Y + 122, 12, overF([250, 204, 21], dim, PANEL));
+  // Cloud.
+  icon(ctx, s, "cloud", X + 14, Y + 165, 16, inkOn(0.6, PANEL));
+  text(ctx, s, "Cloud", X + 39, Y + 164, 13, 500, inkOn(1, PANEL), { line: 18 });
+  text(ctx, s, "A machine of its own, from acme/site", X + 39, Y + 184, 12, 400, inkOn(107 / 255, PANEL), { line: 16 });
+}
+
+// ---------------------------------------------------------------- a reply
+
+// An assistant's reply with a visual, as a session's transcript draws it
+// (UI/ds/transcript.luau, ds/markdown.luau, ds/visual.luau, ds/chart.luau;
+// the conversation 440 wide: its column 356..820): a paragraph, then the
+// visual (show_visual, run by the app's host): a title, a legend and a
+// grouped bar chart. The chart's labels are the canvas's default face, the
+// system's sans (SF on a Mac), not Geist.
+const CARD_GROUND = [22, 22, 24];
+const SERIES = [["Compile", [146, 119, 176], [42, 38, 51, 47, 33, 29]], ["Link", [88, 194, 178], [12, 14, 11, 16, 9, 8]], ["Test", [233, 166, 75], [20, 22, 19, 25, 18, 21]]];
+const MONTHS = ["Jun", "Jul", "Aug", "Sep", "Oct", "Nov"];
+
+export function drawReply(ctx, s) {
+  const X = 356;
+  const primary = "rgb(237,237,239)";
+  // The paragraph: Geist 15/24, its lines as the app breaks them at 464.
+  ["Compile is still the biggest share, but it has dropped since August,", "when the workspace was split. Here are the last six months, by", "step:"]
+    .forEach((line, i) => text(ctx, s, line, X, 151 + 24 * i, 15, 400, primary, { line: 24 }));
+  // The visual: its title (SemiBold 16/24), 12 below it the legend (8-point
+  // dots, Geist 13/20 in text.secondary, 6 from the dot, 16 between).
+  text(ctx, s, "Where the build's time goes", X, 235, 16, 600, primary, { line: 24 });
+  let lx = X;
+  for (const [name, rgb] of SERIES) {
+    ctx.beginPath();
+    ctx.arc((lx + 4) * s, 281 * s, 4 * s, 0, Math.PI * 2);
+    ctx.fillStyle = `rgb(${rgb.join(",")})`;
+    ctx.fill();
+    const w = Math.round(advanceOf(ctx, s, name, 13, 400));
+    text(ctx, s, name, lx + 14, 271, 13, 400, overF(T, 153 / 255, CARD_GROUND), { line: 20 });
+    lx += 14 + w + 16;
+  }
+  // The plot (a canvas 464×150 at 356, 299): insets top 8, right 6, bottom
+  // 22, left the widest label + 8 (32.93: the app's label face measured);
+  // ticks 0..60 by 10 (nice_ticks over 0..51).
+  const top = 299 + 8, left = X + 32.93, pw = 464 - 32.93 - 6, ph = 120;
+  const vy = (v) => top + ph - (v / 60) * ph;
+  for (let t = 0; t <= 60; t += 10) {
+    ctx.fillStyle = over([255, 255, 255], t === 0 ? 18 : 10, CARD_GROUND);
+    ctx.fillRect(left * s, (vy(t) - 0.5) * s, pw * s, 1 * s);
+  }
+  const band = pw / 6, group = band * 0.68, per = group / 3, gap = Math.min(2, per * 0.15), bw = per - gap;
+  MONTHS.forEach((_, i) => SERIES.forEach(([, rgb, values], si) => {
+    const x0 = left + i * band + (band - group) / 2 + si * per + gap / 2;
+    const y0 = vy(values[i]);
+    rrect(ctx, s, x0, y0, bw, vy(0) - y0, 3, `rgb(${rgb.join(",")})`);
+  }));
+  // Labels: 12, text.tertiary; the values' right-aligned 8 short of the
+  // plot, centred on their line; the months centred under their bands.
+  const tertiary = overF(T, 107 / 255, CARD_GROUND);
+  // (Each value's start as the app lays it, right-aligned by the app's
+  // label face's widths: "0 s" 17.21, the rest 24.93. The web's system face
+  // measures a little otherwise, so it's placed, not aligned.)
+  for (let t = 0; t <= 60; t += 10) text(ctx, s, `${t} s`, left - 8 - (t === 0 ? 17.21 : 24.93), vy(t) - 8.5, 12, 400, tertiary);
+  MONTHS.forEach((m, i) => {
+    const w = advanceOf(ctx, s, m, 12, 400);
+    text(ctx, s, m, left + (i + 0.5) * band - w / 2, top + ph + 6, 12, 400, tertiary);
+  });
+}
+
+// The composer's shadow (0 12 32 #00000066) under a rounded box (radius 12):
+// a cut-out's, on a card.
+export function shadowUnder(ctx, s, [x, y, w, h]) {
+  shadow(ctx, s, x, y, w, h, 12, 0, 12, 32, [0, 0, 0, 0.4]);
 }

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Card rig</title>
+<style>
+  html, body { margin: 0; background: #000; }
+  #card { width: 560px; }
+  #card canvas { display: block; width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<script type="module">
+  // One card alone at its size, for captures: ?card=cat|machines|visuals,
+  // ?pose=x,y (the pointer over the card, 0 to 1), ?effect=none, ?still=1.
+  import { mountCard } from "/hero/cards.js";
+  const q = new URLSearchParams(location.search);
+  const pose = (q.get("pose") || "0.5,0.5").split(",").map(Number);
+  window.__hero = await mountCard(document.getElementById("card"), q.get("card") || "cat", {
+    capture: true, pose, effect: q.get("effect") || "ascii", still: q.get("still") === "1",
+  });
+  window.__heroReady = true;
+</script>
+</body>
+</html>

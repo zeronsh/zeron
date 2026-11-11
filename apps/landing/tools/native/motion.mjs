@@ -20,8 +20,10 @@ const browser = await puppeteer.launch({
 });
 try {
   const page = await browser.newPage();
-  await page.setViewport({ width: 1176, height: 768, deviceScaleFactor: 2 });
-  await page.goto(`http://127.0.0.1:${server.address().port}/_rig/?live=1`);
+  // CARD=<name>: a gallery card's scene (its own plugin, its own layers).
+  const card = process.env.CARD;
+  await page.setViewport(card ? { width: 560, height: 388, deviceScaleFactor: 2 } : { width: 1176, height: 768, deviceScaleFactor: 2 });
+  await page.goto(card ? `http://127.0.0.1:${server.address().port}/_rig/card.html?card=${card}` : `http://127.0.0.1:${server.address().port}/_rig/?live=1`);
   await page.waitForFunction(() => window.__heroReady, { timeout: 20000 });
   const web = await page.evaluate(() => new Promise((resolve) => {
     const hero = window.__hero, samples = [];
@@ -34,7 +36,13 @@ try {
     requestAnimationFrame(tick);
   }));
   // The app's boxes: layer i's box is at (-48 + x, 16 + y).
-  const nat = native.map((s) => ({ t: s.t, layers: s.boxes.map((b) => [b[0] + 48, b[1] - 16]) }));
+  // (Each box's offset from where it rests: the first sample's.)
+  // UNTIL=<s>: the app's samples only up to then (a real pointer reaching
+  // the fixture window later sends its layers home).
+  const until = Number(process.env.UNTIL || 1.2);
+  const at0 = native[0].boxes;
+  const nat = native.filter((s) => s.t <= until).map((s) => ({ t: s.t, layers: s.boxes.map((b, i) => [b[0] - at0[i][0], b[1] - at0[i][1]]) }));
+  const N = at0.length;
   const at = (samples, t) => {
     let best = samples[0];
     for (const s of samples) if (s.t <= t) best = s;
@@ -46,7 +54,7 @@ try {
     for (const s of nat) {
       if (s.t + lag < 0) continue;
       const w = at(web, s.t + lag);
-      for (let i = 1; i < 4; i++) for (let a = 0; a < 2; a++) {
+      for (let i = 1; i < N; i++) for (let a = 0; a < 2; a++) {
         n++;
         if (Math.abs(Math.round(w.layers[i][a]) - s.layers[i][a]) > 0) off++;
       }
@@ -58,7 +66,7 @@ try {
   for (const s of nat) {
     if (s.t + bestFit.lag < 0) continue;
     const w = at(web, s.t + bestFit.lag);
-    for (let i = 1; i < 4; i++) for (let a = 0; a < 2; a++) worst = Math.max(worst, Math.abs(w.layers[i][a] - s.layers[i][a]));
+    for (let i = 1; i < N; i++) for (let a = 0; a < 2; a++) worst = Math.max(worst, Math.abs(w.layers[i][a] - s.layers[i][a]));
   }
   console.log(`web frames: ${web.length} over 1.2 s; app samples: ${nat.length}`);
   console.log(`best alignment ${(bestFit.lag * 1000).toFixed(0)} ms: ${bestFit.off} of ${bestFit.n} rounded positions disagree (${(100 * bestFit.off / bestFit.n).toFixed(2)}%), the largest gap ${worst.toFixed(2)} pt (the app's tree rounds to the point)`);
@@ -67,7 +75,7 @@ try {
   // every frame should be one of its step states, exactly.
   const model = [];
   {
-    const st = [1, 2, 3].map((d) => [{ x: 0, v: 0, g: d * 14 }, { x: 0, v: 0, g: d * 9 }]);
+    const st = Array.from({ length: N - 1 }, (_, i) => i + 1).map((d) => [{ x: 0, v: 0, g: d * 14 }, { x: 0, v: 0, g: d * 9 }]);
     model.push(st.map((p) => p.map((q) => q.x)));
     for (let k = 0; k < 240; k++) {
       for (const p of st) for (const q of p) { q.v += (-140 * (q.x - q.g) - 20 * q.v) / 120; q.x += q.v / 120; }
@@ -79,7 +87,7 @@ try {
     let best = Infinity;
     for (const m of model) {
       let e = 0;
-      for (let i = 0; i < 3; i++) for (let a = 0; a < 2; a++) e = Math.max(e, Math.abs(w.layers[i + 1][a] - m[i][a]));
+      for (let i = 0; i < N - 1; i++) for (let a = 0; a < 2; a++) e = Math.max(e, Math.abs(w.layers[i + 1][a] - m[i][a]));
       best = Math.min(best, e);
     }
     worstModel = Math.max(worstModel, best);
@@ -92,7 +100,7 @@ try {
     for (const s of nat) {
       const k = Math.floor((s.t - lag) * 120);
       const m = model[Math.max(0, Math.min(model.length - 1, k))];
-      for (let i = 0; i < 3; i++) for (let a = 0; a < 2; a++) { n++; if (Math.round(k < 0 ? 0 : m[i][a]) !== s.layers[i + 1][a]) off++; }
+      for (let i = 0; i < N - 1; i++) for (let a = 0; a < 2; a++) { n++; if (Math.round(k < 0 ? 0 : m[i][a]) !== s.layers[i + 1][a]) off++; }
     }
     if (bestLag === null || off < appOff) { appOff = off; appN = n; bestLag = lag; }
   }

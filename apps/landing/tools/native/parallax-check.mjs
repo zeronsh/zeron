@@ -66,6 +66,28 @@ async function run(name, page) {
   }
   console.log(name);
   console.table(rows);
+  // The gallery's cards: each follows the mouse over itself.
+  const cardRows = [];
+  for (const card of ["visuals", "cat", "machines"]) {
+    await page.evaluate((c) => document.querySelector(`.p-card[data-card=${c}]`).scrollIntoView({ block: "center" }), card);
+    await page.waitForFunction(`document.querySelector(".p-card[data-card=${card}]").classList.contains("is-live")`, undefined, { timeout: 20000 }).catch(() => page.waitForFunction(`document.querySelector(".p-card[data-card=${card}]").classList.contains("is-live")`, { timeout: 20000 }));
+    await wait(600);
+    const r = await page.evaluate((c) => { const b = document.querySelector(`.p-card[data-card=${c}]`).getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; }, card);
+    const el = await page.$(`.p-card[data-card=${card}]`);
+    // (The cat's frames are its own life: compared with the pointer away,
+    // twice, to see what moves without it.)
+    await page.mouse.move(2, 2);
+    await wait(900);
+    const rest = await el.screenshot();
+    const row = { card };
+    for (const [label, fx, fy] of [["corner", 0.03, 0.04], ["far corner", 0.97, 0.96], ["middle", 0.5, 0.5]]) {
+      await page.mouse.move(r.x + fx * r.w, r.y + fy * r.h, { steps: 12 });
+      await wait(1000);
+      row[label] = +diff(rest, await el.screenshot()).toFixed(2);
+    }
+    cardRows.push(row);
+  }
+  console.table(cardRows);
 }
 
 try {

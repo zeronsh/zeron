@@ -56,6 +56,15 @@ try {
     await page.waitForFunction(() => document.getElementById("hero-app").classList.contains("is-live"), { timeout: 20000 });
     await new Promise((r) => setTimeout(r, 300));
     await (await page.$("#hero-app")).screenshot({ path: join(out, "phone.png") });
+    // The cards: one column, each live, inside the page's width.
+    results.phoneCards = [];
+    for (const card of ["visuals", "cat", "machines"]) {
+      await page.evaluate((c) => document.querySelector(`.p-card[data-card=${c}]`).scrollIntoView({ block: "center" }), card);
+      await page.waitForFunction(`document.querySelector(".p-card[data-card=${card}]").classList.contains("is-live")`, { timeout: 20000 });
+      await new Promise((r) => setTimeout(r, 300));
+      await (await page.$(`.p-card[data-card=${card}]`)).screenshot({ path: join(out, `phone-${card}.png`) });
+      results.phoneCards.push(await page.evaluate((c) => { const el = document.querySelector(`.p-card[data-card=${c}]`); const r = el.getBoundingClientRect(); return { card: c, width: r.width, height: Math.round(r.height), canvas: el.querySelector("canvas")?.width }; }, card));
+    }
     await page.screenshot({ path: join(out, "phone-page.png") });
     const layout = await page.evaluate(() => {
       const r = document.getElementById("hero-app").getBoundingClientRect();
@@ -91,7 +100,17 @@ try {
     await page.mouse.move(box.x + 280, box.y + 60, { steps: 4 });
     await new Promise((r) => setTimeout(r, 1000));
     const b = await el.screenshot({ encoding: "base64" });
-    results.reduced = { stillUnderPointer: a === b, errors };
+    // A card too: the cat sits still, its scene doesn't follow.
+    const cardEl = await page.$(".p-card[data-card=cat]");
+    await page.evaluate(() => document.querySelector(".p-card[data-card=cat]").scrollIntoView({ block: "center" }));
+    await page.waitForFunction(`document.querySelector(".p-card[data-card=cat]").classList.contains("is-live")`, { timeout: 20000 });
+    await new Promise((r) => setTimeout(r, 300));
+    const c1 = await cardEl.screenshot({ encoding: "base64" });
+    const cb = await page.evaluate(() => { const r = document.querySelector(".p-card[data-card=cat]").getBoundingClientRect(); return { x: r.x, y: r.y }; });
+    await page.mouse.move(cb.x + 10, cb.y + 10, { steps: 4 });
+    await new Promise((r) => setTimeout(r, 8000));
+    const c2 = await cardEl.screenshot({ encoding: "base64" });
+    results.reduced = { stillUnderPointer: a === b, catCardStillFor8s: c1 === c2, errors };
     await writeFile(join(out, "reduced.png"), Buffer.from(b, "base64"));
     await browser.close();
   }
@@ -106,7 +125,7 @@ try {
       return { canvas: !!document.querySelector("#hero-app canvas"), imgLoaded: img.complete && img.naturalWidth > 0, src: img.currentSrc };
     });
     await (await page.$("#hero-app")).screenshot({ path: join(out, "no-webgl.png") });
-    results.noWebGL = { ...state, errors };
+    results.noWebGL = { ...state, cards: await page.evaluate(() => [...document.querySelectorAll(".p-card")].map((c) => ({ card: c.dataset.card, canvas: !!c.querySelector("canvas"), img: c.querySelector("img").currentSrc.split("/").pop() }))), errors };
     await browser.close();
   }
 } finally {

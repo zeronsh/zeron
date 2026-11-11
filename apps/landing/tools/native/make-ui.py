@@ -12,7 +12,14 @@ plugins-builtin/parallax-scenes/init.luau verbatim but for the art paths and
 the pointer, read from the page's own states, as `zeron.live("pointer")`
 reads them through the place's `provide`).
 
-usage: make-ui.py <repo> <out>
+The gallery's cards (`--card cat|machines|visuals`) are drawn from the
+branch the cards show (zeron/zgx's ui, with the composer-cat plugin) by a
+build that reads ZERON_ZGX_DEV_PLUGINS: the Parallax scenes plugin runs
+there as itself (no scene copied in), its scene set through its settings;
+`landing_<card>_fixture.luau` adds each card's state.
+
+usage: make-ui.py <repo> <out> [--card cat|machines|visuals|visualsbg]
+(visualsbg: the visuals card's ground, a new chat on Aurora with no chat open)
 """
 import re
 import shutil
@@ -20,6 +27,7 @@ import sys
 from pathlib import Path
 
 repo, out = Path(sys.argv[1]), Path(sys.argv[2])
+card = sys.argv[sys.argv.index("--card") + 1] if "--card" in sys.argv else None
 zgx = repo / "apps/zgx"
 if out.exists():
     shutil.rmtree(out)
@@ -46,6 +54,7 @@ model = '''local model = {
 src = src[:start] + model + src[end:]
 src = src.replace('appearance.wallpaper:set("none")', "-- (landing: the plugin's wallpaper, below)")
 src = src.replace('require("@app/screens/shell/sidebar").options.organize:set("project")', "")
+src = src.replace('sidebar_options.organize:set("project")', "")
 tail = '''
 -- landing: dark, opaque, the Parallax scenes plugin used as the wallpaper
 -- under Zeron's ASCII effect, its scene Blossom.
@@ -82,8 +91,87 @@ ui.after(400, function()
 	require("@app/screens/shell/fit").toggle_sidebar()
 end)
 '''
+SCENES = {"cat": "wheat", "machines": "icebergs", "visuals": "aurora", "visualsbg": "aurora"}
+if card:
+    tail += f'''
+-- landing ({card}): the Parallax scenes plugin, loaded as itself
+-- (ZERON_ZGX_DEV_PLUGINS), on its scene.
+ui.shared("plugin.parallax-scenes.settings", nil :: any):set({{ scene = "{SCENES[card]}", parallax = "normal" }})
+'''
+if card == "machines":
+    tail += '''
+-- Your machines (invented): this Mac, a Linux devbox up, a Mac mini that's
+-- been away three hours; and Cloud.
+model.devices = {
+	{ id = "mac", name = "MacBook Pro", platform = "macos", here = true },
+	{ id = "devbox", name = "devbox", platform = "linux", here = false, online = true },
+	{ id = "mini", name = "Mac mini", platform = "macos", here = false, online = false, seen = os.time() - 3 * 3600 },
+}
+-- The project, a repository Cloud can open (cloud_stub's acme/site); Cloud
+-- itself comes on with the stub's own command (cloud_stub.offer), as the
+-- reference script runs it.
+model.projects[1].name = "site"
+model.projects[1].path = "/Users/you/site"
+model.projects[1].github = "acme/site"
+model.projects[1].repository = "github.com/acme/site"
+publish()
+-- Its branches, as git there would answer (invented), the current first.
+chat_store.refs = function(): any
+	return { after = function(_, ok: (any) -> ())
+		ui.after(0, function()
+			ok({ { name = "main", current = true }, { name = "fix/flaky-tests", current = false }, { name = "feat/cache-builds", current = false } })
+		end)
+	end }
+end
+'''
+if card == "visualsbg":
+    tail += '''
+-- The visuals card's ground: a new chat on Aurora with nothing in front of
+-- the wallpaper where the card shows (no project yet: the composer stays
+-- back, and the page's ask stands in the window's middle, under the card's
+-- cut-out).
+model.projects = {}
+publish()
+'''
+if card == "visuals":
+    tail += '''
+-- The conversation narrowed (Settings → Appearance's width), so the card
+-- holds a reply and its visual whole.
+require("@app/screens/settings/prefs").conversation_width:set(440)
+-- A chat whose reply shows a visual (show_visual: run by the real host), open.
+local VISUAL = [[
+local months = { "Jun", "Jul", "Aug", "Sep", "Oct", "Nov" }
+return function()
+  return ui.column { gap = 12,
+    ui.text { "Where the build's time goes", size = "lg", weight = "semibold" },
+    ui.chart { type = "bar", height = 150, x = months, unit = "s",
+      series = {
+        { name = "Compile", values = { 42, 38, 51, 47, 33, 29 } },
+        { name = "Link", values = { 12, 14, 11, 16, 9, 8 } },
+        { name = "Test", values = { 20, 22, 19, 25, 18, 21 } },
+      } },
+  }
+end
+]]
+table.insert(model.chats, { id = "c1", title = "CI time by step", project = "hello", device = "mac", updated = os.time() - 60, created = os.time() - 600, agent = "claude" })
+publish()
+fixture_chats:set({ c1 = { session = { id = "c1", state = "ready" }, messages = {
+	{ id = "c1-u", role = "user", text = "Where does our CI time go lately?" },
+	{ id = "c1-a", role = "assistant", text = "", blocks = {
+		{ id = "c1-a-t", kind = "text", text = "Compile is still the biggest share, but it has dropped since August, when the workspace was split. Here are the last six months, by step:" },
+		{ id = "c1-a-v", kind = "visual", source = VISUAL, title = "Build time by step" },
+	} },
+} } })
+ui.after(700, function()
+	require("@app/screens/shell/route").open_session("c1")
+end)
+'''
 src = src.replace("local shell = require(\"@app/screens/shell\")", tail + "local shell = require(\"@app/screens/shell\")")
-(out / "landing_hero_fixture.luau").write_text(src)
+name = f"landing_{card}_fixture.luau" if card else "landing_hero_fixture.luau"
+(out / name).write_text(src)
+if card:
+    print(out / name)
+    sys.exit(0)
 
 # --- the place: the plugin's scene where it would replace the box ----------
 page = out / "screens/shell/page.luau"

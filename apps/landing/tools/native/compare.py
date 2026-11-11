@@ -16,7 +16,9 @@ from PIL import Image, ImageChops, ImageStat
 args = sys.argv[1:]
 native, web, out = Path(args[0]), Path(args[1]), Path(args[2])
 names = args[3].split(",") if len(args) > 3 and not args[3].startswith("--") else ["rest"]
-regions = {"window": (0, 0, 1176, 768)}
+# WIDTH=<points>: the pictures' width in points (a card's 560; the window's 1176).
+WIDTH = float(__import__("os").environ.get("WIDTH", "1176"))
+regions = {"window": (0, 0, WIDTH, 768 if WIDTH == 1176 else 388)}
 if "--region" in args:
     for spec in args[args.index("--region") + 1:]:
         if spec.startswith("--"):
@@ -47,7 +49,7 @@ for name in names:
     if a.size != b.size:
         print(f"{name}: sizes differ {a.size} vs {b.size}")
         b = b.resize(a.size)
-    sx = a.size[0] / 1176
+    sx = a.size[0] / WIDTH
     for rname, (x, y, w, h) in regions.items():
         box = tuple(int(round(v * sx)) for v in (x, y, x + w, y + h))
         mean, over8, over32, psnr, d = stats(a.crop(box), b.crop(box))

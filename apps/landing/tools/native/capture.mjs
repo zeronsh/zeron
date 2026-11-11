@@ -23,12 +23,14 @@ try {
   const page = await browser.newPage();
   page.on("console", (m) => console.log("page:", m.text()));
   page.on("pageerror", (e) => console.log("page error:", e.message));
-  await page.setViewport({ width: 1176, height: 768, deviceScaleFactor: scale });
+  // CARD=<name>: a gallery card (560×388) instead of the hero.
+  const card = process.env.CARD;
+  await page.setViewport(card ? { width: 560, height: 388, deviceScaleFactor: scale } : { width: 1176, height: 768, deviceScaleFactor: scale });
   for (const shot of shots) {
     const [name, xy] = shot.split("=");
     const [x, y] = xy.split(":").map(Number);
     const extra = process.env.QUERY ? "&" + process.env.QUERY : "";
-    await page.goto(`http://127.0.0.1:${port}/_rig/?pose=${x},${y}${extra}`);
+    await page.goto(card ? `http://127.0.0.1:${port}/_rig/card.html?card=${card}&pose=${x},${y}${extra}` : `http://127.0.0.1:${port}/_rig/?pose=${x},${y}${extra}`);
     await page.waitForFunction(() => window.__heroReady, { timeout: 20000 });
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     // The canvas' own pixels (not a screenshot through the compositor).

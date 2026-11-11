@@ -416,12 +416,29 @@
      above and below); columns separate with gaps instead of inner padding */
   .p-gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 22px; }
   .p-gallery figure { margin: 0; padding: 22px 0 18px; }
-  .p-gallery img {
-    display: block;
-    width: 100%;
-    height: auto;
+  /* each card a cut-out of the Zeron app, live (public/hero/cards.js):
+     its still (rendered from the same code) until the canvas has drawn,
+     and in its place without WebGL2 */
+  .p-card {
+    position: relative;
+    overflow: hidden;
+    aspect-ratio: 560 / 388;
+    background: #0e0e10;
     border: 1px solid var(--line-soft);
     border-radius: 6px;
+  }
+  .p-card img,
+  .p-card canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .p-card canvas { opacity: 0; transition: opacity .3s ease-out; }
+  .p-card.is-live canvas { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .p-card canvas { transition: none; }
   }
   .p-gallery figcaption {
     margin-top: 13px;
@@ -969,16 +986,22 @@
       </div>
       <div class="panel-row p-gallery">
         <figure>
-          <img src="/assets/shots/sessions.png" alt="Zeron session list showing agent sessions running on another machine" loading="lazy" width="907" height="627" />
-          <figcaption>Every machine's sessions, one list</figcaption>
+          <div class="p-card" data-card="visuals" data-label="A Zeron chat reply with a grouped bar chart the app drew itself: compile, link and test time over six months">
+            <img src="/assets/hero/card-visuals.webp" alt="A Zeron chat reply with a grouped bar chart the app drew itself: compile, link and test time over six months" width="1120" height="776" loading="lazy" decoding="async" />
+          </div>
+          <figcaption>Replies with charts the app draws itself</figcaption>
         </figure>
         <figure>
-          <img src="/assets/shots/diff.png" alt="Zeron branch diff view with added and removed lines across 299 changed files" loading="lazy" width="907" height="627" />
-          <figcaption>Branch diffs, live as agents work</figcaption>
+          <div class="p-card" data-card="cat" data-label="A pixel-art cat sitting on the Zeron message box, put there by a plugin">
+            <img src="/assets/hero/card-cat.webp" alt="A pixel-art cat sitting on the Zeron message box, put there by a plugin" width="1120" height="776" loading="lazy" decoding="async" />
+          </div>
+          <figcaption>Plugins can change anything, even add a cat</figcaption>
         </figure>
         <figure>
-          <img src="/assets/shots/history.png" alt="Zeron commit history view with a branching commit graph" loading="lazy" width="907" height="627" />
-          <figcaption>Commit history for every workspace</figcaption>
+          <div class="p-card" data-card="machines" data-label="The Zeron composer's Work in menu open on a list of machines: this MacBook Pro, a Linux devbox, a Mac mini that's offline, and Cloud">
+            <img src="/assets/hero/card-machines.webp" alt="The Zeron composer's Work in menu open on a list of machines: this MacBook Pro, a Linux devbox, a Mac mini that's offline, and Cloud" width="1120" height="776" loading="lazy" decoding="async" />
+          </div>
+          <figcaption>Pick any of your machines, or Cloud</figcaption>
         </figure>
       </div>
       <div class="panel-row p-devices">
@@ -1521,6 +1544,26 @@
       }
     }, { rootMargin: "400px 0px" });
     io.observe(win);
+  }
+  // The gallery's cards: each a cut-out of the app over its own scene,
+  // mounted as it nears the viewport, its still kept without WebGL2.
+  const cards = [...document.querySelectorAll(".p-card[data-card]")];
+  if (cards.length && gl2 && "IntersectionObserver" in window) {
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const card = entry.target;
+        io.unobserve(card);
+        import("/hero/cards.js").then(async ({ mountCard }) => {
+          const live = await mountCard(card, card.dataset.card, { label: card.dataset.label });
+          if (!live) return;
+          requestAnimationFrame(() => card.classList.add("is-live"));
+          card.querySelector("img")?.setAttribute("aria-hidden", "true");
+          card.addEventListener("herofailed", () => { card.classList.remove("is-live"); live.canvas.remove(); });
+        }).catch((err) => console.warn("card:", err));
+      }
+    }, { rootMargin: "400px 0px" });
+    for (const card of cards) io.observe(card);
   }
 </script>
 <script>
