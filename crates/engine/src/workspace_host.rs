@@ -495,29 +495,12 @@ impl WorkspaceHost {
                         // client is dropped at host teardown.
                         loop {
                             tokio::select! {
-                                event = events.recv() => match event {
-                                    Ok(zeron_sync::RegistryEvent::Connected) => {
-                                        let Some(inner) = weak.upgrade() else { return };
-                                        // Re-join: restart the dial gate's
-                                        // warm-up clock (presence map is empty
-                                        // again; silence isn't evidence yet).
-                                        inner
-                                            .room_joined_at
-                                            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                                        inner.bump_changed();
+                                event = events.recv() => {
+                                    let Some(inner) = weak.upgrade() else { return };
+                                    if !inner.on_registry_event(event) {
+                                        break;
                                     }
-                                    Ok(zeron_sync::RegistryEvent::Applied) => {
-                                        let Some(inner) = weak.upgrade() else { return };
-                                        inner.bump_changed();
-                                    }
-                                    Ok(zeron_sync::RegistryEvent::Presence) => {
-                                        let Some(inner) = weak.upgrade() else { return };
-                                        inner.publish_presence();
-                                    }
-                                    Ok(zeron_sync::RegistryEvent::Disconnected) => {}
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                },
+                                }
                                 _ = token_changed(&mut token_changes) => {
                                     if token_revoked(&token).await {
                                         tracing::info!(org = %org_id,
@@ -1492,6 +1475,32 @@ impl WorkspaceHostInner {
         self.publish_lists(false);
     }
 
+    /// One registry room event; `false` when the client is gone.
+    fn on_registry_event(
+        &self,
+        event: Result<zeron_sync::RegistryEvent, tokio::sync::broadcast::error::RecvError>,
+    ) -> bool {
+        use tokio::sync::broadcast::error::RecvError;
+        match event {
+            Ok(zeron_sync::RegistryEvent::Connected) => {
+                // Re-join: restart the dial gate's warm-up clock (presence map
+                // is empty again; silence isn't evidence yet).
+                self.room_joined_at
+                    .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+                self.bump_changed();
+            }
+            Ok(zeron_sync::RegistryEvent::Applied) => self.bump_changed(),
+            Ok(zeron_sync::RegistryEvent::Presence) => self.publish_presence(),
+            Ok(zeron_sync::RegistryEvent::Disconnected) => {}
+            // Events were dropped (the pump fell behind): any of them may
+            // have been an applied frame, and a presence frame no longer
+            // republishes everything. Republish (and save) as for one.
+            Err(RecvError::Lagged(_)) => self.bump_changed(),
+            Err(RecvError::Closed) => return false,
+        }
+        true
+    }
+
     /// A presence frame changes only the device overlay (`overlay_presence`):
     /// every row change also bumps `changed_tx`, which runs the full publish.
     /// So a heartbeat re-reads the devices alone, not every chat and session.
@@ -2075,6 +2084,44 @@ mod tests {
             assert!(message.contains("injected DNS lookup failure"), "{message}");
             assert!(!message.contains("token-secret"), "{message}");
         }
+    }
+
+    /// The event pump falling behind (the broadcast channel overflowed)
+    /// drops events, applied frames among them. That must still republish
+    /// and save: presence frames no longer republish everything.
+    #[tokio::test]
+    async fn a_lagged_registry_event_pump_still_republishes() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        // A real overflow: capacity 2, five sends, the receiver lags.
+        let (tx, mut rx) = tokio::sync::broadcast::channel(2);
+        for _ in 0..5 {
+            tx.send(zeron_sync::RegistryEvent::Applied).unwrap();
+        }
+        let lagged = rx.recv().await;
+        assert!(matches!(lagged, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))));
+        let mut changed = host.inner.changed_tx.subscribe();
+        changed.mark_unchanged();
+        assert!(host.inner.on_registry_event(lagged));
+        assert!(changed.has_changed().unwrap(), "a lagged pump dropped applied frames silently");
+        drop(tx);
+        while let Ok(event) = rx.try_recv() {
+            assert!(host.inner.on_registry_event(Ok(event)));
+        }
+        assert!(!host.inner.on_registry_event(Err(tokio::sync::broadcast::error::RecvError::Closed)));
     }
 
     /// A crash loses nothing local: what is on disk 1.5 s after a local
