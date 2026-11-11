@@ -417,6 +417,45 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(api.calls), 7)
 
 
+class SupersededTests(unittest.TestCase):
+    """A pull request run whose commit a newer push replaced stops waiting (ci-supersede.yml)."""
+
+    class PullApi:
+        def __init__(self, pull=None, error=None):
+            self.pull, self.error = pull, error
+
+        def get(self, path):
+            if self.error:
+                raise self.error
+            assert path == "/repos/o/r/pulls/7", path
+            return self.pull
+
+    def check(self, api, pr="7", head="abc"):
+        env = {"CI_PR": pr, "CI_PR_HEAD": head}
+        saved = {k: admit.os.environ.get(k) for k in env}
+        admit.os.environ.update(env)
+        try:
+            return admit.superseded(api, "o/r")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    admit.os.environ.pop(k, None)
+                else:
+                    admit.os.environ[k] = v
+
+    def test_head_moved_or_closed(self):
+        self.assertFalse(self.check(self.PullApi({"state": "open", "head": {"sha": "abc"}})))
+        self.assertTrue(self.check(self.PullApi({"state": "open", "head": {"sha": "def"}})))
+        self.assertTrue(self.check(self.PullApi({"state": "closed", "head": {"sha": "abc"}})))
+
+    def test_not_a_pull_request_or_unknown(self):
+        # main, the merge queue, schedules: no pull request to follow.
+        self.assertFalse(self.check(self.PullApi({"state": "closed"}), pr="", head=""))
+        # The API failing never stops a run.
+        self.assertFalse(self.check(self.PullApi(error=OSError("down"))))
+        self.assertFalse(self.check(self.PullApi({"state": "open"})))
+
+
 if __name__ == "__main__":
     unittest.main()
 

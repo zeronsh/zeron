@@ -159,6 +159,9 @@ jobs:
           grep -q 'jar verified' "$RUNNER_TEMP/aab-verification.txt"
           (cd out/android && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
           (cd out/android && sha256sum "$(basename "$aab")" > "$(basename "$aab").sha256")
+          # For android-play.yml, which uploads this bundle from another run and
+          # can't read this job's outputs: whether it carries the release key.
+          if [ "${{ steps.signing.outputs.signed }}" = true ]; then : > out/android/release-signed; fi
           ls -la out/android
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -182,6 +185,7 @@ jobs:
           path: |
             out/android/*.aab
             out/android/*.aab.sha256
+            out/android/release-signed
           if-no-files-found: error
           retention-days: 90
 
@@ -189,13 +193,14 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/zeron-release.jks"
 
+  # A run by hand (Upload this build to Google Play). Main's pushes upload from
+  # android-play.yml instead, once CI has passed: a job here would hold ci.yml's
+  # run, and with it main's concurrency group, for as long as its approval waits
+  # (from Nov 5 to Nov 11 once, every main run and nightly cancelled behind it).
   play:
     name: Upload to Google Play testing
     needs: apk
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      ((github.event_name == 'push' && vars.PLAY_UPLOAD_ENABLED == 'true') ||
-       (github.event_name == 'workflow_dispatch' && inputs.upload_play))
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.upload_play
     runs-on: ubuntu-latest
     environment: google-play
     timeout-minutes: 20
