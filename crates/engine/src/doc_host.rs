@@ -3307,9 +3307,10 @@ impl DocHost {
     }
 
     /// chat2 host duties on the doc-quiesce tick (docs/chat2-sync.md C3):
-    /// - threshold checkpoint: when the room's row log passes 512KB or 200
-    ///   rows, post a full checkpoint so cold readers load one compact blob
-    ///   instead of replaying the log (the alert-shaped growth bound);
+    /// - threshold checkpoint: when the room's stored rows are worth a whole
+    ///   snapshot ([`threshold_checkpoint_due`]: rows as big as the chat, up to
+    ///   8 MB or 20,000 rows), post a full checkpoint so cold readers load one
+    ///   blob instead of replaying the log;
     /// - tail sidecar: publish the last-64 transcript JSON for thin/instant
     ///   readers (the iOS fallback path).
     async fn chat2_maintenance(&self, handle: &Arc<ChatDocHandle>) {
@@ -6770,21 +6771,23 @@ impl DocHost {
     }
 }
 
-/// When a chat2 room's row log has grown enough to replace it with a full
-/// checkpoint (docs/chat2-sync.md C3). Small chats keep the original bound:
-/// 512 KB or 200 rows. A big chat's checkpoint is its whole snapshot (47 MB
-/// for the largest live one), and posting it every 200 rows uploaded about
-/// 250× the rows it pruned. So the bound grows with the snapshot, to a
-/// sixteenth of it in bytes and one row per 64 KB, capped at the room's
-/// alert line (2 MB of rows) and 2,000 rows. A cold reader then replays at
-/// most that many rows on top of the checkpoint it downloads anyway.
+/// When a room's stored rows are worth a checkpoint. A checkpoint is the chat's
+/// WHOLE snapshot, and the rows it prunes are the changes since the last one, so
+/// a big chat should upload it rarely: once the rows add up to the snapshot's
+/// own size, or 8 MB, whichever comes first (never under 512 KB). The 8 MB is
+/// the edge's limit: the nightly backup builds every stored row into one JSON in
+/// the room's memory (about 3.7x the rows at its peak), and a room that runs out
+/// of memory drops every socket. The row count follows the bytes at ~400 B a row,
+/// capped at 20,000: a cold reader replays rows at ~30 µs each, so at most ~0.6 s
+/// on top of the checkpoint it downloads anyway.
 fn threshold_checkpoint_due(row_bytes: u64, row_count: u64, snapshot_bytes: u64) -> bool {
-    const BASE_ROW_BYTES: u64 = 512 * 1024;
-    const BASE_ROWS: u64 = 200;
-    const MAX_ROW_BYTES: u64 = 2 * 1024 * 1024;
-    const MAX_ROWS: u64 = 2_000;
-    let byte_bound = (snapshot_bytes / 16).clamp(BASE_ROW_BYTES, MAX_ROW_BYTES);
-    let row_bound = (snapshot_bytes / (64 * 1024)).clamp(BASE_ROWS, MAX_ROWS);
+    const MIN_ROW_BYTES: u64 = 512 * 1024;
+    const MAX_ROW_BYTES: u64 = 8 * 1024 * 1024;
+    const BYTES_PER_ROW: u64 = 400;
+    const MIN_ROWS: u64 = 200;
+    const MAX_ROWS: u64 = 20_000;
+    let byte_bound = snapshot_bytes.clamp(MIN_ROW_BYTES, MAX_ROW_BYTES);
+    let row_bound = (byte_bound / BYTES_PER_ROW).clamp(MIN_ROWS, MAX_ROWS);
     row_bytes > byte_bound || row_count > row_bound
 }
 
@@ -6794,29 +6797,40 @@ mod threshold_checkpoint_tests {
     const MB: u64 = 1024 * 1024;
 
     #[test]
-    fn small_chats_keep_the_original_bound() {
-        for snapshot in [0, 100 * 1024, 4 * MB, 8 * MB] {
-            assert!(!due(512 * 1024, 200, snapshot));
+    fn a_big_chat_uploads_its_snapshot_only_after_8_mb_of_rows() {
+        let whale = 47 * MB;
+        // The live 47 MB chat's rows average ~480 B. The old rule fired at 753
+        // rows (~0.36 MB): 47 MB uploaded per 0.36 MB of new content.
+        assert!(!due(753 * 480, 753, whale));
+        assert!(!due(8 * MB, 17_000, whale));
+        assert!(due(8 * MB + 1, 0, whale));
+        assert!(due(0, 20_001, whale));
+    }
+
+    #[test]
+    fn a_mid_sized_chat_waits_for_rows_as_big_as_itself() {
+        let chat = 3 * MB;
+        assert!(!due(3 * MB, 7_000, chat));
+        assert!(due(3 * MB + 1, 0, chat));
+        assert!(due(0, (3 * MB / 400) + 1, chat));
+    }
+
+    #[test]
+    fn a_small_chat_keeps_the_512_kb_floor() {
+        for snapshot in [0, 100 * 1024, 512 * 1024] {
+            assert!(!due(512 * 1024, 1_000, snapshot));
             assert!(due(512 * 1024 + 1, 0, snapshot));
-            assert!(due(0, 201, snapshot));
+            assert!(due(0, 512 * 1024 / 400 + 1, snapshot));
         }
     }
 
     #[test]
-    fn a_big_chat_waits_for_rows_worth_its_upload() {
-        let whale = 47 * MB;
-        // The live 47 MB chat checkpointed at 201 rows (~100 KB of rows).
-        assert!(!due(100 * 1024, 201, whale));
-        assert!(!due(2 * MB, 752, whale));
-        assert!(due(0, 753, whale));
-        assert!(due(2 * MB + 1, 0, whale));
-    }
-
-    #[test]
-    fn bounds_never_pass_the_rooms_alert_line() {
-        assert!(due(2 * MB + 1, 0, 4096 * MB));
-        assert!(due(0, 2_001, 4096 * MB));
-        assert!(!due(2 * MB, 2_000, 4096 * MB));
+    fn bounds_never_pass_what_the_room_can_back_up() {
+        for snapshot in [8 * MB, 47 * MB, 4096 * MB] {
+            assert!(due(8 * MB + 1, 0, snapshot));
+            assert!(due(0, 20_001, snapshot));
+            assert!(!due(8 * MB, 20_000, snapshot));
+        }
     }
 }
 
