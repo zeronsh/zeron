@@ -13,7 +13,7 @@ const out = fileURLToPath(new URL("../../public/hero/glyphs.js", import.meta.url
 
 export const RUNS = {
   400: ["Search", "No sessions yet", "Ask anything, @ to mention…", "N", "K"],
-  500: ["New chat", "Sessions", "Star on GitHub", "Local", "Full access", "MacBook Pro", "hello-world", "No ref", "Opus"],
+  500: ["New chat", "Sessions", "Star on GitHub", "Local", "Full access", "MacBook Pro", "hello-world", "No ref", "Opus 5.5", "High"],
 };
 const FILES = { 400: "Geist.ttf", 500: "Geist-Medium.ttf" };
 

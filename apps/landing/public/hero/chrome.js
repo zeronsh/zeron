@@ -23,6 +23,16 @@ export const WINDOW = { w: 1176, h: 768 };
 export const CARD_RADIUS = 12;
 
 const W = WINDOW.w, H = WINDOW.h;
+// The sidebar: closed (its toggle's state; ui/screens/shell/fit.luau). Open,
+// the page starts past it (sidebar 261 + 4); closed, at the window's edge.
+export const SIDEBAR_OPEN = false;
+// The plan's share used, as the ring shows it (invented: the fixture's 38%).
+const USED = 0.38;
+const PAGE_X = SIDEBAR_OPEN ? 265 : 5;
+// The page (the pointer's box), and inside its 1-point edge the wallpaper's
+// layer and the page card's clip (radius 11), in points of the window.
+export const PAGE = [PAGE_X, 42, W - PAGE_X - 5, H - 47];
+export const NODE = [PAGE_X + 1, 43, W - PAGE_X - 7, H - 49];
 // (Only the ⌘ is set by the browser: `hint`.)
 const SANS = '-apple-system, system-ui, "Arial Unicode MS", sans-serif';
 
@@ -56,6 +66,7 @@ const C = {
   send: "rgb(109,109,111)",
   sendInk: over([11, 11, 12], 102, GROUND.send), // zeron.primary.text at 0.4
   claude: "rgb(217,119,87)", // the mark's own #D97757
+  accent: "rgb(146,119,176)", // accent #9277b0
 };
 
 // ---------------------------------------------------------------- icons
@@ -332,13 +343,23 @@ export function drawUnder(ctx, s, { lights = true } = {}) {
 
   // The title strip's controls (ds/title_bar.luau): 24-point buttons on
   // the line 21 down, their 16-point glyphs inside.
-  sidebarGlyph(ctx, s, 92, 13, "left", true, ink(SECONDARY, "window"));
+  // (The sidebar's view options, "…", go with the sidebar.)
+  sidebarGlyph(ctx, s, 92, 13, "left", SIDEBAR_OPEN, ink(SECONDARY, "window"));
   icon(ctx, s, "arrow-left", 124, 13, 16, ink(DISABLED, "window"));
   icon(ctx, s, "arrow-right", 150, 13, 16, ink(DISABLED, "window"));
-  icon(ctx, s, "more-horizontal", 182, 13, 16, ink(SECONDARY, "window"));
+  if (SIDEBAR_OPEN) icon(ctx, s, "more-horizontal", 182, 13, 16, ink(SECONDARY, "window"));
   sidebarGlyph(ctx, s, W - 30, 13, "right", false, ink(SECONDARY, "window"));
 
-  // The sidebar's card.
+  if (SIDEBAR_OPEN) sidebar(ctx, s);
+
+  // The page card's inside (its 1-point edge is clipped away): the
+  // wallpaper's ground where the wallpaper is clear.
+  rrect(ctx, s, NODE[0], NODE[1], NODE[2], NODE[3], CARD_RADIUS - 1, C.card);
+}
+
+// The sidebar, open (ui/ds/sidebar.luau, screens/shell/sidebar.luau).
+function sidebar(ctx, s) {
+  // Its card.
   rrect(ctx, s, 5, 42, 256, H - 47, 12, C.card);
   // New chat, Search.
   icon(ctx, s, "plus", 20, 56.5, 16, ink(SECONDARY, "card"));
@@ -359,16 +380,34 @@ export function drawUnder(ctx, s, { lights = true } = {}) {
   avatar(ctx, s, 18, H - 38.5, 20);
   text(ctx, s, "Local", 43, H - 37.5, 13, 500, C.primary);
   icon(ctx, s, "settings", 230, H - 36, 16, ink(TERTIARY, "card"));
+}
 
-  // The page card's inside (its 1-point edge is clipped away): the
-  // wallpaper's ground where the wallpaper is clear.
-  rrect(ctx, s, 266, 43, W - 272, H - 49, CARD_RADIUS - 1, C.card);
+// The model chip's usage ring (ds/context_usage.luau `Ring`, as the model
+// picker's trail): 12 across, a 1.5-point track (border.strong) of radius
+// 5.25, and the plan's used share from twelve o'clock, clockwise, round
+// capped, in the accent (amber from 80%, red from 95%).
+function usageRing(ctx, s, x, y, used) {
+  const cx = (x + 6) * s, cy = (y + 6) * s, r = 5.25 * s;
+  ctx.save();
+  ctx.lineWidth = 1.5 * s;
+  ctx.strokeStyle = over([255, 255, 255], 46, GROUND.composer);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  if (used > 0) {
+    ctx.strokeStyle = used >= 0.95 ? "rgb(239,68,68)" : used >= 0.8 ? "rgb(245,158,11)" : C.accent;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * used);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 // The composer, over the wallpaper (UI/ds/composer.luau; a new chat with
 // the wallpaper showing: the pill, the tray behind its footer).
 export function drawOver(ctx, s) {
-  const pane = [266, 43, W - 272, H - 49];
+  const pane = NODE;
   const cw = Math.min(pane[2] - 64, 660);
   const cx = pane[0] + 32 + (pane[2] - 64 - cw) / 2;
   const cy = pane[1] + pane[3] / 2 - 107;
@@ -411,9 +450,15 @@ export function drawOver(ctx, s) {
   icon(ctx, s, "alt-arrow-right-bold", x, ty + 7, 10, ink(DISABLED, "composer"));
   x += 14;
   label("No ref", x);
-  // The model: Claude's mark (its own colour), Opus.
-  const opus = advanceOf(ctx, s, "Opus", 12, 500);
-  const chip = right - 12 - (6 + 12 + 6 + opus + 6);
+  // The model (ds/model_picker.luau, a chip): Claude's mark in its own
+  // colour, the model, its effort (the detail, a step quieter), the usage
+  // ring; 6 apart and 6 in. (Its words' boxes to the whole point, as the
+  // place chip's: the app's tree has the chip 130 wide.)
+  const model = Math.round(advanceOf(ctx, s, "Opus 5.5", 12, 500));
+  const effort = Math.round(advanceOf(ctx, s, "High", 12, 500));
+  const chip = right - 12 - (6 + 12 + 6 + model + 6 + effort + 6 + 12 + 6);
   icon(ctx, s, "claude", chip + 6, ty + 6, 12, C.claude);
-  label("Opus", chip + 24);
+  label("Opus 5.5", chip + 24);
+  text(ctx, s, "High", chip + 24 + model + 6, ty + 2.5, 12, 500, ink(DISABLED, "composer"));
+  usageRing(ctx, s, chip + 24 + model + 6 + effort + 6, ty + 6, USED);
 }

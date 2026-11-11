@@ -58,6 +58,29 @@ ui.shared("plugins", nil :: any):set({
 } :: any)
 appearance.plugin:set("parallax-scenes")
 appearance.plugin_effect:set("ascii")
+-- Claude Code's Opus 5.5 as the engine lists it (crates/client/src/catalog.rs:
+-- its full ladder, High by default, Fast Mode offered), at High.
+local LADDER = {
+	{ value = "low", label = "Low" }, { value = "medium", label = "Medium" }, { value = "high", label = "High" },
+	{ value = "xhigh", label = "X-High" }, { value = "max", label = "Max" },
+	{ value = "ultracode", label = "Ultracode" }, { value = "ultrathink", label = "Ultrathink" },
+}
+store.catalog:set({
+	state = "ready",
+	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
+	models = { { value = "claude-opus-5-5", label = "Opus 5.5", harness = "claude-code", efforts = LADDER, effort = "high", fast = true } },
+} :: any)
+-- The account in use and its plan's usage (the composer's ring): invented.
+require("@account/agents").on_device:set({
+	[""] = { ["claude-code"] = { {
+		id = "acct-1", email = "you@example.com", plan = "Max", active = true, can_switch = false,
+		windows = { { label = "5h", used = 0.38 }, { label = "Week", used = 0.21 } },
+	} } },
+} :: any)
+-- The sidebar closed, as its toggle closes it (once the shell is up).
+ui.after(400, function()
+	require("@app/screens/shell/fit").toggle_sidebar()
+end)
 '''
 src = src.replace("local shell = require(\"@app/screens/shell\")", tail + "local shell = require(\"@app/screens/shell\")")
 (out / "landing_hero_fixture.luau").write_text(src)

@@ -55,7 +55,10 @@ Node 22 and Python 3 with Pillow. Once: `npm install` here.
 2. `python3 make-ui.py <repo> <scratch>/ui`: a copy of `apps/zgx/ui` with
    `landing_hero_fixture.luau` (shell_fixture with a first-time user's data:
    one device, one project `hello-world`, no chats; zeron-dark, opaque; the
-   Parallax scenes plugin as the wallpaper under ASCII, Blossom). A release
+   Parallax scenes plugin as the wallpaper under ASCII, Blossom; Claude
+   Code's Opus 5.5 at High, as the engine's catalog lists it; an invented
+   account at 38% of its plan, for the usage ring; the sidebar closed by its
+   own toggle). A release
    build loads no dev plugins, so the plugin's `Scene` is built in the page's
    background place by the plugin's own code.
 3. `python3 reference.py <zeron-zgx-landing> <scratch>/ui <out> "rest=0.5:0.5,tl=0:0,br=1:1"`:
@@ -72,7 +75,13 @@ Node 22 and Python 3 with Pillow. Once: `npm install` here.
    PSNR; side-by-side and difference pictures.
 6. `node motion.mjs <native>/motion.json <out>`: the web's frames against
    the spring model, and the app's samples against the same model.
-7. `node page-check.mjs <out>`: the landing page itself: desktop (drawn,
+7. `node parallax-check.mjs [url|local] <out>`: a visible Chrome and WebKit
+   window, the mouse moved over the hero through the browser's input
+   pipeline at three scroll positions: each corner must move the scene, the
+   middle and the title strip must leave it at rest (needs `npm i --no-save
+   playwright` and `npx playwright install webkit`). Safari itself needs
+   Develop › Allow remote automation for safaridriver.
+8. `node page-check.mjs <out>`: the landing page itself: desktop (drawn,
    follows the mouse), a 390-wide phone (fits, no sideways scroll, scroll
    frame times), Reduce motion (a still), no WebGL (the still picture).
 
@@ -83,21 +92,27 @@ then `cwebp -q 90 -m 6` and `sips --resampleWidth 1600`.
 
 ## Results (Nov 11 2026, M4 Pro, zgx 0bce8ef43 build, headless Chrome)
 
-Window 1176×768 at 2x, mean absolute error of 255 per channel:
+The state: sidebar closed, Opus 5.5 at High, the usage ring. Window
+1176×768 at 2x, mean absolute error of 255 per channel:
 
-| pose | window | title strip | sidebar | wallpaper | composer |
+| pose | window | title strip | wallpaper | composer | model chip |
 |---|---|---|---|---|---|
-| rest (0.5, 0.5) | 0.21 | 0.02 | 0.09 | 0.26 | 0.18 |
-| top-left (0, 0) | 0.22 | 0.02 | 0.09 | 0.28 | 0.17 |
-| bottom-right (1, 1) | 0.21 | 0.02 | 0.09 | 0.27 | 0.17 |
-| (0.25, 0.75) | 0.21 | 0.02 | 0.09 | 0.27 | 0.17 |
+| rest (0.5, 0.5) | 0.26 | 0.02 | 0.28 | 0.21 | 2.08 |
+| top-left (0, 0) | 0.26 | 0.02 | 0.28 | 0.21 | 2.08 |
+| bottom-right (1, 1) | 0.26 | 0.02 | 0.28 | 0.21 | 2.08 |
+| (0.25, 0.75) | 0.26 | 0.02 | 0.28 | 0.21 | 2.08 |
 
-0.3–0.4% of pixels differ by more than 8, 0.1% by more than 32; PSNR 43–44 dB.
-Pictures: `results/side-*.jpg` (app | web | difference ×8), `results/crop-*.png` (2x, unscaled).
+0.3% of pixels differ by more than 8, 0.1% by more than 32; PSNR 43 dB.
+The usage ring alone: 1.46. Pictures: `results/side-*.jpg` (app | web |
+difference ×8), `results/crop-*.png` (2x, unscaled).
+
+Parallax on the page (visible Chrome and WebKit, three scroll positions):
+the scene changes by 8.0–8.3 of 255 with the mouse in the page's corners,
+0.04 back in its middle, 0 over the title strip.
 
 Motion: every web frame is a step state of the 120 Hz spring model (largest
-gap 1e-8 pt); the app's layer positions, sampled 1,805 times over 1.2 s, sit
-on the same model in 10,821 of 10,830 rounded readings.
+gap 1e-8 pt); the app's layer positions, sampled 8,177 times over 1.2 s, sit
+on the same model in every one of 49,062 rounded readings.
 
 What's left, and why it can't go:
 

@@ -9,7 +9,7 @@
 // (or Reduce motion): the scene holds still and nothing follows the pointer.
 
 import { Renderer, texture } from "./wallpaper.js";
-import { WINDOW, CARD_RADIUS, drawUnder, drawOver, iconsReady } from "./chrome.js";
+import { WINDOW, CARD_RADIUS, PAGE, NODE, drawUnder, drawOver, iconsReady } from "./chrome.js";
 
 // The Parallax scenes plugin's numbers (init.luau): a step of depth moves
 // 14 points across and 9 down at the pointer's edge, at Normal; the springs
@@ -19,12 +19,10 @@ const SPRING = { stiffness: 140, damping: 20 };
 const LAYERS = ["sky", "far", "near", "detail"];
 const ART = { w: 576, h: 768 };
 
-// Where things stand, in points of the window (the app's tree at 1176×768):
-// the page (the pointer's box), the wallpaper's layer (inside the page
-// card's 1-point edge), the place a plugin draws in (laid at the window's
-// width from the layer's right edge), the page card's inside clip.
-const PAGE = [265, 42, 906, 721];
-const NODE = [266, 43, 904, 719];
+// Where things stand, in points of the window (the app's tree at 1176×768;
+// chrome.js): the page (the pointer's box), the wallpaper's layer, and the
+// place a plugin draws in, laid at the window's width from the layer's
+// right edge.
 const PLACE = [NODE[0] + NODE[2] - WINDOW.w, NODE[1], WINDOW.w, NODE[3]];
 // ds/wallpaper.luau: ASCII at a 1.5-point font pixel, Medium strength
 // (0.75) and density (no glyph under 0.22).
