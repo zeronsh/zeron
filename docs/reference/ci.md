@@ -267,18 +267,69 @@ token that pull requests from forks get:
 - How much of it a run still holds comes from how many of its jobs have
   finished.
 
+The queue's order: [releases](#releases), then locked pull requests, then
+`ci:priority`, then everyone, each first come first served.
+
+### Releases
+
+The heavy release workflows are admitted as CI is, and go first:
+[`release.yml`](../../.github/workflows/release.yml) (a `v*` tag, or by hand),
+`zgx-beta.yml` on `zeron/zgx` (a `beta-v*` tag, or by hand) and zgx's
+`release.yml` (its dry run on a `v*` tag, or by hand). Before, admission only
+saw what their jobs ran or queued for: their later jobs (packaging, once the
+builds are done) didn't count until GitHub created them, so CI could be
+admitted into the runners they were about to need, and a release queued like
+anything else.
+
+Each has an `admit` job, which every other job of the workflow needs. Its
+name carries the reservation and the class, for example
+`admit [linux=5 windows=1 macos=0] release`. The workflow computes the
+reservation from its event, ref and inputs (zgx-beta's `platforms`): every job
+it will run but the admit job, and but those waiting for a reviewer.
+
+- **The claim is verified**, as a pull request's claim is. It counts only for a
+  run of one of its repository's release workflows (`RELEASE_WORKFLOWS` in
+  `admit.py`: `release.yml` and `zgx-beta.yml` here, `release.yml` in zgx;
+  `CI_RELEASE_WORKFLOWS` replaces them), started by pushing a tag or by hand.
+  A pull request can edit any workflow, so its run is never a release,
+  whatever its admit job says; neither is a branch push. Unverified, the run
+  is an ordinary one.
+- **Releases go first**, first come first served among themselves. A lock's
+  standing reservation doesn't count against them, only what the locked pull
+  request's runs hold (see [No deadlocks](#no-deadlocks)).
+- **Jobs behind a reviewer aren't reserved.** A job whose environment has
+  required reviewers can wait for approval for hours: release.yml's macOS
+  build on a tag or `main`, zgx-beta's `macos package` on a tag (both
+  `apple-release`). It is left out of the reservation, and a job waiting for
+  approval holds no runner and doesn't count. Once approved, it counts as soon
+  as it's queued.
+- **Later jobs stay reserved.** Only write access starts a verified release,
+  so its reservation is trusted: its jobs not created yet stay reserved for 6
+  hours, where CI's stop counting after 10 minutes.
+- No debounce. Admission fails open as CI's does: `CI_ADMISSION=off`, API
+  trouble or a 2-hour wait start the release at once.
+
+The rest is seen, not admitted: the Google Play upload, TestFlight, deploys,
+the cache janitor (`ci-caches.yml`), `ci-supersede.yml` and CI emergency.
+They're small (a job or two), or most of their time is a reviewer's wait,
+which doesn't fit a queue; an admit job would cost them a runner and a wait
+out of proportion. What their jobs run or queue for counts as held, so
+admitted runs don't take those runners (see
+[Across repositories](#across-repositories)).
+
 ### Priority and locks
 
 Adding a label needs the triage role or above, so GitHub decides who can use
 these. A fork's author can't label their own pull request.
 
 - **`ci:priority`**: the pull request's runs go to the front of the queue,
-  behind any locked pull request. Nobody behind them may take runners they
-  wait for, so the next runners to free up go to them. Running jobs are never
-  stopped.
+  behind releases and any locked pull request. Nobody behind them may take
+  runners they wait for, so the next runners to free up go to them. Running
+  jobs are never stopped.
 - **`ci:lock`**: while the pull request is open, admission treats a full run's
-  worth of runners (`MAX_RESERVATION`: 11 Linux, 4 Windows, 4 macOS) as taken, whether or not
-  the pull request is running anything. Its own runs skip the queue and are
+  worth of runners (`MAX_RESERVATION`: 11 Linux, 4 Windows, 4 macOS) as taken
+  for everyone but releases, whether or not the pull request is running
+  anything. Its own runs skip the queue, behind releases only, and are
   admitted as soon as their runners are free. The lock ends when:
   - the label is removed;
   - the pull request is merged or closed;
@@ -312,8 +363,9 @@ Repository variables:
 | `CI_PR_TIER` | fast | `full` runs everything on pull requests |
 | `CI_LOCK_HOURS` | 6 | How long a `ci:lock` label holds runners |
 | `CI_FORK_REUSE` | (unset) | `own`: fork pull requests also reuse their own earlier passes. Set it once the merge queue is required |
-| `CI_PEERS` | `zeronsh/zgx:ci.yml` | Other repositories' admitted CI workflows sharing the runner pool (`owner/repo:workflow.yml`, separated by spaces or commas) |
-| `CI_SEE_OUTSIDE` | on | `off`: ignore runs outside admitted CI (releases, betas, deploys, a peer's other workflows) |
+| `CI_PEERS` | `zeronsh/zgx:ci.yml,release.yml` | Other repositories' admitted workflows sharing the runner pool: `owner/repo:ci.yml`, separated by spaces or commas, and any more of a repository's after its CI's (`,release.yml`). Their release workflows are read whether listed or not |
+| `CI_RELEASE_WORKFLOWS` | (`admit.py`'s `RELEASE_WORKFLOWS`) | The release workflows, whose tag and manual runs go first: file names for this repository's (`release.yml zgx-beta.yml`), `owner/repo:a.yml,b.yml` for another's |
+| `CI_SEE_OUTSIDE` | on | `off`: ignore runs of workflows that aren't admitted (deploys, uploads, the cache janitor, a peer's other workflows) |
 | `PLAY_UPLOAD_ENABLED` | (unset) | `true`: `android-play.yml` uploads main's bundle to Google Play after CI passes |
 | `PLAY_TRACK` | beta | Google Play testing track for that upload (`beta` or `internal`) |
 | `PLAY_RELEASE_STATUS` | draft | Release status for that upload (`draft` or `completed`) |
@@ -328,7 +380,7 @@ read from its admit job is not trusted:
   this branch's largest plan fits under it, within a job per runner type;
 - jobs an admitted run reserved but never created stop counting 10 minutes
   after admission, except the `CI result` job and Android publishing, which
-  start late (90 minutes);
+  start late (90 minutes). A verified release's count for 6 hours;
 - a waiting run that could have been admitted for 3 minutes but still waits
   (an edited admit step that never finishes) is ignored: the runs behind it
   stop waiting for it.
@@ -339,19 +391,22 @@ The organization's 20 hosted runners (5 macOS) are one pool for `zeronsh/zeron`
 and `zeronsh/zgx`. On Nov 10, zgx's CI alone held a median 18 of the 20 for
 half a day, while admission here, seeing only this repository's CI, admitted
 runs as if every runner were free; they then queued for hours. So admission
-reads, besides this repository's `ci.yml`:
+reads, besides this repository's `ci.yml` and release workflows:
 
-- **Peers** (`CI_PEERS`, `zeronsh/zgx:ci.yml` by default): other repositories'
-  admitted CI joins the same queue. Their waiting runs wait in it, their
-  admitted runs hold what they hold, and their `ci:priority` and `ci:lock`
-  labels count as this repository's do. A peer's pull request is keyed
-  `owner/repo#n`, never confused with a pull request number here.
+- **Peers** (`CI_PEERS`, `zeronsh/zgx:ci.yml,release.yml` by default): other
+  repositories' admitted workflows, their CI and their release workflows,
+  join the same queue. Their waiting runs wait in it, their admitted runs
+  hold what they hold, their releases go first as this repository's do, and
+  their `ci:priority` and `ci:lock` labels count as this repository's do. A
+  peer's pull request is keyed `owner/repo#n`, never confused with a pull
+  request number here.
 - **Everything else** (`CI_SEE_OUTSIDE`, on by default): every other run in
-  this repository and the peers (releases, betas, deploys, a peer's CI before
-  it adopts admission). What its jobs run or queue for counts as held, so a
-  release's queued jobs get the next free runners and admitted CI doesn't
-  take them. A job waiting for an environment's approval holds no runner and
-  doesn't count.
+  this repository and the peers (deploys, uploads, the cache janitor, a run of
+  a workflow from before it adopted admission, such as a release tagged on an
+  older commit, or `main`'s `zgx-beta.yml`). What its jobs run or queue for
+  counts as held, so its queued jobs get the next free runners and admitted
+  runs don't take them. A job waiting for an environment's approval holds no
+  runner and doesn't count.
 
 Another repository's runs are read at most every 2 minutes, to spare the
 token's API quota. The peers are public, so the run's own token reads them.
@@ -362,19 +417,24 @@ first.
 
 ### No deadlocks
 
-Every wait points the same way: locked runs (oldest lock first), then
-`ci:priority`, then first come first served. So no two runs can wait for each
-other.
+Every wait points the same way: releases, then locked runs (oldest lock
+first), then `ci:priority`, then first come first served. So no two runs can
+wait for each other.
 
 - A waiting run's `admit` job holds a runner until the run is admitted. A run
   counts those runners only for the runs ahead of it, not behind it.
-- A lock's reservation counts against everyone except older locks. A second
-  lock waits until the first is released; the first never waits for the
-  second.
+- A lock's reservation counts against everyone except older locks and
+  releases. A second lock waits until the first is released; the first never
+  waits for the second. A release never waits for a lock's reservation: the
+  locked pull request's runs queue behind the release, and the lock ends only
+  once the pull request merges, so the two would wait for each other until
+  `CI_LOCK_HOURS`. It waits only for what the lock's runs hold, which they
+  give back by finishing.
 
 `scripts/tests/test_ci_admit.py` simulates 3,000 random queues (any sizes,
-priority, overlapping locks, any polling order) and checks that every run gets
-admitted. The scheduler before this rule deadlocked in about 1 in 10 of them.
+releases, priority, overlapping locks, any polling order) and checks that
+every run gets admitted. The scheduler before this rule deadlocked in about 1
+in 10 of them; with releases waiting for locks' reservations, it gets stuck too.
 
 Waiting costs a runner: an `admit` job runs on the same hosted pool as the
 suites. With about 20 runs waiting at once, their admit jobs took the whole

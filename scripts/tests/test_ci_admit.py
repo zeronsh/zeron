@@ -20,8 +20,8 @@ def held_(pr=None, **counts):
     return Holding(need(**counts), pr)
 
 
-def waiter(run, order, running=True, pr=None, **counts):
-    return Waiter(run, (f"2026-10-27T00:00:{order:02d}Z", order), need(**counts), running, pr)
+def waiter(run, order, running=True, pr=None, release=False, **counts):
+    return Waiter(run, (f"2026-10-27T00:00:{order:02d}Z", order), need(**counts), running, pr, release=release)
 
 
 def job(name, label, status="completed", conclusion="success"):
@@ -92,6 +92,29 @@ class ReservationTests(unittest.TestCase):
     def test_held_never_below_what_is_running(self):
         jobs = [job(f"w{i}", "windows-2022", "in_progress", None) for i in range(3)]
         self.assertEqual(held({"linux": 0, "windows": 2, "macos": 0}, jobs)["windows"], 3)
+
+    def test_jobs_waiting_for_approval_hold_nothing(self):
+        # A beta's reservation leaves out its signing job (the `apple-release` reviewers).
+        declared = {"linux": 1, "windows": 0, "macos": 2}
+        jobs = [job("macos engine", "macos-latest", "in_progress", None),
+                job("macos interface", "macos-latest", "in_progress", None),
+                job("macos package", "macos-latest", "waiting", None)]
+        self.assertEqual(held(declared, jobs, release=True), {"linux": 1, "windows": 0, "macos": 2})
+        jobs[2]["status"] = "queued"  # approved: now it wants a runner
+        self.assertEqual(held(declared, jobs, release=True)["macos"], 3)
+        jobs[0]["status"] = "completed"
+        self.assertEqual(held(declared, jobs, release=True)["macos"], 2)
+
+    def test_a_release_keeps_its_later_jobs_reserved(self):
+        # Its packaging starts once its builds are done, long after CREATE_GRACE and UNSEEN_GRACE.
+        declared = {"linux": 7, "windows": 3, "macos": 2}
+        builds = [job("linux engine", "ubuntu-24.04"), job("windows engine", "windows-2022", "in_progress", None)]
+        self.assertEqual(held(declared, builds, admit.UNSEEN_GRACE + 1, release=True),
+                         {"linux": 6, "windows": 3, "macos": 2})
+        self.assertEqual(held(declared, builds, admit.RELEASE_GRACE + 1, release=True),
+                         {"linux": 0, "windows": 1, "macos": 0})
+        # Unverified, the same name gets CI's graces.
+        self.assertEqual(held(declared, builds, admit.UNSEEN_GRACE + 1), {"linux": 0, "windows": 1, "macos": 0})
 
 
 class DecideTests(unittest.TestCase):
@@ -326,6 +349,26 @@ class PriorityAndLockTests(unittest.TestCase):
         snap = Snapshot([waiter(1, 1, linux=2), waiter(2, 2, pr=None, linux=2)], [], priority={77})
         self.assertEqual(decide(2, need(linux=2), snap, self.BIG).position, 1)
 
+    def test_a_release_goes_ahead_of_locked_and_priority_runs(self):
+        snap = Snapshot([waiter(1, 1, pr=90, linux=3, macos=4), waiter(2, 2, pr=77, linux=3, macos=4),
+                         waiter(3, 3, linux=1), waiter(4, 4, release=True, linux=5, windows=1, macos=4),
+                         waiter(5, 5, release=True, linux=2)],
+                        [held_(macos=3)], locked={90}, priority={77}, lock_times={90: "2026-10-27T10:00:00Z"})
+        order = sorted(snap.waiters, key=lambda w: admit.rank(w, snap))
+        self.assertEqual([w.run_id for w in order], [4, 5, 1, 2, 3])  # releases first come first served
+        self.assertTrue(decide(4, need(linux=5, windows=1, macos=4), snap, self.BIG).admit)  # 3 + 4 <= 10
+        # The locked run waits for the release's macOS runners: 3 held + 4 ahead + 4 > 10.
+        self.assertFalse(decide(1, need(linux=3, macos=4), snap, self.BIG).admit)
+
+    def test_a_release_does_not_wait_for_a_lock_standing_reservation(self):
+        # The lock's runs queue behind the release; it may only wait for what they hold.
+        snap = Snapshot([waiter(1, 1, release=True, macos=4), waiter(2, 2, macos=1)], [held_(macos=3)],
+                        locked={90})
+        self.assertTrue(decide(1, need(macos=4), snap, self.BIG).admit)  # 3 + 4 <= 10
+        self.assertFalse(decide(2, need(macos=1), snap, self.BIG).admit)  # 3 + 4 locked + 4 ahead + 1 > 10
+        snap.holding.append(held_(pr=90, macos=4))  # what the lock's runs hold counts for everyone
+        self.assertFalse(decide(1, need(macos=4), snap, self.BIG).admit)
+
 
 class SchedulerLabelTests(unittest.TestCase):
     class FakeApi:
@@ -428,35 +471,48 @@ class SharedPoolTests(unittest.TestCase):
     as holding what they run or queue."""
 
     class OrgApi:
-        def __init__(self, workflows, runs, jobs, labels=None):
+        def __init__(self, workflows, runs, jobs, labels=None, tags=None):
             self.workflows, self.runs, self.jobs = workflows, runs, jobs
             self.labels = labels or {}
+            self.tags = tags or {}  # (repo, tag) -> its commit
+            self.calls = []
 
         def get(self, path):
+            self.calls.append(path)
             repo = "/".join(path.split("/")[2:4])
             if "/issues?" in path:
                 label = path.split("labels=")[1].split("&")[0].replace("%3A", ":")
                 return [{"number": n, "pull_request": {}} for n in self.labels.get((repo, label), [])]
             if "/pulls/" in path:
                 return {"head": {"sha": "h"}}
+            if "/git/ref/tags/" in path:
+                tag = path.split("/git/ref/tags/")[1]
+                if (repo, tag) not in self.tags:
+                    raise admit.urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+                return {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": self.tags[repo, tag]}}
             if path.endswith(".yml"):
-                return {"id": self.workflows[repo]}
+                workflow = path.rsplit("/", 1)[1]
+                if (repo, workflow) not in self.workflows:
+                    raise admit.urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+                return {"id": self.workflows[repo, workflow]}
             if "/workflows/" in path:
                 wid = int(path.split("/workflows/")[1].split("/")[0])
+                status = path.split("status=")[1].split("&")[0] if "status=" in path else None
                 return {"workflow_runs": [r for r in self.runs[repo]
-                                          if r["workflow_id"] == wid and r["status"] == "in_progress"]}
+                                          if r["workflow_id"] == wid and status in (None, r["status"])]}
             if "/actions/runs?" in path:
                 status = path.split("status=")[1].split("&")[0]
                 return {"workflow_runs": [r for r in self.runs[repo] if r["status"] == status]}
             run = int(path.split("/runs/")[1].split("/")[0])
             return {"jobs": self.jobs[run]}
 
-    def wfrun(self, rid, wid, status="in_progress", event="push"):
-        return {"id": rid, "workflow_id": wid, "status": status, "updated_at": "a", "event": event, "head_sha": "h"}
+    def wfrun(self, rid, wid, status="in_progress", event="push", ref="main"):
+        return {"id": rid, "workflow_id": wid, "status": status, "updated_at": "a", "event": event,
+                "head_sha": "h", "head_branch": ref}
 
     def test_peer_queue_priority_and_outside_runs(self):
         api = self.OrgApi(
-            workflows={"z/gx": 50},
+            workflows={("z/gx", "ci.yml"): 50},
             runs={
                 "o/r": [self.wfrun(1, 9), self.wfrun(2, 7)],  # 2: this repo's release (another workflow)
                 "z/gx": [self.wfrun(3, 50, event="pull_request"), self.wfrun(4, 50), self.wfrun(5, 60, "queued")],
@@ -492,6 +548,96 @@ class SharedPoolTests(unittest.TestCase):
     def test_peers_parse(self):
         self.assertEqual(admit.parse_peers("a/b:ci.yml, c/d:x.yml bad z/y:"), [("a/b", "ci.yml"), ("c/d", "x.yml")])
         self.assertEqual(admit.parse_peers(""), [])
+        # Several workflows of a peer: the file names after its CI's are its too.
+        self.assertEqual(admit.parse_peers("z/gx:ci.yml,release.yml o/r:ci.yml"),
+                         [("z/gx", "ci.yml"), ("z/gx", "release.yml"), ("o/r", "ci.yml")])
+        self.assertEqual(admit.parse_peers("release.yml z/gx:ci.yml"), [("z/gx", "ci.yml")])  # whose?
+
+    def test_release_workflows(self):
+        repos = ["zeronsh/zeron", "zeronsh/zgx", "o/r"]
+        self.assertEqual(admit.release_workflows("zeronsh/zeron", "", repos),
+                         {"zeronsh/zeron": ("release.yml", "zgx-beta.yml"), "zeronsh/zgx": ("release.yml",), "o/r": ()})
+        # CI_RELEASE_WORKFLOWS: bare names are this repository's, `owner/repo:` another's.
+        self.assertEqual(admit.release_workflows("zeronsh/zeron", "release.yml zeronsh/zgx:dry-run.yml", repos),
+                         {"zeronsh/zeron": ("release.yml",), "zeronsh/zgx": ("dry-run.yml",), "o/r": ()})
+
+    def release_org(self):
+        # o/r: CI (9) and release.yml (7); z/gx: CI (50) and release.yml (51); o/r's deploy (99).
+        return self.OrgApi(
+            workflows={("o/r", "ci.yml"): 9, ("o/r", "release.yml"): 7,
+                       ("z/gx", "ci.yml"): 50, ("z/gx", "release.yml"): 51},
+            runs={
+                "o/r": [
+                    # A tag's release, its admit job still queued for a runner (the run is `queued`).
+                    self.wfrun(10, 7, "queued", ref="v1.0"),
+                    # A pull request editing release.yml, claiming the class.
+                    self.wfrun(11, 7, event="pull_request"),
+                    # CI started by hand, claiming the class: not a release workflow.
+                    self.wfrun(12, 9, event="workflow_dispatch"),
+                    # release.yml on a branch push.
+                    self.wfrun(13, 7, ref="main"),
+                    self.wfrun(30, 99),
+                ],
+                "z/gx": [
+                    # The peer's release, started by hand and admitted; its signing awaits approval.
+                    self.wfrun(20, 51, event="workflow_dispatch"),
+                    # An older release.yml without an admit job, a job waiting for an approval.
+                    self.wfrun(21, 51, ref="v0.9"),
+                    self.wfrun(22, 51, "completed", ref="v0.8"),
+                ],
+            },
+            jobs={
+                10: [dict(job("admit [linux=2 macos=1] release", "ubuntu-24.04", "queued", None),
+                          created_at="2026-10-27T00:00:09Z", id=100)],
+                11: [dict(job("admit [linux=1] release", "ubuntu-24.04", "in_progress", None),
+                          created_at="2026-10-27T00:00:01Z", id=110)],
+                12: [dict(job("admit [linux=1] release", "ubuntu-24.04", "in_progress", None),
+                          created_at="2026-10-27T00:00:02Z", id=120)],
+                13: [dict(job("admit [linux=1] release", "ubuntu-24.04", "in_progress", None),
+                          created_at="2026-10-27T00:00:03Z", id=130)],
+                20: [job("admit [linux=1 windows=1] release", "ubuntu-24.04"),
+                     job("dry-run (ubuntu-latest)", "ubuntu-latest", "in_progress", None),
+                     job("dry-run (windows-latest)", "windows-latest", "queued", None),
+                     job("sign", "macos-latest", "waiting", None)],
+                21: [job("dry-run (macos-latest)", "macos-latest", "in_progress", None),
+                     job("publish", "ubuntu-latest", "waiting", None)],
+                30: [job("deploy", "ubuntu-latest", "in_progress", None)],
+            },
+            tags={("o/r", "v1.0"): "h"},
+        )
+
+    def test_release_claims_are_verified(self):
+        api = self.release_org()
+        scheduler = admit.Scheduler(api, "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"), outside=True,
+                                    releases={"o/r": ("release.yml",), "z/gx": ("release.yml",)})
+        snap = scheduler.snapshot()
+        releases = {w.run_id: w.release for w in snap.waiters}
+        # Only the tag's run is a release: not the pull request's, nor CI's, nor the branch push's.
+        self.assertEqual(releases, {10: True, 11: False, 12: False, 13: False})
+        order = sorted(snap.waiters, key=lambda w: admit.rank(w, snap))
+        self.assertEqual([w.run_id for w in order], [10, 11, 12, 13])  # though its admit job is the newest
+        self.assertFalse(order[0].running)
+        # The tag is looked up once per run.
+        scheduler.snapshot()
+        self.assertEqual(sum("/git/ref/tags/v1.0" in c for c in api.calls), 1)
+
+    def test_peer_releases_are_read_and_not_outside(self):
+        api = self.release_org()
+        scheduler = admit.Scheduler(api, "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"), outside=True,
+                                    releases={"o/r": ("release.yml",), "z/gx": ("release.yml",)})
+        snap = scheduler.snapshot()
+        held_needs = sorted(tuple(h.need.values()) for h in snap.holding)
+        # The peer's admitted release holds its reservation (its signing job, waiting, nothing); its
+        # release without admission what it runs; the deploy what it runs. Each once.
+        self.assertEqual(held_needs, sorted([(2, 0, 1), (1, 1, 0), (1, 0, 0)]))
+        # Without release workflows, the same runs are all outside ones: seen as what they run.
+        scheduler = admit.Scheduler(self.release_org(), "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"),
+                                    outside=True)
+        snap = scheduler.snapshot()
+        self.assertEqual(sorted(w.run_id for w in snap.waiters), [12])
+        # (10, 11, 13: an admit job queued or running; 30; 20 and 21 as they are.)
+        self.assertEqual(sorted(tuple(h.need.values()) for h in snap.holding),
+                         sorted([(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (2, 0, 1), (1, 1, 0)]))
 
 
 class SupersededTests(unittest.TestCase):
@@ -538,7 +684,8 @@ if __name__ == "__main__":
 
 
 class LivenessTests(unittest.TestCase):
-    """Random queues always drain: whatever arrives, every run is eventually admitted."""
+    """Random queues always drain: whatever arrives, every run is eventually admitted
+    (releases, locks, priority and everyone else, in any mix)."""
 
     def test_random_queues_drain(self):
         import random
@@ -551,9 +698,13 @@ class LivenessTests(unittest.TestCase):
                 counts = {r: rng.randint(0, cap[r]) for r in admit.RUNNERS}
                 counts["linux"] = max(counts["linux"], 1)
                 runs[run] = {"need": need(**counts), "pr": run, "arrive": rng.randint(0, 5),
-                             "duration": rng.randint(1, 6)}
-            locked = set(rng.sample(sorted(runs), k=min(len(runs), rng.choice([0, 0, 1, 2]))))
-            priority = set(rng.sample(sorted(runs), k=min(len(runs), rng.choice([0, 1, 2])))) - locked
+                             "duration": rng.randint(1, 6), "release": False}
+            # Releases are runs of no pull request.
+            for run in rng.sample(sorted(runs), k=min(len(runs), rng.choice([0, 0, 1, 2, 3]))):
+                runs[run].update(release=True, pr=None)
+            prs = sorted(run for run in runs if runs[run]["pr"] is not None)
+            locked = set(rng.sample(prs, k=min(len(prs), rng.choice([0, 0, 1, 2]))))
+            priority = set(rng.sample(prs, k=min(len(prs), rng.choice([0, 1, 2])))) - locked
             lock_times = {pr: f"2026-10-27T10:0{i}:00Z" for i, pr in enumerate(sorted(locked, key=lambda p: rng.random()))}
             admitted, done = {}, set()
             for tick in range(400):
@@ -568,7 +719,8 @@ class LivenessTests(unittest.TestCase):
                            and runs[run]["arrive"] <= tick]
                 for run in sorted(waiting, key=lambda r: rng.random()):  # polls in any order
                     snap = Snapshot(
-                        [Waiter(r, (f"t{runs[r]['arrive']:03d}", r), runs[r]["need"], True, runs[r]["pr"])
+                        [Waiter(r, (f"t{runs[r]['arrive']:03d}", r), runs[r]["need"], True, runs[r]["pr"],
+                                release=runs[r]["release"])
                          for r in runs if r not in admitted and r not in done and runs[r]["arrive"] <= tick],
                         [Holding(runs[r]["need"], runs[r]["pr"]) for r in admitted],
                         priority=priority, locked=set(locked),

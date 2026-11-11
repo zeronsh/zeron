@@ -29,12 +29,13 @@ name: zgx beta
 # The jobs. Each platform builds its two binaries at once, on runners of its
 # own, then packages them; a platform takes its slower build plus packaging:
 #
-#   version ─┬─ <platform>-engine ─────┐  the engine from the root workspace
-#            │                         ├─ <platform>-package ─┬─ release ── channel
-#            └─ <platform>-interface ──┘  apps/zgx --features beta (its own
-#                                         workspace), as the scripts build it
+#   admit ── version ─┬─ <platform>-engine ─────┐  the engine from the root workspace
+#                     │                         ├─ <platform>-package ─┬─ release ── channel
+#                     └─ <platform>-interface ──┘  apps/zgx --features beta (its own
+#                                                  workspace), as the scripts build it
 #
-# for macos, linux (x86_64 and aarch64, a matrix) and windows. The builds hand
+# for macos, linux (x86_64 and aarch64, a matrix) and windows. `admit` waits
+# for the runners the whole beta needs, ahead of CI (see the job). The builds hand
 # their binaries over as `beta-build-*` artifacts (a day's retention; release
 # and channel take only the `zgx-beta-*` packages), and the packaging scripts
 # take them prebuilt (ZGX_BETA_ENGINE and ZGX_BETA_ZGX_BIN, Windows'
@@ -72,7 +73,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Waits until every runner the beta needs is free (scripts/ci/admit.py, as
+  # ci.yml's admit job; docs/reference/ci.md#releases). A tag's or a by-hand run
+  # is a release in the queue shared with CI: it goes first. Its name carries
+  # the reservation, every job below but those waiting for a reviewer:
+  #   version                                   1 Linux
+  #   linux engine, interface, package          6 Linux (2 each: x86_64, aarch64)
+  #   windows engine, interface, package        3 Windows
+  #   macos engine, interface                   2 macOS
+  #   macos package                             1 macOS by hand; not on a tag,
+  #                                             where it waits for `apple-release`'s
+  #                                             reviewers, and counts once approved
+  #   release, channel                          2 Linux, on a tag
+  # by hand, only the `platforms` asked for. Admission fails open:
+  # CI_ADMISSION=off, or API trouble, starts it at once.
+  admit:
+    if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
+    name: "admit [${{ matrix.reservation }}] release"
+    strategy:
+      # One entry: the reservation, computed once for the name and the step.
+      matrix:
+        reservation:
+          - "linux=${{ github.event_name == 'push' && 9 || (contains(inputs.platforms, 'linux') && 7 || 1) }} windows=${{ (github.event_name == 'push' || contains(inputs.platforms, 'windows')) && 3 || 0 }} macos=${{ (github.event_name == 'push' || contains(inputs.platforms, 'macos')) && (startsWith(github.ref, 'refs/tags/beta-v') && 2 || 3) || 0 }}"
+    runs-on: ubuntu-24.04
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ matrix.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml,release.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I scripts/ci/admit.py
+
   version:
+    needs: admit
     if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
     runs-on: ubuntu-latest
     outputs:
