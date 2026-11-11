@@ -1708,10 +1708,10 @@ impl View {
         // Its rows kept (opened before): what it holds, each entry's id and
         // sum, so the engine sends what changed since (a `since` frame), not
         // the whole transcript. An engine that doesn't know it sends it whole.
-        if let Some(open) = self.open.borrow().as_ref().filter(|o| o.has_whole) {
-            params["known"] = Json::Array(
-                open.entries.iter().filter(|e| !e.id.is_empty()).map(|e| json!([&*e.id, e.sum()])).collect(),
-            );
+        // (Not when its rows are to be built again, the model's name moved:
+        // a settled entry keeps no words to build from, so it needs them all.)
+        if let Some(open) = self.open.borrow().as_ref() {
+            params = with_known(params, open);
         }
         let transcript = rpc.watch(
             "WatchDocMessages",
@@ -3982,6 +3982,16 @@ fn share_parts(value: &mut Value, seen: &mut Seen) {
         }
         _ => {}
     }
+}
+
+/// `params` with what `open` holds (`known`), when it has rows to keep
+/// and they aren't to be built again (`rebuild`).
+fn with_known(mut params: Json, open: &Open) -> Json {
+    if open.has_whole && !open.rebuild {
+        params["known"] =
+            Json::Array(open.entries.iter().filter(|e| !e.id.is_empty()).map(|e| json!([&*e.id, e.sum()])).collect());
+    }
+    params
 }
 
 /// Entries by their ids.
@@ -7269,6 +7279,17 @@ mod tests {
         let known: Vec<(String, u64)> = view.open.borrow().as_ref().unwrap().entries.iter().map(|e| (e.id.to_string(), e.sum())).collect();
         assert_eq!(known.len(), 50);
         assert_eq!(known[7].1, super::sum_of(&reply("a7", "done")));
+        // Told what it holds; not when its rows are to be built again.
+        let params = |rebuild: bool| {
+            let mut slot = view.open.borrow_mut();
+            let open = slot.as_mut().unwrap();
+            open.rebuild = rebuild;
+            let params = super::with_known(json!({ "chatId": "c" }), open);
+            open.rebuild = false;
+            params
+        };
+        assert_eq!(params(false)["known"].as_array().map(Vec::len), Some(50));
+        assert!(params(true).get("known").is_none(), "a rebuild needs the whole copy");
         // The engine's answer: one entry new since.
         view.heard_frame(json!({ "since": true, "upsert": [{ "after": "a49", "entry": reply("a50", "new since") }], "count": 51 }));
         {
