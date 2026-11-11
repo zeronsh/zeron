@@ -455,8 +455,8 @@ pointer is on something (a custom readout, a detail line, a hint, a row's or can
 not change the visual's height, or everything under it jumps as the pointer crosses it. Reserve its \
 space at rest (a placeholder or an empty line of the same height, e.g. ui.text { s.picked or \" \" }), \
 or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or a scene point's hint). \
-Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's own hover readout \
-already keeps its place.\n\
+Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
+never changes the chart's height.\n\
 \n\
 Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
 of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
