@@ -41,14 +41,18 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 `BackdropBlur` implementation; native window Acrylic remains independent.
 The preference remains portable even where a particular surface cannot honor blur.
 
-The built-in registry contains 30 variants across 19 families:
+The built-in registry contains 37 variants across 23 families:
 
 - Zeron Light and Dark
 - VS Code Light+ and Dark+
 - Catppuccin Latte and Mocha
 - Tokyo Night Light and Tokyo Night
 - Dracula
-- GitHub Light and Dark
+- GitHub Light and Dark (deepened near-black surfaces)
+- Vercel Light and Dark
+- Claude Light and Dark
+- Spotify Dark
+- Linear Light and Dark
 - Ayu Light, Dark, and Mirage
 - Gruvbox Light and Dark
 - Rosé Pine Dawn and Moon
@@ -63,8 +67,16 @@ The built-in registry contains 30 variants across 19 families:
 - Cobalt2
 - Andromeda
 
-Every bundled variant records source URL, exact upstream revision, license, and
-a SHA-256 hash of the resolved curated definition.
+Every bundled variant records a source URL, revision, license, and a SHA-256
+hash of the resolved curated definition. VS Code-derived palettes pin an exact
+upstream revision. The native Vercel, Spotify, and Linear palettes are Zeron-authored
+brand-inspired adaptations, versioned as `zeron-curation-v1`; their MIT license
+covers the checked-in Zeron definitions, not the referenced brands or websites.
+Claude's light and dark surface, text, and accent colors follow Luis Llanes's
+[Claude + reference](https://tweakcn.com/themes/cmdght103000n04lh3e2ae93r),
+pinned by its theme id and source update timestamp. Its syntax, terminal, and
+status colors are Zeron-authored adaptations. These themes recommend opaque
+surfaces and remain compatible with the independent Frosted override.
 
 Appearance settings keep light and dark choices in ordinary settings rows.
 Each row opens a palette-preview menu, which allows the catalog to grow without

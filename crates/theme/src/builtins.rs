@@ -30,6 +30,10 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
             ),
             family("dracula", "Dracula", vec![dracula()]),
             family("github", "GitHub", vec![github_light(), github_dark()]),
+            family("vercel", "Vercel", vec![vercel_light(), vercel_dark()]),
+            family("claude", "Claude", vec![claude_light(), claude_dark()]),
+            family("spotify", "Spotify", vec![spotify_dark()]),
+            family("linear", "Linear", vec![linear_light(), linear_dark()]),
             family("ayu", "Ayu", vec![ayu_light(), ayu_dark(), ayu_mirage()]),
             family("gruvbox", "Gruvbox", vec![gruvbox_light(), gruvbox_dark()]),
             family(
@@ -604,10 +608,10 @@ fn github_dark() -> ThemeVariant {
         name: "GitHub Dark",
         appearance: Appearance::Dark,
         treatment: SurfaceTreatment::Opaque,
-        background: "#0d1117",
-        shell: "#010409",
-        raised: "#21262d",
-        card: "#161b22",
+        background: "#010409",
+        shell: "#000204",
+        raised: "#161b22",
+        card: "#0d1117",
         text: "#e6edf3",
         muted: "#8b949e",
         faint: "#6e7681",
@@ -615,7 +619,7 @@ fn github_dark() -> ThemeVariant {
         danger: "#f85149",
         warning: "#d29922",
         success: "#3fb950",
-        terminal_background: "#0d1117",
+        terminal_background: "#010409",
         ansi: [
             "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
             "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#f0f6fc",
@@ -629,6 +633,253 @@ fn github_dark() -> ThemeVariant {
             "vscode",
             "https://github.com/primer/github-vscode-theme",
             "cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf",
+            "MIT",
+        ),
+    })
+}
+
+fn vercel_light() -> ThemeVariant {
+    variant(Seeds {
+        id: "vercel-light",
+        family_id: "vercel",
+        name: "Vercel Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#ffffff",
+        shell: "#fafafa",
+        raised: "#f2f2f2",
+        card: "#ffffff",
+        text: "#171717",
+        muted: "#666666",
+        faint: "#737373",
+        accent: "#171717",
+        danger: "#c52b30",
+        warning: "#a35200",
+        success: "#18794e",
+        terminal_background: "#ffffff",
+        ansi: ANSI_LIGHT,
+        syntax: [
+            "#6e6e6e", "#d1242f", "#067a6e", "#0550ae", "#9a6700", "#6e40c9", "#0550ae", "#171717",
+            "#666666", "#067a6e", "#9a6700", "#c52b30",
+        ],
+        source: source(
+            "vercel-light",
+            "native",
+            "https://vercel.com/geist/colors",
+            "zeron-curation-v1",
+            "MIT",
+        ),
+    })
+}
+
+fn vercel_dark() -> ThemeVariant {
+    variant(Seeds {
+        id: "vercel-dark",
+        family_id: "vercel",
+        name: "Vercel Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#000000",
+        shell: "#0a0a0a",
+        raised: "#1a1a1a",
+        card: "#111111",
+        text: "#ededed",
+        muted: "#bdbdbd",
+        faint: "#808080",
+        accent: "#ededed",
+        danger: "#ff6166",
+        warning: "#ffb224",
+        success: "#46c496",
+        terminal_background: "#000000",
+        ansi: ANSI_DARK,
+        syntax: [
+            "#8f8f8f", "#f97583", "#62c9b8", "#79b8ff", "#ffb224", "#b392f0", "#79b8ff", "#ededed",
+            "#a1a1a1", "#62c9b8", "#ffb224", "#ff6166",
+        ],
+        source: source(
+            "vercel-dark",
+            "native",
+            "https://vercel.com/geist/colors",
+            "zeron-curation-v1",
+            "MIT",
+        ),
+    })
+}
+
+fn claude_light() -> ThemeVariant {
+    variant(Seeds {
+        id: "claude-light",
+        family_id: "claude",
+        name: "Claude Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#faf9f5",
+        shell: "#f5f4ee",
+        raised: "#e9e6dc",
+        card: "#f5f4ef",
+        text: "#3d3929",
+        muted: "#6e6d68",
+        faint: "#817e72",
+        accent: "#c96442",
+        danger: "#b33f3b",
+        warning: "#956522",
+        success: "#40734b",
+        terminal_background: "#faf9f5",
+        ansi: ANSI_LIGHT,
+        syntax: [
+            "#77746b", "#a64b32", "#40734b", "#8b5a26", "#806724", "#7756a3", "#486b87", "#3d3929",
+            "#6e6d68", "#a64b32", "#806724", "#b33f3b",
+        ],
+        source: source(
+            "claude-light",
+            "native",
+            "https://tweakcn.com/themes/cmdght103000n04lh3e2ae93r",
+            "cmdght103000n04lh3e2ae93r@2025-07-27T22:39:29.615Z",
+            "MIT",
+        ),
+    })
+}
+
+fn claude_dark() -> ThemeVariant {
+    variant(Seeds {
+        id: "claude-dark",
+        family_id: "claude",
+        name: "Claude Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#262624",
+        shell: "#1f1e1d",
+        raised: "#30302e",
+        card: "#2c2c2b",
+        text: "#f1f1ef",
+        muted: "#b7b5a9",
+        faint: "#969489",
+        accent: "#d97757",
+        danger: "#f07872",
+        warning: "#deb36e",
+        success: "#a5bf88",
+        terminal_background: "#262624",
+        ansi: [
+            "#1b1b19", "#f07872", "#a5bf88", "#deb36e", "#96b9d0", "#c4ace0", "#8ac5bd", "#c3c0b6",
+            "#817e72", "#f5a39b", "#bfd5a7", "#ead0a0", "#b2cfe0", "#d8c5ea", "#addbd4", "#f1f1ef",
+        ],
+        syntax: [
+            "#969489", "#d97757", "#a5bf88", "#deb36e", "#d6c29b", "#c4ace0", "#96b9d0", "#f1f1ef",
+            "#b7b5a9", "#d97757", "#8ac5bd", "#f07872",
+        ],
+        source: source(
+            "claude-dark",
+            "native",
+            "https://tweakcn.com/themes/cmdght103000n04lh3e2ae93r",
+            "cmdght103000n04lh3e2ae93r@2025-07-27T22:39:29.615Z",
+            "MIT",
+        ),
+    })
+}
+
+fn spotify_dark() -> ThemeVariant {
+    variant(Seeds {
+        id: "spotify-dark",
+        family_id: "spotify",
+        name: "Spotify Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#121212",
+        shell: "#000000",
+        raised: "#282828",
+        card: "#181818",
+        text: "#ffffff",
+        muted: "#b3b3b3",
+        faint: "#8c8c8c",
+        accent: "#1ed760",
+        danger: "#f3727f",
+        warning: "#f6c864",
+        success: "#1ed760",
+        terminal_background: "#121212",
+        ansi: [
+            "#181818", "#f3727f", "#1ed760", "#f6c864", "#76baff", "#c9a3ed", "#67d4cd", "#b3b3b3",
+            "#727272", "#ff9ca5", "#76e69b", "#ffe08a", "#a4d2ff", "#dfc4ff", "#97ece6", "#ffffff",
+        ],
+        syntax: [
+            "#8c8c8c", "#c9a3ed", "#76e69b", "#f6c864", "#67d4cd", "#76baff", "#1ed760", "#ffffff",
+            "#b3b3b3", "#1ed760", "#f6c864", "#f3727f",
+        ],
+        source: source(
+            "spotify-dark",
+            "native",
+            "https://developer.spotify.com/documentation/design",
+            "zeron-curation-v1",
+            "MIT",
+        ),
+    })
+}
+
+fn linear_light() -> ThemeVariant {
+    variant(Seeds {
+        id: "linear-light",
+        family_id: "linear",
+        name: "Linear Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#fafafa",
+        shell: "#f3f3f5",
+        raised: "#ebebef",
+        card: "#ffffff",
+        text: "#23252a",
+        muted: "#626570",
+        faint: "#767985",
+        accent: "#5e6ad2",
+        danger: "#c4404f",
+        warning: "#956800",
+        success: "#27815b",
+        terminal_background: "#fafafa",
+        ansi: ANSI_LIGHT,
+        syntax: [
+            "#737680", "#6658b8", "#27815b", "#a05a2c", "#906b18", "#4169b2", "#a94770", "#23252a",
+            "#626570", "#6658b8", "#906b18", "#c4404f",
+        ],
+        source: source(
+            "linear-light",
+            "native",
+            "https://linear.app",
+            "zeron-curation-v1",
+            "MIT",
+        ),
+    })
+}
+
+fn linear_dark() -> ThemeVariant {
+    variant(Seeds {
+        id: "linear-dark",
+        family_id: "linear",
+        name: "Linear Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#101114",
+        shell: "#0c0d10",
+        raised: "#24252b",
+        card: "#191a1f",
+        text: "#eeeff4",
+        muted: "#a0a3b1",
+        faint: "#7d8191",
+        accent: "#8b8ff5",
+        danger: "#ee7184",
+        warning: "#e8bd70",
+        success: "#6ac59b",
+        terminal_background: "#101114",
+        ansi: [
+            "#191a1f", "#ee7184", "#6ac59b", "#e8bd70", "#82b4f3", "#b7a0ed", "#79c9d5", "#c5c7d2",
+            "#727687", "#f69aaa", "#92d8b5", "#f2d299", "#a6ccfa", "#cebbf6", "#a0dee6", "#eeeff4",
+        ],
+        syntax: [
+            "#7d8191", "#b7a0ed", "#6ac59b", "#e8bd70", "#79c9d5", "#8b8ff5", "#82b4f3", "#eeeff4",
+            "#a0a3b1", "#b7a0ed", "#e8bd70", "#ee7184",
+        ],
+        source: source(
+            "linear-dark",
+            "native",
+            "https://linear.app",
+            "zeron-curation-v1",
             "MIT",
         ),
     })
@@ -1335,4 +1586,82 @@ fn andromeda() -> ThemeVariant {
             "MIT",
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapted_palettes_keep_shared_content_readable_in_interaction_states() {
+        for variant in [
+            github_dark(),
+            vercel_light(),
+            vercel_dark(),
+            claude_light(),
+            claude_dark(),
+            spotify_dark(),
+            linear_light(),
+            linear_dark(),
+        ] {
+            let colors = &variant.colors;
+            for surface in [
+                colors.background,
+                colors.shell,
+                colors.raised,
+                colors.card,
+                colors.dialog,
+                colors.overlay,
+                colors.input.blend_over(colors.background),
+            ] {
+                for background in [
+                    surface,
+                    colors.hover.blend_over(surface),
+                    colors.active.blend_over(surface),
+                    variant.accent.selection.blend_over(surface),
+                ] {
+                    assert!(
+                        colors.text.contrast(background) >= 4.5,
+                        "{} primary text on {background}",
+                        variant.id
+                    );
+                    assert!(
+                        colors.text_muted.contrast(background) >= 3.0,
+                        "{} muted text on {background}",
+                        variant.id
+                    );
+                }
+                assert!(
+                    variant.accent.primary.contrast(surface) >= 3.0,
+                    "{} accent on {surface}",
+                    variant.id
+                );
+            }
+
+            for (index, color) in variant.terminal.ansi.iter().enumerate() {
+                if index % 8 != 0 {
+                    assert!(
+                        color.contrast(variant.terminal.background) >= 3.0,
+                        "{} terminal ANSI slot {index}",
+                        variant.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn github_dark_keeps_near_black_surfaces_with_distinct_elevation() {
+        let variant = github_dark();
+        let colors = &variant.colors;
+        assert!(Color::WHITE.contrast(colors.background) >= 20.0);
+        assert!(colors.background.contrast(colors.shell) < 1.1);
+        assert!(Color::WHITE.contrast(colors.card) < Color::WHITE.contrast(colors.background));
+        assert!(Color::WHITE.contrast(colors.raised) < Color::WHITE.contrast(colors.card));
+        assert_eq!(variant.terminal.background, colors.background);
+        assert_eq!(
+            variant.recommended_surface_treatment,
+            SurfaceTreatment::Opaque
+        );
+    }
 }
