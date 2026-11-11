@@ -134,10 +134,10 @@ end
 -- The colour scheme, one of three.
 local function theme_page(): any
 	local items: { Item } = {}
-	local schemes: { { value: onboarding_state.Appearance, label: string } } = {
-		{ value = "system", label = locale.s("shell.palette.scheme.system") },
-		{ value = "light", label = locale.s("shell.palette.scheme.light") },
-		{ value = "dark", label = locale.s("shell.palette.scheme.dark") },
+	local schemes: { { value: onboarding_state.Appearance, label: string, icon: string } } = {
+		{ value = "system", label = locale.s("shell.palette.scheme.system"), icon = "monitor" },
+		{ value = "light", label = locale.s("shell.palette.scheme.light"), icon = "sun" },
+		{ value = "dark", label = locale.s("shell.palette.scheme.dark"), icon = "moon" },
 	}
 	for _, o in schemes do
 		local value, label = o.value, o.label
@@ -145,6 +145,7 @@ local function theme_page(): any
 			id = `theme:{value}`,
 			label = label,
 			section = locale.s("shell.palette.theme"),
+			icon = o.icon,
 			checked = function(): boolean
 				return appearance.scheme:get() == value
 			end,
@@ -154,6 +155,28 @@ local function theme_page(): any
 		})
 	end
 	return { id = "theme", title = locale.s("shell.palette.theme"), items = items }
+end
+
+-- The other scheme than the one showing (following the system, the one it
+-- shows now), in one step: the palette stays open, and the row now offers
+-- the way back.
+local function scheme_switch(): Item
+	local scheme = appearance.scheme:get()
+	local kind = if scheme == "system" then ui.theme.kind() else scheme
+	local dark = kind == "dark" or kind == "high-contrast"
+	local to: onboarding_state.Appearance = if dark then "light" else "dark"
+	return {
+		id = `t-scheme-{to}`,
+		label = locale.s(`shell.palette.switch_to_{to}`),
+		section = locale.s("shell.palette.settings"),
+		scope = "settings",
+		icon = if dark then "sun" else "moon",
+		keywords = "theme mode appearance scheme dark light",
+		stays = true,
+		run = function()
+			appearance.scheme:set(to)
+		end,
+	}
 end
 
 -- The templates you can run Zeron in, Zeron's own first: picking one uses it
@@ -532,7 +555,8 @@ local function root(): { Item }
 		end
 	end
 	table.insert(out, { id = "t-theme", label = locale.s("shell.palette.theme"), section = locale.s("shell.palette.settings"), scope = "settings", icon = "palette-search", keywords = "dark light appearance", page = theme_page })
-	table.insert(out, { id = "t-frosted", label = locale.s("shell.palette.frosted_glass"), section = locale.s("shell.palette.settings"), icon = "moon", keywords = "material translucent opaque window appearance", toggle = material.frosted })
+	table.insert(out, scheme_switch())
+	table.insert(out, { id = "t-frosted", label = locale.s("shell.palette.frosted_glass"), section = locale.s("shell.palette.settings"), icon = "magic-stick", keywords = "material translucent opaque window appearance", toggle = material.frosted })
 	for _, t in template_items() do
 		table.insert(out, t)
 	end

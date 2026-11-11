@@ -2564,6 +2564,8 @@
       "settings_page": "设置：{title}",
       "go_to": "前往",
       "frosted_glass": "磨砂玻璃",
+      "switch_to_dark": "切换到深色模式",
+      "switch_to_light": "切换到浅色模式",
       "search": "搜索会话、命令和文件…",
       "app": "应用",
       "reload_zeron": "重新启动 Zeron",
