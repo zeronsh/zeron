@@ -688,6 +688,9 @@ pub struct ChatDocHandle {
     sync_service_until: AtomicI64,
     sync_wake_version: AtomicI64,
     sync_wake_ticket: AtomicU64,
+    /// The captured wake's durability mark: 1 + the persister's change count
+    /// when the wake was first checked after its catch-up. 0 = not set.
+    wake_durable_mark: AtomicU64,
     sync_cancel: Mutex<CancellationToken>,
     writers: Arc<AtomicUsize>,
     pub(crate) persistence: Option<Arc<crate::chat_persistence::ChatPersistence>>,
@@ -2040,6 +2043,7 @@ impl DocHost {
             sync_service_until: AtomicI64::new(0),
             sync_wake_version: AtomicI64::new(0),
             sync_wake_ticket: AtomicU64::new(0),
+            wake_durable_mark: AtomicU64::new(0),
             sync_cancel: Mutex::new(CancellationToken::new()),
             writers: Arc::new(AtomicUsize::new(0)),
             persistence,
@@ -2387,6 +2391,7 @@ impl DocHost {
                             let ticket = client.request_catch_up();
                             handle.sync_wake_ticket.store(ticket, Ordering::Release);
                             handle.sync_wake_version.store(version, Ordering::Release);
+                            handle.wake_durable_mark.store(0, Ordering::Release);
                             captured = version;
                         }
                     }
@@ -2571,6 +2576,7 @@ impl DocHost {
                     handle.sync_focus_served.fetch_max(handle.last_focus.load(Ordering::Acquire), Ordering::AcqRel);
                     handle.sync_last_started.store(now_ms(), Ordering::Release);
                     handle.sync_wake_version.store(wake_version.unwrap_or(0), Ordering::Release);
+                    handle.wake_durable_mark.store(0, Ordering::Release);
                     handle.sync_wake_ticket.store(0, Ordering::Release);
                     match action {
                         SyncAdmission::Join => {
@@ -2627,8 +2633,22 @@ impl DocHost {
                 return false;
             }
         }
-        self.save_snapshot(handle);
-        handle.persistence.as_ref().is_some_and(|p| p.is_clean())
+        let Some(persistence) = handle.persistence.as_ref() else {
+            // Legacy (pre-chat2) handle: unchanged.
+            self.save_snapshot(handle);
+            return false;
+        };
+        // Durable once a save covers every change made up to the first check
+        // after catch-up. The save itself happens on the persister's worker:
+        // this runs on the 100 ms scheduler, where a forced export of a big
+        // doc (30–170 ms, block_in_place) stalled every other chat's sync.
+        let mut mark = handle.wake_durable_mark.load(Ordering::Acquire);
+        if mark == 0 {
+            mark = persistence.generation() + 1;
+            handle.wake_durable_mark.store(mark, Ordering::Release);
+            persistence.request_flush();
+        }
+        persistence.saved_generation() + 1 >= mark
     }
 
     fn spawn_sync_worker(
@@ -7241,8 +7261,58 @@ mod publication_eviction_tests {
             !host.wakeup_is_durable(&handle),
             "cannot retire receipt while snapshot is only in memory"
         );
+        // Still not durable while every write fails, however often it asks.
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert!(!host.wakeup_is_durable(&handle));
         db.execute_batch("DROP TRIGGER no_snapshot;").unwrap();
-        assert!(host.wakeup_is_durable(&handle));
+        // The persister retries on its own worker; the receipt follows it.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !host.wakeup_is_durable(&handle) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("receipt retires once the snapshot is on disk");
+        host.shutdown_workers().await;
+    }
+
+    /// The 100 ms sync scheduler never exports a snapshot itself while a
+    /// wake waits to be durable (30–170 ms on a big chat, during which no
+    /// other chat's sync is served): the persister saves on its own worker.
+    /// One thread here, so a save the check made itself shows up at once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_wake_check_never_saves_on_the_schedulers_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open_local("streaming").unwrap();
+        let persistence = handle.persistence.clone().expect("chat2 persister");
+        let text = handle.doc.doc().get_text("body");
+        text.insert(0, "streamed after catch-up").unwrap();
+        handle.doc.doc().commit();
+        let before = persistence.saves();
+        for _ in 0..3 {
+            let _ = host.wakeup_is_durable(&handle);
+            assert_eq!(persistence.saves(), before, "the check saved on the caller's thread");
+        }
+        // Streaming goes on; the receipt still follows the persister's save.
+        text.insert(text.len_unicode(), " more").unwrap();
+        handle.doc.doc().commit();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !host.wakeup_is_durable(&handle) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a streaming chat's wake still retires");
+        assert!(persistence.saves() - before <= 2);
         host.shutdown_workers().await;
     }
 
