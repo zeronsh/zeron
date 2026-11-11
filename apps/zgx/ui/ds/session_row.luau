@@ -77,11 +77,18 @@ export type Session = {
 	pr: { number: number, state: string?, title: string? }?,
 }
 
+-- What the trailing items and the corner give back only once the title has
+-- none left to give (its width is 0 and the row is still too narrow: a long
+-- PR number and a big pill in a narrow sidebar). Flex shrinks in proportion
+-- to size, so a weight this small leaves a row whose title is merely
+-- truncated exactly as wide as one that isn't: the corner's column holds.
+local LAST_RESORT = 0.001
+
 -- A row's trailing items (the subagents pill, the unreachable glyph, the
 -- fold chevron or its empty slot, the corner), closer than its title and
 -- badges stand: 4 apart. One not shown leaves no gap.
 function M.trailing(...: Node?): Node
-	local parts: ContainerProps = { shrink = 0, gap = "$space.1", items = "center" }
+	local parts: ContainerProps = { shrink = LAST_RESORT, gap = "$space.1", items = "center" }
 	for i = 1, select("#", ...) do
 		local node = select(i, ...)
 		if node then
@@ -285,9 +292,9 @@ function M.Corner(props: CornerProps): Node
 	end
 	local action = props.action
 	return ui.overlay {
-		shrink = 0,
+		shrink = LAST_RESORT,
 		relative = true,
-		min_w = M.corner_width(),
+		basis = M.corner_width(),
 		h = 16,
 		items = "end",
 		justify = "center",
