@@ -370,9 +370,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Whether `args` are a development launch's own words (a screen, a
 /// fixture, devtools), or none: not `zeron`'s command line.
 fn dev_launch(args: &[String]) -> bool {
+    // (The words are `zeron`'s command line's too, crates/cli LAUNCH_WORDS: a
+    // beta build parses them there and opens its window as before.)
     args.iter().all(|arg| {
-        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template" | "--safe-mode")
-            || (arg.starts_with("fixture=") && arg.ends_with(".luau"))
+        matches!(arg.as_str(), "--inspect" | "--zeron-template" | "--safe-mode") || zeron_cli::is_launch_word(arg)
     })
 }
 
@@ -1402,6 +1403,24 @@ mod glass_tests {
         let glass = super::zeron_glass();
         assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
         assert!(glass.plain);
+    }
+}
+
+#[cfg(test)]
+mod launch_word_tests {
+    /// The screens and fixtures a launch can name are the command line's
+    /// launch words (crates/cli), so a beta build, which parses everything
+    /// there, still opens its window on them; a typo is no launch word.
+    #[test]
+    fn launch_words_are_the_command_line_s() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        for word in zeron_cli::LAUNCH_WORDS {
+            assert!(super::dev_launch(&args(&[word])), "{word}");
+        }
+        assert!(super::dev_launch(&args(&["main", "--inspect", "fixture=tree_fixture.luau"])));
+        assert!(super::dev_launch(&[]));
+        assert!(!super::dev_launch(&args(&["intor"])));
+        assert!(!super::dev_launch(&args(&["update"])));
     }
 }
 

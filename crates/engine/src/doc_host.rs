@@ -6861,6 +6861,17 @@ impl DocHost {
             .repos
             .get()
             .ok_or_else(|| EngineError::Other("repos engine not wired".into()))?;
+        // A repository with no commit yet (a fresh `git init`) has nothing a
+        // worktree could branch from. The chat runs in the project's folder,
+        // as the Zeron app's chats do by default (crates/ui's Current
+        // checkout) and as a host that predates the spec does; nothing is
+        // committed for the person. (Its later sends stay there, as any chat
+        // keeps its checkout.)
+        if let Ok(false) = repos.has_commits(std::path::Path::new(&spec.repo_path)).await {
+            tracing::info!(chat = %chat_id, repo = %spec.repo_path,
+                "worktree spec: the repository has no commit yet; running in its folder");
+            return Ok((spec.repo_path.clone(), None));
+        }
         let worktree = repos
             .create_worktree(std::path::Path::new(&spec.repo_path), &spec.base)
             .await?;

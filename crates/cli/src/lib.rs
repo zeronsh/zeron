@@ -342,6 +342,7 @@ fn parse(
     if cli.command.is_none()
         && let Some(word) = cli.open_url.as_deref()
         && !is_link(word)
+        && !is_launch_word(word)
     {
         return Err(command.error(
             clap::error::ErrorKind::InvalidSubcommand,
@@ -349,6 +350,18 @@ fn parse(
         ));
     }
     Ok(cli)
+}
+
+/// The zgx app's own launch words (its `dev_launch`: a screen to open, or a
+/// fixture). A development build reads them before this parser; a beta's
+/// passes them here, in the link's place, and they open the window as they
+/// always have.
+pub const LAUNCH_WORDS: &[&str] = &["intro", "onboarding", "main", "gallery"];
+
+/// Whether `word` is one of the app's launch words ([`LAUNCH_WORDS`], or a
+/// fixture: `fixture=<file>.luau`).
+pub fn is_launch_word(word: &str) -> bool {
+    LAUNCH_WORDS.contains(&word) || (word.starts_with("fixture=") && word.ends_with(".luau"))
 }
 
 /// Whether `word` is a link for the window to open: anything with a scheme
@@ -522,6 +535,21 @@ mod tests {
             let error = parse("0.0.0", argv).err().unwrap_or_else(|| panic!("{argv:?} was taken"));
             assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand, "{argv:?}");
             assert_eq!(error.exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    /// The app's launch words open the window as before (a beta build passes
+    /// them here); a word that's merely close to one is still refused.
+    #[test]
+    fn launch_words_still_open_the_window() {
+        for word in ["intro", "onboarding", "main", "gallery", "fixture=markdown_stream_fixture.luau"] {
+            let cli = parse("0.0.0", ["zeron", word]).unwrap_or_else(|e| panic!("{word}: {e}"));
+            assert!(cli.command.is_none(), "{word}");
+            assert_eq!(cli.open_url.as_deref(), Some(word));
+        }
+        for typo in ["intor", "mian", "Main", "fixture=x.lua", "fixture="] {
+            let error = parse("0.0.0", ["zeron", typo]).err().unwrap_or_else(|| panic!("{typo} was taken"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand, "{typo}");
         }
     }
 

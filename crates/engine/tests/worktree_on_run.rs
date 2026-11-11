@@ -606,3 +606,74 @@ async fn worktree_location_rejects_unlaunchable_windows_destinations() {
             .all(|branch| !branch.starts_with("zeron/"))
     );
 }
+
+/// A repository with no commit yet (a fresh `git init`): git can't add a
+/// worktree off its unborn HEAD. The chat runs in the project's folder, as the
+/// Zeron app's chats do by default (Current checkout), instead of failing; no
+/// worktree is made and nothing is committed for the person.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_with_no_commit_runs_in_its_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().canonicalize().unwrap();
+    let worktrees_root = tmp_path.join("worktrees");
+    let repo_dir = tmp_path.join("fresh");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git(&repo_dir, &["init", "-b", "main"]);
+    std::fs::write(repo_dir.join("README.md"), "not committed\n").unwrap();
+    let repo_path = repo_dir.to_string_lossy().to_string();
+
+    let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RecordingHarness { cwds: cwds.clone() }));
+    let core = EngineCore::assemble(&tmp_path.join("data"), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-fresh", &core.device_id, &repo_path, Some("Fresh".into()), true)
+        .expect("create project");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::SET_WORKTREE_SETTINGS,
+            serde_json::json!({ "useCustomDirectory": true, "customDirectory": worktrees_root }),
+        )
+        .await
+        .expect("choose worktree directory");
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            // In the project, as the composer creates it: its row's cwd is
+            // the project's folder.
+            serde_json::json!({
+                "op": "createChat", "chatId": CHAT, "deviceId": core.device_id, "spaceId": "space-fresh",
+            }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace.rename_chat(CHAT, "Pre-titled").expect("rename chat");
+
+    // As zgx asks for a new chat's worktree: off HEAD.
+    let mut payload = run_payload("msg-fresh-1", &repo_path, Some("space-fresh"));
+    if let SessionCommandPayload::Run { request, .. } = &mut payload {
+        request.worktree.as_mut().unwrap().base = "HEAD".into();
+    }
+    core.doc_host.queue_command(CHAT, payload).expect("queue run command");
+    wait_for(|| complete_assistant_count(&core) == 1, "the turn in the folder").await;
+
+    assert_eq!(cwds.lock().unwrap().as_slice(), [repo_path.clone()], "ran in the project's folder");
+    assert!(
+        !worktrees_root.join("fresh").exists(),
+        "no worktree was made for a repository with no commit"
+    );
+    let chat = core.workspace.chat(CHAT).expect("read chat row").expect("chat row exists");
+    assert_ne!(chat.branch.as_deref().map(|b| b.starts_with("zeron/")), Some(true));
+    assert_eq!(chat.cwd.as_deref(), Some(repo_path.as_str()), "the chat stays in the project's folder");
+    // Nothing committed on the person's behalf: HEAD is still unborn.
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    assert!(!head.status.success(), "a commit was made: {}", String::from_utf8_lossy(&head.stdout));
+
+    core.shutdown().await;
+}

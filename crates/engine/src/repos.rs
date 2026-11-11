@@ -1412,6 +1412,16 @@ impl Repos {
 
     // ── worktrees ───────────────────────────────────────────────────────────
 
+    /// Whether the repository at `repo_path` has a commit at HEAD. A fresh
+    /// `git init` doesn't (an unborn HEAD), and git can't add a worktree off
+    /// it ("invalid reference: HEAD").
+    pub async fn has_commits(&self, repo_path: &Path) -> Result<bool, EngineError> {
+        Ok(self
+            .git_probe(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], Some(repo_path))
+            .await?
+            .is_some())
+    }
+
     /// `git worktree add` an isolated checkout under
     /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `zeron/<name>`
     /// branch off `branch`.
