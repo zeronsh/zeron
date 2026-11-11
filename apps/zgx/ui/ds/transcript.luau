@@ -481,10 +481,44 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 	end
 	return ui.presence(function(): string?
 		local w = row:get().waiting
-		return if w == "failed" then "failed" elseif w and said() then "said" elseif w then "waiting" else nil
+		if w == "failed" then
+			return "failed"
+		end
+		local s = if w then said() else nil
+		return if s and s.step then "step" elseif s then "said" elseif w then "waiting" else nil
 	end, function(kind: string): Node
 		if kind == "said" then
 			return ui.row { w_full = true, mt = "$space.4", turn_line(said) }
+		end
+		-- Its Cloud machine coming up for it: the machine's first setup step,
+		-- a tool row as the reply's own are, in the reply's place, under the
+		-- id the machine's own step comes with (which takes over from it).
+		if kind == "step" then
+			local id = row:peek().id
+			return ui.column {
+				w_full = true,
+				mt = "$space.4",
+				Activity {
+					key = `{id}.cloud-setup:g:{id}.cloud-machine`,
+					live = function(): boolean
+						return true
+					end,
+					tools = function(): { Tool }
+						local s = said()
+						return {
+							{
+								id = `{id}.cloud-machine`,
+								kind = "cloud",
+								verb = if s then s.text else "",
+							} :: Tool,
+						}
+					end,
+					summary = function(): string?
+						local s = said()
+						return s and s.summary
+					end,
+				},
+			}
 		end
 		if kind == "failed" then
 			return ui.button {
@@ -557,7 +591,8 @@ end
 -- (Markdown's `window`), so a long reply builds only what's near the view.
 -- (And the pictures its replies show: Props' `pictures`.)
 -- (`at_end`: whether the list rests at its end, the end then what it holds.)
-export type TurnLine = { text: string, spinner: boolean? }
+-- (`step`: said as a setup step's tool row, `summary` its group's line.)
+export type TurnLine = { text: string, spinner: boolean?, step: string?, summary: string? }
 
 -- The line said in a working word's place: a ring while it's still on its
 -- way, then its words, in the working word's quiet ink.

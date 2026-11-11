@@ -159,3 +159,112 @@ test("Cloud turned off while picked falls back to the project's device", functio
 	expect(chosen(app, "Device")).to_contain("MacBook Pro")
 	expect(chosen(app, "Project")).to_contain("Atlas")
 end)
+
+-- ── A new chat on Cloud opens at once ─────────────────────────────────────
+-- As the shipping app starts one: the chat opens under the id it's made with,
+-- the message in it, sending, its machine starting under it as a tool row,
+-- while Cloud makes it; never the composer's alert. Cloud's answer held
+-- (`slow_cloud_create`) to see the moment between.
+
+local function y_of(app: any, words: string): number?
+	for line in app:tree("#transcript"):gmatch("[^\n]+") do
+		if line:find(words, 1, true) then
+			return tonumber(line:match(" %-?%d+,(%-?%d+) "))
+		end
+	end
+	return nil
+end
+
+local function cloud_new_chat(): any
+	local app = mount("chat_fixture.luau")
+	home(app)
+	app:command("cloud_stub.offer")
+	settle(app)
+	pick_in(app, "Device", "Cloud")
+	close(app)
+	return app
+end
+
+local STARTING = '#transcript >> role:button "Starting a Cloud machine…"'
+
+test("a send on Cloud opens its chat at once, the message and its machine starting under it, no alert", function()
+	local app = cloud_new_chat()
+	app:command("slow_cloud_create")
+	app:type('role:textbox "Message"', "Fix the flaky test")
+	app:key("Enter")
+	app:frames(3)
+	-- Cloud hasn't answered: the chat is open already, the message in it.
+	expect(app:state("calls")).to_contain("creating:")
+	expect(app:has("#chat-session")).to_be(true)
+	expect(app:has('#transcript >> ~"Fix the flaky test"')).to_be(true)
+	expect(showing(app, STARTING)).to_be(true)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:has('~"Alerts"')).to_be(false)
+	settle(app)
+	expect(showing(app, STARTING)).to_be(true)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	-- Nothing's sent until Cloud has made it.
+	expect(app:state("calls")).never.to_contain("run:")
+	local before_msg, before_row = y_of(app, "Fix the flaky test"), y_of(app, "Starting a Cloud machine…")
+	-- Cloud makes it: the message goes, and nothing on the page moves.
+	app:command("cloud_create_lands")
+	app:frames(3)
+	expect(y_of(app, "Fix the flaky test")).to_be(before_msg)
+	expect(y_of(app, "Starting a Cloud machine…")).to_be(before_row)
+	settle(app)
+	local calls = app:state("calls")
+	expect(calls).to_contain("made:atlas|-|main|-|cloud")
+	expect(calls).to_contain("created:")
+	expect(calls).to_contain("run:/home/user/atlas|local|main")
+	expect(showing(app, STARTING)).to_be(true)
+	expect(y_of(app, "Fix the flaky test")).to_be(before_msg)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("Cloud answering at once is the same: the chat, the message, the row, no alert", function()
+	local app = cloud_new_chat()
+	app:type('role:textbox "Message"', "Fix the flaky test")
+	app:key("Enter")
+	app:frames(3)
+	expect(showing(app, STARTING)).to_be(true)
+	settle(app)
+	expect(showing(app, STARTING)).to_be(true)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:state("calls")).to_contain("run:/home/user/atlas|local|main")
+	expect(app:error()).to_be(nil)
+end)
+
+test("Cloud refusing the new chat goes back to it, the words kept, and says why", function()
+	local app = cloud_new_chat()
+	app:command("slow_cloud_create")
+	app:type('role:textbox "Message"', "Fix the flaky test")
+	app:key("Enter")
+	settle(app)
+	expect(showing(app, STARTING)).to_be(true)
+	app:command("cloud_create_refused")
+	rested(app)
+	expect(app:state("calls")).to_contain("create_failed:")
+	expect(app:state("calls")).never.to_contain("run:")
+	expect(app:has("#chat-home")).to_be(true)
+	expect(app:text('role:textbox "Message"')).to_contain("Fix the flaky test")
+	expect(app:has('~"Cloud is out of credits for new machines."')).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("Cloud refusing after you've gone to another chat leaves that chat's composer alone", function()
+	local app = cloud_new_chat()
+	app:command("slow_cloud_create")
+	app:type('role:textbox "Message"', "Fix the flaky test")
+	app:key("Enter")
+	settle(app)
+	app:command("go_s2")
+	settle(app)
+	app:command("cloud_create_refused")
+	rested(app)
+	expect(app:state("calls")).to_contain("create_failed:")
+	expect(app:has("#chat-session")).to_be(true)
+	expect(app:text('role:textbox "Message"')).never.to_contain("Fix the flaky test")
+	expect(app:has('~"Cloud is out of credits for new machines."')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
