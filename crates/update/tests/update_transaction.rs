@@ -106,7 +106,44 @@ fn fake_engine() {
         .open(data.join("ran"))
         .unwrap();
     writeln!(ran, "{version}").unwrap();
+    drop(ran);
+    if std::env::var_os(STAYS_ENV).is_some() {
+        stay_for_the_next_update(&data, &options);
+    }
     std::process::exit(0);
+}
+
+/// Set for an engine that, like the app's background engine, keeps running
+/// after it's up and carries out the next update asked of it itself.
+const STAYS_ENV: &str = "FAKE_ENGINE_STAYS";
+
+/// What `run_managed` does for `ApplyUpdate` with no app and no service
+/// manager: refuse unless this process will start the trial (`starts_here`),
+/// else stop and run `boot` again, which becomes the new version in place.
+/// Waits for a `next` file in the data directory; a `done` file ends it.
+fn stay_for_the_next_update(data: &Path, options: &BootOptions) {
+    let note = |what: &str| {
+        use std::io::Write as _;
+        let mut ran = std::fs::OpenOptions::new().append(true).open(data.join("ran")).unwrap();
+        writeln!(ran, "{what}").unwrap();
+    };
+    let waited = Instant::now();
+    while waited.elapsed() < Duration::from_secs(60) {
+        if data.join("done").exists() {
+            return;
+        }
+        if std::fs::remove_file(data.join("next")).is_ok() {
+            if !transaction::starts_here(data) {
+                note("refused");
+                continue;
+            }
+            // Doesn't return when it hands over.
+            let booted = transaction::boot(data, options, || -> anyhow::Result<()> { Ok(()) });
+            note(&format!("stranded {booted:?}"));
+            std::process::exit(3);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -710,6 +747,114 @@ mod mac {
             } else {
                 rig.assert_back_on_the_old_version(&id, Phase::RolledBack);
             }
+        }
+    }
+
+    /// An engine that stays up, started once with no app and no service
+    /// manager: nothing else ever starts an engine, as on m1-laptop.
+    fn start_headless(rig: &Rig) -> std::process::Child {
+        Command::new(rig.mac.as_ref().unwrap().bundle.join("Contents/MacOS/zeron"))
+            .args(["--exact", "fake_engine", "--test-threads=1", "--nocapture"])
+            .env(DATA_ENV, &rig.data)
+            .env(STAYS_ENV, "1")
+            .env_remove("ZERON_UPDATE_CRASH_AT")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// The 3.0.0 release, and an update to it asked of the running engine.
+    fn ask_for_the_next_update(rig: &Rig, behavior: &str) -> String {
+        let mac = rig.mac.as_ref().unwrap();
+        let incoming = mac.bundle.with_file_name(".Zeron.app.new-next");
+        write_bundle(&incoming, "3.0.0", behavior);
+        let layout = Layout::MacBundle { bundle: mac.bundle.clone(), incoming };
+        let id = transaction::request(&rig.data, layout, "2.0.0", "3.0.0", RestartMode::Relaunch)
+            .unwrap()
+            .id;
+        std::fs::write(rig.data.join("next"), "").unwrap();
+        id
+    }
+
+    /// m1-laptop, Nov 11. The background engine had become 0.2.138 as an
+    /// update's trial, so it ran from `.Zeron.app.new-<id>`, which its commit
+    /// renamed to `Zeron.app`. Asked from another device for the next update,
+    /// with the app closed, it stopped, didn't recognise its own installation,
+    /// and nothing started again. Now it becomes the new version itself.
+    #[test]
+    fn a_headless_engine_from_an_earlier_update_carries_out_the_next() {
+        let rig = Rig::new_mac("ok");
+        let first = rig.request(RestartMode::Relaunch, 60);
+        let mut engine = start_headless(&rig);
+        wait_until(&rig, "2.0.0");
+        rig.assert_updated(&first);
+        // Still running, from a path that's gone.
+        assert!(engine.try_wait().unwrap().is_none(), "the engine stopped");
+        assert!(!rig.mac.as_ref().unwrap().incoming.exists());
+
+        let second = ask_for_the_next_update(&rig, "ok");
+        wait_until(&rig, "3.0.0");
+        let record = rig.record();
+        assert_eq!((record.id.as_str(), record.phase), (second.as_str(), Phase::Updated));
+        assert_eq!(rig.current(), "3.0.0");
+        // The same process throughout: what macOS attributes to the app.
+        assert!(engine.try_wait().unwrap().is_none(), "the engine stopped");
+        std::fs::write(rig.data.join("done"), "").unwrap();
+        engine.wait().unwrap();
+    }
+
+    /// The same engine, and a next release that dies on trial: the watchdog
+    /// (started from the installed bundle: this engine's own path is gone)
+    /// puts the data back and starts the installed version again.
+    #[test]
+    fn a_failed_trial_from_a_headless_engine_rolls_back_and_comes_back_up() {
+        let rig = Rig::new_mac("ok");
+        rig.request(RestartMode::Relaunch, 60);
+        let mut engine = start_headless(&rig);
+        wait_until(&rig, "2.0.0");
+
+        let second = ask_for_the_next_update(&rig, "migrate-then-exit");
+        let _ = engine.wait();
+        // Not ours to start: the watchdog relaunches the installed engine.
+        let waited = Instant::now();
+        while !(rig.record().id == second && rig.record().phase_finished()
+            && rig.last_ran().as_deref() == Some("2.0.0")
+            && ran_count(&rig, "2.0.0") >= 2)
+        {
+            assert!(
+                waited.elapsed() < Duration::from_secs(60),
+                "never came back: {:?} ran {:?}",
+                rig.record(),
+                std::fs::read_to_string(rig.data.join("ran"))
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let record = rig.record();
+        assert_eq!(record.phase, Phase::RolledBack, "{:?}", record.reason);
+        assert_eq!(rig.current(), "2.0.0");
+        assert_eq!(rig.database(), MIGRATED, "the first update's data, as it was");
+        std::fs::write(rig.data.join("done"), "").unwrap();
+    }
+
+    fn ran_count(rig: &Rig, what: &str) -> usize {
+        std::fs::read_to_string(rig.data.join("ran"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| *line == what)
+            .count()
+    }
+
+    #[track_caller]
+    fn wait_until(rig: &Rig, version: &str) {
+        let waited = Instant::now();
+        while rig.last_ran().as_deref() != Some(version) {
+            let ran = std::fs::read_to_string(rig.data.join("ran")).unwrap_or_default();
+            assert!(
+                !ran.contains("stranded") && waited.elapsed() < Duration::from_secs(60),
+                "{version} never came: {:?} ran {ran:?}",
+                transaction::read(&rig.data),
+            );
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

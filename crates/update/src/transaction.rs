@@ -181,8 +181,11 @@ impl Layout {
     /// The version this executable is, and the one that's installed. `None` when
     /// it isn't part of this installation (a build started by hand beside it).
     fn whoami(&self, transaction: &Transaction) -> Option<Whoami> {
-        let exe = std::env::current_exe().ok()?;
-        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        self.whoami_of(&std::env::current_exe().ok()?, transaction)
+    }
+
+    fn whoami_of(&self, exe: &Path, transaction: &Transaction) -> Option<Whoami> {
+        let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
         let inside = |dir: &Path| {
             std::fs::canonicalize(dir).is_ok_and(|dir| exe.starts_with(dir))
         };
@@ -198,7 +201,7 @@ impl Layout {
                 let current = crate::bundle_app_version(bundle)?;
                 let me = if inside(incoming) {
                     transaction.target.clone()
-                } else if inside(bundle) {
+                } else if inside(bundle) || became_the_bundle(&exe, bundle, incoming) {
                     current.clone()
                 } else {
                     return None;
@@ -779,6 +782,71 @@ pub fn request(
 // Boot: what this start of the engine has to do first
 // ---------------------------------------------------------------------------
 
+/// An engine that was an earlier update's trial runs from that update's
+/// incoming bundle (`.Zeron.app.new-…`, beside the installed one), and its
+/// commit renamed that folder to the installed bundle: macOS goes on naming
+/// the executable by the path it was started from, which no longer exists.
+/// That engine *is* the installed version. Without this it counted as a build
+/// started by hand beside the installation, so an update it was asked for
+/// stopped it and nothing started the new version.
+fn became_the_bundle(exe: &Path, bundle: &Path, incoming: &Path) -> bool {
+    let (Some(parent), Some(name)) = (bundle.parent(), bundle.file_name()) else {
+        return false;
+    };
+    let prefix = format!(".{}.new-", name.to_string_lossy());
+    let parents = [
+        parent.to_path_buf(),
+        std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+    ];
+    parents.iter().any(|parent| {
+        let Ok(rest) = exe.strip_prefix(parent) else {
+            return false;
+        };
+        let Some(folder) = rest.components().next() else {
+            return false;
+        };
+        let earlier = parent.join(folder);
+        folder.as_os_str().to_string_lossy().starts_with(&prefix)
+            && earlier != incoming
+            && rest.starts_with(Path::new(folder.as_os_str()).join("Contents/MacOS"))
+            // Still there: an abandoned download, not the installed bundle.
+            && !earlier.exists()
+    })
+}
+
+/// A path that starts this executable: its own, or — gone because an earlier
+/// update's commit renamed the folder it ran from ([`became_the_bundle`]) —
+/// the same executable in the installation. The watchdog is started through a
+/// shell that can't report a missing program, so a vanished path meant a
+/// trial with no watchdog at all.
+#[cfg(unix)]
+fn runnable_self(layout: &Layout, exe: PathBuf) -> PathBuf {
+    if exe.is_file() {
+        return exe;
+    }
+    match exe.file_name() {
+        Some(name) => layout.installed_binary(name),
+        None => exe,
+    }
+}
+
+/// Whether [`boot`], run by this process once it has stopped, would start the
+/// update recorded in `data_dir` as a trial, rather than leave the record for
+/// another start. A background engine nothing restarts asks this before it
+/// stops for an update: stopping when it wouldn't strands the device.
+pub fn starts_here(data_dir: &Path) -> bool {
+    std::env::current_exe().is_ok_and(|exe| starts_from(data_dir, &exe))
+}
+
+fn starts_from(data_dir: &Path, exe: &Path) -> bool {
+    read(data_dir).is_some_and(|transaction| {
+        transaction
+            .layout
+            .whoami_of(exe, &transaction)
+            .is_some_and(|who| step_for(&transaction, &who) == Step::StartTrial)
+    })
+}
+
 /// The version folder this executable runs from, and the one `current` names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Whoami {
@@ -1198,7 +1266,7 @@ fn prepare_watchdog(
     transaction: &Transaction,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt as _;
-    let exe = std::env::current_exe()?;
+    let exe = runnable_self(&transaction.layout, std::env::current_exe()?);
     let args: Vec<String> = options
         .engine_args
         .iter()
@@ -1760,5 +1828,80 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(unknown.state, UpdateState::Unknown);
+    }
+
+    /// `/Applications`-like folder with the installed `Zeron.app` at
+    /// `version`, and an update to 2.0.0 requested into `.Zeron.app.new-next`.
+    fn mac_install(version: &str) -> (tempfile::TempDir, Transaction) {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Zeron.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            format!("<plist><key>ZeronVersion</key><string>{version}</string></plist>"),
+        )
+        .unwrap();
+        std::fs::write(bundle.join("Contents/MacOS/Zeron Engine"), "").unwrap();
+        let incoming = root.path().join(".Zeron.app.new-next");
+        std::fs::create_dir_all(incoming.join("Contents/MacOS")).unwrap();
+        let mut update = transaction(Phase::Requested);
+        update.layout = Layout::MacBundle { bundle, incoming };
+        (root, update)
+    }
+
+    /// m1-laptop, Nov 11: the engine had been the trial of the update before
+    /// (started from `.Zeron.app.new-<id>`, renamed to `Zeron.app` at its
+    /// commit) and was still named by that path. Asked for the next update,
+    /// it didn't recognise its own installation, stopped, and never came back.
+    #[test]
+    fn an_engine_from_an_earlier_update_is_the_installed_version() {
+        let (root, update) = mac_install("1.0.0");
+        let installed = root.path().join("Zeron.app/Contents/MacOS/Zeron Engine");
+        let earlier = root.path().join(".Zeron.app.new-earlier/Contents/MacOS/Zeron Engine");
+        for exe in [&installed, &earlier] {
+            let who = update.layout.whoami_of(exe, &update);
+            assert_eq!(who, Some(self::who("1.0.0", "1.0.0")), "{}", exe.display());
+            assert_eq!(step_for(&update, &who.unwrap()), Step::StartTrial);
+        }
+        // The new version, on trial from the incoming bundle.
+        let trial = root.path().join(".Zeron.app.new-next/Contents/MacOS/Zeron Engine");
+        std::fs::write(&trial, "").unwrap();
+        assert_eq!(update.layout.whoami_of(&trial, &update), Some(who("2.0.0", "1.0.0")));
+    }
+
+    /// What isn't the installation stays out of its update: a build beside
+    /// it, an incoming bundle that's still there (an abandoned download), and
+    /// a folder that only looks like one.
+    #[test]
+    fn only_the_installation_is_recognised() {
+        let (root, update) = mac_install("1.0.0");
+        let abandoned = root.path().join(".Zeron.app.new-abandoned");
+        std::fs::create_dir_all(abandoned.join("Contents/MacOS")).unwrap();
+        for exe in [
+            root.path().join("build/Zeron Engine"),
+            abandoned.join("Contents/MacOS/Zeron Engine"),
+            root.path().join(".Other.app.new-x/Contents/MacOS/Zeron Engine"),
+            root.path().join(".Zeron.app.new-x/Zeron Engine"),
+        ] {
+            assert_eq!(update.layout.whoami_of(&exe, &update), None, "{}", exe.display());
+        }
+    }
+
+    /// The question a background engine asks before it stops for an update:
+    /// would it start the trial itself once stopped.
+    #[test]
+    fn an_engine_knows_whether_it_carries_out_the_update() {
+        let (root, update) = mac_install("1.0.0");
+        let data = tempfile::tempdir().unwrap();
+        let earlier = root.path().join(".Zeron.app.new-earlier/Contents/MacOS/Zeron Engine");
+        let beside = root.path().join("build/Zeron Engine");
+        assert!(!starts_from(data.path(), &earlier), "no update requested");
+        write(data.path(), &update).unwrap();
+        assert!(starts_from(data.path(), &earlier));
+        assert!(!starts_from(data.path(), &beside), "a build beside the app leaves it alone");
+        let mut done = update.clone();
+        done.phase = Phase::Failed;
+        write(data.path(), &done).unwrap();
+        assert!(!starts_from(data.path(), &earlier), "nothing in progress");
     }
 }
