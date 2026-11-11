@@ -62,6 +62,8 @@ mod relaunch;
 mod session_home;
 mod sessions;
 mod settings;
+#[cfg(target_os = "macos")]
+mod system_sound;
 mod terminal;
 mod tool_details;
 mod themes;
