@@ -731,6 +731,21 @@ impl SessionDoc {
         self.entry_cache.lock().unwrap_or_else(|e| e.into_inner()).reads
     }
 
+    /// Lets go of the entries [`Self::read_entries`] keeps: the next read
+    /// reads them all again. For a chat nobody is showing, whose reads are
+    /// rare, so its transcript isn't held twice for nothing.
+    pub fn drop_read_cache(&self) {
+        let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if !cache.items.is_empty() {
+            *cache = EntryCache { items: Default::default(), reads: cache.reads };
+        }
+    }
+
+    /// Entries [`Self::read_entries`] keeps now.
+    pub fn entries_cached(&self) -> usize {
+        self.entry_cache.lock().unwrap_or_else(|e| e.into_inner()).items.len()
+    }
+
     /// Every entry, read from the doc whole (no cache).
     pub fn read_entries_whole(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
         // Materialize only the messages container — a whole-doc deep value

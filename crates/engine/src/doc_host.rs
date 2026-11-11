@@ -1132,6 +1132,9 @@ impl ChatDocHandle {
             self.mirror_dirty.store(true, Ordering::Release);
             // Shrink the stale mirror: watch_messages rebuilds on attach.
             self.messages_tx.send_replace(TranscriptSnapshot::default());
+            // And the doc's read cache, which the mirror shared: a chat
+            // nobody shows holds its transcript no more than it used to.
+            self.doc.drop_read_cache();
             *lock(&self.transcript_history) = Default::default();
         } else {
             self.publish_messages_locked();
@@ -7631,6 +7634,49 @@ mod publication_eviction_tests {
             .await
             .unwrap();
         assert!(lock(&host.inner.handles).is_empty());
+        host.shutdown_workers().await;
+    }
+
+    /// A chat leaving the engine's cache takes its doc with it, read cache
+    /// and all: what `read_entries` keeps lives in the doc, not beside it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_evicted_chat_frees_its_doc_and_read_cache() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig { device_id: "here".into(), default_harness: HarnessId::Mock, edge: None },
+        );
+        let handle = host.open("big").unwrap();
+        for i in 0..200 {
+            handle.write_user_message(&format!("m{i}"), "words", i).unwrap();
+        }
+        // Read through the cache, and watched then let go, as a chat looked at.
+        assert_eq!(handle.doc().read_entries().unwrap().len(), 200);
+        drop(handle.watch_messages());
+        assert_eq!(handle.doc().entries_cached(), 200);
+        // A change while nobody watches lets the read cache go.
+        handle.write_user_message("unwatched", "words", 999).unwrap();
+        handle.publish_messages_if_watched();
+        assert_eq!(handle.doc().entries_cached(), 0, "an unwatched chat keeps no second copy");
+        let doc = Arc::downgrade(&handle.doc_arc());
+        drop(handle);
+        for i in 0..WARM_DOC_CAP {
+            host.open(&format!("other-{i}")).unwrap();
+        }
+        host.open("overflow").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                host.evict_over_budget();
+                if !lock(&host.inner.handles).contains_key("big") && doc.upgrade().is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the evicted chat's doc (and its read cache) is freed");
         host.shutdown_workers().await;
     }
 
