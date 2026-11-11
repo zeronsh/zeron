@@ -210,3 +210,8 @@ embed-resource = "3.0.11"
 
 [dev-dependencies]
 tempfile = "3"
+
+# src/terminal.rs's test: the bridge line split as Windows itself splits a
+# command line (CommandLineToArgvW).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
