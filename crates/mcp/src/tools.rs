@@ -450,6 +450,14 @@ chart5, chart6 (series, in order; \
 chart1 is the accent). They follow the reader's theme, light or dark, on frosted glass or an opaque \
 surface, so never assume a background color.\n\
 \n\
+Hover must not move the page. A visual sits in a transcript, so anything you show only while the \
+pointer is on something (a custom readout, a detail line, a hint, a row's or canvas's hover state) must \
+not change the visual's height, or everything under it jumps as the pointer crosses it. Reserve its \
+space at rest (a placeholder or an empty line of the same height, e.g. ui.text { s.picked or \" \" }), \
+or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or a scene point's hint). \
+Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's own hover readout \
+already keeps its place.\n\
+\n\
 Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
 of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
 cards, tiles, boxed panels, banners, or canvas backgrounds. Stats are a row of plain ui.stat figures; \
