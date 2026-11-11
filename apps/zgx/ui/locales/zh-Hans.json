@@ -2894,9 +2894,7 @@
       },
       "device": {
         "offline": "离线",
-        "offline_seen": "离线 · 上次在线：{ago}",
-        "cloud_from": "独立设备，基于 {repo}",
-        "cloud": "独立设备"
+        "offline_seen": "离线 · 上次在线：{ago}"
       },
       "project": {
         "missing": "项目不存在",

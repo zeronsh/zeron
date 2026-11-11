@@ -90,7 +90,8 @@ test("Cloud is offered while it's on, from the project's repository when it can 
 	settle(app)
 	open_row(app, "Device")
 	expect(app:has('role:option ~"Cloud"')).to_be(true)
-	expect(app:has('role:option ~"Cloud" >> ~"A machine of its own, from acme/atlas"')).to_be(true)
+	-- Its row is just its name: no line under it.
+	expect(app:has('role:option ~"Cloud" >> ~"machine of its own"')).to_be(false)
 	close(app)
 	-- A project Cloud can't open (no GitHub repository): Cloud still, its
 	-- plain line (picked, it brings a project it can open).
