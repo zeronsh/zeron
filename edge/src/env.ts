@@ -168,6 +168,10 @@ export const AUTH_USER_HEADER = "x-zeron-auth-user";
  * that has to ask the registry who hosts its chat. */
 export const AUTH_ORG_HEADER = "x-zeron-auth-org";
 
+/** Worker-controlled, like the user header: the caller's org, for a chat room
+ * that has to ask the registry who hosts its chat. */
+export const AUTH_ORG_HEADER = "x-zeron-auth-org";
+
 /** Header the Worker stamps on requests forwarded into workspace-doc rooms
  * (`ws/{orgId}`). Membership (JWT org claim == orgId) is enforced at the
  * Worker; the SessionRoom DO sees this and skips its per-chat
