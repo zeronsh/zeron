@@ -358,12 +358,12 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 		-- The frosted surfaces, each by Zeron's own recipe from this palette
 		-- rather than Zeron's greys (zeron-dark/light.json have them written
 		-- out): the island the overlay's glass, the panel its background at
-		-- 0.4, a field the input's (crates/theme builtins.rs `input`), the
+		-- 0.4, a field dark a settings select's wash (light the input's), the
 		-- sidebar, tabs and cards a wash of the ink.
 		["zeron.island.tint"] = a(menu, pick(0.75, 0.45)),
 		["zeron.panel.tint"] = a(bg, 0.4),
-		["zeron.field.glass"] = pick(a(raised, 0.72), a(card, 0.35)),
-		["zeron.field.glass_hover"] = pick(a(raised, 0.85), a(card, 0.8)),
+		["zeron.field.glass"] = pick(a(text, 0.06), a(card, 0.35)),
+		["zeron.field.glass_hover"] = pick(a(text, 0.1), a(card, 0.8)),
 		["zeron.sidebar.tint"] = a(text, 0.05),
 		["zeron.tab.selected"] = a(text, 0.1),
 		["zeron.tab.hover"] = a(text, 0.06),
