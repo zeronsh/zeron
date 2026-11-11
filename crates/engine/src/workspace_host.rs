@@ -205,6 +205,9 @@ struct WorkspaceHostInner {
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
+    /// [`WorkspaceHost::registry_synced`], published when it changes so
+    /// waiters (the chat sync dispatcher's reconciliation) need not poll it.
+    registry_synced_tx: watch::Sender<bool>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
     changed_tx: watch::Sender<u64>,
@@ -363,6 +366,7 @@ impl WorkspaceHost {
                 .unwrap_or_default(),
         });
         let (changed_tx, changed_rx) = watch::channel(0u64);
+        let edge_less = config.edge.is_none();
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
@@ -375,6 +379,7 @@ impl WorkspaceHost {
                 spaces_tx,
                 sidebar_preferences_tx,
                 room: Mutex::new(None),
+                registry_synced_tx: watch::Sender::new(edge_less),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 claimed: Mutex::default(),
@@ -648,6 +653,11 @@ impl WorkspaceHost {
     /// the server this boot may be arbitrarily behind (gapped cursor,
     /// pre-heal, offline at boot), and "row absent locally" on such a view
     /// is not evidence of deletion.
+    /// Follows [`Self::registry_synced`] (it only ever turns true).
+    pub fn watch_registry_synced(&self) -> watch::Receiver<bool> {
+        self.inner.registry_synced_tx.subscribe()
+    }
+
     pub fn registry_synced(&self) -> bool {
         if self.inner.config.edge.is_none() {
             return true;
@@ -1535,6 +1545,9 @@ impl WorkspaceHostInner {
         let registry_synced = lock(&self.room)
             .as_ref()
             .is_some_and(|room| room.stats().synced);
+        if registry_synced {
+            self.registry_synced_tx.send_if_modified(|synced| !std::mem::replace(synced, true));
+        }
         // Sidebar pins are viewport state. A Cloud device has no viewport, and
         // the edge refuses its writes to rows it doesn't own: reconciling here
         // would rewrite the missing preferences row after every refused push.

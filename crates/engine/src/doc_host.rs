@@ -87,6 +87,9 @@ const SYNC_IDLE_MS: i64 = 10_000;
 const SYNC_QUANTUM_MS: i64 = 30_000;
 const ACTIVE_SYNC_CAP: usize = 28;
 const SYNC_ADMISSION_BATCH: usize = 4;
+/// The least time between two sync dispatcher passes, and the retry delay
+/// while a pass leaves work in flight.
+const SYNC_PASS_SPACING: std::time::Duration = std::time::Duration::from_millis(100);
 const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
 /// A quiesce for a Cloud sleep the stop never followed lifts after this.
 const QUIESCE_LEASE: std::time::Duration = std::time::Duration::from_secs(180);
@@ -294,6 +297,21 @@ struct DocHostInner {
     /// network work even while something still pins the graph.
     shutdown: CancellationToken,
     edge_disconnected: AtomicBool,
+    /// Wakes the sync dispatcher ([`DocHost::spawn_sync_scheduler`]) when
+    /// something it serves changed outside the store: a sync request, a
+    /// failed publication, a new handle, the workspace being wired. Store
+    /// changes arrive through [`DocsStore::watch_sync_jobs`]/`watch_outbox`.
+    /// Shared rather than owned, so the waiting loops hold no strong ref to
+    /// this graph; dropping it notifies both so they see it gone and end.
+    sync_kick: Arc<tokio::sync::Notify>,
+    /// Wakes remote-wake delivery once the workspace it needs is wired.
+    remote_wake_kick: Arc<tokio::sync::Notify>,
+    /// Passes the sync dispatcher has run (idle tests count them).
+    #[cfg(test)]
+    scheduler_passes: AtomicUsize,
+    /// Pages remote-wake delivery has read (idle tests count them).
+    #[cfg(test)]
+    remote_wake_scans: AtomicUsize,
     /// Tracks every spawned worker so `shutdown_workers` can await them.
     tasks: TaskTracker,
     handles: Mutex<HashMap<String, Arc<ChatDocHandle>>>,
@@ -609,6 +627,18 @@ pub struct ChatDocHandle {
     chat_id: String,
     device_id: String,
     doc: Arc<SessionDoc>,
+    /// The host's [`DocHostInner::sync_kick`]: a connected chat losing its
+    /// last viewer or writer may now close, so the dispatcher looks again.
+    sync_kick: Arc<tokio::sync::Notify>,
+    /// A task waits for this chat's viewers to leave ([`Self::note_viewer`]).
+    unwatch_waiter: Arc<AtomicBool>,
+    /// Cancelled as the handle drops: that waiter holds sender clones, and
+    /// must let them go then, so its viewers' streams end (and resubscribe)
+    /// exactly as if it weren't there.
+    unwatch_cancel: CancellationToken,
+    /// The runtime this handle was opened on, for that waiter: a view may
+    /// attach from a plain thread.
+    runtime: Option<tokio::runtime::Handle>,
     messages_tx: watch::Sender<TranscriptSnapshot>,
     /// Serialize historical imports with publication so an async doc-change
     /// task cannot publish recovered content before its presentation cutoff.
@@ -729,6 +759,7 @@ impl Drop for DispatchGuard {
 pub struct DocWriter {
     doc: Arc<SessionDoc>,
     writers: Arc<AtomicUsize>,
+    sync_kick: Arc<tokio::sync::Notify>,
 }
 impl std::ops::Deref for DocWriter {
     type Target = SessionDoc;
@@ -738,12 +769,33 @@ impl std::ops::Deref for DocWriter {
 }
 impl Drop for DocWriter {
     fn drop(&mut self) {
-        self.writers.fetch_sub(1, Ordering::AcqRel);
+        if self.writers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // The last writer: its connection may close now.
+            self.sync_kick.notify_one();
+        }
     }
 }
+impl Drop for DocHostInner {
+    fn drop(&mut self) {
+        // The dispatch loops wait on these alone when idle: let them see the
+        // host gone and end, as their old polling did.
+        self.sync_kick.notify_one();
+        self.remote_wake_kick.notify_one();
+    }
+}
+
+/// The next change of a followed watch; never resolves while unset.
+async fn changed<T>(rx: &mut Option<watch::Receiver<T>>) -> Option<Result<(), watch::error::RecvError>> {
+    match rx {
+        Some(rx) => Some(rx.changed().await),
+        None => std::future::pending().await,
+    }
+}
+
 impl Drop for ChatDocHandle {
     fn drop(&mut self) {
         lock(&self.sync_cancel).cancel();
+        self.unwatch_cancel.cancel();
     }
 }
 
@@ -864,6 +916,7 @@ impl ChatDocHandle {
         DocWriter {
             doc: self.doc.clone(),
             writers: self.writers.clone(),
+            sync_kick: self.sync_kick.clone(),
         }
     }
 
@@ -897,6 +950,7 @@ impl ChatDocHandle {
             }
             self.messages_tx.subscribe()
         };
+        self.note_viewer();
         // Watched: its every commit reads the transcript, so reads keep it.
         self.doc.set_keep_read_cache(true);
         if self.mirror_dirty.load(Ordering::Acquire) {
@@ -909,8 +963,47 @@ impl ChatDocHandle {
     pub fn watch_queue(&self) -> watch::Receiver<Vec<QueuedMessage>> {
         self.touch();
         let rx = self.queue_tx.subscribe();
+        self.note_viewer();
         self.publish_queue();
         rx
+    }
+
+    /// A viewer protects this chat's connection; when the last one leaves,
+    /// kick the dispatcher, which no longer polls for it. One waiter per
+    /// chat at a time, however often views attach.
+    fn note_viewer(&self) {
+        let Some(runtime) = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.runtime.clone())
+        else {
+            return;
+        };
+        if self.unwatch_waiter.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (messages, queue) = (self.messages_tx.clone(), self.queue_tx.clone());
+        let (waiter, kick) = (self.unwatch_waiter.clone(), self.sync_kick.clone());
+        let gone = self.unwatch_cancel.clone();
+        runtime.spawn(async move {
+            loop {
+                // The handle dropping ends the waiter (and its sender
+                // clones) at once: the streams must close with the handle.
+                tokio::select! {
+                    _ = gone.cancelled() => return,
+                    _ = async { messages.closed().await; queue.closed().await } => {}
+                }
+                waiter.store(false, Ordering::Release);
+                kick.notify_one();
+                // A view that attached meanwhile saw the waiter still set and
+                // started none: stay for it, unless one has since started.
+                if (messages.receiver_count() > 0 || queue.receiver_count() > 0)
+                    && !waiter.swap(true, Ordering::AcqRel)
+                {
+                    continue;
+                }
+                break;
+            }
+        });
     }
 
     /// Where a newly steered row goes: after the rows already steered, ahead
@@ -1173,6 +1266,12 @@ impl DocHost {
                 project_action_runtime: OnceLock::new(),
                 shutdown: CancellationToken::new(),
                 edge_disconnected: AtomicBool::new(false),
+                sync_kick: Arc::new(tokio::sync::Notify::new()),
+                remote_wake_kick: Arc::new(tokio::sync::Notify::new()),
+                #[cfg(test)]
+                scheduler_passes: AtomicUsize::new(0),
+                #[cfg(test)]
+                remote_wake_scans: AtomicUsize::new(0),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
                 document_loads: AtomicU64::new(0),
@@ -1592,6 +1691,8 @@ impl DocHost {
         if self.inner.workspace.set(workspace).is_ok() {
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
+            self.kick_sync();
+            self.inner.remote_wake_kick.notify_one();
         }
     }
 
@@ -2045,6 +2146,10 @@ impl DocHost {
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
+            sync_kick: self.inner.sync_kick.clone(),
+            unwatch_waiter: Arc::new(AtomicBool::new(false)),
+            unwatch_cancel: CancellationToken::new(),
+            runtime: tokio::runtime::Handle::try_current().ok(),
             messages_tx,
             transcript_import: Mutex::default(),
             transcript_history,
@@ -2115,6 +2220,7 @@ impl DocHost {
                 let weak_push = Arc::downgrade(&handle);
                 let publication_store = self.inner.store.clone();
                 let publication_chat = chat_id.to_string();
+                let publication_kick = self.inner.sync_kick.clone();
                 // Concurrent commits can run their hooks out of order; this
                 // device's ops still go out in commit order (OwnOpsOrder).
                 let own_order = Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc()));
@@ -2133,6 +2239,8 @@ impl DocHost {
                                 if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, &bytes) {
                                     handle.publication_failed.store(true, Ordering::Release);
                                     lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
+                                    // The dispatcher retries the durable write.
+                                    publication_kick.notify_one();
                                     tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
                                 }
                                 if relay_state.as_ref().is_some_and(|state| state.publish_local(&batch_id, &bytes)) {
@@ -2161,6 +2269,7 @@ impl DocHost {
         // Publish only after the durable subscription and bootstrap are installed.
         lock(&self.inner.handles).insert(chat_id.to_string(), handle.clone());
         drop(opening);
+        self.kick_sync();
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
         self.evict_over_budget();
         Ok(handle)
@@ -2189,7 +2298,15 @@ impl DocHost {
         if self.inner.config.edge.is_some() && !self.inner.edge_disconnected.load(Ordering::Acquire)
         {
             handle.sync_requested.store(true, Ordering::Release);
+            self.kick_sync();
         }
+    }
+
+    /// Run the sync dispatcher's next pass (at most one per
+    /// [`SYNC_PASS_SPACING`]). Call after changing anything it reads that
+    /// the store's own change signals don't cover.
+    pub(crate) fn kick_sync(&self) {
+        self.inner.sync_kick.notify_one();
     }
 
     /// Resolve an actual operation before reserving a client slot. Generation
@@ -2263,10 +2380,35 @@ impl DocHost {
     /// One dispatcher per host; waiting chats are flags on existing handles,
     /// never a spawned task per connection request. Oldest service wins within
     /// each class, with one background admission every four selections.
+    ///
+    /// It runs a pass only when something it serves changed: a durable sync
+    /// job or outbox row (the store's change signals), a sync request,
+    /// failed publication or new handle ([`Self::kick_sync`]), a chat's last
+    /// viewer or writer leaving, a socket waiter anywhere in the process, a
+    /// teardown ending, the registry's chats or its first sync. A pass that
+    /// leaves work in flight (a connection catching up, owing a wake
+    /// receipt or counting down its idle grace, a client closing, a chat
+    /// waiting for a slot, reconciliation or a disk page still to go, a
+    /// failed write to retry, a pinned warm set over budget) arms one
+    /// [`SYNC_PASS_SPACING`] timer, since those advance with time and
+    /// client state rather than events. With none of that, nothing wakes it: an idle engine runs no
+    /// pass at all. Passes stay at least [`SYNC_PASS_SPACING`] apart, which
+    /// bounds admissions to [`SYNC_ADMISSION_BATCH`] per spacing however
+    /// fast events arrive.
     fn spawn_sync_scheduler(&self) {
         let weak = Arc::downgrade(&self.inner);
+        let kick = self.inner.sync_kick.clone();
+        let mut jobs = self.inner.store.watch_sync_jobs();
+        let mut outbox = self.inner.store.watch_outbox();
+        let mut socket_contention = zeron_sync::budget::shared().watch_socket_contention();
         self.spawn_worker(async move {
             use futures::{StreamExt, stream::FuturesUnordered};
+            // Followed once the workspace is wired: ownership and cutover
+            // decide admission, and reconciliation waits for the first sync.
+            let mut registry_chats: Option<watch::Receiver<Vec<zeron_proto::Chat>>> = None;
+            let mut registry_synced: Option<watch::Receiver<bool>> = None;
+            let mut busy = true;
+            let mut last_pass: Option<tokio::time::Instant> = None;
             let mut turn = 0u64;
             let mut disk_cursor = String::new();
             // (winner, fairness turn). Reserve a released slot until teardown
@@ -2280,19 +2422,50 @@ impl DocHost {
             let mut stopping = FuturesUnordered::<tokio::task::JoinHandle<String>>::new();
             let mut stopping_ids = HashSet::new();
             loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-                    Some(result) = stopping.next(), if !stopping.is_empty() => {
-                        match result {
-                            Ok(id) => { stopping_ids.remove(&id); }
-                            Err(error) => tracing::error!(%error, "chat sync teardown failed"),
+                if let Some(last) = last_pass {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(last + SYNC_PASS_SPACING), if busy => {}
+                        _ = kick.notified() => {}
+                        Ok(()) = jobs.changed() => {}
+                        Ok(()) = outbox.changed() => {}
+                        Ok(()) = socket_contention.changed() => {}
+                        Some(Ok(())) = changed(&mut registry_chats) => {}
+                        Some(Ok(())) = changed(&mut registry_synced) => {}
+                        Some(result) = stopping.next(), if !stopping.is_empty() => {
+                            match result {
+                                Ok(id) => { stopping_ids.remove(&id); }
+                                Err(error) => tracing::error!(%error, "chat sync teardown failed"),
+                            }
+                            // The pass after a teardown hands its slot over.
+                            busy = true;
+                            continue;
                         }
-                        continue;
                     }
+                    // However fast events come, passes keep their spacing.
+                    tokio::time::sleep_until(last + SYNC_PASS_SPACING).await;
                 }
+                last_pass = Some(tokio::time::Instant::now());
+                // Whatever changes from here on wakes the next pass.
+                jobs.borrow_and_update();
+                outbox.borrow_and_update();
+                socket_contention.borrow_and_update();
                 let Some(inner) = weak.upgrade() else { return };
                 let host = Self { inner };
-                host.evict_over_budget();
+                #[cfg(test)]
+                host.inner.scheduler_passes.fetch_add(1, Ordering::Relaxed);
+                if let Some(ws) = host.workspace() {
+                    if registry_chats.is_none() {
+                        registry_chats = Some(ws.watch_chats());
+                        registry_synced = Some(ws.watch_registry_synced());
+                    }
+                }
+                for rx in [&mut registry_chats].into_iter().flatten() {
+                    rx.borrow_and_update();
+                }
+                for rx in [&mut registry_synced].into_iter().flatten() {
+                    rx.borrow_and_update();
+                }
+                busy = host.evict_over_budget();
                 if host.inner.edge_disconnected.load(Ordering::Acquire) {
                     continue;
                 }
@@ -2303,8 +2476,11 @@ impl DocHost {
                 // for registry truth before deciding the hosted set is complete.
                 if let Some(ws) = host.workspace() {
                     if ws.sync_status().is_some_and(|s| s.synced) {
-                        if let Ok(Some((version, cursor))) =
-                            host.inner.store.reconciliation_progress()
+                        let progress = host.inner.store.reconciliation_progress();
+                        // A page to accept, or a read to retry: the next pass
+                        // goes on. `None` = nothing to reconcile.
+                        busy |= !matches!(progress, Ok(None));
+                        if let Ok(Some((version, cursor))) = progress
                         {
                             let mut ids: Vec<_> = ws
                                 .watch_chats()
@@ -2339,11 +2515,18 @@ impl DocHost {
                     }
                 }
 
-                let durable = host
-                    .inner
-                    .store
-                    .pending_sync_docs(&disk_cursor, 4)
-                    .unwrap_or_default();
+                let durable = match host.inner.store.pending_sync_docs(&disk_cursor, 4) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        tracing::warn!(%error, "durable sync discovery deferred");
+                        busy = true;
+                        Vec::new()
+                    }
+                };
+                // A full page may have more behind it: the scan goes on. A
+                // short one ends it, and the next scan starts from the top.
+                let durable_more = durable.len() == 4;
+                busy |= durable_more;
                 if durable.is_empty() {
                     disk_cursor.clear();
                 }
@@ -2370,6 +2553,9 @@ impl DocHost {
                         candidates.push((id, None));
                     }
                 }
+                if !durable_more {
+                    disk_cursor.clear();
+                }
                 if let Some((id, _)) = &handoff {
                     if !candidates.iter().any(|(chat, _)| chat == id) {
                         candidates.push((id.clone(), handles.iter().find(|h| &h.chat_id == id).cloned()));
@@ -2381,6 +2567,7 @@ impl DocHost {
                         Ok(version) => version,
                         Err(error) => {
                             tracing::warn!(chat = %id, %error, "sync admission deferred: wake read failed");
+                            busy = true;
                             continue;
                         }
                     };
@@ -2391,13 +2578,22 @@ impl DocHost {
                     match admission {
                         Ok(Some(_)) => waiting.push((id, handle, wake_version)),
                         Ok(None) => {},
-                        Err(error) => tracing::warn!(chat = %id, %error, "sync admission eligibility deferred"),
+                        Err(error) => {
+                            tracing::warn!(chat = %id, %error, "sync admission eligibility deferred");
+                            busy = true;
+                        }
                     }
                 }
                 // Ownership/cutover changes can invalidate a reserved winner.
                 if handoff.as_ref().is_some_and(|(id, _)| !waiting.iter().any(|(chat, _, _)| chat == id)) {
                     handoff = None;
                 }
+                // A connection still moving on its own clock: catching up,
+                // owing a wake receipt, or free to close once its idle grace
+                // runs out. A caught-up connection a viewer or writer holds,
+                // with no wake to receipt, needs nothing until one of those
+                // changes, and each of those wakes this loop.
+                let mut unsettled = false;
                 for handle in &handles {
                     if !handle.sync_started.load(Ordering::Acquire)
                         || stopping_ids.contains(&handle.chat_id)
@@ -2462,6 +2658,8 @@ impl DocHost {
                         handle.sync_requested.store(false, Ordering::Release);
                         stopping_ids.insert(handle.chat_id.clone());
                         stopping.push(host.inner.tasks.spawn(host.stop_sync_owned(handle.clone())));
+                    } else if !(caught_up && pending_wake.is_none() && handle.sync_protected()) {
+                        unsettled = true;
                     }
                 }
                 // Closing clients still own capacity until teardown is joined.
@@ -2473,6 +2671,13 @@ impl DocHost {
                 let contended = available == 0 && !waiting.is_empty();
                 let budget = zeron_sync::budget::shared().stats();
                 let global_contended = !budget.resource_paused && budget.sockets >= budget.socket_limit && budget.socket_waiting > 0;
+                // (A socket waiter arriving later signals `socket_contention`.)
+                // A descriptor-exhaustion pause ends on a clock, not an
+                // event: contention behind it is looked at again then.
+                busy |= global_contended
+                    || (budget.resource_paused
+                        && budget.sockets >= budget.socket_limit
+                        && budget.socket_waiting > 0);
                 // A teardown gap or the end of a paged disk scan is not the
                 // end of contention. Resetting there starves cold jobs under
                 // continuous navigation or a full set of active writers.
@@ -2580,6 +2785,7 @@ impl DocHost {
                             }
                             Err(error) => {
                                 tracing::warn!(chat = %id, %error, "durable sync work deferred");
+                                busy = true;
                                 continue;
                             }
                         },
@@ -2591,6 +2797,7 @@ impl DocHost {
                         Ok(None) => continue,
                         Err(error) => {
                             tracing::warn!(chat = %id, %error, "sync admission recheck failed");
+                            busy = true;
                             continue;
                         }
                     };
@@ -2619,8 +2826,17 @@ impl DocHost {
                         }
                     }
                 }
+                // Work in flight advances with time and client state (catch-up,
+                // idle grace, service quanta, teardown), not with events.
+                busy |= !waiting.is_empty()
+                    // (A cold admission's handle isn't in `handles`.)
+                    || admitted > 0
+                    || handoff.is_some()
+                    || !stopping.is_empty()
+                    || unsettled
+                    || handles.iter().any(|h| h.publication_failed.load(Ordering::Acquire));
                 drop(waiting);
-                host.evict_over_budget();
+                busy |= host.evict_over_budget();
             }
         });
     }
@@ -3582,7 +3798,10 @@ impl DocHost {
     ///
     /// Eviction flushes a final snapshot, so reopen loses nothing; missed
     /// remote updates re-arrive through the room join's VV backfill.
-    fn evict_over_budget(&self) {
+    ///
+    /// True when the warm set is still over budget: every doc that could
+    /// close was pinned, so the dispatcher retries while that lasts.
+    fn evict_over_budget(&self) -> bool {
         // Do not let a cold reopen race the retiring handle's final flush.
         let _opening = lock(&self.inner.opening);
         let mut by_age: Vec<(i64, String)> = {
@@ -3605,7 +3824,7 @@ impl DocHost {
                 )
             };
             if count <= WARM_DOC_CAP && estimate <= zeron_doc::DOC_LRU_BYTE_BUDGET {
-                return;
+                return false;
             }
             let evicted = {
                 let mut handles = lock(&self.inner.handles);
@@ -3623,6 +3842,10 @@ impl DocHost {
                 tracing::debug!(chat = %handle.chat_id, "doc evicted (LRU)");
             }
         }
+        let handles = lock(&self.inner.handles);
+        handles.len() > WARM_DOC_CAP
+            || handles.values().map(|h| h.resident_estimate()).sum::<usize>()
+                > zeron_doc::DOC_LRU_BYTE_BUDGET
     }
 
     /// Seed-specific activity gate: a live WRITER (a run's doc ref) or

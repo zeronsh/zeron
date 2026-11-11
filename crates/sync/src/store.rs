@@ -196,6 +196,11 @@ pub struct DocsStore {
     path: PathBuf,
     /// This open found the file damaged and rebuilt the store.
     recovery: Option<crate::store_recovery::Recovery>,
+    /// Bumped whenever `chat_sync_jobs` gains, renews or loses a row. The
+    /// engine's sync dispatchers wait on this instead of polling the table.
+    sync_jobs_changed: tokio::sync::watch::Sender<u64>,
+    /// Bumped whenever `chat_outbox` gains rows (a durable batch to send).
+    outbox_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl DocsStore {
@@ -254,7 +259,29 @@ impl DocsStore {
             delta_merges: std::sync::atomic::AtomicU64::new(0),
             path,
             recovery,
+            sync_jobs_changed: tokio::sync::watch::Sender::new(0),
+            outbox_changed: tokio::sync::watch::Sender::new(0),
         })
+    }
+
+    /// Changes whenever durable sync jobs (`schedule_sync_job`,
+    /// `reconcile_page`, `complete_sync_job`) change. Wait on it rather than
+    /// polling `pending_sync_jobs`.
+    pub fn watch_sync_jobs(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.sync_jobs_changed.subscribe()
+    }
+
+    /// Changes whenever the chat outbox gains rows.
+    pub fn watch_outbox(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.outbox_changed.subscribe()
+    }
+
+    pub(crate) fn note_sync_jobs_changed(&self) {
+        self.sync_jobs_changed.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    fn note_outbox_changed(&self) {
+        self.outbox_changed.send_modify(|v| *v = v.wrapping_add(1));
     }
 
     /// What this open found and did, when the file was damaged.
@@ -302,6 +329,9 @@ impl DocsStore {
             "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
             params![doc_id, batch_id, bytes],
         );
+        if matches!(result, Ok(n) if n > 0) {
+            self.note_outbox_changed();
+        }
         if result.is_err() {
             self.failed_publications
                 .lock()
@@ -475,6 +505,9 @@ impl DocsStore {
             }
         }
         tx.commit()?;
+        if !updates.is_empty() {
+            self.note_outbox_changed();
+        }
         Ok(())
     }
 

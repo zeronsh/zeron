@@ -174,6 +174,32 @@ pub struct Origins {
     /// `Some(origin)` when the marker is present, and whether the process
     /// is an agent's sign-in.
     markers: HashMap<(u32, u64), (Option<String>, bool)>,
+    /// [`Origins::owned`] reads failed this many times (a process mid-exec,
+    /// a zombie). It gives up after [`UNREADABLE_TRIES`], so such a process
+    /// can't cost a read every scan; [`Origins::resolve`] still retries.
+    unreadable: HashMap<(u32, u64), u8>,
+}
+
+const UNREADABLE_TRIES: u8 = 3;
+
+/// What Zeron started here and still runs: each process whose own origin
+/// marker the scope accepts (an agent, a terminal's shell, anything they
+/// left running), and everything below it. Only these can own a listener
+/// discovery lists, so the socket scan looks at nothing else, and none
+/// alive means there is nothing to scan for.
+#[derive(Default)]
+pub struct Owned {
+    processes: HashMap<u32, Process>,
+    pids: HashSet<u32>,
+}
+
+impl Owned {
+    pub fn is_empty(&self) -> bool {
+        self.pids.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.pids.len()
+    }
 }
 
 impl Origins {
@@ -222,6 +248,83 @@ impl Origins {
             pid = process.parent;
         }
         (None, signing_in)
+    }
+
+    /// [`Owned`] from a process table: reads the marker of each of this
+    /// user's processes not seen before (once per process lifetime, so a
+    /// scan reads only what started since the last one), keeps those whose
+    /// marker `accept`s, and adds their descendants (a launcher may scrub
+    /// its environment). Stops at this engine, as [`Self::resolve`] does.
+    fn owned(
+        &mut self,
+        processes: HashMap<u32, Process>,
+        mine: &HashSet<u32>,
+        accept: &dyn Fn(&str) -> bool,
+        mut read: impl FnMut(u32) -> Option<Vec<u8>>,
+    ) -> Owned {
+        let engine = std::process::id();
+        let mut roots = HashSet::new();
+        for (&pid, process) in &processes {
+            if pid <= 1 || pid == engine || !mine.contains(&pid) {
+                continue;
+            }
+            let key = (pid, process.started_at);
+            let marker = match self.markers.get(&key) {
+                Some((marker, _)) => marker.clone(),
+                None if self.unreadable.get(&key).is_some_and(|n| *n >= UNREADABLE_TRIES) => continue,
+                None => match read(pid) {
+                    Some(environment) => {
+                        let marker = origin_marker(&environment);
+                        let sign_in = has_variable(&environment, SIGN_IN_ENV);
+                        self.markers.insert(key, (marker.clone(), sign_in));
+                        self.unreadable.remove(&key);
+                        marker
+                    }
+                    None => {
+                        *self.unreadable.entry(key).or_default() += 1;
+                        continue;
+                    }
+                },
+            };
+            if marker.as_deref().is_some_and(accept) {
+                roots.insert(pid);
+            }
+        }
+        let mut pids = HashSet::new();
+        let mut outside = HashSet::new();
+        for &start in processes.keys() {
+            let mut path = Vec::new();
+            let mut pid = start;
+            let owned = loop {
+                if roots.contains(&pid) || pids.contains(&pid) {
+                    break true;
+                }
+                if pid <= 1 || pid == engine || outside.contains(&pid) || path.len() >= 64 {
+                    break false;
+                }
+                let Some(process) = processes.get(&pid) else {
+                    break false;
+                };
+                path.push(pid);
+                if process.parent == pid {
+                    break false;
+                }
+                pid = process.parent;
+            };
+            if owned {
+                pids.extend(path);
+                pids.extend(roots.get(&pid));
+            } else {
+                outside.extend(path);
+            }
+        }
+        let alive: HashSet<_> = processes
+            .iter()
+            .map(|(pid, process)| (*pid, process.started_at))
+            .collect();
+        self.markers.retain(|key, _| alive.contains(key));
+        self.unreadable.retain(|key, _| alive.contains(key));
+        Owned { processes, pids }
     }
 
     /// Attribute `listeners`, then forget processes no longer running.
@@ -309,6 +412,53 @@ pub fn same_process(pid: u32, started_at: u64) -> bool {
 /// keeps what it last saw rather than reading a failed scan as "nothing runs".
 #[cfg(target_os = "linux")]
 pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
+    linux_listeners(origins, None)
+}
+
+/// See the macOS variant.
+#[cfg(target_os = "linux")]
+pub fn owned(origins: &mut Origins, accept: &dyn Fn(&str) -> bool) -> Option<Owned> {
+    use std::{fs, os::unix::fs::MetadataExt};
+    let (boot, ticks) = linux_clock();
+    let uid = unsafe { libc::geteuid() };
+    let mut processes = HashMap::new();
+    let mut mine = HashSet::new();
+    for process in fs::read_dir("/proc").ok()?.flatten() {
+        let Ok(pid) = process.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let path = process.path();
+        let Ok(stat) = fs::read_to_string(path.join("stat")) else {
+            continue;
+        };
+        let Some((_, tail)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let fields: Vec<_> = tail.split_whitespace().collect();
+        let Some(parent) = fields.get(1).and_then(|v| v.parse().ok()) else {
+            continue;
+        };
+        if fs::metadata(&path).is_ok_and(|m| m.uid() == uid) {
+            mine.insert(pid);
+        }
+        processes.insert(pid, Process { parent, started_at: linux_started_at(&fields, boot, ticks) });
+    }
+    Some(origins.owned(processes, &mine, accept, |pid| {
+        fs::read(format!("/proc/{pid}/environ")).ok()
+    }))
+}
+
+/// [`listeners`], looking only at `owned`'s processes.
+#[cfg(target_os = "linux")]
+pub fn owned_listeners(origins: &mut Origins, owned: &Owned) -> Option<Vec<Listener>> {
+    if owned.is_empty() {
+        return Some(Vec::new());
+    }
+    linux_listeners(origins, Some(&owned.pids))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_listeners(origins: &mut Origins, only: Option<&HashSet<u32>>) -> Option<Vec<Listener>> {
     use std::{fs, os::unix::fs::MetadataExt};
     let mut sockets = HashMap::new();
     let mut tables = 0;
@@ -353,6 +503,9 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
         };
         let started_at = linux_started_at(&fields, boot, ticks);
         processes.insert(pid, Process { parent, started_at });
+        if only.is_some_and(|only| !only.contains(&pid)) {
+            continue;
+        }
         // Sockets first: most processes listen on nothing, and need neither
         // their cwd nor their arguments read.
         let Ok(fds) = fs::read_dir(path.join("fd")) else {
@@ -466,7 +619,7 @@ pub fn same_process(pid: u32, started_at: u64) -> bool {
 /// ever change shape, that scan is lsof's again.
 #[cfg(target_os = "macos")]
 pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
-    let Some(sockets) = libproc::listening_sockets() else {
+    let Some(sockets) = libproc::listening_sockets(None) else {
         tracing::debug!("preview scan: libproc sockets unreadable; asking lsof");
         return lsof_listeners(origins);
     };
@@ -474,6 +627,42 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
         return Some(Vec::new());
     }
     let processes = libproc::process_table()?;
+    Some(macos_listeners(origins, sockets, &processes))
+}
+
+/// The processes Zeron started here and still runs ([`Owned`]): one
+/// process-table read, plus the environment of each process new since the
+/// last call. `accept` says which origin markers count (the chats and
+/// terminals this device hosts).
+#[cfg(target_os = "macos")]
+pub fn owned(origins: &mut Origins, accept: &dyn Fn(&str) -> bool) -> Option<Owned> {
+    let processes = libproc::process_table()?;
+    let mine: HashSet<u32> = libproc::pids(unsafe { libc::geteuid() }).into_iter().collect();
+    Some(origins.owned(processes, &mine, accept, environment))
+}
+
+/// [`listeners`], looking only at `owned`'s processes: their sockets are
+/// the only ones discovery could list.
+#[cfg(target_os = "macos")]
+pub fn owned_listeners(origins: &mut Origins, owned: &Owned) -> Option<Vec<Listener>> {
+    if owned.is_empty() {
+        return Some(Vec::new());
+    }
+    let Some(sockets) = libproc::listening_sockets(Some(&owned.pids)) else {
+        tracing::debug!("preview scan: libproc sockets unreadable; asking lsof");
+        let mut all = lsof_listeners(origins)?;
+        all.retain(|listener| owned.pids.contains(&listener.pid));
+        return Some(all);
+    };
+    Some(macos_listeners(origins, sockets, &owned.processes))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_listeners(
+    origins: &mut Origins,
+    sockets: Vec<(u32, Option<IpAddr>, u16)>,
+    processes: &HashMap<u32, Process>,
+) -> Vec<Listener> {
     let mut result = Vec::new();
     for (pid, ip, port) in sockets {
         let addresses = match ip {
@@ -509,10 +698,10 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
             });
         }
     }
-    origins.attribute(&mut result, &processes, environment);
+    origins.attribute(&mut result, processes, environment);
     result.sort_by_key(|l| (l.address, l.pid));
     result.dedup_by_key(|l| (l.address, l.pid));
-    Some(result)
+    result
 }
 
 /// `program`'s stdout, or `None` when it could not run or outlived
@@ -767,10 +956,17 @@ mod libproc {
     /// This user's TCP listening sockets: (pid, address, port), the address
     /// `None` for any (lsof's `*`). `None` when the kernel's socket record
     /// isn't the size known here: its fields can't be trusted.
-    pub fn listening_sockets() -> Option<Vec<(u32, Option<IpAddr>, u16)>> {
+    /// `only`: look at just these processes.
+    pub fn listening_sockets(
+        only: Option<&std::collections::HashSet<u32>>,
+    ) -> Option<Vec<(u32, Option<IpAddr>, u16)>> {
         let uid = unsafe { libc::geteuid() };
         let mut sockets = Vec::new();
-        for pid in pids(uid) {
+        let pids: Vec<u32> = match only {
+            Some(only) => only.iter().copied().collect(),
+            None => pids(uid),
+        };
+        for pid in pids {
             for fd in socket_fds(pid) {
                 let mut record = [0u64; SOCKET_FDINFO_SIZE / 8];
                 let read = unsafe {
@@ -826,7 +1022,7 @@ mod libproc {
     }
 
     /// This user's processes.
-    fn pids(uid: libc::uid_t) -> Vec<u32> {
+    pub fn pids(uid: libc::uid_t) -> Vec<u32> {
         let needed = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
         if needed <= 0 {
             return Vec::new();
@@ -957,6 +1153,14 @@ mod libproc {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn listeners(_origins: &mut Origins) -> Option<Vec<Listener>> {
+    Some(Vec::new())
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn owned(_origins: &mut Origins, _accept: &dyn Fn(&str) -> bool) -> Option<Owned> {
+    Some(Owned::default())
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn owned_listeners(_origins: &mut Origins, _owned: &Owned) -> Option<Vec<Listener>> {
     Some(Vec::new())
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1165,6 +1369,72 @@ mod tests {
         });
         assert_eq!(listeners[0].origin.as_deref(), Some("chat:c"));
     }
+    /// Owned = processes whose own marker is in scope, plus everything
+    /// below them; never the engine or what it starts unmarked; each
+    /// process's environment read once, an unreadable one a few times.
+    #[test]
+    fn owned_processes_are_the_marked_trees_in_scope() {
+        let engine = std::process::id();
+        let p = |parent, started_at| Process { parent, started_at };
+        // 100: an agent (chat:a) → 101 a shell → 102 a scrubbed server.
+        // 110: a server an agent of chat:a left running, adopted by launchd.
+        // 200: another engine's chat (chat:z, not hosted here) → 201.
+        // 300: the user's own server; 400: started by this engine, unmarked.
+        // 500: unreadable.
+        let processes: HashMap<u32, Process> = [
+            (100, p(engine, 1)),
+            (101, p(100, 2)),
+            (102, p(101, 3)),
+            (110, p(1, 4)),
+            (200, p(1, 5)),
+            (201, p(200, 6)),
+            (300, p(1, 7)),
+            (400, p(engine, 8)),
+            (500, p(1, 9)),
+        ]
+        .into();
+        let mine: HashSet<u32> = processes.keys().copied().collect();
+        let reads = std::cell::RefCell::new(Vec::new());
+        let read = |pid: u32| {
+            reads.borrow_mut().push(pid);
+            match pid {
+                100 | 110 => Some(environment(&["ZERON_ORIGIN=chat:a"])),
+                200 => Some(environment(&["ZERON_ORIGIN=chat:z"])),
+                500 => None,
+                _ => Some(environment(&["PATH=/bin"])),
+            }
+        };
+        let accept = |origin: &str| origin == "chat:a";
+        let mut origins = Origins::default();
+        let owned = origins.owned(processes.clone(), &mine, &accept, read);
+        let mut pids: Vec<_> = owned.pids.iter().copied().collect();
+        pids.sort();
+        assert_eq!(pids, [100, 101, 102, 110]);
+        assert!(!reads.borrow().contains(&engine));
+        // The next sweep reads nothing new: every verdict is kept for the
+        // process's lifetime, and an unreadable one is retried, not forever.
+        for _ in 0..UNREADABLE_TRIES + 2 {
+            reads.borrow_mut().clear();
+            let again = origins.owned(processes.clone(), &mine, &accept, read);
+            assert_eq!(again.len(), 4);
+            assert!(reads.borrow().iter().all(|pid| *pid == 500), "{:?}", reads.borrow());
+        }
+        reads.borrow_mut().clear();
+        origins.owned(processes.clone(), &mine, &accept, read);
+        assert!(reads.borrow().is_empty(), "gave up on the unreadable process");
+        // With the agent and its leftovers gone, nothing is owned: the scan
+        // has nothing to look for.
+        let rest: HashMap<u32, Process> = processes
+            .into_iter()
+            .filter(|(pid, _)| ![100, 101, 102, 110].contains(pid))
+            .collect();
+        assert!(origins.owned(rest, &mine, &accept, read).is_empty());
+        // Other users' processes are never read.
+        reads.borrow_mut().clear();
+        let theirs: HashMap<u32, Process> = [(700, p(1, 10))].into();
+        assert!(origins.owned(theirs, &HashSet::new(), &accept, read).is_empty());
+        assert!(reads.borrow().is_empty());
+    }
     #[test]
     fn origin_marker_matches_the_whole_name() {
         assert_eq!(
@@ -1281,7 +1551,7 @@ mod tests {
         let v6 = std::net::TcpListener::bind("[::1]:0").unwrap();
         let any = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let pid = std::process::id();
-        let mut ours: Vec<String> = libproc::listening_sockets()
+        let mut ours: Vec<String> = libproc::listening_sockets(None)
             .expect("socket records readable")
             .into_iter()
             .filter(|(p, _, _)| *p == pid)
