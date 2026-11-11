@@ -98,8 +98,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: android
-          # Only main writes the cache: pull request caches would evict main's.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Restored, never saved: its ~0.9 GB saved the least build time per GB of
+          # the repository's 10 GB cache (docs/reference/ci.md#caches).
+          save-if: false
       - name: build tools (cargo-ndk, rsvg-convert)
         run: |
           cargo install cargo-ndk --locked

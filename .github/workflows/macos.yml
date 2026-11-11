@@ -165,8 +165,9 @@ jobs:
           git -C frame-source-tests checkout --detach FETCH_HEAD
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          # Restored, never saved: it runs only when the GPUI pin moves, and its cache
+          # saved the least build time per GB of the 10 GB (docs/reference/ci.md#caches).
+          save-if: false
           workspaces: frame-source-tests
       - name: Native frame-source recovery regression
         working-directory: frame-source-tests

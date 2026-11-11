@@ -69,6 +69,7 @@ jobs:
           save-rust-cache: 'true'
           # One .deb cache for both package sets (apt-install.sh uses it as its archive).
           apt-cache: ui-browser
+          save-apt-cache: 'true'
           apt-recommends: ${{ inputs.browser && 'true' || 'false' }}
           apt-packages: >-
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev

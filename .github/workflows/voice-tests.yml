@@ -35,8 +35,9 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p 'test_voice_remote*.py' -v
       - uses: ./.github/actions/linux-ci
         with:
+          # Restored, never saved: voice runs nightly, and its cache saved the least
+          # build time per GB of the repository's 10 GB (docs/reference/ci.md#caches).
           rust-cache: voice
-          save-rust-cache: 'true'
           apt-cache: voice
           apt-packages: >-
             libasound2-dev clang libclang-dev pkg-config meson ninja-build
@@ -67,9 +68,9 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Only main writes the cache: pull request caches evicted main's.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          # Restored, never saved: voice runs nightly, and its cache saved the least
+          # build time per GB of the repository's 10 GB (docs/reference/ci.md#caches).
+          save-if: false
       - name: Initialize a projected Windows runtime (no provider or audio devices)
         run: |
           $env:ZERON_VOICE_MEDIA_DIR = Join-Path $env:RUNNER_TEMP 'zeron-media/codex-resources/voice'
