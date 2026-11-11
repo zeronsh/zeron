@@ -502,22 +502,19 @@ pub(crate) fn user_message_line(text: &str) -> String {
 /// its result, in the same turn. An interrupted turn still emits a `result`.
 #[cfg(test)]
 pub(crate) fn steer_message_line(text: &str, id: &str, immediate: bool) -> String {
-    steer_message_line_with_images(text, id, immediate, &[])
+    steer_message_line_with_images(&[text.to_owned()], id, immediate, &[])
 }
 
 /// [`steer_message_line`] carrying inline images ahead of the text, in the
 /// same block shape as [`user_message_line_with_images`].
+/// `texts`: the message's text blocks ([`message_content`]).
 pub(crate) fn steer_message_line_with_images(
-    text: &str,
+    texts: &[String],
     id: &str,
     immediate: bool,
     images: &[ImageBlock],
 ) -> String {
-    let content = if images.is_empty() {
-        Value::String(text.to_owned())
-    } else {
-        Value::Array(content_blocks(text, images))
-    };
+    let content = message_content(texts, images);
     serde_json::json!({"type":"user", "uuid":id, "priority": if immediate { "now" } else { "next" },
         "message":{"role":"user","content":content}, "parent_tool_use_id":null})
     .to_string()
@@ -538,12 +535,8 @@ pub(crate) struct ImageBlock {
 /// The run's opening prompt, tagged with `id` so its `command_lifecycle`
 /// frames can be told apart from a steer's. Images precede the text, as in
 /// [`user_message_line_with_images`].
-pub(crate) fn prompt_line(text: &str, id: &str, images: &[ImageBlock]) -> String {
-    let content = if images.is_empty() {
-        Value::String(text.to_owned())
-    } else {
-        Value::Array(content_blocks(text, images))
-    };
+pub(crate) fn prompt_line(texts: &[String], id: &str, images: &[ImageBlock]) -> String {
+    let content = message_content(texts, images);
     json!({
         "type": "user",
         "uuid": id,
@@ -566,8 +559,34 @@ pub(crate) fn user_message_line_with_images(text: &str, images: &[ImageBlock]) -
     .to_string()
 }
 
+/// A user message's content: one text as a plain string, as ever; more
+/// texts (a selected skill's own block, see
+/// `zeron_proto::invocation::claude_prompt_blocks`) or any image as blocks,
+/// the images first.
+fn message_content(texts: &[String], images: &[ImageBlock]) -> Value {
+    match texts {
+        [text] if images.is_empty() => Value::String(text.clone()),
+        _ => {
+            let mut blocks = image_blocks(images);
+            blocks.extend(
+                texts
+                    .iter()
+                    .map(|text| json!({ "type": "text", "text": text })),
+            );
+            Value::Array(blocks)
+        }
+    }
+}
+
+#[cfg(test)]
 fn content_blocks(text: &str, images: &[ImageBlock]) -> Vec<Value> {
-    let mut blocks: Vec<Value> = images
+    let mut blocks = image_blocks(images);
+    blocks.push(json!({ "type": "text", "text": text }));
+    blocks
+}
+
+fn image_blocks(images: &[ImageBlock]) -> Vec<Value> {
+    images
         .iter()
         .map(|img| {
             json!({
@@ -579,9 +598,7 @@ fn content_blocks(text: &str, images: &[ImageBlock]) -> Vec<Value> {
                 },
             })
         })
-        .collect();
-    blocks.push(json!({ "type": "text", "text": text }));
-    blocks
+        .collect()
 }
 
 /// The run's opening control request. `perTaskStopAffordance` tells the CLI

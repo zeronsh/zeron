@@ -972,6 +972,15 @@ impl Harness for ClaudeHarness {
     }
 }
 
+/// A user message's text blocks: a selected skill becomes the slash command
+/// that opens the last one (`claude_prompt_blocks`). Ultrathink leads the
+/// first, unless a command opens it.
+fn message_texts(reasoning: Option<zeron_proto::ReasoningLevel>, prompt: &str) -> Vec<String> {
+    let mut texts = zeron_proto::invocation::claude_prompt_blocks(prompt);
+    texts[0] = apply_ultrathink(reasoning, &texts[0]);
+    texts
+}
+
 impl ClaudeHarness {
     async fn run_with_mode(
         &self,
@@ -1023,11 +1032,14 @@ impl ClaudeHarness {
         // the old-app behavior (the agent opens the path with its Read tool).
         let images = load_image_blocks(&request.attachments).await;
         let first_command = uuid::Uuid::new_v4().to_string();
-        let first = wire::prompt_line(
-            &apply_ultrathink(request.reasoning, &request.prompt),
-            &first_command,
-            &images,
-        );
+        // (A title run's prompt quotes the user's request: what is selected
+        // there is only words to title, never a skill to run.)
+        let texts = if title_only {
+            vec![apply_ultrathink(request.reasoning, &request.prompt)]
+        } else {
+            message_texts(request.reasoning, &request.prompt)
+        };
+        let first = wire::prompt_line(&texts, &first_command, &images);
         stdin.line(first);
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
@@ -1720,7 +1732,7 @@ async fn run_session(session: Session) {
                     let id = uuid::Uuid::new_v4().to_string();
                     let images = load_image_blocks(&msg.attachments).await;
                     let line = wire::steer_message_line_with_images(
-                        &apply_ultrathink(config.reasoning, &msg.prompt),
+                        &message_texts(config.reasoning, &msg.prompt),
                         &id,
                         open_tools.is_empty(),
                         &images,

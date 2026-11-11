@@ -204,15 +204,55 @@ pub fn validate_harness_invocations(text: &str, harness: crate::HarnessId) -> Re
     Ok(())
 }
 
-/// Keep selected skill identity intact until Codex builds native input blocks.
-/// Other providers receive readable Markdown and their advertised command text.
-pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
+/// Mentions of images, files, chats and annotations become the plain text
+/// every provider reads; selections stay canonical links.
+fn mention_prompt(text: &str) -> String {
     // Browser annotations become plain text blocks for every provider.
-    let text = crate::annotation::annotation_prompt(&crate::file_mentions::file_mention_prompt(
+    crate::annotation::annotation_prompt(&crate::file_mentions::file_mention_prompt(
         &crate::attachment_mentions::attachment_mention_prompt(
             &crate::chat_mentions::chat_mention_prompt(text),
         ),
-    ));
+    ))
+}
+
+/// One selection as `harness` reads it, at `range` in `text`.
+fn harness_selection(
+    text: &str,
+    range: &Range<usize>,
+    invocation: &Invocation,
+    harness: crate::HarnessId,
+) -> String {
+    match invocation {
+        Invocation::Skill {
+            command: Some(command),
+            ..
+        } if command.harness == harness
+            && text[..range.start]
+                .trim_matches([' ', '\t', '\r', '\n'])
+                .is_empty() =>
+        {
+            // The catalog supplies the provider's canonical command, regardless
+            // of whether the user selected the skill through $ or /.
+            format!("/{}", command.name)
+        }
+        Invocation::Skill {
+            path,
+            command: Some(command),
+            ..
+        } if native_skill_identity(path) && command.harness == harness => {
+            format!("Use the skill /{}", command.name)
+        }
+        // Inline invocations and file-only providers need explicit intent;
+        // a dollar token by itself has no universal provider semantics.
+        Invocation::Skill { .. } => format!("Use the skill {}", invocation.prompt_text()),
+        Invocation::Command { .. } => invocation.prompt_text(),
+    }
+}
+
+/// Keep selected skill identity intact until Codex builds native input blocks.
+/// Other providers receive readable Markdown and their advertised command text.
+pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
+    let text = mention_prompt(text);
     if harness == crate::HarnessId::Codex {
         return text;
     }
@@ -220,38 +260,67 @@ pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
     let mut at = 0;
     for (range, invocation) in invocation_links(&text) {
         result.push_str(&text[at..range.start]);
-        match &invocation {
-            Invocation::Skill {
-                command: Some(command),
-                ..
-            } if command.harness == harness
-                && text[..range.start]
-                    .trim_matches([' ', '\t', '\r', '\n'])
-                    .is_empty() =>
-            {
-                // The catalog supplies the provider's canonical command, regardless
-                // of whether the user selected the skill through $ or /.
-                result.push_str(&format!("/{}", command.name));
-            }
-            Invocation::Skill {
-                path,
-                command: Some(command),
-                ..
-            } if native_skill_identity(path) && command.harness == harness => {
-                result.push_str(&format!("Use the skill /{}", command.name));
-            }
-            Invocation::Skill { .. } => {
-                // Inline invocations and file-only providers need explicit intent;
-                // a dollar token by itself has no universal provider semantics.
-                result.push_str("Use the skill ");
-                result.push_str(&invocation.prompt_text());
-            }
-            _ => result.push_str(&invocation.prompt_text()),
-        }
+        result.push_str(&harness_selection(&text, &range, &invocation, harness));
         at = range.end;
     }
     result.push_str(&text[at..]);
     result
+}
+
+/// The text blocks of a Claude Code user message for `text`.
+///
+/// Claude Code runs a skill natively only when its `/name` opens the last
+/// text block of the message, and everything after the name becomes the
+/// skill's arguments. A skill selected at the start of the message is
+/// already that: one block, as [`harness_prompt`] writes it. A skill
+/// selected later in the message gets a second block, `/name` and the text
+/// after it, behind the whole message as written. Earlier skills in the
+/// same message can't run natively too, and the model may not start a
+/// user-only skill itself, so each says where its instructions are.
+pub fn claude_prompt_blocks(text: &str) -> Vec<String> {
+    let harness = crate::HarnessId::ClaudeCode;
+    let text = mention_prompt(text);
+    let links = invocation_links(&text);
+    let slash = |invocation: &Invocation| match invocation {
+        Invocation::Skill {
+            command: Some(command),
+            ..
+        } if command.harness == harness => Some(command.name.clone()),
+        _ => None,
+    };
+    let last = links
+        .iter()
+        .rposition(|(_, invocation)| slash(invocation).is_some());
+    let Some(last) = last.filter(|&last| {
+        !text[..links[last].0.start]
+            .trim_matches([' ', '\t', '\r', '\n'])
+            .is_empty()
+    }) else {
+        return vec![harness_prompt(&text, harness)];
+    };
+    let mut whole = String::new();
+    let mut rest = String::new();
+    let mut at = 0;
+    for (index, (range, invocation)) in links.iter().enumerate() {
+        let piece = match (slash(invocation), invocation) {
+            (Some(name), _) if index == last => format!("/{name}"),
+            (Some(name), Invocation::Skill { path, .. }) if !native_skill_identity(path) => {
+                format!("/{name} (a skill the user picked; its instructions are in {path})")
+            }
+            _ => harness_selection(&text, range, invocation, harness),
+        };
+        whole.push_str(&text[at..range.start]);
+        whole.push_str(&piece);
+        if index > last {
+            rest.push_str(&text[at..range.start]);
+            rest.push_str(&piece);
+        }
+        at = range.end;
+    }
+    whole.push_str(&text[at..]);
+    rest.push_str(&text[at..]);
+    let name = slash(&links[last].1).expect("the last slash skill");
+    vec![whole, format!("/{name}{}", rest.trim_end())]
 }
 
 pub fn invocation_prompt(text: &str) -> String {
@@ -310,6 +379,67 @@ mod tests {
         crate::HarnessId::Opencode,
         crate::HarnessId::Muse,
     ];
+
+    fn claude_skill(name: &str, path: &str) -> Invocation {
+        Invocation::Skill {
+            name: name.into(),
+            path: path.into(),
+            command: Some(SkillCommand {
+                name: name.into(),
+                harness: crate::HarnessId::ClaudeCode,
+            }),
+        }
+    }
+
+    #[test]
+    fn claude_gets_a_mid_message_skill_as_its_last_text_block() {
+        let tidy = claude_skill("p:tidy", "/s/tidy/SKILL.md");
+        let native = claude_skill("p:native", "harness-skill:p:native");
+        let codex = Invocation::Skill {
+            name: "fix".into(),
+            path: "/s/fix/SKILL.md".into(),
+            command: Some(SkillCommand {
+                name: "fix".into(),
+                harness: crate::HarnessId::Codex,
+            }),
+        };
+        let review = Invocation::Command {
+            name: "review".into(),
+        };
+        // No selection, or a skill already leading: one block, as ever.
+        for text in [
+            "just words /p:tidy".to_owned(),
+            format!("\n {} the parser", tidy.link()),
+            format!("{} then {}", review.link(), codex.link()),
+        ] {
+            assert_eq!(
+                claude_prompt_blocks(&text),
+                vec![harness_prompt(&text, crate::HarnessId::ClaudeCode)],
+                "{text}"
+            );
+        }
+        assert_eq!(
+            claude_prompt_blocks(&format!("Please {} the parser\n", tidy.link())),
+            ["Please /p:tidy the parser\n", "/p:tidy the parser"]
+        );
+        // Only the last runs natively; earlier ones say where they live, and
+        // what follows the last is its arguments, written as before.
+        assert_eq!(
+            claude_prompt_blocks(&format!(
+                "{} and {} then {} with {} and {}",
+                tidy.link(),
+                native.link(),
+                tidy.link(),
+                review.link(),
+                codex.link()
+            )),
+            [
+                "/p:tidy (a skill the user picked; its instructions are in /s/tidy/SKILL.md) and \
+                 Use the skill /p:native then /p:tidy with /review and Use the skill [$fix](/s/fix/SKILL.md)",
+                "/p:tidy with /review and Use the skill [$fix](/s/fix/SKILL.md)",
+            ]
+        );
+    }
 
     #[test]
     fn image_chips_reach_every_provider_as_their_plain_label() {

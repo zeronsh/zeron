@@ -517,6 +517,105 @@ async fn ultrathink_preserves_selected_commands_on_initial_and_steered_sends() {
     }
 }
 
+/// The user frames' `message.content`, as the CLI read them.
+fn captured_contents(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|frame| frame["type"] == "user")
+        .map(|frame| frame["message"]["content"].clone())
+        .collect()
+}
+
+/// Claude Code runs a skill natively only when its `/name` opens the last
+/// text block of the message. A skill selected later in a message (as the
+/// engine hands it over, a canonical selection) gets that block of its own
+/// after the whole message, on the first prompt and on a steer alike; one
+/// selected at the start stays the plain `/name args` message it was.
+#[tokio::test]
+async fn a_skill_selected_mid_message_opens_the_last_text_block() {
+    use zeron_proto::invocation::{Invocation, SkillCommand};
+
+    let skill = |name: &str| Invocation::Skill {
+        name: name.into(),
+        path: format!("/repo/.claude/skills/{name}/SKILL.md"),
+        command: Some(SkillCommand {
+            name: format!("pstack:{name}"),
+            harness: HarnessId::ClaudeCode,
+        }),
+    };
+    let poteto = skill("poteto-mode");
+    let review = skill("review");
+    let dir = tempfile::tempdir().unwrap();
+
+    // The first prompt: a selection mid-message.
+    let capture = dir.path().join("run.jsonl");
+    let mut initial = request(&format!(
+        "Please run {} on the parser, then tidy",
+        poteto.link()
+    ));
+    initial.env.insert(
+        "FAKE_CLAUDE_CAPTURE".into(),
+        capture.to_string_lossy().into(),
+    );
+    let (run_controls, _steer, _token) = controls("A");
+    run_to_end(&harness(), initial, run_controls).await;
+    assert_eq!(
+        captured_contents(&capture),
+        vec![serde_json::json!([
+            { "type": "text", "text": "Please run /pstack:poteto-mode on the parser, then tidy" },
+            { "type": "text", "text": "/pstack:poteto-mode on the parser, then tidy" },
+        ])]
+    );
+
+    // A steer: two selections, the earlier one pointing at its instructions.
+    let capture = dir.path().join("steer.jsonl");
+    let (steer_controls, steer, _token) = controls("A");
+    steer
+        .send(SteerMessage {
+            prompt: format!(
+                "First {} and then {} the diff",
+                review.link(),
+                poteto.link()
+            ),
+            message_id: None,
+            attachments: Vec::new(),
+            config: None,
+        })
+        .await
+        .unwrap();
+    let mut initial = request("scenario:steer");
+    initial.env.insert(
+        "FAKE_CLAUDE_CAPTURE".into(),
+        capture.to_string_lossy().into(),
+    );
+    run_to_end(&harness(), initial, steer_controls).await;
+    let contents = captured_contents(&capture);
+    assert_eq!(contents[0], serde_json::json!("scenario:steer"));
+    assert_eq!(
+        contents[1],
+        serde_json::json!([
+            { "type": "text", "text": "First /pstack:review (a skill the user picked; its instructions are in /repo/.claude/skills/review/SKILL.md) and then /pstack:poteto-mode the diff" },
+            { "type": "text", "text": "/pstack:poteto-mode the diff" },
+        ])
+    );
+
+    // At the start: one plain message, as before.
+    let capture = dir.path().join("leading.jsonl");
+    let mut initial = request(&format!("{} on the parser", poteto.link()));
+    initial.env.insert(
+        "FAKE_CLAUDE_CAPTURE".into(),
+        capture.to_string_lossy().into(),
+    );
+    let (run_controls, _steer, _token) = controls("A");
+    run_to_end(&harness(), initial, run_controls).await;
+    assert_eq!(
+        captured_contents(&capture),
+        vec![serde_json::json!("/pstack:poteto-mode on the parser")]
+    );
+}
+
 #[tokio::test]
 async fn steering_lines_are_written_to_stdin_mid_run() {
     let (controls, steer, _token) = controls("A");

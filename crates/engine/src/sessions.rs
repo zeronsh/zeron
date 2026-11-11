@@ -900,7 +900,8 @@ impl SessionsEngine {
                     // OpenCode must see the canonical selection before it
                     // decodes the provider command: a project-scoped command
                     // can disappear between composer discovery and delivery.
-                    prompt: if harness_id == HarnessId::Opencode {
+                    // Claude Code builds its message blocks from it.
+                    prompt: if selections_reach_harness(harness_id) {
                         delivered.to_owned()
                     } else {
                         zeron_proto::invocation::harness_prompt(delivered, harness_id)
@@ -1414,7 +1415,7 @@ impl SessionsEngine {
             Box::new(request)
         });
         let message = SteerMessage {
-            prompt: if harness_id == HarnessId::Opencode {
+            prompt: if selections_reach_harness(harness_id) {
                 delivered.to_owned()
             } else {
                 zeron_proto::invocation::harness_prompt(delivered, harness_id)
@@ -3111,6 +3112,14 @@ impl Inner {
                     .parts
                     .iter()
                     .filter_map(|part| match part {
+                        // Earlier selections are history, never this
+                        // turn's: Claude Code reads its prompt's selections
+                        // itself, so they reach it as the words they were.
+                        zeron_doc::MessagePart::Text { text, .. }
+                            if harness_id == HarnessId::ClaudeCode =>
+                        {
+                            Some(zeron_proto::invocation::harness_prompt(text, harness_id))
+                        }
                         zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
                         zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
                             "Tool: {}\n{}",
@@ -3166,6 +3175,14 @@ impl Inner {
             prompt
         ))
     }
+}
+
+/// Harnesses that read the composer's canonical selections themselves:
+/// OpenCode resolves its commands at delivery, and Claude Code puts a
+/// selected skill's slash command at the head of the message's last text
+/// block (`zeron_proto::invocation::claude_prompt_blocks`).
+fn selections_reach_harness(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::Opencode | HarnessId::ClaudeCode)
 }
 
 /// Whether the provider routes this prompt as a native command: a command
@@ -4007,7 +4024,7 @@ async fn drive_run(
                     listener(&chat_id, &request.cwd);
                 }
                 let mut wire_request = request;
-                if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
+                if !matches!(harness_id, HarnessId::Cursor) && !selections_reach_harness(harness_id) {
                     wire_request.prompt =
                         zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
                 }

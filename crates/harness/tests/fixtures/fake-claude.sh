@@ -24,6 +24,10 @@ while :; do
 done
 
 emit() { printf '%s\n' "$1"; }
+# FAKE_CLAUDE_CAPTURE: a file each user line read is added to, for a test to
+# read the frames as the CLI got them.
+capture() { [ -z "$FAKE_CLAUDE_CAPTURE" ] || printf '%s\n' "$1" >> "$FAKE_CLAUDE_CAPTURE"; }
+capture "$first"
 uuid_of() { printf '%s\n' "$1" | sed 's/.*"uuid":"\([^"]*\)".*/\1/'; }
 
 case "$first" in
@@ -183,6 +187,7 @@ case "$first" in
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'
   # The queued steering user line, applied at "the step boundary" (here: now).
   read -r steer || exit 1
+  capture "$steer"
   case "$steer" in *'"priority":"now"'*) ;; *) exit 9 ;; esac
   # Old output continues until Claude actually consumes the input.
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"-still-first"}}}'
