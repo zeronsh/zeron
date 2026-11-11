@@ -55,8 +55,8 @@ export type Item = {
 	-- model's provider, telling it from a namesake), searched as its name
 	-- is. The name gives way first: it fades, the hint stays whole. With
 	-- `hint_when_found`, they show only while a search found the row by
-	-- them (its name alone doesn't hold what was typed). Both are followed
-	-- as the items change (a row's hint comes and goes in place).
+	-- them (its name alone doesn't hold what was typed). A row whose hint
+	-- changes is built again (its key holds them).
 	hint: string?,
 	hint_when_found: boolean?,
 	-- Its label is an email address: drawn as ds.PrivateText draws one, its
@@ -444,9 +444,8 @@ return ui.component(function(props: Props): Node
 		return now.hint ~= nil and (not now.hint_when_found or not by_name(now, string.lower(query:get())))
 	end
 	-- A name with its hint beside it: the name fades where the row runs
-	-- short, the hint keeps its width; the row's own gap between them. The
-	-- hint follows the row's item as it changes (`live`).
-	local function named(item: Item, live: State<Item>): Node
+	-- short, the hint keeps its width; the row's own gap between them.
+	local function named(item: Item): Node
 		return ui.row {
 			grow = 1,
 			min_w = 0,
@@ -459,11 +458,9 @@ return ui.component(function(props: Props): Node
 				shrink = 1,
 			},
 			ui.show(function(): boolean
-				return hint_shown(live:get())
+				return hint_shown(item)
 			end, ui.text {
-				function(): string
-					return live:get().hint or ""
-				end,
+				item.hint :: string,
 				shrink = 0,
 				text_size = "$font.size.md",
 				color = "$text.tertiary",
@@ -1172,15 +1169,14 @@ return ui.component(function(props: Props): Node
 				local items: { Node } = {}
 				table.insert(
 					items,
-					ui.each(shown, function(item: Item, _i: number, live: State<Item>)
+					ui.each(shown, function(item: Item)
 						local r = row({
 							role = "option",
 							-- A row with a hint is heard as it reads: its name,
 							-- then its hint while that shows.
 							label = if item.hint
 								then function(): string
-									local now = live:get()
-									return if hint_shown(now) then `{item.label} {now.hint}` else item.label
+									return if hint_shown(item) then `{item.label} {item.hint}` else item.label
 								end
 								else nil,
 							-- What assistive technology hears the selected
@@ -1254,7 +1250,7 @@ return ui.component(function(props: Props): Node
 										wrap = true,
 									},
 								}
-								elseif item.hint then named(item, live)
+								elseif item.hint then named(item)
 								else text(item.label),
 							if item.tag
 								then ui.text {
@@ -1300,10 +1296,12 @@ return ui.component(function(props: Props): Node
 							r,
 						}
 					end, {
-						-- (A row gaining or losing its hint is built again, with
-						-- or without the hint's place.)
+						-- (A row whose hint changes, or comes or goes, is built
+						-- again: its hint is part of what it is.)
 						key = function(item: Item)
-							return if item.hint then `{item.value}\0hint` else item.value
+							return if item.hint
+								then `{item.value}\0{item.hint}\0{if item.hint_when_found then "found" else "always"}`
+								else item.value
 						end,
 						w_full = true,
 					})
