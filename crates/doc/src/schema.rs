@@ -787,6 +787,10 @@ impl SessionDoc {
         let LoroValue::List(items) = self.doc.get_list(root).get_value() else {
             return Vec::new();
         };
+        // Changes not yet committed show in the doc but their events come
+        // only at the commit: read every item now (the commit's events then
+        // mark the ones it changed, to read again).
+        let changed = if self.doc.get_pending_txn_len() > 0 { EntryChanges::all() } else { changed };
         if changed.all {
             cache.items.clear();
         } else {
@@ -1931,6 +1935,106 @@ pub fn materialize_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The doc's own cached reads never go stale, however the doc moves:
+    /// undo, revert, checkout and back, a fork, queue changes, and two
+    /// devices editing the same earlier entry at once, each importing the
+    /// other's. Checked against a whole read after every step.
+    #[test]
+    fn cached_reads_follow_undo_revert_checkout_fork_and_concurrent_edits() {
+        use crate::queue::QueuedMessage;
+        let same = |doc: &SessionDoc, what: &str| {
+            assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap(), "entries, after {what}");
+            assert_eq!(doc.read_commands().unwrap(), doc.read_commands_whole().unwrap(), "commands, after {what}");
+        };
+        let entry = |id: &str, words: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: words.into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let a = SessionDoc::init("moves").unwrap();
+        for i in 0..20 {
+            a.push_message(&entry(&format!("row-{i}"), "words")).unwrap();
+        }
+        same(&a, "first rows");
+
+        // Queue rows come and go; the transcript stays as it was.
+        let row = |id: &str| QueuedMessage {
+            id: id.into(),
+            text: "later".into(),
+            attachments: Vec::new(),
+            hold_for_turn_end: false,
+            issued_by: "dev".into(),
+            issued_at: 1,
+            edited_at: None,
+            delivery_gate: None,
+        };
+        a.push_queued(&row("q1")).unwrap();
+        a.set_queued_text("q1", "later, edited", 2).unwrap();
+        same(&a, "queue changes");
+        a.remove_queued("q1").unwrap();
+        same(&a, "queue row removed");
+
+        // Undo: an earlier entry's change, then a new entry, undone.
+        let mut undo = loro::UndoManager::new(a.doc());
+        a.append_error_part("row-4", "row-4-note", "stopped").unwrap();
+        same(&a, "earlier entry changed");
+        a.push_message(&entry("undone", "soon gone")).unwrap();
+        same(&a, "pushed");
+        undo.undo().unwrap();
+        same(&a, "undo of the push");
+        undo.undo().unwrap();
+        same(&a, "undo of the earlier change");
+        undo.redo().unwrap();
+        same(&a, "redo");
+
+        // Revert to an earlier version, as a new change.
+        let before = a.doc().state_frontiers();
+        a.set_message_status("row-2", MessageStatus::Aborted).unwrap();
+        a.push_message(&entry("reverted", "soon gone")).unwrap();
+        same(&a, "before revert");
+        a.doc().revert_to(&before).unwrap();
+        same(&a, "revert");
+
+        // Checkout to the past and back.
+        let now = a.doc().state_frontiers();
+        a.doc().checkout(&before).unwrap();
+        same(&a, "checkout");
+        a.doc().checkout_to_latest();
+        assert_eq!(a.doc().state_frontiers(), now);
+        same(&a, "back to latest");
+
+        // A fork reads as its source.
+        let fork = SessionDoc::from_doc(a.doc().fork());
+        assert_eq!(fork.read_entries().unwrap(), a.read_entries().unwrap());
+        same(&fork, "fork");
+
+        // Two devices edit the same earlier entry at once, each importing
+        // the other's; both read as whole, and the same.
+        let b = SessionDoc::from_doc(LoroDoc::new());
+        b.doc().import(&a.export_snapshot().unwrap()).unwrap();
+        same(&b, "b joined");
+        let (va, vb) = (a.doc().oplog_vv(), b.doc().oplog_vv());
+        a.append_error_part("row-9", "row-9-a", "from a").unwrap();
+        a.set_message_status("row-9", MessageStatus::Complete).unwrap();
+        b.append_error_part("row-9", "row-9-b", "from b").unwrap();
+        b.set_message_status("row-9", MessageStatus::Aborted).unwrap();
+        b.push_message(&entry("from-b", "b's")).unwrap();
+        same(&a, "a's edit");
+        same(&b, "b's edit");
+        let to_b = a.doc().export(ExportMode::updates(&vb)).unwrap();
+        let to_a = b.doc().export(ExportMode::updates(&va)).unwrap();
+        b.doc().import(&to_b).unwrap();
+        a.doc().import(&to_a).unwrap();
+        same(&a, "a imported b");
+        same(&b, "b imported a");
+        assert_eq!(a.read_entries().unwrap(), b.read_entries().unwrap());
+    }
 
     /// Every kind of transcript change, local or imported, reads the same
     /// through the entry cache as whole, and re-reads only what it touched.
