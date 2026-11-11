@@ -7067,7 +7067,7 @@ dependencies = [
 
 [[package]]
 name = "zatex"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "ttf-parser",
 ]
@@ -7233,7 +7233,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zeron-cli"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "anyhow",
  "clap",
@@ -7248,7 +7248,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-launch"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -7256,7 +7256,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-notify"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "objc",
  "sha2",
@@ -7265,18 +7265,18 @@ dependencies = [
 
 [[package]]
 name = "zeron-plugin-guard"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "zeron-preview-label"
-version = "0.2.139"
+version = "0.2.140"
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "chrono",
  "pulldown-cmark 0.12.2",
@@ -7287,7 +7287,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "anyhow",
  "clap",
@@ -7301,7 +7301,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "anyhow",
  "futures",
@@ -7318,7 +7318,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "base64 0.22.1",
  "gltf",
@@ -7330,7 +7330,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual-gpu"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "pollster",
  "tracing",
@@ -7340,7 +7340,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice"
-version = "0.2.139"
+version = "0.2.140"
 dependencies = [
  "anyhow",
  "cpal",
