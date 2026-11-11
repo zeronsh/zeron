@@ -3566,7 +3566,7 @@ impl DocHost {
             if let Some(handle) = evicted {
                 // Final flush outside the map lock; ≤1s of changes could be
                 // pending in the snapshot debounce.
-                self.save_snapshot(&handle);
+                self.save_snapshot_compacted(&handle);
                 tracing::debug!(chat = %handle.chat_id, "doc evicted (LRU)");
             }
         }
@@ -6696,6 +6696,16 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        self.persist(handle, false);
+    }
+
+    /// Save with any snapshot deltas folded in: the handle is going away
+    /// (eviction, shutdown), so the next open reads one blob.
+    fn save_snapshot_compacted(&self, handle: &ChatDocHandle) {
+        self.persist(handle, true);
+    }
+
+    fn persist(&self, handle: &ChatDocHandle, compact: bool) {
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -6703,16 +6713,21 @@ impl DocHost {
             // race) means this doc is its transcript's only copy — skipping
             // the save turned an app quit into total loss (2026-08-11);
             // persist it, and let the adopt path convert it on reopen.
+            // The epoch column alone: no blob read or delta merge.
             let thin_on_disk = matches!(
-                self.inner.store.load_snapshot_with_cursor(&handle.chat_id),
-                Ok(Some((_, _, epoch))) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
+                self.inner.store.snapshot_epoch(&handle.chat_id),
+                Ok(epoch) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
             );
             if thin_on_disk {
                 return;
             }
         }
         if let Some(persistence) = &handle.persistence {
-            persistence.flush_sync();
+            if compact {
+                persistence.compact_sync();
+            } else {
+                persistence.flush_sync();
+            }
             return;
         }
         match handle.doc.export_snapshot() {
@@ -6751,7 +6766,7 @@ impl DocHost {
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
-            self.save_snapshot(&handle);
+            self.save_snapshot_compacted(&handle);
         }
     }
 
