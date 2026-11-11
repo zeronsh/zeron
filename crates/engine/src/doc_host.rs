@@ -632,6 +632,13 @@ pub struct ChatDocHandle {
     sync_kick: Arc<tokio::sync::Notify>,
     /// A task waits for this chat's viewers to leave ([`Self::note_viewer`]).
     unwatch_waiter: Arc<AtomicBool>,
+    /// Cancelled as the handle drops: that waiter holds sender clones, and
+    /// must let them go then, so its viewers' streams end (and resubscribe)
+    /// exactly as if it weren't there.
+    unwatch_cancel: CancellationToken,
+    /// The runtime this handle was opened on, for that waiter: a view may
+    /// attach from a plain thread.
+    runtime: Option<tokio::runtime::Handle>,
     messages_tx: watch::Sender<TranscriptSnapshot>,
     /// Serialize historical imports with publication so an async doc-change
     /// task cannot publish recovered content before its presentation cutoff.
@@ -788,6 +795,7 @@ async fn changed<T>(rx: &mut Option<watch::Receiver<T>>) -> Option<Result<(), wa
 impl Drop for ChatDocHandle {
     fn drop(&mut self) {
         lock(&self.sync_cancel).cancel();
+        self.unwatch_cancel.cancel();
     }
 }
 
@@ -964,7 +972,10 @@ impl ChatDocHandle {
     /// kick the dispatcher, which no longer polls for it. One waiter per
     /// chat at a time, however often views attach.
     fn note_viewer(&self) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let Some(runtime) = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.runtime.clone())
+        else {
             return;
         };
         if self.unwatch_waiter.swap(true, Ordering::AcqRel) {
@@ -972,10 +983,15 @@ impl ChatDocHandle {
         }
         let (messages, queue) = (self.messages_tx.clone(), self.queue_tx.clone());
         let (waiter, kick) = (self.unwatch_waiter.clone(), self.sync_kick.clone());
+        let gone = self.unwatch_cancel.clone();
         runtime.spawn(async move {
             loop {
-                messages.closed().await;
-                queue.closed().await;
+                // The handle dropping ends the waiter (and its sender
+                // clones) at once: the streams must close with the handle.
+                tokio::select! {
+                    _ = gone.cancelled() => return,
+                    _ = async { messages.closed().await; queue.closed().await } => {}
+                }
                 waiter.store(false, Ordering::Release);
                 kick.notify_one();
                 // A view that attached meanwhile saw the waiter still set and
@@ -2132,6 +2148,8 @@ impl DocHost {
             doc: doc.clone(),
             sync_kick: self.inner.sync_kick.clone(),
             unwatch_waiter: Arc::new(AtomicBool::new(false)),
+            unwatch_cancel: CancellationToken::new(),
+            runtime: tokio::runtime::Handle::try_current().ok(),
             messages_tx,
             transcript_import: Mutex::default(),
             transcript_history,
@@ -2654,7 +2672,12 @@ impl DocHost {
                 let budget = zeron_sync::budget::shared().stats();
                 let global_contended = !budget.resource_paused && budget.sockets >= budget.socket_limit && budget.socket_waiting > 0;
                 // (A socket waiter arriving later signals `socket_contention`.)
-                busy |= global_contended;
+                // A descriptor-exhaustion pause ends on a clock, not an
+                // event: contention behind it is looked at again then.
+                busy |= global_contended
+                    || (budget.resource_paused
+                        && budget.sockets >= budget.socket_limit
+                        && budget.socket_waiting > 0);
                 // A teardown gap or the end of a paged disk scan is not the
                 // end of contention. Resetting there starves cold jobs under
                 // continuous navigation or a full set of active writers.

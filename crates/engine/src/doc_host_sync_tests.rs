@@ -1477,3 +1477,32 @@ async fn a_watched_caught_up_connection_runs_no_passes() {
     assert!(lock(&handle.chat2).is_none());
     host.shutdown_workers().await;
 }
+
+/// Retiring a viewed handle (a cutover, a delete) must end its viewers'
+/// streams, so they resubscribe: the waiter that kicks the dispatcher when
+/// views leave must not hold them open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_handle_ends_its_viewers_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = DocHost::new(
+        Arc::new(DocsStore::open(dir.path()).unwrap()),
+        DocHostConfig {
+            device_id: "here".into(),
+            default_harness: HarnessId::Mock,
+            edge: None,
+        },
+    );
+    let handle = host.open("viewed").unwrap();
+    let mut messages = handle.watch_messages();
+    let mut queue = handle.watch_queue();
+    tokio::time::sleep(Duration::from_millis(50)).await; // the waiter runs
+    lock(&host.inner.handles).remove("viewed");
+    drop(handle);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while messages.changed().await.is_ok() {}
+        while queue.changed().await.is_ok() {}
+    })
+    .await
+    .expect("a viewer's stream outlived its dropped handle");
+    host.shutdown_workers().await;
+}
