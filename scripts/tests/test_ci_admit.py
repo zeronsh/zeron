@@ -417,6 +417,78 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(api.calls), 7)
 
 
+class SharedPoolTests(unittest.TestCase):
+    """One queue across the organization's repositories (CI_PEERS), and runs
+    admission doesn't schedule (releases, a peer's CI without admission) seen
+    as holding what they run or queue."""
+
+    class OrgApi:
+        def __init__(self, workflows, runs, jobs, labels=None):
+            self.workflows, self.runs, self.jobs = workflows, runs, jobs
+            self.labels = labels or {}
+
+        def get(self, path):
+            repo = "/".join(path.split("/")[2:4])
+            if "/issues?" in path:
+                label = path.split("labels=")[1].split("&")[0].replace("%3A", ":")
+                return [{"number": n, "pull_request": {}} for n in self.labels.get((repo, label), [])]
+            if "/pulls/" in path:
+                return {"head": {"sha": "h"}}
+            if path.endswith(".yml"):
+                return {"id": self.workflows[repo]}
+            if "/workflows/" in path:
+                wid = int(path.split("/workflows/")[1].split("/")[0])
+                return {"workflow_runs": [r for r in self.runs[repo]
+                                          if r["workflow_id"] == wid and r["status"] == "in_progress"]}
+            if "/actions/runs?" in path:
+                status = path.split("status=")[1].split("&")[0]
+                return {"workflow_runs": [r for r in self.runs[repo] if r["status"] == status]}
+            run = int(path.split("/runs/")[1].split("/")[0])
+            return {"jobs": self.jobs[run]}
+
+    def wfrun(self, rid, wid, status="in_progress", event="push"):
+        return {"id": rid, "workflow_id": wid, "status": status, "updated_at": "a", "event": event, "head_sha": "h"}
+
+    def test_peer_queue_priority_and_outside_runs(self):
+        api = self.OrgApi(
+            workflows={"z/gx": 50},
+            runs={
+                "o/r": [self.wfrun(1, 9), self.wfrun(2, 7)],  # 2: this repo's release (another workflow)
+                "z/gx": [self.wfrun(3, 50, event="pull_request"), self.wfrun(4, 50), self.wfrun(5, 60, "queued")],
+            },
+            jobs={
+                1: [dict(job("admit [linux=2]", "ubuntu-24.04", "in_progress", None),
+                         created_at="2026-10-27T00:00:02Z", id=10)],
+                2: [job("build", "macos-latest", "in_progress", None), job("approve", "ubuntu", "waiting", None)],
+                # A peer's waiting run claiming its pull request #1 (labelled ci:priority there).
+                3: [dict(job("admit [linux=1 windows=1] #1", "ubuntu-24.04", "in_progress", None),
+                         created_at="2026-10-27T00:00:01Z", id=30)],
+                # A peer CI run without admission: what it runs and queues counts.
+                4: [job("linux", "ubuntu-latest", "in_progress", None), job("windows", "windows-latest", "queued", None)],
+                # A peer's release, queued for runners.
+                5: [job("macos", "macos-latest", "queued", None)],
+            },
+            labels={("z/gx", "ci:priority"): [1]},
+        )
+        scheduler = admit.Scheduler(api, "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"), outside=True)
+        snap = scheduler.snapshot()
+        self.assertEqual(sorted(w.run_id for w in snap.waiters), [1, 3])
+        peer = next(w for w in snap.waiters if w.run_id == 3)
+        self.assertEqual(peer.pr, "z/gx#1")  # a peer's pull request, never confused with this repo's #1
+        self.assertIn("z/gx#1", snap.priority)
+        held_needs = sorted(tuple(h.need.values()) for h in snap.holding)
+        # This repo's release (macOS; its approval wait holds nothing), the peer's run without
+        # admission (Linux + Windows), the peer's queued release (macOS).
+        self.assertEqual(held_needs, sorted([(1, 1, 0), (2, 0, 1), (1, 1, 0)]))
+        # The peer's prioritised run goes first, ahead of this repo's older-by-nothing one.
+        order = sorted(snap.waiters, key=lambda w: admit.rank(w, snap))
+        self.assertEqual([w.run_id for w in order], [3, 1])
+
+    def test_peers_parse(self):
+        self.assertEqual(admit.parse_peers("a/b:ci.yml, c/d:x.yml bad z/y:"), [("a/b", "ci.yml"), ("c/d", "x.yml")])
+        self.assertEqual(admit.parse_peers(""), [])
+
+
 class SupersededTests(unittest.TestCase):
     """A pull request run whose commit a newer push replaced stops waiting (ci-supersede.yml)."""
 
