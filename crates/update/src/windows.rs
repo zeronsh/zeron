@@ -416,7 +416,9 @@ pub async fn complete_install(
     }
     let manifest = super::fetch_latest_on(edge_url, super::Channel::of_version(version))
         .await
-        .context("reading the release feed")?;
+        .with_context(|| {
+            format!("reading the release feed (neither this version's manifest, manifest-{version}.json, nor the latest one)")
+        })?;
     let latest = manifest.version.trim().to_owned();
     if latest != version && !super::version_newer(&latest, version) {
         bail!("the release feed offers Zeron {latest}, which is older than this Zeron {version}");

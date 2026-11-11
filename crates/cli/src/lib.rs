@@ -250,7 +250,14 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
     };
     if engines == Engines::Helper && cli.command.as_ref().is_some_and(Command::runs_engine) {
         // The helper parses the same arguments and does all of the below
-        // itself (logging, Windows' image cleanup, the command).
+        // itself (logging, the command). Windows' image cleanup is this
+        // executable's, though (the helper isn't the installed zeron.exe): an
+        // install that's only ever run headless must lose the image an update
+        // set aside too.
+        #[cfg(windows)]
+        if matches!(&cli.command, Some(Command::Headless) | Some(Command::Engine)) {
+            zeron_update::windows::cleanup_previous_image();
+        }
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(error) => return Launch::Done(Err(error.into())),
