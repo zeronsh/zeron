@@ -648,11 +648,12 @@ return function(props: Props): Node
 	-- The width it would take, its tree docked: as last split (opening, a
 	-- neighbour opening or closing) or dragged. Kept across launches.
 	local files_w = ui.persist("shell_files_width", FILES_W)
-	-- Whether a width was chosen (its edge dragged, or keyed) since it was
-	-- last opened or closed: until its toggle, it holds that width (another
-	-- chat's panel, a relaunch), the fit narrowing it only as it must. Its
-	-- toggle forgets it, as Zeron's does: it opens at its share again, and
-	-- keeps to its share as the window is resized.
+	-- Whether a width was chosen (its edge dragged, or keyed): it holds that
+	-- width (another chat's panel, closed and opened again, a relaunch), the
+	-- fit narrowing it only as it must. Never chosen, it opens at its share,
+	-- and keeps to its share as the window is resized. (Its toggle used to
+	-- forget the width, as Zeron's did: a panel dragged narrow came back at
+	-- half the window each time it was opened.)
 	local chosen = ui.persist("shell_panel_width_chosen", false)
 	local from_x, from_w, resizing = 0, 0, false
 	-- Its edge being dragged: whether its tree was docked at the press (kept
@@ -835,32 +836,18 @@ return function(props: Props): Node
 			right_w:set(r)
 		end
 	end
-	-- (Whose panel shows: the session's, a plugin page's; none on a new
-	-- chat. Another one is the route moving, not the person opening or
-	-- closing this one, and the panel lands at once, as it is there.)
-	local function owner(peek: boolean): string
-		local c: any = if peek then route.chat:peek() else route.chat:get()
-		if c.name == "plugin" then
-			return `page:{c.plugin or ""}/{c.page or ""}`
-		end
-		return if c.name == "session" then `chat:{c.session or ""}` else c.name or ""
-	end
-	-- It opens at its share, unless a width was chosen since its toggle
-	-- (its edge dragged, then another chat's panel shown, or the fit hiding
-	-- it for room and bringing it back). Its toggle, opening or closing it,
-	-- forgets that width. (The sidebar folding or coming back splits them
-	-- again too, above, as Zeron's does: Gaël's call over Wing's earlier
-	-- rule, where the chat took all the sidebar gave and the panel held.)
-	local split = { on = shown:peek(), open = props.files:peek(), owner = owner(true) }
+	-- It opens at its share, unless a width was chosen (its edge dragged):
+	-- then at that width, as far as there's room, whether it was closed and
+	-- opened again, another chat's panel shown, or the fit hid it for room
+	-- and brought it back. (The sidebar folding or coming back splits them
+	-- again, above, as Zeron's does: Gaël's call over Wing's earlier rule,
+	-- where the chat took all the sidebar gave and the panel held; and the
+	-- sidebar's edge double-clicked, below.)
+	local split = { on = shown:peek() }
 	ui.effect(function()
 		local on = shown:get()
-		local open, who = props.files:get(), owner(false)
 		local changed = on ~= split.on
-		local toggled = open ~= split.open and who == split.owner
-		split = { on = on, open = open, owner = who }
-		if toggled and chosen:peek() then
-			chosen:set(false)
-		end
+		split = { on = on }
 		local vw = fit.viewport:peek()
 		if changed and on and not shell_view.expanded:peek() and vw > 0 then
 			local side = sidebar_settled()

@@ -1,8 +1,10 @@
 -- The right panel in the main window (A's ui/shell_fixture.luau, read as it
--- is): closing a chat's last tab closes that chat's panel, easing shut as
--- the title bar's toggle closes it, and leaves the other chats' alone;
--- opened again, it shows its empty page, its block a little over the
--- panel's middle, level with where a new chat's composer stands.
+-- is): by default, closing a chat's last tab leaves its panel open on its
+-- home. With Settings → General's "Close the panel with its last tab" on,
+-- it closes that chat's panel, easing shut as the title bar's toggle closes
+-- it, and leaves the other chats' alone; opened again, it shows its empty
+-- page, its block a little over the panel's middle, level with where a new
+-- chat's composer stands.
 
 local function eventually(app: any, ok: () -> boolean, ms: number?): boolean
 	local tries = math.ceil((ms or 15000) / 50)
@@ -71,7 +73,9 @@ test("closing a chat's last tab closes its panel, easing shut; other chats keep 
 	app:resize(1200, 800)
 	app:frames(30)
 	expect(app:error()).to_be_nil()
-	-- (Settings → General's "Close the panel with its last tab": on, untouched.)
+	-- (Settings → General's "Close the panel with its last tab": on. It's off
+	-- by default: the next test.)
+	app:set_state("settings_close_panel_with_last_tab", true)
 	-- Two chats, each with its panel open and a tab in it.
 	show_chat(app, "Write the docs")
 	open_files_tab(app)
@@ -125,6 +129,27 @@ test("closing a chat's last tab closes its panel, easing shut; other chats keep 
 		local page, block = box(app, "panel-empty"), box(app, "panel-home-block")
 		return page ~= nil and block ~= nil and block.h > page.h and block.y == page.y
 	end)).to_be(true)
+end)
+
+test("by default, closing a chat's last tab leaves its panel open on its home, at its width", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	expect(app:error()).to_be_nil()
+	show_chat(app, "Fix the build")
+	open_files_tab(app)
+	expect(panel_open(app, "a1")).to_be(true)
+	app:frames(30)
+	local open_w = panel_width(app)
+	expect(open_w > 300).to_be(true)
+	app:click("#panel-strip >> role:tab")
+	app:key("cmd+w")
+	-- Its home, the panel still open where it was.
+	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
+	app:frames(60)
+	expect(panel_open(app, "a1")).to_be(true)
+	expect(app:has("#panel-strip >> role:tab")).to_be(false)
+	expect(panel_width(app)).to_be(open_w)
 end)
 
 -- The focused node's line, as the tree says.
@@ -183,6 +208,7 @@ test("closing a chat's last tab, the panel shuts on what it showed: no frame of 
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)
 	app:frames(30)
+	app:set_state("settings_close_panel_with_last_tab", true)
 	show_chat(app, "Fix the build")
 	open_files_tab(app)
 	expect(app:has("#files-pane")).to_be(true)
