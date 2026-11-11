@@ -32,6 +32,9 @@ export type Bind = {
 	-- none from an older engine), and sending one again (its message id).
 	waiting: (() -> { any }?)?,
 	retry: ((message: string?) -> ())?,
+	-- Whether the chat's newest message is a prompt on its way: its machine
+	-- coming up is said under it in the transcript then, not in the deck.
+	sending: (() -> boolean)?,
 }
 
 function M.bind(c: Bind): any
@@ -165,7 +168,11 @@ function M.bind(c: Bind): any
 			return nil
 		end
 		local a = b.alert:get()
-		return { line = if a and a.kind == "expiring" then nil else logic.line(s, { intent = intent }) }
+		local line = if a and a.kind == "expiring" then nil else logic.line(s, { intent = intent })
+		if line and line.boot and c.sending and c.sending() then
+			line = nil
+		end
+		return { line = line }
 	end
 	function b.dismiss()
 		local s, a = b.session(), b.alert:peek()
