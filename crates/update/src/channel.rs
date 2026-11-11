@@ -96,6 +96,10 @@ pub struct ChannelRecord {
     /// The channel is the person's choice (`select`), not a download's claim.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chosen: bool,
+    /// Stable because a stable release ended a claim, not by choice
+    /// ([`release_claim_for_stable_build`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released: bool,
 }
 
 /// The record in `data_dir` (stable when it's missing or unreadable).
@@ -124,6 +128,7 @@ pub fn select(data_dir: &Path, channel: Channel) -> std::io::Result<()> {
     let mut record = read(data_dir);
     record.channel = channel;
     record.chosen = true;
+    record.released = false;
     write(data_dir, &record)
 }
 
@@ -131,17 +136,26 @@ pub fn select(data_dir: &Path, channel: Channel) -> std::io::Result<()> {
 /// claimed it before (and the user may have chosen Stable since). Whether it
 /// changed anything.
 pub fn claim_for_beta_build(data_dir: &Path, build: &str) -> std::io::Result<bool> {
-    let record = read(data_dir);
-    // (On beta by choice already: a claim would only make it look like one.)
-    if record.claimed_by.as_deref() == Some(build) || (record.chosen && record.channel == Channel::Beta) {
-        return Ok(false);
+    let record = recorded(data_dir);
+    if let Some(record) = &record {
+        // Beta with no claim was chosen: only the switch ever wrote that,
+        // the old app's included, before `chosen` was recorded. Kept, and
+        // said so now.
+        if record.channel == Channel::Beta && record.claimed_by.is_none() && !record.chosen {
+            write(data_dir, &ChannelRecord { chosen: true, ..record.clone() })?;
+            return Ok(false);
+        }
+        // (On beta by choice already: a claim would only make it look like one.)
+        if record.claimed_by.as_deref() == Some(build) || (record.chosen && record.channel == Channel::Beta) {
+            return Ok(false);
+        }
     }
     write(
         data_dir,
         &ChannelRecord {
             channel: Channel::Beta,
             claimed_by: Some(build.to_owned()),
-            chosen: false,
+            ..ChannelRecord::default()
         },
     )?;
     Ok(true)
@@ -153,7 +167,7 @@ pub fn claim_for_beta_build(data_dir: &Path, build: &str) -> std::io::Result<boo
 pub fn release_claim_for_stable_build(data_dir: &Path) -> std::io::Result<bool> {
     match recorded(data_dir) {
         Some(record) if is_claim_only(&record) => {
-            write(data_dir, &ChannelRecord::default())?;
+            write(data_dir, &ChannelRecord { released: true, ..ChannelRecord::default() })?;
             Ok(true)
         }
         _ => Ok(false),
@@ -188,15 +202,14 @@ pub fn selected() -> Channel {
 }
 
 /// Whether Stable is a choice on record: the only thing that takes a beta
-/// build back to an older stable (crates/update `offer`). Every record saying
-/// stable is one: a claim only ever says beta, and a claim's release is
-/// written by a stable build.
+/// build back to an older stable (crates/update `offer`). A record saying
+/// stable is one, unless a stable release wrote it ending a claim.
 pub fn stable_on_record() -> bool {
     data_dir().is_some_and(stable_on_record_in)
 }
 
 fn stable_on_record_in(dir: &Path) -> bool {
-    recorded(dir).is_some_and(|record| record.channel == Channel::Stable)
+    recorded(dir).is_some_and(|record| record.channel == Channel::Stable && !record.released)
 }
 
 /// What's recorded, when there's a record to read.
@@ -300,7 +313,7 @@ mod tests {
 
     #[test]
     fn a_choice_stands_and_without_one_an_app_stays_on_its_own_channel() {
-        let chose = |channel| Some(ChannelRecord { channel, claimed_by: None, chosen: true });
+        let chose = |channel| Some(ChannelRecord { channel, chosen: true, ..ChannelRecord::default() });
         // Someone turned beta off at that Mac: their choice, on a beta build.
         assert_eq!(choice_for(chose(Channel::Stable), Some("0.2.136-beta.1")), Channel::Stable);
         assert_eq!(choice_for(chose(Channel::Beta), Some("0.2.136")), Channel::Beta);
@@ -309,10 +322,10 @@ mod tests {
         assert_eq!(choice_for(None, None), Channel::Stable);
         // A download's claim holds on its beta build and ends on a stable one,
         // before that build's first launch records it.
-        let claimed = || Some(ChannelRecord { channel: Channel::Beta, claimed_by: Some("0.2.139-beta.6".into()), chosen: false });
+        let claimed = || Some(ChannelRecord { channel: Channel::Beta, claimed_by: Some("0.2.139-beta.6".into()), ..ChannelRecord::default() });
         assert_eq!(choice_for(claimed(), Some("0.2.139-beta.6")), Channel::Beta);
         assert_eq!(choice_for(claimed(), Some("0.2.139")), Channel::Stable);
-        let chosen = Some(ChannelRecord { channel: Channel::Beta, claimed_by: Some("0.2.139-beta.6".into()), chosen: true });
+        let chosen = Some(ChannelRecord { channel: Channel::Beta, claimed_by: Some("0.2.139-beta.6".into()), chosen: true, ..ChannelRecord::default() });
         assert_eq!(choice_for(chosen, Some("0.2.139")), Channel::Beta);
     }
 
@@ -350,11 +363,16 @@ mod tests {
         // A beta download's claim.
         claim_for_beta_build(dir.path(), "0.2.139-beta.6").unwrap();
         assert!(release_claim_for_stable_build(dir.path()).unwrap());
-        assert_eq!(read(dir.path()), ChannelRecord::default());
+        assert_eq!(read(dir.path()).channel, Channel::Stable);
+        assert!(!stable_on_record_in(dir.path()), "a released claim isn't a choice of Stable");
         assert!(!release_claim_for_stable_build(dir.path()).unwrap());
         // Beta chosen in the app, on a stable build (the old app's records
-        // have no claim, and no `chosen` either).
+        // have no claim, and no `chosen` either): the beta it installs keeps
+        // it a choice.
         std::fs::write(dir.path().join(FILE), br#"{"channel":"beta"}"#).unwrap();
+        assert!(!release_claim_for_stable_build(dir.path()).unwrap());
+        assert!(!claim_for_beta_build(dir.path(), "0.2.139-beta.7").unwrap());
+        assert!(read(dir.path()).chosen);
         assert!(!release_claim_for_stable_build(dir.path()).unwrap());
         assert_eq!(read(dir.path()).channel, Channel::Beta);
         // Beta chosen after a claim: it stays, through later betas' claims too.

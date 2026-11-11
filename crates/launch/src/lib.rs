@@ -223,8 +223,13 @@ pub fn exec_helper(app_exe: &Path, args: impl IntoIterator<Item = OsString>) -> 
             Ok(child) => child,
             Err(error) => return error,
         };
+        // Only for an update's trial (`ZERON_INSTALLED_AT`, crates/update):
+        // otherwise this one must outlive the helper's own clean shutdown
+        // (Ctrl+C reaches both, and a job would cut the helper's short).
         #[cfg(windows)]
-        ends_with_this_process(&child);
+        if std::env::var_os("ZERON_INSTALLED_AT").is_some() {
+            ends_with_this_process(&child);
+        }
         match child.wait() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(error) => error,
@@ -233,10 +238,10 @@ pub fn exec_helper(app_exe: &Path, args: impl IntoIterator<Item = OsString>) -> 
 }
 
 /// Windows can't replace a process, so this one waits on the helper in its
-/// place, and whatever stops this one must stop the helper too: an update's
-/// watchdog ends a failed trial by terminating the process it started, which
-/// is this one, and the helper (the engine) must not outlive it to hold the
-/// data the old version is restoring. A job that ends with this process does
+/// place. In an update's trial, whatever stops this one must stop the helper
+/// too: the watchdog ends a failed trial by terminating the process it
+/// started, which is this one, and the helper (the engine) must not outlive
+/// it to hold the data the old version is restoring. A job that ends with this process does
 /// it, however it ends. What the helper starts in turn (agents, its own
 /// successor) leaves the job. Best effort: without a job, it's as before.
 #[cfg(windows)]

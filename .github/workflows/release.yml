@@ -299,7 +299,10 @@ jobs:
               beta="$(jq -r '.version // empty' beta-current.json)"
             fi
             if [ -z "$beta" ]; then
-              echo "couldn't read the beta channel's manifest: left as it is"
+              # Loudly: claim-only betas reach stable through this copy alone.
+              # Re-run the job once the bucket answers.
+              echo "::error::couldn't read the beta channel's manifest, so this release isn't in the beta channel"
+              exit 1
             elif python3 - "$VERSION" "$beta" <<'PY'
           import re, sys
           def key(v):
