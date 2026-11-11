@@ -570,6 +570,11 @@ local function Composer(): Node
 				store.retry(id, message)
 			end
 		end,
+		-- A send on its way: its machine coming up is said in the
+		-- transcript, under it.
+		sending = function(): boolean
+			return CloudMachine.sending_last(store.messages)
+		end,
 	}
 	-- This device's outbox for the chat (#1256): sends uploading or stopped,
 	-- each removable where the engine can take one back. Whether it can is
@@ -982,7 +987,6 @@ local function Composer(): Node
 			return
 		end
 		local plan = where.plan()
-		own_notice:set { key = if plan.cloud then "chat.composer.starting_cloud" else "chat.composer.starting", spinner = true }
 		-- (`why`: what to say instead, a Cloud chat's reason in words.)
 		local failed = function(why: string?)
 			own_notice:set { tone = "danger", text = why, key = if why then nil else "chat.composer.didnt_start", dismissable = true }
@@ -990,6 +994,54 @@ local function Composer(): Node
 				shared.text:set(text_out)
 			end
 		end
+		-- On Cloud, as the shipping app starts one: the chat opens at once
+		-- under the id it's made with, your message in it, sending, and its
+		-- machine starting under that (a tool row, as the machine's own setup
+		-- steps are); Cloud makes it meanwhile, and the message goes once it
+		-- has. Refused, back to the new chat with the words and why.
+		if plan.cloud then
+			local chat_id = store.new_id()
+			req.project = plan.project
+			req.device = plan.device
+			req.branch = plan.branch
+			req.session = chat_id
+			req.fresh = true
+			req.message_id = store.new_id()
+			req.worktree = plan.worktree
+			T.sent_here(req.message_id :: string)
+			own_notice:set(nil)
+			store.creating(req)
+			store.open(chat_id)
+			-- (Down with its prompt: the dock's one slide.)
+			slide_next = true
+			route.open_session(chat_id)
+			sessions
+				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true })
+				:after(function(made: any)
+					local cwd = if type(made) == "table" then made.cwd else nil
+					req.cwd = if type(cwd) == "string" and cwd ~= "" then cwd else nil
+					store.created(chat_id)
+					store.send(req):after(function() end, function(_e: any) end)
+				end, function(e: any)
+					local why = if type(e) == "table" and type(e.message) == "string" and string.find(e.message, " ", 1, true)
+						then e.message
+						else nil
+					store.create_failed(chat_id)
+					-- Still on it: back to the new chat, where the words and
+					-- why are said. (Gone to another chat meanwhile, that
+					-- chat's composer is left alone.)
+					if route.current:peek().name == "session" and route.current:peek().session == chat_id then
+						route.new_chat(plan.project)
+						-- (Said once the new chat is back: a chat moving
+						-- clears the composer's own line.)
+						ui.after(0, function()
+							failed(why)
+						end)
+					end
+				end)
+			return
+		end
+		own_notice:set { key = "chat.composer.starting", spinner = true }
 		-- Made where the project is (or on the device chosen), then its first
 		-- message run there, as the shipping app starts one (the send sets
 		-- its config: the model, effort, access and plan chosen here): in
