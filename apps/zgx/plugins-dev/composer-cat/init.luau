@@ -40,14 +40,42 @@ local function within(range: { number }): number
 	return (range[1] + math.random() * (range[2] - range[1])) * 1000
 end
 
+-- At most this many timers are ever pending (checked as each motion comes
+-- round): one per motion's next turn, and the playing motion's frames and
+-- its end. Fired timers are let go, so a composer left open all day holds
+-- no more than at its first minute.
+local LONGEST = 0
+for _, each in EVERY do
+	LONGEST = math.max(LONGEST, #each.motion)
+end
+local MOST = #EVERY + LONGEST + 1
+
 local function Cat(): Node
 	local frame = ui.use_state("idle")
-	local timers: { () -> () } = {}
+	-- Each motion's next turn (its one pending timer, replaced as it fires),
+	-- and the playing motion's frame timers (let go when it ends).
+	local turns: { [number]: (() -> ())? } = {}
+	local steps: { () -> () } = {}
 	local busy = false
 	local gone = false
+	local function pending(): number
+		local n = #steps
+		for i = 1, #EVERY do
+			if turns[i] then
+				n += 1
+			end
+		end
+		return n
+	end
 	ui.on_cleanup(function()
 		gone = true
-		for _, cancel in timers do
+		for i = 1, #EVERY do
+			local cancel = turns[i]
+			if cancel then
+				cancel()
+			end
+		end
+		for _, cancel in steps do
 			cancel()
 		end
 	end)
@@ -58,26 +86,31 @@ local function Cat(): Node
 			return
 		end
 		busy = true
+		steps = {}
 		local at = 0
 		for _, step in motion do
 			local name, ms = step[1], step[2]
-			table.insert(timers, ui.after(at, function()
+			table.insert(steps, ui.after(at, function()
 				frame:set(name)
 			end))
 			at += ms
 		end
-		table.insert(timers, ui.after(at, function()
+		table.insert(steps, ui.after(at, function()
 			frame:set("idle")
 			busy = false
+			-- (All its timers have fired: none to keep.)
+			steps = {}
 		end))
 	end
 	if not reduced() then
-		for _, each in EVERY do
-			local function again()
+		for i, each in EVERY do
+			local function turn()
+				turns[i] = nil
 				play(each.motion)
-				table.insert(timers, ui.after(within(each.range), again))
+				turns[i] = ui.after(within(each.range), turn)
+				assert(pending() <= MOST, "composer-cat: timers left pending")
 			end
-			table.insert(timers, ui.after(within(each.range), again))
+			turns[i] = ui.after(within(each.range), turn)
 		end
 	end
 	return ui.image {
