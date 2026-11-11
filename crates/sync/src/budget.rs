@@ -24,6 +24,10 @@ pub struct Budget {
     paused_until: Mutex<Option<Instant>>,
     next_dial: Mutex<Option<Instant>>,
     socket_waiters: AtomicUsize,
+    /// Bumped when a socket request finds every socket taken: holders that
+    /// could yield one (the engine's sync dispatcher) wait on it rather than
+    /// polling [`Budget::stats`].
+    socket_contention: tokio::sync::watch::Sender<u64>,
 }
 
 pub struct Permit {
@@ -58,6 +62,7 @@ impl Budget {
             paused_until: Mutex::new(None),
             next_dial: Mutex::new(None),
             socket_waiters: AtomicUsize::new(0),
+            socket_contention: tokio::sync::watch::Sender::new(0),
         })
     }
 
@@ -105,6 +110,9 @@ impl Budget {
         }
         self.socket_waiters.fetch_add(1, Ordering::AcqRel);
         let _waiting = Waiting(&self.socket_waiters);
+        if self.sockets.available_permits() == 0 {
+            self.socket_contention.send_modify(|n| *n = n.wrapping_add(1));
+        }
         self.acquire(&self.sockets, false).await
     }
     pub async fn dial(&self) -> Result<Permit, SyncError> {
@@ -153,6 +161,11 @@ impl Budget {
                 _ => return,
             }
         }
+    }
+
+    /// Changes when a socket request has to wait for one.
+    pub fn watch_socket_contention(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.socket_contention.subscribe()
     }
 
     pub fn stats(&self) -> BudgetStats {

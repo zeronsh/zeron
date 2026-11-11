@@ -11,6 +11,13 @@
 //!   vanishing (git init / de-git) kicks a recheck;
 //! - a slow 2-minute repair tick (native watchers coalesce/drop events).
 //!
+//! A kick runs git only when something git's answer depends on changed
+//! ([`GitInputs`]: the `.git` entry, HEAD and the branch it names, config,
+//! packed-refs, shallow, the global config). Everything else — a rescan
+//! after the shared watcher restarted, `.git` churn from commands other
+//! chats run in a busy repository, the repair tick — costs a few `stat`s
+//! and reapplies the last answer.
+//!
 //! Stamps are written ONLY on change, so steady state never grows the oplog.
 //! Remote devices read `space.git_detected` straight from the doc — branch
 //! pickers and the diff sidebar gate on it with zero RPCs.
@@ -56,6 +63,9 @@ struct SpacesSyncInner {
     workspace: WorkspaceHost,
     device_id: String,
     entries: Mutex<HashMap<String, Arc<SpaceEntry>>>,
+    /// Git probes run (tests count them).
+    #[cfg(test)]
+    git_probes: std::sync::atomic::AtomicUsize,
     /// Ends the supervisor loop eagerly on shutdown (weak refs alone only end
     /// it once the whole graph drops).
     cancel: CancellationToken,
@@ -81,6 +91,8 @@ impl SpacesSync {
                 workspace: workspace.clone(),
                 device_id: device_id.to_string(),
                 entries: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                git_probes: std::sync::atomic::AtomicUsize::new(0),
                 cancel: CancellationToken::new(),
                 supervisor: Mutex::new(None),
             }),
@@ -182,13 +194,16 @@ fn watch_folder(hub: &Arc<FsWatchHub>, entry: &SpaceEntry) -> FsWatch {
     )
 }
 
-/// Per-space task: trailing-debounce kicks, then recheck git presence.
+/// Per-space task: trailing-debounce kicks, then recheck git presence —
+/// with git itself only when its inputs changed.
 async fn entry_task(
     inner: Weak<SpacesSyncInner>,
     space_id: String,
     entry: Weak<SpaceEntry>,
     mut kick_rx: mpsc::UnboundedReceiver<()>,
 ) {
+    // The inputs and answer of the last complete probe.
+    let mut last: Option<(GitInputs, GitProbe)> = None;
     while kick_rx.recv().await.is_some() {
         loop {
             match tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()).await {
@@ -200,12 +215,147 @@ async fn entry_task(
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
-        check_space(&inner, &space_id, &entry.path).await;
+        let folder = entry.path.clone();
+        let inputs = tokio::task::spawn_blocking(move || GitInputs::read(&folder))
+            .await
+            .ok();
+        let probe = match (&last, &inputs) {
+            (Some((seen, probe)), Some(now)) if seen == now => probe.clone(),
+            _ => {
+                #[cfg(test)]
+                inner.git_probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let in_repository = inputs.as_ref().map(|inputs| inputs.repository);
+                let probe = probe_git(&inner, &space_id, &entry.path, in_repository).await;
+                // A failed git call is retried on the next kick.
+                last = inputs.filter(|_| probe.complete).map(|inputs| (inputs, probe.clone()));
+                probe
+            }
+        };
+        apply_probe(&inner, &space_id, probe);
     }
 }
 
-/// Probe git presence and stamp the row — write only on change.
-async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) {
+/// What a space's git check reads, cheaply (`stat`s and two tiny files):
+/// git's answer can't change while these don't. Found the way git finds a
+/// repository: the nearest `.git` at or above the folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitInputs {
+    /// A `.git` was found at or above the folder.
+    repository: bool,
+    /// (path, (inode, mtime ns, size)) — `None` = absent.
+    stamps: Vec<(PathBuf, Option<(u64, i128, u64)>)>,
+    /// Small files whose content says where to look: a `.git` file's
+    /// `gitdir:`, `commondir`, HEAD.
+    contents: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl GitInputs {
+    fn read(folder: &Path) -> Self {
+        fn stamp(path: &Path) -> Option<(u64, i128, u64)> {
+            #[cfg(unix)]
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(path).ok()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as i128);
+            #[cfg(unix)]
+            let inode = meta.ino();
+            #[cfg(not(unix))]
+            let inode = 0;
+            // A directory's mtime moves with every lock file git makes in
+            // it: only its identity counts.
+            if meta.is_dir() {
+                Some((inode, 0, 0))
+            } else {
+                Some((inode, mtime, meta.len()))
+            }
+        }
+        let mut inputs = GitInputs { repository: false, stamps: Vec::new(), contents: Vec::new() };
+        let read = |inputs: &mut GitInputs, path: PathBuf| -> Option<Vec<u8>> {
+            let content = std::fs::read(&path).ok().filter(|c| c.len() <= 4096);
+            inputs.contents.push((path, content.clone()));
+            content
+        };
+        inputs.stamps.push((folder.to_path_buf(), stamp(folder)));
+        // Git finds the repository from the real path (a symlinked folder).
+        let resolved = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+        let folder = resolved.as_path();
+        // System and global configuration (remote rewrites, includes).
+        inputs.stamps.push(("/etc/gitconfig".into(), stamp(Path::new("/etc/gitconfig"))));
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            inputs.stamps.push((home.join(".gitconfig"), stamp(&home.join(".gitconfig"))));
+            let xdg = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"));
+            let path = xdg.join("git/config");
+            inputs.stamps.push((path.clone(), stamp(&path)));
+        }
+        let Some(dot_git) = folder.ancestors().map(|dir| dir.join(".git")).find(|p| {
+            let found = stamp(p);
+            inputs.stamps.push((p.clone(), found));
+            found.is_some()
+        }) else {
+            return inputs; // not in a repository
+        };
+        inputs.repository = true;
+        let git_dir = if dot_git.is_dir() {
+            dot_git
+        } else {
+            // A linked worktree or submodule: `gitdir: <path>`.
+            let pointer = read(&mut inputs, dot_git.clone()).unwrap_or_default();
+            let pointer = String::from_utf8_lossy(&pointer);
+            let Some(target) = pointer.trim().strip_prefix("gitdir:") else {
+                return inputs;
+            };
+            dot_git.parent().unwrap_or(folder).join(target.trim())
+        };
+        let common_dir = match read(&mut inputs, git_dir.join("commondir")) {
+            Some(common) => git_dir.join(String::from_utf8_lossy(&common).trim()),
+            None => git_dir.clone(),
+        };
+        let head = read(&mut inputs, git_dir.join("HEAD")).unwrap_or_default();
+        let head = String::from_utf8_lossy(&head);
+        let mut stamped = vec![
+            common_dir.join("config"),
+            git_dir.join("config.worktree"),
+            common_dir.join("packed-refs"),
+            common_dir.join("shallow"),
+        ];
+        // HEAD's branch: its first commit decides the repository's identity.
+        if let Some(branch) = head.trim().strip_prefix("ref:") {
+            stamped.push(common_dir.join(branch.trim()));
+        }
+        for path in stamped {
+            let found = stamp(&path);
+            inputs.stamps.push((path, found));
+        }
+        inputs
+    }
+}
+
+/// One git check's answer.
+#[derive(Clone)]
+struct GitProbe {
+    detected: bool,
+    checkout_id: Option<String>,
+    /// `None` = the check failed; the row keeps its last identity.
+    repository_id: Option<Option<String>>,
+    /// `None` = the check failed; the row keeps its last repository.
+    github_repo: Option<Option<String>>,
+    /// Every git call answered: the probe can stand for unchanged inputs.
+    complete: bool,
+}
+
+/// Probe git presence. `in_repository`: whether [`GitInputs`] found a
+/// `.git` — what tells "not a repository" from a git call that failed.
+async fn probe_git(
+    inner: &Arc<SpacesSyncInner>,
+    space_id: &str,
+    path: &Path,
+    in_repository: Option<bool>,
+) -> GitProbe {
     let detected = inner.repos.is_repo(path).await;
     let (checkout_id, repository_id) = if detected {
         let checkout_id = match inner.repos.checkout_identity(path).await {
@@ -231,10 +381,43 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
     // The project's GitHub repository, so every device can offer running a
     // session on Cloud without asking this one.
     let github_repo = if detected {
-        inner.repos.github_repo(path).await
+        match inner.repos.github_repo_checked(path).await {
+            Ok(repo) => Ok(repo),
+            Err(err) => {
+                tracing::debug!(space = %space_id, error = %err, "spaces: origin read failed");
+                Err(())
+            }
+        }
     } else {
-        None
+        Ok(None)
     };
+    // Kept for unchanged inputs only when every answer is git's real one: a
+    // failed call (git busy, a lock) is retried on the next kick.
+    let complete = if detected {
+        checkout_id.is_some() && repository_id.is_some() && github_repo.is_ok()
+    } else {
+        in_repository == Some(false)
+    };
+    // `None` = the read failed; the row keeps its last repository.
+    let github_repo = github_repo.ok();
+    GitProbe {
+        detected,
+        complete,
+        checkout_id,
+        repository_id,
+        github_repo,
+    }
+}
+
+/// Stamp the row with a probe's answer — write only on change.
+fn apply_probe(inner: &Arc<SpacesSyncInner>, space_id: &str, probe: GitProbe) {
+    let GitProbe {
+        detected,
+        checkout_id,
+        repository_id,
+        github_repo,
+        complete: _,
+    } = probe;
     let current = match inner.workspace.read_spaces() {
         Ok(spaces) => spaces.into_iter().find(|s| s.id == space_id),
         Err(err) => {
@@ -246,6 +429,7 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
         return; // deleted while checking
     };
     let repository_id = repository_id.unwrap_or_else(|| current.repository_id.clone());
+    let github_repo = github_repo.unwrap_or_else(|| current.github_repo.clone());
     // Cloud projects of this repository (no engine of their own) take this
     // clone's identity so they group with it — checked every pass, since
     // this space's own row is usually unchanged.
@@ -356,6 +540,141 @@ async fn spaces_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// Kicks run git only when an input of its answer changed. A busy
+    /// repository (other chats staging, building, committing on other
+    /// branches) and every watcher rescan cost a few `stat`s; HEAD moving to
+    /// another branch, the config or the folder's repository changing still
+    /// probe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_changed_git_inputs_run_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("src/a.rs"), "a").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "one"]);
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(data.path()).unwrap());
+        let workspace = WorkspaceHost::open(
+            store,
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "dev".into(),
+                device_name: "Dev".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace
+            .create_space("space", "dev", repo.to_str().unwrap(), None, false)
+            .unwrap();
+        let sync = SpacesSync::start(Repos::new(data.path(), "dev"), workspace.clone(), "dev");
+        let probes = || sync.inner.git_probes.load(std::sync::atomic::Ordering::Relaxed);
+        let settle = || tokio::time::sleep(Duration::from_millis(1_500));
+        let kick = || {
+            for entry in lock(&sync.inner.entries).values() {
+                let _ = entry.kick_tx.send(());
+            }
+        };
+        let detected = || {
+            workspace
+                .read_spaces()
+                .unwrap()
+                .into_iter()
+                .find(|s| s.id == "space")
+                .is_some_and(|s| s.git_detected)
+        };
+        // Positive outcomes are polled (git subprocesses on a loaded
+        // machine); "nothing ran" needs the debounce to pass, so it waits.
+        let reach = |n: usize, what: &'static str| {
+            let probes = &probes;
+            async move {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while probes() < n {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect(what);
+                // Let its row write land.
+                settle().await;
+                assert_eq!(probes(), n, "{what}: one probe");
+            }
+        };
+        reach(1, "the first check probes").await;
+        assert!(detected());
+
+        // Churn that can't change the answer: the index, objects, a lock
+        // file, a commit on another branch, the work tree, a rescan.
+        std::fs::write(repo.join("src/a.rs"), "b").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["branch", "side"]);
+        std::fs::write(repo.join(".git/index.lock"), "").unwrap();
+        std::fs::remove_file(repo.join(".git/index.lock")).unwrap();
+        kick();
+        settle().await;
+        kick();
+        settle().await;
+        assert_eq!(probes(), 1, "nothing git reads changed");
+
+        git(&repo, &["checkout", "-q", "side"]);
+        kick();
+        reach(2, "HEAD moved to another branch").await;
+
+        git(&repo, &["remote", "add", "origin", "https://github.com/o/r.git"]);
+        kick();
+        reach(3, "the config changed").await;
+        let space = workspace.read_spaces().unwrap().into_iter().find(|s| s.id == "space").unwrap();
+        assert_eq!(space.github_repo.as_deref(), Some("o/r"));
+
+        std::fs::rename(repo.join(".git"), repo.join("git-gone")).unwrap();
+        kick();
+        reach(4, "the repository went away").await;
+        assert!(!detected());
+        // "Not a repository" is a real answer: kept while nothing changes.
+        kick();
+        settle().await;
+        assert_eq!(probes(), 4, "an answered absence is not re-probed");
+        sync.shutdown().await;
+    }
+
+    /// A linked worktree's inputs follow its own HEAD and the shared config.
+    #[test]
+    fn worktree_inputs_follow_its_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "wt", root.join("wt").to_str().unwrap()]);
+        let before = GitInputs::read(&root.join("wt"));
+        assert_eq!(before, GitInputs::read(&root.join("wt")));
+        git(&root.join("wt"), &["commit", "-q", "--allow-empty", "-m", "two"]);
+        assert_ne!(before, GitInputs::read(&root.join("wt")), "its branch moved");
+        let before = GitInputs::read(&root.join("wt"));
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "main moves"]);
+        assert_eq!(before, GitInputs::read(&root.join("wt")), "another branch is no input");
+        git(&repo, &["config", "zeron.test", "1"]);
+        assert_ne!(before, GitInputs::read(&root.join("wt")), "the shared config");
+    }
 
     /// The folder watch rides the shared hub: going live sends one recheck
     /// (the check→attach gap), `.git` appearing among the direct children

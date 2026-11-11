@@ -1176,6 +1176,7 @@ impl Engine {
         let preview_workspace = core.workspace.clone();
         let preview_device = core.device_id.clone();
         let preview_terminals = core.terminals.clone();
+        let preview_sessions = core.sessions.clone();
         let projects = Arc::new(move || zeron_preview::Scope {
             chats: preview_workspace
                 .read_chats()
@@ -1186,7 +1187,45 @@ impl Engine {
                 .collect(),
             terminals: preview_terminals.chats(),
             reserved_ports: zeron_harness::agent_ports::reserved(),
+            live: preview_sessions.active_count() > 0 || preview_terminals.any_open(),
         });
+        // Discovery parks while nothing Zeron started is alive. A run
+        // changing state (a turn starting) or a terminal opening is what can
+        // start a server: wake it then. It keeps its cadence from there for
+        // as long as the run, the terminal, or anything they started lives.
+        // The chats it serves changing (one arriving here with its folder,
+        // as the registry loads after a restart) also wakes it: a server
+        // one of them left running belongs to it from then on.
+        {
+            let previews = core.previews.clone();
+            let mut sessions = core.sessions.watch_sessions();
+            let mut terminals = core.terminals.watch_opened();
+            let mut chats = core.workspace.watch_chats();
+            let device = core.device_id.clone();
+            let folders = move |chats: &[zeron_proto::Chat]| -> Vec<(String, Option<String>)> {
+                chats
+                    .iter()
+                    .filter(|chat| chat.device_id == device)
+                    .map(|chat| (chat.id.clone(), chat.cwd.clone()))
+                    .collect()
+            };
+            let mut served = folders(&chats.borrow_and_update());
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        changed = sessions.changed() => if changed.is_err() { break },
+                        changed = terminals.changed() => if changed.is_err() { break },
+                        changed = chats.changed() => {
+                            if changed.is_err() { break }
+                            let now = folders(&chats.borrow_and_update());
+                            if now == served { continue }
+                            served = now;
+                        }
+                    }
+                    previews.rescan();
+                }
+            });
+        }
         let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
             edge_url: config.edge_url.clone(),
             org_id: preview_org,

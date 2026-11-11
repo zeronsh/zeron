@@ -1445,3 +1445,35 @@ async fn a_completed_wake_is_not_rechecked_every_tick() {
     drop(busy);
     host.shutdown_workers().await;
 }
+
+/// A chat open in the app with its connection caught up and nothing owed
+/// costs the dispatcher nothing: no pass runs while it sits there. When the
+/// view goes, its idle grace starts counting and the connection closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watched_caught_up_connection_runs_no_passes() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay(Hold::Checkpoint).await;
+    relay.release.send_replace(true);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let host = host(store.clone(), &relay);
+    let handle = host.open("viewed").unwrap();
+    let view = handle.watch_messages();
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    until(|| !store.has_pending_chat_updates("viewed").unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let passes = || host.inner.scheduler_passes.load(Ordering::Relaxed);
+    let settled = passes();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(passes(), settled, "a settled, watched connection was polled");
+    assert!(handle.sync_started.load(Ordering::Acquire));
+
+    // The last viewer leaving wakes the dispatcher; the grace has run out.
+    handle
+        .last_access
+        .store(now_ms() - SYNC_IDLE_MS - 1, Ordering::Release);
+    drop(view);
+    until(|| !handle.sync_started.load(Ordering::Acquire)).await;
+    assert!(lock(&handle.chat2).is_none());
+    host.shutdown_workers().await;
+}

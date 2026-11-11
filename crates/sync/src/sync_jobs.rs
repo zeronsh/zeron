@@ -27,6 +27,7 @@ impl DocsStore {
                 params![doc, kind],
             )?;
             tx.commit()?;
+            self.note_sync_jobs_changed();
             Ok(())
         })
     }
@@ -75,6 +76,7 @@ impl DocsStore {
                 )?;
             }
             tx.commit()?;
+            self.note_sync_jobs_changed();
             Ok(())
         })
     }
@@ -94,10 +96,13 @@ impl DocsStore {
 
     pub fn complete_sync_job(&self, doc: &str, kind: &str, version: i64) -> Result<(), StoreError> {
         store_blocking(|| {
-            self.conn().execute(
+            let removed = self.conn().execute(
                 "DELETE FROM chat_sync_jobs WHERE doc_id=?1 AND kind=?2 AND version=?3",
                 params![doc, kind, version],
             )?;
+            if removed > 0 {
+                self.note_sync_jobs_changed();
+            }
             Ok(())
         })
     }
