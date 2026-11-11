@@ -343,7 +343,12 @@ struct Logins;
 
 #[async_trait]
 impl zeron_engine::registry::RunEnvironment for Logins {
-    async fn prepare(&self, _harness: HarnessId, request: &mut RunRequest) -> Result<(), String> {
+    async fn prepare(
+        &self,
+        _harness: HarnessId,
+        _chat_id: Option<&str>,
+        request: &mut RunRequest,
+    ) -> Result<(), String> {
         request.env.insert("LOGGED_IN".into(), "yes".into());
         Ok(())
     }
