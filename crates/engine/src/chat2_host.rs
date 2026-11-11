@@ -89,7 +89,7 @@ impl EngineChatSink {
         } else {
             ""
         };
-        match doc.doc().import_with(bytes, origin) {
+        match doc.import_with(bytes, origin) {
             Ok(status) => {
                 if status.pending.is_some() {
                     // Room sequence contiguity does not prove causal history
@@ -185,7 +185,6 @@ impl ChatDocSink for EngineChatSink {
         let import = || {
             let doc = self.doc.upgrade().ok_or("doc evicted")?;
             let status = doc
-                .doc()
                 .import_with(bytes, crate::transcript_history::REPLAY_ORIGIN)
                 .map_err(|e| format!("checkpoint import: {e}"))?;
             if status.pending.is_some() {
@@ -283,7 +282,7 @@ impl ChatDocSink for EngineChatSink {
                 ""
             };
             let before = doc.doc().oplog_vv();
-            match doc.doc().import_with(bytes, origin) {
+            match doc.import_with(bytes, origin) {
                 Ok(status) if status.pending.is_some() => {
                     // Held in memory until its history arrives. Kept on disk too, apart
                     // from the journal a save retires: a save doesn't hold what's parked.

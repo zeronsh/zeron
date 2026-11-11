@@ -1944,15 +1944,14 @@ impl DocHost {
         // did not run before a crash. Imported updates do not echo as local writes.
         if room_gen >= 2 {
             for (_, bytes) in self.inner.store.pending_chat_updates(chat_id)? {
-                doc.doc()
-                    .import(&bytes)
+                doc.import(&bytes)
                     .map_err(|e| EngineError::Other(e.to_string()))?;
             }
             // The same for what a crash left unsaved of what came by relay. A row
             // this build can't read is skipped, as a stored row would be.
             let (received, _) = self.inner.store.pending_chat_inbox(chat_id)?;
             for bytes in received {
-                if let Err(err) = doc.doc().import(&bytes) {
+                if let Err(err) = doc.import(&bytes) {
                     tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a kept update");
                 }
             }
@@ -1963,7 +1962,7 @@ impl DocHost {
             if !parked.is_empty() {
                 let mut waiting = false;
                 for bytes in &parked {
-                    match doc.doc().import(bytes) {
+                    match doc.import(bytes) {
                         Ok(status) => waiting |= status.pending.is_some(),
                         Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat relay: couldn't replay a parked update"),
                     }

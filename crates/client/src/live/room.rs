@@ -293,7 +293,7 @@ impl ViewerSink {
         let Some(doc) = self.doc.upgrade() else {
             return RowImportOutcome::Applied;
         };
-        match doc.doc().import(bytes) {
+        match doc.import(bytes) {
             Ok(status) if status.pending.is_some() => RowImportOutcome::PendingDependencies,
             Ok(_) => {
                 self.persister.applied(cursor, urgent);
@@ -441,7 +441,7 @@ impl ChatDocSink for ViewerSink {
             return RelayImport::Unreadable;
         };
         let before = doc.doc().oplog_vv();
-        let status = match doc.doc().import(bytes) {
+        let status = match doc.import(bytes) {
             Ok(status) => status,
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "relay import failed");

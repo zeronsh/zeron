@@ -1846,7 +1846,8 @@ impl View {
             // out of the engine's order, they're asked for whole instead.
             if let Some(expected) = frame["orderSum"].as_u64()
                 && result.is_ok()
-                && order_sum(open.entries.iter().map(|e| &*e.id)) != expected
+                // (Rows without an id are left out, as `known` leaves them.)
+                && order_sum(open.entries.iter().filter(|e| !e.id.is_empty()).map(|e| &*e.id)) != expected
             {
                 result = Err(());
             }
@@ -7435,6 +7436,14 @@ mod tests {
         view.heard_frame(json!({ "since": true, "upsert": [{ "after": "a51", "entry": reply("a52", "more") }], "count": 53, "orderSum": sum }));
         assert_eq!(view.generation.get(), generation, "held in the engine's order: taken");
         assert_eq!(ids(&view), order);
+        // A row without an id (a malformed one the app kept) is left out of
+        // the order, as it's left out of `known`: no reload for it.
+        reopen(&view);
+        view.open.borrow_mut().as_mut().unwrap().entries.insert(1, super::Entry::new(json!({ "role": "user", "parts": [] })));
+        let sum = super::order_sum(order.iter().map(String::as_str));
+        view.heard_frame(json!({ "since": true, "count": 54, "orderSum": sum }));
+        assert_eq!(view.generation.get(), generation, "a row without an id doesn't make it reload");
+        view.open.borrow_mut().as_mut().unwrap().entries.remove(1);
         // Held in another order than the engine's: asked for whole again.
         reopen(&view);
         let mut other = ids(&view);

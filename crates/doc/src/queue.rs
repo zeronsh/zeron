@@ -127,7 +127,7 @@ impl SessionDoc {
         let queue = self.doc().get_movable_list("queue");
         let map = queue.push_container(loro::LoroMap::new())?;
         write_queued_map(&map, item)?;
-        self.doc().commit();
+        self.commit();
         Ok(())
     }
 
@@ -157,7 +157,7 @@ impl SessionDoc {
         let _row = self.queue_row_guard();
         let map = queue.insert_container(index.min(queue.len()), loro::LoroMap::new())?;
         write_queued_map(&map, item)?;
-        self.doc().commit();
+        self.commit();
         Ok(())
     }
 
@@ -185,7 +185,7 @@ impl SessionDoc {
         }
         map.insert("text", text)?;
         map.insert("editedAt", now_ms)?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -213,7 +213,7 @@ impl SessionDoc {
                 map.delete("deliveryGate")?;
             }
         }
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -272,7 +272,7 @@ impl SessionDoc {
             map.insert("editedAt", now_ms)?;
         }
         map.delete("deliveryGate")?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -288,7 +288,7 @@ impl SessionDoc {
             return Ok(false);
         }
         queue.mov(from, to)?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -299,7 +299,7 @@ impl SessionDoc {
             return Ok(false);
         };
         queue.delete(index, 1)?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -323,7 +323,7 @@ impl SessionDoc {
             return Ok(None);
         }
         queue.delete(index, 1)?;
-        self.doc().commit();
+        self.commit();
         Ok(item)
     }
 

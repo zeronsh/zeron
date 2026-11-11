@@ -462,9 +462,11 @@ pub struct EntryChanges {
     /// Anything may have changed: read every entry again.
     pub all: bool,
     /// The doc's version the latest observed change brought it to: every
-    /// change up to it is in `ids`. (Loro delivers a change's events while
-    /// it still holds the doc's transaction lock, so the version read in the
-    /// callback is that change's own.)
+    /// change up to it is in `ids`. Exact for changes made through
+    /// [`SessionDoc::commit`] and its imports, which hold the doc's change
+    /// lock until their events are delivered, so no other change is in
+    /// flight when the callback reads the version. (Loro itself delivers a
+    /// local commit's events after releasing its own lock.)
     pub at: Option<loro::Frontiers>,
 }
 
@@ -499,6 +501,74 @@ impl EntryChanges {
     }
 }
 
+/// One change at a time, through to its events: held by every
+/// [`SessionDoc`] commit and import while Loro applies the change and
+/// delivers its events (a local commit delivers them after releasing Loro's
+/// own lock, so Loro alone doesn't keep two changes apart). Reentrant: a
+/// subscriber may write.
+#[derive(Default)]
+struct ChangeLock {
+    owner: std::sync::Mutex<(Option<std::thread::ThreadId>, usize)>,
+    free: std::sync::Condvar,
+}
+
+struct ChangeGuard<'a>(&'a ChangeLock);
+
+thread_local! {
+    /// This thread is inside a [`SessionDoc`] import: Loro holds the doc's
+    /// transaction lock until the import's events are delivered, so a read
+    /// from one of them mustn't ask Loro for the pending transaction (it
+    /// would wait on that lock, held by this very thread). None can be
+    /// pending then: Loro stops the transaction for the import.
+    static IMPORTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Marks this thread as importing while it lives.
+struct Importing;
+
+impl Importing {
+    fn start() -> Self {
+        IMPORTING.set(IMPORTING.get() + 1);
+        Importing
+    }
+}
+
+impl Drop for Importing {
+    fn drop(&mut self) {
+        IMPORTING.set(IMPORTING.get() - 1);
+    }
+}
+
+impl ChangeLock {
+    fn lock(&self) -> ChangeGuard<'_> {
+        let me = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match owner.0 {
+                Some(holder) if holder == me => break,
+                None => {
+                    owner.0 = Some(me);
+                    break;
+                }
+                Some(_) => owner = self.free.wait(owner).unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+        owner.1 += 1;
+        ChangeGuard(self)
+    }
+}
+
+impl Drop for ChangeGuard<'_> {
+    fn drop(&mut self) {
+        let mut owner = self.0.owner.lock().unwrap_or_else(|e| e.into_inner());
+        owner.1 -= 1;
+        if owner.1 == 0 {
+            owner.0 = None;
+            self.0.free.notify_one();
+        }
+    }
+}
+
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
@@ -515,6 +585,11 @@ pub struct SessionDoc {
     /// Whether read entries are kept (`set_keep_read_cache`): off, every
     /// read reads them all and keeps nothing.
     keep_entries: std::sync::atomic::AtomicBool,
+    /// The kept entries' and commands' bytes, roughly: read without the
+    /// caches' locks (the engine's eviction weighs every open chat).
+    entry_bytes: std::sync::atomic::AtomicUsize,
+    command_bytes: std::sync::atomic::AtomicUsize,
+    change: ChangeLock,
     _entry_events: loro::Subscription,
 }
 
@@ -545,6 +620,9 @@ impl SessionDoc {
             command_cache: Default::default(),
             command_changes,
             keep_entries: std::sync::atomic::AtomicBool::new(true),
+            entry_bytes: Default::default(),
+            command_bytes: Default::default(),
+            change: ChangeLock::default(),
             _entry_events,
         }
     }
@@ -561,6 +639,33 @@ impl SessionDoc {
 
     pub fn doc(&self) -> &LoroDoc {
         &self.doc
+    }
+
+    /// Commit, holding the change lock until the commit's events are
+    /// delivered (see [`ChangeLock`]). Every write to the doc commits so.
+    pub fn commit(&self) {
+        let _change = self.change.lock();
+        LoroDoc::commit(&self.doc);
+    }
+
+    /// [`LoroDoc::import`], under the change lock.
+    pub fn import(&self, bytes: &[u8]) -> Result<loro::ImportStatus, LoroError> {
+        let _change = self.change.lock();
+        let _importing = Importing::start();
+        self.doc.import(bytes)
+    }
+
+    /// [`LoroDoc::import_with`], under the change lock.
+    pub fn import_with(&self, bytes: &[u8], origin: &str) -> Result<loro::ImportStatus, LoroError> {
+        let _change = self.change.lock();
+        let _importing = Importing::start();
+        self.doc.import_with(bytes, origin)
+    }
+
+    /// Changes made but not yet committed (none while this thread imports,
+    /// where asking would wait on a lock this thread holds).
+    fn pending_changes(&self) -> usize {
+        if IMPORTING.get() > 0 { 0 } else { self.doc.get_pending_txn_len() }
     }
 
     /// A single atomic value prevents tokens and capacity from tearing on sync.
@@ -587,14 +692,14 @@ impl SessionDoc {
             self.doc
                 .get_map("meta")
                 .insert("contextUsage", serde_json::to_string(&next)?)?;
-            self.doc.commit();
+            self.commit();
         }
         Ok(())
     }
 
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -612,7 +717,7 @@ impl SessionDoc {
             self.doc
                 .get_map("meta")
                 .insert("forkHistorySession", session_id)?;
-            self.doc.commit();
+            self.commit();
         }
         Ok(())
     }
@@ -657,14 +762,14 @@ impl SessionDoc {
         self.doc
             .get_map("meta")
             .insert("sentBy", serde_json::to_string(&all)?.as_str())?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
     pub fn mark_provider_switched(&self) -> Result<(), DocError> {
         if !self.provider_switched() {
             self.doc.get_map("meta").insert("providerSwitched", true)?;
-            self.doc.commit();
+            self.commit();
         }
         Ok(())
     }
@@ -700,7 +805,7 @@ impl SessionDoc {
         self.doc
             .get_map("meta")
             .insert("providerSessions", serde_json::to_string(&marks)?)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -721,7 +826,7 @@ impl SessionDoc {
         for part in &entry.parts {
             push_part(&parts, part)?;
         }
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -736,7 +841,7 @@ impl SessionDoc {
         for part in &entry.parts {
             push_part(&parts, part)?;
         }
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -762,9 +867,11 @@ impl SessionDoc {
     ) -> Result<Vec<std::sync::Arc<SessionMessageEntry>>, DocError> {
         let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
         let keep = self.keep_entries.load(std::sync::atomic::Ordering::Acquire);
-        Ok(self.read_list_cached("messages", &mut cache, &self.entry_changes, keep, |value| {
+        let read = self.read_list_cached("messages", &mut cache, &self.entry_changes, keep, |value| {
             self.parse_entry(value).map(std::sync::Arc::new)
-        }))
+        });
+        self.entry_bytes.store(cache.bytes, std::sync::atomic::Ordering::Relaxed);
+        Ok(read)
     }
 
     /// Whether read entries are kept between reads. The engine keeps them
@@ -781,13 +888,14 @@ impl SessionDoc {
     pub fn forget_cached_entries(&self) {
         let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.clear();
+        self.entry_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
         self.entry_changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
     }
 
     /// What the kept entries and commands hold, roughly, in bytes.
     pub fn cached_bytes(&self) -> usize {
-        self.entry_cache.lock().unwrap_or_else(|e| e.into_inner()).bytes
-            + self.command_cache.lock().unwrap_or_else(|e| e.into_inner()).bytes
+        self.entry_bytes.load(std::sync::atomic::Ordering::Relaxed)
+            + self.command_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Entries this doc's [`Self::read_entries`] has read from the doc (not
@@ -870,11 +978,19 @@ impl SessionDoc {
         parse: impl Fn(serde_json::Value) -> Option<T>,
     ) -> Vec<T> {
         for _ in 0..3 {
-            let now = self.doc.state_frontiers();
-            let changed = std::mem::take(&mut *changes.lock().unwrap_or_else(|e| e.into_inner()));
+            // (Under the change lock: no change is between applying and
+            // delivering its events, so `changes` holds every change up to
+            // `now`.)
+            let (now, changed) = {
+                let _change = self.change.lock();
+                (
+                    self.doc.state_frontiers(),
+                    std::mem::take(&mut *changes.lock().unwrap_or_else(|e| e.into_inner())),
+                )
+            };
             let trusted = keep
                 && !changed.all
-                && self.doc.get_pending_txn_len() == 0
+                && self.pending_changes() == 0
                 && (cache.read_at.as_ref() == Some(&now) || changed.at.as_ref() == Some(&now));
             if trusted {
                 for id in &changed.ids {
@@ -886,7 +1002,7 @@ impl SessionDoc {
                 cache.clear();
             }
             let out = self.read_items(root, cache, &parse, keep);
-            if self.doc.get_pending_txn_len() == 0 && self.doc.state_frontiers() == now {
+            if self.pending_changes() == 0 && self.doc.state_frontiers() == now {
                 cache.read_at = keep.then_some(now);
                 return out;
             }
@@ -1021,7 +1137,7 @@ impl SessionDoc {
         // Each command read from the doc once, then again only when it
         // changes (`read_entries`' cache, for the ledger).
         let mut cache = self.command_cache.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(self.read_list_cached("commands", &mut cache, &self.command_changes, true, |value| {
+        let read = self.read_list_cached("commands", &mut cache, &self.command_changes, true, |value| {
             match serde_json::from_value(value) {
                 Ok(entry) => Some(entry),
                 Err(err) => {
@@ -1029,7 +1145,9 @@ impl SessionDoc {
                     None
                 }
             }
-        }))
+        });
+        self.command_bytes.store(cache.bytes, std::sync::atomic::Ordering::Relaxed);
+        Ok(read)
     }
 
     /// Every command, read from the doc whole (no cache).
@@ -1086,7 +1204,7 @@ impl SessionDoc {
                 .as_str()
                 .ok_or_else(|| DocError::Schema("status not a string".into()))?,
         )?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -1116,7 +1234,7 @@ impl SessionDoc {
                     if let Some(r) = resolution {
                         map.insert("resolution", r)?;
                     }
-                    self.doc.commit();
+                    self.commit();
                     return Ok(());
                 }
             }
@@ -1143,7 +1261,7 @@ impl SessionDoc {
                 );
                 if id_matches {
                     map.insert("status", status_str(status))?;
-                    self.doc.commit();
+                    self.commit();
                     return Ok(true);
                 }
             }
@@ -1198,7 +1316,7 @@ impl SessionDoc {
                     message: message.to_string(),
                 },
             )?;
-            self.doc.commit();
+            self.commit();
             return Ok(true);
         }
         Ok(false)
@@ -1247,7 +1365,7 @@ impl SessionDoc {
                         "answers",
                         loro_value_from_json(&serde_json::to_value(answers)?),
                     )?;
-                    self.doc.commit();
+                    self.commit();
                     return Ok(true);
                 }
             }
@@ -1283,7 +1401,7 @@ impl SessionDoc {
         if let Some(t) = tail {
             part.insert("subagentTail", t)?;
         }
-        self.doc.commit();
+        self.commit();
         Ok(true)
     }
 
@@ -1770,7 +1888,7 @@ impl<'a> SegmentWriter<'a> {
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
-        doc.doc.commit();
+        doc.commit();
         Ok(Self {
             doc,
             entry_index,
@@ -1898,7 +2016,7 @@ impl<'a> SegmentWriter<'a> {
         }
 
         if dirty {
-            self.doc.doc.commit();
+            self.doc.commit();
         }
         Ok(())
     }
@@ -1916,7 +2034,7 @@ impl<'a> SegmentWriter<'a> {
         if self.duration_from > 0 {
             map.insert("durationMs", (now - self.duration_from).max(0))?;
         }
-        self.doc.doc.commit();
+        self.doc.commit();
         Ok(())
     }
 }
@@ -2114,6 +2232,83 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         let commits = writer.join().unwrap();
         assert!(compared >= 50, "too few still moments to compare ({compared}, {commits} commits)");
+        assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
+    }
+
+    /// A local commit on one thread overlapping an import on another (the
+    /// harness writing while the room delivers). Loro delivers a local
+    /// commit's events after releasing its own lock, so an import can land
+    /// while they're on their way: its rows already show, its events come
+    /// later. A read in that gap must not trust the cache. Made to happen:
+    /// a subscriber ahead of the cache's own starts the import while the
+    /// commit's events are delivered, and reads when the import's events
+    /// start (before the cache has heard of it).
+    #[test]
+    fn a_read_between_an_overlapping_import_and_its_events_is_whole() {
+        use std::sync::{Arc, Mutex, OnceLock};
+        let entry = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: "words".into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let shared: Arc<OnceLock<Arc<SessionDoc>>> = Arc::default();
+        let update: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
+        let importer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let reader: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let loro = LoroDoc::new();
+        let _probe = {
+            let (shared, update, importer, seen, reader) =
+                (shared.clone(), update.clone(), importer.clone(), seen.clone(), reader.clone());
+            loro.subscribe_root(Arc::new(move |event| {
+                let Some(doc) = shared.get() else { return };
+                match event.triggered_by {
+                    loro::EventTriggerKind::Local => {
+                        if let Some(bytes) = update.lock().unwrap().take() {
+                            let doc = doc.clone();
+                            *importer.lock().unwrap() =
+                                Some(std::thread::spawn(move || drop(doc.import(&bytes).unwrap())));
+                            // (Time for the import to land, if it can.)
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                    }
+                    loro::EventTriggerKind::Import => {
+                        // A reader on another thread, in the gap: the
+                        // import shows, its events aren't through yet.
+                        let (doc, seen) = (doc.clone(), seen.clone());
+                        *reader.lock().unwrap() = Some(std::thread::spawn(move || {
+                            let cached = doc.read_entries().unwrap();
+                            seen.lock().unwrap().push(cached == doc.read_entries_whole().unwrap());
+                        }));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    _ => {}
+                }
+            }))
+        };
+        let doc = Arc::new(SessionDoc::from_doc(loro));
+        for i in 0..20 {
+            doc.push_message(&entry(&format!("row-{i}"))).unwrap();
+        }
+        // Another device's edit to an earlier row, as the room brings it.
+        let remote = SessionDoc::from_doc(LoroDoc::new());
+        remote.doc().set_peer_id(7).unwrap();
+        remote.import(&doc.export_snapshot().unwrap()).unwrap();
+        let before = remote.doc().oplog_vv();
+        remote.append_error_part("row-3", "row-3-remote", "from afar").unwrap();
+        *update.lock().unwrap() = Some(remote.doc().export(ExportMode::updates(&before)).unwrap());
+        assert_eq!(doc.read_entries().unwrap().len(), 20);
+        let _ = shared.set(doc.clone());
+        // The local commit, during whose events the import comes.
+        doc.set_message_status("row-11", MessageStatus::Aborted).unwrap();
+        importer.lock().unwrap().take().unwrap().join().unwrap();
+        reader.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![true], "the read in the gap was whole");
         assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
     }
 
