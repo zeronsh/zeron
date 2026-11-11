@@ -14,6 +14,8 @@
 # and the `zeron-engine` it's given, built from the same commit:
 #   BETA_VERSION=<workspace version>-beta.<n>
 #   ZGX_BETA_ENGINE=<a zeron-engine binary, or a release's linux tarball>
+# The engine must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below), which
+# a stable release from before that isn't.
 
 set -euo pipefail
 

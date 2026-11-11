@@ -3,7 +3,8 @@
 # beta\<version>\ with its scripts, plugins and the zeron.exe it's given, built
 # from the same commit, as engine\zeron.exe (a Windows release has no separate
 # engine: it runs as `zeron.exe engine`). A tester keeps their data and device.
-# No standalone .exe: this interface can't run without that folder.
+# No standalone .exe: this interface can't run without that folder. The engine
+# must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below).
 param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
     [string]$BetaVersion,
