@@ -37,13 +37,18 @@ export type Choice = { id: string, label: string }
 -- An option of a model (Devin Fusion's lead and sidekick): its choices and
 -- the one it starts on (by id).
 export type Option = { id: string, label: string, default: string, choices: { Choice } }
+-- Where a model is served from, for an agent reaching models through
+-- several providers (Pi signed in to Codex and OpenCode): its id and name.
+export type Provider = { id: string, name: string }
 -- A model: its agent, its reasoning levels (low to high) and the one it
--- starts on, whether it offers Fast mode, its other options, and whether
--- it's its agent's default (what a chat that names no model runs).
+-- starts on, whether it offers Fast mode, its other options, whether it's
+-- its agent's default (what a chat that names no model runs), and its
+-- provider.
 export type Model = {
 	value: string,
 	label: string,
 	harness: string,
+	provider: Provider?,
 	efforts: { EffortSlider.Level }?,
 	effort: string?,
 	fast: boolean?,
@@ -295,11 +300,33 @@ return ui.component(function(props: Props): Node
 		props.effort:set(own_effort(m))
 	end)
 
-	-- The models as the dropdown's items, each in its agent's mark.
+	-- The models as the dropdown's items, each in its agent's mark. A model
+	-- with a provider has its name as the row's hint, shown where it tells
+	-- the model from a namesake (its agent lists the same name from another
+	-- provider: Pi's GPT-5.5 through Codex and through OpenCode), and on a
+	-- row a search found by it ("codex"); elsewhere it would only repeat.
 	local items = ui.computed(function(): { Dropdown.Item }
 		local out: { Dropdown.Item } = {}
 		local by_agent = agents:get()
-		for _, m in read(props.models) :: { Model } do
+		local models = read(props.models) :: { Model }
+		-- The providers each agent's name comes from ("": none named).
+		local sources: { [string]: { [string]: boolean } } = {}
+		local function key(m: Model): string
+			return `{m.harness}\0{string.lower(m.label)}`
+		end
+		for _, m in models do
+			local k = key(m)
+			sources[k] = sources[k] or {}
+			sources[k][if m.provider then m.provider.id else ""] = true
+		end
+		local function namesake(m: Model): boolean
+			local n = 0
+			for _ in sources[key(m)] do
+				n += 1
+			end
+			return n > 1
+		end
+		for _, m in models do
 			local agent = by_agent[m.harness]
 			table.insert(out, {
 				value = m.value,
@@ -307,6 +334,8 @@ return ui.component(function(props: Props): Node
 				mark = if agent then agent.mark else nil,
 				svg = if agent then agent.icon else nil,
 				svg_seed = m.harness,
+				hint = if m.provider then m.provider.name else nil,
+				hint_when_found = if m.provider then not namesake(m) else nil,
 			})
 		end
 		return out

@@ -265,6 +265,7 @@ fn grok_spec() -> AcpAgentSpec {
                 default: false,
                 id: "grok-4.5".into(),
                 label: "Grok 4.5".into(),
+                provider: None,
                 description: Some("xAI's coding model — 500k context".into()),
                 reasoning_levels: vec![
                     ReasoningLevel::Low,
@@ -343,6 +344,7 @@ fn devin_spec() -> AcpAgentSpec {
                     default: false,
                     id: "swe-1-7-medium".into(),
                     label: "SWE-1.7 Medium".into(),
+                    provider: None,
                     description: Some("Devin's default coding model".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -351,6 +353,7 @@ fn devin_spec() -> AcpAgentSpec {
                     default: false,
                     id: "claude-fable-5-1-high".into(),
                     label: "Claude Fable 5.1 High".into(),
+                    provider: None,
                     description: Some("Anthropic's frontier model through Devin".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -359,6 +362,7 @@ fn devin_spec() -> AcpAgentSpec {
                     default: false,
                     id: "adaptive".into(),
                     label: "Adaptive".into(),
+                    provider: None,
                     description: Some("Devin picks the model per request".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -502,6 +506,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     default: false,
                     id: "hermes-4-405b".into(),
                     label: "Hermes 4 405B".into(),
+                    provider: None,
                     description: Some("Nous Research's hybrid-reasoning flagship".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -510,6 +515,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     default: false,
                     id: "hermes-4-70b".into(),
                     label: "Hermes 4 70B".into(),
+                    provider: None,
                     description: Some("Faster Hermes 4 — same post-training, 70B".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
@@ -1213,6 +1219,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     default: false,
                     id: "gemini-3.7-flash".into(),
                     label: "Gemini 3.7 Flash".into(),
+                    provider: None,
                     description: None,
                     reasoning_levels: vec![Low, Medium, High],
                     options: Vec::new(),
@@ -1221,6 +1228,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     default: false,
                     id: "gemini-3.1-pro".into(),
                     label: "Gemini 3.1 Pro".into(),
+                    provider: None,
                     description: None,
                     reasoning_levels: vec![Low, High],
                     options: Vec::new(),
@@ -2947,6 +2955,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .or_else(|| name.map(str::to_owned))
                 .or_else(|| known.map(|m| m.label.clone()))
                 .unwrap_or_else(|| id.to_owned()),
+            provider: None,
             description: aliased
                 .and_then(|m| m.description.clone())
                 .or_else(|| description.map(str::to_owned))
@@ -4668,6 +4677,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
                 id: group.id.clone(),
                 label: group.label.to_owned(),
                 // variant descriptions only restate their thinking level
+                provider: None,
                 description: None,
                 reasoning_levels: group.variants.iter().map(|(level, _)| *level).collect(),
                 options: first.options.clone(),

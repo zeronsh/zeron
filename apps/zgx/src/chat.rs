@@ -1654,6 +1654,15 @@ fn model_value(harness: &str, m: &Json) -> Value {
     if m["default"].as_bool() == Some(true) {
         fields.push(("default", Value::Bool(true)));
     }
+    // Where it's served from, for an agent reaching models through several
+    // providers (Pi signed in to Codex and OpenCode): its id and its name.
+    let provider = &m["provider"];
+    if let (Some(pid), Some(name)) = (provider["id"].as_str(), provider["name"].as_str())
+        && !pid.is_empty()
+        && !name.is_empty()
+    {
+        fields.push(("provider", Value::record([("id", Value::from(pid)), ("name", Value::from(name))])));
+    }
     Value::record(fields)
 }
 
@@ -6983,6 +6992,12 @@ mod tests {
         assert!(model_value("claude-code", &claude).field("default").is_none());
         let marked = json!({ "id": "claude-opus-5-5", "default": true });
         assert!(matches!(model_value("claude-code", &marked).field("default"), Some(Value::Bool(true))));
+        // A model's provider rides along when the agent names one, and only then.
+        assert!(model_value("claude-code", &marked).field("provider").is_none());
+        let pi = json!({ "id": "openai-codex/gpt-5.5", "label": "GPT-5.5", "provider": { "id": "openai-codex", "name": "Codex" } });
+        let provider = model_value("pi", &pi).field("provider").cloned().expect("a provider");
+        assert_eq!(provider.field("id").map(text).as_deref(), Some("openai-codex"));
+        assert_eq!(provider.field("name").map(text).as_deref(), Some("Codex"));
     }
 
     #[test]

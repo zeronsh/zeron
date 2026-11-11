@@ -505,6 +505,11 @@ pub struct Model {
     /// mirroring the Electron app's `ModelInfo.description`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Where the model is served from, for a harness that reaches models
+    /// through several providers (Pi signed in to both Codex and OpenCode
+    /// can list the same model twice). `None` for a harness with one source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ModelProvider>,
     #[serde(default)]
     pub reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
@@ -515,6 +520,15 @@ pub struct Model {
     /// is marked (catalogs from older engines mark none).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
+}
+
+/// A model's provider: its stable id as the harness names it (`openai-codex`,
+/// `opencode`) and its name as people say it (`Codex`, `OpenCode`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProvider {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

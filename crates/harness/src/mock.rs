@@ -205,6 +205,7 @@ impl Harness for MockHarness {
                 default: false,
                 id: "mock-1".into(),
                 label: "Mock 1".into(),
+                provider: None,
                 description: None,
                 reasoning_levels: vec![ReasoningLevel::Medium],
                 options: vec![],
@@ -215,6 +216,7 @@ impl Harness for MockHarness {
                 default: false,
                 id: "mock-fable-5".into(),
                 label: "Fable 5".into(),
+                provider: None,
                 description: None,
                 reasoning_levels: vec![
                     ReasoningLevel::Low,

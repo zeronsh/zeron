@@ -232,6 +232,7 @@ mod tests {
             default: false,
             id: "live".into(),
             label: "Live".into(),
+            provider: None,
             description: None,
             reasoning_levels: vec![],
             options: vec![],

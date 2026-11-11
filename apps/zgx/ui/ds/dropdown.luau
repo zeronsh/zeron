@@ -51,6 +51,14 @@ export type Item = {
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
 	emoji: string?,
 	description: string?,
+	-- Quiet words beside its name, in the name's size and on its line (a
+	-- model's provider, telling it from a namesake), searched as its name
+	-- is. The name gives way first: it fades, the hint stays whole. With
+	-- `hint_when_found`, they show only while a search found the row by
+	-- them (its name alone doesn't hold what was typed). Both are followed
+	-- as the items change (a row's hint comes and goes in place).
+	hint: string?,
+	hint_when_found: boolean?,
 	-- Its label is an email address: drawn as ds.PrivateText draws one, its
 	-- tile no letter of it (`seed`'s avatar).
 	private: boolean?,
@@ -386,12 +394,59 @@ return ui.component(function(props: Props): Node
 		return control.text(props.placeholder) or locale.s("ds.dropdown.placeholder")
 	end
 
+	-- Whether a search finds an item: by its name, else by its hint (or its
+	-- name and hint read together: "gpt codex").
+	local function by_name(item: Item, q: string): boolean
+		return q == "" or string.find(string.lower(item.label), q, 1, true) ~= nil
+	end
+	local function found(item: Item, q: string): boolean
+		if by_name(item, q) then
+			return true
+		end
+		if not item.hint then
+			return false
+		end
+		local hint = string.lower(item.hint)
+		return string.find(hint, q, 1, true) ~= nil or string.find(string.lower(item.label) .. " " .. hint, q, 1, true) ~= nil
+	end
+	-- Whether an item's hint shows now (`hint_when_found`: while a search
+	-- found it by its hint, not its name).
+	local function hint_shown(now: Item): boolean
+		return now.hint ~= nil and (not now.hint_when_found or not by_name(now, string.lower(query:get())))
+	end
+	-- A name with its hint beside it: the name fades where the row runs
+	-- short, the hint keeps its width; the row's own gap between them. The
+	-- hint follows the row's item as it changes (`live`).
+	local function named(item: Item, live: State<Item>): Node
+		return ui.row {
+			grow = 1,
+			min_w = 0,
+			gap = "$space.2",
+			items = "center",
+			FadeText {
+				item.label,
+				text_size = "$font.size.md",
+				color = "$text.primary",
+				shrink = 1,
+			},
+			ui.show(function(): boolean
+				return hint_shown(live:get())
+			end, ui.text {
+				function(): string
+					return live:get().hint or ""
+				end,
+				shrink = 0,
+				text_size = "$font.size.md",
+				color = "$text.tertiary",
+			}),
+		}
+	end
 	local shown = ui.computed(function(): { Item }
 		local q = string.lower(query:get())
 		local out: { Item } = {}
 		local keep = props.filter
 		for _, item in items() do
-			if (keep == nil or keep(item)) and (q == "" or string.find(string.lower(item.label), q, 1, true)) then
+			if (keep == nil or keep(item)) and found(item, q) then
 				table.insert(out, item)
 			end
 		end
@@ -1088,9 +1143,17 @@ return ui.component(function(props: Props): Node
 				local items: { Node } = {}
 				table.insert(
 					items,
-					ui.each(shown, function(item: Item)
+					ui.each(shown, function(item: Item, _i: number, live: State<Item>)
 						local r = row({
 							role = "option",
+							-- A row with a hint is heard as it reads: its name,
+							-- then its hint while that shows.
+							label = if item.hint
+								then function(): string
+									local now = live:get()
+									return if hint_shown(now) then `{item.label} {now.hint}` else item.label
+								end
+								else nil,
 							-- What assistive technology hears the selected
 							-- state as (the check it no longer shows).
 							selected = function(): boolean
@@ -1162,6 +1225,7 @@ return ui.component(function(props: Props): Node
 										wrap = true,
 									},
 								}
+								elseif item.hint then named(item, live)
 								else text(item.label),
 							if item.tag
 								then ui.text {
