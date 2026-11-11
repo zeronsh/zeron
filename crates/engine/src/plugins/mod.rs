@@ -793,6 +793,9 @@ impl Plugins {
         }
         self.inner.tools.drop_pending();
         self.inner.services.shutdown();
+        // Its host holds the engine (doc host, sessions, workspace), and the
+        // engine holds these plugins: let go, so the graph can be freed.
+        self.inner.agents.shutdown();
     }
 
     fn kick(&self, kick: Kick) {

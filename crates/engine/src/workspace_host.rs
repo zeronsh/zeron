@@ -311,7 +311,21 @@ pub struct WorkspaceHost {
     inner: Arc<WorkspaceHostInner>,
 }
 
+/// A [`WorkspaceHost`] that doesn't keep it alive (see `WeakDocHost`).
+#[derive(Clone)]
+pub(crate) struct WeakWorkspaceHost(Weak<WorkspaceHostInner>);
+
+impl WeakWorkspaceHost {
+    pub(crate) fn upgrade(&self) -> Option<WorkspaceHost> {
+        self.0.upgrade().map(|inner| WorkspaceHost { inner })
+    }
+}
+
 impl WorkspaceHost {
+    pub(crate) fn downgrade(&self) -> WeakWorkspaceHost {
+        WeakWorkspaceHost(Arc::downgrade(&self.inner))
+    }
+
     /// Load (or migrate, or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {

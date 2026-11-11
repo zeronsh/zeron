@@ -591,6 +591,13 @@ impl Agents {
         *lock(&self.inner.host) = Some(host);
     }
 
+    /// The engine is shutting down: let go of its host (it holds the
+    /// engine, which holds this). Ops after this are refused as before a
+    /// host was set.
+    pub fn shutdown(&self) {
+        lock(&self.inner.host).take();
+    }
+
     pub fn set_sink(&self, sink: Arc<dyn Sink>) {
         *lock(&self.inner.sink) = Some(sink);
     }

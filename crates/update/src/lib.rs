@@ -1389,6 +1389,13 @@ pub fn set_before_restart(prepare: impl Fn() + Send + Sync + 'static) {
         Some(std::sync::Arc::new(prepare));
 }
 
+/// Runs what [`set_before_restart`] set, as [`restart_service`] does first,
+/// without restarting anything. For tests.
+#[doc(hidden)]
+pub fn run_before_restart() {
+    before_restart();
+}
+
 fn before_restart() {
     let prepare = BEFORE_RESTART
         .lock()

@@ -502,6 +502,17 @@ pub struct DocHost {
     inner: Arc<DocHostInner>,
 }
 
+/// A [`DocHost`] that doesn't keep it alive: for what outlives the engine
+/// graph (a process-wide hook), so a shut-down graph can still be freed.
+#[derive(Clone)]
+pub(crate) struct WeakDocHost(Weak<DocHostInner>);
+
+impl WeakDocHost {
+    pub(crate) fn upgrade(&self) -> Option<DocHost> {
+        self.0.upgrade().map(|inner| DocHost { inner })
+    }
+}
+
 /// How a taken queue row reaches the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueSend {
@@ -1249,6 +1260,10 @@ impl ChatDocHandle {
 }
 
 impl DocHost {
+    pub(crate) fn downgrade(&self) -> WeakDocHost {
+        WeakDocHost(Arc::downgrade(&self.inner))
+    }
+
     pub fn new(store: Arc<DocsStore>, config: DocHostConfig) -> Self {
         let host = Self {
             inner: Arc::new(DocHostInner {
