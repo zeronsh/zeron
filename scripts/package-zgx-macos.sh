@@ -112,12 +112,23 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ZGX_BIN" "$APP/Contents/MacOS/zeron"
 install -m 755 "$ENGINE_BIN" "$APP/Contents/MacOS/Zeron Engine"
 # Zeron.app's Info.plist, as the old app's, with this one's versions: the
-# short version stays numeric (a beta's is the next release's), the bundle
-# version is a beta's build, the engine its own (crates/update
-# `bundle_engine_version`), and zgx's floor macOS 13 (Ghostty's).
+# short version stays numeric (a beta's is the next release's), the engine
+# its own (crates/update `bundle_engine_version`), and zgx's floor macOS 13
+# (Ghostty's).
+#
+# The bundle version (CFBundleVersion) only ever goes up, since LaunchServices
+# takes the highest of several copies with the same bundle id (a retired
+# bundle can linger): `<x.y.z>.<n>` for beta n, `<x.y.z>.9999` for the
+# release itself. So 0.2.139.7 (beta.7) < 0.2.139.9999 (0.2.139) <
+# 0.2.140.1 (0.2.140-beta.1). A beta's number stays below 9999. (The old app
+# wrote plain `<x.y.z>`, below all of these.)
+STABLE_BUILD=9999
+if [[ -n "$NUMBER" ]]; then
+  (( 10#$NUMBER < STABLE_BUILD )) || die "beta number $NUMBER must stay below $STABLE_BUILD, the release's build"
+fi
 PLIST="$APP/Contents/Info.plist"
 sed "s/__VERSION__/$CORE/" "$ROOT/dist/macos/Info.plist" >"$PLIST"
-plutil -replace CFBundleVersion -string "$CORE${NUMBER:+.$NUMBER}" "$PLIST"
+plutil -replace CFBundleVersion -string "$CORE.${NUMBER:-$STABLE_BUILD}" "$PLIST"
 plutil -replace ZeronEngineVersion -string "$ENGINE_VERSION" "$PLIST"
 plutil -replace ZeronVersion -string "$VERSION" "$PLIST"
 plutil -replace LSMinimumSystemVersion -string "13.0" "$PLIST"

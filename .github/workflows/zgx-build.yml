@@ -113,6 +113,13 @@ jobs:
           test "$(plutil -extract CFBundleIdentifier raw "$plist")" = sh.zeron.app
           test "$(plutil -extract ZeronVersion raw "$plist")" = "$ZGX_VERSION"
           test "$(plutil -extract LSMinimumSystemVersion raw "$plist")" = 13.0
+          # Always up (scripts/package-zgx-macos.sh): <x.y.z>.<n> for beta n,
+          # <x.y.z>.9999 for the release.
+          case "$ZGX_VERSION" in
+            *-beta.*) want="${ZGX_VERSION%-beta.*}.${ZGX_VERSION##*-beta.}" ;;
+            *) want="$ZGX_VERSION.9999" ;;
+          esac
+          test "$(plutil -extract CFBundleVersion raw "$plist")" = "$want"
           test "$("$app/Contents/MacOS/zeron" --version)" = "zeron $ZGX_VERSION"
           test -x "$app/Contents/MacOS/Zeron Engine"
           test -f "$app/Contents/Resources/ui/app.luau"
