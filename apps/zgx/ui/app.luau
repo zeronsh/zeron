@@ -14,6 +14,10 @@ if ui.shared("window", "onboarding"):peek() == "main" then
 	-- Plugins: their page in Settings, and what they're shown of Zeron.
 	require("@app/screens/plugins")
 	local shell = require("@app/screens/shell")
+	-- A frame stats panel over the window (ZERON_FPS_HUD=1, src/fps_hud.rs).
+	if ui.shared("debug.fps_hud", false):peek() == true then
+		return require("@app/screens/fps_hud")(shell())
+	end
 	return shell()
 end
 
