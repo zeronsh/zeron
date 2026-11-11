@@ -192,8 +192,11 @@
 			"match": { "wash": "alpha({accent}, 0.34)" },
 			// A field: cut into the glass (a darker wash than the window, as
 			// the composer sits), its edge a faint light hairline that firms
-			// under the pointer.
-			"field": { "bg": "#00000038", "glass": "#343438b8", "glass_hover": "#343438d9", "hover": "#0000004d", "edge": "#ffffff14", "edge_hover": "#ffffff26" },
+			// under the pointer. Frosted, a settings select's wash, as Zeron's
+			// (settings/widgets.rs `select_fill`: wash 0.06, 0.10 under the
+			// pointer), so the glass shows through it: the composer's
+			// `input_glass_bg` (#343438b8) drew a solid grey box there.
+			"field": { "bg": "#00000038", "glass": "#ebebeb0f", "glass_hover": "#ebebeb1a", "hover": "#0000004d", "edge": "#ffffff14", "edge_hover": "#ffffff26" },
 			"check": { "bg": "#00000038", "edge": "#ffffff38" },
 			// Tones: the palette's 300s and 400s, pale enough to read on dark
 			// glass; their washes a touch firmer than light's (a faint hue
@@ -231,7 +234,7 @@
 			// dialogs the composer's dark tint / the overlay glass (popover.rs
 			// `surface_bg`), the island its overlay glass (shell.rs, theme.rs
 			// `glass_overlay`), the composer and its trays `composer_surface_bg`,
-			// settings' cards `block_fill` (wash 0.045), fields `input_glass_bg`.
+			// settings' cards `block_fill` (wash 0.045), fields `select_fill`.
 			// The panel keeps ds/tokens' own (the page's card's wash), level
 			// with the page and sidebar: Zeron's `panel_bg` (its background at
 			// 0.4) sank it below them, darkest where the glass is darkest.
