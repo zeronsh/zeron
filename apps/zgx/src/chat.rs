@@ -125,6 +125,9 @@ struct Chats {
     /// the first frame, rather than a skeleton while it's read and built
     /// again; the engine's copy then brings what changed.
     let_go: RefCell<Vec<LetGo>>,
+    /// Moves with each chat let go of: only the last one's look at the
+    /// footprint, once the app has rested, counts.
+    let_go_turn: Cell<u64>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -258,6 +261,8 @@ fn compressed(bytes: &[u8]) -> Box<[u8]> {
 struct Built {
     row: Option<Value>,
     subagents: Option<Rc<[Value]>>,
+    /// Folded, its compressed bytes' length (what a chat kept is weighed by).
+    folded: usize,
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
@@ -266,12 +271,17 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let RowContext { doc, device, model } = &**context;
     let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
     let subagents = row.as_ref().and_then(subagents_in);
+    let mut folded = 0;
     let row = match row {
         Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
             (Some(id), Ok(bytes)) => Some(Value::folded(
                 id.into(),
                 FoldedEntry {
-                    bytes: compressed(&bytes),
+                    bytes: {
+                        let bytes = compressed(&bytes);
+                        folded = bytes.len();
+                        bytes
+                    },
                     context: context.clone(),
                 },
             )),
@@ -279,7 +289,7 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
         },
         row => row,
     };
-    Built { row, subagents }
+    Built { row, subagents, folded }
 }
 
 /// A long chat's settled entries, as a worker thread makes them: what they fold
@@ -401,6 +411,8 @@ fn folding(entries: Vec<(usize, String, Json)>, context: &RowContext) -> Folding
 struct LetGo {
     /// When it was let go of.
     at: std::time::Instant,
+    /// About what it holds, in bytes (`let_go_weight`).
+    bytes: usize,
     id: String,
     entries: Vec<Entry>,
     older_todo: Option<(usize, Json)>,
@@ -414,13 +426,71 @@ struct LetGo {
 /// are kept at most (a long chat's rows are its whole transcript, built).
 const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
 const LET_GO_MOST: usize = 6;
+/// How long after a chat is let go of the app is taken to have rested, its
+/// footprint then looked at (`room_to_keep`).
+const LET_GO_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+/// And at most about this much of them, the oldest going first: a long
+/// chat's kept rows (7,900 entries, 18 MB as JSON) cost some 14 MB, and the
+/// app rests near 265 MB of its 300 MB: one long chat, or a few others.
+const LET_GO_BYTES: usize = 20 << 20;
+/// Nothing kept while the app's footprint (what Activity Monitor shows) is
+/// past this: what's kept is the first to go when memory is short.
+#[cfg(target_os = "macos")]
+const LET_GO_FOOTPRINT: u64 = 280 << 20;
+
+/// The process's footprint in bytes, as Activity Monitor shows it.
+#[cfg(target_os = "macos")]
+fn footprint() -> Option<u64> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a rusage_info_v4 the call fills in, as RUSAGE_INFO_V4 asks.
+    let read = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, (&mut info as *mut libc::rusage_info_v4).cast()) };
+    (read == 0).then_some(info.ri_phys_footprint)
+}
+
+/// Whether the app has room to keep a chat let go of.
+fn room_to_keep() -> bool {
+    #[cfg(target_os = "macos")]
+    if footprint().is_some_and(|bytes| bytes > LET_GO_FOOTPRINT) {
+        return false;
+    }
+    true
+}
+
+/// `ZERON_ZGX_KEEP_CHATS=0`: chats let go of are kept as they were before
+/// (one, two seconds, for a split taking it), to compare what keeping costs.
+fn keeping_chats() -> bool {
+    thread_local! {
+        static ON: bool = std::env::var("ZERON_ZGX_KEEP_CHATS").map_or(true, |v| v != "0");
+    }
+    ON.with(|on| *on)
+}
+/// What each entry costs beyond its folded bytes (its id, sum, row slots).
+const LET_GO_PER_ENTRY: usize = 512;
+
+/// About what a chat's kept rows hold: each settled row's folded bytes, each
+/// entry's slots, and the newest entries' JSON, whole, with the rows built
+/// from it.
+fn let_go_weight(entries: &[Entry], built: &HashMap<Rc<str>, Built>) -> usize {
+    let folded: usize = built.values().map(|b| b.folded).sum();
+    let whole: usize = entries
+        .iter()
+        .filter_map(|e| e.json.as_ref())
+        .map(|json| serde_json::to_vec(json).map_or(0, |b| b.len()))
+        .sum();
+    folded + entries.len() * LET_GO_PER_ENTRY + 2 * whole
+}
 
 /// The chats let go of that are still kept: none older than `LET_GO_KEPT`,
 /// and the newest `LET_GO_MOST`.
 fn prune_let_go(kept: &mut Vec<LetGo>) {
-    kept.retain(|held| held.at.elapsed() < LET_GO_KEPT);
-    let over = kept.len().saturating_sub(LET_GO_MOST);
+    let (most, kept_for) = if keeping_chats() { (LET_GO_MOST, LET_GO_KEPT) } else { (1, std::time::Duration::from_secs(2)) };
+    kept.retain(|held| held.at.elapsed() < kept_for);
+    let over = kept.len().saturating_sub(most);
     kept.drain(..over);
+    // (The oldest first, until what's kept fits.)
+    while keeping_chats() && kept.iter().map(|held| held.bytes).sum::<usize>() > LET_GO_BYTES {
+        kept.remove(0);
+    }
 }
 
 /// How long after connecting other devices' catalogs start being looked at.
@@ -1023,9 +1093,34 @@ impl Chats {
             return;
         }
         let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
+        let bytes = let_go_weight(&entries, &built);
         kept.retain(|held| held.id != id);
-        kept.push(LetGo { at: std::time::Instant::now(), id, entries, older_todo, built, built_model, context, context_usage });
+        // (Too big on its own to keep: not kept, and what is kept stays.)
+        if keeping_chats() && bytes > LET_GO_BYTES {
+            return;
+        }
+        kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context, context_usage });
         prune_let_go(&mut kept);
+        eprintln!(
+            "zeron-zgx: chat: kept chats let go of: {}, {:.1} MB",
+            kept.len(),
+            kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e6
+        );
+        drop(kept);
+        // The app's footprint once it has come to rest after the switch (as
+        // it lets a chat go it's opening the next, drawing it, its GPU
+        // memory counted too: past any mark at nearly every switch): past
+        // its mark then, what's kept goes.
+        let turn = self.let_go_turn.get().wrapping_add(1);
+        self.let_go_turn.set(turn);
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(LET_GO_SETTLE).await;
+            if me.let_go_turn.get() == turn && !room_to_keep() && !me.let_go.borrow().is_empty() {
+                me.let_go.borrow_mut().clear();
+                eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint at rest is past its mark)");
+            }
+        });
     }
 
     /// What a view let go of lately, if it was this chat: an `Open` that has
@@ -3882,9 +3977,10 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
     {
         *older_todo = Some((place, part));
     }
+    let folded = bytes.as_ref().map_or(0, |bytes| bytes.len());
     let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
     let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
-    built.insert(entry.id.clone(), Built { row, subagents });
+    built.insert(entry.id.clone(), Built { row, subagents, folded });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
@@ -7563,6 +7659,102 @@ mod tests {
         }
         assert!(chats.take_let_go("x0").is_none());
         assert!(chats.take_let_go(&format!("x{}", LET_GO_MOST + 1)).is_some());
+        // And no more than LET_GO_BYTES of them: a chat alone over it isn't
+        // kept, and those kept before it stay.
+        chats.keep_let_go(Some(open("small")));
+        let mut huge = open("huge");
+        huge.built.insert("huge-m".into(), super::Built { folded: super::LET_GO_BYTES + 1, ..Default::default() });
+        chats.keep_let_go(Some(huge));
+        assert!(chats.take_let_go("huge").is_none(), "too big to keep");
+        assert!(chats.take_let_go("small").is_some());
+    }
+
+    /// What keeping chats let go of costs (`let_go`): six chats the size of a
+    /// long one (some 7,900 entries, about 28 MB as JSON whole), each built as
+    /// a view builds it (its settled rows folded), kept one after another; the
+    /// process's footprint (what Activity Monitor shows) after each.
+    ///   cargo test --release --bin zeron-zgx kept_chats_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement"]
+    #[cfg(target_os = "macos")]
+    fn kept_chats_cost() {
+        use super::{Chats, Entry, Open, RowContext, WHOLE_TAIL, built_for, settle};
+        use serde_json::json;
+        use std::rc::Rc;
+        fn footprint_mb() -> f64 {
+            let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+            let r = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, &mut info as *mut _ as *mut _) };
+            assert_eq!(r, 0);
+            info.ri_phys_footprint as f64 / 1e6
+        }
+        let words = |i: usize, n: usize| -> String {
+            (0..n).map(|k| format!("word{} ", (i * 31 + k * 7) % 997)).collect()
+        };
+        let chat = |c: usize| -> Vec<Json> {
+            (0..7900)
+                .map(|i| {
+                    let id = format!("c{c}-e{i}");
+                    if i % 2 == 0 {
+                        json!({ "id": id, "role": "user", "createdAt": 1_762_000_000_000_i64 + i as i64, "parts": [{ "id": "t0", "kind": "text", "text": words(i, 40) }] })
+                    } else {
+                        json!({ "id": id, "role": "assistant", "status": "complete", "createdAt": 1_762_000_000_000_i64 + i as i64, "durationMs": 9000, "parts": [
+                            { "id": "r0", "kind": "reasoning", "text": words(i, 120) },
+                            { "id": "x0", "kind": "tool", "status": "completed", "call": { "kind": "exec", "command": format!("cargo test {i}") }, "output": words(i + 1, 200) },
+                            { "id": "t0", "kind": "text", "text": format!("## Part {i}\n\n{}\n\n- a\n- b\n\n```rust\nfn f() {{}}\n```\n", words(i + 2, 160)) },
+                        ] })
+                    }
+                })
+                .collect()
+        };
+        let chats = Rc::new(Chats::default());
+        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: Some("Opus".into()) });
+        let base = footprint_mb();
+        println!("KEPT base {base:.1} MB");
+        // One built as a view builds it and let go of with nothing kept: what a
+        // long chat opened at all leaves, cache or not.
+        let build = |c: usize| {
+            let list = chat(c);
+            let whole_from = list.len().saturating_sub(WHOLE_TAIL);
+            let mut entries: Vec<Entry> = Vec::with_capacity(list.len());
+            let mut built = std::collections::HashMap::new();
+            let mut older_todo = None;
+            for (at, e) in list.into_iter().enumerate() {
+                let row = built_for(&e, &context, at < whole_from);
+                let mut entry = Entry::new(e);
+                built.insert(entry.id.clone(), row);
+                if at < whole_from {
+                    settle(&mut entry, at, &mut older_todo);
+                }
+                entries.push(entry);
+            }
+            Open { id: format!("c{c}"), entries, built, older_todo, heard: true, ..Open::default() }
+        };
+        drop(build(99));
+        println!("KEPT one opened and let go, none kept: {:.1} MB (+{:.1})", footprint_mb(), footprint_mb() - base);
+        zgx_desktop::release_thread_heap();
+        println!("KEPT and the heap released: {:.1} MB (+{:.1})", footprint_mb(), footprint_mb() - base);
+        for c in 0..6 {
+            let list = chat(c);
+            let json_mb = list.iter().map(|e| serde_json::to_vec(e).map_or(0, |b| b.len())).sum::<usize>() as f64 / 1e6;
+            let whole_from = list.len().saturating_sub(WHOLE_TAIL);
+            let mut entries: Vec<Entry> = Vec::with_capacity(list.len());
+            let mut built = std::collections::HashMap::new();
+            let mut older_todo = None;
+            for (at, e) in list.into_iter().enumerate() {
+                let row = built_for(&e, &context, at < whole_from);
+                let mut entry = Entry::new(e);
+                built.insert(entry.id.clone(), row);
+                if at < whole_from {
+                    settle(&mut entry, at, &mut older_todo);
+                }
+                entries.push(entry);
+            }
+            chats.keep_let_go(Some(Open { id: format!("c{c}"), entries, built, older_todo, heard: true, ..Open::default() }));
+            let weights: Vec<String> = chats.let_go.borrow().iter().map(|h| format!("{}={:.1}MB", h.id, h.bytes as f64 / 1e6)).collect();
+            println!("KEPT {} chats: {:.1} MB (+{:.1}); this one {json_mb:.1} MB as JSON; kept {}", c + 1, footprint_mb(), footprint_mb() - base, weights.join(" "));
+        }
+        chats.let_go.borrow_mut().clear();
+        println!("KEPT none again: {:.1} MB", footprint_mb());
     }
 
     /// A chat let go while its rows wait to be built again (its model's
