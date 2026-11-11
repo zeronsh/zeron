@@ -1171,6 +1171,33 @@ do
 			end
 		end,
 	}
+	-- (table_fixture's `status`.)
+	local STATUS_TABLE = [[
+Beta.5 is almost out. Here's where everything stands:
+
+| Area | Status |
+|---|---|
+| **Beta.5** | Windows and both Linux builds passed. macOS has been building, signing and notarizing for about 40 minutes; notarization usually takes the longest. It publishes right after. |
+| **Memory** | Two of the three fixes are merged in zgx (#1960, #1981); #1945 merges after its checks. Together they bring memory after heavy use to about **264 MB** (was 315, and beta.1 was 271). The memory chat is now chasing the remaining ~50 MB stuck in partly used memory pages. |
+| **Streaming** | ff4bff4f's three zgx PRs are open and in CI: append-only text, styled text that follows state, and the fade-in drawn as one piece. Next is the GPU-run fade-in under the glass, worked out with the render chat. Your staging app's build is at 5.9% (from 7.1%), with about 4–4.5% as the next target. |
+| **Scrolling** | Waiting on zgx CI: accessibility updates (#1931), zgx's built-in scroll bar (#1961), and the "scrolling stopped" timer (#1975). The Zeron side of each is ready on branches. The working-rings fix is merged. |
+| **The scroll-skip / overlapping-rows bug** | Not reproduced, and no cause yet. Tests are in place. If it happens again, send a screenshot and the chat name before navigating away. |
+]]
+	-- `status_table`: a reply whose table has a 38-character label beside
+	-- long prose (table_fixture's `status`, the one Wing couldn't scroll).
+	ui.command {
+		id = "status_table",
+		title = "A reply with a wide status table",
+		run = function()
+			TRANSCRIPTS.s7 = {
+				{ id = "st1", role = "user", text = "Where does everything stand?" },
+				{ id = "st2", role = "assistant", text = STATUS_TABLE, model = "Opus" },
+			}
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
 	-- `long_chat_cross`: the same, other chats' long messages (folded behind
 	-- Show more) between its turns.
 	ui.command {
