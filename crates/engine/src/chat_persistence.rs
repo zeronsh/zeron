@@ -178,7 +178,7 @@ impl ChatPersistence {
         if let Some(wake) = &self.wake {
             let _ = wake.try_send(());
         } else {
-            self.flush_sync();
+            self.flush_unless_saving();
         }
     }
 
@@ -211,8 +211,17 @@ impl ChatPersistence {
             let _ = wake.try_send(());
         } else {
             // Offline synchronous tooling/tests have no executor to schedule.
-            self.flush_sync();
+            self.flush_unless_saving();
         }
+    }
+
+    /// Without a runtime: save now, unless a save is under way. That one
+    /// takes this change in (its export waits for the change to finish), and
+    /// the change stays marked for the next save. Never waits for it: this
+    /// runs in a change's hooks, under the doc's change lock, which that
+    /// save's export is waiting for.
+    fn flush_unless_saving(&self) {
+        self.flush_with(false, false);
     }
 
     async fn run(weak: Weak<Self>, mut rx: mpsc::Receiver<()>) {
@@ -297,8 +306,21 @@ impl ChatPersistence {
     }
 
     fn flush(&self, compact: bool) {
+        self.flush_with(compact, true);
+    }
+
+    /// `wait`: for a save already under way (else, with one, do nothing).
+    fn flush_with(&self, compact: bool, wait: bool) {
         let flush = || {
-            let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+            let _write = if wait {
+                self.write.lock().unwrap_or_else(|e| e.into_inner())
+            } else {
+                match self.write.try_lock() {
+                    Ok(write) => write,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                }
+            };
             let mut delta = self.delta.lock().unwrap_or_else(|e| e.into_inner());
             let generation = self.generation.load(Ordering::Acquire);
             let folds_deltas = compact
@@ -436,6 +458,77 @@ impl ChatPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Off a runtime a change's hooks save inline. A save already under
+    /// way (holding the persister's write lock) waits in its export for the
+    /// doc's change lock, which the change holds while its hooks run: the
+    /// hook must not wait for that save. It finishes, and the save that was
+    /// under way takes the change in.
+    #[test]
+    fn an_inline_save_from_a_changes_hooks_never_waits_for_a_save_under_way() {
+        use std::sync::OnceLock;
+        let raw = loro::LoroDoc::new();
+        let persister: Arc<OnceLock<Arc<ChatPersistence>>> = Arc::default();
+        let (started, saving) = std::sync::mpsc::channel::<()>();
+        let saving = Mutex::new(saving);
+        let saver: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        // Ahead of the hook: while the change's events are delivered (the
+        // change lock held), a save starts on another thread and gets as
+        // far as its export.
+        let _pause = {
+            let (persister, saver) = (persister.clone(), saver.clone());
+            raw.subscribe_root(Arc::new(move |_| {
+                let Some(p) = persister.get() else { return };
+                if saver.lock().unwrap().is_some() {
+                    return;
+                }
+                let p = p.clone();
+                let started = started.clone();
+                *saver.lock().unwrap() = Some(std::thread::spawn(move || {
+                    p.generation.fetch_add(1, Ordering::Release);
+                    let _ = started.send(());
+                    p.flush_sync();
+                }));
+                saving.lock().unwrap().recv().unwrap();
+                std::thread::sleep(Duration::from_millis(30));
+            }))
+        };
+        // The hook, as the engine's: a change marks the chat dirty.
+        let _hook = {
+            let persister = persister.clone();
+            raw.subscribe_root(Arc::new(move |_| {
+                if let Some(p) = persister.get() {
+                    p.dirty(false);
+                }
+            }))
+        };
+        let doc = Arc::new(SessionDoc::from_doc(raw));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        assert!(tokio::runtime::Handle::try_current().is_err(), "off a runtime");
+        let p = ChatPersistence::new(&doc, store.clone(), "inline".into(), 0);
+        let _ = persister.set(p.clone());
+        let (done, finished) = std::sync::mpsc::channel();
+        let writer = {
+            let doc = doc.clone();
+            std::thread::spawn(move || {
+                doc.doc().get_map("meta").insert("note", "a change").unwrap();
+                doc.commit();
+                let _ = done.send(());
+            })
+        };
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the change finished: its hook didn't wait for the save under way");
+        writer.join().unwrap();
+        saver.lock().unwrap().take().unwrap().join().unwrap();
+        // What was saved has the change.
+        let saved = store.load_snapshot("inline").unwrap().expect("saved");
+        let reopened = loro::LoroDoc::new();
+        reopened.import(&saved).unwrap();
+        use loro::ToJson;
+        assert_eq!(reopened.get_map("meta").get_value().to_json_value()["note"], "a change");
+    }
     /// Runs only on an explicitly supplied local snapshot; never writes back
     /// to it or connects to an edge/production room.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -515,27 +515,38 @@ struct ChangeLock {
 struct ChangeGuard<'a>(&'a ChangeLock);
 
 thread_local! {
-    /// This thread is inside a [`SessionDoc`] import: Loro holds the doc's
-    /// transaction lock until the import's events are delivered, so a read
-    /// from one of them mustn't ask Loro for the pending transaction (it
-    /// would wait on that lock, held by this very thread). None can be
-    /// pending then: Loro stops the transaction for the import.
-    static IMPORTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The docs this thread is importing into (by address): Loro holds a
+    /// doc's transaction lock until its import's events are delivered, so a
+    /// read of THAT doc from one of them mustn't ask Loro for its pending
+    /// transaction (it would wait on that lock, held by this very thread).
+    /// None can be pending then: Loro stops the transaction for the import.
+    /// Any other doc is asked as ever.
+    static IMPORTING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Marks this thread as importing while it lives.
-struct Importing;
+/// Marks this thread as importing into a doc while it lives.
+struct Importing(usize);
 
 impl Importing {
-    fn start() -> Self {
-        IMPORTING.set(IMPORTING.get() + 1);
-        Importing
+    fn start(doc: &SessionDoc) -> Self {
+        let at = doc as *const SessionDoc as usize;
+        IMPORTING.with_borrow_mut(|docs| docs.push(at));
+        Importing(at)
+    }
+
+    fn here(doc: &SessionDoc) -> bool {
+        let at = doc as *const SessionDoc as usize;
+        IMPORTING.with_borrow(|docs| docs.contains(&at))
     }
 }
 
 impl Drop for Importing {
     fn drop(&mut self) {
-        IMPORTING.set(IMPORTING.get() - 1);
+        IMPORTING.with_borrow_mut(|docs| {
+            if let Some(i) = docs.iter().rposition(|at| *at == self.0) {
+                docs.remove(i);
+            }
+        });
     }
 }
 
@@ -651,21 +662,21 @@ impl SessionDoc {
     /// [`LoroDoc::import`], under the change lock.
     pub fn import(&self, bytes: &[u8]) -> Result<loro::ImportStatus, LoroError> {
         let _change = self.change.lock();
-        let _importing = Importing::start();
+        let _importing = Importing::start(self);
         self.doc.import(bytes)
     }
 
     /// [`LoroDoc::import_with`], under the change lock.
     pub fn import_with(&self, bytes: &[u8], origin: &str) -> Result<loro::ImportStatus, LoroError> {
         let _change = self.change.lock();
-        let _importing = Importing::start();
+        let _importing = Importing::start(self);
         self.doc.import_with(bytes, origin)
     }
 
     /// Changes made but not yet committed (none while this thread imports,
     /// where asking would wait on a lock this thread holds).
     fn pending_changes(&self) -> usize {
-        if IMPORTING.get() > 0 { 0 } else { self.doc.get_pending_txn_len() }
+        if Importing::here(self) { 0 } else { self.doc.get_pending_txn_len() }
     }
 
     /// A single atomic value prevents tokens and capacity from tearing on sync.
@@ -2239,6 +2250,56 @@ mod tests {
         let commits = writer.join().unwrap();
         assert!(compared >= 50, "too few still moments to compare ({compared}, {commits} commits)");
         assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
+    }
+
+    /// While importing into one doc, a read of ANOTHER doc still sees its
+    /// uncommitted changes (only the importing doc's pending check is
+    /// skipped; this thread doesn't hold the other's lock).
+    #[test]
+    fn a_read_of_another_doc_during_an_import_still_checks_its_pending_changes() {
+        use std::sync::{Arc, Mutex, OnceLock};
+        let entry = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: "words".into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let b = Arc::new(SessionDoc::init("b").unwrap());
+        for i in 0..5 {
+            b.push_message(&entry(&format!("b-{i}"))).unwrap();
+        }
+        assert_eq!(b.read_entries().unwrap().len(), 5);
+        // B changed, not yet committed: shows in a whole read.
+        let row = b.doc().get_list("messages").get(2).unwrap().into_container().unwrap().into_map().unwrap();
+        row.insert("status", "aborted").unwrap();
+        assert!(b.doc().get_pending_txn_len() > 0);
+        // A read of B from inside an import's events into A.
+        let seen: Arc<Mutex<Option<bool>>> = Arc::default();
+        let target: Arc<OnceLock<Arc<SessionDoc>>> = Arc::default();
+        let a_raw = LoroDoc::new();
+        let _probe = {
+            let (seen, target) = (seen.clone(), target.clone());
+            a_raw.subscribe_root(Arc::new(move |event| {
+                if event.triggered_by == loro::EventTriggerKind::Import
+                    && let Some(b) = target.get()
+                {
+                    let cached = b.read_entries().unwrap();
+                    *seen.lock().unwrap() = Some(cached == b.read_entries_whole().unwrap());
+                }
+            }))
+        };
+        let a = SessionDoc::from_doc(a_raw);
+        let _ = target.set(b.clone());
+        let other = SessionDoc::init("a").unwrap();
+        other.push_message(&entry("a-0")).unwrap();
+        a.import(&other.export_snapshot().unwrap()).unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(true), "B's uncommitted change was read");
+        b.commit();
+        assert_eq!(b.read_entries().unwrap(), b.read_entries_whole().unwrap());
     }
 
     /// A local commit on one thread overlapping an import on another (the

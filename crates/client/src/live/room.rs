@@ -429,7 +429,9 @@ impl ChatDocSink for ViewerSink {
         if vv.includes_vv(&doc.doc().oplog_vv()) {
             return Some(Vec::new());
         }
-        doc.doc().export(loro::ExportMode::updates(&vv)).ok()
+        // (Through the doc's change lock: an export commits what's pending,
+        // and that commit's events must be delivered under it.)
+        doc.export(loro::ExportMode::updates(&vv)).ok()
     }
 
     /// As with a stored row, except that nothing on the edge can give this back: it
