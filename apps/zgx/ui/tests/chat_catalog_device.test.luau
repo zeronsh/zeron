@@ -175,3 +175,23 @@ test("the composer says when the connection or the chat's host is gone", functio
 	expect(app:has('~"Can\'t reach Old laptop — messages will send when it\'s reachable."')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
+
+-- `@` searches the files where the chat runs: its host goes with the search
+-- (the engine forwards it there). Asked of this Mac's engine alone, a chat on
+-- another device is refused ("chat belongs to another device"), and the list
+-- showed "Files 0" (beta.5, a chat on home-laptop).
+test("@ in a session on another device searches that device's files", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("go_s2")
+	app:frames(30)
+	app:command("session_on_box")
+	app:frames(30)
+	app:type('role:textbox "Message"', "@chat")
+	app:wait("#never-shown", { timeout_ms = 300 })
+	app:frames(30)
+	expect(app:state("calls")).to_contain("search:s2:chat")
+	expect(app:state("calls")).to_contain("search_on:box")
+	expect(app:state("calls")).never.to_contain("search_on:here")
+	expect(app:error()).to_be(nil)
+end)

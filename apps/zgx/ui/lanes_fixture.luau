@@ -299,6 +299,7 @@ end
 local files_stub = require("@app/screens/files/api") :: any
 files_stub.search = function(target: any, query: string): any
 	note(`search:{target.chat or target.space or "?"}:{query}`)
+	note(`search_on:{target.device or "here"}`)
 	local found = {}
 	for _, path in { "src/lib.rs", "README.md" } do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then

@@ -758,10 +758,16 @@ local function Composer(): Node
 		text = shared.text,
 		agent = agent,
 		target = invocation_target,
+		-- (A made chat's files are on its host: the device goes too, or this
+		-- Mac's engine is asked about a chat it doesn't hold.)
 		files = function(): any
 			local id = session_id:peek()
+			if id then
+				local s = store.session:peek()
+				return { chat = id, device = if s and s.id == id then s.device else nil }
+			end
 			local p = route.project:peek()
-			return if id then { chat = id } elseif p then { space = p.id, device = p.device } else nil
+			return if p then { space = p.id, device = p.device } else nil
 		end,
 		in_chat = function(): boolean
 			return session_id:get() ~= nil
