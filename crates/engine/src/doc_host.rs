@@ -6101,6 +6101,7 @@ impl DocHost {
                     tracing::warn!(chat = %handle.chat_id, command = %entry.id,
                         "command rejected: attachments never arrived");
                     self.forget_store_looks(&missing);
+                    note_rejected_run(handle, &entry, "its attachments never arrived");
                     self.resolve_command(
                         handle,
                         &entry.id,
@@ -7640,26 +7641,124 @@ mod queued_message_prompt_tests {
     }
 }
 
-/// A run that failed to start after its message reached the transcript (an
-/// agent this device doesn't have, a session that wouldn't open): nothing
-/// else would say so, and the chat stopped at the message with no reply and
-/// no error. Its failure is written under it, as a turn that never ran.
-/// (A message that never landed is left alone: the send stays undelivered
-/// and its Retry re-issues it, `retry_delivery`.)
+/// A run that failed to start (an agent this device doesn't have, a session
+/// that wouldn't open, its attachments never arrived): nothing else would say
+/// so. Its message used to stop the chat with no reply and no error, or, when
+/// it had not reached the transcript yet, never show at all (the composer read
+/// "Sending…" for good, on every client). The message is written, as a prompt
+/// a Stop cancelled is (`execute`), and its failure under it, as a turn that
+/// never ran: every client shows both, whatever it is and wherever it runs.
 fn note_rejected_run(handle: &ChatDocHandle, entry: &SessionCommandEntry, why: &str) {
-    let SessionCommandPayload::Run { message_id, .. } = &entry.payload else {
+    let SessionCommandPayload::Run { message_id, request } = &entry.payload else {
         return;
     };
+    // (Idempotent by id: a message that already landed stays as it is.)
+    if let Err(err) =
+        handle.write_user_message(message_id, &request.prompt, entry.issued_at.min(now_ms()))
+    {
+        tracing::warn!(chat = %handle.chat_id, error = %err, "writing a run that didn't start failed");
+        return;
+    }
     let Ok(entries) = handle.doc.read_entries_shared() else {
         return;
     };
-    // Landed, and the last entry: no reply or failure followed it.
+    // The last entry: no reply or failure followed it (a run re-issued after
+    // one did is the reply's, not this).
     if entries.last().map(|e| e.id.as_str()) != Some(message_id.as_str()) {
         return;
     }
     let note = format!("Couldn't start this turn: {why}");
     if let Err(err) = handle.note_turn_failure(message_id, &note) {
         tracing::warn!(chat = %handle.chat_id, error = %err, "noting a run that didn't start failed");
+    }
+}
+
+#[cfg(test)]
+mod rejected_run_tests {
+    use super::*;
+
+    fn run(message_id: &str, prompt: &str) -> SessionCommandEntry {
+        SessionCommandEntry {
+            id: format!("cmd-{message_id}"),
+            payload: SessionCommandPayload::Run {
+                request: zeron_proto::RunRequest {
+                    mcp: None,
+                    prompt: prompt.into(),
+                    harness: Some(HarnessId::Codex),
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: "~".into(),
+                    sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                    auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
+                    attachments: Vec::new(),
+                    worktree: None,
+                    resume: None,
+                    env: Default::default(),
+                    extra_mcp: Vec::new(),
+                },
+                message_id: message_id.into(),
+            },
+            issued_by: "host".into(),
+            issued_at: 1_000,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        }
+    }
+
+    fn host(dir: &std::path::Path) -> DocHost {
+        DocHost::new(
+            Arc::new(DocsStore::open(dir).unwrap()),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        )
+    }
+
+    /// Turned away before its message reached the chat: the message is
+    /// written and its failure under it, so no client waits on it for good.
+    /// Once only.
+    #[tokio::test]
+    async fn a_run_turned_away_before_its_message_landed_shows_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("chat").unwrap();
+        let entry = run("m1", "hello there");
+        note_rejected_run(&handle, &entry, "no such agent here");
+        note_rejected_run(&handle, &entry, "no such agent here");
+        let entries = handle.doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!((entries[0].id.as_str(), entries[0].role), ("m1", MessageRole::User));
+        assert!(matches!(&entries[0].parts[..], [MessagePart::Text { text, .. }] if text == "hello there"));
+        assert_eq!(entries[1].status, Some(MessageStatus::Aborted));
+        assert!(entries[1].parts.iter().any(|part| matches!(part,
+            MessagePart::Error { message, .. } if message == "Couldn't start this turn: no such agent here")));
+        drop(handle);
+        host.shutdown_workers().await;
+    }
+
+    /// A message that already had a reply (a re-issued attempt turned away)
+    /// gets nothing more under it, and isn't written again.
+    #[tokio::test]
+    async fn a_message_already_answered_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("chat").unwrap();
+        handle.write_user_message("m1", "hello there", 1_000).unwrap();
+        handle.note_turn_failure("m1", "earlier").unwrap();
+        note_rejected_run(&handle, &run("m1", "hello there"), "again");
+        let entries = handle.doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert!(!entries[1].parts.iter().any(|part| matches!(part,
+            MessagePart::Error { message, .. } if message.ends_with("again"))));
+        drop(handle);
+        host.shutdown_workers().await;
     }
 }
 

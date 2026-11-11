@@ -304,7 +304,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // plays it.
     if matches!(screen, Screen::Intro) && !asked_for_intro {
         let signed_in = auth::session_exists();
-        match launch_screen(signed_in, onboarded(), signed_in && welcome_due(finished_setup_before(), welcomed())) {
+        // (Signed in now: whatever setup chose before, it's an account's.)
+        if signed_in {
+            remember_stayed_local(false);
+        }
+        let welcome = signed_in && welcome_due(finished_setup_before(), welcomed());
+        match launch_screen(signed_in, onboarded(), !signed_in && stayed_local(), welcome) {
             Launched::Welcome => WELCOME.store(true, std::sync::atomic::Ordering::Relaxed),
             Launched::Intro => {}
             Launched::Onboarding => screen = Screen::Onboarding,
@@ -558,6 +563,35 @@ fn onboarded() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || (cfg!(feature = "beta") && finished_in_zeron_app())
 }
 
+/// Where setup's ending without an account ("Local", Skip for now) is
+/// remembered: a launch signed out then opens the main window, not the intro
+/// and setup again. Only that choice does: an account whose session has gone
+/// (expired, revoked) is still asked to sign in, signing out of the main
+/// window takes it away (`app.onboard`), and so does any launch signed in.
+fn stayed_local_marker() -> Option<PathBuf> {
+    zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("local"))
+}
+
+fn stayed_local() -> bool {
+    stayed_local_marker().is_some_and(|path| path.is_file())
+}
+
+/// Remember (or forget) that setup ended without an account.
+fn remember_stayed_local(local: bool) {
+    let Some(path) = stayed_local_marker() else { return };
+    let result = if local {
+        path.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::write(&path, b""))
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(error) = result {
+        eprintln!("zeron-zgx: staying signed out wasn't remembered: {error}");
+    }
+}
+
 /// This launch welcomes someone who already had Zeron to this interface.
 static WELCOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -588,22 +622,20 @@ enum Launched {
     Main,
 }
 
-/// Where a plain launch opens. Setup finished on this computer: the main
-/// window, signed in or not (someone who chose to stay signed out isn't walked
-/// through the intro and setup again on every launch; signing out from the
-/// main window still brings setup back, ui/screens/shell). Signed in on an
-/// earlier run without having finished it here: setup at once. The first
-/// launch of this interface by someone signed in who finished setup before
-/// (`welcome`) is the exception: the intro, then their username and card, once.
-fn launch_screen(signed_in: bool, onboarded: bool, welcome: bool) -> Launched {
-    if welcome {
-        Launched::Welcome
-    } else if onboarded {
-        Launched::Main
-    } else if signed_in {
-        Launched::Onboarding
-    } else {
-        Launched::Intro
+/// Where a plain launch opens. Signed in: the main window once setup is
+/// finished on this computer, else setup at once; the first launch of this
+/// interface by someone who finished setup before (`welcome`) is the
+/// exception: the intro, then their username and card, once. Signed out: the
+/// main window when setup here ended without an account (`stayed_local`), so
+/// someone who chose "Local" isn't walked through the intro and setup on every
+/// launch; else the intro.
+fn launch_screen(signed_in: bool, onboarded: bool, stayed_local: bool, welcome: bool) -> Launched {
+    match (signed_in, onboarded, stayed_local) {
+        _ if welcome => Launched::Welcome,
+        (true, true, _) => Launched::Main,
+        (true, false, _) => Launched::Onboarding,
+        (false, _, true) => Launched::Main,
+        (false, _, false) => Launched::Intro,
     }
 }
 
@@ -711,6 +743,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
                 eprintln!("zeron-zgx: setup's end wasn't remembered: {error}");
             }
         }
+        // How it ended: without an account ("Local"), or signed in.
+        remember_stayed_local(!auth::session_exists());
         // (Through setup in this interface, however they came: no welcome after.)
         if let Some(path) = welcomed_marker() {
             let _ = path.parent().map(std::fs::create_dir_all);
@@ -731,6 +765,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         }
         // (Whoever signs in next is someone else's first run, not this welcome.)
         WELCOME.store(false, std::sync::atomic::Ordering::Relaxed);
+        // (Signed out: setup again, also if they quit before finishing it.)
+        remember_stayed_local(false);
         windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
         window.close();
     });
@@ -1380,25 +1416,37 @@ mod welcome_tests {
         assert!(!super::welcome_due(false, false));
     }
 
-    /// Setup finished here opens the main window whether or not anyone is
-    /// signed in: staying signed out ("Local") doesn't replay the intro and
+    /// Setup that ended without an account ("Local") opens the main window
+    /// on a launch signed out: staying signed out doesn't replay the intro and
     /// setup on every launch.
     #[test]
-    fn finished_setup_opens_the_main_window_signed_out_too() {
+    fn staying_local_opens_the_main_window_signed_out() {
         use super::{Launched, launch_screen};
-        assert_eq!(launch_screen(false, true, false), Launched::Main);
-        assert_eq!(launch_screen(true, true, false), Launched::Main);
+        assert_eq!(launch_screen(false, true, true, false), Launched::Main);
+        // (The choice alone decides, signed out.)
+        assert_eq!(launch_screen(false, false, true, false), Launched::Main);
     }
 
-    /// Before setup is finished here: someone new gets the intro; someone
-    /// signed in on an earlier run goes straight to setup; the welcome (signed
-    /// in, finished setup before, not yet welcomed) comes first of all.
+    /// Signed out without having chosen Local (an account whose session has
+    /// gone, or signed out of the main window): the intro and sign-in, as
+    /// before, even with setup finished.
     #[test]
-    fn unfinished_setup_and_the_welcome_open_as_before() {
+    fn signed_out_without_choosing_local_gets_the_intro() {
         use super::{Launched, launch_screen};
-        assert_eq!(launch_screen(false, false, false), Launched::Intro);
-        assert_eq!(launch_screen(true, false, false), Launched::Onboarding);
-        assert_eq!(launch_screen(true, false, true), Launched::Welcome);
-        assert_eq!(launch_screen(true, true, true), Launched::Welcome);
+        assert_eq!(launch_screen(false, true, false, false), Launched::Intro);
+        assert_eq!(launch_screen(false, false, false, false), Launched::Intro);
+    }
+
+    /// Signed in, exactly as before: the main window once setup is finished
+    /// here, else setup at once; the welcome first of all.
+    #[test]
+    fn signed_in_launches_open_as_before() {
+        use super::{Launched, launch_screen};
+        for stayed_local in [false, true] {
+            assert_eq!(launch_screen(true, true, stayed_local, false), Launched::Main);
+            assert_eq!(launch_screen(true, false, stayed_local, false), Launched::Onboarding);
+            assert_eq!(launch_screen(true, false, stayed_local, true), Launched::Welcome);
+            assert_eq!(launch_screen(true, true, stayed_local, true), Launched::Welcome);
+        }
     }
 }

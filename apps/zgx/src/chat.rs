@@ -594,9 +594,6 @@ struct Pending {
     held: bool,
     /// Becomes a queue row when it leaves the outbox, and shows there.
     row: bool,
-    /// Failed by the grace (`await_landing`): the engine took it, and its
-    /// retry is the engine's (`RetryDelivery`), not another run.
-    stalled: bool,
     /// The files the engine delivers for it, for a run sent again.
     transfers: Vec<Json>,
 }
@@ -2415,7 +2412,6 @@ impl View {
             at: stamp(now_seconds()),
             held: false,
             row: false,
-            stalled: false,
             transfers: Vec::new(),
         });
         drop(pending);
@@ -2570,9 +2566,6 @@ impl View {
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
         let sent = command_with(&id, run.clone(), &transfers).await;
-        if sent.is_ok() {
-            self.await_landing(&id, &message_id);
-        }
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
             if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
@@ -2638,7 +2631,6 @@ impl View {
                         p.row = row;
                         p.waiting = waiting;
                         p.retry = None;
-                        p.stalled = false;
                     }
                     None => {
                         let (words, paths) =
@@ -2652,7 +2644,6 @@ impl View {
                             at: stamp(send["createdAt"].as_i64().unwrap_or(0) / 1000),
                             held: true,
                             row,
-                            stalled: false,
                             transfers: Vec::new(),
                         });
                         changed = true;
@@ -2673,35 +2664,8 @@ impl View {
         {
             p.waiting = "failed";
             p.retry = retry;
-            p.stalled = false;
         }
         self.publish_messages();
-    }
-
-    /// A prompt the engine took that its chat hasn't shown within the
-    /// grace: undelivered, failed with a retry, as the shipping app calls
-    /// it (transcript.rs `send_undelivered`). A run the engine turned away
-    /// before its message reached the chat said nothing, and read "Sending…"
-    /// for good. (One in the engine's outbox is the engine's to report.)
-    fn await_landing(self: &Rc<Self>, id: &str, message_id: &str) {
-        let (me, id, message_id) = (self.clone(), id.to_owned(), message_id.to_owned());
-        engine::get().spawn(async move {
-            zgx::timer::sleep(std::time::Duration::from_secs_f64(SEND_GRACE_SECONDS)).await;
-            let stalled = {
-                let mut pending = me.pending.borrow_mut();
-                match pending.get_mut(&id).and_then(|prompts| prompts.iter_mut().find(|p| p.id == message_id)) {
-                    Some(p) if p.waiting == "sending" && !p.held => {
-                        p.waiting = "failed";
-                        p.stalled = true;
-                        true
-                    }
-                    _ => false,
-                }
-            };
-            if stalled {
-                me.publish_messages();
-            }
-        });
     }
 
     fn forget_pending(&self, id: &str, message_id: &str) {
@@ -2738,36 +2702,14 @@ impl View {
         if self.open_id().as_deref() != Some(&id) {
             return Err("missing");
         }
-        let (run, transfers, held, stalled) = {
+        let (run, transfers, held) = {
             let mut pending = self.pending.borrow_mut();
             let prompts = pending.get_mut(&id).ok_or("missing")?;
             let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
-            (p.retry.clone(), p.transfers.clone(), p.held, std::mem::take(&mut p.stalled))
+            (p.retry.clone(), p.transfers.clone(), p.held)
         };
         self.publish_messages();
-        // Taken, and never shown: the engine sends its dead attempt again
-        // (one still on its way is left to go), and the grace starts over.
-        if stalled {
-            let retried = engine::get()
-                .call("RetryDelivery", json!({ "chatId": id }))
-                .await
-                .map(|_| ())
-                .map_err(|e| engine::outcome(&e));
-            if retried.is_ok() {
-                self.await_landing(&id, &message_id);
-            } else {
-                // (Failed again, still the engine's to send.)
-                if let Some(p) =
-                    self.pending.borrow_mut().get_mut(&id).and_then(|v| v.iter_mut().find(|p| p.id == message_id))
-                {
-                    p.waiting = "failed";
-                    p.stalled = true;
-                }
-                self.publish_messages();
-            }
-            return retried;
-        }
         // In the engine's outbox: the engine has what it takes to send it.
         if held {
             return engine::get()

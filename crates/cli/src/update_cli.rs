@@ -90,11 +90,21 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 app_root.join(zeron_update::managed_dir(&manifest.version)).display(),
                 manifest.version
             );
-            // (No service running: nothing is restarted. One that's installed
-            // but stopped stays stopped; a `zeron headless` run by hand, or the
-            // desktop app's engine, picks the new version up when it next
-            // starts.)
-            println!("no engine service is running: the new version starts the next time the engine does.");
+            // No service up. One that's down because it broke (failed, or
+            // restarting itself) is restarted into the new version, which may
+            // be what mends it. One that's stopped, or not installed, stays as
+            // it is: a `zeron headless` run by hand, or the desktop app's
+            // engine, picks the new version up when it next starts.
+            if restarts_after_swap(&service_state()) {
+                match zeron_update::restart_service() {
+                    Ok(()) => println!("engine service restarted."),
+                    Err(err) => println!(
+                        "note: service restart failed ({err:#}) — restart the engine manually to finish."
+                    ),
+                }
+            } else {
+                println!("no engine service is running: the new version starts the next time the engine does.");
+            }
             Ok(())
         }
         InstallKind::MacApp { bundle } => {
@@ -140,6 +150,43 @@ fn service_running() -> bool {
             .args(["--quiet", "is-active", &unit])
             .status()
             .is_ok_and(|status| status.success())
+}
+
+/// The installed service's state as systemd has it (`ActiveState`: active,
+/// inactive, failed, activating, …); empty where there's no systemd or no
+/// answer.
+fn service_state() -> String {
+    if !cfg!(target_os = "linux") {
+        return String::new();
+    }
+    let unit = zeron_update::service_unit();
+    zeron_update::systemctl_query(&unit)
+        .args(["show", "--property=ActiveState", "--value", &unit])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// Whether a service not up (see [`service_running`]) is restarted after the
+/// swap: when it broke (failed, or caught restarting itself), yes; stopped
+/// (inactive) or not installed (inactive too, or no answer), no.
+fn restarts_after_swap(state: &str) -> bool {
+    matches!(state, "failed" | "activating" | "deactivating" | "reloading")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_broken_service_is_restarted_after_the_swap() {
+        for state in ["failed", "activating", "deactivating", "reloading"] {
+            assert!(super::restarts_after_swap(state), "{state}");
+        }
+        for state in ["inactive", "", "maintenance", "unknown"] {
+            assert!(!super::restarts_after_swap(state), "{state}");
+        }
+    }
 }
 
 /// Report how the update went: it may yet go back, so "restarted" says nothing.
