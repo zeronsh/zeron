@@ -311,12 +311,12 @@ end)
 "#;
 
 /// The width and height a window's canvas measures (`c:measure_text`:
-/// `Scene::measure_text_with_font` on a scene with zgx-gpu's text, over the
+/// `Scene::measure_text_with_font` on a scene with zgx-text, over the
 /// system's fonts and the app's), with `more` fonts beside them.
 fn as_a_window_measures(text: &str, size: f32, width: Option<f32>, font: &zgx::text_layout::FontStyle, more: &[&[u8]]) -> Json {
-    let services = zgx_gpu::TextServices::new();
+    let services = zgx_text::TextServices::new();
     for bytes in text::APP_FONTS.iter().chain(more) {
-        let font = zgx_gpu::text::FontData::new(Arc::<[u8]>::from(*bytes)).unwrap();
+        let font = zgx_text::text::FontData::new(Arc::<[u8]>::from(*bytes)).unwrap();
         font.install(&mut services.text_system().borrow_mut());
     }
     let mut scene = zgx::scene::Scene::new(0., 0.);

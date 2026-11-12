@@ -15,8 +15,8 @@ use std::sync::Arc;
 use mlua::Table;
 use zgx::scene::Scene;
 use zgx::text_layout::{FontFamily, FontFeatures, FontStyle, LetterSpacing, LineHeight};
-use zgx_gpu::TextServices;
-use zgx_gpu::text::FontData;
+use zgx_text::TextServices;
+use zgx_text::text::FontData;
 
 /// A canvas text's size where its options give none (zgx-script's).
 const TEXT_SIZE: f32 = 12.;
