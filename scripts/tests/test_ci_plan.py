@@ -211,5 +211,26 @@ class WorkflowConsistencyTests(unittest.TestCase):
             self.assertIn(f"keys).{suite} ||", ci, suite)
 
 
+class AndroidPlayTests(unittest.TestCase):
+    def test_only_a_trusted_upload_joins_the_concurrency_group(self):
+        """Every CI run on a branch named main starts android-play.yml (a fork's pull
+        request from its own main, the nightly, a run by hand): only the `play` job,
+        which needs a trusted push's bundle, may cancel the upload waiting for approval."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        spec = yaml.safe_load((ROOT / ".github" / "workflows" / "android-play.yml").read_text())
+        self.assertNotIn("concurrency", spec)
+        jobs = spec["jobs"]
+        self.assertEqual(jobs["play"]["concurrency"], {"group": "android-google-play", "cancel-in-progress": True})
+        self.assertEqual([name for name, job in jobs.items() if "concurrency" in job], ["play"])
+        self.assertEqual(jobs["play"]["needs"], "bundle")
+        gate = " ".join(jobs["bundle"]["if"].split())
+        for condition in ("github.event.workflow_run.event == 'push'",
+                          "github.event.workflow_run.head_repository.full_name == github.repository"):
+            self.assertIn(condition, gate)
+
+
 if __name__ == "__main__":
     unittest.main()

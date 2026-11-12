@@ -12,6 +12,11 @@ name: Android Play upload
 #
 # Only the newest build waits: a newer one cancels the older run still waiting
 # for its approval, so there is never a backlog of stale uploads to approve.
+# The concurrency group is on the `play` job, not the workflow: only a trusted
+# main push with a bundle reaches it. Every completed CI run whose branch is
+# named main starts this workflow (a fork's pull request from its own main, the
+# nightly, a run by hand); at the workflow level each would cancel the upload
+# waiting for approval.
 #
 # Armed by the repository variable PLAY_UPLOAD_ENABLED=true, as before. Track
 # and status: PLAY_TRACK (beta) and PLAY_RELEASE_STATUS (draft). A run by hand
@@ -26,10 +31,6 @@ on:
 permissions:
   contents: read
   actions: read  # the bundle, from the CI run's artifacts
-
-concurrency:
-  group: android-google-play
-  cancel-in-progress: true
 
 jobs:
   # Without the environment, so no reviewer is asked about a run with nothing
@@ -61,6 +62,9 @@ jobs:
     if: needs.bundle.outputs.built == 'true'
     runs-on: ubuntu-latest
     environment: google-play
+    concurrency:
+      group: android-google-play
+      cancel-in-progress: true
     timeout-minutes: 20
     env:
       PLAY_TRACK: ${{ vars.PLAY_TRACK || 'beta' }}

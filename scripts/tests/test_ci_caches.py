@@ -356,11 +356,18 @@ class Janitor(unittest.TestCase):
             e(ghostty, ref=MAIN),
             e(f"v0-rust-zgx-tests-zgx-linux-Linux-x64-{H}", ref="refs/heads/zeron/linux-headless-fixes"),
             e(PASS_KEY, ref="refs/pull/1219/merge"),
-            e(PASS_KEY, ref="refs/heads/gh-readonly-queue/main/pr-1-abc"),
         ])
-        self.assertEqual(self.kept(sel), {(ghostty, ZGX), (PASS_KEY, "refs/pull/1219/merge"),
-                                          (PASS_KEY, "refs/heads/gh-readonly-queue/main/pr-1-abc")})
+        self.assertEqual(self.kept(sel), {(ghostty, ZGX), (PASS_KEY, "refs/pull/1219/merge")})
         self.assertTrue(all("may not save" in why for _, why in sel.delete))
+
+    def test_pass_records_stay_only_where_a_run_trusts_them(self):
+        trusted = (MAIN, ZGX, "refs/pull/1219/merge", "refs/pull/7/merge")
+        never = ("refs/heads/gh-readonly-queue/main/pr-1-abc",  # the merge queue reuses nothing
+                 "refs/heads/zeron/some-branch",  # a run by hand
+                 "refs/tags/v0.2.140", "refs/pull/7/head", "refs/heads/main-copy", "")
+        sel = caches.select([e(PASS_KEY, ref=r) for r in trusted + never])
+        self.assertEqual(self.kept(sel), {(PASS_KEY, r) for r in trusted})
+        self.assertEqual(self.deleted(sel), {(PASS_KEY, r) for r in never})
 
     def test_only_the_newest_generation_per_family_and_ref_stays(self):
         old = e(f"v0-rust-windows-Windows_NT-x64-15d0a0c1-00000001", created="2026-11-10T09:00:00Z")
@@ -390,6 +397,15 @@ class Janitor(unittest.TestCase):
         self.assertLessEqual(sel.kept_bytes, 7 * GB)
         self.assertIn((PASS_KEY, MAIN), self.kept(sel))
         self.assertTrue(all("budget" in why for _, why in sel.delete))
+
+    def test_pass_records_do_not_count_against_the_budget(self):
+        # Pull requests (a fork's too) can save any number of them: they never push out a cache.
+        windows = e(f"v0-rust-windows-Windows_NT-x64-{H}", size=GB)
+        passes = [e(PASS_KEY.replace("core-tests", f"job{n}"), ref=f"refs/pull/{n}/merge", size=60 * 1024)
+                  for n in range(1, 200)]
+        sel = caches.select([windows] + passes, budget=GB + 10**6)
+        self.assertEqual(sel.delete, [])
+        self.assertEqual(len(sel.keep), 200)
 
     def test_within_budget_nothing_declared_goes(self):
         entries = [e(f"v0-rust-windows-Windows_NT-x64-{H}", size=GB), e(f"ci-linux-v1-ui-Linux-x64-{H}", size=GB)]

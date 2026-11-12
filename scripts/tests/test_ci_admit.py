@@ -39,6 +39,20 @@ class ReservationTests(unittest.TestCase):
         # Another run's admit name comes from its own (editable) ci.yml.
         self.assertEqual(parse_reservation("admit [linux=999 windows=50 macos=40]"), admit.MAX_RESERVATION)
 
+    def test_giant_numbers_in_a_name_are_not_read(self):
+        # int() of a number this long raises ValueError (Python's int max str digits):
+        # more than 4 digits is no reservation or claim at all.
+        giant = "9" * 5000
+        self.assertIsNone(parse_reservation(f"admit [linux={giant}]"))
+        self.assertEqual(parse_reservation(f"admit [linux={giant} macos=1]"), {"linux": 0, "windows": 0, "macos": 1})
+        self.assertEqual(parse_reservation("admit [linux=9999]")["linux"], admit.MAX_RESERVATION["linux"])
+        self.assertIsNone(parse_reservation("admit [linux=12345]"))
+        self.assertIsNone(admit.PR_CLAIM.search(f"admit [linux=2] #{giant}"))
+        self.assertEqual(admit.PR_CLAIM.search("admit [linux=2] #1356").group(1), "1356")
+        scheduler = admit.Scheduler(None, "o/r", 1)
+        run = {"event": "pull_request", "head_sha": "abc"}
+        self.assertIsNone(scheduler.verified_pr(f"admit [linux=2] #{giant}", run, {77}))
+
     def test_cap_is_the_largest_plan(self):
         sys.path.insert(0, str(pathlib.Path(admit.__file__).parent))
         import plan
@@ -344,6 +358,26 @@ class PriorityAndLockTests(unittest.TestCase):
         # (One job left of the older lock's run: a full run, 19 runners, still fits in 20.)
         snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
+
+    def test_two_locks_added_in_the_same_second_do_not_wait_for_each_other(self):
+        # The queue order (rank) and the lock order (lock_is_older) break the tie the
+        # same way: by the key as text, not by when each admit job was created.
+        big = {"total": 20, "macos": 5, "windows": 10}
+        full_counts = admit.MAX_RESERVATION
+        full = need_of(full_counts)
+        same = "2026-10-27T10:00:00Z"
+        # #91's admit job was created first, but #90 sorts first as text.
+        snap = Snapshot([waiter(1, 2, pr=90, **full_counts), waiter(2, 1, pr=91, **full_counts)], [],
+                        locked={90, 91}, lock_times={90: same, 91: same})
+        first, second = decide(1, full, snap, big), decide(2, full, snap, big)
+        self.assertTrue(first.admit)
+        self.assertEqual(first.position, 0)
+        self.assertFalse(second.admit)
+        self.assertEqual(second.position, 1)
+        # A peer's key (`owner/repo#n`) against a number: still one order.
+        snap = Snapshot([waiter(1, 1, pr="o/zgx#5", **full_counts), waiter(2, 2, pr=90, **full_counts)], [],
+                        locked={90, "o/zgx#5"}, lock_times={90: same, "o/zgx#5": same})
+        self.assertEqual([decide(r, full, snap, big).admit for r in (1, 2)], [False, True])
 
     def test_an_unverified_claim_is_an_ordinary_run(self):
         snap = Snapshot([waiter(1, 1, linux=2), waiter(2, 2, pr=None, linux=2)], [], priority={77})
