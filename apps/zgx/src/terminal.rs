@@ -161,13 +161,15 @@ async fn start(arg: Value) -> Result<Value, String> {
     let dir = claims_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let claim = dir.join(format!("{}-{}", std::process::id(), operation_nonce()));
-    let line = format!(
+    // (In base64: no quote inside it for a shell to read as its own, `runnable`.)
+    let open = base64::engine::general_purpose::STANDARD.encode(Json::Object(params).to_string());
+    let line = runnable(format!(
         "{} terminal-bridge --port {port} --data {} --open {} --claim {}",
         quote(&exe.to_string_lossy()),
         quote(&data.to_string_lossy()),
-        quote(&Json::Object(params).to_string()),
+        quote(&open),
         quote(&claim.to_string_lossy()),
-    );
+    ));
     note_issued(&line);
     Ok(Value::record([("command", Value::from(line.as_str())), ("claim", Value::from(claim.to_string_lossy().as_ref()))]))
 }
@@ -288,8 +290,40 @@ fn command(arg: Value, device: Option<String>) -> Result<Value, String> {
     if let Some(device) = device {
         line.push_str(&format!(" --device {}", quote(&device)));
     }
+    let line = runnable(line);
     note_issued(&line);
     Ok(Value::from(line.as_str()))
+}
+
+/// The line zgx's terminal runs for the bridge's `line`. The Windows beta is
+/// a GUI program (main.rs `windows_subsystem`), and Windows attaches none to
+/// the pseudoconsole it's started on: the bridge would have no console, its
+/// shell opened and nothing shown. So cmd.exe, a console program, is started
+/// on it, waits for the bridge, and the bridge attaches to its console
+/// (`attach_console`). Each word is in quotes with none inside (the open
+/// parameters are base64), so cmd takes nothing in them for its own syntax.
+#[cfg(all(windows, feature = "beta"))]
+fn runnable(line: String) -> String {
+    let cmd = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+    format!("{} /d /s /c \"{line}\"", quote(&cmd))
+}
+#[cfg(not(all(windows, feature = "beta")))]
+fn runnable(line: String) -> String {
+    line
+}
+
+/// The console of the cmd.exe that started this bridge (`runnable`), when
+/// it has none of its own (a GUI program's).
+#[cfg(all(windows, feature = "beta"))]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
+    // SAFETY: the process's own standard handle, and a mode for it to fill.
+    unsafe {
+        let mut mode = 0;
+        if GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut mode) == 0 {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,10 +354,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--port" => port = value.parse().ok(),
             "--data" => data = Some(PathBuf::from(value)),
             "--terminal" => terminal = Some(value.clone()),
-            "--open" => match serde_json::from_str::<Json>(value) {
-                Ok(Json::Object(params)) => open = Some(params),
-                _ => return Err("--open takes OpenTerminal's parameters".into()),
-            },
+            // (As JSON, or JSON in base64: `start`'s.)
+            "--open" => {
+                let decoded = base64::engine::general_purpose::STANDARD.decode(value).ok().and_then(|bytes| String::from_utf8(bytes).ok());
+                match serde_json::from_str::<Json>(decoded.as_deref().unwrap_or(value)) {
+                    Ok(Json::Object(params)) => open = Some(params),
+                    _ => return Err("--open takes OpenTerminal's parameters".into()),
+                }
+            }
             "--claim" => claim = Some(PathBuf::from(value)),
             "--device" => device = Some(value.clone()),
             other => return Err(format!("unknown flag {other}")),
@@ -603,6 +641,8 @@ fn resizes() -> Option<std::os::fd::OwnedFd> {
 
 /// Runs the bridge; returns the process's exit code.
 pub fn bridge(args: &[String]) -> i32 {
+    #[cfg(all(windows, feature = "beta"))]
+    attach_console();
     let args = match parse(args) {
         Ok(args) => args,
         Err(why) => {
