@@ -42,6 +42,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // each device that allowed it, called by its windows and agents from
     // this device or another (plugins/service).
     "service",
+    // Its service running scripts it's given (`zeron.eval`): an agent's,
+    // sandboxed to what the service hands it.
+    "eval",
     // The agents' accounts, usage and models (plugins/agents): reading
     // them, and the two controls (switching an account, setting a model).
     "usage.read",
@@ -479,6 +482,9 @@ impl Manifest {
             }
             _ => {}
         }
+        if asks("eval") && self.service.is_none() {
+            return Some("It asks for \"eval\" but has no service to run scripts in".into());
+        }
         if !self.ui.change.is_empty() && !asks("ui.change") {
             return Some("It changes parts of Zeron but doesn't ask for \"ui.change\"".into());
         }
@@ -630,6 +636,12 @@ mod tests {
         assert!(problem(ui.clone()).is_some());
         ui["permissions"] = serde_json::json!(["ui.change"]);
         assert_eq!(problem(ui), None);
+        // Scripts run in a service: "eval" without one is broken.
+        let mut eval = with("permissions", serde_json::json!(["eval"]));
+        assert!(problem(eval.clone()).is_some());
+        eval["permissions"] = serde_json::json!(["service", "eval"]);
+        eval["service"] = serde_json::json!("service.luau");
+        assert_eq!(problem(eval), None);
         let replace = |screen: &str| {
             let mut m = with("ui", serde_json::json!({ "replace": [screen] }));
             m["permissions"] = serde_json::json!(["ui.replace"]);

@@ -417,6 +417,7 @@ impl Services {
             device: hooks.device(),
             store: Some(Self::store_path(&self.inner.store_dir, &plan.plugin)),
             limits: self.inner.config.limits.clone(),
+            eval: plan.allows("eval"),
         };
         let (vm, loaded) = Vm::start(spec, ops);
         let outcome = match tokio::time::timeout(self.inner.config.load_timeout, loaded).await {

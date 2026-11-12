@@ -340,6 +340,9 @@ function M.permission(item: any, permission: string): Line
 				return { device = on }
 			end
 		)
+	elseif permission == "eval" then
+		-- Code nobody signed, inside the service's sandbox: said plainly.
+		return line(false, "magic-stick", "plugins.words.permission.eval.title", "plugins.words.permission.eval.detail")
 	elseif permission == "commands" then
 		-- The programs its manifest names, as you: what they can do, it can.
 		-- Each by name; a shell or an interpreter says it's full control, one

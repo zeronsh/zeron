@@ -48,6 +48,7 @@ fn spec(dir: &Path, limits: Limits) -> Spec {
         device: json!({ "id": "dev-1", "name": "Laptop" }),
         store: Some(dir.join(".store.json")),
         limits,
+        eval: true,
     }
 }
 
@@ -259,6 +260,124 @@ async fn a_broken_service_says_why_it_didnt_load() {
     let dir = folder(&[]);
     let (_, described, _) = start(dir.path(), Limits::default()).await;
     assert!(described.unwrap_err().contains("isn't in the plugin"));
+}
+
+const EVAL: &str = r#"
+local zeron = require("./zeron")("svc")
+local made = {}
+local api = { math = math, pcall = pcall, error = error, make = function(kind, w) table.insert(made, kind) return { kind = kind, w = w } end }
+
+zeron.serve("eval", function(args)
+	local started = os.clock()
+	local ok, value = zeron.eval(args.source, { name = "agent", env = api, budget_ms = args.budget })
+	return { ok = ok, value = value, ms = (os.clock() - started) * 1000, made = #made, leaked = api.x ~= nil }
+end)
+
+zeron.serve("add", function(args) return args.a + args.b end)
+"#;
+
+async fn eval(vm: &Vm, source: &str, budget: Option<u64>) -> Json {
+    ask(vm, "eval", json!({ "source": source, "budget": budget })).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn a_script_sees_only_what_its_given() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let seen = eval(
+        &vm,
+        r#"
+local here = {}
+here.zeron, here.ui, here.require = zeron ~= nil, ui ~= nil, require ~= nil
+here.getfenv, here.setfenv, here.debug = getfenv ~= nil, setfenv ~= nil, debug ~= nil
+here.loadstring, here._G, here.print, here.os = loadstring ~= nil, _G ~= nil, print ~= nil, os ~= nil
+-- (Strings keep their methods; the `string` library isn't given.)
+here.strings = ("ab"):len() == 2 and string == nil
+x = 1
+here.w = make("rect", math.floor(2.5)).w
+return here
+"#,
+        None,
+    )
+    .await;
+    assert_eq!(seen["ok"], true, "{seen}");
+    assert_eq!(
+        seen["value"],
+        json!({ "zeron": false, "ui": false, "require": false, "getfenv": false, "setfenv": false, "debug": false,
+                "loadstring": false, "_G": false, "print": false, "os": false, "strings": true, "w": 2 })
+    );
+    assert_eq!(seen["made"], 1);
+    // (What it set stayed its own.)
+    assert_eq!(seen["leaked"], false);
+}
+
+#[tokio::test]
+async fn a_scripts_errors_say_where() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let syntax = eval(&vm, "local a = 1\nlocal = 2", None).await;
+    assert_eq!(syntax["ok"], false);
+    assert!(syntax["value"].as_str().unwrap().starts_with("agent:2:"), "{syntax}");
+    let runtime = eval(&vm, "local a = 1\nlocal b = nil\nreturn b.field", None).await;
+    assert_eq!(runtime["ok"], false);
+    assert!(runtime["value"].as_str().unwrap().starts_with("agent:3:"), "{runtime}");
+    let raised = eval(&vm, "\nerror('no such screen')", None).await;
+    assert_eq!(raised["value"], "agent:2: no such screen");
+    // Bytecode is refused, as `require` refuses it.
+    let binary = eval(&vm, "\x1bLua", None).await;
+    assert_eq!(binary["ok"], false, "{binary}");
+}
+
+#[tokio::test]
+async fn a_runaway_script_stops_at_its_budget_and_the_service_goes_on() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    for source in [
+        "while true do end",
+        // (A `pcall` it was given doesn't keep it going.)
+        "while true do pcall(function() while true do end end) end",
+    ] {
+        let spun = eval(&vm, source, Some(50)).await;
+        assert_eq!(spun["ok"], false, "{spun}");
+        assert_eq!(spun["value"], "agent: the script ran past its time budget (50 ms)");
+        let ms = spun["ms"].as_f64().unwrap();
+        assert!((50.0..500.0).contains(&ms), "{ms}");
+    }
+    assert_eq!(eval(&vm, "return 1 + 1", None).await["value"], 2);
+    assert_eq!(ask(&vm, "add", json!({ "a": 1, "b": 2 })).await.unwrap().unwrap(), json!(3));
+}
+
+#[tokio::test]
+async fn eval_needs_its_permission() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let ops = Arc::new(Echo::default());
+    let (vm, loaded) = Vm::start(Spec { eval: false, ..spec(dir.path(), Limits::default()) }, ops);
+    loaded.await.unwrap().unwrap();
+    match ask(&vm, "eval", json!({ "source": "return 1" })).await.unwrap() {
+        Err(Failure::Error(why)) => assert!(why.contains("needs the \"eval\" permission"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_hundred_line_script_runs_in_a_few_milliseconds() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let mut source = String::from("local total = 0\n");
+    for i in 0..98 {
+        source.push_str(&format!("total = total + make(\"rect\", math.max({i}, 1)).w\n"));
+    }
+    source.push_str("return total");
+    let ran = eval(&vm, &source, None).await;
+    assert_eq!(ran["ok"], true, "{ran}");
+    assert_eq!(ran["made"], 98);
+    let ms = ran["ms"].as_f64().unwrap();
+    eprintln!("a 100-line script compiled and ran in {ms:.2} ms");
+    assert!(ms < 50.0, "{ms}");
 }
 
 #[test]
