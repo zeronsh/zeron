@@ -71,7 +71,7 @@ local TOGGLE_IN, ROW_PAD = 88, 10
 -- (`ui.window.controls`: 12 in and 60 across in zgx's inset title bar, so
 -- 88 in, as ever). In full screen macOS hides them, and the controls take
 -- the window's edge inset (Zeron's `titlebar_cluster_start(true)`). Off
--- macOS the bar keeps its 88.
+-- macOS, `toggle_in` says.
 local LIGHTS_GAP, FULL_SCREEN_IN = 16, 12
 -- How they slide over: as Zeron's do (`titlebar_tween`, 200 ms, ease out),
 -- once the system's animation is over. The window draws no frames while
@@ -94,17 +94,23 @@ local function read(state: State<any>?, tracked: boolean): any
 	return if tracked then state:get() else state:peek()
 end
 
--- Whether the window is on macOS, as the host says (src/main.rs
--- `platform`): its buttons the traffic lights at the bar's left. Asked once.
-local macos: boolean? = nil
-local function on_macos(): boolean
-	if macos == nil then
-		local ok, platform = pcall(function(): any
+-- The window's system, as the host says (src/main.rs `platform`: "macos",
+-- "linux", "windows"…), "" where none is said (headless, a preview).
+-- Asked once.
+local platform: string? = nil
+local function host_platform(): string
+	if platform == nil then
+		local ok, said = pcall(function(): any
 			return ui.shared("platform", ""):peek()
 		end)
-		macos = ok and platform == "macos"
+		platform = if ok and type(said) == "string" then said else ""
 	end
-	return macos :: boolean
+	return platform :: string
+end
+-- Whether the window is on macOS: its buttons the traffic lights at the
+-- bar's left.
+local function on_macos(): boolean
+	return host_platform() == "macos"
 end
 
 -- Whether the window is in full screen (tracked).
@@ -134,7 +140,10 @@ end
 -- until the system's animation ends: 88 meanwhile, where they put it.)
 -- Elsewhere, by where the window's buttons stand: 10 in with them at the
 -- right (the shipping app's), past them at the left (never nearer than
--- the lights' 88), 88 with none reported.
+-- the lights' 88). With none reported on Linux or Windows (a tiling
+-- compositor that draws none, full screen) nothing stands at the left: 10
+-- in. Where no system is said (headless, a preview) the bar keeps the
+-- lights' 88, as on macOS.
 local function toggle_in(full: boolean, tracked: boolean?): number
 	if not on_macos() then
 		local side, buttons = window_buttons(tracked)
@@ -143,7 +152,7 @@ local function toggle_in(full: boolean, tracked: boolean?): number
 		elseif side == "left" then
 			return math.max(TOGGLE_IN, buttons.x + buttons.width)
 		end
-		return TOGGLE_IN
+		return if host_platform() == "" then TOGGLE_IN else ROW_PAD
 	end
 	if full then
 		return FULL_SCREEN_IN
@@ -319,12 +328,18 @@ end
 local TitleBar = ui.component(function(props: Props): Node
 	local m = island.metrics()
 	local CONTROL, GROUP_GAP, CONTROL_GAP = m.control, m.group, m.gap
+	-- Where the toggle stands: `toggle_in`, never over the lights this bar
+	-- draws itself (`lights`).
+	local function start_at(full: boolean, tracked: boolean?): number
+		local at = toggle_in(full, tracked)
+		return if props.lights then math.max(TOGGLE_IN, at) else at
+	end
 	-- The island: from the window's inset to the control row's end; as tall
 	-- as an island (a control and its padding), a padding's worth less as it
 	-- comes (Zeron's 28 to 32). Its end follows the row (full screen).
 	local ISLAND_LEFT = m.inset
 	local function island_w(full: boolean, tracked: boolean?): number
-		local start = toggle_in(full, tracked)
+		local start = start_at(full, tracked)
 		return start + controls_w(start) - ISLAND_LEFT
 	end
 	local ISLAND_TO = island.thickness()
@@ -397,7 +412,7 @@ local TitleBar = ui.component(function(props: Props): Node
 	local row_ref = ui.ref()
 	follow(row_ref, {
 		left = function(full: boolean): number
-			return toggle_in(full)
+			return start_at(full)
 		end,
 		-- (On the bar's line: the window's buttons' where they set it.)
 		top = function(): number
@@ -415,7 +430,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			ref = row_ref,
 			absolute = true,
 			-- (Kept by `follow` above, from here.)
-			left = toggle_in(full_screen_now(), false),
+			left = start_at(full_screen_now(), false),
 			top = middle(false) - CONTROL / 2,
 			items = "center",
 			pointer_events = "auto",
