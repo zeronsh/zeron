@@ -86,6 +86,9 @@ Releases (the `release` class):
     only counts when the run was started by pushing a tag or by hand
     (workflow_dispatch), never by a pull request, which can edit any workflow
     file (Scheduler.verified_release). Otherwise the run is an ordinary one.
+    A release workflow's runs are listed for those two events only
+    (RELEASE_EVENTS): a pull request's runs of it are outside runs, seen as
+    what they run, so however many there are they can't hide a release.
   - Verified releases go first, first come first served among themselves. A
     lock's standing reservation doesn't count against them, only what its
     runs hold: its runs wait behind the release, which must not wait for them.
@@ -157,6 +160,10 @@ RELEASE_WORKFLOWS = {
     "zeronsh/zeron": ("release.yml", "zgx-beta.yml"),
     "zeronsh/zgx": ("release.yml",),
 }
+# The events that start a release (a tag's push, a run by hand): a release workflow's
+# runs are listed for these only, so a pull request's runs of an edited copy (a fork's,
+# any number of them) can't push a real release out of the RECENT_RELEASES window.
+RELEASE_EVENTS = ("push", "workflow_dispatch")
 # How long a verified release's not-yet-created jobs stay reserved after admission: its
 # packaging and publishing start only once its builds are done (a hosted job's limit).
 RELEASE_GRACE = 6 * 3600
@@ -626,9 +633,12 @@ class Scheduler:
             if release_workflow:
                 # Its admit job is its first: a run waiting for a runner for it is still
                 # `queued`, one waiting for an approval `waiting`. Releases are few: the latest
-                # page, whatever the status. (exclude_pull_requests only trims the response.)
-                runs = [run for run in self.list_runs(f"{path}?exclude_pull_requests=true", stale_ok,
-                                                      recent=self.RECENT_RELEASES)
+                # page of each RELEASE_EVENTS, whatever the status. Its other runs (a pull
+                # request's) are outside ones, below. (exclude_pull_requests only trims the
+                # response.)
+                runs = [run for event in RELEASE_EVENTS
+                        for run in self.list_runs(f"{path}?event={event}&exclude_pull_requests=true", stale_ok,
+                                                  recent=self.RECENT_RELEASES)
                         if run.get("status") != "completed"]
             else:
                 runs = self.list_runs(f"{path}?status=in_progress", stale_ok)
@@ -659,13 +669,15 @@ class Scheduler:
                                                 stalled_for(jobs)))
 
         if self.outside:
-            mine = set(admitted)
+            release_workflows = {k for k, (_, release) in admitted.items() if release}
             for repo in repos:
                 stale_ok = 0.0 if repo == self.repo else self.OUTSIDE_REFRESH
                 for status in ("queued", "in_progress"):
                     for run in self.list_runs(f"/repos/{repo}/actions/runs?status={status}", stale_ok):
-                        if (repo, run.get("workflow_id")) in mine or run["id"] in live:
-                            continue
+                        workflow = (repo, run.get("workflow_id"))
+                        if run["id"] in live or (workflow in admitted and not (
+                                workflow in release_workflows and run.get("event") not in RELEASE_EVENTS)):
+                            continue  # (a release workflow's pull request runs: outside ones)
                         live.add(run["id"])
                         need = outside_need(self.run_jobs(run, repo, max(stale_ok, 60.0)))
                         if need["total"]:
