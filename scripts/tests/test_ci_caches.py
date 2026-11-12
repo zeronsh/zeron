@@ -25,6 +25,36 @@ class Workflows(unittest.TestCase):
         errors = caches.lint(ROOT)
         self.assertEqual(errors, [], "\n" + "\n".join(errors))
 
+    def test_zgx_never_restores_what_the_pull_request_saved_itself(self):
+        """zgx-tests.yml runs the zgx CLI and links the Ghostty build it restores: on a pull
+        request, each restore waits for a check that the pull request's own scope has none."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        spec = yaml.safe_load((ROOT / ".github" / "workflows" / "zgx-tests.yml").read_text(encoding="utf-8"))
+        guarded = 0
+        for name, job in spec["jobs"].items():
+            steps = job["steps"]
+            ids = {s.get("id"): s for s in steps if s.get("id")}
+            for step in steps:
+                if not step.get("uses", "").startswith("actions/cache/restore@"):
+                    continue
+                if not step["with"]["key"].startswith(("zgx-cli-", "zgx-ghostty-")):
+                    continue
+                check = ids.get(f"{step['id']}-own")
+                self.assertIsNotNone(check, (name, step["id"]))
+                self.assertEqual(check["if"], "github.event_name == 'pull_request'")
+                self.assertIn("refs/pull/${{ github.event.pull_request.number }}/merge", check["env"]["REF"])
+                self.assertIn("&ref=$REF", check["run"])
+                self.assertIn('echo "restore=false"', check["run"])  # an API error too (fail closed)
+                self.assertLess(steps.index(check), steps.index(step))
+                self.assertEqual(step["if"], f"github.event_name != 'pull_request' || "
+                                             f"steps.{step['id']}-own.outputs.restore == 'true'")
+                self.assertEqual(job["permissions"].get("actions"), "read", name)
+                guarded += 1
+        self.assertEqual(guarded, 3)  # the CLI on Linux and macOS, Ghostty on macOS
+
 
 def lint(workflows: dict[str, str], actions: dict[str, str] = None) -> list[str]:
     with tempfile.TemporaryDirectory() as root:

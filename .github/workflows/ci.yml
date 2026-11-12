@@ -243,6 +243,9 @@ jobs:
   zgx:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).zgx
+    permissions:
+      contents: read
+      actions: read  # zgx-tests.yml lists the pull request's own cache entries (not restored)
     uses: ./.github/workflows/zgx-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}

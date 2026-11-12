@@ -137,6 +137,15 @@ before merging** and **Block force pushes** (`main`'s also restricts
 deletions and updates). Until then (no ruleset targets it today) its passes
 and caches don't count.
 
+A pull request's runs also restore from the pull request's own cache scope,
+which its earlier commits can write (an edited workflow saves anything): a
+fake zgx CLI saved there would be run by every later commit's tests. So on a
+pull request, `zgx-tests.yml` first lists the entries with the key in that
+scope (`actions/caches?key=…&ref=refs/pull/<n>/merge`, with `actions: read`)
+and, if there is one, or the API fails, builds the CLI rather than restore
+it; Ghostty's restore (any `zgx-ghostty-` entry, since it has restore keys)
+likewise.
+
 The `zgx` suite (`zgx-tests.yml`):
 
 | Job | Runs on a pull request |

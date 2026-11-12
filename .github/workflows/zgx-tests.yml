@@ -25,7 +25,9 @@ name: zgx tests
 # request's own entries would only evict the shared ones (docs/reference/ci.md).
 # And only while zeron/zgx is protected as main is (pull request required, no
 # force push; plan.py integration_trusted): otherwise anyone who can push to it
-# could save what the pull requests into it restore and run.
+# could save what the pull requests into it restore and run. On a pull request,
+# the zgx CLI and Ghostty caches aren't restored if the pull request saved an
+# entry of its own (a fake, from an earlier commit): they're built instead.
 on:
   workflow_call:
     inputs:
@@ -62,6 +64,9 @@ jobs:
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'zgx-linux') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read  # the pull request's own cache entries, which aren't restored
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: System packages (zgx-beta.yml's)
@@ -85,7 +90,27 @@ jobs:
       - id: zgx-rev
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      # A pull request's earlier commit could have saved a zgx CLI of its own making in the
+      # pull request's own cache scope, which a later commit would restore and run. So on a
+      # pull request, an entry with this key in that scope means building it instead
+      # (and so does an API error: fail closed).
+      - id: zgx-cli-own
+        name: The zgx CLI cache isn't one this pull request saved
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          if n=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$KEY&ref=$REF" \
+                 --jq '[.actions_caches[] | select(.key == env.KEY)] | length') && [ "$n" = 0 ]; then
+            echo "restore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not restoring $KEY: this pull request saved one itself, or its caches couldn't be listed."
+            echo "restore=false" >> "$GITHUB_OUTPUT"
+          fi
       - id: zgx-cli
+        if: github.event_name != 'pull_request' || steps.zgx-cli-own.outputs.restore == 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
@@ -119,6 +144,9 @@ jobs:
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'zgx-macos') }}
     runs-on: macos-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read  # the pull request's own cache entries, which aren't restored
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain
@@ -130,7 +158,27 @@ jobs:
         with:
           version: 0.16.0
           use-cache: false
+      # A pull request's earlier commit could have saved a Ghostty build of its own making in the
+      # pull request's own cache scope, which a later commit would restore and run. So on a
+      # pull request, any `zgx-ghostty-` entry in that scope (restore-keys would take any)
+      # means building it instead (and so does an API error: fail closed).
+      - id: ghostty-own
+        name: The Ghostty build cache isn't one this pull request saved
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: zgx-ghostty-
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          if n=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$KEY&ref=$REF" \
+                 --jq '.actions_caches | length') && [ "$n" = 0 ]; then
+            echo "restore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not restoring $KEY: this pull request saved one itself, or its caches couldn't be listed."
+            echo "restore=false" >> "$GITHUB_OUTPUT"
+          fi
       - id: ghostty
+        if: github.event_name != 'pull_request' || steps.ghostty-own.outputs.restore == 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/Library/Caches/zgx-ghostty
@@ -170,7 +218,27 @@ jobs:
       - id: zgx-rev
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      # A pull request's earlier commit could have saved a zgx CLI of its own making in the
+      # pull request's own cache scope, which a later commit would restore and run. So on a
+      # pull request, an entry with this key in that scope means building it instead
+      # (and so does an API error: fail closed).
+      - id: zgx-cli-own
+        name: The zgx CLI cache isn't one this pull request saved
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          if n=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$KEY&ref=$REF" \
+                 --jq '[.actions_caches[] | select(.key == env.KEY)] | length') && [ "$n" = 0 ]; then
+            echo "restore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not restoring $KEY: this pull request saved one itself, or its caches couldn't be listed."
+            echo "restore=false" >> "$GITHUB_OUTPUT"
+          fi
       - id: zgx-cli
+        if: github.event_name != 'pull_request' || steps.zgx-cli-own.outputs.restore == 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
