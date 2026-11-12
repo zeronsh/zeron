@@ -30,6 +30,14 @@ local FAN = { { x = 0, turn = -3 }, { x = 6, turn = 3 }, { x = 10, turn = 7 } }
 
 -- Each tab's node, for its width (`Strip` keeps the one showing in view).
 local tab_refs: { [string]: any } = {}
+-- One more each time a tab's node mounts. `tab_refs` is a plain table, so what
+-- looked a tab up before its node was there (the tab for a chat alone replaced
+-- by one as wide) would never look again: `tab_ref` follows this.
+local tabs_mounted = ui.state("shell_session_tabs_mounted", 0)
+local function tab_ref(id: string): any
+	tabs_mounted:get()
+	return tab_refs[id]
+end
 
 local function chat_of(id: string): any
 	for _, c in sessions.now:get().chats do
@@ -365,6 +373,9 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 		ui.row {
 			id = `session-tab-{id}`,
 			ref = own,
+			on_mount = function()
+				tabs_mounted:set(tabs_mounted:peek() + 1)
+			end,
 			role = "tab",
 			label = function(): string
 				return title(id)
@@ -529,7 +540,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			return shown:get()
 		end,
 		width = function(id: string): number
-			local r = tab_refs[id]
+			local r = tab_ref(id)
 			return if r then r.width or 0 else 0
 		end,
 		content = content,
@@ -577,7 +588,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			return
 		end
 		for _, id in list do
-			local r = tab_refs[id]
+			local r = tab_ref(id)
 			if not r or (r.width or 0) <= 0 then
 				return
 			end

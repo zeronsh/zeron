@@ -664,6 +664,31 @@ test("the chosen tab's wash glides to the tab chosen", function()
 	expect(app:error()).to_be_nil()
 end)
 
+-- The tab for a chat alone, replaced as you navigate by one just as wide (both
+-- titles as long as a tab's may show), still stands on the chosen tab's wash.
+test("a chat alone's tab replaced by one as wide still has the chosen tab's wash", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 800)
+	app:frames(30)
+	app:command("long_titles")
+	app:frames(10)
+	open(app, "Desktop app performance investigation, first pass")
+	expect(app:wait("#session-tab-chosen", { timeout_ms = 2000 })).to_be(true)
+	local first = box(app, "#session-tab-a1")
+	open(app, "Desktop app performance investigation, second pass")
+	app:frames(30)
+	local now = tabs_shown(app)
+	expect(now.a1).to_be_nil()
+	expect(now.a2).to_be(true)
+	local tab = box(app, "#session-tab-a2")
+	expect(tab.w).to_be(first.w)
+	expect(app:wait("#session-tab-chosen", { timeout_ms = 2000 })).to_be(true)
+	local pill = box(app, "#session-tab-chosen")
+	expect(math.abs(pill.x - tab.x) <= 0.5).to_be(true)
+	expect(math.abs(pill.w - tab.w) <= 0.5).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
 -- The arrows go from tab to tab, choosing each, the keyboard going with them;
 -- Home and End go to the ends.
 test("the arrows go from tab to tab, choosing each", function()

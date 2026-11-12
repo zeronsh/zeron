@@ -801,6 +801,13 @@ M.Panel = ui.component(function(props: Props): Node
 	-- it shows, still (for the tab lifted by a drag, and the drag's preview).
 	local chip_refs: { [string]: any } = {}
 	local chip_faces: { [string]: () -> Node } = {}
+	-- One more each time a tab's node mounts: what looked a tab up before its
+	-- node was there looks again (`chip_refs` is a plain table).
+	local chips_mounted = ui.use_state(0)
+	local function chip_ref(id: string): any
+		chips_mounted:get()
+		return chip_refs[id]
+	end
 	-- The strip's dragging (below, once its scroll is made).
 	local strip: any
 
@@ -935,6 +942,9 @@ M.Panel = ui.component(function(props: Props): Node
 			ui.row {
 				id = `panel-tab-{id}`,
 				ref = ref,
+				on_mount = function()
+					chips_mounted:set(chips_mounted:peek() + 1)
+				end,
 				-- (What plugins place by, and what's under them: the tab, and a
 				-- file tab's file, as a token.)
 				class = if tab.kind == "files" then "panel-tab file-tab" else "panel-tab",
@@ -1124,7 +1134,7 @@ M.Panel = ui.component(function(props: Props): Node
 			return out
 		end,
 		width = function(id: string): number
-			local r = chip_refs[id]
+			local r = chip_ref(id)
 			return if r then r.width or 0 else 0
 		end,
 		content = strip_content,
@@ -1167,7 +1177,7 @@ M.Panel = ui.component(function(props: Props): Node
 			return
 		end
 		for _, t in list do
-			local r = chip_refs[t.id]
+			local r = chip_ref(t.id)
 			if not r or (r.width or 0) <= 0 then
 				return
 			end

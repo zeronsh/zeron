@@ -1300,6 +1300,17 @@ ui.command {
 		publish()
 	end,
 }
+-- Two chats' titles long enough that each one's tab is as wide as its title may
+-- go (tests/session_tabs).
+ui.command {
+	id = "long_titles",
+	title = "Two chats with long titles",
+	run = function()
+		find("a1").title = "Desktop app performance investigation, first pass"
+		find("a2").title = "Desktop app performance investigation, second pass"
+		publish()
+	end,
+}
 -- A session starts in Cobalt (another device's, say): it has one again.
 ui.command {
 	id = "cobalt_arrives",
