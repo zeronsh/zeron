@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde_json::{Value as Json, json};
 use zeron_plugin_guard::net;
 
@@ -924,8 +925,9 @@ fn guarded_client(hosts: &[String]) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("The network isn't available: {e}"))
 }
 
-/// `zeron.fetch`: `{ url, method?, headers?, body?, timeout? }` → `{ status,
-/// headers, body }` (http and https only; the body as text, 16 MB at most).
+/// `zeron.fetch`: `{ url, method?, headers?, body?, timeout?, binary? }` →
+/// `{ status, headers, body }` (http and https only; the body as text, or
+/// with `binary` as base64 so a font or a picture comes whole; 16 MB at most).
 /// Where it may go is plugin-guard's `net` (R15): public addresses, or the
 /// hosts the manifest names; checked again on every redirect and at every
 /// address a name resolves to.
@@ -973,7 +975,12 @@ async fn fetch(http: &reqwest::Client, policy: &net::Policy, args: &Json) -> Res
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(json!({ "status": status, "headers": headers, "body": String::from_utf8_lossy(&body) }))
+    // (Text crosses into Luau as UTF-8: any other byte would be lost.)
+    let body = match args["binary"].as_bool().unwrap_or(false) {
+        true => base64::engine::general_purpose::STANDARD.encode(&body),
+        false => String::from_utf8_lossy(&body).into_owned(),
+    };
+    Ok(json!({ "status": status, "headers": headers, "body": body }))
 }
 
 #[cfg(test)]

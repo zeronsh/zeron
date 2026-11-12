@@ -500,6 +500,52 @@ async fn local_server(to: Option<String>) -> u16 {
     port
 }
 
+/// A font or a picture comes whole: with `binary` the body is its bytes in
+/// base64 (every byte, NUL and those that aren't UTF-8); without, text.
+#[tokio::test]
+async fn fetch_gives_bytes_in_base64_when_asked() {
+    use base64::Engine as _;
+    let bytes: Vec<u8> = (0..=255u8).chain([0xff, 0xfe, 0, 0x80]).collect();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = bytes.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let head = format!("HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+    let r = rig(Config::default());
+    let mut plan = r.plan(
+        "1.0.0",
+        r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("get", function(args)
+	return zeron.fetch(args.url, { binary = args.binary }):await().body
+end)
+"#,
+        &["service", "network"],
+    );
+    plan.hosts = vec![format!("127.0.0.1:{port}")];
+    let url = format!("http://127.0.0.1:{port}/font.ttf");
+    let binary = r.ask(&plan, "get", json!({ "url": url, "binary": true })).await.unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD.decode(binary.as_str().unwrap()).unwrap();
+    assert_eq!(decoded, bytes);
+    let text = r.ask(&plan, "get", json!({ "url": url })).await.unwrap();
+    assert_eq!(text, json!(String::from_utf8_lossy(&bytes)));
+}
+
 /// R15: "network" is the internet. A plugin's fetch never reaches this
 /// device, your network or instance metadata (by address, by a name that
 /// resolves there, or by a redirect), unless its manifest names the host.

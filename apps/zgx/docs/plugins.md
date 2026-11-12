@@ -370,7 +370,7 @@ end)
 | `zeron.emit(event, data)` | to your windows: those on this device, and those watching from another (`:on`). 64 KB at most | |
 | `zeron.watch(folders, fn, { quiet? })` | changes under whole paths on this device, each all the way down: `fn(changed)` once a burst has been quiet `quiet` ms (250), `changed` by folder: its changed paths (relative, `/`-separated), or `true` when anything may have (as it starts, too many, events lost). Reads aren't changes. Returns a stop function; it lasts while the service runs. Pair it with `emit` to tell windows, instead of their polling | `files.read` |
 | `zeron.run(program, args, { cwd, stdin, timeout, env })` | a promise of `{ status, stdout, stderr }`, as the window's | `commands` |
-| `zeron.fetch(url, { method, headers, body, timeout })` | a promise of `{ status, headers, body }` (http and https; public addresses, or the manifest's `network.hosts`) | `network` |
+| `zeron.fetch(url, { method, headers, body, timeout, binary })` | a promise of `{ status, headers, body }` (http and https; public addresses, or the manifest's `network.hosts`; 16 MB at most). `body` is text, any byte that isn't UTF-8 replaced; with `binary = true` it is the bytes in base64, whole (a font, a picture) | `network` |
 | `zeron.folders()` | a promise of this device's chats' and projects' folders (whole paths) | `sessions.read` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
