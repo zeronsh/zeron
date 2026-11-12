@@ -50,6 +50,7 @@ local IconButton = icon_button.IconButton
 local ToggleButton = require("@self/toggle_button")
 local ContextMenu = require("@self/context_menu")
 local motion = require("@self/motion")
+local seam = require("@self/seam")
 local locale = require("@self/locale")
 -- A session's row, its corner, its group's header and pager: shared with
 -- every other list of sessions (the panel home's).
@@ -178,6 +179,20 @@ export type Props = {
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
+	-- The width a double click on its edge puts back (the theme's own else).
+	default_width: number?,
+	-- Told its column's width as it shows (its card and `before`), each
+	-- frame as it folds or comes back (what stands beside it follows its
+	-- edge by it).
+	shown: State<number>?,
+	-- The window's gap before its card, which its column holds as it shows
+	-- (the app sets it in by that): part of its move, so the column moves on
+	-- one curve, and gone only with its last points, so the card's left edge
+	-- stands still as it folds.
+	before: number?,
+	-- Its edge double-clicked, after its width is back to its default: the
+	-- app re-splits what's beside it.
+	on_reset: (() -> ())?,
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
 	card: boolean?,
@@ -357,17 +372,25 @@ return ui.component(function(props: Props): Node
 	local function room_now(): number
 		return if limit then math.min(wide:peek(), limit()) else wide:peek()
 	end
+	local before = props.before or 0
 	local function target(): number
 		if collapsed:get() then
 			return 0
 		end
-		return room()
+		return room() + before
 	end
+	-- (Its column's width as it shows, `before` included; its card's,
+	-- what's past that.)
 	local shown_w = ui.use_state(target())
+	local function card_w(): number
+		return math.max(shown_w:get() - before, 0)
+	end
 	local resizing = false
 	local dragging = ui.use_state(false)
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
+	-- Its edge's drag: a bounce past its least or most, added to its width.
+	local edge_drag = seam.drag()
 	local easing: any = nil
 	local steps = 0
 	local was_folded = collapsed:peek()
@@ -417,15 +440,24 @@ return ui.component(function(props: Props): Node
 		else
 			base = to
 		end
-		shown_w:set(math.max(base + step:peek(), 0))
+		shown_w:set(math.max(base + step:peek() + edge_drag.nudge:peek(), 0))
 	end)
-	-- (Following the step as it eases.)
+	-- (Following the step as it eases, and the edge's bounce.)
 	ui.effect(function()
-		local w = math.max(base + step:get(), 0)
+		local w = math.max(base + step:get() + edge_drag.nudge:get(), 0)
 		if shown_w:peek() ~= w then
 			shown_w:set(w)
 		end
 	end)
+	if props.shown then
+		local told = props.shown
+		ui.effect(function()
+			local w = shown_w:get()
+			if told:peek() ~= w then
+				told:set(w)
+			end
+		end)
+	end
 	local selected = props.selected
 	-- (Reduce motion: there at once; ds/motion.)
 	local function eased(f: () -> number, how: any): any
@@ -3339,7 +3371,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				drag_y = nil
 			end,
 			drag_preview = function()
-				return lifted(TITLE, ui.text { sec_now().name, literal = true, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" })
+				-- (A long name fades at the card's end, as on its row.)
+				return lifted(TITLE, FadeText { sec_now().name, literal = true, grow = 1, text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" })
 			end,
 			ui.show(
 				editing,
@@ -3376,7 +3409,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						end)
 					end,
 				})),
-				ui.text {
+				FadeText {
 					function(): string
 						return sec_now().name
 					end,
@@ -4549,12 +4582,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 			-- (The scroll's room round its icons is part of the gap above it.)
 			gap = RAIL_GROUP - ROOM,
 			items = "center",
+			-- (It appears where it stands: a fade, no growing into place.)
 			opacity = ui.tween(ui.computed(function(): number
 				return if collapsed:get() then 1 else 0
 			end), { duration = 220, ease = "out(3)" }),
-			scale = motion.tween(ui.computed(function(): number
-				return if collapsed:get() then 1 else 0.96
-			end), { duration = 260, ease = "out(3)" }),
 			pointer_events = function()
 				return if collapsed:get() then "auto" else "none"
 			end,
@@ -4986,9 +5017,33 @@ fn layer(input:LayerInput)->vec4<f32> {
 	-- Its column: the top, a notice if it has one, the list, you at the foot
 	-- (collapsed, folded away: the rail keeps to what you work in, and what
 	-- you start).
+	-- (Its content stands at its width, at its left, as its edge folds over
+	-- it and uncovers it again: nothing in it moves, it only fades a little
+	-- (ds/motion `content`), as the panel's does.)
+	local body_el: any = nil
+	if not is_island then
+		local folded_was = collapsed:peek()
+		ui.effect(function()
+			local folded = collapsed:get()
+			if folded == folded_was then
+				return
+			end
+			folded_was = folded
+			if body_el then
+				anime.animate(body_el, motion.content(not folded))
+			end
+		end)
+	end
 	local body: { [any]: any } = {
+		id = if is_island then nil else "sidebar-content",
 		w = function(): number
 			return room()
+		end,
+		on_mount = function(el: any)
+			body_el = el
+			if not is_island then
+				anime.animate(el, motion.content(not collapsed:peek(), true))
+			end
 		end,
 		h_full = true,
 		shrink = 0,
@@ -5048,17 +5103,22 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if #feet > 0 then
 		table.insert(body, ui.column { w_full = true, shrink = 0, gap = "$zeron.list.gap", table.unpack(feet) })
 	end
-	-- Its edge: dragged, it resizes (242 to 400), following the pointer at once.
-	-- (Pressed itself, so it keeps the pointer as it's dragged.) A card's reaches
-	-- across the gap beside it, which lights as it does between the panel and the
-	-- page, over the card's height; `gap`: how far past the sidebar that is.
+	-- Its edge: dragged, it resizes (242 to 400), following the pointer at once,
+	-- bouncing past either end; double-clicked, back to its default width,
+	-- easing there. (Pressed itself, so it keeps the pointer as it's dragged.)
+	-- A card's is the gap beside it, which lights as it does between the panel
+	-- and the page, over the card's height; `gap`: how wide that is. It takes
+	-- the pointer from `seam.REACH` inside the gap's middle to the gap's far
+	-- side: on its own side only, as it lies under the page (raised over it,
+	-- its head would take the presses of the top bar's first tabs, which
+	-- reach over it).
 	local function edge_handle(gap: number, top: number, bottom: number): Node
 		return ui.div {
 			absolute = true,
 			right = ui.raw(-gap, "over the gap beside it"),
 			top = top,
 			bottom = bottom,
-			w = ui.raw(6 + gap, "a little into it, and the gap"),
+			w = ui.raw(seam.REACH + gap / 2, "the seam's reach inside the gap's middle, and the gap"),
 			cursor = "col_resize",
 			label = locale.t("ds.sidebar.resize"),
 			pointer_events = function()
@@ -5068,28 +5128,40 @@ fn layer(input:LayerInput)->vec4<f32> {
 				edge_over:set(inside)
 			end,
 			on_press = function(e)
+				if e.clicks == 2 then
+					wide:set(props.default_width or WIDE)
+					if props.on_reset then
+						props.on_reset()
+					end
+					return
+				end
 				from_x, from_w = e.x, wide:peek()
 				resizing = true
 				dragging:set(true)
 			end,
 			on_pointer_move = function(e)
 				if resizing then
-					wide:set(math.clamp(from_w + e.x - from_x, MIN_W, MAX_W))
+					local want = from_w + e.x - from_x
+					edge_drag.at(want, MIN_W, if limit then math.min(MAX_W, limit()) else MAX_W)
+					wide:set(math.clamp(want, MIN_W, MAX_W))
 				end
 			end,
 			on_release = function()
 				resizing = false
 				dragging:set(false)
+				edge_drag.release()
 			end,
 		}
 	end
+	-- Its edge lit: under the pointer and as it's dragged, not held past an end.
+	local edge_lit = seam.lit(function(): boolean
+		return (edge_over:get() or dragging:get()) and not collapsed:get()
+	end, edge_drag)
 	local root = ui.column {
 		id = if is_island then "rail" else nil,
 		w = if props.card
 			then "100%" :: any
-			else function(): number
-				return shown_w:get()
-			end,
+			else card_w,
 		-- Folded away, out of layout and out of reach (no row to tab to),
 		-- its scroll and folds kept for when it opens.
 		hidden = function(): boolean
@@ -5172,12 +5244,10 @@ fn layer(input:LayerInput)->vec4<f32> {
 				bottom = 0,
 				w = 1,
 				pointer_events = "none",
-				bg = function()
-					-- (The cards beside it are its edge at rest; the
-					-- hairline shows only under the pointer and as it's dragged.)
-					return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
-				end,
-				opacity = shown_wide,
+				-- (The cards beside it are its edge at rest; the
+				-- hairline shows only under the pointer and as it's dragged.)
+				bg = "$border.strong",
+				opacity = edge_lit,
 			},
 		if props.card then nil else edge_handle(0, 0, 0),
 	}
@@ -5190,9 +5260,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 	local card_top = props.top or 0
 	return ui.div {
 		relative = true,
-		w = function(): number
-			return shown_w:get()
-		end,
+		w = card_w,
 		hidden = function(): boolean
 			return collapsed:get() and shown_w:get() <= 0
 		end,
@@ -5207,10 +5275,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 			w = gap,
 			rounded = "$radius.full",
 			pointer_events = "none",
-			bg = function()
-				return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
-			end,
-			opacity = shown_wide,
+			bg = "$border.strong",
+			opacity = edge_lit,
 		},
 		edge_handle(gap, card_top, 5),
 	}

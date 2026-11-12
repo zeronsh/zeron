@@ -202,7 +202,7 @@ function M.bind(b: Bind): { [string]: any }
 		if not target then
 			return
 		end
-		local key = `{target.chat or target.space or ""}:{t.query}`
+		local key = `{target.device or ""}:{target.chat or target.space or ""}:{t.query}`
 		if key == searched:peek() then
 			return
 		end

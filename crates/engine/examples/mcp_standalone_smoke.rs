@@ -65,6 +65,7 @@ impl Harness for SmokeHarness {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![Model {
+            default: false,
             id: "smoke-1".into(),
             label: "Smoke 1".into(),
             description: None,

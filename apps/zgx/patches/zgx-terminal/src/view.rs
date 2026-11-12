@@ -541,7 +541,7 @@ impl Engine {
             .as_ref()
             .is_some_and(NodeHandle::assistive_technology);
         let every_row = changed.len() == screen_rows;
-        let shown: Vec<Rc<RowPaint>> = if every_row || (output && listening) {
+        let shown: Vec<Rc<RowPaint>> = if every_row {
             let rows = self.rows.borrow();
             self.slots
                 .borrow()
@@ -637,20 +637,46 @@ impl Engine {
         }
     }
 
-    /// What a reader hears of rows `changed` from what `rows` show: new
+    /// What a reader hears of rows `changed` from what the rows show: new
     /// lines and what lines gained, less the shell's echo of what was typed.
+    /// `shown`, every row's paint, when every row changed (output may have
+    /// scrolled them); otherwise empty, and only the changed rows are read.
+    /// Out of line: worked out only while a reader listens, it leaves the
+    /// paint of every other frame as it was.
+    #[cold]
+    #[inline(never)]
     fn news_of(&self, shown: &[Rc<RowPaint>], changed: &[(usize, RowPaint)]) -> String {
         if changed.is_empty() {
             return String::new();
         }
-        let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
-        let before: Vec<&str> = after.clone();
-        for (row, paint) in changed {
-            if let Some(text) = after.get_mut(*row) {
-                *text = &paint.text;
+        let news = if shown.is_empty() {
+            // Rows that didn't all change didn't scroll: what each changed
+            // row showed is all there is to compare.
+            let rows = self.rows.borrow();
+            let slots = self.slots.borrow();
+            // Top first, as a reader hears the screen.
+            let mut was: Vec<(usize, Rc<RowPaint>, &RowPaint)> = changed
+                .iter()
+                .filter_map(|(row, now)| {
+                    let slot = slots.get(*row)?;
+                    Some((*row, rows[*slot].with_untracked(Rc::clone), now))
+                })
+                .collect();
+            was.sort_unstable_by_key(|(row, ..)| *row);
+            crate::news::changed_news(
+                was.iter()
+                    .map(|(_, was, now)| (was.text.as_str(), now.text.as_str())),
+            )
+        } else {
+            let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
+            let before: Vec<&str> = after.clone();
+            for (row, paint) in changed {
+                if let Some(text) = after.get_mut(*row) {
+                    *text = &paint.text;
+                }
             }
-        }
-        let news = crate::news::news(&before, &after);
+            crate::news::news(&before, &after)
+        };
         crate::news::less_echo(&mut self.typed.borrow_mut(), news)
     }
 
@@ -682,17 +708,22 @@ impl Engine {
     /// Each slot's line counted from the top of the screen again: lines
     /// counted from far back would be placed less exactly.
     fn rebase(&self) {
-        let slots = self.slots.borrow();
-        let lines = self.lines.borrow();
-        for (row, slot) in slots.iter().enumerate() {
-            if lines[*slot].with_untracked(|line| *line != row) {
-                lines[*slot].set(row);
+        let order: Rc<[usize]> = self.slots.borrow().iter().copied().collect();
+        {
+            let lines = self.lines.borrow();
+            for (row, slot) in order.iter().enumerate() {
+                if lines[*slot].with_untracked(|line| *line != row) {
+                    lines[*slot].set(row);
+                }
             }
         }
         if self.scrolled.with_untracked(|top| *top != 0) {
             self.scrolled.set(0);
         }
-        self.order.set(slots.iter().copied().collect());
+        // Nothing borrowed: outside a flush (the first read, before the
+        // first fit) this builds the new slots' rows at once, which take
+        // theirs from `rows` and `lines`.
+        self.order.set(order);
     }
 
     /// The screen scrolled by `shift` lines: each screen row is shown by the
@@ -760,7 +791,11 @@ impl Engine {
         self.paint();
     }
 
-    /// Measure the cell for the font size (on mounting, and as it changes).
+    /// Measure the cell for the font size (on mounting, and as it or the
+    /// window's scale factor changes): whole device pixels, as terminals
+    /// make it, so every column's edge, background and glyph is on the
+    /// pixel grid, not each a different fraction off it (a cell 15.6 pixels
+    /// wide at a scale of 2). The width the nearest, the height up.
     fn measure(&self, scene: &zgx::scene::Scene) {
         let mut metrics = self.metrics.get();
         let (width, height) = scene.measure_text_with_font(
@@ -769,8 +804,15 @@ impl Engine {
             None,
             &self.font.borrow(),
         );
-        metrics.cell_width = width / 10.;
-        metrics.cell_height = height.ceil();
+        let (width, height) = match scene.pixel_scale() {
+            0. => (width / 10., height.ceil()),
+            scale => (
+                (width / 10. * scale).round().max(1.) / scale,
+                (height * scale).ceil() / scale,
+            ),
+        };
+        metrics.cell_width = width;
+        metrics.cell_height = height;
         if metrics != self.metrics.get() {
             self.metrics.set(metrics);
             self.generation.set(self.generation.get().wrapping_add(1));
@@ -1491,8 +1533,12 @@ impl TerminalBackend for EngineTerminal {
                 engine.task.borrow_mut().take();
                 engine.process_task.borrow_mut().take();
                 engine.poll_task.borrow_mut().take();
-                // Dropping the session hangs up its program.
+                // Dropping the session hangs up its program, and lets go of
+                // its screen and pictures: given back at the idle trim, which
+                // a frame arms, and none may come (a window covered, hidden
+                // or minimized, or with nothing to draw where it was).
                 engine.session.borrow_mut().take();
+                zgx::idle::request(&engine.runtime);
             }
         }
     }
@@ -1525,7 +1571,9 @@ impl Drop for EngineTerminal {
         self.0.task.borrow_mut().take();
         self.0.process_task.borrow_mut().take();
         self.0.poll_task.borrow_mut().take();
-        self.0.session.borrow_mut().take();
+        if self.0.session.borrow_mut().take().is_some() {
+            zgx::idle::request(&self.0.runtime);
+        }
     }
 }
 
@@ -1854,6 +1902,23 @@ fn view(engine: Rc<Engine>) -> View {
                 engine.measure(&scene.borrow());
             }
             *engine.root.borrow_mut() = Some(handle.clone());
+            // Measured again as the window's scale factor changes.
+            if let Some(geometry) = handle.observe_text_geometry() {
+                let remeasure = engine.clone();
+                let mut seen = geometry.with_untracked(|revision| *revision);
+                let effect = engine.runtime.effect(move || {
+                    let now = geometry.get();
+                    if std::mem::replace(&mut seen, now) == now {
+                        return;
+                    }
+                    let scene = remeasure.root.borrow().as_ref().and_then(NodeHandle::scene);
+                    if let Some(scene) = scene {
+                        remeasure.measure(&scene.borrow());
+                        remeasure.fit(remeasure.size.get());
+                    }
+                });
+                handle.retain(effect);
+            }
             if let Some(size) = handle.observe_size() {
                 let fit = engine.clone();
                 let effect = engine.runtime.effect(move || {

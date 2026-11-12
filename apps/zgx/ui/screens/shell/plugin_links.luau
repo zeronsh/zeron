@@ -3,10 +3,26 @@
 -- links in Zeron" setting is. Anything else goes where links go.
 --
 --   plugin_links.take(session, url)   true when a plugin's tab took it
+--   plugin_links.unclaimed(open)      runs `open` with no tab taking its link
+--
+-- A link a plugin opens itself (`zeron.open_url`) is never taken: its pull
+-- request viewer's Open on GitHub would only bring that viewer forward.
 
 local boundary = require("@app/screens/shell/boundary")
 
 local M = {}
+
+-- (While a link a plugin opened goes where links go.)
+local passing = false
+
+function M.unclaimed(open: () -> ())
+	passing = true
+	local ok, why = pcall(open)
+	passing = false
+	if not ok then
+		error(why, 0)
+	end
+end
 
 local settings = ui.shared("plugins.settings", {} :: { any })
 
@@ -30,7 +46,7 @@ local function on(): boolean
 end
 
 function M.take(session: any, url: string): boolean
-	if not session or not on() then
+	if passing or not session or not on() then
 		return false
 	end
 	local address, number = M.pull_request(url)

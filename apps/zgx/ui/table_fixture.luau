@@ -19,6 +19,26 @@ local TABLES: { [string]: string } = {
 | The veil keeps a chunk list per paragraph until it finishes fading | No, but the list is short and goes when the reply settles |
 | A wider retained tree makes hit testing walk more nodes | Yes, the spatial index skips whole columns once #1523 lands |
 ]],
+	-- A 30-character label beside prose, as in a reply listing its chats: the
+	-- label's room is its words' own, the prose takes the rest.
+	running = [[
+| Chat | Doing |
+| --- | --- |
+| **a1b2c3d4**, engine hang | Getting function names into the hang capture, which lock froze and whose code holds it, then a fix in a separate worktree. It won't deploy, restart the engine or push. It will say whether the build should go back to the previous release until there's a fix. |
+| **e5f6a7b8**, nightly CI builds | The first full build on GitHub passed: Linux in 17m and Windows in 43m29s. It's rerunning to measure how fast a second build is once cached. |
+| **c9d0e1f2**, sidebar icon | Building it. |
+]],
+	-- A 38-character label beside long prose with bold and code, as in a
+	-- reply giving where things stand (the table Wing couldn't scroll).
+	status = [[
+| Area | Status |
+|---|---|
+| **Beta.5** | Windows and both Linux builds passed. macOS has been building, signing and notarizing for about 40 minutes; notarization usually takes the longest. It publishes right after. |
+| **Memory** | Two of the three fixes are merged in zgx (#1960, #1981); #1945 merges after its checks. Together they bring memory after heavy use to about **264 MB** (was 315, and beta.1 was 271). The memory chat is now chasing the remaining ~50 MB stuck in partly used memory pages. |
+| **Streaming** | ff4bff4f's three zgx PRs are open and in CI: append-only text, styled text that follows state, and the fade-in drawn as one piece. Next is the GPU-run fade-in under the glass, worked out with the render chat. Your staging app's build is at 5.9% (from 7.1%), with about 4–4.5% as the next target. |
+| **Scrolling** | Waiting on zgx CI: accessibility updates (#1931), zgx's built-in scroll bar (#1961), and the "scrolling stopped" timer (#1975). The Zeron side of each is ready on branches. The working-rings fix is merged. |
+| **The scroll-skip / overlapping-rows bug** | Not reproduced, and no cause yet. Tests are in place. If it happens again, send a screenshot and the chat name before navigating away. |
+]],
 	-- Short labels and numbers beside a column of prose.
 	mixed = [[
 | Build | Size | Change | Notes |
@@ -80,7 +100,7 @@ end }
 ui.command { id = "only_all", title = "all", run = function()
 	only:set("all")
 end }
-for _, w in { 280, 360, 480, 620, 760 } do
+for _, w in { 280, 360, 400, 480, 560, 620, 680, 760, 860 } do
 	ui.command { id = `width_{w}`, title = `{w}`, run = function()
 		width:set(w)
 	end }
@@ -131,6 +151,8 @@ return ui.column {
 				return width:get()
 			end,
 			shown("two"),
+			shown("running"),
+			shown("status"),
 			shown("mixed"),
 			shown("many"),
 			shown("code"),

@@ -19,7 +19,8 @@
 #                       is the next release's (newer than the stable whose
 #                       engine goes in)
 #   ZGX_BETA_ENGINE     the engine: a built binary, a Zeron.app, its app tarball, or
-#                       its `Zeron Engine` binary
+#                       its `Zeron Engine` binary; built with LUAU_CXXFLAGS=-DNDEBUG
+#                       (checked), which a stable release from before that isn't
 #   ZGX_BETA_ZGX_BIN    the interface, built already (with --features beta and
 #                       ZERON_BETA_VERSION); otherwise built here
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)
@@ -70,6 +71,11 @@ ENGINE_VERSION="$("$ENGINE_BIN" --version | sed -n 's/^zeron-engine //p')"
 # for any argument instead. (Read, not run: running an old one starts it.)
 LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
   die "the $ENGINE_VERSION engine predates the shared command line: the beta needs a stable release with it"
+# Its Luau (visuals, plugin services) without its asserts: with them, each
+# LUAU_ASSERT keeps its Luau source file's path (Luau/Common.h's __FILE__),
+# VM/src/l*.cpp; with NDEBUG, none.
+! LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$ENGINE_BIN" ||
+  die "$ENGINE_BIN was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG"
 
 # The interface: apps/zgx is a workspace of its own (its own lock, patches).
 ZGX_BIN="${ZGX_BETA_ZGX_BIN:-}"
@@ -86,6 +92,10 @@ fi
 # `zeron --version`, and a development build is staging's.
 [[ "$("$ZGX_BIN" --version)" == "zeron $BETA_VERSION" ]] ||
   die "$ZGX_BIN isn't the $BETA_VERSION beta (it says '$("$ZGX_BIN" --version)')"
+# Luau without its asserts (a fifth of script time): zgx-script compiles its
+# warning about them in only when they're on (cfg luau_asserts).
+! LC_ALL=C grep -aq "Luau was built with its asserts" "$ZGX_BIN" ||
+  die "$ZGX_BIN was built with Luau's asserts: LUAU_CXXFLAGS=-DNDEBUG (apps/zgx/.cargo/config.toml) didn't reach it"
 # Production's only: neither binary may carry staging's edge or sign-in.
 STAGING_MARKS='staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
 for bin in "$ZGX_BIN" "$ENGINE_BIN"; do
@@ -119,6 +129,11 @@ rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_
   "$ROOT/apps/zgx/ui/" "$APP/Contents/Resources/ui/"
 rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
   "$ROOT/apps/zgx/plugins-builtin/" "$APP/Contents/Resources/plugins-builtin/"
+# Each ships the canonical SDK, whatever copy sits in its folder (examples_tests
+# `sdk_copies_match_canonical` keeps those equal too).
+for dir in "$APP/Contents/Resources/plugins-builtin/"*/; do
+  cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
+done
 
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"

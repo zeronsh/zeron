@@ -167,6 +167,10 @@ struct Shared {
     colors_asked: Mutex<Vec<ColorRequest>>,
     /// The pictures programs sent (the kitty graphics protocol), by id.
     images: Images,
+    /// Whether pictures can arrive: not through Windows' own pseudoconsole,
+    /// which drops their strings. Without, the session answers as a
+    /// terminal with no pictures does (`shows_pictures`).
+    pictures: bool,
     tx: Sender<Msg>,
     poller: Arc<Poller>,
 }
@@ -287,6 +291,10 @@ impl Session {
         let (pid, controller) = (pty.child().id(), pty.file().try_clone()?.into());
         #[cfg(windows)]
         let pid = pty.child_watcher().pid().map_or(0, |pid| pid.get());
+        #[cfg(unix)]
+        let pictures = true;
+        #[cfg(windows)]
+        let pictures = pty.hands_on_strings();
 
         let poller = Arc::new(Poller::new()?);
         let (tx, rx) = mpsc::channel();
@@ -298,21 +306,12 @@ impl Session {
             palette: Mutex::new(crate::Palette::default()),
             colors_asked: Mutex::new(Vec::new()),
             images: Images::default(),
+            pictures,
             tx,
             poller: poller.clone(),
         });
-        let config = Config {
-            scrolling_history: options.scrollback,
-            // Programs may set the clipboard, and ask to read it: the app
-            // asks its user (`SessionEvent::ClipboardLoad`).
-            osc52: Osc52::CopyPaste,
-            // Programs may turn on the kitty keyboard protocol (`CSI > u`):
-            // the view encodes keys as it asks.
-            kitty_keyboard: true,
-            ..Config::default()
-        };
         let term = Arc::new(FairMutex::new(Term::new(
-            config,
+            config(options, pictures),
             &size,
             Listener(shared.clone()),
         )));
@@ -350,7 +349,16 @@ impl Session {
         size: GridSize,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        let (tx, _) = mpsc::channel();
+        Self::replay_with(options, size, wake, true).0
+    }
+    /// As `replay`, showing pictures or not, with what it writes back.
+    fn replay_with(
+        options: &SessionOptions,
+        size: GridSize,
+        wake: impl Fn() + Send + Sync + 'static,
+        pictures: bool,
+    ) -> (Self, Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             pending: AtomicBool::new(false),
             events: Mutex::new(Vec::new()),
@@ -359,17 +367,12 @@ impl Session {
             palette: Mutex::new(crate::Palette::default()),
             colors_asked: Mutex::new(Vec::new()),
             images: Images::default(),
+            pictures,
             tx,
             poller: Arc::new(Poller::new().expect("a poller")),
         });
-        let config = Config {
-            scrolling_history: options.scrollback,
-            osc52: Osc52::CopyPaste,
-            kitty_keyboard: true,
-            ..Config::default()
-        };
-        let term = Term::new(config, &size, Listener(shared.clone()));
-        Self {
+        let term = Term::new(config(options, pictures), &size, Listener(shared.clone()));
+        let session = Self {
             shared,
             term: Arc::new(FairMutex::new(term)),
             pid: 0,
@@ -377,7 +380,17 @@ impl Session {
             controller: None,
             exited: Arc::new(Mutex::new(None)),
             replay: Some(Box::new(Mutex::new(Parse::default()))),
-        }
+        };
+        (session, rx)
+    }
+    /// Whether pictures a program sends can arrive (the kitty graphics
+    /// protocol, sixel). Not through Windows' own pseudoconsole, which drops
+    /// them; through Windows Terminal's (`conpty.dll` and `OpenConsole.exe`
+    /// beside the app) they do. Without, device attributes don't announce
+    /// sixel and picture commands go unanswered, as in a terminal with none.
+    #[doc(hidden)]
+    pub fn shows_pictures(&self) -> bool {
+        self.shared.pictures
     }
     /// Parse `bytes` as a replay's output (see `replay`); nothing for a
     /// session running a program.
@@ -527,6 +540,21 @@ struct Io {
     poller: Arc<Poller>,
     exited: Arc<Mutex<Option<i32>>>,
 }
+/// The screen model's configuration: device attributes announce sixel
+/// only where pictures can arrive.
+fn config(options: &SessionOptions, pictures: bool) -> Config {
+    Config {
+        scrolling_history: options.scrollback,
+        // Programs may set the clipboard, and ask to read it: the app asks
+        // its user (`SessionEvent::ClipboardLoad`).
+        osc52: Osc52::CopyPaste,
+        // Programs may turn on the kitty keyboard protocol (`CSI > u`): the
+        // view encodes keys as it asks.
+        kitty_keyboard: true,
+        sixel: pictures,
+        ..Config::default()
+    }
+}
 #[derive(Default)]
 struct Parse {
     parser: Processor<StdSyncHandler>,
@@ -549,14 +577,22 @@ impl Parse {
             &mut self.graphics,
         );
         self.sniffer.feed(bytes, |end, osc| {
+            // A picture's body: the screen model reads around it.
+            if let Osc::Body(from) = osc {
+                parser.advance(term, &bytes[parsed..from]);
+                parsed = end;
+                return;
+            }
             parser.advance(term, &bytes[parsed..end]);
             parsed = end;
             let event = match osc {
+                Osc::Body(_) => return,
                 Osc::Pwd(path) => SessionEvent::Pwd(path),
                 Osc::CommandStarted => {
                     *started = Some(Instant::now());
                     return;
                 }
+                Osc::Sixel(_) | Osc::Graphics(_) if !shared.pictures => return,
                 Osc::Sixel(body) => {
                     let size = *shared.size.lock().unwrap();
                     let cell = (size.cell_width, size.cell_height);
@@ -799,5 +835,113 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     #[cfg(windows)]
     {
         status.code().unwrap_or(-1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a session writes back to its program for `output`.
+    fn answers(pictures: bool, output: &[u8]) -> (Vec<String>, Session) {
+        let size = GridSize::new(40, 10);
+        let (session, rx) = Session::replay_with(&SessionOptions::default(), size, || {}, pictures);
+        session.feed(output);
+        let written = rx
+            .try_iter()
+            .filter_map(|msg| match msg {
+                Msg::Input(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                _ => None,
+            })
+            .collect();
+        (written, session)
+    }
+
+    /// A screen's cells, row by row, and its cursor.
+    fn screen<T: EventListener>(term: &alacritty_terminal::Term<T>) -> (Vec<String>, (i32, usize)) {
+        use alacritty_terminal::index::{Column, Line};
+        let grid = term.grid();
+        let rows = (0..grid.screen_lines() as i32)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                (0..grid.columns()).map(|c| row[Column(c)].c).collect()
+            })
+            .collect();
+        let cursor = grid.cursor.point;
+        (rows, (cursor.line.0, cursor.column.0))
+    }
+
+    /// Spared pictures' bodies, the screen model ends as it would reading
+    /// them, however reads cut the output: the same cells and cursor, the
+    /// pictures placed by the same commands.
+    #[test]
+    fn the_screen_is_the_same_without_reading_picture_bodies() {
+        let output: &[u8] = b"ab\x1b_Ga=T,f=24,s=1,v=1,c=2,r=1,i=3,q=2;AAAA\x1b\\cd\r\n\
+            \x1b[31mred\x1bP0;0q#1;2;100;0;0!8~-!8~\x1b\\ef\x1b_Xapc\x1b\\gh\r\n\
+            \x1bP+q544e\x1b\\\x1b]0;t\x07ij\x1b_Gq=2,a=t,f=24,s=1,v=1,i=4;AAAA\x1b\\kl";
+        let size = GridSize::new(40, 10);
+        // Read whole by the screen model, as before.
+        let reference = {
+            let mut term = alacritty_terminal::Term::new(
+                config(&SessionOptions::default(), true),
+                &size,
+                alacritty_terminal::event::VoidListener,
+            );
+            let (mut parser, mut sniffer) =
+                (Processor::<StdSyncHandler>::new(), Sniffer::default());
+            let (mut graphics, images) = (Graphics::default(), Images::default());
+            let mut parsed = 0;
+            sniffer.feed(output, |end, osc| {
+                parser.advance(&mut term, &output[parsed..end]);
+                parsed = end;
+                match osc {
+                    Osc::Graphics(command) => {
+                        graphics.command(&command, &mut term, (0, 0), &images);
+                    }
+                    Osc::Sixel(body) => {
+                        graphics.sixel(&body, &mut term, (0, 0), [0, 0, 0], &images)
+                    }
+                    _ => {}
+                }
+            });
+            parser.advance(&mut term, &output[parsed..]);
+            (screen(&term), term.placements().len())
+        };
+        assert_eq!(reference.1, 2);
+        for cut in 0..output.len() {
+            let (session, _) = Session::replay_with(&SessionOptions::default(), size, || {}, true);
+            session.feed(&output[..cut]);
+            session.feed(&output[cut..]);
+            let term = session.term();
+            assert_eq!(
+                (screen(&term), term.placements().len()),
+                reference,
+                "cut at {cut}"
+            );
+        }
+    }
+
+    /// Where pictures can't arrive (Windows' own pseudoconsole), nothing
+    /// says they can: device attributes announce no sixel, a kitty query
+    /// goes unanswered and a picture placed anyway shows nothing, as in a
+    /// terminal with no pictures, so programs send text instead.
+    #[test]
+    fn without_pictures_nothing_announces_them() {
+        let query = b"\x1b_Ga=q,i=1,s=1,v=1,f=24;AAAA\x1b\\";
+        let place = b"\x1b_Ga=T,i=2,s=1,v=1,f=24;AAAA\x1b\\\x1bPq#1;2;100;0;0~\x1b\\";
+        let ask = [&b"\x1b[c"[..], query, place].concat();
+        let (written, session) = answers(false, &ask);
+        assert_eq!(written, ["\x1b[?62;22c"]);
+        assert!(!session.shows_pictures());
+        assert!(session.term().placements().is_empty());
+        assert!(session.image(2).is_none());
+        // Where they can, all of it is as before.
+        let (written, session) = answers(true, &ask);
+        assert_eq!(
+            written,
+            ["\x1b[?62;4;22c", "\x1b_Gi=1;OK\x1b\\", "\x1b_Gi=2;OK\x1b\\"]
+        );
+        assert!(session.shows_pictures());
+        assert_eq!(session.term().placements().len(), 2);
     }
 }

@@ -59,7 +59,7 @@ local shared = {
 	-- Organize is those on, in this order.
 	organize_order = ui.persist("shell_sidebar_organize_order", { "project", "device" }),
 	sort = ui.persist("shell_sidebar_sort", "updated"),
-	width = ui.persist("shell_sidebar_width", 256),
+	width = ui.persist("shell_sidebar_width", fit.SIDEBAR_DEFAULT),
 	details = {
 		branch = ui.persist("shell_sidebar_show_branch", true),
 		pr = ui.persist("shell_sidebar_show_pr", true),
@@ -309,11 +309,14 @@ local ASKED: { [string]: string } = { approval = "approval", question = "input" 
 
 -- Which sessions show, as a plugin allowed to change how the sidebar shows
 -- asks (`sidebar.filter`, the plugin system's to grant): nil, all of them;
--- or `{ statuses = { "working", … }, by = "Focus" }`, those in these
--- states ("idle", in none). Written by a plugin, so read with care: what
--- isn't that shape is nil, and a word it doesn't know counts for nothing.
+-- or `{ statuses = { "working", … } }`, those in these states ("idle", in
+-- none). Written by a plugin, so read with care: what isn't that shape is
+-- nil, and a word it doesn't know counts for nothing. Who's narrowing it is
+-- the host's word (`sidebar.filter_by`: the name of the plugin allowed to,
+-- src/plugins), never the plugin's own `by`, which could claim to be Zeron.
 local KNOWN = { working = true, waiting = true, input = true, approval = true, failed = true, done = true, woke = true, idle = true }
 local filter = ui.shared("sidebar.filter", nil :: any)
+local filter_by = ui.shared("sidebar.filter_by", nil :: any)
 type Narrow = { statuses: { [string]: boolean }, words: { string }, by: string }
 local narrow = ui.computed(function(): Narrow?
 	local f = filter:get()
@@ -331,7 +334,8 @@ local narrow = ui.computed(function(): Narrow?
 	if #words == 0 then
 		return nil
 	end
-	local by = if type(f.by) == "string" and f.by ~= "" then string.sub(f.by, 1, 40) else locale.s("shell.sidebar.filter.a_plugin")
+	local named = filter_by:get()
+	local by = if type(named) == "string" and named ~= "" then string.sub(named, 1, 40) else locale.s("shell.sidebar.filter.a_plugin")
 	return { statuses = statuses, words = words, by = by }
 end)
 -- How the notice names each state (shell.sidebar.filter.state.<word>).
@@ -729,26 +733,33 @@ local function connection_line(): Node
 			id = "connection-line",
 			w_full = true,
 			shrink = 0,
-			px = "$space.3",
+			-- (Its dot on the foot's left edge: Star on GitHub's glyph's, the
+			-- filter's and the empty list's words'. Its words on Star on
+			-- GitHub's: the dot or the ring in a slot as wide as the star,
+			-- as far from them.)
+			px = "$space.2",
 			pb = "$space.2",
-			gap = "$space.2",
+			gap = "$zeron.space.tight",
 			items = "center",
-			ui.presence(function(): string
-				return if connection() == "reconnecting" then "ring" else "dot"
-			end, function(glyph: string): Node
-				if glyph == "ring" then
-					return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
-				end
-				return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
-			end),
-			ui.text {
+			ui.row {
+				shrink = 0,
+				w = 12,
+				items = "center",
+				ui.presence(function(): string
+					return if connection() == "reconnecting" then "ring" else "dot"
+				end, function(glyph: string): Node
+					if glyph == "ring" then
+						return ui.div { shrink = 0, status.StatusIcon { kind = "connecting", size = 10 } }
+					end
+					return ui.div { shrink = 0, w = 5, h = 5, rounded = "$radius.full", bg = "$warning" }
+				end),
+			},
+			ds.FadeText {
 				function(): string
 					local key = CONNECTION[connection() or ""]
-				return if key then locale.s(key) else ""
+					return if key then locale.s(key) else ""
 				end,
 				grow = 1,
-				min_w = 0,
-				truncate = true,
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
 			},
@@ -845,6 +856,10 @@ local renaming_row = ui.state("shell_renaming_row", nil :: string?)
 -- The session asked about deleting, and its dialog.
 local deleting = ui.state("shell_deleting", nil :: string?)
 local delete_open = ui.state("shell_delete_open", false)
+-- What the delete takes with it (its subagents and side chats, theirs in
+-- turn), as the host counted them when it was asked.
+local delete_subagents = ui.state("shell_delete_subagents", 0)
+local delete_sides = ui.state("shell_delete_sides", 0)
 -- Sleep → Custom…: the chat, the moment chosen, and whether it's asking.
 local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
 local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
@@ -1237,9 +1252,19 @@ local function menu(id: string): { any }?
 			icon = "trash-bin-minimalistic",
 			danger = true,
 			-- (Asked once more, as Zeron's: "Delete session?")
+			-- (Once it knows what goes with it, to say so.)
 			on_select = function()
-				deleting:set(id)
-				delete_open:set(true)
+				local function ask(subagents: number, sides: number)
+					delete_subagents:set(subagents)
+					delete_sides:set(sides)
+					deleting:set(id)
+					delete_open:set(true)
+				end
+				sessions.deleted_with(id):after(function(with: any)
+					ask(tonumber(with and with.subagents) or 0, tonumber(with and with.sides) or 0)
+				end, function()
+					ask(0, 0)
+				end)
 			end,
 		},
 	}
@@ -1291,8 +1316,7 @@ local function project_menu(id: string): { any }?
 			label = locale.s("shell.sidebar.menu.edit_project"),
 			icon = "pen",
 			on_select = function()
-				project_editor().open(id)
-				project_editor_used:set(true)
+				M.edit_project(id)
 			end,
 		},
 		{
@@ -1451,7 +1475,17 @@ local function delete_dialog(): Node
 		local id = deleting:get()
 		local c = if id then chat(id) else nil
 		local t = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
-		return locale.s("shell.sidebar.session.will_delete", { title = t })
+		local will = locale.s("shell.sidebar.session.will_delete", { title = t })
+		local subagents, sides = delete_subagents:get(), delete_sides:get()
+		local also = if subagents > 0 and sides > 0
+			then locale.s("shell.sidebar.session.also_deletes_both", { subagents = subagents, sides = sides })
+			elseif subagents > 0 then locale.s("shell.sidebar.session.also_deletes_subagents", { n = subagents })
+			elseif sides > 0 then locale.s("shell.sidebar.session.also_deletes_side", { n = sides })
+			else nil
+		if not also then
+			return will
+		end
+		return locale.s("shell.sidebar.session.will_delete_with", { will = will, also = also })
 	end
 	return ds.Dialog {
 		open = delete_open,
@@ -1466,10 +1500,19 @@ local function delete_dialog(): Node
 				if not id then
 					return
 				end
+				-- (Its title now: refused, the window has already left it.)
+				local c = chat(id)
+				local title = if c and c.title ~= "" then (string.gsub(c.title, "%s+", " ")) else locale.s("shell.sidebar.session.new_session")
 				if route.current:peek().session == id then
 					route.new_chat()
 				end
-				sessions.delete(id):after(function() end, function() end)
+				sessions.delete(id):after(function() end, function(err: any)
+					ds.toast.show {
+						title = locale.s("shell.sidebar.session.couldnt_delete", { title = title }),
+						body = if type(err) == "string" and err ~= "" then err else nil,
+						tone = "warning",
+					}
+				end)
 			end,
 		},
 		-- (As its own body line, but following the session.)
@@ -1557,6 +1600,14 @@ M.Sidebar = ui.component(function(props: Props): Node
 		details = shared.details,
 		places = shared.places :: any,
 		width = shared.width,
+		default_width = fit.SIDEBAR_DEFAULT,
+		shown = if props.island then nil else view.sidebar_shown,
+		before = if props.island then nil else 5,
+		-- (Its edge double-clicked: the chat and the panel split again, as
+		-- Zeron's `reset_panel_widths`.)
+		on_reset = function()
+			view.seam_reset:set(view.seam_reset:peek() + 1)
+		end,
 		collapsed = props.collapsed,
 		limit = props.limit,
 		direct = props.direct,
@@ -1635,10 +1686,14 @@ M.Sidebar = ui.component(function(props: Props): Node
 		h_full = true,
 		shrink = 0,
 		relative = true,
-		-- (The window's gap before its card, closing with it.)
-		pl = motion.tween(ui.computed(function(): number
-			return if fit.current:get().sidebar then 5 else 0
-		end), motion.sidebar),
+		-- (The window's gap before its card: there as long as the card is,
+		-- going only with its last 5 points, so the card's left edge stands
+		-- still as it folds and comes back. It once closed on the sidebar's
+		-- clock, the whole card sliding 5 points.)
+		pl = function(): number
+			local shown = view.sidebar_shown:get()
+			return ui.raw(math.min(5, shown), "the window's gap before its card")
+		end,
 		-- (That gap's top moves the window, as the bar beside it does.)
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
@@ -1648,6 +1703,14 @@ M.Sidebar = ui.component(function(props: Props): Node
 		project_dialogs(),
 	}
 end)
+
+-- A project's name and icon edited (Edit project…), from its header's menu
+-- or Settings → Projects: the window's one editor, `start` and `also` as its
+-- `open`'s.
+function M.edit_project(id: string, start: { [string]: any }?, also: { string }?)
+	project_editor().open(id, start, also)
+	project_editor_used:set(true)
+end
 
 -- `Sidebar { … }` builds it; `sidebar.pin(id)`, `sidebar.archive(id)` and
 -- `sidebar.rename(id)` act on a session as its menu does.

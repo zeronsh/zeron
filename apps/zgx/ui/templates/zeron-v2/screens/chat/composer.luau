@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local Quote = require("@ds/quote")
@@ -29,6 +30,7 @@ local art = require("@app/screens/shell/art")
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
 local LinkNotice = require("@app/screens/chat/link_notice")
+local CloudTray = require("@app/screens/chat/cloud_tray")
 local files = require("@app/screens/files/api")
 local Where = require("@app/screens/chat/where")
 local DropOverlay = require("@ds/drop_overlay")
@@ -81,6 +83,22 @@ local WHERE = { "checkout", "device", "project", "branch" }
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
+-- An agent's default model: the row its catalog marks, else its first
+-- (harness nil: the first agent listed's).
+local function default_of(models: { any }, harness: string?): any
+	local first = nil
+	for _, m in models do
+		local h = harness or m.harness
+		harness = h
+		if m.harness == h then
+			if m.default then
+				return m
+			end
+			first = first or m
+		end
+	end
+	return first
+end
 local function equal(a: any, b: any): boolean
 	if type(a) == "table" or type(b) == "table" then
 		local x: { [string]: any } = if type(a) == "table" then a else {}
@@ -431,7 +449,7 @@ local function Composer(): Node
 				return
 			end
 		end
-		local first = cat.models[1]
+		local first = default_of(cat.models)
 		if first then
 			model:set(first.value)
 			if first.effort then
@@ -490,6 +508,20 @@ local function Composer(): Node
 		local s = open()
 		return if s and s.tasks then s.tasks else {}
 	end)
+	-- Its Cloud machine, on a chat that has one: its state and its alert.
+	local machine = CloudTray.bind {
+		chat = function(): string?
+			return session_id:get()
+		end,
+		device = function(): string?
+			local s = open()
+			return s and s.device
+		end,
+		running = function(): boolean
+			local s = open()
+			return s ~= nil and s.running == true
+		end,
+	}
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
 	local own_notice = ui.state("chat_own_notice", nil :: any)
@@ -533,6 +565,7 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = sessions.connection:get(),
+			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
@@ -548,15 +581,16 @@ local function Composer(): Node
 			store.load_catalog()
 		end
 	end)
-	-- A new chat with no model yet: the catalog's first. (Never a session's:
+	-- A new chat with no model yet: the first agent's default. (Never a session's:
 	-- its model is its own.) Whenever that's so: the catalog come, or the
 	-- new page come back to with none chosen there, so what shows is what a
 	-- reload shows too.
 	ui.effect(function()
 		local c = store.catalog:get()
 		if session_id:get() == nil and c.state == "ready" and model:get() == nil and #c.models > 0 then
-			model:set(c.models[1].value)
-			effort:set(c.models[1].effort)
+			local first = default_of(c.models)
+			model:set(first.value)
+			effort:set(first.effort)
 		end
 	end)
 
@@ -689,11 +723,15 @@ local function Composer(): Node
 		end
 		local id = session_id:peek()
 		local p = route.project:peek()
-		local target: any = if id then { chat = id } elseif p then { space = p.id, device = p.device } else nil
+		local s = store.session:peek()
+		local target: any = if id
+			then { chat = id, device = if s and s.id == id then s.device else nil }
+			elseif p then { space = p.id, device = p.device }
+			else nil
 		if not target then
 			return
 		end
-		local key = `{id or (p and p.id) or ""}:{t.query}`
+		local key = `{target.device or ""}:{id or (p and p.id) or ""}:{t.query}`
 		if key == searched:peek() then
 			return
 		end
@@ -1036,9 +1074,8 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
-	local accounts = shared.model_accounts(function(): string?
-		return device:get()
-	end)
+	-- (The catalog's device, a new chat's project's host included.)
+	local accounts = shared.model_accounts(run_device)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -1069,8 +1106,15 @@ local function Composer(): Node
 		}
 	end
 
+	local dictation = Dictation.bind(shared.text, function(): string
+		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
+	end, function(): boolean
+		return question:get() ~= nil or approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+	end, "main")
+
 	local function composer(): Node
 		return ds.Composer {
+			dictation = dictation,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",
@@ -1122,12 +1166,8 @@ local function Composer(): Node
 				if not s or s.model ~= nil or s.harness == nil then
 					return nil
 				end
-				for _, m in store.catalog:get().models do
-					if m.harness == s.harness then
-						return m.value
-					end
-				end
-				return nil
+				local m = default_of(store.catalog:get().models, s.harness)
+				return m and m.value
 			end,
 			models = function(): { ds.Model }
 				return store.catalog:get().models
@@ -1323,6 +1363,11 @@ local function Composer(): Node
 			on_dismiss_notice = function()
 				own_notice:set(nil)
 			end,
+			-- (The only notice with an action: a sleeping machine's Wake.)
+			on_notice_action = machine.wake,
+			alerts = machine.alerts,
+			on_alert_action = machine.on_alert,
+			on_dismiss_alert = machine.dismiss,
 			disabled = function(): boolean
 				local s = store.session:get()
 				local id = session_id:get()

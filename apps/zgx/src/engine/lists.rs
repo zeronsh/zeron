@@ -10,6 +10,10 @@
 //! it. A listener here hears the list as it now is ([`Frame::list`]) and
 //! which rows changed ([`Frame::changes`]), and keeps its own copy with
 //! [`Frame::apply_to_list`] or [`Frame::apply_to_map`].
+//!
+//! A kept list's rows are found by an [`Index`] kept with it, so one row's
+//! change costs that row, not a look over all of them (the chat list
+//! changes every few seconds while chats work anywhere).
 
 use std::{
     cell::RefCell,
@@ -40,11 +44,15 @@ pub struct Frame<'a> {
 }
 
 impl Frame<'_> {
-    /// `list` (a copy of the list kept by its listener) made this one.
-    pub fn apply_to_list(&self, list: &mut Json) {
+    /// `list` (a copy of the list kept by its listener, `index` its rows'
+    /// places) made this one.
+    pub fn apply_to_list(&self, list: &mut Json, index: &mut Index) {
         match (self.changes, list.as_array_mut()) {
-            (Some(changes), Some(rows)) if !changes.reordered => apply_rows(rows, changes, self.key),
-            _ => *list = self.list.clone(),
+            (Some(changes), Some(rows)) if !changes.reordered => apply_rows(rows, changes, self.key, index),
+            _ => {
+                *list = self.list.clone();
+                index.forget();
+            }
         }
     }
 
@@ -78,6 +86,14 @@ impl Frame<'_> {
     }
 }
 
+#[cfg(test)]
+impl<'a> Frame<'a> {
+    /// A frame as the engine's watch would give it.
+    pub fn for_tests(list: &'a Json, changes: Option<&'a Changes>, key: &'static str) -> Self {
+        Frame { list, changes, key }
+    }
+}
+
 /// A list's rows by their key.
 pub fn by_key(list: &Json, key: &str) -> HashMap<String, Json> {
     list.as_array()
@@ -87,21 +103,118 @@ pub fn by_key(list: &Json, key: &str) -> HashMap<String, Json> {
         .collect()
 }
 
-fn apply_rows(rows: &mut Vec<Json>, changes: &Changes, key: &str) {
+/// Where a kept list's rows are, by key (the last row of a key, as a map
+/// made from the list would say). Each place it gives is checked against
+/// the row there, and a key it doesn't know against the rows, so a list
+/// changed behind its back (replaced, or written to) is found out and it is
+/// made again: it can be wrong only for as long as it isn't asked.
+#[derive(Default)]
+pub struct Index {
+    at: HashMap<String, usize>,
+    /// Whether `at` was made from the list (else it is made when next asked).
+    made: bool,
+}
+
+impl Index {
+    /// The list was replaced: made again when next asked.
+    pub fn forget(&mut self) {
+        self.made = false;
+        self.at.clear();
+    }
+
+    fn make(&mut self, rows: &[Json], key: &str) {
+        self.at.clear();
+        self.at.reserve(rows.len());
+        for (i, row) in rows.iter().enumerate() {
+            if let Some(k) = row[key].as_str() {
+                self.at.insert(k.to_owned(), i);
+            }
+        }
+        self.made = true;
+        #[cfg(test)]
+        work::add(rows.len());
+    }
+
+    /// Made from `rows`, if it isn't.
+    pub fn ensure(&mut self, rows: &[Json], key: &str) {
+        if !self.made {
+            self.make(rows, key);
+        }
+    }
+
+    /// Where the row keyed `k` is in `rows`, if it's there.
+    pub fn find(&mut self, rows: &[Json], key: &str, k: &str) -> Option<usize> {
+        if !self.made {
+            self.make(rows, key);
+        }
+        match self.at.get(k) {
+            Some(&i) if rows.get(i).is_some_and(|row| row[key].as_str() == Some(k)) => {
+                // (The last of its key, as `make` would have it.)
+                if self.at.len() == rows.len() {
+                    return Some(i);
+                }
+            }
+            Some(_) => {}
+            // Not known: a new row (it looks, once, to be sure it is).
+            None => {
+                #[cfg(test)]
+                work::add(rows.len());
+                if !rows.iter().any(|row| row[key].as_str() == Some(k)) {
+                    return None;
+                }
+            }
+        }
+        // Not as it was told: made again from the rows.
+        self.make(rows, key);
+        self.at.get(k).copied()
+    }
+
+    /// Whether it knows every row of `rows` by a key of its own (no key
+    /// twice, none missing).
+    pub fn covers(&self, rows: &[Json]) -> bool {
+        self.made && self.at.len() == rows.len()
+    }
+
+    /// `row` (keyed `k`) put last in `rows`.
+    fn pushed(&mut self, rows: &[Json], k: &str) {
+        if self.made {
+            self.at.insert(k.to_owned(), rows.len() - 1);
+        }
+    }
+}
+
+fn apply_rows(rows: &mut Vec<Json>, changes: &Changes, key: &str, index: &mut Index) {
     if !changes.removed.is_empty() {
         rows.retain(|row| !row[key].as_str().is_some_and(|k| changes.removed.iter().any(|r| r == k)));
-    }
-    let mut at: HashMap<String, usize> = HashMap::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        if let Some(k) = row[key].as_str() {
-            at.insert(k.to_owned(), i);
-        }
+        index.forget();
     }
     for row in &changes.changed {
-        match row[key].as_str().and_then(|k| at.get(k)) {
-            Some(&i) => rows[i] = row.clone(),
+        match row[key].as_str() {
+            Some(k) => match index.find(rows, key, k) {
+                Some(i) => rows[i] = row.clone(),
+                None => {
+                    rows.push(row.clone());
+                    index.pushed(rows, k);
+                }
+            },
             None => rows.push(row.clone()),
         }
+    }
+}
+
+/// Work done over a list's rows, counted for tests (a change should cost
+/// what changed, not the list).
+#[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+    thread_local! {
+        static DONE: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn add(n: usize) {
+        DONE.with(|d| d.set(d.get() + n));
+    }
+    pub(crate) fn done() -> usize {
+        DONE.with(Cell::get)
     }
 }
 
@@ -119,6 +232,7 @@ struct List {
     method: &'static str,
     key: &'static str,
     list: Option<Rc<Json>>,
+    index: Index,
     listeners: Vec<(u64, Rc<Listener>)>,
     _watch: Option<Watch>,
 }
@@ -179,6 +293,7 @@ pub fn listen(rpc: &Rpc, method: &'static str, on_frame: impl Fn(&Frame) + 'stat
                 method,
                 key: key_of(method),
                 list: None,
+                index: Index::default(),
                 listeners: vec![(id, listener)],
                 _watch: None,
             }));
@@ -201,7 +316,9 @@ fn heard(list: &Rc<RefCell<List>>, item: Json) {
     let key = list.borrow().key;
     let changes = match item {
         Json::Array(_) => {
-            list.borrow_mut().list = Some(Rc::new(item));
+            let mut l = list.borrow_mut();
+            l.list = Some(Rc::new(item));
+            l.index.forget();
             None
         }
         Json::Object(mut frame) => {
@@ -218,10 +335,12 @@ fn heard(list: &Rc<RefCell<List>>, item: Json) {
                 reordered: frame.get("order").is_some(),
             };
             let mut l = list.borrow_mut();
+            let l = &mut *l;
             // (Not shared now: listeners only borrow it while they hear.)
             let Some(Json::Array(rows)) = l.list.as_mut().map(Rc::make_mut) else { return };
-            apply_rows(rows, &changes, key);
+            apply_rows(rows, &changes, key, &mut l.index);
             if let Some(order) = frame.get("order").and_then(Json::as_array) {
+                l.index.forget();
                 let mut by: HashMap<String, Json> = HashMap::with_capacity(rows.len());
                 for row in rows.drain(..) {
                     if let Some(k) = row[key].as_str().map(str::to_owned) {
@@ -267,7 +386,7 @@ mod tests {
         let changes = Changes { changed: vec![json!({ "id": "c", "n": 2 }), json!({ "id": "d", "n": 0 })], removed: vec!["b".into()], reordered: false };
         let frame = frame_of(&after, Some(&changes));
         let mut list = before.clone();
-        frame.apply_to_list(&mut list);
+        frame.apply_to_list(&mut list, &mut Index::default());
         assert_eq!(list, after);
         let mut map = by_key(&before, "id");
         frame.apply_to_map(&mut map);
@@ -276,11 +395,58 @@ mod tests {
         // Reordered, or the whole list: the list as it is.
         let reordered = Changes { changed: vec![], removed: vec![], reordered: true };
         let swapped = json!([{ "id": "c", "n": 2 }, { "id": "a", "n": 1 }, { "id": "d", "n": 0 }]);
-        frame_of(&swapped, Some(&reordered)).apply_to_list(&mut list);
+        frame_of(&swapped, Some(&reordered)).apply_to_list(&mut list, &mut Index::default());
         assert_eq!(list, swapped);
         let whole = frame_of(&before, None);
         assert_eq!(whole.touched(), None);
-        whole.apply_to_list(&mut list);
+        whole.apply_to_list(&mut list, &mut Index::default());
         assert_eq!(list, before);
+    }
+
+    /// A row's change finds its row through the list's index, the work the
+    /// same for a list of 100 rows or 10,000; and a list changed behind the
+    /// index's back (replaced, a row removed) still gets the change where a
+    /// map made from it would put it.
+    #[test]
+    fn a_change_costs_its_row_not_the_list() {
+        let cost = |n: usize| {
+            let mut list = Json::Array((0..n).map(|i| json!({ "id": format!("r{i}"), "n": 0 })).collect());
+            let mut index = Index::default();
+            // (The first change makes the index.)
+            let first = Changes { changed: vec![json!({ "id": "r1", "n": 1 })], removed: vec![], reordered: false };
+            frame_of(&Json::Null, Some(&first)).apply_to_list(&mut list, &mut index);
+            let before = work::done();
+            for k in 0..50 {
+                let row = json!({ "id": format!("r{}", (k * 37) % n), "n": k });
+                let changes = Changes { changed: vec![row.clone()], removed: vec![], reordered: false };
+                frame_of(&Json::Null, Some(&changes)).apply_to_list(&mut list, &mut index);
+                assert_eq!(list[(k * 37) % n], row);
+            }
+            work::done() - before
+        };
+        assert_eq!(cost(100), cost(10_000));
+        assert_eq!(cost(100), 0);
+
+        // Behind its back: the index notices, and the list ends as the
+        // engine's would.
+        let mut list = json!([{ "id": "a", "n": 0 }, { "id": "b", "n": 0 }, { "id": "c", "n": 0 }]);
+        let mut index = Index::default();
+        let change = |list: &mut Json, index: &mut Index, row: Json| {
+            let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+            frame_of(&Json::Null, Some(&changes)).apply_to_list(list, index);
+        };
+        change(&mut list, &mut index, json!({ "id": "c", "n": 1 }));
+        list.as_array_mut().unwrap().remove(0);
+        change(&mut list, &mut index, json!({ "id": "c", "n": 2 }));
+        assert_eq!(list, json!([{ "id": "b", "n": 0 }, { "id": "c", "n": 2 }]));
+        *list.as_array_mut().unwrap() = vec![json!({ "id": "c", "n": 3 }), json!({ "id": "a", "n": 0 })];
+        change(&mut list, &mut index, json!({ "id": "a", "n": 1 }));
+        change(&mut list, &mut index, json!({ "id": "d", "n": 0 }));
+        assert_eq!(list, json!([{ "id": "c", "n": 3 }, { "id": "a", "n": 1 }, { "id": "d", "n": 0 }]));
+        // A key twice (a whole list from an old engine): the last one, as
+        // a map made from the list says.
+        let mut list = json!([{ "id": "a", "n": 0 }, { "id": "a", "n": 1 }]);
+        change(&mut list, &mut Index::default(), json!({ "id": "a", "n": 2 }));
+        assert_eq!(list, json!([{ "id": "a", "n": 0 }, { "id": "a", "n": 2 }]));
     }
 }

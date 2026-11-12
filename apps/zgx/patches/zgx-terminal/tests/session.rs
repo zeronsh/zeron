@@ -294,6 +294,109 @@ fn a_program_draws_a_sixel_image() {
     assert_eq!(image.pixels()[..4], [255, 0, 0, 255]);
 }
 
+/// Pictures come as strings of their own (APC, DCS) that a pseudoconsole
+/// has to hand on. A program's output through ConPTY, by cmd's `echo` as a
+/// console program writes, with the text around them to show it read. (Not
+/// PowerShell: two starting at once on a loaded runner showed nothing in
+/// 20 s, not even their titles.)
+/// What it saw goes to stderr as it is (not captured, so a run that is
+/// cancelled still says), and on failure the session isn't dropped: closing a
+/// pseudoconsole mid-string may block, and did, for the job's whole hour.
+/// Whatever else blocks, the process ends after a minute, saying so.
+#[cfg(windows)]
+fn through_conpty(name: &str, string: &str, check: impl Fn(&Session) -> Result<(), String>) {
+    use std::io::Write;
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watched = (done.clone(), name.to_string());
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(60));
+        if !watched.0.load(std::sync::atomic::Ordering::SeqCst) {
+            let said = format!(
+                "{}: still running after 60 s; ending the tests\n",
+                watched.1
+            );
+            let _ = std::io::stderr().write_all(said.as_bytes());
+            std::process::exit(101);
+        }
+    });
+    // The escapes are in the command line as they are: echo writes them.
+    let command = format!("cmd.exe /d /c echo ab{string}cd");
+    let mut run = Scripted::run(&command, 30, 4);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let after = loop {
+        run.events.extend(run.session.take_events());
+        if rows(&run.session.term())
+            .iter()
+            .any(|row| row.contains("cd"))
+        {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let result = match after {
+        true => check(&run.session),
+        false => Err("the text after it never came".into()),
+    };
+    // One lock at a time: a guard held across the report's arguments and
+    // `screen` taking it again would deadlock.
+    let placements = run.session.term().placements().len();
+    let screen = run.screen();
+    let report = format!(
+        "{name}: {result:?}\nplacements {placements}\nscreen:\n{screen}\nevents {:?}\n",
+        run.events,
+    );
+    let _ = std::io::stderr().write_all(report.as_bytes());
+    if let Err(error) = result {
+        std::mem::forget(run);
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        panic!("{name}: {error}");
+    }
+    drop(run);
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Through Windows Terminal's ConPTY (`conpty.dll` beside the binary) a
+/// picture arrives; through Windows' own, which drops the strings, none
+/// does, and the session says it shows none (`shows_pictures`), so it never
+/// announces them: a session claiming pictures there fails here.
+#[cfg(windows)]
+#[test]
+fn a_windows_program_places_a_picture() {
+    // 2 by 2 black pixels, RGB (twelve zero bytes in base64).
+    through_conpty(
+        "kitty",
+        "\x1b_Ga=T,f=24,s=2,v=2,i=5,q=2;AAAAAAAAAAAAAAAA\x1b\\",
+        |session| match (session.shows_pictures(), session.image(5)) {
+            (true, Some(image)) if image.pixels() == [0, 0, 0, 255].repeat(4) => Ok(()),
+            (true, Some(_)) => Err("its pixels differ".into()),
+            (true, None) => Err("no picture came".into()),
+            (false, None) => Ok(()),
+            (false, Some(_)) => Err("a picture came, but the session said none could".into()),
+        },
+    );
+}
+
+/// A sixel image, as `a_windows_program_places_a_picture`.
+#[cfg(windows)]
+#[test]
+fn a_windows_program_draws_a_sixel_image() {
+    // 4 red columns of six pixels.
+    through_conpty("sixel", "\x1bPq#1;2;100;0;0!4~\x1b\\", |session| {
+        let placed = session.term().placements().first().map(|p| p.image);
+        let image = placed.and_then(|id| session.image(id));
+        match (session.shows_pictures(), image) {
+            (true, Some(image)) if (image.width(), image.height()) == (4, 6) => Ok(()),
+            (true, Some(image)) => Err(format!("{} by {}", image.width(), image.height())),
+            (true, None) => Err("no image came".into()),
+            (false, None) => Ok(()),
+            (false, Some(_)) => Err("an image came, but the session said none could".into()),
+        }
+    });
+}
+
 #[cfg(windows)]
 #[test]
 fn a_windows_program_writes_exact_cells_and_exits() {

@@ -42,6 +42,7 @@ pub(crate) fn account(id: &str, active: bool, used: f32) -> AgentAccount {
 
 pub(crate) fn model(id: &str) -> Model {
     Model {
+        default: false,
         id: id.into(),
         label: id.to_uppercase(),
         description: None,
@@ -98,6 +99,10 @@ pub(crate) struct Host {
     pub(crate) pending: Mutex<HashMap<String, String>>,
     pub(crate) answered: Mutex<Vec<(String, String, Vec<UserInputAnswer>)>>,
     pub(crate) sent_by: Mutex<Vec<(String, String, Json)>>,
+    /// Chats pinned to an account: (provider, chat) → account.
+    pub(crate) pinned: Mutex<Vec<Pin>>,
+    /// Providers whose accounts can be pinned, and how.
+    pub(crate) mechanisms: Mutex<HashMap<HarnessId, &'static str>>,
 }
 
 impl AgentHost for Host {
@@ -172,6 +177,23 @@ impl AgentHost for Host {
     fn default_harness(&self) -> Option<HarnessId> {
         Some(HarnessId::ClaudeCode)
     }
+
+    fn pin_mechanism(&self, account: &AgentAccount) -> Option<&'static str> {
+        lock(&self.mechanisms).get(&account.harness).copied().filter(|_| account.auth_kind != Some(zeron_proto::AgentAuthKind::ApiKey))
+    }
+
+    fn pins(&self) -> Vec<Pin> {
+        lock(&self.pinned).clone()
+    }
+
+    fn set_pin(&self, harness: HarnessId, chat: &str, account: Option<&str>) -> Result<(), String> {
+        let mut pins = lock(&self.pinned);
+        pins.retain(|p| !(p.harness == harness && p.chat == chat));
+        if let Some(account) = account {
+            pins.push(Pin { chat: chat.into(), harness, account: account.into(), since: 7 });
+        }
+        Ok(())
+    }
 }
 
 type Told = (String, Target, String, String, Json);
@@ -182,6 +204,13 @@ struct FakeSink {
     told: Mutex<Vec<Told>>,
     /// Services that fail every event.
     failing: Mutex<HashSet<String>>,
+    /// What a service answers when asked (`run.preparing`), per plugin;
+    /// `delay` is how long it takes first.
+    answers: Mutex<HashMap<String, (Result<Json, String>, Duration)>>,
+    asked: Mutex<Vec<Told>>,
+    /// How many asks were in flight at once, at most.
+    inflight: Arc<AtomicUsize>,
+    most_inflight: Arc<AtomicUsize>,
 }
 
 impl Sink for FakeSink {
@@ -201,6 +230,19 @@ impl Sink for FakeSink {
         let fails = lock(&self.failing).contains(plugin);
         Box::pin(async move { if fails { Err("it errored".into()) } else { Ok(()) } })
     }
+
+    fn ask_service(&self, plugin: &str, listener: &str, event: &str, data: Json) -> BoxFuture<'static, Result<Json, String>> {
+        lock(&self.asked).push((plugin.into(), Target::Service, listener.into(), event.into(), data));
+        let (answer, delay) = lock(&self.answers).get(plugin).cloned().unwrap_or((Ok(Json::Null), Duration::ZERO));
+        let (inflight, most) = (self.inflight.clone(), self.most_inflight.clone());
+        Box::pin(async move {
+            let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            inflight.fetch_sub(1, Ordering::SeqCst);
+            answer
+        })
+    }
 }
 
 struct Fixture {
@@ -211,7 +253,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let agents = Agents::new(Pacing::default());
+        Self::with(Pacing::default())
+    }
+
+    fn with(pacing: Pacing) -> Self {
+        let agents = Agents::new(pacing);
         let host = Arc::new(Host::default());
         *lock(&host.snapshot) = AgentAccountsSnapshot {
             accounts: vec![account("a1", true, 0.5), account("a2", false, 0.1)],
@@ -867,4 +913,295 @@ async fn messages_a_question_is_answered_as_respond_to_input_answers_it() {
     f.op("p", json!({ "op": "answer", "chat": "c1", "request": "r9", "answers": { "q1": ["A", "B"] } })).await.unwrap();
     assert_eq!(lock(&f.host.answered)[1].1, "r9");
     assert_eq!(f.op("p", json!({ "op": "answer", "chat": "c1", "answers": {} })).await.unwrap_err().reason, reason::BAD_CALL);
+}
+
+// ── Pinning a chat to an account ───────────────────────────────────────────
+
+const PIN: &[&str] = &[ACCOUNTS_PIN, ACCOUNTS_READ, SESSIONS_READ];
+
+impl Fixture {
+    fn pinning(&self) -> &Self {
+        lock(&self.host.mechanisms).insert(HarnessId::ClaudeCode, "env");
+        self
+    }
+
+    fn answer(&self, plugin: &str, answer: Result<Json, String>, delay: Duration) {
+        lock(&self.sink.answers).insert(plugin.into(), (answer, delay));
+    }
+
+    fn hook(&self, plugin: &str) {
+        self.agents.listen(plugin, Target::Service, &[("@1".into(), "run.preparing".into(), json!({}))]);
+    }
+}
+
+fn pin(chat: &str, account: &str) -> Json {
+    json!({ "op": "pin_account", "provider": "claude-code", "chat": chat, "account": account })
+}
+
+#[tokio::test]
+async fn pins_need_their_permissions_and_are_answered_with_them() {
+    let f = Fixture::new();
+    f.pinning();
+    f.grant("p", &[ACCOUNTS_READ, SESSIONS_READ]);
+    let refused = f.op("p", pin("c1", "a2")).await.unwrap_err();
+    assert_eq!(refused.reason, reason::NOT_ALLOWED);
+    assert!(refused.message.contains(ACCOUNTS_PIN), "{}", refused.message);
+    f.grant("p", &[ACCOUNTS_PIN]);
+    assert_eq!(f.op("p", json!({ "op": "pins" })).await.unwrap_err().reason, reason::NOT_ALLOWED, "reading pins is accounts.read");
+    f.op("p", pin("c1", "a2")).await.unwrap();
+    f.grant("p", &[ACCOUNTS_PIN, ACCOUNTS_READ]);
+    f.op("p", json!({ "op": "pins" })).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_pin_runs_a_chat_on_a_saved_account_says_who_and_shows_in_pins() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.grant("watcher", &[ACCOUNTS_READ]);
+    f.agents.observe_accounts(&f.snapshot());
+    f.agents.listen("watcher", Target::Window, &[("@1".into(), "account.pinned".into(), json!({}))]);
+    let done = f.op("p", pin("c1", "a2")).await.unwrap();
+    assert_eq!(done, json!({ "provider": "claude-code", "account": "a2", "chat": "c1" }));
+    assert_eq!(lock(&f.host.pinned).len(), 1);
+    let told = f.told();
+    assert_eq!(told.len(), 1, "{told:?}");
+    let (_, _, _, event, data) = &told[0];
+    assert_eq!(event, "account.pinned");
+    assert_eq!((data["account"].as_str(), data["from"].as_str()), (Some("a2"), None));
+    assert_eq!(data["by"], json!({ "plugin": "p", "name": "Plugin p" }));
+    assert!(data.get("chat").is_none(), "a chat's id needs sessions.read: {data}");
+    let pins = f.op("p", json!({ "op": "pins" })).await.unwrap();
+    assert_eq!(pins, json!([{ "provider": "claude-code", "account": "a2", "chat": "c1", "since": 7 }]));
+    // Without sessions.read the rows are counted, not named.
+    f.grant("q", &[ACCOUNTS_READ]);
+    assert_eq!(f.op("q", json!({ "op": "pins" })).await.unwrap(), json!([{ "provider": "claude-code", "account": "a2", "since": 7 }]));
+    assert_eq!(f.agents.status("p")["actions"][0]["op"], "pin_account");
+    // Moving it says where it was; the same again is refused so nothing loops.
+    f.op("p", pin("c1", "a1")).await.unwrap();
+    assert_eq!(f.told().last().unwrap().4["from"], "a2");
+    assert_eq!(f.op("p", pin("c1", "a1")).await.unwrap_err().reason, reason::ALREADY);
+}
+
+#[tokio::test]
+async fn a_pin_is_taken_back_with_no_account() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.agents.listen("p", Target::Window, &[("@1".into(), "account.unpinned".into(), json!({}))]);
+    f.op("p", pin("c1", "a2")).await.unwrap();
+    f.told();
+    let done = f.op("p", json!({ "op": "pin_account", "provider": "claude-code", "chat": "c1" })).await.unwrap();
+    assert_eq!(done, json!({ "provider": "claude-code", "chat": "c1" }));
+    assert!(lock(&f.host.pinned).is_empty());
+    let told = f.told();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].3, "account.unpinned");
+    assert_eq!((told[0].4["account"].as_str(), told[0].4["chat"].as_str()), (Some("a2"), Some("c1")));
+    let nothing = f.op("p", json!({ "op": "pin_account", "provider": "claude-code", "chat": "c1" })).await.unwrap_err();
+    assert_eq!(nothing.reason, reason::ALREADY, "nothing was pinned");
+}
+
+#[tokio::test]
+async fn a_pin_is_refused_for_what_cant_be_pinned() {
+    let f = Fixture::new();
+    f.grant("p", PIN);
+    // No provider mechanism on this device.
+    assert_eq!(f.op("p", pin("c1", "a2")).await.unwrap_err().reason, reason::FAILED);
+    f.pinning();
+    assert_eq!(f.op("p", pin("c1", "zz")).await.unwrap_err().reason, reason::NOT_FOUND);
+    assert_eq!(f.op("p", pin("nope", "a2")).await.unwrap_err().reason, reason::NOT_FOUND);
+    assert_eq!(f.op("p", json!({ "op": "pin_account", "chat": "c1", "account": "a2" })).await.unwrap_err().reason, reason::BAD_CALL);
+    assert_eq!(f.op("p", json!({ "op": "pin_account", "provider": "claude-code", "account": "a2" })).await.unwrap_err().reason, reason::BAD_CALL);
+    // An API key bills per token: spreading over it saves nothing.
+    lock(&f.host.snapshot).accounts[1].auth_kind = Some(zeron_proto::AgentAuthKind::ApiKey);
+    let refused = f.op("p", pin("c1", "a2")).await.unwrap_err();
+    assert_eq!(refused.reason, reason::FAILED);
+    assert!(lock(&f.host.pinned).is_empty());
+}
+
+#[tokio::test]
+async fn pins_are_part_of_the_loop_guard() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.agents.listen("p", Target::Window, &[("@1".into(), "account.pinned".into(), json!({}))]);
+    let mut refused = None;
+    for i in 0..(LOOP_HOPS + 2) {
+        let account = if i % 2 == 0 { "a2" } else { "a1" };
+        match f.op("p", pin("c1", account)).await {
+            Ok(_) => {}
+            Err(r) => {
+                refused = Some(r);
+                break;
+            }
+        }
+    }
+    assert_eq!(refused.expect("stopped").reason, reason::LOOP);
+}
+
+#[tokio::test]
+async fn account_rows_say_whether_they_can_be_pinned_and_whether_they_are_usable() {
+    let f = Fixture::new();
+    f.grant("p", &[ACCOUNTS_READ, USAGE_READ]);
+    let rows = f.op("p", json!({ "op": "accounts" })).await.unwrap();
+    assert_eq!((rows[0]["pinnable"].clone(), rows[0].get("mechanism")), (json!(false), None), "no mechanism on this device");
+    f.pinning();
+    lock(&f.host.snapshot).accounts[1].usage_error = Some("Sign in again".into());
+    lock(&f.host.snapshot).accounts[0].usage_windows[0] = window("Session", 1.0, 4_000_000_000);
+    // A full window whose reset has passed is stale, not a limit.
+    lock(&f.host.snapshot).accounts[1].usage_windows[0] = window("Session", 1.0, 1_000);
+    let rows = f.op("p", json!({ "op": "accounts" })).await.unwrap();
+    assert_eq!(rows[0]["pinnable"], true);
+    assert_eq!(rows[0]["mechanism"], "env");
+    assert_eq!(rows[0]["signed_out"], false);
+    assert_eq!(rows[1]["signed_out"], true);
+    // A window that's full and hasn't reset says when it will (usage.read).
+    let usage = f.op("p", json!({ "op": "usage" })).await.unwrap();
+    assert_eq!(usage[0]["limited_until"], 4_000_000_000_000_i64);
+    assert!(usage[1].get("limited_until").is_none());
+    assert!(rows[0].get("limited_until").is_none(), "limits are usage");
+}
+
+#[tokio::test]
+async fn pins_of_an_account_that_is_gone_are_taken_back_and_told() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.op("p", pin("c1", "a2")).await.unwrap();
+    f.agents.listen("p", Target::Window, &[("@1".into(), "account.unpinned".into(), json!({}))]);
+    f.told();
+    let mut next = f.snapshot();
+    next.accounts.retain(|a| a.id != "a2");
+    *lock(&f.host.snapshot) = next.clone();
+    f.agents.observe_accounts(&next);
+    assert!(lock(&f.host.pinned).is_empty());
+    let told = f.told();
+    let unpinned: Vec<_> = told.iter().filter(|t| t.3 == "account.unpinned").collect();
+    assert_eq!(unpinned.len(), 1, "{told:?}");
+    assert_eq!(unpinned[0].4["reason"], "removed");
+    assert!(unpinned[0].4.get("by").is_none(), "nobody's change");
+}
+
+#[tokio::test]
+async fn the_pre_run_hook_takes_the_listeners_account_and_pins_the_chat() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    f.answer("p", Ok(json!({ "account": "a2" })), Duration::ZERO);
+    let got = f.agents.preparing(HarnessId::ClaudeCode, "c1").await;
+    assert_eq!(got.as_deref(), Some("a2"));
+    assert_eq!(lock(&f.host.pinned)[0].account, "a2");
+    let asked = lock(&f.sink.asked).clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].3, "run.preparing");
+    assert_eq!((asked[0].4["provider"].as_str(), asked[0].4["chat"].as_str()), (Some("claude-code"), Some("c1")));
+    // Told as any pin: with who made it.
+    assert_eq!(f.agents.status("p")["actions"][0]["op"], "pin_account");
+    // A chat that has its pin isn't asked again.
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert_eq!(lock(&f.sink.asked).len(), 1);
+}
+
+#[tokio::test]
+async fn the_pre_run_hook_gives_up_after_its_wait_and_runs_the_chat_on_the_live_login() {
+    let f = Fixture::with(Pacing { prepare_wait: Duration::from_millis(50), ..Pacing::default() });
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    f.answer("p", Ok(json!({ "account": "a2" })), Duration::from_secs(5));
+    let started = Instant::now();
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert!(started.elapsed() < Duration::from_secs(2), "it didn't wait for the answer");
+    assert!(lock(&f.host.pinned).is_empty());
+    assert!(f.agents.notices("p").iter().any(|n| n.contains("run.preparing") && n.contains("answer")), "{:?}", f.agents.notices("p"));
+}
+
+#[tokio::test]
+async fn the_pre_run_hook_ignores_what_it_cant_use() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    // An error, an account that isn't there, a bare nothing: no pin.
+    for answer in [Err("boom".to_string()), Ok(json!({ "account": "zz" })), Ok(Json::Null), Ok(json!({ "account": 4 }))] {
+        f.answer("p", answer, Duration::ZERO);
+        let chat = format!("c{}", lock(&f.sink.asked).len() + 10);
+        lock(&f.host.chats).push(super::tests::chat(&chat, "opus"));
+        assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, &chat).await, None);
+    }
+    assert!(lock(&f.host.pinned).is_empty());
+    // A plugin that wasn't allowed accounts.pin is never asked.
+    let g = Fixture::new();
+    g.pinning().grant("p", &[ACCOUNTS_READ]);
+    g.agents.observe_accounts(&g.snapshot());
+    g.hook("p");
+    g.answer("p", Ok(json!({ "account": "a2" })), Duration::ZERO);
+    assert_eq!(g.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert!(lock(&g.sink.asked).is_empty());
+    // Nor is one asked about a provider with no mechanism here.
+    let h = Fixture::new();
+    h.grant("p", PIN);
+    h.hook("p");
+    h.answer("p", Ok(json!({ "account": "a2" })), Duration::ZERO);
+    assert_eq!(h.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert!(lock(&h.sink.asked).is_empty());
+}
+
+#[tokio::test]
+async fn a_chat_the_hook_passed_on_isnt_asked_again_but_can_still_be_pinned() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    f.answer("p", Ok(Json::Null), Duration::ZERO);
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert_eq!(lock(&f.sink.asked).len(), 1, "once per chat");
+    f.op("p", pin("c1", "a2")).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_first_listener_with_an_account_wins() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.grant("q", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    f.hook("q");
+    f.answer("p", Ok(Json::Null), Duration::ZERO);
+    f.answer("q", Ok(json!({ "account": "a1" })), Duration::ZERO);
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await.as_deref(), Some("a1"));
+    assert_eq!(lock(&f.sink.asked).len(), 2);
+}
+
+#[tokio::test]
+async fn the_pre_run_hook_is_asked_one_chat_at_a_time_so_each_answer_sees_the_last_pin() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    lock(&f.host.chats).push(super::tests::chat("c2", "opus"));
+    f.hook("p");
+    f.answer("p", Ok(json!({ "account": "a2" })), Duration::from_millis(40));
+    let (a, b) = tokio::join!(
+        f.agents.preparing(HarnessId::ClaudeCode, "c1"),
+        f.agents.preparing(HarnessId::ClaudeCode, "c2"),
+    );
+    assert_eq!((a.as_deref(), b.as_deref()), (Some("a2"), Some("a2")));
+    assert_eq!(f.sink.most_inflight.load(Ordering::SeqCst), 1, "never two asks at once");
+    assert_eq!(lock(&f.host.pinned).len(), 2);
+}
+
+#[tokio::test]
+async fn with_nobody_listening_the_pre_run_hook_reads_nothing_and_waits_for_no_one() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert!(lock(&f.sink.asked).is_empty());
+    assert_eq!(f.host.forced.load(Ordering::SeqCst), 0);
+    // It isn't remembered as passed on: a listener that arrives later is asked.
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    f.answer("p", Ok(json!({ "account": "a2" })), Duration::ZERO);
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await.as_deref(), Some("a2"));
 }

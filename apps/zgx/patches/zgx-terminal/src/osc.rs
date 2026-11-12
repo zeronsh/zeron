@@ -21,6 +21,11 @@ pub(crate) enum Osc {
     Graphics(Vec<u8>),
     /// DCS `q`: a sixel image, its parameters, the `q` and its data.
     Sixel(Vec<u8>),
+    /// Part of a picture's body, from this offset in the bytes read to the
+    /// one given with it: kept here, and nothing the screen model need read
+    /// (it passes an APC's bytes over, and a sixel image's are only drawn
+    /// here), so it is spared them.
+    Body(usize),
 }
 
 /// Longer commands are another kind (a clipboard's contents, an image):
@@ -193,6 +198,13 @@ impl Sniffer {
                             self.graphics = Vec::new();
                         } else {
                             self.graphics.extend_from_slice(body);
+                            // Known a picture, its body is spared the
+                            // screen model: it still reads the string's
+                            // start and end, which is all it keeps of one.
+                            if !self.apc_started && !body.is_empty() {
+                                let from = offset(rest);
+                                found(from + body.len(), Osc::Body(from));
+                            }
                         }
                     }
                     match end.map(|at| rest[at]) {
@@ -325,6 +337,10 @@ mod tests {
         let mut found = Vec::new();
         for chunk in chunks {
             sniffer.feed(chunk, |at, osc| {
+                if let Osc::Body(from) = osc {
+                    assert!(from < at && !chunk[from..at].contains(&0x1b));
+                    return;
+                }
                 assert!(
                     matches!(chunk[at - 1], 0x07 | b'\\'),
                     "ends after its terminator"
@@ -423,6 +439,27 @@ mod tests {
             sniff(&[b"\x1bPq#1!6~\x1b\\\x1bP+q544e\x1b\\\x1bP=1s\x1b\\\x1bP$qm\x1b\\"]),
             [Osc::Sixel(b"q#1!6~".to_vec())]
         );
+    }
+
+    /// A picture's body, once known one, is told apart for the screen model
+    /// to be spared it, across reads: a graphics command's after its `G`, a
+    /// sixel image's parameters and data. Other strings are not.
+    #[test]
+    fn picture_bodies_are_told_apart() {
+        let mut sniffer = Sniffer::default();
+        let mut bodies = Vec::new();
+        let chunks: [&[u8]; 2] = [
+            b"x\x1b_Ga=T;AAAA",
+            b"BBBB\x1b\\y\x1bPq#1~~\x1b\\\x1b_Xno\x1b\\\x1bP+q54\x1b\\",
+        ];
+        for chunk in chunks {
+            sniffer.feed(chunk, |at, osc| {
+                if let Osc::Body(from) = osc {
+                    bodies.push(chunk[from..at].to_vec());
+                }
+            });
+        }
+        assert_eq!(bodies, [&b"Ga=T;AAAA"[..], b"BBBB", b"q#1~~"]);
     }
 
     /// Output with no graphics command holds no room for one.

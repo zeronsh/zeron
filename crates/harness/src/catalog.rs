@@ -200,6 +200,7 @@ mod tests {
     };
     fn models(id: &str) -> Vec<Model> {
         vec![Model {
+            default: false,
             id: id.into(),
             label: id.into(),
             description: None,

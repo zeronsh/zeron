@@ -36,6 +36,45 @@ const CONNECT_WAIT: Duration = Duration::from_secs(20);
 
 type Listener = Rc<dyn Fn(&Rpc)>;
 
+/// This device's id, as the engine on `rpc` says it: asked again, waiting
+/// a little longer each time (to 5 s), until it answers or `rpc` closes.
+/// Asked once, a failed ask (the engine busy, its socket dropping mid-call)
+/// left the app not knowing which device is here for the whole connection:
+/// this device's own chats were then routed and labelled as another
+/// device's ("being edited on another device", a chat that kept loading).
+pub async fn local_device(rpc: &Rpc) -> Option<String> {
+    ask_until_answered(
+        || rpc.call("LocalDevice", json!({})),
+        || rpc.is_closed(),
+        |wait| Box::pin(zgx::timer::sleep(wait)),
+    )
+    .await
+}
+
+async fn ask_until_answered<A, AF>(
+    ask: A,
+    closed: impl Fn() -> bool,
+    sleep: impl Fn(Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
+) -> Option<String>
+where
+    A: Fn() -> AF,
+    AF: std::future::Future<Output = Result<Json, String>>,
+{
+    let mut wait = Duration::from_millis(250);
+    loop {
+        if closed() {
+            return None;
+        }
+        if let Ok(answer) = ask().await
+            && let Some(id) = answer["deviceId"].as_str()
+        {
+            return Some(id.to_owned());
+        }
+        sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(5));
+    }
+}
+
 pub struct Engine {
     config: Result<Config, manager::Refusal>,
     /// The connection, while there is one.
@@ -405,6 +444,56 @@ mod tests {
     use super::*;
 
     const LONG: Duration = Duration::from_secs(3600);
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            if let std::task::Poll::Ready(out) = future.as_mut().poll(&mut cx) {
+                return out;
+            }
+        }
+    }
+
+    /// 2026-11-11, work-laptop: the one ask for this device's id failed and
+    /// was never made again, so the Mac's own chats were treated as another
+    /// device's. Failed asks are made again, waiting longer each time, until
+    /// the engine answers; a closed connection stops it.
+    #[test]
+    fn this_device_is_asked_for_until_the_engine_answers() {
+        let asks = Cell::new(0);
+        let waits = RefCell::new(Vec::new());
+        let here = run(ask_until_answered(
+            || {
+                asks.set(asks.get() + 1);
+                let answer = match asks.get() {
+                    1 => Err("closed".to_owned()),
+                    2 => Ok(json!({})),
+                    3 => Err("timed out".to_owned()),
+                    _ => Ok(json!({ "deviceId": "mac" })),
+                };
+                std::future::ready(answer)
+            },
+            || false,
+            |wait| {
+                waits.borrow_mut().push(wait);
+                Box::pin(std::future::ready(()))
+            },
+        ));
+        assert_eq!(here.as_deref(), Some("mac"));
+        assert_eq!(asks.get(), 4);
+        assert_eq!(
+            *waits.borrow(),
+            [250, 500, 1000].map(Duration::from_millis).to_vec()
+        );
+
+        let closed = run(ask_until_answered(
+            || std::future::ready(Err("closed".to_owned())),
+            || true,
+            |_| Box::pin(std::future::ready(())),
+        ));
+        assert_eq!(closed, None);
+    }
 
     /// A window whose data dir holds a copy of an engine's token (a test
     /// window on the user's engine) once dialled every 3 s for as long as it

@@ -11,7 +11,7 @@ local function place(app: any): string
 	local best: string? = nil
 	local best_y = 0
 	for line in app:tree("#transcript"):gmatch("[^\n]+") do
-		local y, sh = line:match("#transcript scroll %-?%d+,(%-?%d+) %d+x(%d+)")
+		local y, sh = line:match("#transcript scroll.- %-?%d+,(%-?%d+) %d+x(%d+)")
 		if y then
 			top, h = tonumber(y) :: number, tonumber(sh) :: number
 		end
@@ -113,6 +113,23 @@ test("a chat scrolled far up comes back there once its history arrives", functio
 	app:frames(20)
 	settle(app)
 	expect(place(app)).to_be(before)
+end)
+
+-- Opened at its end, then all the way to its top: an offset back at the 0
+-- the view was made with, so its rest is a value the rest already held
+-- (`ui.debounced`'s `every`), and the place must still be noted.
+test("a chat opened at its end and scrolled to its very top comes back at its top", function()
+	local app = open()
+	expect(at_end(app)).to_be(true)
+	app:scroll("#transcript", -100000)
+	app:frames(20)
+	settle(app)
+	local before = place(app)
+	expect(string.match(before, "^u1 at ") ~= nil).to_be(true)
+	away(app)
+	back(app)
+	expect(place(app)).to_be(before)
+	expect(at_end(app)).to_be(false)
 end)
 
 test("a chat left at its end comes back at its end when its newest rows come first", function()

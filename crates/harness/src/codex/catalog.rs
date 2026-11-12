@@ -118,6 +118,7 @@ fn model(
     options: Vec<ModelOption>,
 ) -> Model {
     Model {
+        default: false,
         id: id.into(),
         label: label.into(),
         description: (!description.is_empty()).then(|| description.into()),

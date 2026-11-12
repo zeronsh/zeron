@@ -11,7 +11,7 @@
 //! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, markChatSeen)
+//!   setChatArchived, deleteChat, renameDevice, removeDevice, markChatSeen)
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
@@ -60,6 +60,8 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod device_stats;
+mod remote_plugins;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -189,6 +191,10 @@ struct QueueMessageParams {
     /// supports mid-turn steering.
     #[serde(default)]
     hold_for_turn_end: bool,
+    /// The row's `pending://` bytes, already committed locally. A Cloud-hosted
+    /// chat's row waits until they're in the edge's store.
+    #[serde(default)]
+    transfers: Vec<crate::uploads::AttachmentTransfer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -822,6 +828,14 @@ enum MutateParams {
     DeleteChat { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RenameDevice { device_id: String, name: String },
+    /// Another of your devices removed from the account (Settings →
+    /// Devices): its row tombstoned, so no device lists or dials it. Its chats
+    /// and projects stay. Refused for this device (`this_device`: its own
+    /// engine writes its row back at every boot) and for one online now
+    /// (`device_online`: its engine is running, maybe with live chats, and
+    /// would drop out from under them).
+    #[serde(rename_all = "camelCase")]
+    RemoveDevice { device_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -1145,6 +1159,14 @@ impl EngineRpc {
                         "Cloud runs Codex and Claude Code only".into(),
                     )));
                 }
+                // What Cloud's machines run: the edge's list (the last one read,
+                // when it's out of reach), as a phone reads it. This computer's
+                // own catalog only before either: it fails where an agent isn't
+                // installed or signed in here, and Cloud's are signed in on the
+                // machine.
+                if let Some(models) = self.cloud_models(p.harness).await {
+                    return Some(RpcReply::value(&models));
+                }
                 Some(self.handle(method, local(&[])).await)
             }
             methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
@@ -1156,6 +1178,31 @@ impl EngineRpc {
             ))),
             _ => None,
         }
+    }
+
+    /// Cloud's models for `harness`: the edge's list, kept on disk as it's
+    /// read, else the last one kept. `None` before the edge was ever read, or
+    /// with nothing listed for it.
+    async fn cloud_models(&self, harness: HarnessId) -> Option<Vec<zeron_proto::Model>> {
+        let key = serde_json::to_value(harness).ok()?.as_str()?.to_owned();
+        let path = self.repos.data_dir().join("cloud-models.json");
+        let listed = match self.cloud().models().await {
+            Ok(listed) => {
+                if let Ok(bytes) = serde_json::to_vec(&listed) {
+                    if let Err(error) = std::fs::write(&path, bytes) {
+                        tracing::warn!(%error, "Could not keep Cloud's models");
+                    }
+                }
+                listed
+            }
+            Err(error) => {
+                tracing::debug!(%error, "Cloud's models: the last list kept");
+                let bytes = std::fs::read(&path).ok()?;
+                serde_json::from_slice(&bytes).ok()?
+            }
+        };
+        let models = crate::cloud_client::cloud_models(listed.get(&key)?);
+        (!models.is_empty()).then_some(models)
     }
 
     /// `ListCloudBranches {repo, defaultBranch?}`: the branches a Cloud
@@ -2118,32 +2165,34 @@ impl EngineRpc {
                 // A Cloud chat's children on Cloud go with it: its delegates
                 // (each on a machine of its own, which would otherwise outlive
                 // the parent) and its side chats (on its machine, now gone).
-                let children: Vec<String> = if on_cloud {
-                    self.workspace
-                        .read_chats()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|chat| {
-                            chat.parent_chat_id.as_deref() == Some(chat_id.as_str())
-                                && zeron_proto::is_cloud_device(&chat.device_id, "")
-                        })
-                        .map(|chat| chat.id)
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                // Its children on computers go too, and theirs in turn: the
+                // apps place a child under its parent, so one left behind
+                // can't be reached, yet keeps its doc and maybe a live run.
+                // (Their runs end with their rows: see
+                // `SessionsEngine::follow_chat_deletions`.)
+                let children = chat_descendants(
+                    &self.workspace.read_chats().unwrap_or_default(),
+                    &chat_id,
+                    on_cloud,
+                );
+                let cloud_children: Vec<String> = children
+                    .iter()
+                    .filter(|(_, cloud)| *cloud)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                let children: Vec<String> = children.into_iter().map(|(id, _)| id).collect();
                 self.voice.retire_chat(&chat_id);
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
                 for child in &children {
                     self.voice.retire_chat(child);
                     if let Err(err) = self.workspace.delete_chat(child) {
-                        tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
+                        tracing::warn!(chat = %child, error = %err, "deleting a deleted chat's child failed");
                     }
                     self.doc_host.purge_chat(child);
                 }
                 if on_cloud {
-                    self.delete_cloud_machines(std::iter::once(chat_id).chain(children).collect());
+                    self.delete_cloud_machines(std::iter::once(chat_id).chain(cloud_children).collect());
                 }
                 Ok(())
             }
@@ -2152,6 +2201,35 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::RemoveDevice { device_id } => {
+                if device_id == self.workspace.device_id() {
+                    return Err(RpcError::BadParams("this_device".into()));
+                }
+                // (Cloud's machines are the edge's to retire, with their sessions.)
+                let row = self
+                    .workspace
+                    .read_devices()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|d| d.id == device_id);
+                let cloud = zeron_proto::is_cloud_device(&device_id, "")
+                    || row.as_ref().is_some_and(|d| {
+                        zeron_proto::is_cloud_device(&d.id, &d.platform)
+                            || d.capabilities.iter().any(|c| {
+                                c == zeron_proto::CLOUD_SESSION_CAPABILITY || c == zeron_proto::CLOUD_ACCOUNT_CAPABILITY
+                            })
+                    });
+                if cloud {
+                    return Err(RpcError::BadParams("cloud_device".into()));
+                }
+                if self.workspace.peer_liveness(&device_id) == zeron_rpc::PeerLiveness::Live {
+                    return Err(RpcError::Failed("device_online".into()));
+                }
+                self.workspace
+                    .delete_device(&device_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::SetChatSleep { chat_id, until } => {
                 let until = match until {
                     Some(ms) => Some(
@@ -2176,6 +2254,34 @@ impl EngineRpc {
             }
         }
     }
+}
+
+/// The chats that go when `root` is deleted, each with whether it is on
+/// Cloud: its children on computers (subagents, side chats) and theirs in
+/// turn, plus — when the parent is itself on Cloud — its children on Cloud.
+/// (A computer's chat keeps its Cloud delegates, as before.)
+fn chat_descendants(
+    chats: &[zeron_proto::Chat],
+    root: &str,
+    root_on_cloud: bool,
+) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::from([root]);
+    let mut frontier: Vec<(&str, bool)> = vec![(root, root_on_cloud)];
+    while let Some((parent, parent_on_cloud)) = frontier.pop() {
+        for chat in chats {
+            if chat.parent_chat_id.as_deref() != Some(parent) {
+                continue;
+            }
+            let on_cloud = zeron_proto::is_cloud_device(&chat.device_id, "");
+            if (on_cloud && !parent_on_cloud) || !seen.insert(chat.id.as_str()) {
+                continue;
+            }
+            out.push((chat.id.clone(), on_cloud));
+            frontier.push((chat.id.as_str(), on_cloud));
+        }
+    }
+    out
 }
 
 /// An RPC rejection is scoped to the requested capability. Only a broken
@@ -2474,16 +2580,20 @@ fn forwardable(method: &str) -> bool {
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
             // Plugins are per device (what it runs, what it allowed): Settings
-            // → Plugins' device switcher lists, declines, turns off, installs
-            // (from a link; it lands waiting there) and removes them on
-            // another of your devices from this one. Allowing stays with
-            // that device's own window (`zeron_rpc::peer_refused`, both ends).
+            // → Plugins' device switcher lists, reviews, allows, declines,
+            // turns off, installs (from a link, or a file it sends there)
+            // and removes them on another of your devices from this one.
+            // What the consent window sends goes only for this device's app
+            // (`zeron_rpc::app_forward_only`), and there it's held to a
+            // review minted for this device (plugins/reviews.rs).
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
+            | methods::REVIEW_PLUGIN
             | methods::DECIDE_PLUGIN
             | methods::SET_PLUGIN_OFF
             | methods::REMOVE_PLUGIN
             | methods::INSTALL_PLUGIN
+            | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
             | methods::PLUGIN_STATUS
@@ -2610,20 +2720,33 @@ fn keyed_frame(rows: Vec<serde_json::Value>, key: &str, last: Option<SentRows>) 
 /// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
+/// (`options`: what the watcher asked for beyond the original frames: a long
+/// reply's changed parts alone, `partPatches`.)
 fn doc_messages_stream(
     rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<zeron_doc::SessionDoc>,
+    options: zeron_doc::DiffOptions,
 ) -> BoxStream<'static, serde_json::Value> {
-    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    doc_messages_stream_from(rx, doc, options, None)
+}
+
+/// [`doc_messages_stream`], from `start` (a transcript the reader already
+/// has, and its opening cutoff) when given: deltas from it, no reset.
+fn doc_messages_stream_from(
+    rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
+    doc: std::sync::Arc<zeron_doc::SessionDoc>,
+    options: zeron_doc::DiffOptions,
+    start: Option<(crate::doc_host::TranscriptSnapshot, zeron_doc::TranscriptBaseline)>,
+) -> BoxStream<'static, serde_json::Value> {
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript_with};
+    let (prev, baseline) = match start {
+        Some((snapshot, baseline)) => (Some(snapshot), baseline),
+        None => (None, zeron_doc::TranscriptBaseline::default()),
+    };
+    let usage = prev.as_ref().map(|_| doc.context_usage());
     futures::stream::unfold(
-        (
-            rx,
-            None::<crate::doc_host::TranscriptSnapshot>,
-            doc,
-            None,
-            zeron_doc::TranscriptBaseline::default(),
-        ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
+        (rx, prev, doc, usage.flatten(), baseline),
+        move |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
             loop {
                 if prev.is_some() {
                     rx.changed().await.ok()?;
@@ -2633,7 +2756,7 @@ fn doc_messages_stream(
                 let current = rx.borrow_and_update().clone();
                 let frame = match prev.as_ref() {
                     None => TranscriptFrame::reset(&current.entries),
-                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
+                    Some(prev) => diff_transcript_with(&prev.entries, &current.entries, options),
                 };
                 let replay_baseline = match prev.as_ref() {
                     None => {
@@ -2684,11 +2807,117 @@ fn doc_messages_stream(
     .boxed()
 }
 
+/// A slice of the transcript as frames, for a reader that isn't showing the
+/// chat (an agent reading or waiting on it): a `reset` of the slice, then
+/// deltas of the slice, each with its `window` facts.
+async fn windowed_doc_messages_stream(
+    host: crate::doc_host::DocHost,
+    chat_id: String,
+    window: zeron_doc::TranscriptWindow,
+) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    // Opening a whale and building its mirror mustn't stall the RPC task.
+    let (rx, doc) = tokio::task::spawn_blocking(move || {
+        let handle = host.open(&chat_id)?;
+        Ok::<_, crate::EngineError>((handle.watch_messages(), handle.doc_arc()))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?;
+    Ok(futures::stream::unfold(
+        (rx, doc, window, None, None, None),
+        |(mut rx, doc, window, mut prev, mut prev_info, mut prev_usage)| async move {
+            loop {
+                let prev_slice: Option<&Vec<std::sync::Arc<zeron_doc::SessionMessageEntry>>> =
+                    prev.as_ref();
+                if prev_slice.is_some() {
+                    rx.changed().await.ok()?;
+                }
+                let current = rx.borrow_and_update().clone();
+                let (slice, info) = window.apply(&current.entries);
+                let frame = match prev.as_ref() {
+                    None => TranscriptFrame::reset(slice),
+                    Some(prev) => diff_transcript(prev, slice),
+                };
+                let usage = doc.context_usage();
+                let unchanged = frame.is_empty_delta()
+                    && prev_info.as_ref() == Some(&info)
+                    && prev_usage == Some(usage);
+                prev = Some(slice.to_vec());
+                if unchanged {
+                    continue;
+                }
+                let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
+                    frame,
+                    context_usage: usage,
+                    replay_baseline: None,
+                })
+                .ok()?;
+                value["window"] = serde_json::to_value(&info).ok()?;
+                prev_info = Some(info);
+                prev_usage = Some(usage);
+                return Some((value, (rx, doc, window, prev, prev_info, prev_usage)));
+            }
+        },
+    )
+    .boxed())
+}
+
+/// For a reader that holds the transcript as `known`: one `since` frame of
+/// what changed from it (a reset only when that's most of it), then deltas
+/// as the doc changes. A long chat opened again costs what's new.
+async fn since_doc_messages_stream(
+    host: crate::doc_host::DocHost,
+    chat_id: String,
+    options: zeron_doc::DiffOptions,
+    known: Vec<(String, u64)>,
+) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+    let (rx, doc, first, start) = tokio::task::spawn_blocking(move || {
+        let handle = host.open(&chat_id)?;
+        let rx = handle.watch_messages();
+        // As the doc is now, not as last published (a commit's publish may
+        // be on its way): what's changed is measured from this. Cheap: the
+        // doc reads only the entries changed since its last read.
+        handle.publish_messages();
+        let current = rx.borrow().clone();
+        let baseline = zeron_doc::TranscriptBaseline::capture(&current.entries);
+        let frame = zeron_doc::delta_from_known(&known, &current.entries);
+        // What the frame carries is history, not a reply arriving: its
+        // cutoff, only for what it carries (the reader's rows have theirs).
+        let sent = match &frame {
+            zeron_doc::TranscriptFrame::Delta { upsert, .. } => {
+                let entries: Vec<_> = upsert.iter().map(|u| u.entry.clone()).collect();
+                zeron_doc::TranscriptBaseline::capture(&entries)
+            }
+            _ => baseline.clone(),
+        };
+        let mut first = serde_json::to_value(zeron_doc::TranscriptUpdate {
+            frame,
+            context_usage: handle.doc().context_usage(),
+            replay_baseline: Some(sent),
+        })
+        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        first["since"] = serde_json::Value::Bool(true);
+        // The order the reader must now hold its rows in (it checks).
+        first["orderSum"] = serde_json::json!(zeron_doc::order_sum(
+            current.entries.iter().map(|e| e.id.as_str())
+        ));
+        Ok::<_, crate::EngineError>((rx, handle.doc_arc(), first, (current, baseline)))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?;
+    Ok(futures::stream::once(async move { first })
+        .chain(doc_messages_stream_from(rx, doc, options, Some(start)))
+        .boxed())
+}
+
 /// First paint reads only the local tail; full history is deferred until the
 /// next stream poll. No network dependency or persisted truncation.
 async fn opening_doc_messages_stream(
     host: crate::doc_host::DocHost,
     chat_id: String,
+    options: zeron_doc::DiffOptions,
 ) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
     let (handle, preview) = tokio::task::spawn_blocking(move || {
         let handle = host.open(&chat_id)?;
@@ -2711,7 +2940,7 @@ async fn opening_doc_messages_stream(
     let full = futures::stream::once(async move {
         match tokio::task::spawn_blocking(move || (handle.watch_messages(), handle.doc_arc())).await
         {
-            Ok((rx, doc)) => doc_messages_stream(rx, doc),
+            Ok((rx, doc)) => doc_messages_stream(rx, doc, options),
             Err(error) => {
                 tracing::warn!(%error, "transcript opening failed");
                 futures::stream::empty().boxed()
@@ -2910,6 +3139,11 @@ impl RpcService for EngineRpc {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
         let params = self.agent_gate(method, params)?;
+        // Machine stats: answered here, or asked of another of the
+        // account's devices with its own deadline and error words.
+        if method == methods::DEVICE_STATS {
+            return self.device_stats(params).await;
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -2924,12 +3158,22 @@ impl RpcService for EngineRpc {
                     "Another device installs a plugin from a link (url), not a file on this one".into(),
                 ));
             }
-            // Allowing a plugin is that device's person's, in its own window
-            // (the receiving side refuses it too: `zeron_rpc::peer_refused`).
+            // What only that device may answer for itself (credentials,
+            // signing, templates' consent), refused there too.
             if zeron_rpc::peer_refused(method, &params) {
                 return Err(RpcError::Failed(format!(
                     "{method}: only that device's own window can do that. It's waiting for you there."
                 )));
+            }
+            // A review, an allow and a file sent there are Zeron's consent
+            // window's and Settings → Plugins': this device's app, never an
+            // agent's token (which can't call them here either).
+            if zeron_rpc::app_forward_only(method, &params) {
+                if !zeron_rpc::caller().is_local() {
+                    return Err(crate::plugins::reviews::needed("Allowing a plugin on another device"));
+                }
+                let reply = self.forward(&target, method, params).await;
+                return reply.map_err(|error| remote_plugins::older_engine(&target, method, error));
             }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)
@@ -3027,6 +3271,17 @@ impl RpcService for EngineRpc {
             .await;
         }
         if crate::cloud_client::handles(method) {
+            // The person wakes a chat's machine (a size picked, a fresh one):
+            // what waited for it goes with its clock started now, however
+            // long it waited. First, so the machine finds it as it boots.
+            if matches!(
+                method,
+                methods::CLOUD_SESSION_WAKE | methods::CLOUD_SESSION_RETRY
+            ) && let Ok(p) = serde_json::from_value::<ChatParams>(params.clone())
+                && let Err(err) = self.doc_host.restart_waiting_clocks(&p.chat_id)
+            {
+                tracing::warn!(chat = %p.chat_id, %err, "waiting messages not restarted for a wake");
+            }
             return Box::pin(crate::cloud_client::dispatch(
                 self.cloud(),
                 &self.agent_accounts,
@@ -3410,19 +3665,48 @@ impl RpcService for EngineRpc {
                     .get("openingTail")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                // Opt-in too: a reply's changed parts alone (`parts` frames),
+                // for a viewport that applies them.
+                let options = zeron_doc::DiffOptions {
+                    part_patches: params
+                        .get("partPatches")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                };
+                let window = params
+                    .get("window")
+                    .filter(|v| !v.is_null())
+                    .map(|v| serde_json::from_value::<zeron_doc::TranscriptWindow>(v.clone()))
+                    .transpose()
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
+                // What the reader holds (each entry's id and `entry_sum`):
+                // it's sent what changed since, not the transcript.
+                let known = params
+                    .get("known")
+                    .filter(|v| !v.is_null())
+                    .map(|v| serde_json::from_value::<Vec<(String, u64)>>(v.clone()))
+                    .transpose()
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let p: ChatParams = parse_params(params)?;
+                if let Some(window) = window {
+                    return windowed_doc_messages_stream(self.doc_host.clone(), p.chat_id, window)
+                        .await
+                        .map(RpcReply::Stream);
+                }
                 // An open transcript keeps its chat's checkout diff live (and
                 // discardable) even when the chat is archived; the guard lives
                 // exactly as long as the stream.
                 let interest = self.diff_sync.retain_chat(&p.chat_id);
-                let stream = if opening_tail {
-                    opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?
+                let stream = if let Some(known) = known {
+                    since_doc_messages_stream(self.doc_host.clone(), p.chat_id, options, known).await?
+                } else if opening_tail {
+                    opening_doc_messages_stream(self.doc_host.clone(), p.chat_id, options).await?
                 } else {
                     let handle = self
                         .doc_host
                         .open(&p.chat_id)
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    doc_messages_stream(handle.watch_messages(), handle.doc_arc())
+                    doc_messages_stream(handle.watch_messages(), handle.doc_arc(), options)
                 };
                 Ok(RpcReply::Stream(
                     stream
@@ -3456,11 +3740,12 @@ impl RpcService for EngineRpc {
                 let p: QueueMessageParams = parse_params(params)?;
                 let id = self
                     .doc_host
-                    .queue_message_with_behavior(
+                    .queue_message_with_transfers(
                         &p.chat_id,
                         &p.text,
                         p.attachments,
                         p.hold_for_turn_end,
+                        p.transfers,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
@@ -3681,6 +3966,61 @@ impl RpcService for EngineRpc {
             methods::WATCH_TRANSFERS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_transfers(),
             ))),
+            methods::WATCH_HELD_SENDS => Ok(RpcReply::Stream(watch_stream(
+                self.doc_host.watch_held_sends(),
+            ))),
+            methods::REMOVE_HELD_SEND => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct RemoveHeldSendParams {
+                    chat_id: String,
+                    id: String,
+                }
+                let p: RemoveHeldSendParams = parse_params(params)?;
+                let removed = self
+                    .doc_host
+                    .remove_held_send(&p.chat_id, &p.id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "removed": removed }))
+            }
+            methods::WATCH_WAITING_MESSAGES => {
+                let p: ChatParams = parse_params(params)?;
+                let (changes, held) = self
+                    .doc_host
+                    .watch_waiting_messages(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let host = self.doc_host.clone();
+                let chat = p.chat_id;
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(
+                        (changes, held, true),
+                        move |(mut changes, mut held, first)| {
+                            let host = host.clone();
+                            let chat = chat.clone();
+                            async move {
+                                if !first {
+                                    tokio::select! {
+                                        changed = changes.changed() => changed.ok()?,
+                                        changed = held.changed() => changed.ok()?,
+                                    }
+                                }
+                                changes.borrow_and_update();
+                                held.borrow_and_update();
+                                // (Off the runtime's workers: a chat opened
+                                // cold reads its whole doc here.)
+                                let items = tokio::task::spawn_blocking(move || {
+                                    host.waiting_messages(&chat).unwrap_or_default()
+                                })
+                                .await
+                                .unwrap_or_default();
+                                let value = serde_json::json!({ "items": items });
+                                Some((value, (changes, held, false)))
+                            }
+                        },
+                    )
+                    .boxed(),
+                ))
+            }
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self
@@ -5930,6 +6270,58 @@ mod tests {
         );
     }
 
+    /// A reader that kept the transcript (opened before, or reconnecting)
+    /// says what it holds and gets only what changed since: no tail, no
+    /// whole copy. Then deltas as ever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reader_holding_the_transcript_gets_what_changed_since() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig { device_id: "viewer".into(), default_harness: zeron_proto::HarnessId::Mock, edge: None },
+        );
+        let handle = host.open("kept").unwrap();
+        for i in 0..300 {
+            handle.write_user_message(&format!("m{i}"), &format!("words {i}"), i).unwrap();
+        }
+        // What the reader holds: the whole copy as sent, summed as it holds it.
+        let mut whole = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
+        let sent = whole.next().await.unwrap();
+        drop(whole);
+        let held: Vec<serde_json::Value> = sent["reset"].as_array().unwrap().clone();
+        let known: Vec<(String, u64)> = held
+            .iter()
+            .map(|e| (e["id"].as_str().unwrap().to_owned(), zeron_doc::entry_sum(e)))
+            .collect();
+        // While it was away: one more message.
+        handle.write_user_message("away", "while away", 400).unwrap();
+        let mut stream = since_doc_messages_stream(host.clone(), "kept".into(), Default::default(), known)
+            .await
+            .unwrap();
+        let first = stream.next().await.unwrap();
+        assert_eq!(first["since"], true);
+        assert!(first.get("reset").is_none(), "a delta, not the whole copy");
+        let upserts = first["upsert"].as_array().unwrap();
+        assert_eq!(upserts.len(), 1);
+        assert_eq!(upserts[0]["entry"]["id"], "away");
+        assert_eq!(first["count"], 301);
+        let ids: Vec<String> = handle.doc().read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(
+            first["orderSum"].as_u64(),
+            Some(zeron_doc::order_sum(ids.iter().map(String::as_str))),
+            "the order the reader must hold its rows in"
+        );
+        assert!(serde_json::to_string(&first).unwrap().len() < 4_000);
+        // Then live changes, as deltas.
+        handle.write_user_message("next", "after", 500).unwrap();
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next()).await.unwrap().unwrap();
+        assert_eq!(next["upsert"][0]["entry"]["id"], "next");
+        assert_eq!(next["count"], 302);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
         use crate::doc_host::{DocHost, DocHostConfig};
@@ -5976,7 +6368,7 @@ mod tests {
         locked_rx.recv().unwrap();
         let opening = tokio::time::timeout(
             Duration::from_secs(2),
-            opening_doc_messages_stream(host.clone(), "whale".into()),
+            opening_doc_messages_stream(host.clone(), "whale".into(), Default::default()),
         )
         .await;
         release_tx.send(()).unwrap();
@@ -6382,7 +6774,7 @@ mod context_usage_tests {
         let handle = host.open("replay-chat").unwrap();
         let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "replay-chat")
             .with_handle(Arc::downgrade(&handle));
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         let first: zeron_doc::TranscriptUpdate =
             serde_json::from_value(stream.next().await.unwrap()).unwrap();
         assert!(first.replay_baseline.unwrap().entries.is_empty());
@@ -6478,7 +6870,7 @@ mod context_usage_tests {
             update.replay_baseline.is_none(),
             "live updates must not resend the history watermark"
         );
-        let mut reopened = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut reopened = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         let opening: zeron_doc::TranscriptUpdate =
             serde_json::from_value(reopened.next().await.unwrap()).unwrap();
         assert_eq!(
@@ -6506,7 +6898,7 @@ mod context_usage_tests {
         let handle = host.open("interleaved").unwrap();
         let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "interleaved")
             .with_handle(Arc::downgrade(&handle));
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         stream.next().await.unwrap();
         let source = zeron_doc::SessionDoc::init("interleaved").unwrap();
         sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
@@ -6597,7 +6989,7 @@ mod context_usage_tests {
             .unwrap();
         // Cached content exists before the first watcher and never enters
         // the changed-parts tracker. It may not have been painted yet.
-        let mut first = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut first = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         let opening: zeron_doc::TranscriptUpdate =
             serde_json::from_value(first.next().await.unwrap()).unwrap();
         assert_eq!(
@@ -6618,7 +7010,7 @@ mod context_usage_tests {
         assert!(update.replay_baseline.is_none());
         // A later subscriber sees a longer historical prefix, but must not
         // change the first subscriber's ongoing live animation.
-        let mut second = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut second = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         let opening: zeron_doc::TranscriptUpdate =
             serde_json::from_value(second.next().await.unwrap()).unwrap();
         assert_eq!(
@@ -6682,7 +7074,7 @@ mod context_usage_tests {
             id: "body".into(),
             text: text.into(),
         };
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         stream.next().await.unwrap();
         writer.sync(&[part("live")]).unwrap();
         sink.apply_row(&source.export_snapshot().unwrap(), 1);
@@ -6693,7 +7085,7 @@ mod context_usage_tests {
                 .unwrap();
         drop(stream);
         // No unwatched commit clears provenance before the new attach.
-        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
         stream.next().await.unwrap();
         writer.sync(&[part("live plus recovered")]).unwrap();
         sink.apply_replay_row(&source.export_snapshot().unwrap(), 2);
@@ -6711,6 +7103,72 @@ mod context_usage_tests {
         host.shutdown_workers().await;
     }
 
+    /// A long reply's calls arriving and finishing: a watcher that asked for
+    /// part patches gets the changed calls alone; one that didn't, the reply
+    /// whole as ever. Both end with the same transcript.
+    #[tokio::test]
+    async fn part_patches_carry_a_reply_s_changed_calls_alone_when_asked_for() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+        use zeron_sync::chat_client::ChatDocSink;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("parts").unwrap();
+        let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "parts")
+            .with_handle(Arc::downgrade(&handle));
+        let source = zeron_doc::SessionDoc::init("parts").unwrap();
+        let mut writer = zeron_doc::SegmentWriter::begin(&source, "reply", "host", 0).unwrap();
+        let call = |i: usize, output: Option<&str>| -> zeron_doc::MessagePart {
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool", "id": format!("t{i}"),
+                "call": { "kind": "exec", "command": format!("echo {i}") },
+                "resolved": output.is_some(), "output": output,
+            }))
+            .unwrap()
+        };
+        let mut calls: Vec<_> = (0..40).map(|i| call(i, Some("ok"))).collect();
+        calls.push(call(40, None));
+        writer.sync(&calls).unwrap();
+        sink.apply_row(&source.export_snapshot().unwrap(), 1);
+        let options = zeron_doc::DiffOptions { part_patches: true };
+        let mut patched = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), options);
+        let mut whole = doc_messages_stream(handle.watch_messages(), handle.doc_arc(), Default::default());
+        async fn next(stream: &mut BoxStream<'static, serde_json::Value>) -> serde_json::Value {
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        let read = |value: serde_json::Value| serde_json::from_value::<zeron_doc::TranscriptUpdate>(value).unwrap();
+        let (mut a, mut b) = (vec![], vec![]);
+        zeron_doc::apply_transcript_frame(&mut a, read(next(&mut patched).await).frame).unwrap();
+        zeron_doc::apply_transcript_frame(&mut b, read(next(&mut whole).await).frame).unwrap();
+        // The call in flight finishes, and the next arrives.
+        calls[40] = call(40, Some("done"));
+        calls.push(call(41, None));
+        writer.sync(&calls).unwrap();
+        sink.apply_row(&source.export_snapshot().unwrap(), 2);
+        let value = next(&mut patched).await;
+        assert!(value.get("upsert").is_none_or(|u| u.as_array().is_some_and(Vec::is_empty)), "{value}");
+        let ids: Vec<_> = value["parts"].as_array().unwrap().iter().map(|p| p["part"]["id"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(ids, ["t40", "t41"]);
+        zeron_doc::apply_transcript_frame(&mut a, read(value).frame).unwrap();
+        let value = next(&mut whole).await;
+        assert!(value.get("parts").is_none(), "{value}");
+        assert_eq!(value["upsert"].as_array().map(Vec::len), Some(1));
+        zeron_doc::apply_transcript_frame(&mut b, read(value).frame).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a[0].parts.len(), 42);
+        host.shutdown_workers().await;
+    }
+
     #[tokio::test]
     async fn context_only_commits_reach_remote_watch_and_reconnect() {
         let host = zeron_doc::SessionDoc::init("context-chat").unwrap();
@@ -6723,7 +7181,7 @@ mod context_usage_tests {
             .import(&host.export_snapshot().unwrap())
             .unwrap();
         let (tx, rx) = watch::channel(crate::doc_host::TranscriptSnapshot::default());
-        let mut stream = doc_messages_stream(rx, remote.clone());
+        let mut stream = doc_messages_stream(rx, remote.clone(), Default::default());
         let first = stream.next().await.unwrap();
         assert_eq!(first["contextUsage"]["tokens"], 42000);
         assert!(first.get("reset").is_some());
@@ -6745,7 +7203,7 @@ mod context_usage_tests {
             .unwrap();
         assert_eq!(update["contextUsage"]["tokens"], 0);
         assert_eq!(update["contextUsage"]["window"], 200000);
-        let mut reconnect = doc_messages_stream(tx.subscribe(), remote.clone());
+        let mut reconnect = doc_messages_stream(tx.subscribe(), remote.clone(), Default::default());
         assert_eq!(
             reconnect.next().await.unwrap()["contextUsage"],
             update["contextUsage"]

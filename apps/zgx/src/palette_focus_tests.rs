@@ -65,7 +65,7 @@ fn start(app: &mut TestApp, from: From) {
             app.ui.input.focus(&app.ui.scene, None);
         }
         From::Composer => app.click("#chat-composer >> role:textbox"),
-        From::Row => app.click("#shell-sidebar >> role:button \"Fix the build\""),
+        From::Row => crate::focus_tests::keys_on_row(app, "#shell-sidebar >> role:button \"Fix the build\""),
     }
     app.frames(20);
 }

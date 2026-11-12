@@ -3,7 +3,8 @@
 # beta\<version>\ with its scripts, plugins and the zeron.exe it's given, built
 # from the same commit, as engine\zeron.exe (a Windows release has no separate
 # engine: it runs as `zeron.exe engine`). A tester keeps their data and device.
-# No standalone .exe: this interface can't run without that folder.
+# No standalone .exe: this interface can't run without that folder. The engine
+# must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below).
 param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
     [string]$BetaVersion,
@@ -87,12 +88,20 @@ function Copy-Scripts([string]$From, [string]$To) {
 Push-Location $root
 try {
     if ($BetaVersion) {
-        # A workspace of its own (its own lock, patches).
+        # A workspace of its own (its own lock, patches). Built from its
+        # folder: cargo reads .cargo/config.toml by where it runs, not by the
+        # manifest, and the build's flags are there (Luau's NDEBUG), as
+        # scripts/package-zgx-beta.sh. Its target stays apps/zgx/target.
         $env:ZERON_BETA_VERSION = $BetaVersion
-        cargo build --release --locked --features beta --manifest-path apps/zgx/Cargo.toml --target-dir apps/zgx/target
+        Push-Location (Join-Path $root 'apps/zgx')
+        try {
+            cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
+        } finally { Pop-Location }
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './apps/zgx/target/release/zeron-zgx.exe').Path
     } else {
+        # Luau (the engine's visuals and plugin services) without its asserts.
+        $env:LUAU_CXXFLAGS = '-DNDEBUG'
         cargo build --release --locked -p zeron
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
         $built = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
@@ -106,12 +115,27 @@ try {
         foreach ($binary in @($built, $BetaEngine)) {
             $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($binary))
             if ($text -match $stagingMarks) { throw "$binary carries staging's edge or sign-in client: $($Matches[0])" }
+            # Luau without its asserts (a fifth of script time): zgx-script
+            # compiles its warning about them in only when they're on.
+            if ($binary -eq $built -and $text.Contains('Luau was built with its asserts')) {
+                throw "$built was built with Luau's asserts: LUAU_CXXFLAGS=-DNDEBUG (apps/zgx/.cargo/config.toml) didn't reach it"
+            }
             if ($binary -eq $BetaEngine -and -not $text.Contains('Multi-device controller for coding agents')) {
                 throw 'The engine predates the shared command line'
             }
         }
         $text = $null
     }
+    # The engine's Luau (visuals, plugin services) without its asserts: with
+    # them, each LUAU_ASSERT keeps its Luau source file's path (Luau/Common.h's
+    # __FILE__), VM\src\l*.cpp; with NDEBUG, none. A beta's engine is the
+    # zeron.exe it's given; a release's is the zeron.exe built here.
+    $engine = if ($BetaVersion) { $BetaEngine } else { $built }
+    $engineText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($engine))
+    if ($engineText -match 'VM[\\/]src[\\/]l[a-z]+\.cpp') {
+        throw "$engine was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG"
+    }
+    $engineText = $null
     $out = Join-Path $root 'target/package'
     $arch = Get-WindowsPackageArch $built
     $stage = Join-Path $out "zeron-$version-windows-$arch"
@@ -129,6 +153,10 @@ try {
         Copy-Scripts 'apps/zgx/ui' (Join-Path $beta 'ui')
         Remove-Item -LiteralPath (Join-Path $beta 'ui/tests') -Recurse -Force
         Copy-Scripts 'apps/zgx/plugins-builtin' (Join-Path $beta 'plugins-builtin')
+        # Each ships the canonical SDK, as scripts/package-zgx-beta.sh.
+        foreach ($dir in Get-ChildItem -Directory -LiteralPath (Join-Path $beta 'plugins-builtin')) {
+            Copy-Item -LiteralPath 'apps/zgx/plugins-sdk/zeron.luau' -Destination (Join-Path $dir.FullName 'zeron.luau') -Force
+        }
         New-Item -ItemType Directory -Force -Path (Join-Path $beta 'engine') | Out-Null
         Copy-Item -LiteralPath $BetaEngine -Destination (Join-Path $beta 'engine/zeron.exe')
         Copy-Item -Path 'apps/zgx/fonts/*-OFL.txt' -Destination $licenses

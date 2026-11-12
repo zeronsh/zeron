@@ -2,7 +2,8 @@
 -- (agent and model, effort, Fast, the model's options, access, plan, and
 -- where: device, project, checkout, branch), never a chat's. They come back
 -- after a chat is opened or made, and after a relaunch, with the page's
--- draft and what it carries. (A chat's own composer keeps its own.) On the
+-- draft and what it carries. (Except where: New chat after a chat was open
+-- starts in that chat's project, on its device.) (A chat's own composer keeps its own.) On the
 -- chat fixture: s1 runs Opus/high/full access, s2 Sonnet/medium/edits.
 
 local function settle(app: any)
@@ -54,7 +55,8 @@ test("the new page's settings come back after visiting a chat", function()
 	go(app, "go_s1")
 	expect(app:state("chat_model")).to_be("opus")
 	go(app, "go_new")
-	expect(shown(app)).to_be(mine)
+	-- (All but where: that's the chat last open's, Long chat in Atlas.)
+	expect(shown(app)).to_be((mine:gsub("|notes|local|%-$", "|atlas|local|main")))
 end)
 
 test("a model never picked on the new page doesn't become the last chat's", function()
@@ -78,7 +80,8 @@ test("a model's options picked in a chat stay that chat's", function()
 	app:set_state("chat_options", { lead = "sol" })
 	settle(app)
 	go(app, "go_new")
-	expect(shown(app)).to_be(mine)
+	-- (All but where: that's the chat last open's, Short chat in Atlas.)
+	expect(shown(app)).to_be((mine:gsub("|notes|local|%-$", "|atlas|local|main")))
 end)
 
 test("a chat made from the new page leaves the new page's settings as they were", function()
@@ -95,7 +98,8 @@ test("a chat made from the new page leaves the new page's settings as they were"
 	settle(app)
 	go(app, "go_s1")
 	go(app, "go_new")
-	expect(shown(app)).to_be(mine)
+	-- (All but where: that's the chat last open's, Long chat in Atlas.)
+	expect(shown(app)).to_be((mine:gsub("|notes|local|%-$", "|atlas|local|main")))
 end)
 
 test("the new page's project, picked there, outlasts the project the route last asked for", function()
@@ -106,9 +110,11 @@ test("the new page's project, picked there, outlasts the project the route last 
 	expect(app:state("chat_project")).to_be("atlas")
 	app:set_state("chat_project", "notes")
 	settle(app)
+	-- A chat visited (Long chat, in Atlas): New chat starts where it was,
+	-- not in the project last picked on the new page.
 	go(app, "go_s1")
 	go(app, "go_new")
-	expect(app:state("chat_project")).to_be("notes")
+	expect(app:state("chat_project")).to_be("atlas")
 	-- Asked for in a project again: that one.
 	go(app, "go_home")
 	expect(app:state("chat_project")).to_be("atlas")
@@ -142,7 +148,8 @@ test("the new page's settings, draft and what it carries survive a relaunch", fu
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	go(app, "go_new")
-	expect(shown(app)).to_be(mine)
+	-- (Where is the chat last open's before the relaunch, Long chat in Atlas.)
+	expect(shown(app)).to_be((mine:gsub("|notes|local|%-$", "|atlas|local|main")))
 	expect(app:text('role:textbox "Message"')).to_be("Half a thought")
 	expect(#(app:state("chat.composer.cargo") or {})).to_be(cargo)
 end)

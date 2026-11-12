@@ -83,6 +83,14 @@ data class LaunchOptions(
     val remoteVoice: Boolean = false,
     /** `--ez voice-selftest true`: log a host-less WebRTC offer (debuggable builds). */
     val voiceSelfTest: Boolean = false,
+    /** `--es dev-user <id> --es dev-org <id>`: a dev bearer for an `AUTH_MODE=dev` edge, not persisted (debuggable builds). */
+    val dev: Pair<String, String>? = null,
+    /** `--es edge <url>`: a local edge in place of production (debuggable builds). */
+    val edge: String? = null,
+    /** `--ez no-relay-layer true`: behave as a build without the relay layer does, an old phone in an account of new devices (debuggable builds). */
+    val noRelayLayer: Boolean = false,
+    /** `--es send-on-open <text>`: with `route chat:<id>`, send this once the session is open, for rigs (debuggable builds). */
+    val sendOnOpen: String? = null,
 )
 
 /**
@@ -235,6 +243,7 @@ class AppModel(private val app: Application) {
         if (options.voiceSelfTest) voice.selfTest()
         val stored = credentials.stored()
         when {
+            options.dev != null -> start(Credentials.Dev(options.dev.first, options.dev.second))
             // A `route` with nobody signed in opens on the demo (screenshots, tests).
             options.demo || options.route != null && stored == null -> start(Credentials.Demo(demoOptions()))
             stored != null -> start(stored)
@@ -243,7 +252,8 @@ class AppModel(private val app: Application) {
         scope.launch {
             while (true) {
                 delay(30_000)
-                refreshWorkspace()
+                // Nothing is looking, and this process may not be suspended for a long time.
+                if (inForeground) refreshWorkspace()
             }
         }
     }
@@ -286,11 +296,15 @@ class AppModel(private val app: Application) {
             deviceName = deviceName(),
             platform = "android",
             appVersion = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: "0",
+            // Not behind a remote flag: rooms have to hear this from the build for the 14 days
+            // before any engine flips (docs/design/relay-mobile.md). The room's answer decides the rest.
+            relayLayer = !launch.noRelayLayer,
         )
         return try {
             val client = CoreClient(config, credentials, listener)
             if (credentials is Credentials.WorkOs) this.credentials.store(credentials)
             _client.value = client
+            client.setNetworkOnline(networkPath.online)
             refreshWorkspace()
             client.preloadSessions()
             cloud.refresh()
@@ -306,7 +320,7 @@ class AppModel(private val app: Application) {
         start(Credentials.Demo(demoOptions()))
     }
 
-    val edgeUrl: String get() = authProductionEdgeUrl()
+    val edgeUrl: String get() = launch.edge ?: authProductionEdgeUrl()
 
     private val deviceId: String
         get() {
@@ -453,7 +467,24 @@ class AppModel(private val app: Application) {
         sweepFreshSideChats()
     }
 
+    private var inForeground = true
+
+    /**
+     * iOS suspends a backgrounded app, which is what stops its sockets. Android may not for
+     * hours (before 14, a process just stays running with its keepalives waking the radio),
+     * so once delivery has had its time the core is told to let go of them. Not during a
+     * call, which runs in the background on purpose.
+     */
+    private val rest = object : Runnable {
+        override fun run() {
+            if (inForeground) return
+            if (voice.live) main.postDelayed(this, REST_RECHECK_MS) else _client.value?.onBackgroundIdle()
+        }
+    }
+
     fun onForeground() {
+        inForeground = true
+        main.removeCallbacks(rest)
         endDeliveryHold()
         _client.value?.onForeground()
         refreshWorkspace()
@@ -467,6 +498,7 @@ class AppModel(private val app: Application) {
     }
 
     fun onBackground() {
+        inForeground = false
         // Give the already-durable room outbox and host wake time to reach
         // the edge when the user leaves right after tapping Send.
         endDeliveryHold()
@@ -477,6 +509,8 @@ class AppModel(private val app: Application) {
         } == true
         if (_client.value != null && !isDemo && (recent || pending)) DeliveryService.hold(app, 25_000)
         _client.value?.onBackground()
+        main.removeCallbacks(rest)
+        main.postDelayed(rest, REST_AFTER_MS)
     }
 
     private fun endDeliveryHold() = DeliveryService.release(app)
@@ -501,19 +535,33 @@ class AppModel(private val app: Application) {
         if (wait > 0) delay(wait)
     }
 
+    private val networkPath = NetworkPathTracker(
+        setOnline = {
+            Log.i("Zeron", "network: ${if (it) "online" else "no path"}")
+            _client.value?.setNetworkOnline(it)
+        },
+        pathChanged = {
+            Log.i("Zeron", "network: path changed")
+            _client.value?.networkPathChanged()
+        },
+    )
+
     private fun watchNetwork() {
         val cm = app.getSystemService(ConnectivityManager::class.java) ?: return
+        networkPath.seed(cm.activeNetwork?.let { n -> cm.getNetworkCapabilities(n)?.let { networkShape(n, it) } })
         cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                main.post { _client.value?.setNetworkOnline(true) }
+            // onAvailable says nothing here that this doesn't: it always follows immediately.
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                val shape = networkShape(network, capabilities)
+                main.post { networkPath.update(shape) }
+            }
+
+            override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                main.post { networkPath.setBlocked(blocked) }
             }
 
             override fun onLost(network: Network) {
-                main.post {
-                    val active = cm.getNetworkCapabilities(cm.activeNetwork)
-                    val online = active?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-                    _client.value?.setNetworkOnline(online)
-                }
+                main.post { networkPath.update(null) }
             }
         })
     }
@@ -700,6 +748,10 @@ class AppModel(private val app: Application) {
         }
     }
 }
+
+/** Past [DeliveryService]'s 25 s, so a message sent just before leaving goes first. */
+private const val REST_AFTER_MS = 30_000L
+private const val REST_RECHECK_MS = 60_000L
 
 /** A snackbar raised from anywhere in the app. */
 class Toast(val message: String, val action: String? = null, val run: (() -> Unit)? = null)

@@ -24,6 +24,10 @@ pub struct Budget {
     paused_until: Mutex<Option<Instant>>,
     next_dial: Mutex<Option<Instant>>,
     socket_waiters: AtomicUsize,
+    /// Bumped when a socket request finds every socket taken: holders that
+    /// could yield one (the engine's sync dispatcher) wait on it rather than
+    /// polling [`Budget::stats`].
+    socket_contention: tokio::sync::watch::Sender<u64>,
 }
 
 pub struct Permit {
@@ -58,6 +62,7 @@ impl Budget {
             paused_until: Mutex::new(None),
             next_dial: Mutex::new(None),
             socket_waiters: AtomicUsize::new(0),
+            socket_contention: tokio::sync::watch::Sender::new(0),
         })
     }
 
@@ -65,6 +70,17 @@ impl Budget {
         &self,
         resource: &Arc<Semaphore>,
         background: bool,
+    ) -> Result<Permit, SyncError> {
+        self.acquire_signalling(resource, background, None).await
+    }
+
+    /// [`Self::acquire`], bumping `waiting` when the resource has no permit
+    /// free and the caller has to wait for one.
+    async fn acquire_signalling(
+        &self,
+        resource: &Arc<Semaphore>,
+        background: bool,
+        waiting: Option<&tokio::sync::watch::Sender<u64>>,
     ) -> Result<Permit, SyncError> {
         // Never allow callers to build an unbounded semaphore wait queue.
         let _waiting =
@@ -82,11 +98,19 @@ impl Budget {
         } else {
             None
         };
-        let resource = resource
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| SyncError::Closed)?;
+        let resource = match resource.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                if let Some(waiting) = waiting {
+                    waiting.send_modify(|n| *n = n.wrapping_add(1));
+                }
+                resource
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| SyncError::Closed)?
+            }
+        };
         self.wait_for_resources().await;
         Ok(Permit {
             _resource: resource,
@@ -105,7 +129,8 @@ impl Budget {
         }
         self.socket_waiters.fetch_add(1, Ordering::AcqRel);
         let _waiting = Waiting(&self.socket_waiters);
-        self.acquire(&self.sockets, false).await
+        self.acquire_signalling(&self.sockets, false, Some(&self.socket_contention))
+            .await
     }
     pub async fn dial(&self) -> Result<Permit, SyncError> {
         let permit = self.acquire(&self.dials, false).await?;
@@ -153,6 +178,11 @@ impl Budget {
                 _ => return,
             }
         }
+    }
+
+    /// Changes when a socket request has to wait for one.
+    pub fn watch_socket_contention(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.socket_contention.subscribe()
     }
 
     pub fn stats(&self) -> BudgetStats {

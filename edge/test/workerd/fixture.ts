@@ -1,3 +1,4 @@
+import { handleAttachmentBlob } from "../../src/attachment-blobs";
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
@@ -16,6 +17,7 @@ import { deviceParam, forward } from "../../src/forward";
 import { runnerChatGate, runnerDeviceGate } from "../../src/runner-access";
 import { previewRoute } from "../../src/preview-route";
 import { releaseRoute } from "../../src/releases";
+import { modelListRoute } from "../../src/model-list";
 import { runnerRefusal } from "../../src/runner-policy";
 import { handleVaultRoute } from "../../src/vault-routes";
 import { handleUserDirectoryRoute } from "../../src/user-directory";
@@ -89,6 +91,14 @@ export class VaultStub extends WorkerEntrypoint {
       { fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", defaultBranch: "main", private: true, pushedAt: 2 }
     ]);
   }
+  githubListing(caller: Caller, query?: string) {
+    return this.answer("githubListing", [caller, query], {
+      repos: [
+        { fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", defaultBranch: "main", private: true, pushedAt: 2, installationId: 7, account: "ada", accounts: ["ada"] }
+      ],
+      installations: [{ id: 7, target: "acme", targetType: "Organization", reachedBy: ["ada"] }]
+    });
+  }
   githubBranches(caller: Caller, repo: string) {
     return this.answer("githubBranches", [caller, repo], ["main", "dev"]);
   }
@@ -109,7 +119,7 @@ const json = (value: unknown, status = 200) =>
 /**
  * The production routing seam, in src/index.ts's order, minus the routes
  * that need loro's WASM (which cannot load in this tier): releases, admin + runner
- * pre-bearer routes, bearer gate, runner policy, /cloud, /vault, preview,
+ * pre-bearer routes, the hosted model list, bearer gate, runner policy, /cloud, /vault, preview,
  * /device (with Cloud auto-wake), /registry, /chat2 and /blob (with the
  * runner chat gate) — all through the production `forward`.
  */
@@ -118,6 +128,8 @@ export default {
     const url = new URL(request.url);
     const release = await releaseRoute(request, env, url);
     if (release) return release;
+    const modelList = await modelListRoute(request, env, url);
+    if (modelList) return modelList;
     const admin = await handleAdminRoute(request, env, url);
     if (admin) return admin;
     const billing = await handleBillingPublicRoute(request, env, url);
@@ -157,7 +169,7 @@ export default {
         return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "nudge" && request.method === "POST") {
-        autoWakeCloudDevice(env, ctx, auth, deviceId);
+        autoWakeCloudDevice(env, ctx, auth, deviceId, env.CLOUD_EDGE_URL ?? url.origin);
         return forward(env.DEVICE_ROOMS, room, request, auth, "/nudge", "");
       }
       if (parts[2] === "status") return forward(env.DEVICE_ROOMS, room, request, auth, "/status", "");
@@ -176,7 +188,10 @@ export default {
     }
     const chat = chatRoute(request, env, auth.userId);
     if (chat) return chat;
-    if (parts[0] === "blob" && parts[1] && parts[2]) {
+    if (parts[0] === "blob" && parts.length === 4 && parts[2] === "attachments" && id.test(parts[1]) && id.test(parts[3])) {
+      return handleAttachmentBlob(request, env, auth, parts[1], parts[3]);
+    }
+    if (parts[0] === "blob" && parts[1] && parts[2] && parts.length === 3) {
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;
       const key = `blob/${auth.userId}/${parts[1]}/${parts[2]}`;

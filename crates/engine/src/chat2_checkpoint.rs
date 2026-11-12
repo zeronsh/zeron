@@ -17,11 +17,11 @@ pub(crate) fn chat2_checkpoint_parts(len: usize) -> usize {
     if len <= CHAT2_CHECKPOINT_SINGLE_MAX { 1 } else { len.div_ceil(CHAT2_CHECKPOINT_PART_BYTES) }
 }
 
-/// Why a checkpoint didn't land: the edge said no (its status), or the
-/// request didn't get there.
+/// Why a checkpoint didn't land: the edge said no (its status and answer), or
+/// the request didn't get there.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CheckpointPost {
-    Rejected(u16),
+    Rejected(u16, String),
     Failed(String),
 }
 
@@ -30,7 +30,9 @@ pub(crate) enum CheckpointPost {
 /// it (a long chat's state alone outgrew it: 35 and 39 MB, refused with 413
 /// on every post), in parts to `/checkpoint-part`, then committed whole by
 /// its size (`/checkpoint?staged=`). An edge from before parts answers the
-/// first part 404: it stays without a checkpoint, as it was.
+/// first part 404: it stays without a checkpoint, as it was. `commit_flags`
+/// (`&atFloor=1`, `&heal=1`: the relay layer's) go on the commit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn post_chat2_checkpoint(
     http: &reqwest::Client,
     edge_url: &str,
@@ -38,6 +40,7 @@ pub(crate) async fn post_chat2_checkpoint(
     bearer: &str,
     seq_covered: u64,
     frontier: &[u8],
+    commit_flags: &str,
     snapshot: Vec<u8>,
 ) -> Result<(), CheckpointPost> {
     let base = format!("{}/chat2/{}", edge_url.trim_end_matches('/'), chat_id);
@@ -45,13 +48,16 @@ pub(crate) async fn post_chat2_checkpoint(
     let send = |request: reqwest::RequestBuilder| async move {
         match request.timeout(std::time::Duration::from_secs(300)).bearer_auth(bearer).send().await {
             Ok(res) if res.status().is_success() => Ok(()),
-            Ok(res) => Err(CheckpointPost::Rejected(res.status().as_u16())),
+            Ok(res) => {
+                let status = res.status().as_u16();
+                Err(CheckpointPost::Rejected(status, res.text().await.unwrap_or_default()))
+            }
             Err(err) => Err(CheckpointPost::Failed(describe_http_error(err))),
         }
     };
     let len = snapshot.len();
     if chat2_checkpoint_parts(len) == 1 {
-        let url = format!("{base}/checkpoint?seqCovered={seq_covered}");
+        let url = format!("{base}/checkpoint?seqCovered={seq_covered}{commit_flags}");
         return send(http.post(url).header("x-chat2-frontier", frontier).body(snapshot)).await;
     }
     // (One buffer, sliced: no part is copied.)
@@ -60,8 +66,45 @@ pub(crate) async fn post_chat2_checkpoint(
         let part = snapshot.slice(offset..(offset + CHAT2_CHECKPOINT_PART_BYTES).min(len));
         send(http.post(format!("{base}/checkpoint-part?offset={offset}")).body(part)).await?;
     }
-    let url = format!("{base}/checkpoint?seqCovered={seq_covered}&staged={len}");
+    let url = format!("{base}/checkpoint?seqCovered={seq_covered}&staged={len}{commit_flags}");
     send(http.post(url).header("x-chat2-frontier", frontier)).await
+}
+
+/// The room's answer to a heal claim (`POST /chat2/{id}/heal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HealClaim {
+    /// Its stored checkpoint holds the version claimed: that is the heal.
+    Healed,
+    /// It doesn't: send the checkpoint.
+    NotCovered,
+    /// An edge from before the claim: send the checkpoint, and don't ask it again.
+    Unsupported,
+    Failed,
+}
+
+/// Ask the room to count its stored checkpoint as this host's heal, which it does
+/// only if that checkpoint already holds `version`: every op the host relayed.
+/// Costs a request with no body, where the heal it replaces sends the whole chat.
+pub(crate) async fn post_heal_claim(
+    http: &reqwest::Client,
+    edge_url: &str,
+    chat_id: &str,
+    bearer: &str,
+    version: &[u8],
+) -> HealClaim {
+    let url = format!("{}/chat2/{}/heal", edge_url.trim_end_matches('/'), chat_id);
+    let version = base64::engine::general_purpose::STANDARD.encode(version);
+    let request = http
+        .post(url)
+        .header("x-chat2-version", version)
+        .timeout(std::time::Duration::from_secs(30))
+        .bearer_auth(bearer);
+    match request.send().await {
+        Ok(res) if res.status().is_success() => HealClaim::Healed,
+        Ok(res) if res.status().as_u16() == 409 => HealClaim::NotCovered,
+        Ok(res) if matches!(res.status().as_u16(), 404 | 405) => HealClaim::Unsupported,
+        Ok(_) | Err(_) => HealClaim::Failed,
+    }
 }
 
 #[cfg(test)]
@@ -162,7 +205,7 @@ mod tests {
         assert!(snapshot.len() > CHAT2_CHECKPOINT_SINGLE_MAX);
         let (url, heard) = fake_edge(false).await;
         let http = reqwest::Client::new();
-        let posted = post_chat2_checkpoint(&http, &url, "chat-1", "bearer", 42, b"\x01", snapshot.clone()).await;
+        let posted = post_chat2_checkpoint(&http, &url, "chat-1", "bearer", 42, b"\x01", "&atFloor=1", snapshot.clone()).await;
         assert_eq!(posted, Ok(()));
         let heard = lock(&heard).clone();
         let parts = chat2_checkpoint_parts(snapshot.len());
@@ -173,7 +216,7 @@ mod tests {
             assert!(body.len() <= CHAT2_CHECKPOINT_PART_BYTES);
             whole.extend_from_slice(body);
         }
-        assert_eq!(heard[parts].0, format!("/chat2/chat-1/checkpoint?seqCovered=42&staged={}", snapshot.len()));
+        assert_eq!(heard[parts].0, format!("/chat2/chat-1/checkpoint?seqCovered=42&staged={}&atFloor=1", snapshot.len()));
         assert!(heard[parts].1.is_empty());
         assert!(whole == snapshot, "the parts make the snapshot");
         let reader = loro::LoroDoc::new();
@@ -189,13 +232,13 @@ mod tests {
         let (url, heard) = fake_edge(true).await;
         let http = reqwest::Client::new();
         let small = vec![7u8; 1024];
-        assert_eq!(post_chat2_checkpoint(&http, &url, "c", "b", 3, b"\x01", small.clone()).await, Ok(()));
+        assert_eq!(post_chat2_checkpoint(&http, &url, "c", "b", 3, b"\x01", "", small.clone()).await, Ok(()));
         assert_eq!(lock(&heard).clone(), vec![("/chat2/c/checkpoint?seqCovered=3".to_owned(), small)]);
         lock(&heard).clear();
         let large = vec![9u8; CHAT2_CHECKPOINT_SINGLE_MAX + 1];
         assert_eq!(
-            post_chat2_checkpoint(&http, &url, "c", "b", 3, b"\x01", large).await,
-            Err(CheckpointPost::Rejected(404))
+            post_chat2_checkpoint(&http, &url, "c", "b", 3, b"\x01", "", large).await,
+            Err(CheckpointPost::Rejected(404, "{}".to_owned()))
         );
         let heard = lock(&heard).clone();
         assert_eq!(heard.len(), 1, "stops at the first part refused");

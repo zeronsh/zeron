@@ -1431,6 +1431,71 @@ async fn an_acquired_edit_blocks_turn_end_and_commit_sends_the_new_text() {
     core.shutdown().await;
 }
 
+/// 2026-11-11, work-laptop: the person tapped Edit on a queued message on
+/// the Mac hosting the chat and was told it was "being edited on another
+/// device". The lease was their own: the same window asking again (its
+/// Acquired reply lost to a dropped app socket, or the chat reopened) must
+/// take its lease over. Any other editor, even on the same device, is still
+/// locked out until the lease ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_editor_asking_again_takes_its_own_lease_over() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "opening turn",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "mine", Vec::new())
+        .expect("queue row");
+
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: first, ..
+    } = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("first begin")
+    else {
+        panic!("first edit must be acquired");
+    };
+    let again = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("second begin");
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: second,
+        text,
+        ..
+    } = again
+    else {
+        panic!("the same editor must get its own lease back, got {again:?}");
+    };
+    assert_ne!(first, second, "a fresh lease generation");
+    assert_eq!(text, "mine");
+
+    // Another window on the same device, and another device, stay locked.
+    for (device, instance) in [("laptop", "window-2"), ("phone", "window-1")] {
+        let outcome = core
+            .doc_host
+            .begin_queued_message_edit(CHAT, &id, device, instance)
+            .await
+            .expect("other begin");
+        assert!(
+            matches!(&outcome, BeginQueueEditOutcome::Locked { owner_device_id, .. } if owner_device_id == "laptop"),
+            "{device}/{instance} must be locked out, got {outcome:?}"
+        );
+    }
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_one_editor_wins_and_an_expired_edit_requires_review() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
@@ -1964,6 +2029,77 @@ async fn a_send_during_a_turn_boundary_turn_waits_for_the_turn_end() {
     core.shutdown().await;
 }
 
+/// Two messages sent while the host was away (a Cloud machine asleep): by the
+/// time the second is read, the first has just started a turn. The sender never
+/// saw that turn, so the second waits for it and is a turn of its own, rather
+/// than a steer that cut the first off with an empty reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_issued_before_the_running_turn_started_is_the_next_turn_not_a_steer() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the opening turn").await;
+    let template = core.sessions.last_request(CHAT).expect("a request");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core.sessions.turn_in_flight(CHAT) {
+        assert!(tokio::time::Instant::now() < deadline, "the opening turn never ended");
+        let _ = harness.finish.send(());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Both sent a minute ago, two seconds apart, while the host was away.
+    let sent = |id: &str, prompt: &str, ago_ms: i64| {
+        let mut request = template.clone();
+        request.prompt = prompt.into();
+        let issued_at = chrono::Utc::now().timestamp_millis() - ago_ms;
+        zeron_doc::SessionCommandEntry {
+            id: format!("cmd-{id}"),
+            payload: SessionCommandPayload::Run {
+                message_id: format!("m-{id}"),
+                request,
+            },
+            issued_by: "phone".into(),
+            issued_at,
+            based_on: None,
+            expires_at: Some(issued_at + 3_600_000),
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        }
+    };
+    let doc = core.doc_host.open(CHAT).unwrap();
+    doc.doc()
+        .queue_command(&sent("first", "first, sent while away", 60_000))
+        .unwrap();
+    doc.doc()
+        .queue_command(&sent("second", "second, sent while away", 58_000))
+        .unwrap();
+    core.doc_host.enqueue_wakeup(CHAT).expect("wake the host");
+    wait_for(
+        || queue_texts(&core) == vec!["second, sent while away"],
+        "the second to wait for the first turn",
+    )
+    .await;
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["opening", "first, sent while away"],
+        "the second was steered into the first turn"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while prompts.lock().unwrap().len() < 3 {
+        assert!(tokio::time::Instant::now() < deadline, "the second never ran");
+        let _ = harness.finish.send(());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["opening", "first, sent while away", "second, sent while away"]
+    );
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// An agent that reads input mid-turn still gets a plain send immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
@@ -1983,5 +2119,65 @@ async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
     assert_eq!(user_messages(&core), vec!["opening", "steer me"]);
     assert_eq!(harness.requests.lock().unwrap().len(), 1);
     let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// A send reaches the agent as fast in a long, watched chat as in a new one:
+/// it never waits behind the open transcript's publish (a long chat's whole
+/// transcript read per change, before the drain, was V3 Release's
+/// "sending…").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_to_delivered_stays_flat_as_the_chat_grows() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    // Watched, as the app watches the open chat.
+    let _watch = handle.watch_messages();
+    let send = |text: &str| {
+        let text = text.to_owned();
+        let core = &core;
+        let prompts = prompts.clone();
+        let harness = harness.clone();
+        async move {
+            let start = std::time::Instant::now();
+            core.doc_host.queue_message(CHAT, &text, Vec::new()).expect("queue message");
+            wait_for(|| prompts.lock().unwrap().iter().any(|p| *p == text), "the send to reach the agent").await;
+            let took = start.elapsed();
+            let _ = harness.finish.send(());
+            wait_for(|| queue_texts(core).is_empty(), "the queue to empty").await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            took
+        }
+    };
+    let small = [send("small 1").await, send("small 2").await].into_iter().min().unwrap();
+    for i in 0..3000 {
+        handle
+            .doc()
+            .push_message(&SessionMessageEntry {
+                id: format!("old-{i}"),
+                role: MessageRole::Assistant,
+                // (Shaped like a real reply: many parts, as a turn's calls and words.)
+                parts: (0..12)
+                    .map(|p| MessagePart::Text { id: format!("t{p}"), text: "x".repeat(160) })
+                    .collect(),
+                created_at: i,
+                device_id: "dev".into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let big = [send("big 1").await, send("big 2").await].into_iter().min().unwrap();
+    let whole = {
+        let start = std::time::Instant::now();
+        let _ = handle.doc().read_entries_whole().unwrap();
+        start.elapsed()
+    };
+    eprintln!("send to delivered: new chat {small:?}, 3,000-entry chat {big:?} (a whole read: {whole:?})");
+    assert!(
+        big < small + whole / 2 + Duration::from_millis(50),
+        "a send in a long chat ({big:?}) waited behind its transcript (new chat {small:?}, a whole read {whole:?})"
+    );
     core.shutdown().await;
 }

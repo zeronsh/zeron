@@ -617,6 +617,61 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
 }
 
+/// Host stamps repeat on every turn; one that says nothing new pushes
+/// nothing (each push is a stored row in the room and a broadcast).
+#[test]
+fn repeated_host_stamps_push_only_what_changed() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    ws.take_pushable();
+    let pushed = |ws: &mut RegistryDoc| -> Vec<Vec<String>> {
+        ws.take_pushable()
+            .into_iter()
+            .flat_map(|b| b.ops)
+            .map(|op| op.set.unwrap_or_default().into_keys().collect())
+            .collect()
+    };
+    let context = |branch: &str, at: i64| zeron_proto::ConversationSourceContext {
+        checkout_id: "co-1".into(),
+        repo_root: "/repo".into(),
+        cwd: "/repo".into(),
+        branch: branch.into(),
+        head_sha: None,
+        observed_at: ts(at),
+    };
+
+    assert!(ws.set_chat_harness_session("chat-1", "hs-1", "/repo", Some("claude")).unwrap());
+    assert_eq!(pushed(&mut ws).len(), 1);
+    assert!(ws.set_chat_harness_session("chat-1", "hs-1", "/repo", Some("claude")).unwrap());
+    assert!(pushed(&mut ws).is_empty(), "the same session again");
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", Some("claude")).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["harnessSessionId".to_string()]]);
+
+    ws.set_chat_source_context("chat-1", &context("main", 1_000)).unwrap();
+    assert_eq!(pushed(&mut ws).len(), 1);
+    ws.set_chat_source_context("chat-1", &context("main", 9_000)).unwrap();
+    assert!(pushed(&mut ws).is_empty(), "only the observation time moved");
+    ws.set_chat_source_context("chat-1", &context("feature", 9_000)).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["branch".to_string(), "sourceContext".to_string()]]);
+
+    ws.set_chat_branch("chat-1", "feature").unwrap();
+    ws.set_chat_checkout("chat-1", "co-1").unwrap();
+    ws.set_chat_room_gen("chat-1", 2).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["roomGen".to_string()]]);
+    ws.set_chat_room_gen("chat-1", 2).unwrap();
+    ws.set_chat_cwd("chat-1", "/tmp").unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["cwd".to_string()]]);
+
+    // A missing field reads as null: clearing it again is no write either.
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", None).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["harnessSessionHarness".to_string()]]);
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", None).unwrap();
+    assert!(pushed(&mut ws).is_empty());
+    let row = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(row.harness_session_id.as_deref(), Some("hs-2"));
+    assert_eq!(row.branch.as_deref(), Some("feature"));
+}
+
 #[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
@@ -2476,6 +2531,49 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
 }
 
 #[test]
+fn a_device_removed_from_another_is_gone_everywhere_and_comes_back_on_its_own_boot() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-a", "Laptop")).unwrap();
+    let mut b = RegistryDoc::new("dev-b");
+    b.upsert_device(&device("dev-b", "Old box")).unwrap();
+    let mut box_chat = chat("chat-b", "dev-b");
+    box_chat.space_id = Some("sp-b".into());
+    b.upsert_chat(&box_chat).unwrap();
+    b.upsert_space(&space("sp-b", "dev-b", "/srv/app")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_devices().unwrap().len(), 2);
+
+    // Removed from the laptop: gone there at once, then on the box too.
+    assert!(a.delete_device("dev-b").unwrap());
+    assert!(a.read_devices().unwrap().iter().all(|d| d.id != "dev-b"));
+    assert!(a.device_deleted("dev-b"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        let ids: Vec<String> = ws.read_devices().unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec!["dev-a".to_string()]);
+        assert!(ws.device_deleted("dev-b"));
+        // Its chats and projects stay, readable.
+        assert_eq!(ws.read_chats().unwrap().len(), 1);
+        assert_eq!(ws.read_spaces().unwrap().len(), 1);
+    }
+    // Already gone: nothing to do, nothing pushed; a rename finds no row.
+    assert!(!a.delete_device("dev-b").unwrap());
+    assert!(!a.delete_device("never-heard-of").unwrap());
+    assert!(!a.rename_device("dev-b", "x").unwrap());
+    assert_eq!(a.pending_len(), 0);
+
+    // Zeron opening on the box again revives its row everywhere.
+    b.upsert_device(&device("dev-b", "Old box")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        assert!(!ws.device_deleted("dev-b"));
+        assert_eq!(ws.read_devices().unwrap().len(), 2);
+    }
+}
+
+#[test]
 fn a_chat_sleeps_wakes_once_and_clears() {
     use zeron_proto::{ChatSleep, SleepState};
     let mut ws = RegistryDoc::new("dev-a");
@@ -2852,4 +2950,278 @@ fn an_unreadable_look_never_loses_a_project_row() {
     doc.write(KIND_SPACES, "sp-a", OpKind::Update, fields([("icon", json!({ "image": "file:///etc/passwd" }))]));
     assert_eq!(doc.read_spaces().unwrap().len(), 1);
     assert_eq!(shown_emoji(&doc, "sp-a"), None);
+}
+
+/// The publish path reconciles pins against the chats `read_all` already
+/// read: same outcome as the self-reading form, and the lists `read_all`
+/// returns are the same before and after (pins live in other rows).
+#[test]
+fn sidebar_reconcile_with_read_chats_matches_and_leaves_lists_alone() {
+    let build = || {
+        let mut doc = RegistryDoc::new("desktop");
+        pin_sessions(&mut doc, &["live", "archived", "deleted"]);
+        let mut archived = chat("archived", "desktop");
+        archived.archived = true;
+        doc.upsert_chat(&archived).unwrap();
+        doc.delete_chat("deleted").unwrap();
+        doc
+    };
+    let mut reference = build();
+    let mut publishing = build();
+    let before = publishing.read_all().unwrap();
+    for authoritative in [false, true, true] {
+        let expected = reference.reconcile_sidebar_pins(authoritative).unwrap();
+        let state = publishing.read_all().unwrap();
+        let got = publishing
+            .reconcile_sidebar_pins_with(authoritative, state.chats.iter().map(|c| c.id.as_str()))
+            .unwrap();
+        assert_eq!(got, expected);
+        assert_eq!(publishing.sidebar_preferences(), reference.sidebar_preferences());
+    }
+    assert_eq!(
+        publishing.sidebar_preferences().unwrap().pinned_session_ids,
+        ["live", "archived"]
+    );
+    assert_eq!(publishing.read_all().unwrap(), before);
+}
+
+/// Every kind of mutation, in random order, with typed reads after each:
+/// the read cache (row_cache) must match a full read every time. In debug
+/// builds each cached read checks itself against a full one, so a mutation
+/// path that forgets to record its rows panics here.
+#[test]
+fn cached_reads_match_full_reads_under_every_mutation() {
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let statuses = [SessionStatus::Idle, SessionStatus::Working, SessionStatus::AwaitingInput];
+    let mut doc = RegistryDoc::new("host");
+    // A second replica stands in for the server: its pending ops become
+    // authoritative rows for `doc`.
+    let mut other = RegistryDoc::new("peer");
+    let mut server_seq = 0u64;
+    let mut local_only = false;
+    for step in 0..3_000 {
+        let id = format!("c{}", next(24));
+        match next(11) {
+            0 => doc.upsert_chat(&chat(&id, "host")).unwrap(),
+            1 => {
+                doc.rename_chat(&id, &format!("title {step}")).unwrap();
+            }
+            2 => {
+                doc.delete_chat(&id).unwrap();
+            }
+            3 => doc
+                .upsert_session(&session(&id, "host", statuses[next(3) as usize]))
+                .unwrap(),
+            4 => {
+                // The server acks the oldest pushed batch.
+                let pushed = doc.take_pushable();
+                if let Some(batch) = pushed.first() {
+                    server_seq += 1;
+                    doc.ack_batch(&batch.batch, server_seq);
+                }
+            }
+            5 | 6 => {
+                // A peer's writes arrive as authoritative rows.
+                if next(2) == 0 {
+                    other.upsert_chat(&chat(&id, "peer")).unwrap();
+                } else {
+                    other
+                        .upsert_session(&session(&id, "peer", statuses[next(3) as usize]))
+                        .unwrap();
+                }
+                let rows: Vec<RegistryRow> = other
+                    .take_pushable()
+                    .iter()
+                    .flat_map(|b| &b.ops)
+                    .filter_map(|op| apply_op(None, op).0)
+                    .collect();
+                server_seq += 1;
+                let _ = doc.apply_rows(server_seq, rows);
+            }
+            7 => {
+                // A full state frame: the peer's rows replace ours.
+                let rows: Vec<RegistryRow> = other
+                    .read_chats()
+                    .unwrap()
+                    .iter()
+                    .map(|c| {
+                        let mut row = RegistryRow {
+                            kind: KIND_CHATS.into(),
+                            id: c.id.clone(),
+                            seq: server_seq,
+                            deleted: false,
+                            del_hlc: None,
+                            fields: Default::default(),
+                            clocks: Default::default(),
+                        };
+                        row.fields.insert("id".into(), json!(c.id));
+                        row.fields.insert("deviceId".into(), json!(c.device_id));
+                        row.fields.insert("createdAt".into(), json!(c.created_at.timestamp_millis()));
+                        row
+                    })
+                    .collect();
+                server_seq += 1;
+                let _ = doc.apply_state(server_seq, next(2) == 0, 0, rows);
+            }
+            8 => {
+                local_only = !local_only;
+                doc.set_local_only(local_only);
+            }
+            9 => doc.mark_disconnected(),
+            _ => {
+                doc.set_chat_archived(&id, next(2) == 0).unwrap();
+            }
+        }
+        if next(3) > 0 {
+            // Reads in between steps (some steps stack before a read).
+            doc.read_chats().unwrap();
+            doc.read_sessions().unwrap();
+            doc.read_devices().unwrap();
+        }
+    }
+    doc.read_chats().unwrap();
+    doc.read_sessions().unwrap();
+}
+
+/// A steady stream of session-status changes re-parses only the session
+/// that changed, and no chat row: a full read on every change (hundreds of
+/// rows each) must not come back.
+#[test]
+fn a_session_status_stream_parses_only_the_rows_that_changed() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    for i in 0..300 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+        doc.upsert_session(&session(&format!("c{i}"), "host", SessionStatus::Idle)).unwrap();
+    }
+    // Warm: the first reads parse everything once.
+    doc.read_chats().unwrap();
+    doc.read_sessions().unwrap();
+    let chats_version = doc.kind_version(KIND_CHATS);
+    let statuses = [SessionStatus::Working, SessionStatus::Idle];
+    let before = doc.rows_parsed();
+    for turn in 0..200 {
+        let id = format!("c{}", turn % 5);
+        doc.upsert_session(&session(&id, "host", statuses[turn % 2])).unwrap();
+        let sessions = doc.read_sessions().unwrap();
+        assert_eq!(sessions.len(), 300);
+    }
+    let parsed = doc.rows_parsed() - before;
+    // Tests also run a full check per read; that one isn't counted.
+    assert!(parsed <= 200, "{parsed} rows parsed for 200 one-row changes");
+    assert_eq!(doc.kind_version(KIND_CHATS), chats_version, "a session change counted as a chat change");
+}
+
+fn same_replica(a: &RegistryDoc, b: &RegistryDoc) {
+    assert_eq!(a.read_chats().unwrap(), b.read_chats().unwrap());
+    assert_eq!(a.read_sessions().unwrap(), b.read_sessions().unwrap());
+    assert_eq!(a.read_devices().unwrap(), b.read_devices().unwrap());
+    assert_eq!(a.cursor(), b.cursor());
+    // A load coalesces the queued writes (nothing is in flight after one),
+    // as a whole-snapshot load always has: compare what they show and that
+    // something still waits to be pushed, not the op count.
+    assert_eq!(a.pending_len() == 0, b.pending_len() == 0);
+}
+
+/// A whole save, then deltas of what changed: loading them gives back the
+/// same replica, rows, cursor and pending writes alike.
+#[test]
+fn a_registry_saved_as_deltas_loads_back_the_same() {
+    let mut doc = RegistryDoc::new("host");
+    let mut peer = RegistryDoc::new("peer");
+    for i in 0..50 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+    }
+    let base = doc.to_bytes().unwrap();
+    doc.mark_saved();
+    let mut deltas = Vec::new();
+    for step in 0..60u64 {
+        let id = format!("c{}", step % 7);
+        match step % 4 {
+            0 => doc.upsert_session(&session(&id, "host", SessionStatus::Working)).unwrap(),
+            1 => {
+                doc.rename_chat(&id, &format!("t{step}")).unwrap();
+            }
+            2 => {
+                peer.upsert_session(&session(&format!("p{step}"), "peer", SessionStatus::Idle)).unwrap();
+                let rows: Vec<RegistryRow> = peer
+                    .take_pushable()
+                    .iter()
+                    .flat_map(|b| &b.ops)
+                    .filter_map(|op| apply_op(None, op).0)
+                    .collect();
+                let _ = doc.apply_rows(step + 1, rows);
+            }
+            _ => {
+                if let Some(batch) = doc.take_pushable().first() {
+                    doc.ack_batch(&batch.batch.clone(), step);
+                }
+            }
+        }
+        deltas.push(doc.delta_bytes().unwrap().expect("incremental"));
+        doc.mark_saved();
+    }
+    let (loaded, clean) = RegistryDoc::from_saved(&base, &deltas, &[], "host").unwrap();
+    assert!(clean);
+    same_replica(&doc, &loaded);
+}
+
+/// One session-status change is one row in a delta, not the registry.
+#[test]
+fn a_session_status_change_saves_one_row_not_the_registry() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    for i in 0..300 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+        doc.upsert_session(&session(&format!("c{i}"), "host", SessionStatus::Idle)).unwrap();
+    }
+    let whole = doc.to_bytes().unwrap().len();
+    doc.mark_saved();
+    let statuses = [SessionStatus::Working, SessionStatus::Idle];
+    for turn in 0..100 {
+        doc.upsert_session(&session(&format!("c{}", turn % 5), "host", statuses[turn % 2])).unwrap();
+        let delta = doc.delta_bytes().unwrap().expect("incremental").len();
+        assert!(delta < 2_000, "a one-row change saved {delta} B (whole registry {whole} B)");
+        doc.mark_saved();
+    }
+    assert!(whole > 100_000, "fixture too small: {whole} B");
+}
+
+/// A full state replace changes every row: only a whole save records it.
+#[test]
+fn a_full_replace_needs_a_whole_save() {
+    let mut doc = RegistryDoc::new("host");
+    doc.upsert_chat(&chat("c1", "host")).unwrap();
+    doc.mark_saved();
+    let _ = doc.apply_state(5, true, 0, Vec::new());
+    assert!(doc.delta_bytes().unwrap().is_none());
+    doc.mark_saved();
+    doc.upsert_chat(&chat("c2", "host")).unwrap();
+    assert!(doc.delta_bytes().unwrap().is_some());
+}
+
+/// A delta that doesn't decode ends the chain: what follows contributes its
+/// pending writes (nothing else holds them), not its rows or cursor, and
+/// the load says the next save should be whole.
+#[test]
+fn a_broken_delta_chain_keeps_its_pending_writes() {
+    let mut doc = RegistryDoc::new("host");
+    let base = doc.to_bytes().unwrap();
+    doc.mark_saved();
+    doc.upsert_chat(&chat("kept", "host")).unwrap();
+    let first = doc.delta_bytes().unwrap().unwrap();
+    doc.mark_saved();
+    doc.upsert_chat(&chat("after", "host")).unwrap();
+    let after = doc.delta_bytes().unwrap().unwrap();
+    let (loaded, clean) =
+        RegistryDoc::from_saved(&base, &[first, b"not json".to_vec(), after], &[], "host").unwrap();
+    assert!(!clean);
+    let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }

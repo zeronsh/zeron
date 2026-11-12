@@ -42,10 +42,11 @@ pub fn watch_key(params: &Json) -> String {
 }
 
 /// How long before a session's pull request watch that ended is started
-/// again: 2 s, doubling to a minute while it keeps ending, and back to 2 s
-/// once it's heard (as the shipping app's sidebar retries, #1128). Without
-/// it, a watch that failed once (the engine restarting, the device away)
-/// left the chat's badge missing until its branch changed.
+/// again: 2 s, doubling to five minutes while it keeps ending, and back to
+/// 2 s once it's heard (as the shipping app's sidebar retries, #1128).
+/// Without it, a watch that failed once (the engine restarting) left the
+/// chat's badge missing until its branch changed. A watch that ended because
+/// its chat isn't there to watch ([`away`]) isn't retried on a timer at all.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Retry {
     next: std::time::Duration,
@@ -53,7 +54,7 @@ pub struct Retry {
 
 impl Retry {
     pub const FIRST: std::time::Duration = std::time::Duration::from_secs(2);
-    pub const MOST: std::time::Duration = std::time::Duration::from_secs(60);
+    pub const MOST: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
     pub fn new() -> Self {
         Self { next: Self::FIRST }
@@ -75,6 +76,220 @@ impl Retry {
 impl Default for Retry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Why a watch ended when asking again soon can't help: its folder isn't a
+/// checkout on the device it names (another device's chat, a removed
+/// worktree), or that device is offline. Each kept being asked every few
+/// seconds, for as long as its row showed: hundreds of failed watches a
+/// minute with a few such chats open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Away {
+    NotHere,
+    Offline,
+}
+
+/// What a watch's end (`why`, the engine's words) says of its chat.
+pub fn away(why: &str) -> Option<Away> {
+    if why.contains("not a known checkout") {
+        Some(Away::NotHere)
+    } else if why.contains("device is offline") {
+        Some(Away::Offline)
+    } else {
+        None
+    }
+}
+
+/// A watch set aside ([`away`]) until something it depends on changes: its
+/// chat's folder, branch or device (another watch, by its key), or its
+/// device coming back online.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parked {
+    pub why: Away,
+    pub device: String,
+    /// The session list has shown its device offline since: online again,
+    /// it's worth asking.
+    seen_offline: bool,
+}
+
+impl Parked {
+    pub fn new(why: Away, params: &Json) -> Self {
+        Self { why, device: params["targetDeviceId"].as_str().unwrap_or("").to_string(), seen_offline: false }
+    }
+
+    /// Its device as the session list has it now (`None`: not listed):
+    /// whether to try again. Only coming back online after being seen
+    /// offline counts, so a device the list calls online while the engine
+    /// can't reach it is asked once, not again and again.
+    pub fn wake(&mut self, online: Option<bool>) -> bool {
+        match online {
+            Some(false) => {
+                self.seen_offline = true;
+                false
+            }
+            Some(true) => self.seen_offline,
+            None => false,
+        }
+    }
+}
+
+/// What [`Watches::ended`] made of a watch's end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ended {
+    /// Not the watch that's wanted now (another key, let go): nothing.
+    Stale,
+    /// Set aside until its chat or device changes.
+    Parked,
+    /// Started again after this long, if still wanted then.
+    Wait(std::time::Duration),
+}
+
+/// One session's pull request watch, as the host keeps it: what it's of
+/// (`key`, `params`), the watch itself (`W`; none while it waits, having
+/// ended, or is set aside), and why it waits.
+pub struct Entry<W> {
+    pub key: String,
+    pub params: Json,
+    pub watch: Option<W>,
+    retry: Retry,
+    /// The plugin shows its session now. One it stopped showing is kept
+    /// while it's set aside or waiting, so its row scrolling back into view
+    /// doesn't start it over at once (each start was a failed watch more).
+    wanted: bool,
+    parked: Option<Parked>,
+    again_at: Option<std::time::Instant>,
+}
+
+impl<W> Entry<W> {
+    fn new(key: String, params: Json) -> Self {
+        Self { key, params, watch: None, retry: Retry::new(), wanted: true, parked: None, again_at: None }
+    }
+
+    fn ready(&self) -> bool {
+        self.wanted && self.watch.is_none() && self.parked.is_none()
+    }
+}
+
+/// A plugin's pull request watches, by session: which to start, when to
+/// start one that ended again, and which to set aside. The host does the
+/// starting (`W` is its watch) and tells each end here.
+pub struct Watches<W> {
+    entries: std::collections::HashMap<String, Entry<W>>,
+}
+
+impl<W> Default for Watches<W> {
+    fn default() -> Self {
+        Self { entries: Default::default() }
+    }
+}
+
+/// A watch to start: its session, key and params.
+pub type Start = (String, String, Json);
+
+impl<W> Watches<W> {
+    pub fn get(&self, session: &str) -> Option<&Entry<W>> {
+        self.entries.get(session)
+    }
+
+    /// The sessions the plugin shows now, each with its watch's params:
+    /// those to start now. One no longer shown stops; its wait or its being
+    /// set aside is kept (at most `keep_most` entries in all).
+    pub fn want(&mut self, wanted: &[(String, Json)], now: std::time::Instant, keep_most: usize) -> Vec<Start> {
+        let shown: std::collections::HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
+        for (id, w) in self.entries.iter_mut() {
+            w.wanted = shown.contains(id.as_str());
+            if !w.wanted {
+                w.watch = None;
+            }
+        }
+        self.entries.retain(|_, w| w.wanted || w.parked.is_some() || w.again_at.is_some());
+        if self.entries.len() > keep_most {
+            self.entries.retain(|_, w| w.wanted);
+        }
+        let mut start = Vec::new();
+        for (id, params) in wanted {
+            let key = watch_key(params);
+            match self.entries.get_mut(id) {
+                // Watched, set aside, or waiting with its start still to
+                // come: as it is. Its wait ran out while it wasn't shown:
+                // started now.
+                Some(w) if w.key == key => {
+                    if w.ready() && !w.again_at.is_some_and(|at| at > now) {
+                        w.again_at = None;
+                        start.push((id.clone(), key, params.clone()));
+                    }
+                }
+                _ => {
+                    self.entries.insert(id.clone(), Entry::new(key.clone(), params.clone()));
+                    start.push((id.clone(), key, params.clone()));
+                }
+            }
+        }
+        start
+    }
+
+    /// `session`'s watch of `key` started.
+    pub fn started(&mut self, session: &str, key: &str, watch: W) {
+        if let Some(w) = self.entries.get_mut(session).filter(|w| w.key == key) {
+            w.again_at = None;
+            w.watch = Some(watch);
+        }
+    }
+
+    /// `session`'s watch heard: the next end waits the least again.
+    pub fn heard(&mut self, session: &str) -> bool {
+        self.entries.get_mut(session).map(|w| w.retry.heard()).is_some()
+    }
+
+    /// `session`'s watch of `key` ended (`why`, the engine's words).
+    pub fn ended(&mut self, session: &str, key: &str, why: &str, now: std::time::Instant) -> Ended {
+        let Some(w) = self.entries.get_mut(session).filter(|w| w.key == key) else {
+            return Ended::Stale;
+        };
+        w.watch = None;
+        if let Some(away) = away(why) {
+            w.parked = Some(Parked::new(away, &w.params));
+            w.again_at = None;
+            return Ended::Parked;
+        }
+        let wait = w.retry.ended();
+        w.again_at = Some(now + wait);
+        Ended::Wait(wait)
+    }
+
+    /// `session`'s wait for `key` is over: its params, to start it again,
+    /// if it's still shown as it was and neither watched nor set aside.
+    pub fn due(&self, session: &str, key: &str) -> Option<Json> {
+        self.entries.get(session).filter(|w| w.key == key && w.ready()).map(|w| w.params.clone())
+    }
+
+    /// Whether any watch is set aside (nothing to wake otherwise).
+    pub fn any_parked(&self) -> bool {
+        self.entries.values().any(|w| w.parked.is_some())
+    }
+
+    /// The session list moved: each set-aside watch that's shown, whose
+    /// chat changed (`params`: its watch's params now) or whose device came
+    /// back online (`online`), to start again.
+    pub fn wake(&mut self, params: impl Fn(&str) -> Option<Json>, online: impl Fn(&str) -> Option<bool>) -> Vec<Start> {
+        let mut start = Vec::new();
+        for (session, w) in self.entries.iter_mut() {
+            if !w.wanted {
+                continue;
+            }
+            let Some(parked) = w.parked.as_mut() else { continue };
+            match params(session) {
+                Some(now) if watch_key(&now) != w.key => {
+                    // Its chat moved: a watch of where it is now.
+                    *w = Entry::new(watch_key(&now), now);
+                }
+                Some(_) if parked.wake(online(&parked.device)) => w.parked = None,
+                _ => continue,
+            }
+            start.push((session.clone(), w.key.clone(), w.params.clone()));
+        }
+        start
     }
 }
 
@@ -260,11 +475,214 @@ mod tests {
     fn a_watch_that_keeps_ending_waits_longer_each_time_and_heard_starts_over() {
         use std::time::Duration;
         let mut retry = Retry::new();
-        let waits: Vec<u64> = (0..7).map(|_| retry.ended().as_secs()).collect();
-        assert_eq!(waits, vec![2, 4, 8, 16, 32, 60, 60]);
+        let waits: Vec<u64> = (0..10).map(|_| retry.ended().as_secs()).collect();
+        assert_eq!(waits, vec![2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
         retry.heard();
         assert_eq!(retry.ended(), Duration::from_secs(2));
         assert_eq!(retry.ended(), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_chat_that_isn_t_here_or_whose_device_is_offline_is_set_aside() {
+        // (The words the app log showed, Nov 9.)
+        assert_eq!(away("bad params: cwd is not a known checkout on this device"), Some(Away::NotHere));
+        assert_eq!(away("transport: peer cloud-3f2a: device is offline (no recent presence)"), Some(Away::Offline));
+        for transient in ["closed", "no engine", "transport: peer mac: connect timed out", "transport: peer mac: unreachable (backing off after 3 failed dials; retrying in ~8s)"] {
+            assert_eq!(away(transient), None, "{transient}");
+        }
+    }
+
+    #[test]
+    fn a_set_aside_watch_wakes_only_when_its_device_comes_back() {
+        let params = json!({ "cwd": "/w", "targetDeviceId": "box" });
+        let mut parked = Parked::new(Away::Offline, &params);
+        assert_eq!(parked.device, "box");
+        // The list still calls it online (its last beat is recent): no
+        // asking again on every change of the list.
+        for _ in 0..50 {
+            assert!(!parked.wake(Some(true)));
+        }
+        assert!(!parked.wake(None), "not listed: nothing to go by");
+        assert!(!parked.wake(Some(false)));
+        assert!(!parked.wake(Some(false)));
+        assert!(parked.wake(Some(true)), "back online");
+        // A chat whose folder isn't on this device: this device is always
+        // online, so only a change of its chat wakes it.
+        let mut here = Parked::new(Away::NotHere, &json!({ "cwd": "/gone", "targetDeviceId": "mac" }));
+        assert!((0..50).all(|_| !here.wake(Some(true))));
+    }
+
+    fn shown(ids: &[(&str, &str, &str)]) -> Vec<(String, Json)> {
+        ids.iter()
+            .map(|(id, cwd, device)| (id.to_string(), watch_params(&json!({ "cwd": cwd, "branch": "fix", "device": device })).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_chat_that_isn_t_here_is_asked_about_once_until_it_changes() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut w: Watches<u32> = Watches::default();
+        let list = shown(&[("a", "/elsewhere", "mac")]);
+        let start = w.want(&list, t0, 512);
+        assert_eq!(start.len(), 1);
+        let (session, key, _) = start[0].clone();
+        w.started(&session, &key, 1);
+        assert_eq!(w.ended(&session, &key, "bad params: cwd is not a known checkout on this device", t0), Ended::Parked);
+        // Its row scrolling away and back, the list moving, its device
+        // (this one) online all along: nothing started.
+        for i in 0..100 {
+            let at = t0 + Duration::from_secs(i);
+            assert!(w.want(if i % 2 == 0 { &list } else { &[] }, at, 512).is_empty());
+            let same = list[0].1.clone();
+            assert!(w.wake(|_| Some(same.clone()), |_| Some(true)).is_empty());
+            assert_eq!(w.due(&session, &key), None);
+        }
+        // Shown, and its chat moved to another branch: a watch of that.
+        assert!(w.want(&list, t0, 512).is_empty());
+        let moved = watch_params(&json!({ "cwd": "/elsewhere", "branch": "next", "device": "mac" })).unwrap();
+        let start = w.wake(|_| Some(moved.clone()), |_| Some(true));
+        assert_eq!(start.len(), 1);
+        assert_eq!(start[0].1, watch_key(&moved));
+    }
+
+    #[test]
+    fn a_chat_on_an_offline_device_is_asked_about_again_once_it_s_back() {
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let mut w: Watches<u32> = Watches::default();
+        let list = shown(&[("a", "/w", "box")]);
+        let (session, key, params) = w.want(&list, t0, 512).remove(0);
+        w.started(&session, &key, 1);
+        assert_eq!(w.ended(&session, &key, "transport: peer box: device is offline (no recent presence)", t0), Ended::Parked);
+        let p = |_: &str| Some(params.clone());
+        assert!(w.wake(p, |_| Some(true)).is_empty(), "still called online by the list");
+        assert!(w.wake(p, |_| Some(false)).is_empty());
+        assert_eq!(w.wake(p, |_| Some(true)).len(), 1, "back");
+        w.started(&session, &key, 2);
+        assert!(w.get(&session).unwrap().watch.is_some());
+    }
+
+    #[test]
+    fn a_row_scrolled_away_and_back_keeps_its_wait() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut w: Watches<u32> = Watches::default();
+        let list = shown(&[("a", "/w", "mac")]);
+        let (session, key, _) = w.want(&list, t0, 512).remove(0);
+        for (n, wait) in [2, 4, 8].into_iter().enumerate() {
+            w.started(&session, &key, n as u32);
+            assert_eq!(w.ended(&session, &key, "closed", t0), Ended::Wait(Duration::from_secs(wait)));
+        }
+        // Away and back before its 8 s wait is up: not started (its timer
+        // will), and its wait didn't start over at 2 s.
+        assert!(w.want(&[], t0 + Duration::from_secs(1), 512).is_empty());
+        assert_eq!(w.due(&session, &key), None, "not shown: not started");
+        assert!(w.want(&list, t0 + Duration::from_secs(2), 512).is_empty());
+        assert!(w.due(&session, &key).is_some(), "shown again: its timer starts it");
+        // Its wait ran out while it wasn't shown: started as it shows.
+        w.want(&[], t0 + Duration::from_secs(3), 512);
+        assert_eq!(w.want(&list, t0 + Duration::from_secs(20), 512).len(), 1);
+        w.started(&session, &key, 9);
+        assert_eq!(w.ended(&session, &key, "closed", t0), Ended::Wait(Duration::from_secs(16)));
+    }
+
+    /// Ten chats (five whose watch fails: three not on this device, two on
+    /// an offline one), their rows in and out of view every 5 s, for 20
+    /// minutes: how many watches are started, under the old rules (a retry
+    /// on a 2 s → 60 s timer, started over each time a row comes back) and
+    /// these. `cargo test … watch_starts -- --nocapture` prints them.
+    #[test]
+    fn watch_starts_over_twenty_minutes_with_ten_chats() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let chats = [
+            ("a", "/w/a", "mac"), ("b", "/w/b", "mac"), ("c", "/w/c", "mac"), ("d", "/w/d", "mac"), ("e", "/w/e", "mac"),
+            ("f", "/gone/f", "mac"), ("g", "/gone/g", "mac"), ("h", "/other/h", "mac"),
+            ("i", "/w/i", "box"), ("j", "/w/j", "box"),
+        ];
+        let fails = |id: &str| match id {
+            "f" | "g" | "h" => Some("bad params: cwd is not a known checkout on this device"),
+            "i" | "j" => Some("transport: peer box: device is offline (no recent presence)"),
+            _ => None,
+        };
+        // Rows: all shown, then the last three scrolled away, by turns.
+        let shown_at = |tick: u64| -> Vec<(String, Json)> {
+            let n = if tick % 2 == 0 { 10 } else { 7 };
+            shown(&chats[..n])
+        };
+        let end = Duration::from_secs(20 * 60);
+
+        // These rules.
+        let mut w: Watches<()> = Watches::default();
+        let mut timers: Vec<(Duration, String, String)> = Vec::new();
+        let mut failed_starts = 0;
+        let mut start = |w: &mut Watches<()>, timers: &mut Vec<_>, at: Duration, (session, key, _): Start| {
+            w.started(&session, &key, ());
+            if let Some(why) = fails(&session) {
+                failed_starts += 1;
+                if let Ended::Wait(wait) = w.ended(&session, &key, why, t0 + at) {
+                    timers.push((at + wait, session, key));
+                }
+            }
+        };
+        let mut at = Duration::ZERO;
+        let mut tick = 0;
+        while at < end {
+            for s in w.want(&shown_at(tick), t0 + at, 512) {
+                start(&mut w, &mut timers, at, s);
+            }
+            let due: Vec<_> = timers.iter().filter(|(t, ..)| *t <= at).cloned().collect();
+            timers.retain(|(t, ..)| *t > at);
+            for (_, session, key) in due {
+                if let Some(params) = w.due(&session, &key) {
+                    start(&mut w, &mut timers, at, (session, key, params));
+                }
+            }
+            // (The list moves; box stays offline.)
+            let list = shown_at(tick);
+            let params = |id: &str| list.iter().find(|(s, _)| s == id).map(|(_, p)| p.clone());
+            for s in w.wake(params, |d| Some(d == "mac")) {
+                start(&mut w, &mut timers, at, s);
+            }
+            at += Duration::from_secs(5);
+            tick += 1;
+        }
+
+        // The old rules: a failed watch waits 2 s doubling to 60 s; a row
+        // that comes back is a new watch, its wait started over.
+        let mut old_failed = 0;
+        let mut waits: std::collections::HashMap<&str, (Duration, Duration)> = Default::default(); // id → (next start, next wait)
+        let mut at = Duration::ZERO;
+        let mut tick = 0;
+        let mut shown_before: Vec<&str> = Vec::new();
+        while at < end {
+            let n = if tick % 2 == 0 { 10 } else { 7 };
+            let now_shown: Vec<&str> = chats[..n].iter().map(|c| c.0).collect();
+            waits.retain(|id, _| now_shown.contains(id));
+            for id in &now_shown {
+                if fails(id).is_none() {
+                    continue;
+                }
+                let fresh = !shown_before.contains(id);
+                let entry = waits.entry(id).or_insert((at, Duration::from_secs(2)));
+                if fresh {
+                    *entry = (at, Duration::from_secs(2));
+                }
+                // (A 5 s step: every start due in it.)
+                while entry.0 < at + Duration::from_secs(5) {
+                    old_failed += 1;
+                    entry.0 += entry.1;
+                    entry.1 = (entry.1 * 2).min(Duration::from_secs(60));
+                }
+            }
+            shown_before = now_shown;
+            at += Duration::from_secs(5);
+            tick += 1;
+        }
+        println!("failed pull request watches started in 20 min, 10 chats (5 failing): before {old_failed} ({:.1}/min), after {failed_starts} ({:.2}/min)", old_failed as f64 / 20.0, failed_starts as f64 / 20.0);
+        assert_eq!(failed_starts, 5, "each failing chat asked about once");
+        assert!(old_failed > 100);
     }
 
     #[test]

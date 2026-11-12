@@ -42,6 +42,29 @@ pub struct Row {
 struct Room {
     rows: Vec<Row>,
     batches: HashMap<String, u64>,
+    /// The relay layer: the offline queue, and what a sleeping host left behind.
+    queue: Vec<Row>,
+    checkpoint: Option<Checkpoint>,
+    /// Every `hello` header this room heard, in order.
+    hellos: Vec<serde_json::Value>,
+    wakes: usize,
+}
+
+#[derive(Clone)]
+struct Checkpoint {
+    bytes: Vec<u8>,
+    frontier: Vec<u8>,
+    seq: u64,
+}
+
+/// A frame for other sockets in a room. Never stored.
+#[derive(Clone)]
+struct RelayOut {
+    chat: String,
+    from: String,
+    to: Option<String>,
+    skip: Vec<String>,
+    frame: Vec<u8>,
 }
 
 struct Shared {
@@ -53,10 +76,31 @@ struct Shared {
     /// Refuse chat2 joins (outage simulation).
     refuse_chat: Mutex<bool>,
     relays: Mutex<HashMap<String, RelayState>>,
+    /// Per device: client sockets opened on its device room (dials, host or not).
+    relay_dials: Mutex<HashMap<String, usize>>,
+    /// Every connection a client made to the edge: sockets and plain requests alike.
+    connections: std::sync::atomic::AtomicUsize,
     nudge_status: Mutex<u16>,
     nudge_status_by_chat: Mutex<HashMap<String, u16>>,
     nudges: Mutex<Vec<(String, usize)>>,
     host_hints: Mutex<HashMap<String, String>>,
+    /// `CHAT_RELAY_LAYER=1`: answer `relay: 1`, and serve the frames behind it.
+    relay_layer: Mutex<bool>,
+    /// Answer plain-HTTP chat pulls and checkpoint reads, which [`MockEdge::start`]
+    /// refuses so older tests stay on their sockets.
+    http: Mutex<bool>,
+    relay_tx: broadcast::Sender<RelayOut>,
+    /// Close every socket of this chat, as a dropped network does.
+    kick_tx: broadcast::Sender<String>,
+    /// Per chat: checkpoint downloads, row pulls (with their queries), and HTTP pushes.
+    downloads: Mutex<HashMap<String, usize>>,
+    probes: Mutex<HashMap<String, usize>>,
+    pulls: Mutex<HashMap<String, Vec<String>>>,
+    http_pushes: Mutex<HashMap<String, Vec<String>>>,
+    /// The attachment store: scripted answers, requests seen, objects.
+    store_statuses: Mutex<std::collections::VecDeque<u16>>,
+    store_puts: Mutex<Vec<String>>,
+    stored: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 enum Out {
@@ -90,10 +134,23 @@ impl MockEdge {
             sockets: Mutex::new(HashMap::new()),
             refuse_chat: Mutex::new(false),
             relays: Mutex::new(HashMap::new()),
+            relay_dials: Mutex::new(HashMap::new()),
+            connections: Default::default(),
             nudge_status: Mutex::new(200),
             nudge_status_by_chat: Mutex::new(HashMap::new()),
             nudges: Mutex::new(Vec::new()),
             host_hints: Mutex::new(HashMap::new()),
+            relay_layer: Mutex::new(false),
+            http: Mutex::new(false),
+            relay_tx: broadcast::channel(4096).0,
+            kick_tx: broadcast::channel(64).0,
+            downloads: Mutex::new(HashMap::new()),
+            probes: Mutex::new(HashMap::new()),
+            pulls: Mutex::new(HashMap::new()),
+            http_pushes: Mutex::new(HashMap::new()),
+            store_statuses: Mutex::new(std::collections::VecDeque::new()),
+            store_puts: Mutex::new(Vec::new()),
+            stored: Mutex::new(HashMap::new()),
         });
         let accept_shared = shared.clone();
         let task = tokio::spawn(async move {
@@ -104,7 +161,18 @@ impl MockEdge {
                 let shared = accept_shared.clone();
                 let registry_url = registry_url.clone();
                 tokio::spawn(async move {
+                    // Count what a client sends the edge. A `HEAD /` is the preview's local
+                    // port discovery finding this listener on localhost, not a dial.
+                    let mut peek = [0u8; 5];
+                    if let Ok(n) = stream.peek(&mut peek).await
+                        && &peek[..n] != b"HEAD "
+                    {
+                        shared.connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let mut first = [0u8; 4];
+                    if *shared.http.lock().unwrap() && serve_plain_get(&mut stream, &shared).await {
+                        return;
+                    }
                     if stream.peek(&mut first).await.is_ok() && first[0] == b'P' {
                         let mut request = Vec::new();
                         let mut buf = [0u8; 4096];
@@ -132,6 +200,29 @@ impl MockEdge {
                                 .unwrap_or(0);
                             if request.len() < end + 4 + length {
                                 continue;
+                            }
+                            let first_line = headers.lines().next().unwrap_or_default().to_owned();
+                            if first_line.contains("/attachments/") {
+                                let upload = first_line
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .and_then(|p| p.rsplit('/').next())
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                let scripted = shared.store_statuses.lock().unwrap().pop_front();
+                                let status = scripted.unwrap_or(200);
+                                shared.store_puts.lock().unwrap().push(upload.clone());
+                                if status == 200 {
+                                    shared.stored.lock().unwrap().insert(
+                                        upload,
+                                        request[end + 4..end + 4 + length].to_vec(),
+                                    );
+                                }
+                                let response = format!(
+                                    "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                                );
+                                let _ = stream.write_all(response.as_bytes()).await;
+                                return;
                             }
                             if headers
                                 .lines()
@@ -168,6 +259,14 @@ impl MockEdge {
                                     "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
                                 );
                                 let _ = stream.write_all(response.as_bytes()).await;
+                            } else if *shared.http.lock().unwrap()
+                                && let Some(reply) = http_push(
+                                    &headers,
+                                    &request[end + 4..end + 4 + length],
+                                    &shared,
+                                )
+                            {
+                                let _ = stream.write_all(&reply).await;
                             }
                             return;
                         }
@@ -218,6 +317,88 @@ impl MockEdge {
             shared,
             task,
         }
+    }
+
+    /// An edge with `CHAT_RELAY_LAYER=1`, answering HTTP as the real one does.
+    pub async fn start_relay() -> Self {
+        let edge = Self::start().await;
+        *edge.shared.relay_layer.lock().unwrap() = true;
+        *edge.shared.http.lock().unwrap() = true;
+        edge
+    }
+
+    /// Turn the edge flag on or off for rooms' next answers.
+    pub fn set_relay_layer(&self, on: bool) {
+        *self.shared.relay_layer.lock().unwrap() = on;
+    }
+
+    /// What a chat's host stored before it slept.
+    pub fn post_checkpoint(&self, chat: &str, bytes: Vec<u8>, frontier: Vec<u8>) {
+        let mut rooms = self.shared.rooms.lock().unwrap();
+        let room = rooms.entry(chat.to_owned()).or_default();
+        let seq = room.rows.len() as u64;
+        room.checkpoint = Some(Checkpoint { bytes, frontier, seq });
+    }
+
+    /// Drop every socket of this chat, as a network loss does. They may redial.
+    pub fn kick(&self, chat: &str) {
+        let _ = self.shared.kick_tx.send(chat.to_owned());
+    }
+
+    pub fn queue_len(&self, chat: &str) -> usize {
+        self.shared
+            .rooms
+            .lock()
+            .unwrap()
+            .get(chat)
+            .map_or(0, |r| r.queue.len())
+    }
+
+    pub fn hellos(&self, chat: &str) -> Vec<serde_json::Value> {
+        self.shared
+            .rooms
+            .lock()
+            .unwrap()
+            .get(chat)
+            .map(|r| r.hellos.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn checkpoint_downloads(&self, chat: &str) -> usize {
+        self.shared.downloads.lock().unwrap().get(chat).copied().unwrap_or(0)
+    }
+
+    /// Probes this room has answered.
+    pub fn probes(&self, chat: &str) -> usize {
+        self.shared.probes.lock().unwrap().get(chat).copied().unwrap_or(0)
+    }
+
+    /// The query string of every plain-HTTP row pull of this chat.
+    pub fn pulls(&self, chat: &str) -> Vec<String> {
+        self.shared.pulls.lock().unwrap().get(chat).cloned().unwrap_or_default()
+    }
+
+    /// The query string of every plain-HTTP push to this chat.
+    pub fn http_pushes(&self, chat: &str) -> Vec<String> {
+        self.shared.http_pushes.lock().unwrap().get(chat).cloned().unwrap_or_default()
+    }
+
+    /// Answers for the next attachment-store PUTs (then 200).
+    pub fn script_store(&self, statuses: &[u16]) {
+        self.shared
+            .store_statuses
+            .lock()
+            .unwrap()
+            .extend(statuses.iter().copied());
+    }
+
+    /// What the attachment store holds, by upload id.
+    pub fn stored(&self, upload_id: &str) -> Option<Vec<u8>> {
+        self.shared.stored.lock().unwrap().get(upload_id).cloned()
+    }
+
+    pub fn store_puts(&self) -> usize {
+        self.shared.store_puts.lock().unwrap().len()
     }
 
     pub fn nudge_status(&self, status: u16) {
@@ -301,6 +482,22 @@ impl MockEdge {
             .unwrap_or(0)
     }
 
+    /// Every connection the edge has accepted so far, of any kind.
+    pub fn connections(&self) -> usize {
+        self.shared.connections.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many times a client dialed `device`'s room, whether its host was there or not.
+    pub fn relay_client_dials(&self, device: &str) -> usize {
+        self.shared
+            .relay_dials
+            .lock()
+            .unwrap()
+            .get(device)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn relay_host_connected(&self, device: &str) -> bool {
         self.shared
             .relays
@@ -351,6 +548,152 @@ async fn proxy(client: Ws, upstream: &str) {
     }
 }
 
+/// `GET /chat2/{id}/rows` and `/checkpoint`. True: it was a plain GET, and it's done.
+async fn serve_plain_get(stream: &mut tokio::net::TcpStream, shared: &Shared) -> bool {
+    let mut peeked = [0u8; 2048];
+    let Ok(n) = stream.peek(&mut peeked).await else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&peeked[..n]).to_ascii_lowercase();
+    if !head.starts_with("get ") || head.contains("upgrade: websocket") {
+        return false;
+    }
+    let line = String::from_utf8_lossy(&peeked[..n]);
+    let path = line.split_whitespace().nth(1).unwrap_or_default().to_owned();
+    let (path, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let mut buf = [0u8; 4096];
+    let _ = stream.read(&mut buf).await;
+    let (status, body) = match parts.as_slice() {
+        ["chat2", chat, "checkpoint"] => {
+            let found = shared
+                .rooms
+                .lock()
+                .unwrap()
+                .get(*chat)
+                .and_then(|r| r.checkpoint.clone());
+            match found {
+                Some(checkpoint) => {
+                    *shared.downloads.lock().unwrap().entry(chat.to_string()).or_default() += 1;
+                    (200, checkpoint.bytes)
+                }
+                None => (404, Vec::new()),
+            }
+        }
+        ["chat2", chat, "rows"] => {
+            shared
+                .pulls
+                .lock()
+                .unwrap()
+                .entry(chat.to_string())
+                .or_default()
+                .push(query.to_owned());
+            let after = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("after="))
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let (state, rows, head_seq) = {
+                let rooms = shared.rooms.lock().unwrap();
+                let room = rooms.get(*chat);
+                let head_seq = room.map_or(0, |r| r.rows.len() as u64);
+                let rows: Vec<Row> = room
+                    .map(|r| r.rows.iter().filter(|row| row.seq > after).cloned().collect())
+                    .unwrap_or_default();
+                (state_frame(room, head_seq, false), rows, head_seq)
+            };
+            let mut frames = vec![state];
+            frames.extend(rows.iter().map(row_frame));
+            frames.push(chat_frames::encode(frame_type::ROWS_DONE, &json!({ "headSeq": head_seq }), &[]));
+            let mut body = Vec::new();
+            for frame in frames {
+                body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+                body.extend_from_slice(&frame);
+            }
+            (200, body)
+        }
+        _ => (404, Vec::new()),
+    };
+    let head = format!(
+        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes()).await;
+    let _ = stream.write_all(&body).await;
+    true
+}
+
+/// `POST /chat2/{id}/rows`: stored, as the real room stores it.
+fn http_push(headers: &str, body: &[u8], shared: &Shared) -> Option<Vec<u8>> {
+    let line = headers.lines().next()?;
+    let target = line.split_whitespace().nth(1)?;
+    let (path, query) = target.split_once('?')?;
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let ["chat2", chat, "rows"] = parts.as_slice() else {
+        return None;
+    };
+    shared
+        .http_pushes
+        .lock()
+        .unwrap()
+        .entry(chat.to_string())
+        .or_default()
+        .push(query.to_owned());
+    let field = |name: &str| {
+        query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix(name))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let batch = field("batchId=");
+    let device = field("device=");
+    let seq = {
+        let mut rooms = shared.rooms.lock().unwrap();
+        let room = rooms.entry(chat.to_string()).or_default();
+        match room.batches.get(&batch) {
+            Some(seq) => *seq,
+            None => {
+                let seq = room.rows.len() as u64 + 1;
+                let row = Row { seq, device, batch_id: batch.clone(), bytes: body.to_vec() };
+                room.rows.push(row.clone());
+                room.batches.insert(batch.clone(), seq);
+                let _ = shared.tx.send((chat.to_string(), row));
+                seq
+            }
+        }
+    };
+    let reply = json!({ "batchId": batch, "seq": seq, "dup": false }).to_string();
+    Some(
+        format!(
+            "HTTP/1.1 200 Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        )
+        .into_bytes(),
+    )
+}
+
+fn state_frame(room: Option<&Room>, head_seq: u64, relay: bool) -> Vec<u8> {
+    let checkpoint = room.and_then(|r| r.checkpoint.as_ref());
+    let mut state = json!({
+        "headSeq": head_seq,
+        "seqFloor": checkpoint.map_or(0, |c| c.seq),
+        "checkpointSeq": checkpoint.map_or(0, |c| c.seq),
+        "checkpointSize": checkpoint.map_or(0, |c| c.bytes.len()),
+        "rowCount": head_seq,
+        "rowBytes": 0,
+    });
+    if relay {
+        state["relay"] = json!(1);
+        state["legacyPeers"] = json!(0);
+    }
+    chat_frames::encode(
+        frame_type::STATE,
+        &state,
+        checkpoint.map_or(&[][..], |c| &c.frontier),
+    )
+}
+
 fn row_frame(row: &Row) -> Vec<u8> {
     chat_frames::encode(
         frame_type::ROW,
@@ -368,8 +711,12 @@ async fn serve_chat(ws: Ws, chat: String, shared: Arc<Shared>) {
         .or_default() += 1;
     let (mut tx, mut rx) = ws.split();
     let mut broadcasts = shared.tx.subscribe();
+    let mut relayed = shared.relay_tx.subscribe();
+    let mut kicks = shared.kick_tx.subscribe();
     let mut device = String::new();
     let mut joined = false;
+    // This socket's hello asked for the layer, and the room has it.
+    let mut relay = false;
     loop {
         tokio::select! {
             message = rx.next() => {
@@ -390,15 +737,17 @@ async fn serve_chat(ws: Ws, chat: String, shared: Arc<Shared>) {
                 match frame.kind {
                     frame_type::HELLO => {
                         device = frame.header["device"].as_str().unwrap_or_default().to_owned();
+                        relay = *shared.relay_layer.lock().unwrap() && frame.header["relay"] == 1;
                         let head_seq = head(&shared);
-                        let state = chat_frames::encode(
-                            frame_type::STATE,
-                            &json!({
-                                "headSeq": head_seq, "seqFloor": 0, "checkpointSeq": 0,
-                                "checkpointSize": 0, "rowCount": head_seq, "rowBytes": 0,
-                            }),
-                            &[],
-                        );
+                        let state = {
+                            let mut rooms = shared.rooms.lock().unwrap();
+                            let room = rooms.entry(chat.clone()).or_default();
+                            room.hellos.push(frame.header.clone());
+                            if frame.header["gen"] == 3 {
+                                room.wakes += 1;
+                            }
+                            state_frame(Some(room), head_seq, relay)
+                        };
                         if tx.send(Message::Binary(state)).await.is_err() {
                             break;
                         }
@@ -467,12 +816,121 @@ async fn serve_chat(ws: Ws, chat: String, shared: Arc<Shared>) {
                         }
                     }
                     frame_type::PROBE => {
+                        *shared.probes.lock().unwrap().entry(chat.clone()).or_default() += 1;
                         let ok = chat_frames::encode(frame_type::PROBE_OK, &json!({ "headSeq": head(&shared) }), &[]);
                         if tx.send(Message::Binary(ok)).await.is_err() {
                             break;
                         }
                     }
+                    frame_type::RELAY | frame_type::ANNOUNCE | frame_type::SYNC_REQ | frame_type::SYNC_DATA if relay => {
+                        let mut header = frame.header.clone();
+                        let to = header.get("to").and_then(|v| v.as_str()).map(str::to_owned);
+                        let skip = header
+                            .get("skip")
+                            .and_then(|v| v.as_array())
+                            .map(|list| list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default();
+                        if let Some(map) = header.as_object_mut() {
+                            map.remove("to");
+                            map.remove("skip");
+                            map.insert("device".into(), json!(device));
+                        }
+                        let _ = shared.relay_tx.send(RelayOut {
+                            chat: chat.clone(),
+                            from: device.clone(),
+                            to,
+                            skip,
+                            frame: chat_frames::encode(frame.kind, &header, &frame.payload),
+                        });
+                    }
+                    frame_type::ENQUEUE if relay => {
+                        let batch_id = frame.header["batchId"].as_str().unwrap_or_default().to_owned();
+                        let dup = {
+                            let mut rooms = shared.rooms.lock().unwrap();
+                            let room = rooms.entry(chat.clone()).or_default();
+                            let dup = room.queue.iter().any(|row| row.batch_id == batch_id);
+                            if !dup {
+                                room.queue.push(Row {
+                                    seq: 0,
+                                    device: device.clone(),
+                                    batch_id: batch_id.clone(),
+                                    bytes: frame.payload.clone(),
+                                });
+                            }
+                            dup
+                        };
+                        if !dup {
+                            let _ = shared.relay_tx.send(RelayOut {
+                                chat: chat.clone(),
+                                from: device.clone(),
+                                to: None,
+                                skip: Vec::new(),
+                                frame: chat_frames::encode(
+                                    frame_type::RELAY,
+                                    &json!({ "device": device, "queued": true, "batchId": batch_id }),
+                                    &frame.payload,
+                                ),
+                            });
+                        }
+                        let ack = chat_frames::encode(frame_type::QUEUED, &json!({ "batchId": batch_id, "dup": dup }), &[]);
+                        if tx.send(Message::Binary(ack)).await.is_err() {
+                            break;
+                        }
+                    }
+                    frame_type::QUEUE_REQ if relay => {
+                        let rows: Vec<Row> = shared
+                            .rooms
+                            .lock()
+                            .unwrap()
+                            .get(&chat)
+                            .map(|r| r.queue.clone())
+                            .unwrap_or_default();
+                        let count = rows.len();
+                        let mut failed = false;
+                        for row in rows {
+                            let out = chat_frames::encode(
+                                frame_type::RELAY,
+                                &json!({ "device": row.device, "queued": true, "batchId": row.batch_id }),
+                                &row.bytes,
+                            );
+                            if tx.send(Message::Binary(out)).await.is_err() {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        let done = chat_frames::encode(frame_type::QUEUE_DONE, &json!({ "count": count }), &[]);
+                        if failed || tx.send(Message::Binary(done)).await.is_err() {
+                            break;
+                        }
+                    }
+                    frame_type::DELIVERED if relay => {
+                        let ids: Vec<String> = frame.header["batchIds"]
+                            .as_array()
+                            .map(|list| list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default();
+                        if let Some(room) = shared.rooms.lock().unwrap().get_mut(&chat) {
+                            room.queue.retain(|row| !ids.contains(&row.batch_id));
+                        }
+                    }
                     _ => {}
+                }
+            }
+            out = relayed.recv() => {
+                let Ok(out) = out else { continue };
+                if !relay || out.chat != chat || out.from == device || out.skip.contains(&device) {
+                    continue;
+                }
+                if out.to.as_ref().is_some_and(|to| *to != device) {
+                    continue;
+                }
+                if tx.send(Message::Binary(out.frame)).await.is_err() {
+                    break;
+                }
+            }
+            kicked = kicks.recv() => {
+                if kicked.is_ok_and(|kicked| kicked == chat) {
+                    let _ = tx.close().await;
+                    break;
                 }
             }
             broadcast = broadcasts.recv() => {
@@ -519,6 +977,7 @@ async fn serve_relay(ws: Ws, device: String, query: HashMap<String, String>, sha
             st.host = Some(tx.clone());
         } else {
             st.clients.insert(conn_id.clone(), tx.clone());
+            *shared.relay_dials.lock().unwrap().entry(device.clone()).or_default() += 1;
         }
     }
     let writer = tokio::spawn(async move {

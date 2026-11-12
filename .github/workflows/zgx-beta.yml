@@ -123,6 +123,10 @@ jobs:
       - name: the engine, from this commit
         env:
           ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
+          # Luau without its asserts (a fifth of script time). Here, not in a
+          # root .cargo/config.toml, so test builds keep them; the package
+          # refuses an engine that has them.
+          LUAU_CXXFLAGS: -DNDEBUG
         run: cargo build --release --locked -p zeron --bin zeron-engine
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
@@ -218,6 +222,10 @@ jobs:
       - name: the engine, from this commit
         env:
           ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
+          # Luau without its asserts (a fifth of script time). Here, not in a
+          # root .cargo/config.toml, so test builds keep them; the package
+          # refuses an engine that has them.
+          LUAU_CXXFLAGS: -DNDEBUG
         run: cargo build --release --locked -p zeron --bin zeron-engine
       - name: package
         env:
@@ -278,6 +286,10 @@ jobs:
       - name: the engine, from this commit
         env:
           ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
+          # Luau without its asserts (a fifth of script time). Here, not in a
+          # root .cargo/config.toml, so test builds keep them; the package
+          # refuses an engine that has them.
+          LUAU_CXXFLAGS: -DNDEBUG
         run: |
           cargo build --release --locked -p zeron
           if ($LASTEXITCODE -ne 0) { throw 'the engine failed to build' }

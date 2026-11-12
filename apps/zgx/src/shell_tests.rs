@@ -397,8 +397,7 @@ fn a_session_is_renamed_in_its_row() {
     assert!(app.find(field).is_none(), "Esc closes it");
     assert!(!calls(&app).contains("Nope"), "Esc keeps the old name");
     // Its menu's Rename: the same field, in the row.
-    app.click("#sidebar >> role:button \"Tidy the tests\"");
-    app.frames(10);
+    crate::focus_tests::keys_on_row(&mut app, "#sidebar >> role:button \"Tidy the tests\"");
     app.keys("shift+F10");
     assert!(app.wait_until(|app| app.find("role:menuitem \"Rename\"").is_some()));
     app.frames(30);
@@ -428,8 +427,7 @@ fn a_sessions_copy_menu_copies_and_says_so() {
     let mut app = TestApp::with_desktop(|runtime| ScriptHost::new(runtime, path.clone()));
     app.ui.scene.borrow_mut().resize(W, H);
     app.frames(30);
-    app.click("#sidebar >> role:button \"Write the docs\"");
-    app.frames(10);
+    crate::focus_tests::keys_on_row(&mut app, "#sidebar >> role:button \"Write the docs\"");
     app.keys("shift+F10");
     assert!(app.wait_until(|app| app.find("role:menuitem \"Copy\"").is_some()));
     app.frames(20);
@@ -446,8 +444,7 @@ fn a_sessions_copy_menu_copies_and_says_so() {
     let mut app = TestApp::with_desktop(|runtime| ScriptHost::new(runtime, path.clone()));
     app.ui.scene.borrow_mut().resize(W, H);
     app.frames(30);
-    app.click("#sidebar >> role:button \"Tidy the tests\"");
-    app.frames(10);
+    crate::focus_tests::keys_on_row(&mut app, "#sidebar >> role:button \"Tidy the tests\"");
     app.keys("shift+F10");
     assert!(app.wait_until(|app| app.find("role:menuitem \"Copy\"").is_some()));
     app.frames(20);
@@ -477,8 +474,7 @@ fn deleting_a_session_asks_first() {
         })
     };
     let ask = |app: &mut TestApp| {
-        app.click("#sidebar >> role:button \"Tidy the tests\"");
-        app.frames(10);
+        crate::focus_tests::keys_on_row(app, "#sidebar >> role:button \"Tidy the tests\"");
         app.keys("shift+F10");
         assert!(app.wait_until(|app| app.find("role:menuitem \"Delete…\"").is_some()));
         app.frames(20);

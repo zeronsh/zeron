@@ -64,6 +64,27 @@ test("table: two columns of prose fit the reply, wrapped, rather than running ou
 	expect(words(app, 2, 1, 2).w > whole * 0.3).to_be(true)
 end)
 
+test("table: a 30-character label beside prose fits the reply at its widths, wrapped", function()
+	for _, width in { 480, 620, 760 } do
+		local app = only("running", width)
+		fits(app, 2)
+		-- The prose wrapped inside the view, not past it.
+		local view, prose = box(app, ".md-table"), words(app, 2, 1, 2)
+		expect(prose.x + prose.w <= view.x + view.w).to_be(true)
+		expect(prose.h > words(app, 2, 0, 2).h).to_be(true)
+	end
+end)
+
+test("table: the same table scrolls, rather than clips, once its columns' least widths can't fit", function()
+	local app = only("running", 280)
+	-- (Its prose runs past the view: the header's words end inside it.)
+	local view, prose = box(app, ".md-table"), words(app, 2, 1, 2)
+	expect(prose.x + prose.w + 16 > view.x + view.w).to_be(true)
+	app:wheel(".md-table", { dy = 40, mouse = true, shift = true })
+	expect(across(app)).to_be(40)
+	expect(down(app)).to_be(0)
+end)
+
 test("table: short columns keep to one line and the prose beside them takes the rest", function()
 	local app = only("mixed")
 	fits(app, 4)
@@ -252,4 +273,88 @@ test("table: words the source sets on their right sit there", function()
 	near(head.x + head.w, free.x + free.w)
 	near(head.x + head.w, team.x + team.w)
 	expect(free.x > team.x).to_be(true)
+end)
+
+-- Every text box in the table: its right edge.
+local function ends(app: any): { number }
+	local out = {}
+	for line in app:tree(".md-table"):gmatch("[^\n]+") do
+		local x, w = line:match('text ".-" ([%-%d.]+),[%-%d.]+ ([%d.]+)x[%d.]+')
+		if x then
+			table.insert(out, tonumber(x) :: number + tonumber(w) :: number)
+		end
+	end
+	return out
+end
+local function furthest(app: any): number
+	local most = -math.huge
+	for _, e in ends(app) do
+		most = math.max(most, e)
+	end
+	return most
+end
+
+-- Each table, at a narrow and a usual reply width: every word in it is one
+-- the frame shows or can be scrolled to. Scrolled to its end, no text runs
+-- past the frame's inside; one that ran past it at rest means the table
+-- has room to scroll. (Nov 10, beta.4: a 38-character label beside prose
+-- laid its grid out wider than the box the scroll measures, so the prose
+-- was cut at the frame with nothing to scroll: `status`.)
+test("table: every word is in view or can be scrolled to, at any width", function()
+	for _, name in { "status", "running", "two", "mixed", "many", "code", "said", "loose" } do
+		for _, width in { 280, 360, 400, 480, 560, 620, 680, 760, 860 } do
+			local app = mount("table_fixture.luau")
+			-- (Tall enough that the wheel, aimed at the table's middle, lands
+			-- in the window.)
+			app:resize(960, 2400)
+			app:command(`only_{name}`)
+			app:command(`width_{width}`)
+			app:frames(10)
+			expect(app:error()).to_be_nil()
+			local view = box(app, ".md-table")
+			local inside = view.x + view.w - 1
+			local rest = furthest(app)
+			for _ = 1, 60 do
+				app:wheel(".md-table", { dy = 40, mouse = true, shift = true })
+			end
+			app:frames(4)
+			local at = `{name} at {width}`
+			local now = furthest(app)
+			expect(`{at}: ends {now}`).to_be(`{at}: ends {math.min(now, inside + 1)}`)
+			-- (Past the frame at rest: the table had room to move, as far as
+			-- its words ran past it.)
+			if rest > inside + 1 then
+				expect(`{at}: moved {now < rest}`).to_be(`{at}: moved true`)
+			end
+		end
+	end
+end)
+
+test("table: the status table fits a usual reply, its prose wrapped beside its labels", function()
+	local app = only("status")
+	fits(app, 2)
+	local view = box(app, ".md-table")
+	for _, e in ends(app) do
+		expect(e <= view.x + view.w - 1).to_be(true)
+	end
+	-- The prose wraps beside its labels.
+	expect(words(app, 2, 5, 2).h > words(app, 2, 0, 2).h).to_be(true)
+end)
+
+test("table: in a chat, a reply's status table keeps its prose inside its frame", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(960, 800)
+	app:frames(20)
+	app:command("status_table")
+	app:command("go_s7")
+	app:frames(30)
+	app:wait("#never-shown", { timeout_ms = 250 })
+	app:frames(10)
+	expect(app:error()).to_be_nil()
+	local view = box(app, ".md-table")
+	local list = ends(app)
+	expect(#list).to_be(12)
+	for _, e in list do
+		expect(e <= view.x + view.w - 1).to_be(true)
+	end
 end)

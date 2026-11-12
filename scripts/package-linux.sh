@@ -14,6 +14,8 @@
 # and the `zeron-engine` it's given, built from the same commit:
 #   BETA_VERSION=<workspace version>-beta.<n>
 #   ZGX_BETA_ENGINE=<a zeron-engine binary, or a release's linux tarball>
+# The engine must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below), which
+# a stable release from before that isn't.
 
 set -euo pipefail
 
@@ -50,12 +52,20 @@ if [[ -n "$BETA_VERSION" ]]; then
   # argument.)
   LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
     { echo "the stable engine predates the shared command line" >&2; exit 1; }
-  # A workspace of its own (its own lock, patches).
-  ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release --locked --features beta \
-    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target"
+  # A workspace of its own (its own lock, patches). Built from its folder:
+  # cargo reads .cargo/config.toml by where it runs, not by the manifest, and
+  # the build's flags are there (Luau's NDEBUG), as scripts/package-zgx-beta.sh.
+  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$BETA_VERSION" cargo build --release --locked --features beta \
+    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
   BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
   [[ "$("$BIN" --version)" == "zeron $BETA_VERSION" ]] ||
     { echo "$BIN isn't the $BETA_VERSION beta (it says '$("$BIN" --version)')" >&2; exit 1; }
+  # Luau without its asserts (a fifth of script time): zgx-script compiles its
+  # warning about them in only when they're on (cfg luau_asserts).
+  if LC_ALL=C grep -aq "Luau was built with its asserts" "$BIN"; then
+    echo "$BIN was built with Luau's asserts: LUAU_CXXFLAGS=-DNDEBUG (apps/zgx/.cargo/config.toml) didn't reach it" >&2
+    exit 1
+  fi
   # Production's only: neither binary may carry staging's edge or sign-in.
   STAGING_MARKS='staging\.zeron\.sh|zeron-edge-staging|client_01KWD0E9SYPV2WE4QN9TP9DP0W'
   for bin in "$BIN" "$ENGINE_BIN"; do
@@ -66,7 +76,14 @@ if [[ -n "$BETA_VERSION" ]]; then
     fi
   done
 elif [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p zeron
+  # Fat LTO in one codegen unit: `zeron` goes from 205 to 172 MB (16% less), with
+  # the same start-up (median engine boot 387 ms both ways, n=20 each), at about
+  # 60% more build time. A Cloud machine copies the binary back in on every wake,
+  # so its size is wake time. Only here: macOS and Windows keep their build times.
+  # The release was already stripped, with no debug info to split. Luau (the
+  # engine's visuals and plugin services) without its asserts.
+  CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 LUAU_CXXFLAGS=-DNDEBUG \
+    cargo build --release -p zeron
   BIN="$ROOT/target/release/zeron"
 else
   cargo build -p zeron
@@ -75,6 +92,13 @@ fi
 # The background engine the app starts: sessions keep running with the app
 # closed, in a process of its own.
 ENGINE_BIN="${ENGINE_BIN:-$(dirname "$BIN")/zeron-engine}"
+# The engine's Luau (visuals, plugin services) without its asserts: with them,
+# each LUAU_ASSERT keeps its Luau source file's path (Luau/Common.h's
+# __FILE__), VM/src/l*.cpp; with NDEBUG, none. (A debug package has them.)
+if [[ "$PROFILE" == "release" ]] && LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$ENGINE_BIN"; then
+  echo "$ENGINE_BIN was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG" >&2
+  exit 1
+fi
 
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
@@ -93,6 +117,10 @@ if [[ -n "$BETA_VERSION" ]]; then
     "$ROOT/apps/zgx/ui/" "$STAGE/ui/"
   rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/plugins-builtin/" "$STAGE/plugins-builtin/"
+  # Each ships the canonical SDK, as scripts/package-zgx-beta.sh.
+  for dir in "$STAGE/plugins-builtin/"*/; do
+    cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
+  done
   cp "$ROOT/apps/zgx/fonts/"*-OFL.txt "$STAGE/licenses/fonts/"
   rm -rf "$OUT_DIR/.stable"
 fi

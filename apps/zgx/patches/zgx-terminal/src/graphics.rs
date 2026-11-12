@@ -480,8 +480,17 @@ fn append(loading: &mut Loading, payload: &[u8], more: bool) -> Result<(), &'sta
         engine::GeneralPurposeConfig::new()
             .with_decode_padding_mode(engine::DecodePaddingMode::Indifferent),
     );
-    let mut text = std::mem::take(&mut loading.tail);
-    text.extend(payload.iter().filter(|b| !b.is_ascii_whitespace()));
+    // Mostly a chunk is whole groups of four and nothing else, decoded
+    // where it is; else its characters join what was left over.
+    let joined;
+    let text: &[u8] = if loading.tail.is_empty() && !payload.iter().any(u8::is_ascii_whitespace) {
+        payload
+    } else {
+        let mut text = std::mem::take(&mut loading.tail);
+        text.extend(payload.iter().filter(|b| !b.is_ascii_whitespace()));
+        joined = text;
+        &joined
+    };
     // Padded, a chunk ends its encoding; else what doesn't fill a group of
     // four waits for the next.
     let whole = if !more || text.last() == Some(&b'=') {
@@ -495,8 +504,7 @@ fn append(loading: &mut Loading, payload: &[u8], more: bool) -> Result<(), &'sta
     BASE64
         .decode_vec(&text[..whole], &mut loading.data)
         .map_err(|_| "EINVAL:bad base64")?;
-    text.drain(..whole);
-    loading.tail = text;
+    loading.tail = text[whole..].to_vec();
     Ok(())
 }
 
@@ -848,6 +856,28 @@ mod tests {
         );
         // Placed by its number.
         assert_eq!(fx.run("a=p,I=4", &[]), format!("\x1b_Gi={id},I=4;OK\x1b\\"));
+        // Wrapped, as some programs wrap their base64, in chunks.
+        let wrapped: Vec<u8> = text
+            .as_bytes()
+            .chunks(6)
+            .flat_map(|line| line.iter().copied().chain(*b"\r\n"))
+            .collect();
+        let (a, b) = wrapped.split_at(9);
+        let mut body = b"a=t,f=100,i=9,m=1;".to_vec();
+        body.extend_from_slice(a);
+        assert_eq!(
+            fx.graphics
+                .command(&body, &mut fx.term, (10, 20), &fx.images),
+            None
+        );
+        let mut body = b"m=0;".to_vec();
+        body.extend_from_slice(b);
+        fx.graphics
+            .command(&body, &mut fx.term, (10, 20), &fx.images);
+        assert_eq!(
+            fx.images.lock().unwrap()[&9].pixels(),
+            [1, 2, 3, 255, 4, 5, 6, 255]
+        );
     }
 
     /// A program asking what's supported is told, and nothing is kept: the

@@ -35,6 +35,28 @@ pub const NUDGE_KIND: &str = "nudge";
 /// The RPC stream over the relay: both `s` (stream id) and `k` (kind) are `"rpc"`.
 pub const RPC_KIND: &str = "rpc";
 
+/// A client that reassembles [`RPC_CHUNK_KIND`] says so in its RPC frames' stream
+/// id. The relay passes `s` through and older hosts don't read it, so neither
+/// needs to change for a new client; the frames stay `k: "rpc"`.
+const RPC_CHUNKS_STREAM: &str = "rpc.chunks";
+/// One piece of a large RPC reply. `s` is [`CHUNK_MORE`] or [`CHUNK_LAST`]. A
+/// connection's replies go out one at a time, so pieces never interleave.
+const RPC_CHUNK_KIND: &str = "rpc-chunk";
+const CHUNK_MORE: &str = "more";
+const CHUNK_LAST: &str = "last";
+/// A reply larger than this travels in pieces this big. A long chat's
+/// transcript is one reply, and the relay is no place for one message: past
+/// 32 MiB (measured on workerd) the runtime closes the HOST's socket, which
+/// takes down every client of the device, and Cloudflare documents far lower
+/// message limits elsewhere. Half a MiB stays under all of them.
+const RPC_CHUNK_BYTES: usize = 512 << 10;
+/// The most a client that can't reassemble will take in one frame: tungstenite's
+/// default cap, in builds before [`RPC_CHUNKS_STREAM`]. Past it the frame ends
+/// that client's whole link, so it gets an error for the one request instead.
+const MAX_UNCHUNKED_REPLY_BYTES: usize = (16 << 20) - 4096;
+/// Largest reply a client reassembles. The cap only stops runaways.
+const MAX_REASSEMBLED_BYTES: usize = 512 << 20;
+
 /// Relay error codes (payload `{"error": code}` on [`RELAY_KIND`] frames).
 pub const HOST_OFFLINE: &str = "host_offline";
 pub const HOST_CLOSED: &str = "host_closed";
@@ -309,6 +331,10 @@ pub struct HostRelayConfig {
     pub token: Arc<dyn TokenSource>,
     /// Reconnect delay after a session ends (a small jitter is added).
     pub retry: Duration,
+    /// The most jitter added to a reconnect.
+    pub max_jitter: Duration,
+    /// Called each time the relay joins the room.
+    pub on_connected: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl HostRelayConfig {
@@ -322,13 +348,15 @@ impl HostRelayConfig {
             device_id: device_id.into(),
             token,
             retry: Duration::from_secs(5),
+            max_jitter: Duration::from_secs(2),
+            on_connected: None,
         }
     }
 }
 
 /// The service as relay clients see it: every method but the ones a peer
 /// may not have answered here ([`crate::peer_refused`]: the local-only
-/// ones, allowing a plugin, a file path on the caller's device), refused
+/// ones, a file path on the caller's device), refused
 /// before they reach it; the rest served as [`crate::Caller::Peer`], with
 /// the device the edge verified for this connection (`fromDevice`), if any.
 struct RelayGuard {
@@ -396,7 +424,8 @@ impl HostRelay {
                         let url = format!("{url}&nudgeAck=1");
                         let started = tokio::time::Instant::now();
                         let outcome = {
-                            let session = host_session(&url, &service, &on_nudge);
+                            let session =
+                                host_session(&url, &service, &on_nudge, config.on_connected.as_ref());
                             tokio::pin!(session);
                             loop {
                                 tokio::select! {
@@ -443,7 +472,7 @@ impl HostRelay {
                 // only wakes/successes DURING this wait cut it short.
                 while online.try_recv().is_ok() {}
                 tokio::select! {
-                    _ = tokio::time::sleep(delay + jitter()) => {}
+                    _ = tokio::time::sleep(delay + jitter(config.max_jitter)) => {}
                     // Wake = redial NOW (the old socket died with the suspend).
                     _ = wake.recv() => { delay = HOST_REJOIN_MIN; }
                     // A sibling dial succeeded = the network is back.
@@ -474,13 +503,13 @@ const DIAL_RETRY_SPACING: Duration = Duration::from_millis(1500);
 /// DO's lifecycle, not our failure, so the rejoin does not escalate.
 const HOST_HEALTHY_SESSION: Duration = Duration::from_secs(30);
 
-fn jitter() -> Duration {
+fn jitter(max: Duration) -> Duration {
     // Cheap decorrelation without a rand dependency.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    Duration::from_millis(u64::from(nanos) % 2_000)
+    Duration::from_millis(u64::from(nanos) % (max.as_millis() as u64).max(1))
 }
 
 /// One per-client virtual connection: `in_tx` feeds the ndjson dispatch loop
@@ -497,10 +526,54 @@ struct VirtualConn {
     device: Option<String>,
 }
 
+/// The relay frames that carry one RPC reply to `conn_id`.
+fn reply_frames(conn_id: &str, chunks: bool, text: String) -> Result<Vec<Vec<u8>>, RpcError> {
+    let frame = |s: &str, k: &str, payload: &[u8]| {
+        encode_device_frame(&DeviceFrameHeader::new(s, k).with_to(conn_id), payload)
+    };
+    if text.len() > RPC_CHUNK_BYTES && chunks {
+        let count = text.len().div_ceil(RPC_CHUNK_BYTES);
+        return text
+            .as_bytes()
+            .chunks(RPC_CHUNK_BYTES)
+            .enumerate()
+            .map(|(index, piece)| {
+                let s = if index + 1 == count {
+                    CHUNK_LAST
+                } else {
+                    CHUNK_MORE
+                };
+                frame(s, RPC_CHUNK_KIND, piece)
+            })
+            .collect();
+    }
+    if text.len() > MAX_UNCHUNKED_REPLY_BYTES {
+        #[derive(Deserialize)]
+        struct Id {
+            id: u64,
+        }
+        let id = serde_json::from_str::<Id>(&text)
+            .map_err(|e| RpcError::Transport(format!("oversized reply without an id: {e}")))?
+            .id;
+        let refusal = serde_json::to_string(&crate::ServerFrame {
+            id,
+            err: Some(format!(
+                "reply of {} MiB is too large for this device's Zeron over the relay; update it",
+                text.len() >> 20
+            )),
+            ..Default::default()
+        })
+        .map_err(|e| RpcError::Transport(format!("encode refusal: {e}")))?;
+        return Ok(vec![frame(RPC_KIND, RPC_KIND, refusal.as_bytes())?]);
+    }
+    Ok(vec![frame(RPC_KIND, RPC_KIND, text.as_bytes())?])
+}
+
 fn make_virtual_conn(
     service: Arc<dyn RpcService>,
     conn_id: String,
     device: Option<String>,
+    chunks: bool,
     host_out: mpsc::Sender<Vec<u8>>,
 ) -> VirtualConn {
     // Peers never reach what only a local client may call.
@@ -510,11 +583,12 @@ fn make_virtual_conn(
     tokio::spawn(serve_connection(service, srv_out_tx, in_rx));
     tokio::spawn(async move {
         while let Some(text) = srv_out_rx.recv().await {
-            let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND).with_to(conn_id.clone());
-            match encode_device_frame(&header, text.as_bytes()) {
-                Ok(frame) => {
-                    if host_out.send(frame).await.is_err() {
-                        break; // relay socket gone
+            match reply_frames(&conn_id, chunks, text) {
+                Ok(frames) => {
+                    for frame in frames {
+                        if host_out.send(frame).await.is_err() {
+                            return; // relay socket gone
+                        }
                     }
                 }
                 Err(err) => tracing::error!(error = %err, "device-room: frame encode failed"),
@@ -529,11 +603,15 @@ async fn host_session(
     url: &str,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
+    on_connected: Option<&Arc<dyn Fn() + Send + Sync>>,
 ) -> Result<(), RpcError> {
     let ws = zeron_sync::dial::connect_ws(url)
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
+    if let Some(on_connected) = on_connected {
+        on_connected();
+    }
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
     let transport = zeron_sync::socket::pump_with_timing(
@@ -638,9 +716,16 @@ async fn handle_host_frame(
         return;
     };
     let device = header.from_device;
-    let conn = conns
-        .entry(from.clone())
-        .or_insert_with(|| make_virtual_conn(service.clone(), from, device.clone(), out_tx.clone()));
+    let chunks = header.s == RPC_CHUNKS_STREAM;
+    let conn = conns.entry(from.clone()).or_insert_with(|| {
+        make_virtual_conn(
+            service.clone(),
+            from,
+            device.clone(),
+            chunks,
+            out_tx.clone(),
+        )
+    });
     if conn.device != device {
         tracing::warn!("device-room: a conn's verified device changed; dropping the frame");
         return;
@@ -711,6 +796,7 @@ impl DeviceLink {
                 // host has echoed at least once, so old hosts keep working.
                 let mut last_echo = tokio::time::Instant::now();
                 let mut echo_seen = false;
+                let mut reassembling: Vec<u8> = Vec::new();
                 let echo_frame =
                     encode_device_frame(&DeviceFrameHeader::new(ECHO_KIND, ECHO_KIND), &[])
                         .unwrap_or_default();
@@ -724,7 +810,7 @@ impl DeviceLink {
                     tokio::select! {
                         frame = out_rx.recv() => match frame {
                             Some(text) => {
-                                let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND);
+                                let header = DeviceFrameHeader::new(RPC_CHUNKS_STREAM, RPC_KIND);
                                 let encoded = match encode_device_frame(&header, text.as_bytes()) {
                                     Ok(bytes) => bytes,
                                     Err(err) => {
@@ -757,6 +843,20 @@ impl DeviceLink {
                                         let text = String::from_utf8_lossy(&payload).into_owned();
                                         if in_tx.send(text).await.is_err() {
                                             break "client dropped".to_string();
+                                        }
+                                    }
+                                    Ok((header, payload)) if header.k == RPC_CHUNK_KIND => {
+                                        last_echo = tokio::time::Instant::now();
+                                        if reassembling.len() + payload.len() > MAX_REASSEMBLED_BYTES {
+                                            break "reply too large".to_string();
+                                        }
+                                        reassembling.extend_from_slice(&payload);
+                                        if header.s == CHUNK_LAST {
+                                            let whole = std::mem::take(&mut reassembling);
+                                            let text = String::from_utf8_lossy(&whole).into_owned();
+                                            if in_tx.send(text).await.is_err() {
+                                                break "client dropped".to_string();
+                                            }
                                         }
                                     }
                                     Ok((header, _)) if header.k == ECHO_KIND => {
@@ -1091,6 +1191,12 @@ impl LinkCache {
         lock(&self.dial_state).clear();
     }
 
+    /// Close every peer socket and forget each one's retry curve. The next call dials.
+    pub fn close_all(&self) {
+        lock(&self.links).clear();
+        lock(&self.dial_state).clear();
+    }
+
     /// Data-driven cooldown reset: called when out-of-band evidence says the
     /// peer is alive again (fresh workspace presence heartbeat). The next call
     /// dials immediately instead of waiting out the backoff window.
@@ -1243,6 +1349,14 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rejoin_jitters_within_what_its_relay_allows() {
+        for _ in 0..200 {
+            assert!(super::jitter(std::time::Duration::from_millis(100)).as_millis() < 100);
+        }
+        assert_eq!(super::jitter(std::time::Duration::ZERO), std::time::Duration::ZERO);
+    }
+
     #[tokio::test]
     async fn relay_refuses_local_only_methods_and_serves_the_rest() {
         use crate::{RpcReply, RpcService, methods};
@@ -1298,7 +1412,7 @@ mod tests {
     /// from a link (which lands waiting here). What it reaches runs as a
     /// peer.
     #[tokio::test]
-    async fn relay_refuses_allowing_and_paths_from_peers() {
+    async fn relay_carries_peers_approvals_but_not_paths_signing_or_templates() {
         use crate::{RpcReply, RpcService, methods};
         use std::sync::{Arc, Mutex};
 
@@ -1319,10 +1433,7 @@ mod tests {
         let guard = super::RelayGuard { inner: Arc::new(Seen(seen.clone())), device: None };
         let hash = "ab".repeat(32);
         for (method, params) in [
-            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash})),
-            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})),
-            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
-            (methods::REVIEW_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
+            (methods::REVIEW_TEMPLATE, serde_json::json!({"pending": "x", "hash": hash})),
             (methods::SIGN_PLUGIN, serde_json::json!({"id": "x"})),
             (methods::DECIDE_TEMPLATE, serde_json::json!({"pending": "x", "allow": true, "hash": hash})),
             (methods::INSTALL_PLUGIN, serde_json::json!({"path": "/tmp/x.zeron-plugin"})),
@@ -1334,15 +1445,24 @@ mod tests {
         }
         assert!(seen.lock().unwrap().is_empty(), "refused before the service");
 
-        for (method, params) in [
+        // Your other devices' Settings → Plugins: reviews and allows (the
+        // engine holds each to a review minted for that very device,
+        // plugins/reviews.rs), installs from a link or a file sent here.
+        let reached = [
             (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": false, "hash": hash})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})),
+            (methods::REVIEW_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
             (methods::SET_PLUGIN_OFF, serde_json::json!({"id": "x", "off": true})),
             (methods::INSTALL_PLUGIN, serde_json::json!({"url": "https://example.com/x.zeron-plugin"})),
-        ] {
+            (methods::STAGE_PLUGIN_PACKAGE, serde_json::json!({"data": ""})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"upload": "u", "name": "x.zeron-plugin"})),
+        ];
+        let count = reached.len();
+        for (method, params) in reached {
             guard.handle(method, params).await.expect(method);
         }
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), count);
         assert!(
             seen.iter().all(|(_, caller)| matches!(caller, crate::Caller::Peer { .. })),
             "served as a peer: {seen:?}"

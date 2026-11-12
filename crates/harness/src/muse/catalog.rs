@@ -62,6 +62,7 @@ pub(super) fn models(result: &Value) -> Vec<Model> {
             Some((
                 row["isDefault"] == true,
                 Model {
+                    default: false,
                     id: id.into(),
                     label,
                     description: row["description"]

@@ -2,9 +2,10 @@
 -- GitHub repositories, the shipping app's Settings → Cloud (crates/ui
 -- settings/cloud.rs) in this design. Cloud is on for every account that has
 -- it (set up as it's first read), so there's no switch: the credits Cloud used,
--- day by day, over a range; GitHub, the way Cloud clones and pushes (the
--- block setup's Connect GitHub shows, ds.GitHubBlock); and the repositories
--- Cloud can open, chosen on GitHub. Billing has its own page.
+-- day by day, over a range; GitHub, the way Cloud clones and pushes (its logins,
+-- and the block setup's Connect GitHub shows, ds.GitHubBlock, for connecting
+-- one); the repositories Cloud can open, chosen on GitHub; and the size of
+-- machine new chats start on. Billing has its own page.
 --
 -- Listed only while the account has Cloud (screens/settings/init.luau).
 -- Cloud's status and repositories are the account's (account/cloud), read
@@ -14,6 +15,7 @@ local ds = require("@ds")
 local cloud = require("@account/cloud")
 local github = require("@account/github")
 local search = require("@app/screens/settings/search")
+local machine_logic = require("@app/screens/chat/cloud_machine")
 
 local M = {}
 
@@ -22,6 +24,7 @@ M.TITLE = "Cloud"
 
 M.ROWS = {
 	{ key = "usage", title = ui.t("settings.cloud.usage.title"), terms = ui.t("settings.cloud.usage.terms") },
+	{ key = "machine", title = ui.t("settings.cloud.machine.title"), terms = ui.t("settings.cloud.machine.terms") },
 	{ key = "github", title = "GitHub", terms = ui.t("settings.cloud.github.terms") },
 	{ key = "repos", title = ui.t("settings.cloud.repos.title"), terms = ui.t("settings.cloud.repos.terms") },
 }
@@ -77,7 +80,7 @@ function M.group(n: number): string
 	return if n < 0 and out ~= "0" then `-{out}` else out
 end
 
--- "1,240 credits": whole credits (a minute each), a decimal only under ten
+-- "1,240 credits": whole credits, a decimal only under ten
 -- so a short session still reads as something.
 function M.credits(n: number): string
 	local v = math.abs(n)
@@ -285,6 +288,116 @@ local function usage(): Node
 	}
 end
 
+-- The sizes, on the same grid as a chat's size list (ds/grid, the columns
+-- screens/chat/cloud_machine's GRID): a radio group, a row a size; the one new
+-- chats start on says "Current" in the trailing slot. Picked: the edge is asked,
+-- shown at once, put back if it refuses (account/cloud).
+local Grid = require("@ds/grid")
+
+local SizeRow = ui.component(function(props: { row: State<machine_logic.DefaultRow>, width: State<number> }): Node
+	local row, width = props.row, props.width
+	local grid = machine_logic.GRID :: Grid.Grid
+	local function chosen(): boolean
+		return row:get().current
+	end
+	local parts: { [any]: any } = {
+		role = "radio",
+		label = function(): string
+			return row:get().name
+		end,
+		checked = chosen,
+		focusable = true,
+		w_full = true,
+		min_h = 36,
+		px = "$space.2",
+		gap = "$space.2",
+		items = "center",
+		rounded = "$radius.md",
+		cursor = "pointer",
+		hover = { bg = "$hover" },
+		focus = require("@ds/control").ring,
+		on_click = function()
+			if not chosen() then
+				cloud.set_machine(row:peek().id)
+			end
+		end,
+		Grid.name(grid, function(): string
+			return row:get().name
+		end),
+	}
+	for _, cell in Grid.cells(grid, width, function(): { string }?
+		return row:get().cells
+	end) do
+		table.insert(parts, cell)
+	end
+	table.insert(parts, Grid.gap())
+	table.insert(parts, Grid.trail(function(): string?
+		return row:get().trail
+	end, chosen))
+	return ui.row(parts)
+end)
+
+local MachineChoice = ui.component(function(): Node
+	local width = ui.use_state(0)
+	local rows = ui.computed(function(): { machine_logic.DefaultRow }
+		return machine_logic.default_rows(cloud.machines(), cloud.machine())
+	end)
+	return ui.column {
+		role = "radiogroup",
+		label = ui.t("settings.cloud.machine.title"),
+		focus_group = "vertical",
+		w_full = true,
+		on_resize = Grid.measure(width),
+		ui.each(rows, function(_r: machine_logic.DefaultRow, _i: number, row: State<machine_logic.DefaultRow>): Node
+			return SizeRow { row = row, width = width }
+		end, {
+			key = function(r: machine_logic.DefaultRow): string
+				return r.id
+			end,
+			w_full = true,
+		}),
+	}
+end)
+
+-- The size new chats start on: every size the account's offered, each with
+-- its specs and rate. (An edge that offers no choice: no section.)
+local function default_machine(): Node
+	local function ids(): string
+		local out = {}
+		for _, m in cloud.machines() do
+			table.insert(out, m.id)
+		end
+		return table.concat(out, ",")
+	end
+	return ui.show(function(): boolean
+		return ids() ~= ""
+	end, ds.Settings.Section {
+		title = ui.t("settings.cloud.machine.title"),
+		description = ui.t("settings.cloud.machine.description"),
+		row(
+			"machine",
+			ds.Settings.Group {
+				ui.column {
+					w_full = true,
+					px = "$space.2",
+					py = "$space.2",
+					gap = "$space.2",
+					MachineChoice {},
+					ui.show(function(): boolean
+						return cloud.now:get().machine_failure ~= nil
+					end, ui.text {
+						ui.t("settings.cloud.machine.failed"),
+						wrap = true,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$zeron.tone.danger.ink",
+					}),
+				},
+			}
+		),
+	})
+end
+
 local function github_now(): github.Now
 	return github.now:get() :: github.Now
 end
@@ -298,6 +411,133 @@ local function github_phase(): any
 		return "failed"
 	end
 	return p
+end
+
+-- A login being asked about: whose Disconnect was pressed.
+local forgetting = ui.state("settings_cloud_github_forgetting", nil :: github.Account?)
+local forget_open = ui.state("settings_cloud_github_forget_open", false)
+
+-- One login: its face, its name, and what can be done with it. A connection
+-- under way holds these still (the flow is what's being shown).
+local function account_row(first: github.Account, _i: number, now: State<github.Account>): Node
+	local function needs_reconnect(): boolean
+		return now:get().status == "needs_reconnect"
+	end
+	return ds.Settings.Row {
+		lead = ds.Avatar {
+			seed = first.login,
+			size = 32,
+			label = first.login,
+			src = function(): string?
+				return now:get().avatar
+			end,
+		},
+		label = function(): string
+			return now:get().login
+		end,
+		description = function(): string
+			return if needs_reconnect()
+				then ui.t("settings.cloud.github.needs_reconnect_description"):get()
+				else ui.t("settings.cloud.github.connected"):get()
+		end,
+		truncate = true,
+		badge = ui.show(needs_reconnect, ds.Badge { ui.t("settings.cloud.github.needs_reconnect"), tone = "warning", size = "sm" }),
+		control = ui.show(function(): boolean
+			return not github.connecting(github_now())
+		end, ui.row {
+			gap = "$space.2",
+			items = "center",
+			ui.show(needs_reconnect, ds.Button {
+				ui.t("settings.cloud.github.reconnect"),
+				tone = "secondary",
+				size = "sm",
+				on_click = github.connect,
+			}),
+			ds.Button {
+				ui.t("settings.cloud.github.disconnect"),
+				tone = "ghost",
+				size = "sm",
+				on_click = function()
+					forgetting:set(now:peek())
+					forget_open:set(true)
+				end,
+			},
+		}),
+	}
+end
+
+-- The logins, and what's asked beside them: another login, and the App on
+-- another account or organization.
+local function github_accounts(): Node
+	local accounts = ui.computed(function(): { github.Account }
+		return github.accounts(github_now())
+	end)
+	local function some(): boolean
+		return #accounts:get() > 0
+	end
+	return ui.column {
+		w_full = true,
+		gap = "$space.2",
+		ds.Settings.Each(accounts, account_row, {
+			key = function(a: github.Account): string
+				return a.slot or a.login
+			end,
+		}),
+		ui.show(function(): boolean
+			return github_now().already ~= nil
+		end, ds.Callout {
+			tone = "info",
+			title = function(): string
+				return ui.t("settings.cloud.github.already_title", { login = github_now().already or "" }):get()
+			end,
+			body = ui.t("settings.cloud.github.already_body"),
+		}),
+		ui.show(function(): boolean
+			return some() and not github.connecting(github_now()) and github_now().phase ~= "failed"
+		end, ds.Settings.Group {
+			ds.Settings.Row {
+				icon = "plus",
+				label = ui.t("settings.cloud.github.another"),
+				description = ui.t("settings.cloud.github.another_description"),
+				control = ds.Button {
+					ui.t("settings.cloud.github.another_action"),
+					tone = "secondary",
+					size = "sm",
+					on_click = github.connect,
+				},
+			},
+			ds.Settings.Row {
+				icon = "git-branch",
+				label = ui.t("settings.cloud.github.install"),
+				description = ui.t("settings.cloud.github.install_description"),
+				control = ds.Button {
+					ui.t("settings.cloud.repos.choose"),
+					tone = "ghost",
+					size = "sm",
+					on_click = github.choose,
+					ds.Icon { name = "arrow-up-right", size = 14 },
+				},
+			},
+		}),
+		ds.Dialog {
+			open = forget_open,
+			tone = "danger",
+			title = function(): string
+				local a = forgetting:get()
+				return ui.t("settings.cloud.github.forget_title", { login = if a then a.login else "" }):get()
+			end,
+			body = ui.t("settings.cloud.github.forget_body"),
+			confirm = {
+				label = ui.t("settings.cloud.github.disconnect"),
+				on_click = function()
+					local a = forgetting:peek()
+					if a then
+						github.forget(a)
+					end
+				end,
+			},
+		},
+	}
 end
 
 local function github_section(): Node
@@ -317,44 +557,82 @@ local function github_section(): Node
 		end
 		was = p
 	end)
+	-- A login gone or reconnected: the repositories it brought, again.
+	local function logins(): string
+		local out = {}
+		for _, a in github.accounts(github_now()) do
+			table.insert(out, `{a.login}:{a.status}`)
+		end
+		return table.concat(out, ",")
+	end
+	local logins_were = logins()
+	ui.effect(function()
+		local now = logins()
+		if now ~= logins_were then
+			logins_were = now
+			if github_now().phase == "connected" then
+				cloud.load_repos()
+			end
+		end
+	end)
+	-- The block is for connecting: shown until there's a login to list, and
+	-- beside the list while another is being connected.
+	local function block_shows(): boolean
+		local n = github_now()
+		return #github.accounts(n) == 0 or github.connecting(n) or n.phase == "failed"
+	end
 	return ds.Settings.Section {
 		title = "GitHub",
 		description = ui.t("settings.cloud.github.description"),
 		row(
 			"github",
-			ds.GitHubBlock {
-				hug = true,
-				state = github_phase,
-				copied = copied,
-				code = function()
-					return github_now().code
-				end,
-				account = function()
-					return github_now().account
-				end,
-				repos = function()
-					return github_now().repos
-				end,
-				failed = function()
-					return github_now().failure
-				end,
-				on_connect = function()
-					if github_now().phase == "unavailable" then
-						github.load()
-					else
-						github.connect()
-					end
-				end,
-				on_cancel = github.cancel,
-				on_disconnect = function()
-					github.disconnect()
-				end,
-				on_copy = copy,
-				on_open = function()
-					copy()
-					github.open()
-				end,
-				on_choose = github.choose,
+			ui.column {
+				w_full = true,
+				gap = "$space.2",
+				github_accounts(),
+				ui.show(function(): boolean
+					return #github.accounts(github_now()) > 0 and github.connecting(github_now())
+				end, ui.text {
+					ui.t("settings.cloud.github.another_hint"),
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				}),
+				ui.show(block_shows, ds.GitHubBlock {
+					hug = true,
+					state = github_phase,
+					copied = copied,
+					code = function()
+						return github_now().code
+					end,
+					account = function()
+						return github_now().account
+					end,
+					repos = function()
+						return github_now().repos
+					end,
+					failed = function()
+						return github_now().failure
+					end,
+					on_connect = function()
+						if github_now().phase == "unavailable" then
+							github.load()
+						else
+							github.connect()
+						end
+					end,
+					on_cancel = github.cancel,
+					on_disconnect = function()
+						github.disconnect()
+					end,
+					on_copy = copy,
+					on_open = function()
+						copy()
+						github.open()
+					end,
+					on_choose = github.choose,
+				}),
 			}
 		),
 	}
@@ -429,6 +707,17 @@ local function repositories(): Node
 							badge = ui.show(function(): boolean
 								return r:get().private
 							end, ds.Badge { ui.t("settings.cloud.repos.private"), size = "sm" }),
+							-- Whose it is, once there's more than one to be.
+							control = ui.show(function(): boolean
+								return github.many(github_now()) and r:get().account ~= nil
+							end, ui.text {
+								function(): string
+									return r:get().account or ""
+								end,
+								text_size = "$font.size.sm",
+								line_height = "$font.line.sm",
+								color = "$text.tertiary",
+							}),
 						}
 					end, {
 						key = function(r: cloud.Repo): string
@@ -500,6 +789,7 @@ function M.view(): Node
 			w_full = true,
 			gap = "$space.6",
 			usage(),
+			default_machine(),
 			github_section(),
 			repositories(),
 		}),

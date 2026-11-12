@@ -67,7 +67,8 @@ export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside:
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
-export type Action = { label: string | Message | () -> string, icon: Icon.Name, on_click: (() -> ())? }
+-- `shown`: whether it's offered now (followed as it changes); none, always.
+export type Action = { label: string | Message | () -> string, icon: Icon.Name, on_click: (() -> ())?, shown: (() -> boolean)? }
 -- What an empty list shows: what is missing, and how to fill it.
 export type Empty = { title: string | Message, hint: (string | Message)? }
 -- The trigger's weight: `filled` (a control on its own, with a chevron),
@@ -447,8 +448,10 @@ return ui.component(function(props: Props): Node
 				table.insert(out, item.value)
 			end
 		end
-		for n in actions do
-			table.insert(out, `action:{n}`)
+		for n, action in actions do
+			if not action.shown or action.shown() then
+				table.insert(out, `action:{n}`)
+			end
 		end
 		return out
 	end
@@ -1387,25 +1390,23 @@ return ui.component(function(props: Props): Node
 					local acts: { Node } = {}
 					for n, action in props.actions do
 						local key = `action:{n}`
-						table.insert(
-							acts,
-							row({
-								color = "$text.secondary",
-								bg = function()
-									return if hi:get() == key then "$hover" else "#00000000"
-								end,
-								on_hover = function(inside: boolean)
-									if inside then
-										hi:set(key)
-									end
-								end,
-								on_click = function()
-									run(n)
-								end,
-								Menu.glyph(action.icon),
-								text(action.label),
-							}, false)
-						)
+						local made = row({
+							color = "$text.secondary",
+							bg = function()
+								return if hi:get() == key then "$hover" else "#00000000"
+							end,
+							on_hover = function(inside: boolean)
+								if inside then
+									hi:set(key)
+								end
+							end,
+							on_click = function()
+								run(n)
+							end,
+							Menu.glyph(action.icon),
+							text(action.label),
+						}, false)
+						table.insert(acts, if action.shown then ui.show(action.shown, made) else made)
 					end
 					table.insert(rows, ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) })
 				end

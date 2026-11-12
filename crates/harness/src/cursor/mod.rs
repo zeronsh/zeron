@@ -602,6 +602,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 })
                 .collect();
             Some(Model {
+                default: false,
                 id,
                 label,
                 description: str_of(item, "description"),

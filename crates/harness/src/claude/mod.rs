@@ -230,6 +230,24 @@ fn model_arg(request: &RunRequest) -> Option<String> {
     })
 }
 
+/// Whether this run must really be limited to a 200K window. The model id
+/// alone cannot do it: models such as `claude-opus-5-5` run 1M under their
+/// plain id, so the "200K" choice only held for ids that happen to default to
+/// 200K (zeronsh/zeron#1083). The CLI's `CLAUDE_CODE_DISABLE_1M_CONTEXT`
+/// makes it resolve a 200K window (verified on 2.1.319: `modelUsage.contextWindow`
+/// 1000000 -> 200000), and its own autocompact then works from that window.
+/// It is read at launch, so changing it needs a fresh process.
+///
+/// Only an explicit 200K choice sets it. Unset, a model keeps the window the
+/// CLI gives it (1M for the long-context rows, whose select defaults to 1M).
+fn caps_context_at_200k(request: &RunRequest) -> bool {
+    request
+        .model_options
+        .get("contextWindow")
+        .and_then(Value::as_str)
+        .is_some_and(|window| window.eq_ignore_ascii_case("200k"))
+}
+
 /// Every flag-layer setting a request launches with, for
 /// `apply_flag_settings` on a live process: `null` drops the override back
 /// to the user's own settings, exactly as a launch without the flag
@@ -487,6 +505,10 @@ impl ClaudeHarness {
         // stream-json`) forwards its own subagents' text too, which only
         // adds tagged frames to its stream.
         cmd.env("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
+        // "200K" really limits the window (see `caps_context_at_200k`).
+        if caps_context_at_200k(request) {
+            cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+        }
         // Host-resolved environment (a Cloud device's `ANTHROPIC_API_KEY`
         // from the user's own key, `GH_TOKEN`, …). Never a Claude.ai
         // subscription token: those stay inside the CLI's own login.
@@ -841,6 +863,7 @@ impl Harness for ClaudeHarness {
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && Self::launch_args(live) == Self::launch_args(next)
+            && caps_context_at_200k(live) == caps_context_at_200k(next)
             && access(live) == access(next)
     }
     /// Model, context window, effort, fast mode, thinking, ultracode, the
@@ -853,6 +876,8 @@ impl Harness for ClaudeHarness {
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
+            // The 200K limit is an environment variable of the process.
+            && caps_context_at_200k(live) == caps_context_at_200k(next)
             && strictness(permission_mode(next)) <= strictness(permission_mode(live))
     }
     fn access_modes(&self) -> &[AccessMode] {
@@ -867,8 +892,10 @@ impl Harness for ClaudeHarness {
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
         crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
     }
+    /// Without the curated rows the installed Claude Code is too old for.
     fn fallback_models(&self) -> Vec<Model> {
-        catalog::configured_models()
+        let cli = self.model_context().ok().flatten().and_then(|c| c.binary_version);
+        catalog::fallback_models(cli.as_deref())
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -879,7 +906,12 @@ impl Harness for ClaudeHarness {
                 || self.model_context().map(|c| c.unwrap().key()),
                 || async {
                     let response = self.initialize().await?;
-                    catalog::with_discovered_models(catalog::configured_models(), &response)
+                    let cli = self.model_context()?.and_then(|c| c.binary_version);
+                    catalog::with_discovered_models_for(
+                        catalog::configured_models(),
+                        &response,
+                        cli.as_deref(),
+                    )
                 },
             )
             .await
@@ -2484,6 +2516,55 @@ mod access_tests {
         assert!(harness.same_runtime(&auto, &request(Supervised, true, false)));
         assert_eq!(harness.access_modes(), &AccessMode::ALL);
         assert!(harness.supports_plan());
+    }
+
+    fn with_options(model: &str, options: Value) -> RunRequest {
+        let mut r = request(AccessMode::FullAccess, true, false);
+        r.model = Some(model.into());
+        r.model_options = options.as_object().cloned().unwrap_or_default();
+        r
+    }
+
+    #[test]
+    fn the_200k_choice_limits_the_window_through_the_cli() {
+        // Only an explicit 200K choice caps; unset keeps the CLI's window
+        // (1M on Opus 5.5), which is what its select now shows as default.
+        let chosen = with_options("claude-opus-5-5", json!({"contextWindow": "200k"}));
+        let unset = with_options("claude-opus-5-5", json!({}));
+        assert!(caps_context_at_200k(&chosen));
+        assert!(!caps_context_at_200k(&unset));
+        assert!(catalog::static_models().iter().any(|m| m.id == "claude-opus-5-5"
+            && m.options
+                .iter()
+                .any(|o| o.id == "contextWindow" && o.default_choice == "1m")));
+        // 1M keeps the `[1m]` id and never the limit.
+        let one_m = with_options("claude-opus-5-5", json!({"contextWindow": "1m"}));
+        assert!(!caps_context_at_200k(&one_m));
+        assert_eq!(model_arg(&one_m).as_deref(), Some("claude-opus-5-5[1m]"));
+        // A model without the option is left to the CLI.
+        assert!(!caps_context_at_200k(&with_options(
+            "claude-haiku-4-5",
+            json!({})
+        )));
+        // The limit is a launch environment variable, so a change relaunches.
+        let harness = ClaudeHarness::default();
+        assert!(!harness.same_runtime(&chosen, &one_m));
+        assert!(!harness.reconfigures_in_place(&chosen, &one_m));
+        assert!(!harness.reconfigures_in_place(&one_m, &chosen));
+        // Same `--model` and flags; only the 200K limit differs.
+        assert!(!harness.same_runtime(&chosen, &unset));
+        assert!(harness.same_runtime(&unset, &with_options("claude-opus-5-5", json!({}))));
+        // The command carries it.
+        let env_of = |r: &RunRequest| {
+            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
+            cmd.as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "CLAUDE_CODE_DISABLE_1M_CONTEXT")
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(env_of(&chosen).as_deref(), Some("1"));
+        assert_eq!(env_of(&one_m), None);
+        assert_eq!(env_of(&unset), None);
     }
 
     #[test]

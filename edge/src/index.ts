@@ -36,6 +36,8 @@
  *   GET  /device/:deviceId/status
  *   PUT  /blob/:chatId/:partId        — tool-output sidecar (chat2-sync A2)
  *   GET  /blob/:chatId/:partId
+ *   PUT|GET|HEAD|DELETE /blob/:chatId/attachments/:uploadId — attachment bytes
+ *                                       awaiting a Cloud machine (attachment-blobs.ts)
  *   GET  /chat2/:chatId/ws            — chat2 log-relay room (wss, chat2-sync B)
  *   GET|POST /chat2/:chatId/checkpoint — client-built doc snapshot (Range-resumable GET)
  *   GET|PUT  /chat2/:chatId/tail      — host-published sidecars, served verbatim
@@ -79,6 +81,7 @@ import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
+import { modelListRoute } from "./model-list";
 import { releaseRoute } from "./releases";
 import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
@@ -96,6 +99,7 @@ import {
 import { handleAdminRoute, runCloudCron } from "./cloud/billing";
 import { sandboxProvider } from "./cloud/providers";
 import { FakeProvider } from "./cloud/providers/fake";
+import { handleAttachmentBlob } from "./attachment-blobs";
 import { runnerChatGate, runnerDeviceGate } from "./runner-access";
 import { runnerRefusal } from "./runner-policy";
 import { handleOnboardingRoute } from "./onboarding-routes";
@@ -149,6 +153,8 @@ export default {
     }
     const release = await releaseRoute(request, env, url);
     if (release) return release;
+    const modelList = await modelListRoute(request, env, url);
+    if (modelList) return modelList;
 
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
@@ -248,7 +254,7 @@ export default {
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;
     }
-    const chatResponse = chatRoute(request, env, auth.userId);
+    const chatResponse = chatRoute(request, env, auth.userId, auth.orgId);
     if (chatResponse) return chatResponse;
 
     // ── workspace rooms (ARCHITECTURE §2.2/§6.1): same SessionRoom DO class;
@@ -392,9 +398,14 @@ export default {
       if (parts[2] === "nudge" && request.method === "POST") {
         // A send to a sleeping Cloud session wakes its machine; the nudge
         // queues in the DeviceRoom and replays once its engine reconnects.
-        autoWakeCloudDevice(env, ctx, auth, deviceId);
+        autoWakeCloudDevice(env, ctx, auth, deviceId, env.CLOUD_EDGE_URL ?? url.origin);
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, "/nudge", "");
       }
+    }
+
+    // ── attachment bytes on their way to a Cloud machine (attachment-blobs.ts).
+    if (parts[0] === "blob" && parts.length === 4 && parts[2] === "attachments" && ID_RE.test(parts[1]) && ID_RE.test(parts[3])) {
+      return handleAttachmentBlob(request, env, auth, parts[1], parts[3]);
     }
 
     // ── R2 tool-output sidecar (docs/chat2-sync.md A2): full tool outputs

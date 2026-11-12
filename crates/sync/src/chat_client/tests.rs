@@ -2445,3 +2445,902 @@ async fn http_repairs_socket_gap_without_clearing_a_newer_gap() {
     assert_eq!(client.stats().cursor, 4);
     client.shutdown().await;
 }
+
+// ── the relay layer ─────────────────────────────────────────────────────────
+
+fn relay_for(sink: &Arc<RecordingSink>) -> crate::chat_relay::RelayHandle {
+    crate::chat_relay::RelayHandle::spawn("dev-a", sink.clone(), Default::default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_the_relay_layer_hello_is_byte_identical() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        let raw = end.rx.recv().await.expect("hello");
+        assert_eq!(raw, encode(frame_type::HELLO, &serde_json::json!({"cursor": 0, "device": "dev-a"}), &[]));
+    });
+    let _join = tokio::time::timeout(
+        Duration::from_secs(1),
+        ChatClient::connect_with_tuned(connector(vec![pipe]), sink, fetch, "dev-a", 0, ChatTuning::default()),
+    )
+    .await;
+    server.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_room_without_the_layer_leaves_the_session_on_stored_rows() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let relay = relay_for(&sink);
+    let server = tokio::spawn(async move {
+        let hello = expect_kind(&mut end, frame_type::HELLO).await;
+        assert_eq!(hello.header["relay"], 1);
+        send(&end, frame_type::STATE, serde_json::json!({"headSeq": 0, "seqFloor": 0,
+            "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0}), &[]).await;
+        expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 0}), &[]).await;
+        // Asked for the queue, this push would have gone there. No queue here.
+        let push = expect_kind(&mut end, frame_type::PUSH).await;
+        assert_eq!(push.payload, vec![7u8]);
+        end
+    });
+    let client = ChatClient::connect_full(
+        connector(vec![pipe]), sink, fetch, "dev-a", 0, ChatTuning::default(), None, Some(relay),
+    )
+    .await
+    .unwrap();
+    client.set_queue_pushes(true);
+    assert!(!client.relay_room());
+    client.enqueue_update(vec![7]);
+    let _end = server.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_room_with_the_layer_queues_pushes_and_exchanges_relay_frames() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let relay = relay_for(&sink);
+    let mut events = relay.events();
+    let (retired_tx, retired_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        expect_kind(&mut end, frame_type::HELLO).await;
+        send(&end, frame_type::STATE, serde_json::json!({"headSeq": 0, "seqFloor": 0,
+            "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0,
+            "relay": 1, "legacyPeers": 1}), &[]).await;
+        expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 0}), &[]).await;
+        // The task reads the queue as soon as the room is up.
+        expect_kind(&mut end, frame_type::QUEUE_REQ).await;
+        let queued = expect_kind(&mut end, frame_type::ENQUEUE).await;
+        assert_eq!(queued.payload, vec![9u8]);
+        let batch = queued.header["batchId"].as_str().unwrap().to_string();
+        send(&end, frame_type::QUEUED, serde_json::json!({"batchId": batch, "dup": false}), &[]).await;
+        retired_rx.await.unwrap();
+        send(&end, frame_type::LEGACY_PEER, serde_json::json!({"device": "old"}), &[]).await;
+        end
+    });
+    let client = ChatClient::connect_full(
+        connector(vec![pipe]), sink, fetch, "dev-a", 0, ChatTuning::default(), None, Some(relay.clone()),
+    )
+    .await
+    .unwrap();
+    client.set_queue_pushes(true);
+    assert!(client.relay_room());
+    // `legacyPeers: 1` in state tells the host at once.
+    let event = events.recv().await.unwrap();
+    assert_eq!(event, crate::chat_relay::RelayEvent::LegacyPeer);
+    client.enqueue_update(vec![9]);
+    for _ in 0..100 {
+        if client.stats().pending_pushes == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(client.stats().pending_pushes, 0, "queued retires the batch");
+    assert_eq!(client.stats().cursor, 0, "the queue has no row seq");
+    retired_tx.send(()).unwrap();
+    let event = events.recv().await.unwrap();
+    assert_eq!(event, crate::chat_relay::RelayEvent::LegacyPeer);
+    let _end = server.await.unwrap();
+}
+
+/// A pending send held for the queue, with the HTTPS path up.
+struct RecordingPushTransport {
+    pushes: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ChatTransport for RecordingPushTransport {
+    fn fetch_rows(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn push(&self, batch: String, _bytes: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        self.pushes.lock().unwrap().push(batch.clone());
+        Box::pin(async move { Ok(serde_json::json!({"batchId": batch, "seq": 1}).to_string()) })
+    }
+}
+
+/// A sink holding one send in its outbox, as a relaunch finds it.
+#[derive(Default)]
+struct OutboxSink {
+    inner: RecordingSink,
+    retired: std::sync::Mutex<Vec<String>>,
+}
+
+impl ChatDocSink for OutboxSink {
+    fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let retired = self.retired.lock().unwrap();
+        Ok(if retired.is_empty() { vec![("outbox-1".into(), vec![5])] } else { Vec::new() })
+    }
+    fn acknowledge_update(&self, batch: &str) -> Result<(), String> {
+        self.retired.lock().unwrap().push(batch.into());
+        Ok(())
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.inner.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.inner.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, frontier: &[u8]) -> bool {
+        self.inner.contains_frontier(frontier)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.inner.advance_cursor(cursor)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_send_for_the_queue_stays_off_https_and_goes_by_enqueue_once_a_socket_answers() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(OutboxSink::default());
+    let (fetch, _) = fetcher(b"");
+    let relay = crate::chat_relay::RelayHandle::spawn("dev-a", sink.clone(), Default::default());
+    relay.set_queue_pushes(true);
+    let pushes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ChatClient::connect_full(
+        connector(vec![pipe]), sink.clone(), fetch, "dev-a", 0, ChatTuning::default(),
+        Some(Arc::new(RecordingPushTransport { pushes: pushes.clone() })),
+        Some(relay),
+    )
+    .await
+    .unwrap();
+    expect_kind(&mut end, frame_type::HELLO).await;
+    send(&end, frame_type::STATE, serde_json::json!({"headSeq": 0, "seqFloor": 0,
+        "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0, "relay": 1}), &[]).await;
+    expect_kind(&mut end, frame_type::ROWS_REQ).await;
+    let queued = expect_kind(&mut end, frame_type::ENQUEUE).await;
+    assert_eq!(queued.header["batchId"], "outbox-1");
+    assert_eq!(queued.payload, vec![5u8]);
+    assert!(pushes.lock().unwrap().is_empty(), "the bootstrap pull must not store it");
+    assert_eq!(client.stats().pending_pushes, 1, "still ours until the room has it");
+    send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 0}), &[]).await;
+    send(&end, frame_type::QUEUED, serde_json::json!({"batchId": "outbox-1", "dup": false}), &[]).await;
+    for _ in 0..100 {
+        if client.stats().pending_pushes == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(client.stats().pending_pushes, 0);
+    assert_eq!(*sink.retired.lock().unwrap(), vec!["outbox-1".to_string()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_send_for_the_queue_still_goes_over_https_on_a_network_with_no_sockets() {
+    let sink = Arc::new(OutboxSink::default());
+    let (fetch, _) = fetcher(b"");
+    let relay = crate::chat_relay::RelayHandle::spawn("dev-a", sink.clone(), Default::default());
+    relay.set_queue_pushes(true);
+    let pushes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ChatClient::connect_full(
+        connector(Vec::new()), sink.clone(), fetch, "dev-a", 0, ChatTuning::default(),
+        Some(Arc::new(RecordingPushTransport { pushes: pushes.clone() })),
+        Some(relay),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(client.stats().pending_pushes > 0);
+    assert!(pushes.lock().unwrap().is_empty(), "a socket may still answer");
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert!(!client.socketless(), "twenty seconds of failed dials isn't a network without sockets");
+    assert_eq!(*pushes.lock().unwrap(), vec!["outbox-1".to_string()], "but the send doesn't wait for that");
+    assert_eq!(client.stats().pending_pushes, 0);
+    assert_eq!(*sink.retired.lock().unwrap(), vec!["outbox-1".to_string()]);
+    drop(client);
+}
+
+/// Answers `relay_defer_checkpoint` as told, and contains nothing.
+#[derive(Default)]
+struct DeferringSink {
+    inner: RecordingSink,
+    defer: std::sync::atomic::AtomicBool,
+}
+
+impl ChatDocSink for DeferringSink {
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.inner.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.inner.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, _frontier: &[u8]) -> bool {
+        false
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.inner.advance_cursor(cursor)
+    }
+    fn relay_defer_checkpoint(&self) -> bool {
+        self.defer.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deferred_checkpoint_downloads_nothing_until_it_is_asked_for_and_then_once() {
+    let (first, mut first_end) = pipe_pair();
+    let (second, mut second_end) = pipe_pair();
+    let sink = Arc::new(DeferringSink::default());
+    sink.defer.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (fetch, fetches) = fetcher(b"checkpoint");
+    let state = serde_json::json!({"headSeq": 3, "seqFloor": 3,
+        "checkpointSeq": 3, "checkpointSize": 10, "rowCount": 0, "rowBytes": 0, "relay": 1});
+    let relay = crate::chat_relay::RelayHandle::spawn("dev-a", sink.clone(), Default::default());
+    let join = ChatClient::connect_full(
+        connector(vec![first, second]), sink.clone(), fetch, "dev-a", 3, ChatTuning::default(), None, Some(relay),
+    );
+    let (client, ()) = tokio::join!(join, async {
+        expect_kind(&mut first_end, frame_type::HELLO).await;
+        send(&first_end, frame_type::STATE, state.clone(), b"frontier").await;
+        expect_kind(&mut first_end, frame_type::ROWS_REQ).await;
+        send(&first_end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 3}), &[]).await;
+    });
+    let client = client.unwrap();
+    assert!(client.checkpoint_deferred());
+    assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(client.stats().cursor, 3);
+
+    // The host didn't come through: read it, with deferring still allowed.
+    client.read_deferred_checkpoint();
+    expect_kind(&mut second_end, frame_type::HELLO).await;
+    send(&second_end, frame_type::STATE, state, b"frontier").await;
+    expect_kind(&mut second_end, frame_type::ROWS_REQ).await;
+    send(&second_end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 3}), &[]).await;
+    for _ in 0..100 {
+        if fetches.load(std::sync::atomic::Ordering::SeqCst) == 1 && client.caught_up() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1, "read once");
+    assert!(!client.checkpoint_deferred());
+    client.read_deferred_checkpoint();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1, "asking again does nothing");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_phone_answers_only_its_host_and_never_exports_for_another_viewer() {
+    use crate::chat_relay::{RelayHandle, RelayPolicy};
+    #[derive(Default)]
+    struct Exports(std::sync::atomic::AtomicU64);
+    impl ChatDocSink for Exports {
+        fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
+            RowImportOutcome::Applied
+        }
+        fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn contains_frontier(&self, _: &[u8]) -> bool {
+            true
+        }
+        fn advance_cursor(&self, _: u64) {}
+        fn relay_version(&self) -> Option<Vec<u8>> {
+            Some(vec![1])
+        }
+        fn relay_export(&self, _: &[u8]) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(vec![9])
+        }
+    }
+    let sink = Arc::new(Exports::default());
+    let relay = RelayHandle::spawn("phone", sink.clone(), RelayPolicy::default());
+    relay.set_serve_host_only(true);
+    relay.set_host(Some("host".into()));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    relay.room_up(tx);
+    let ask = |from: &str| wire::decode(&encode(frame_type::SYNC_REQ, &serde_json::json!({ "device": from }), &[0])).unwrap();
+    async fn next_sync_data(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> wire::WireFrame {
+        loop {
+            let frame = wire::decode(&rx.recv().await.unwrap()).unwrap();
+            if frame.kind == frame_type::SYNC_DATA {
+                return frame;
+            }
+        }
+    }
+    relay.room_frame(ask("other-viewer"));
+    let refused = tokio::time::timeout(Duration::from_secs(5), next_sync_data(&mut rx)).await.unwrap();
+    assert_eq!(refused.header["to"], "other-viewer");
+    assert_eq!(refused.header["gone"], true);
+    assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 0, "no export for it");
+    relay.room_frame(ask("host"));
+    // The export runs on a real blocking thread, which a paused clock can't wait on.
+    let served = loop {
+        tokio::task::yield_now().await;
+        if let Ok(frame) = rx.try_recv() {
+            let frame = wire::decode(&frame).unwrap();
+            if frame.kind == frame_type::SYNC_DATA {
+                break frame;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    assert_eq!(served.header["to"], "host");
+    assert_eq!(served.payload.to_vec(), vec![9u8]);
+    assert_eq!(sink.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+struct CountingTransport {
+    plain: Arc<std::sync::atomic::AtomicU64>,
+    fallback: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ChatTransport for CountingTransport {
+    fn fetch_rows(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.plain.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn fetch_rows_fallback(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.fallback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn push(&self, _batch: String, _bytes: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        Box::pin(async { Ok(String::new()) })
+    }
+}
+
+async fn pulls_while_dials_fail(relay_on: bool) -> (u64, u64) {
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let plain = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let fallback = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let relay = relay_on.then(|| relay_for(&sink));
+    let client = ChatClient::connect_full(
+        connector(Vec::new()), sink, fetch, "dev-a", 0, ChatTuning::default(),
+        Some(Arc::new(CountingTransport { plain: plain.clone(), fallback: fallback.clone() })),
+        relay,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    drop(client);
+    (
+        plain.load(std::sync::atomic::Ordering::SeqCst),
+        fallback.load(std::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_device_whose_sockets_keep_failing_tells_the_room_it_needs_rows() {
+    let (plain, fallback) = pulls_while_dials_fail(true).await;
+    assert!(plain >= 1, "the bootstrap pull isn't a fallback");
+    assert!(fallback >= 1, "{plain} {fallback}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_the_relay_layer_a_pull_is_only_ever_a_pull() {
+    let (plain, fallback) = pulls_while_dials_fail(false).await;
+    assert!(plain >= 1);
+    assert_eq!(fallback, 0);
+}
+
+/// A sink whose rows park until "history" arrives, as a row that depends on
+/// relayed ops does.
+#[derive(Default)]
+struct ParkingSink {
+    history: std::sync::atomic::AtomicBool,
+    cursor: std::sync::atomic::AtomicU64,
+}
+
+impl ChatDocSink for ParkingSink {
+    fn cursor_is_verified(&self) -> bool {
+        true
+    }
+    fn apply_row(&self, _bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        if self.history.load(std::sync::atomic::Ordering::SeqCst) {
+            self.cursor.store(cursor, std::sync::atomic::Ordering::SeqCst);
+            RowImportOutcome::Applied
+        } else {
+            RowImportOutcome::PendingDependencies
+        }
+    }
+    fn apply_checkpoint(&self, _bytes: &[u8], _cursor: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn contains_frontier(&self, _frontier: &[u8]) -> bool {
+        true
+    }
+    fn advance_cursor(&self, _cursor: u64) {}
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_row_waiting_on_relayed_history_holds_its_cursor_and_doesnt_redial() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(ParkingSink::default());
+    let (fetch, fetches) = fetcher(b"");
+    let relay = crate::chat_relay::RelayHandle::spawn("dev-a", sink.clone(), Default::default());
+    let history = sink.clone();
+    let row = |seq: u64| serde_json::json!({"seq": seq, "device": "b", "batchId": format!("b{seq}")});
+    let server = tokio::spawn(async move {
+        expect_kind(&mut end, frame_type::HELLO).await;
+        send(&end, frame_type::STATE, serde_json::json!({"headSeq": 2, "seqFloor": 0,
+            "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 2, "rowBytes": 2,
+            "relay": 1, "legacyPeers": 0}), &[]).await;
+        expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        send(&end, frame_type::ROW, row(1), &[1]).await;
+        send(&end, frame_type::ROW, row(2), &[2]).await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 2}), &[]).await;
+        // The cursor holds, so the re-read starts from the parked row.
+        let again = loop {
+            let frame = decode(&end.rx.recv().await.expect("frame")).expect("decodes");
+            if frame.kind == frame_type::ROWS_REQ {
+                break frame;
+            }
+        };
+        assert_eq!(again.header["after"], 0);
+        // Peers have filled the gap by now.
+        history.history.store(true, std::sync::atomic::Ordering::SeqCst);
+        send(&end, frame_type::ROW, row(1), &[1]).await;
+        send(&end, frame_type::ROW, row(2), &[2]).await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 2}), &[]).await;
+        end
+    });
+    let client = ChatClient::connect_full(
+        connector(vec![pipe]), sink.clone(), fetch, "dev-a", 0, ChatTuning::default(), None, Some(relay),
+    )
+    .await
+    .unwrap();
+    let end = server.await.unwrap();
+    for _ in 0..100 {
+        if client.stats().cursor == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(client.stats().cursor, 2);
+    assert_eq!(client.stats().disconnects, 0, "no redial");
+    assert_eq!(client.stats().rejoins, 0, "no redial");
+    assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing to fetch");
+    drop(end);
+}
+
+/// A doc that holds the checkpoint once it's imported it, and parks rows regardless.
+#[derive(Default)]
+struct CheckpointDoc {
+    imported: std::sync::atomic::AtomicU64,
+}
+
+impl ChatDocSink for CheckpointDoc {
+    fn cursor_is_verified(&self) -> bool {
+        true
+    }
+    fn apply_row(&self, _bytes: &[u8], _cursor: u64) -> RowImportOutcome {
+        RowImportOutcome::PendingDependencies
+    }
+    fn apply_checkpoint(&self, _bytes: &[u8], _cursor: u64) -> Result<(), String> {
+        self.imported.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn contains_frontier(&self, _frontier: &[u8]) -> bool {
+        self.imported.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+    fn advance_cursor(&self, _cursor: u64) {}
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_row_parked_after_a_checkpoint_read_doesnt_read_it_again_or_redial() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(CheckpointDoc::default());
+    let (fetch, fetches) = fetcher(b"the whole chat");
+    let relay = crate::chat_relay::RelayHandle::spawn("dev-a", sink.clone(), Default::default());
+    let server = tokio::spawn(async move {
+        expect_kind(&mut end, frame_type::HELLO).await;
+        send(&end, frame_type::STATE, serde_json::json!({"headSeq": 1, "seqFloor": 0,
+            "checkpointSeq": 0, "checkpointSize": 14, "rowCount": 1, "rowBytes": 1,
+            "relay": 1, "legacyPeers": 0}), b"frontier").await;
+        expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        send(&end, frame_type::ROW, serde_json::json!({"seq": 1, "device": "b", "batchId": "b1"}), &[1]).await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+        // It holds this socket, and no more dials come.
+        std::future::pending::<()>().await;
+        drop(end);
+    });
+    let client = ChatClient::connect_full(
+        connector(vec![pipe]), sink.clone(), fetch, "dev-a", 0, ChatTuning::default(), None, Some(relay),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1, "reading it again can't fill the gap");
+    assert_eq!(client.stats().disconnects, 0, "no redial");
+    assert_eq!(client.stats().rejoins, 0, "no redial");
+    server.abort();
+}
+
+/// Holds a download open until told, so a second reader has to overlap it.
+struct HeldFetcher {
+    calls: Arc<std::sync::atomic::AtomicU64>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl CheckpointFetcher for HeldFetcher {
+    fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let release = self.release.clone();
+        Box::pin(async move {
+            release.notified().await;
+            Ok(b"the whole chat".to_vec())
+        })
+    }
+}
+
+/// Answers a pull with a state naming a checkpoint.
+struct CheckpointRows;
+
+impl ChatTransport for CheckpointRows {
+    fn fetch_rows(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        Box::pin(async {
+            let frames = [
+                encode(frame_type::STATE, &serde_json::json!({"headSeq": 0, "seqFloor": 0,
+                    "checkpointSeq": 0, "checkpointSize": 14, "rowCount": 0, "rowBytes": 0}), b"frontier"),
+                encode(frame_type::ROWS_DONE, &serde_json::json!({"headSeq": 0}), &[]),
+            ];
+            let mut body = Vec::new();
+            for frame in frames {
+                body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+                body.extend_from_slice(&frame);
+            }
+            Ok(body)
+        })
+    }
+    fn push(&self, _batch: String, _bytes: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        Box::pin(async { Ok(String::new()) })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_bootstrap_pull_and_the_first_socket_share_one_checkpoint_download() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(CheckpointDoc::default());
+    let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let client = ChatClient::connect_full(
+        connector(vec![pipe]),
+        sink.clone(),
+        Arc::new(HeldFetcher { calls: calls.clone(), release: release.clone() }),
+        "dev-a",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(CheckpointRows)),
+        None,
+    )
+    .await
+    .unwrap();
+    // The pull found it missing and is downloading. The socket finds it missing too.
+    expect_kind(&mut end, frame_type::HELLO).await;
+    send(&end, frame_type::STATE, serde_json::json!({"headSeq": 0, "seqFloor": 0,
+        "checkpointSeq": 0, "checkpointSize": 14, "rowCount": 0, "rowBytes": 0}), b"frontier").await;
+    expect_kind(&mut end, frame_type::ROWS_REQ).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "only one of them is downloading");
+    release.notify_one();
+    send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 0}), &[]).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "and the other found it there");
+    assert_eq!(sink.imported.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(client.stats().connected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_the_layer_a_parked_row_takes_the_checkpoint_path_as_before() {
+    let (pipe1, mut end1) = pipe_pair();
+    let (pipe2, mut end2) = pipe_pair();
+    let sink = Arc::new(ParkingSink::default());
+    let (fetch, fetches) = fetcher(b"");
+    let history = sink.clone();
+    let server = tokio::spawn(async move {
+        expect_kind(&mut end1, frame_type::HELLO).await;
+        let state = serde_json::json!({"headSeq": 1, "seqFloor": 0, "checkpointSeq": 0,
+            "checkpointSize": 8, "rowCount": 1, "rowBytes": 1});
+        send(&end1, frame_type::STATE, state.clone(), &[]).await;
+        expect_kind(&mut end1, frame_type::ROWS_REQ).await;
+        send(&end1, frame_type::ROW,
+            serde_json::json!({"seq": 1, "device": "b", "batchId": "b1"}), &[1]).await;
+        send(&end1, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+        // The client redials: its second join must read the checkpoint.
+        expect_kind(&mut end2, frame_type::HELLO).await;
+        history.history.store(true, std::sync::atomic::Ordering::SeqCst);
+        send(&end2, frame_type::STATE, state, &[]).await;
+        expect_kind(&mut end2, frame_type::ROWS_REQ).await;
+        send(&end2, frame_type::ROW,
+            serde_json::json!({"seq": 1, "device": "b", "batchId": "b1"}), &[1]).await;
+        send(&end2, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+        (end1, end2)
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe1, pipe2]), sink, fetch, "dev-a", 0, ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let _ends = server.await.unwrap();
+    for _ in 0..500 {
+        if client.stats().cursor == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(client.stats().cursor, 1);
+    assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1, "the checkpoint was read");
+}
+
+/// A row that depends on ops that were only ever relayed: no checkpoint fills it.
+#[derive(Default)]
+struct ForeverParked {
+    checkpoints: std::sync::atomic::AtomicU64,
+}
+impl ChatDocSink for ForeverParked {
+    fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
+        RowImportOutcome::PendingDependencies
+    }
+    fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+        self.checkpoints.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn contains_frontier(&self, _: &[u8]) -> bool {
+        true
+    }
+    fn advance_cursor(&self, _: u64) {}
+}
+
+struct RoomWithParkedRow {
+    dials: Arc<std::sync::atomic::AtomicU64>,
+}
+impl BinConnector for RoomWithParkedRow {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        self.dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (pipe, mut end) = pipe_pair();
+        tokio::spawn(async move {
+            let state = serde_json::json!({"headSeq": 6, "seqFloor": 5,
+                "checkpointSeq": 5, "checkpointSize": 16_000_000, "rowCount": 1, "rowBytes": 10});
+            let _ = expect_kind(&mut end, frame_type::HELLO).await;
+            send(&end, frame_type::STATE, state, b"frontier").await;
+            let _ = expect_kind(&mut end, frame_type::ROWS_REQ).await;
+            send(&end, frame_type::ROW,
+                serde_json::json!({"seq": 6, "device": "viewer", "batchId": "drained"}), b"row").await;
+            send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 6}), &[]).await;
+            while end.rx.recv().await.is_some() {}
+        });
+        Box::pin(async move { Ok(pipe) })
+    }
+}
+
+/// A parked row that reading the checkpoint doesn't fill: over ten idle minutes
+/// the client stays quiet instead of redialling and downloading it again. It does
+/// rejoin now and then, ever more slowly, to hear whether the checkpoint changed.
+#[tokio::test(start_paused = true)]
+async fn old_reader_with_the_host_away_stays_quiet() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let sink = Arc::new(ForeverParked::default());
+    let dials = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (fetch, fetches) = fetcher(b"the same stale checkpoint");
+    let client = ChatClient::connect_with_tuned(
+        Arc::new(RoomWithParkedRow { dials: dials.clone() }),
+        sink.clone(),
+        fetch,
+        "old-phone",
+        5,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    let (d, f) = (dials.load(Relaxed), fetches.load(Relaxed));
+    client.shutdown().await;
+    assert!(d <= 6 && f <= 2, "dials={d} fetches={f}");
+}
+
+// ── review: flag-off parked row vs a newer checkpoint ───────────────────────
+
+/// Rows park until the room's newer checkpoint ("v2") is imported.
+#[derive(Default)]
+struct NeedsNewerCheckpoint {
+    filled: std::sync::atomic::AtomicBool,
+    cursor: std::sync::atomic::AtomicU64,
+}
+
+impl ChatDocSink for NeedsNewerCheckpoint {
+    fn cursor_is_verified(&self) -> bool {
+        true
+    }
+    fn apply_row(&self, _bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        if self.filled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.cursor.store(cursor, std::sync::atomic::Ordering::SeqCst);
+            RowImportOutcome::Applied
+        } else {
+            RowImportOutcome::PendingDependencies
+        }
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], _cursor: u64) -> Result<(), String> {
+        if bytes == b"v2" {
+            self.filled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    fn contains_frontier(&self, frontier: &[u8]) -> bool {
+        frontier != b"f2" || self.filled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn advance_cursor(&self, _cursor: u64) {}
+}
+
+/// The room's checkpoint version: 1 until the host posts its compensating one.
+struct VersionedFetcher {
+    version: Arc<std::sync::atomic::AtomicU64>,
+}
+impl CheckpointFetcher for VersionedFetcher {
+    fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let v = self.version.load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move { Ok(format!("v{v}").into_bytes()) })
+    }
+}
+
+/// A healthy room: every dial is answered, every rows request served.
+struct HealthyRoom {
+    version: Arc<std::sync::atomic::AtomicU64>,
+}
+impl BinConnector for HealthyRoom {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        let (pipe, mut end) = pipe_pair();
+        let version = self.version.clone();
+        tokio::spawn(async move {
+            let _ = expect_kind(&mut end, frame_type::HELLO).await;
+            let v = version.load(std::sync::atomic::Ordering::SeqCst);
+            let state = serde_json::json!({"headSeq": 1, "seqFloor": 0, "checkpointSeq": 0,
+                "checkpointSize": 8, "rowCount": 1, "rowBytes": 1});
+            send(&end, frame_type::STATE, state, format!("f{v}").as_bytes()).await;
+            while let Some(bytes) = end.rx.recv().await {
+                let Some(frame) = decode(&bytes) else { continue };
+                if frame.kind == frame_type::ROWS_REQ {
+                    send(&end, frame_type::ROW,
+                        serde_json::json!({"seq": 1, "device": "host", "batchId": "b1"}), &[1]).await;
+                    send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+                }
+            }
+        });
+        Box::pin(async move { Ok(pipe) })
+    }
+}
+
+/// Flags off (no relay handle), gen 2: a host push was rejected, so the next row
+/// parks until the host's compensating checkpoint lands. The checkpoint lands a
+/// little after the reader first parked. The reader must eventually read it.
+#[tokio::test(start_paused = true)]
+async fn review_flag_off_parked_row_reads_a_checkpoint_posted_after_it_parked() {
+    let sink = Arc::new(NeedsNewerCheckpoint::default());
+    let version = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let client = ChatClient::connect_with_tuned(
+        Arc::new(HealthyRoom { version: version.clone() }),
+        sink.clone(),
+        Arc::new(VersionedFetcher { version: version.clone() }),
+        "viewer",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    // The host's compensating checkpoint lands 30 s later.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    version.store(2, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    let cursor = client.stats().cursor;
+    client.shutdown().await;
+    assert_eq!(cursor, 1, "the parked row never imported: the newer checkpoint was never read");
+}
+
+/// A redial asked for while the socket is already down (the app returning to the
+/// foreground after the OS cut it) is answered by the next dial. It must not end
+/// the session that dial joins: that cost a second dial and about a second.
+#[tokio::test(start_paused = true)]
+async fn a_redial_asked_while_down_doesnt_end_the_next_session() {
+    let _serial = PATH_AND_TIMING.lock().await;
+    let (pipe1, mut end1) = pipe_pair();
+    let (pipe2, mut end2) = pipe_pair();
+    let (pipe3, _end3) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let flaky = FlakyConnector::new(vec![Some(pipe1), None, Some(pipe2), Some(pipe3)]);
+    let s1 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end1, state, &[], vec![], false).await;
+            end1
+        }
+    });
+    let client = ChatClient::connect_with_tuned(flaky.clone(), sink, fetch, "dev-a", 0, ChatTuning::default())
+        .await
+        .expect("first join succeeds");
+    drop(s1.await.unwrap());
+    while flaky.dial_times().len() < 2 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client.redial();
+    let s2 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end2, state, &[], vec![], true).await;
+            end2
+        }
+    });
+    let _keep = s2.await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(flaky.dial_times().len(), 3, "the join, the refusal, and one recovery");
+    assert_eq!(client.stats().disconnects, 1);
+    assert!(client.stats().connected);
+    client.shutdown().await;
+}
+
+/// The relay layer's frames go out while the row backfill is still running: on a
+/// relay chat they are the catch-up, and a host that has just rejoined waits for
+/// this device's announce.
+#[tokio::test(start_paused = true)]
+async fn relay_frames_go_out_before_the_backfill_finishes() {
+    use crate::chat_relay::{RelayHandle, RelayPolicy};
+    struct Versioned;
+    impl ChatDocSink for Versioned {
+        fn apply_row(&self, _: &[u8], _: u64) -> RowImportOutcome {
+            RowImportOutcome::Applied
+        }
+        fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn contains_frontier(&self, _: &[u8]) -> bool {
+            true
+        }
+        fn advance_cursor(&self, _: u64) {}
+        fn relay_version(&self) -> Option<Vec<u8>> {
+            Some(vec![1])
+        }
+    }
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(Versioned);
+    let (fetch, _) = fetcher(b"");
+    let relay = RelayHandle::spawn("phone", sink.clone(), RelayPolicy::default());
+    let server = tokio::spawn(async move {
+        expect_kind(&mut end, frame_type::HELLO).await;
+        send(&end, frame_type::STATE, serde_json::json!({"headSeq": 0, "seqFloor": 0,
+            "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0,
+            "relay": 1, "legacyPeers": 0}), &[]).await;
+        expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        // No ROWS_DONE yet: the announce must still arrive.
+        let announced = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = decode(&end.rx.recv().await.expect("frame")).expect("decodes");
+                if frame.kind == frame_type::ANNOUNCE {
+                    return frame;
+                }
+            }
+        })
+        .await;
+        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 0}), &[]).await;
+        (announced.is_ok(), end)
+    });
+    let join = ChatClient::connect_full(
+        connector(vec![pipe]), sink, fetch, "phone", 0, ChatTuning::default(), None, Some(relay),
+    );
+    let (client, served) = tokio::join!(join, server);
+    let (announced, _end) = served.unwrap();
+    assert!(announced, "the announce waited for the backfill");
+    client.unwrap().shutdown().await;
+}

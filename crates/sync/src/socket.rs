@@ -128,8 +128,12 @@ pub async fn pump_with_timing<S, T>(
             {
                 Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => return,
                 Ok(Some(Ok(frame))) => frame,
-                _ => {
-                    tracing::warn!("socket read failed or silent past lease; reconnecting");
+                Ok(Some(Err(error))) => {
+                    tracing::warn!(%error, "socket read failed; reconnecting");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("socket silent past lease; reconnecting");
                     return;
                 }
             };

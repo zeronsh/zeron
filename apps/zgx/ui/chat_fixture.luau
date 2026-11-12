@@ -177,6 +177,24 @@ for _, d in { "box", "old" } do
 		end,
 	}
 end
+-- The open session, on a Cloud machine of its own, which the device list
+-- says isn't online (a machine asleep or waking, as it does): what it says
+-- comes from `cloud_stub.session.*`.
+ui.command {
+	id = "session_on_cloud",
+	title = "The open session runs on Cloud",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		local devices = table.clone(now.devices)
+		table.insert(devices, { id = "cloud-s2", name = "Cloud machine", platform = "cloud", here = false, online = false, cloud = true })
+		now.devices = devices
+		sessions.now:set(now)
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { device = "cloud-s2" })
+		end
+	end,
+}
 -- The chat open, kept across a reload as the host keeps it (the fixture
 -- runs again on one; the host's transcript doesn't start over).
 local kept_open = ui.state("fixture_opened", nil :: string?)
@@ -198,6 +216,16 @@ ui.command {
 	title = "Chats open as the host opens one it no longer holds",
 	run = function()
 		SLOW_OPEN:set(true)
+	end,
+}
+-- `never_open`: a chat that isn't here at all (never read on this device):
+-- the session stays loading, nothing comes.
+local NEVER_OPEN = ui.state("fixture_never_open", false)
+ui.command {
+	id = "never_open",
+	title = "Chats open and never arrive",
+	run = function()
+		NEVER_OPEN:set(true)
 	end,
 }
 local pending_history: { any }? = nil
@@ -239,6 +267,14 @@ stub.open = function(id: string?)
 	-- `slow_open`: as the host opens a chat it no longer holds, the
 	-- transcript emptied and the session loading at once, the chat a moment
 	-- later.
+	if NEVER_OPEN:peek() then
+		ui.batch(function()
+			store.messages:set({})
+			store.draft:set { id = "", text = "" }
+			publish(id, { state = "loading" })
+		end)
+		return
+	end
 	if SLOW_OPEN:peek() then
 		ui.batch(function()
 			store.messages:set({})
@@ -254,6 +290,22 @@ stub.open = function(id: string?)
 	end
 	arrive()
 end
+-- Run in the app itself (its Rust host installed, as `zgx inspect` drives
+-- it), the host writes `chat.session` too: it never opened this chat (the
+-- stub above did), so an engine frame (WatchSessions, WatchChats, the engine
+-- unreachable) has it publish none (src/chat.rs `publish_session`), and the
+-- page went back to opening, its transcript gone. The fixture is the engine
+-- here: its chat stays open, as an engine's does through its frames.
+ui.effect(function()
+	if store.session:get() == nil and opened and META[opened] then
+		local id = opened :: string
+		ui.after(0, function()
+			if opened == id and store.session:peek() == nil then
+				store.session:set(META[id])
+			end
+		end)
+	end
+end)
 -- A promise settled at once.
 local function settled(value: any): any
 	return {
@@ -273,6 +325,11 @@ ui.command {
 }
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	-- A send carries no time of its own: the host starts its clock when it
+	-- gets it (a message held back goes with its week starting then).
+	if req.at or req.issued_at or req.sent_at or req.expires_at then
+		note(`stamped:{req.text}`)
+	end
 	if SEND_FAILS:peek() then
 		SEND_FAILS:set(false)
 		return {
@@ -318,6 +375,36 @@ stub.send = function(req: any)
 end
 stub.retry = function(id: string, message: string)
 	note(`retry:{id}:{message}`)
+end
+-- This device's outbox, as the engine takes a send out of it (#1256's
+-- RemoveHeldSend): gone from the chat's waiting list, or not there. An
+-- engine from before it refuses.
+local no_removal = false
+ui.command {
+	id = "engine_without_removal",
+	title = "The engine can't take a send out of its outbox",
+	run = function()
+		no_removal = true
+	end,
+}
+stub.remove_held = function(id: string, item: string, message: string?): any
+	note(`remove_held:{id}:{item}:{message or "-"}`)
+	if no_removal then
+		return { after = function(_self: any, _ok: any, err: (any) -> ()) err({ message = "unsupported" }) end }
+	end
+	local s = META[id]
+	local kept, found = {}, false
+	for _, w in (s and s.waiting) or {} do
+		if w.id == item then
+			found = true
+		else
+			table.insert(kept, w)
+		end
+	end
+	if found then
+		publish(id, { waiting = kept })
+	end
+	return settled(found)
 end
 -- Each project's branches, as git where it lives would list them (the
 -- box's asked of the box).
@@ -512,6 +599,7 @@ local FILES = { "src/chat.rs", "src/main.rs", "ui/screens/chat/composer.luau", "
 local files_stub = files :: any
 files_stub.search = function(target: any, query: string): any
 	note(`search:{target.chat or target.space or "?"}:{query}`)
+	note(`search_on:{target.device or "here"}`)
 	local found = {}
 	for _, path in FILES do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then
@@ -649,6 +737,75 @@ ui.command {
 		local tools = table.clone(m.tools or {})
 		table.insert(tools, { id = `lt{#tools + 1}`, kind = "exec" :: any, verb = "Ran", target = "cargo test" })
 		store.messages:set_key({ n, "tools" }, tools)
+	end,
+}
+-- The reply's host stops reporting mid-turn (it died, or slept): the reply
+-- stays unfinished in the transcript, begun a while ago, and its session no
+-- longer says a turn runs.
+ui.command {
+	id = "reply_stalls",
+	title = "The reply's host stops reporting",
+	run = function()
+		local n = store.messages:len()
+		if n > 0 then
+			store.messages:set_key({ n, "started" }, ui.now() / 1000 - 120)
+		end
+		if opened then
+			publish(opened, { running = false })
+		end
+	end,
+}
+-- On its way to the chat and not yet taken, sent three days ago (the
+-- engine's WatchWaitingMessages); and one whose files the store refused.
+ui.command {
+	id = "waiting_old",
+	title = "A message sent three days ago, not yet taken",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "w1", message = "m-w1", text = "Sent long ago", sent = os.time() - 3 * 86400, expires = os.time() + 4 * 86400 } } })
+		end
+	end,
+}
+ui.command {
+	id = "waiting_expired",
+	title = "A message that waited past its week",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "w2", message = "m-w2", text = "Too late", sent = os.time() - 8 * 86400, expires = os.time() - 86400 } } })
+		end
+	end,
+}
+ui.command {
+	id = "waiting_store_full",
+	title = "A message whose files the store refused",
+	run = function()
+		if opened then
+			publish(opened, { waiting = { { id = "o1", message = "m-o1", text = "With files", sent = os.time(), held = true, failure = "too many files are waiting for Cloud machines to collect them; retry once one has" } } })
+		end
+	end,
+}
+-- This device's outbox for the chat: one send still uploading, one that
+-- stopped trying.
+ui.command {
+	id = "waiting_outbox",
+	title = "Two sends in this device's outbox",
+	run = function()
+		if opened then
+			publish(opened, { waiting = {
+				{ id = "o-up", message = "m-up", text = "Still uploading", sent = os.time(), held = true },
+				{ id = "o-stop", message = "m-stop", text = "Gave up", sent = os.time(), held = true, failure = "upload failed" },
+			} })
+		end
+	end,
+}
+-- A message queued three days ago, still waiting.
+ui.command {
+	id = "queue_old",
+	title = "A message queued three days ago",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q-old", text = "Old words", at = os.time() - 3 * 86400 } } })
+		end
 	end,
 }
 ui.command {
@@ -838,6 +995,33 @@ local function seed()
 	}) :: any)
 end
 seed()
+-- Cloud chats' machines, each with its own copy of Atlas's repository
+-- (acme/atlas), as the engine lists them.
+ui.command {
+	id = "fixture.cloud_copies",
+	title = "Fixture: Cloud machines, each with a copy of Atlas's repository",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.devices = table.clone(now.devices)
+		now.projects = table.clone(now.projects)
+		for i, created in { 100, 300, 200 } do
+			table.insert(now.devices, { id = `cloud-m{i}`, name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+			table.insert(now.projects, { id = `atlas-c{i}`, name = "atlas", device = `cloud-m{i}`, path = "/home/user/atlas", git = true, github = "acme/atlas", created = created })
+		end
+		sessions.now:set(now)
+	end,
+}
+-- A second repository Cloud can open: Site (acme/site), on the build box.
+ui.command {
+	id = "fixture.site_project",
+	title = "Fixture: Site, a second repository Cloud can open",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		table.insert(now.projects, { id = "site", name = "Site", device = "box", path = "/srv/site", git = true, github = "acme/site" })
+		sessions.now:set(now)
+	end,
+}
 -- This device's connection as the shell hears it (`connection`).
 for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offline", "offline" }, { "connection_back", nil } } do
 	ui.command {
@@ -1018,6 +1202,154 @@ do
 			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
 				store.messages:set(now)
 			end
+		end,
+	}
+	-- `long_chat`: Tall replies becomes a long working chat as a real
+	-- agent's reads (ui/long_chat_fixture), opened at its end: replies of
+	-- markdown and tables cut by their work, short prompts between them.
+	ui.command {
+		id = "long_chat",
+		title = "Tall replies becomes a long working chat",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- (table_fixture's `status`.)
+	local STATUS_TABLE = [[
+Beta.5 is almost out. Here's where everything stands:
+
+| Area | Status |
+|---|---|
+| **Beta.5** | Windows and both Linux builds passed. macOS has been building, signing and notarizing for about 40 minutes; notarization usually takes the longest. It publishes right after. |
+| **Memory** | Two of the three fixes are merged in zgx (#1960, #1981); #1945 merges after its checks. Together they bring memory after heavy use to about **264 MB** (was 315, and beta.1 was 271). The memory chat is now chasing the remaining ~50 MB stuck in partly used memory pages. |
+| **Streaming** | ff4bff4f's three zgx PRs are open and in CI: append-only text, styled text that follows state, and the fade-in drawn as one piece. Next is the GPU-run fade-in under the glass, worked out with the render chat. Your staging app's build is at 5.9% (from 7.1%), with about 4–4.5% as the next target. |
+| **Scrolling** | Waiting on zgx CI: accessibility updates (#1931), zgx's built-in scroll bar (#1961), and the "scrolling stopped" timer (#1975). The Zeron side of each is ready on branches. The working-rings fix is merged. |
+| **The scroll-skip / overlapping-rows bug** | Not reproduced, and no cause yet. Tests are in place. If it happens again, send a screenshot and the chat name before navigating away. |
+]]
+	-- `status_table`: a reply whose table has a 38-character label beside
+	-- long prose (table_fixture's `status`, the one Wing couldn't scroll).
+	ui.command {
+		id = "status_table",
+		title = "A reply with a wide status table",
+		run = function()
+			TRANSCRIPTS.s7 = {
+				{ id = "st1", role = "user", text = "Where does everything stand?" },
+				{ id = "st2", role = "assistant", text = STATUS_TABLE, model = "Opus" },
+			}
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_cross`: the same, other chats' long messages (folded behind
+	-- Show more) between its turns.
+	ui.command {
+		id = "long_chat_cross",
+		title = "Tall replies becomes a long working chat with other chats' messages",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_cross_late`: the same, but its other chats' messages and
+	-- the replies after them not yet whole (a synced chat's rows as they first
+	-- come); `long_chat_cross_fill`: they come whole, in place.
+	ui.command {
+		id = "long_chat_cross_late",
+		title = "A long working chat whose last rows aren't whole yet",
+		run = function()
+			local whole = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			local now = {}
+			for i, m in whole do
+				local early = table.clone(m)
+				if i > #whole - 40 and (m.sender or string.sub(m.id, 1, 2) == "ly") then
+					early.text = string.sub(m.text, 1, 40)
+					early.copy = early.text
+					if early.blocks then
+						early.blocks = { early.blocks[1] }
+					end
+				end
+				table.insert(now, early)
+			end
+			TRANSCRIPTS.s7 = now
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(now)
+			end
+		end,
+	}
+	ui.command {
+		id = "long_chat_cross_fill",
+		title = "The long working chat's last rows come whole",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_sent`: the same, up to the reply before its last prompt
+	-- (sent then from the composer); `long_chat_streams`, run again and
+	-- again: its last reply streams in, a step at a time, then ends.
+	ui.command {
+		id = "long_chat_sent",
+		title = "Tall replies becomes a long working chat, its last turn to come",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	local stage = 0
+	ui.command {
+		id = "long_chat_streams",
+		title = "The long working chat's last reply streams a step",
+		run = function()
+			local fixture = require("./long_chat_fixture") :: any
+			local stages = fixture.stages()
+			local n = store.messages:len()
+			if stage < 0 then
+				return
+			end
+			stage += 1
+			if stage == 1 then
+				local prompt = store.messages:peek()[n]
+				if prompt and prompt.role == "user" and prompt.waiting then
+					store.messages:set_key({ n, "waiting" }, ui.null)
+				end
+				store.messages:push { id = "orbit-trigger", role = "assistant", text = "", model = "Opus", streaming = true, started = ui.now() / 1000, tools = {}, blocks = {} }
+				publish(opened :: any, { running = true })
+				n += 1
+			end
+			local s = stages[stage]
+			if s then
+				ui.batch(function()
+					store.messages:set_key({ n, "blocks" }, s.blocks)
+					store.draft:set { id = "orbit-trigger", text = s.part_text or "", part = s.part, part_text = s.part_text }
+				end)
+				return
+			end
+			local done = fixture.trigger()
+			local text = {}
+			for _, b in done do
+				if b.kind == "text" then
+					table.insert(text, b.text)
+				end
+			end
+			ui.batch(function()
+				store.messages:set_key({ n, "blocks" }, done)
+				store.messages:set_key({ n, "text" }, table.concat(text, "\n\n"))
+				store.messages:set_key({ n, "streaming" }, false)
+				store.messages:set_key({ n, "at" }, "Nov 10, 1:13 PM")
+				store.draft:set { id = "", text = "" }
+			end)
+			publish(opened :: any, { running = false })
+			stage = -1
 		end,
 	}
 end
@@ -1722,6 +2054,39 @@ ui.command {
 		for _, m in c.models do
 			if m.value ~= "opus" then
 				table.insert(models, m)
+			end
+		end
+		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
+	end,
+}
+-- The agent marks a default that isn't its first row (Claude lists
+-- best-first and marks the CLI's own default).
+ui.command {
+	id = "catalog_marks_fusion_default",
+	title = "The catalog marks Fusion its agent's default",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = {}
+		for _, m in c.models do
+			local row = table.clone(m) :: any
+			row.default = if m.value == "fusion" then true else nil
+			table.insert(models, row)
+		end
+		store.catalog:set({ state = "ready", complete = (c :: any).complete, harnesses = c.harnesses, models = models } :: any)
+	end,
+}
+-- The same, complete and without Opus: a new chat on Opus gives way.
+ui.command {
+	id = "catalog_complete_without_opus_marks_fusion",
+	title = "The catalog is complete, without Opus, Fusion its default",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = {}
+		for _, m in c.models do
+			if m.value ~= "opus" then
+				local row = table.clone(m) :: any
+				row.default = if m.value == "fusion" then true else nil
+				table.insert(models, row)
 			end
 		end
 		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)

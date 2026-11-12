@@ -7,3 +7,4 @@ mod osc7501;
 mod codex_subagents;
 mod claude_subagents;
 mod local_profiles;
+mod self_presence;

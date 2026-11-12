@@ -600,7 +600,7 @@ function M.Section(props: SectionProps): Node
 		cursor = if foldable then "pointer" else nil,
 		hover = if foldable then { color = "$text.secondary" } else nil,
 		on_click = if foldable then props.on_toggle else nil,
-		ui.text {
+		FadeText {
 			props.title,
 			grow = 1,
 			text_size = "$font.size.xs",

@@ -164,8 +164,8 @@ impl Updates {
         *self.list.borrow_mut() = Some(list);
         let (me, rpc) = (self.clone(), rpc.clone());
         engine::get().spawn(async move {
-            if let Ok(answer) = rpc.call("LocalDevice", json!({})).await {
-                *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
+            if let Some(here) = engine::local_device(&rpc).await {
+                *me.here.borrow_mut() = Some(here);
                 me.publish();
             }
         });

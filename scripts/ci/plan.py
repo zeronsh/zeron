@@ -64,6 +64,7 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "frame_source": [("macos-frame-source", "macos")],  # macos.yml
     "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
     "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
+    "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux")],  # zgx-tests.yml
 }
 # Run only nightly, manually or with `ci:full` (see the module docstring): voice
 # (the AEC3 audio stack and the packaged Windows media runtime; no failures of
@@ -100,6 +101,15 @@ MOBILE_CORE = [
 VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scripts/package-voice-runtime.py",
                "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
 
+# The zgx suite's own files, and the crates it builds: main() replaces ZGX_CORE
+# with the closure of reuse.SUITE_PACKAGES["zgx"]; this list is the fallback.
+ZGX_PATHS = ["apps/zgx/**", "scripts/ci/nextest.toml", ".github/workflows/zgx-tests.yml"]
+ZGX_CORE = [
+    "crates/engine/**", "crates/plugin-guard/**", "crates/zatex/**", "crates/theme/**",
+    "crates/preview-label/**", "crates/cli/**", "crates/launch/**", "crates/notify/**",
+    "crates/proto/**", "crates/update/**", "crates/visual/**", "crates/visual-gpu/**",
+]
+
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                      ".github/workflows/ui-tests.yml"],
@@ -124,6 +134,10 @@ BROAD: dict[str, list[str]] = {
     "ios": CARGO + MOBILE_CORE + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"],
     "android": CARGO + ["apps/android/**", "crates/**", "scripts/android/**", "apps/ios/Zeron/Fonts/**",
                         "apps/ios/Zeron/Assets.xcassets/**", ".github/workflows/android.yml"],
+    # The zgx interface (its own workspace: apps/zgx/Cargo.lock) with its Rust and
+    # Luau UI tests, and the engine's plugin host (also on macOS here; core-tests
+    # runs it on Linux).
+    "zgx": CARGO + ZGX_PATHS + ZGX_CORE,
 }
 
 # Fast tier: the files that always select the platform suite...
@@ -250,19 +264,23 @@ def gpui_moved(files: list[dict]) -> bool:
 
 
 def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None,
-         nightly: bool = False) -> dict[str, bool]:
+         nightly: bool = False, zgx: list[str] | None = None) -> dict[str, bool]:
     """files: [{"filename", "previous_filename"?, "patch"?}], or None for "everything".
+
+    `mobile`, `zgx`: the crate directories (`crates/x/**`) the iOS/Android and
+    zgx suites build, when the workspace could be read.
 
     `nightly`: the nightly schedule, a manual run or `ci:full`, which also run NIGHTLY_SUITES.
     """
-    suites = select(files, tier, mobile)
+    suites = select(files, tier, mobile, zgx)
     if not nightly:
         for suite in NIGHTLY_SUITES:
             suites[suite] = False
     return suites
 
 
-def select(files: list[dict] | None, tier: str, mobile: list[str] | None) -> dict[str, bool]:
+def select(files: list[dict] | None, tier: str, mobile: list[str] | None,
+           zgx: list[str] | None = None) -> dict[str, bool]:
     if files is None:
         return {suite: True for suite in SUITE_JOBS}
     files = [f for f in files if not version_only(f)]
@@ -273,6 +291,8 @@ def select(files: list[dict] | None, tier: str, mobile: list[str] | None) -> dic
     broad = dict(BROAD)
     if mobile is not None:
         broad["ios"] = CARGO + mobile + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"]
+    if zgx is not None:
+        broad["zgx"] = CARGO + ZGX_PATHS + zgx
     suites = {suite: any(matches(p, broad[suite]) for p in paths) for suite in SUITE_JOBS}
     suites["frame_source"] = suites["frame_source"] or gpui_moved(files)
     if tier == "fast":
@@ -433,7 +453,12 @@ def main() -> int:
         mobile = [d + "/**" for d in sorted(reuse.Workspace(".").closure(["zeron-mobile"]))] + ["crates/mobile-bindgen/**"]
     except (OSError, ValueError, KeyError) as error:
         print(f"::warning::could not read the workspace ({error}); using the static mobile core list")
-    selected = plan(files, tier, mobile, nightly)
+    zgx = None
+    try:
+        zgx = [d + "/**" for d in sorted(reuse.Workspace(".").closure(reuse.SUITE_PACKAGES["zgx"]))]
+    except (OSError, ValueError, KeyError) as error:
+        print(f"::warning::could not read the workspace ({error}); using the static zgx crate list")
+    selected = plan(files, tier, mobile, nightly, zgx)
     off, flags = gated(files, tier, selected, nightly)
     # What a job does depends on its gated jobs and flags too: they are part of the fingerprint.
     variants = {suite: " ".join(f"-{j}" for j in off.get(suite, [])) + " " + " ".join(flags.get(suite, []))
