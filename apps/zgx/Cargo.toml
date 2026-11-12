@@ -171,7 +171,8 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788
 # DirectComposition tree of the window's own. The runtime ships with Windows
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# (And the terminal bridge's console, src/terminal.rs.)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["webview2"] }
 
 # zgx's D-Bus (menus, portals) linked in rather than loaded: `zeron` is also
@@ -191,6 +192,12 @@ accesskit_consumer = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8
 accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
 accesskit_unix = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
 accesskit_windows = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+
+# zgx's terminal, with block elements and box drawing drawn to the cell
+# (patches/zgx-terminal/src/paint.rs): zgx's own renderer drew them from the
+# font, gapped, where Ghostty (macOS only) draws them whole.
+[patch."https://github.com/zeronsh/zgx"]
+zgx-terminal = { path = "patches/zgx-terminal" }
 
 # zgx is slow unoptimized (its own setting): optimize dependencies, keep
 # this crate quick to build.

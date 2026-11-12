@@ -302,7 +302,7 @@ end
 
 -- A JavaScript string literal.
 local function js_string(v: string): string
-	return `"{string.gsub(string.gsub(string.gsub(v, "\\", "\\\\"), '"', '\\"'), "\n", "\\n")}"`
+	return ui.json.encode(v)
 end
 
 -- A JavaScript literal for a flat table of strings, numbers and booleans.
@@ -311,7 +311,7 @@ local function js(value: { [string]: any }): string
 	for k, v in value do
 		local lit: string
 		if type(v) == "string" then
-			lit = `"{string.gsub(string.gsub(v, "\\", "\\\\"), '"', '\\"')}"`
+			lit = js_string(v)
 		elseif type(v) == "boolean" then
 			lit = tostring(v)
 		elseif type(v) == "number" then
@@ -565,11 +565,24 @@ Page = ui.component(function(props: Props): Node
 		local nonce = math.random(1, 2147483647)
 		nonces:set_key(id, nonce)
 		session_picks:set_key(id, nil)
-		web:run(`{SCRIPT}\n;window.__zeronAnnotator.start({nonce}, {js(annotate_theme())});`)
 		annotating:set_key(id, true)
 		if not mode:peek() then
 			mode:set(true)
 		end
+		problem:set(nil)
+		web:eval(`{SCRIPT}\n;window.__zeronAnnotator.start({nonce}, {js(annotate_theme())});`, function(value: any, err: string?)
+			-- A late answer from a stopped picker or another page changes nothing.
+			if nonces:peek()[id] ~= nonce or not annotating:peek()[id] then
+				return
+			end
+			if err or value ~= true then
+				web:run("window.__zeronAnnotator && window.__zeronAnnotator.stop();")
+				nonces:set_key(id, nil)
+				annotating:set_key(id, nil)
+				mode:set(false)
+				problem:set("panel.browser.annotate_failed")
+			end
+		end)
 		web:focus()
 	end
 	local function toggle_annotating()
@@ -1524,7 +1537,8 @@ Page = ui.component(function(props: Props): Node
 				if not main_frame or type(value) ~= "table" or value.kind ~= "zeron.annotation" then
 					return
 				end
-				if value.nonce ~= nonces:peek()[id] then
+				local nonce = nonces:peek()[id]
+				if not annotating:peek()[id] or type(nonce) ~= "number" or value.nonce ~= nonce then
 					return
 				end
 				if value.event == "pick" and type(value.pick) == "table" then

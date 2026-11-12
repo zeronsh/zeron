@@ -7725,7 +7725,6 @@ dependencies = [
 [[package]]
 name = "zgx-terminal"
 version = "0.1.10"
-source = "git+https://github.com/zeronsh/zgx?rev=06c6d56ac8f2d7788ddb77ab019ee2af121710f8#06c6d56ac8f2d7788ddb77ab019ee2af121710f8"
 dependencies = [
  "base64 0.22.1",
  "flate2",

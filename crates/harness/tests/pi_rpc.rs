@@ -217,8 +217,12 @@ async fn steers_confirm_on_consumption_and_interrupt_is_terminal_once() {
         .run(request(dir.path(), "slow"), c)
         .await
         .unwrap();
+    // The steer is itself a slow turn (the fixture's `slow`: a second, checking
+    // for an abort every 10 ms), so the cancel sent once it's confirmed always
+    // lands inside it. A quick steered turn could finish before the abort got
+    // there on a loaded runner, and the run ended Completed.
     tx.send(SteerMessage {
-        prompt: "redirect".into(),
+        prompt: "slow".into(),
         message_id: Some("user-id".into()),
         attachments: Vec::new(),
         config: None,

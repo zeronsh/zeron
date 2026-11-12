@@ -1,0 +1,1324 @@
+//! The terminal zgx draws, headless: a real program's output in its rows,
+//! typing reaching the program, its reports in the controller's state and
+//! events, and the session outliving the view that showed it.
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
+use zgx::{
+    compose::{TaskRunner, prelude::*},
+    scene::NodeKind,
+    task::LocalExecutor,
+    terminal::{Terminal, TerminalOptions},
+    widgets::Ui,
+};
+#[cfg(unix)]
+use zgx::{
+    input::{InputEvent, Key, Modifiers},
+    terminal::TerminalEvent,
+};
+
+struct Harness {
+    ui: Ui,
+    executor: Rc<RefCell<LocalExecutor>>,
+}
+impl Harness {
+    fn new() -> Self {
+        Self {
+            ui: Ui::new(640., 360.),
+            executor: Rc::new(RefCell::new(LocalExecutor::new())),
+        }
+    }
+    fn mount(&mut self, view: View) {
+        self.ui.mount(provide(
+            TaskRunner::from_executor(self.executor.clone()),
+            view,
+        ));
+        self.ui.prepare_frame();
+    }
+    /// Run what is due (the session's wakes, posted deliveries, a frame).
+    fn pump(&mut self) {
+        while self.executor.borrow_mut().tick() > 0 {}
+        zgx::native_view::deliver_posted();
+        self.ui.prepare_frame();
+    }
+    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            self.pump();
+            if done(self) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {:?}",
+                self.texts()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// The text the rows draw, run by run, in order.
+    fn texts(&self) -> Vec<String> {
+        let scene = self.ui.scene.borrow();
+        scene
+            .paint_items()
+            .filter_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+    fn shows(&self, text: &str) -> bool {
+        self.texts().iter().any(|shown| shown == text)
+    }
+    /// The colour `text` is drawn in, where it shows.
+    #[cfg(unix)]
+    fn color_of(&self, text: &str) -> Option<zgx::scene::Color> {
+        let scene = self.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text {
+                text: shown, color, ..
+            } if &**shown == text => Some(*color),
+            _ => None,
+        })
+    }
+    /// The family `text` is drawn in, where it shows.
+    #[cfg(unix)]
+    fn family_of(&self, text: &str) -> Option<zgx::text_layout::FontFamily> {
+        let scene = self.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text { text: shown, .. } if &**shown == text => {
+                Some(item.font.family.clone())
+            }
+            _ => None,
+        })
+    }
+}
+
+/// What the rows' canvases draw a point high (underlines, a strike) and
+/// stroke (a curly underline), with their colours: `(colour, stroked)`.
+#[cfg(unix)]
+fn underline_marks(app: &Harness) -> Vec<(zgx::scene::Color, bool)> {
+    use zgx::canvas::{Brush, Draw, Shape};
+    let scene = app.ui.scene.borrow();
+    let mut marks = Vec::new();
+    for item in scene.paint_items() {
+        let NodeKind::Canvas(canvas) = item.kind else {
+            continue;
+        };
+        for draw in canvas.commands() {
+            match draw {
+                Draw::Fill {
+                    path,
+                    brush: Brush::Solid(color),
+                    ..
+                } => {
+                    if let Some(Shape::Rect { rect, .. }) = path.shape()
+                        && (rect.height - 1.).abs() < 0.01
+                    {
+                        marks.push((*color, false));
+                    }
+                }
+                Draw::Stroke {
+                    brush: Brush::Solid(color),
+                    ..
+                } => marks.push((*color, true)),
+                _ => {}
+            }
+        }
+    }
+    marks
+}
+
+fn session(command: &str) -> TerminalOptions {
+    TerminalOptions {
+        command: Some(command.into()),
+        ..Default::default()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn output_shows_in_rows_and_reports_reach_the_controller() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(r"printf '\033]2;Building\007hello world\r\n\033[31mred\033[0m\r\n'; sleep 30"),
+    );
+    // As a desktop host with the `terminal` feature provides it.
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the output", |app| {
+        app.shows("hello world") && app.shows("red")
+    });
+    // Its reports come with the read after: the view can draw what the
+    // screen model holds (a resize's paint) before that read.
+    app.until("the title", |_| term.title() == "Building");
+    let state = term.state().get();
+    assert!(state.columns > 10 && state.rows > 5, "{state:?}");
+    assert!(zgx_terminal::is_engine_drawn(&term));
+    // The shell running it is in front (`sh -c` doesn't take its
+    // commands to the front).
+    app.until("the foreground process", |_| {
+        term.process() == "sh" && term.state().get().pid > 0
+    });
+}
+
+/// What the terminal's live region (its `Status` node) says now.
+fn news(app: &Harness) -> String {
+    app.ui
+        .semantics
+        .borrow()
+        .iter()
+        .find(|(_, node)| node.role == zgx::semantics::Role::Status)
+        .map(|(_, node)| node.label.clone())
+        .unwrap_or_default()
+}
+
+/// Every platform's reader (Orca, VoiceOver, Narrator) hears the live
+/// region through the same frame's accessibility update. Each line waits
+/// for the test's Enter and the test delivers each frame, so reads and
+/// frames come in the order it sets (output the view's first paint drew,
+/// before it could be news, once lost a line here).
+#[test]
+fn a_reader_hears_every_read_of_output_since_the_last_frame() {
+    let mut app = Harness::new();
+    app.ui.set_assistive_technology(true);
+    #[cfg(unix)]
+    let command = "stty -echo; echo ready; read a; echo alpha; read b; echo beta; \
+                   read c; echo gamma; sleep 30";
+    #[cfg(windows)]
+    let command = "cmd.exe /d /c echo ready& set /p a=& echo alpha& set /p b=& echo beta& \
+                   set /p c=& echo gamma& ping -n 30 127.0.0.1 >nul";
+    let term = Terminal::new(&app.ui.runtime, session(command));
+    let frames = zgx::frame::FrameClock::new();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        frames.clone(),
+        provide(renderer, zgx::terminal::terminal(&term).w(600.).h(300.)),
+    ));
+    let mut index = 0;
+    let mut frame = |app: &mut Harness| {
+        index += 1;
+        frames.deliver(zgx::frame::Frame {
+            index,
+            time: Instant::now(),
+            interval: Duration::from_millis(16),
+        });
+        app.pump();
+    };
+    app.until("ready", |app| app.shows("ready"));
+    // What showed as the view mounted is no news; anything waiting goes.
+    frame(&mut app);
+    let before = news(&app);
+    let mut heard = Vec::new();
+    // Two reads before a frame: both said with it, in order.
+    term.input("\r");
+    app.until("alpha", |app| app.shows("alpha"));
+    term.input("\r");
+    app.until("beta", |app| app.shows("beta"));
+    assert_eq!(news(&app), before, "news went out before its frame");
+    frame(&mut app);
+    heard.push(news(&app));
+    // One read, the next frame: said alone.
+    term.input("\r");
+    app.until("gamma", |app| app.shows("gamma"));
+    frame(&mut app);
+    heard.push(news(&app));
+    assert_eq!(heard, ["alpha\nbeta", "gamma"]);
+}
+
+/// A screen of identical lines, one of them rewritten in place: the reader
+/// hears that line alone. Looking for a scroll over the whole screen once
+/// took it for lines scrolled in, the rewritten one and every one below.
+#[cfg(unix)]
+#[test]
+fn a_reader_hears_the_one_line_changed_among_identical_lines() {
+    let mut app = Harness::new();
+    app.ui.set_assistive_technology(true);
+    let command = "stty -echo; i=0; while [ $i -lt 200 ]; do echo same; i=$((i+1)); done; \
+                   printf same; read a; printf '\\033[5;1Hdiff'; sleep 30";
+    let term = Terminal::new(&app.ui.runtime, session(command));
+    let frames = zgx::frame::FrameClock::new();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        frames.clone(),
+        provide(renderer, zgx::terminal::terminal(&term).w(600.).h(300.)),
+    ));
+    let mut index = 0;
+    let mut frame = |app: &mut Harness| {
+        index += 1;
+        frames.deliver(zgx::frame::Frame {
+            index,
+            time: Instant::now(),
+            interval: Duration::from_millis(16),
+        });
+        app.pump();
+    };
+    app.until("a screen of identical lines", |app| {
+        app.shows("same") && term.state().get().rows > 5
+    });
+    // What the lines' arrival said goes with this frame.
+    frame(&mut app);
+    term.input("\r");
+    app.until("the line rewritten", |app| app.shows("diff"));
+    frame(&mut app);
+    assert_eq!(news(&app), "diff");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_process_in_front_is_named_again_after_it_execs_another() {
+    let mut app = Harness::new();
+    // The shell, then `cat` in its place: the same pid, another program.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session("stty -echo; printf ready; read x; exec cat"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the shell in front", |_| term.process() == "sh");
+    let pid = term.state().get().pid;
+    term.input("\r");
+    // cat's output is the next check's cue.
+    term.input("hello\r");
+    app.until("cat in front", |_| term.process() == "cat");
+    assert_eq!(term.state().get().pid, pid, "exec kept the pid");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_process_in_front_is_named_after_its_session_moves_to_another_window() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        // `ready` once echo is off: what is typed from then isn't echoed.
+        session("stty -echo; echo ready; read x; exec cat"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer.clone(),
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the shell ready", |app| {
+        app.shows("ready") && term.process() == "sh"
+    });
+    term.input("\r");
+    term.input("hello\r");
+    // cat's output read: a check is due, on this window's tasks.
+    app.until("cat's output", |app| app.shows("hello"));
+    // The view shows in another window, and the first window's tasks
+    // never run again, as when it closes.
+    let first = std::mem::replace(
+        &mut app.executor,
+        Rc::new(RefCell::new(LocalExecutor::new())),
+    );
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    drop(first);
+    app.until("cat in front", |_| term.process() == "cat");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_quiet_command_typed_at_a_shell_is_named_in_front() {
+    let mut app = Harness::new();
+    // An interactive shell (job control: a command takes the front), and
+    // a command that prints nothing after the shell's echo of it.
+    let term = Terminal::new(&app.ui.runtime, session("PS1='$ ' exec sh -i"));
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the prompt", |app| {
+        app.texts().iter().any(|t| t.starts_with('$'))
+    });
+    app.until("the shell in front", |_| term.process() == "sh");
+    term.input("sleep 30\r");
+    app.until("sleep in front", |_| term.process() == "sleep");
+}
+
+#[cfg(unix)]
+#[test]
+fn streaming_output_is_read_at_most_once_a_refresh() {
+    let mut app = Harness::new();
+    // Three hundred lines, each its own chunk a millisecond or two apart:
+    // far more often than a refresh.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            "i=1; while [ $i -le 300 ]; do echo \"line $i\"; i=$((i+1)); sleep 0.001; done; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("line 1", |app| !lines_shown(app).is_empty());
+    let (start, before) = (Instant::now(), zgx_terminal::reads(&term));
+    app.until("line 300", |app| {
+        lines_shown(app).last().is_some_and(|last| last.0 == 300)
+    });
+    let reads = zgx_terminal::reads(&term) - before;
+    let refreshes = start.elapsed().as_secs_f64() / app.ui.refresh_interval().as_secs_f64();
+    // The harness looks every 5 ms: read at each look, that would be about
+    // three times as many.
+    assert!(
+        (reads as f64) <= refreshes + 2.,
+        "{reads} reads in {refreshes:.1} refreshes"
+    );
+}
+
+/// Every `line N` shown, with the top of its box on screen, in the order
+/// the scene paints them (which assistive technology reads).
+#[cfg(unix)]
+fn lines_shown(app: &Harness) -> Vec<(u32, f32)> {
+    let scene = app.ui.scene.borrow();
+    scene
+        .paint_items()
+        .filter_map(|item| match scene.kind(item.id) {
+            NodeKind::Text { text, .. } => text
+                .strip_prefix("line ")
+                .and_then(|n| n.trim().parse().ok())
+                .map(|n| (n, scene.transformed_bounds(item.id).y)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn scrolled_output_shows_each_line_at_its_row_in_order() {
+    let mut app = Harness::new();
+    // Forty lines at once, then twenty one by one (a scroll of a line or
+    // two between frames), past the bottom of about twenty rows.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            "i=1; while [ $i -le 40 ]; do echo \"line $i\"; i=$((i+1)); done; \
+             while [ $i -le 60 ]; do echo \"line $i\"; i=$((i+1)); sleep 0.02; done; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    let mut checked = 0;
+    app.until("line 60", |app| {
+        // Each frame on the way: the lines shown are consecutive, each a row
+        // below the one before, in reading order, and on screen.
+        let shown = lines_shown(app);
+        if let Some((first, top)) = shown.first().copied() {
+            let rows = shown.len() as f32;
+            let height = shown.get(1).map_or(0., |second| second.1 - top);
+            for (i, (line, y)) in shown.iter().enumerate() {
+                assert_eq!(*line, first + i as u32, "lines out of order: {shown:?}");
+                assert!(
+                    (y - (top + i as f32 * height)).abs() < 0.01,
+                    "line {line} not at its row: {shown:?}"
+                );
+            }
+            assert!(
+                height > 0. || shown.len() == 1,
+                "lines on one row: {shown:?}"
+            );
+            assert!(
+                top >= 0. && top + rows * height <= 300.,
+                "lines off screen: {shown:?}"
+            );
+            checked += 1;
+        }
+        shown.last().is_some_and(|last| last.0 == 60)
+    });
+    assert!(checked > 1, "only {checked} frames checked");
+    let shown = lines_shown(&app);
+    assert!(
+        shown.len() > 10 && shown[0].0 > 1,
+        "the screen didn't scroll: {shown:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn typing_reaches_the_program() {
+    let mut app = Harness::new();
+    let term = Terminal::new(&app.ui.runtime, session("cat"));
+    app.mount(zgx_terminal::terminal_view(&term).w(600.).h(300.));
+    term.focus();
+    app.until("focus", |_| term.focused());
+    app.ui.dispatch(InputEvent::Text("abc".into()));
+    app.ui.dispatch(InputEvent::KeyDown {
+        key: Key::Enter,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    // The tty's echo, then cat's copy.
+    app.until("the echo and the copy", |app| {
+        app.texts().iter().filter(|t| *t == "abc").count() == 2
+    });
+    // Control chords reach it as control characters: ^D ends cat.
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let heard = events.clone();
+    let _subscription = term.on_event(move |event| heard.borrow_mut().push(event.clone()));
+    app.ui.dispatch(InputEvent::KeyDown {
+        key: Key::Character("d".into()),
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    });
+    app.until("the exit", |_| term.exited().is_some());
+    assert_eq!(term.exited(), Some(0));
+    assert!(
+        events.borrow().iter().any(|event| matches!(
+            event,
+            TerminalEvent::CloseRequested {
+                process_alive: false
+            }
+        )),
+        "{:?}",
+        events.borrow()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_session_outlives_its_view() {
+    let mut app = Harness::new();
+    let term = Terminal::new(&app.ui.runtime, session(r"printf 'kept\r\n'; sleep 30"));
+    let shown = app.ui.runtime.signal(true);
+    let (view_term, view_shown) = (term.clone(), shown.clone());
+    app.mount(switch(
+        move || view_shown.get(),
+        move |showing, _| {
+            if showing {
+                zgx_terminal::terminal_view(&view_term).w(600.).h(300.)
+            } else {
+                text("elsewhere")
+            }
+        },
+    ));
+    app.until("the output", |app| app.shows("kept"));
+    let backend = term.backend().expect("a backend");
+    shown.set(false);
+    app.pump();
+    assert!(!app.shows("kept"), "{:?}", app.texts());
+    assert!(term.exited().is_none(), "unmounting keeps the session");
+    shown.set(true);
+    app.until("the output again", |app| app.shows("kept"));
+    assert!(
+        Rc::ptr_eq(&backend, &term.backend().unwrap()),
+        "the same session"
+    );
+    term.close();
+    assert!(term.backend().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_grid_is_in_the_themes_monospaced_font_and_follows_it() {
+    use zgx::{
+        text_layout::FontFamily,
+        theme::{ThemeOverride, tok},
+    };
+    let mut app = Harness::new();
+    let term = Terminal::new(&app.ui.runtime, session(r"printf 'fonts\r\n'; sleep 30"));
+    // An app's own code font, over its theme's (none at first).
+    let chosen = app.ui.runtime.signal(None::<&'static str>);
+    let over = chosen.clone();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        theme_scope_with(
+            move || match over.get() {
+                Some(name) => ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(name)),
+                None => ThemeOverride::new(),
+            },
+            zgx::terminal::terminal(&term).w(600.).h(300.),
+        ),
+    ));
+    app.until("the output", |app| app.shows("fonts"));
+    // zgx's own themes name the platform's monospaced font.
+    assert_eq!(app.family_of("fonts"), Some(FontFamily::Monospace));
+    chosen.set(Some("Test Mono"));
+    app.until("the rows in the chosen font", |app| {
+        app.family_of("fonts") == Some(FontFamily::from("Test Mono"))
+    });
+    chosen.set(None);
+    app.until("the rows in the theme's font again", |app| {
+        app.family_of("fonts") == Some(FontFamily::Monospace)
+    });
+    term.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_rows_are_in_the_themes_terminal_colours_and_follow_each_switch() {
+    use zgx::{
+        scene::Color,
+        theme::{Theme, ThemeOverride, tok},
+    };
+    let mut app = Harness::new();
+    app.ui.theme().register(
+        Theme::from_json(
+            r##"{ "name": "test-paper", "type": "light", "tokens": {
+                "terminal.foreground": "#202124", "terminal.ansi.1": "#b00020" } }"##,
+        )
+        .unwrap(),
+    );
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"printf 'plain [31mred[0m
+'; sleep 30",
+        ),
+    );
+    // A scope's own text colour over the theme's (none at first).
+    let scoped = app.ui.runtime.signal(false);
+    let over = scoped.clone();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        theme_scope_with(
+            move || match over.get() {
+                true => ThemeOverride::new().with(tok::TERMINAL_FOREGROUND, Color(0, 0, 255, 255)),
+                false => ThemeOverride::new(),
+            },
+            zgx::terminal::terminal(&term).w(600.).h(300.),
+        ),
+    ));
+    app.until("the output", |app| app.shows("red"));
+    // zgx's own themes set no terminal colours: the palette's show.
+    let palette = zgx_terminal::Palette::default();
+    let own =
+        |rgb: zgx_terminal::alacritty_terminal::vte::ansi::Rgb| Color(rgb.r, rgb.g, rgb.b, 255);
+    let (text, red) = (own(palette.foreground), own(palette.ansi[1]));
+    let colours = |app: &Harness| (app.color_of("plain"), app.color_of("red"));
+    assert_eq!(colours(&app), (Some(text), Some(red)));
+    let paper = (
+        Some(Color(0x20, 0x21, 0x24, 255)),
+        Some(Color(0xb0, 0x00, 0x20, 255)),
+    );
+    for _ in 0..3 {
+        app.ui.theme().set("test-paper").unwrap();
+        app.until("the paper theme's colours", |app| colours(app) == paper);
+        // A scope's token over it; the unset red stays the theme's.
+        scoped.set(true);
+        app.until("the scope's text colour", |app| {
+            colours(app) == (Some(Color(0, 0, 255, 255)), paper.1)
+        });
+        scoped.set(false);
+        app.until("the theme's again", |app| colours(app) == paper);
+        app.ui.theme().set(zgx::theme::DARK).unwrap();
+        app.until("the palette's own again", |app| {
+            colours(app) == (Some(text), Some(red))
+        });
+    }
+    term.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_apps_resolver_names_what_is_in_front() {
+    // A session server's client in front: the app says what is behind it.
+    zgx_terminal::front::resolve_with(|pid| {
+        (pid != 0).then(|| zgx_terminal::Foreground {
+            name: "claude".into(),
+            pid: 4242,
+            idle: false,
+            status: Some(zgx::terminal::ProgramStatus {
+                state: zgx::terminal::ProgramState::Blocked,
+                kind: Some("permission".into()),
+                ..Default::default()
+            }),
+        })
+    });
+    zgx_terminal::front::set_pushed(true);
+    let mut app = Harness::new();
+    let term = Terminal::new(&app.ui.runtime, session("sleep 30"));
+    app.mount(zgx_terminal::terminal_view(&term).w(600.).h(300.));
+    app.until("the resolved process", |_| term.process() == "claude");
+    let state = term.state().get();
+    assert_eq!(state.pid, 4242);
+    assert_eq!(
+        state.status.map(|status| status.state),
+        Some(zgx::terminal::ProgramState::Blocked)
+    );
+    assert!(term.needs_confirm_close(), "it isn't idle");
+    // The app says it changed: each terminal asks again.
+    zgx_terminal::front::resolve_with(|pid| {
+        (pid != 0).then(|| zgx_terminal::Foreground {
+            name: "zsh".into(),
+            pid: 4243,
+            idle: true,
+            status: None,
+        })
+    });
+    zgx_terminal::front::changed();
+    app.until("the new process", |_| term.process() == "zsh");
+    assert!(!term.needs_confirm_close());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_programs_output_shows_in_rows() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session("cmd.exe /d /c echo hello world& ping -n 30 127.0.0.1 >nul"),
+    );
+    app.mount(zgx_terminal::terminal_view(&term).w(600.).h(300.));
+    app.until("the output", |app| app.shows("hello world"));
+    let state = term.state().get();
+    assert!(state.columns > 10 && state.rows > 5, "{state:?}");
+    // cmd starts ping after its echo shows: closing asks first once ping
+    // is in front (cmd's newest child), not as soon as the echo is read.
+    app.until("ping in front", |_| term.needs_confirm_close());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_program_asking_for_the_kitty_keyboard_protocol_gets_it() {
+    let mut app = Harness::new();
+    // Push "disambiguate" (CSI > 1 u), ask what is on (CSI ? u), read the
+    // answer, then read one key.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r#"exec sh -c 'stty raw -echo; printf "\033[>1u\033[?u"; dd bs=1 count=5 2>/dev/null | od -An -c | tr -d " \n"; printf "\r\n"; dd bs=1 count=7 2>/dev/null | od -An -c | tr -d " \n"; printf "\r\n"; exec sleep 30'"#,
+        ),
+    );
+    app.mount(zgx_terminal::terminal_view(&term).w(600.).h(300.));
+    app.until("the flags' answer", |app| app.shows(r"033[?1u"));
+    term.focus();
+    app.until("focus", |_| term.focused());
+    app.ui.dispatch(InputEvent::KeyDown {
+        key: Key::Character("c".into()),
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    });
+    // Ctrl+C as CSI 99;5 u, not ^C.
+    app.until("the key", |app| app.shows(r"033[99;5u"));
+}
+
+/// A platform keeping a clipboard and a primary selection in memory.
+#[cfg(unix)]
+#[derive(Default)]
+struct Selections {
+    clipboard: RefCell<Option<String>>,
+    primary: RefCell<Option<String>>,
+}
+#[cfg(unix)]
+impl zgx::platform::Platform for Selections {
+    fn clipboard_text(&self) -> Option<String> {
+        self.clipboard.borrow().clone()
+    }
+    fn set_clipboard_text(&self, text: String) -> bool {
+        *self.clipboard.borrow_mut() = Some(text);
+        true
+    }
+    fn primary_text(&self) -> Option<String> {
+        self.primary.borrow().clone()
+    }
+    fn set_primary_text(&self, text: String) -> bool {
+        *self.primary.borrow_mut() = Some(text);
+        true
+    }
+    fn open_files(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Vec<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn save_file(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Option<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_selection_is_the_primary_and_a_middle_click_pastes_it() {
+    use zgx::input::PointerButton;
+    let mut app = Harness::new();
+    let selections = Rc::new(Selections::default());
+    let platform = zgx::platform::PlatformService(selections.clone());
+    let term = Terminal::new(&app.ui.runtime, session(r"printf 'pick me\r\n'; exec cat"));
+    app.mount(provide(
+        platform,
+        zgx_terminal::terminal_view(&term).w(600.).h(300.),
+    ));
+    app.until("the output", |app| app.shows("pick me"));
+    // Drag across the first row's text (the grid starts 10 points in, 6
+    // down), as far as its end.
+    let (y, right) = (12., 400.);
+    let press = |app: &mut Harness, event| {
+        app.ui.dispatch(event);
+        app.pump();
+    };
+    press(
+        &mut app,
+        InputEvent::PointerDown {
+            x: 11.,
+            y,
+            button: PointerButton::Primary,
+        },
+    );
+    press(&mut app, InputEvent::PointerMove { x: right, y });
+    press(
+        &mut app,
+        InputEvent::PointerUp {
+            x: right,
+            y,
+            button: PointerButton::Primary,
+        },
+    );
+    assert_eq!(selections.primary.borrow().as_deref(), Some("pick me"));
+    // A middle click pastes it to cat, which echoes it back.
+    *selections.primary.borrow_mut() = Some("from elsewhere".into());
+    press(
+        &mut app,
+        InputEvent::PointerDown {
+            x: 100.,
+            y: 100.,
+            button: PointerButton::Middle,
+        },
+    );
+    press(
+        &mut app,
+        InputEvent::PointerUp {
+            x: 100.,
+            y: 100.,
+            button: PointerButton::Middle,
+        },
+    );
+    app.until("the paste", |app| {
+        app.texts().iter().any(|t| t.starts_with("from elsewhere"))
+    });
+}
+
+/// A program's first output reaches the app's clipboard: the platform is
+/// the session's before it is first read, which can be as it starts (on a
+/// busy machine, the program had written before the view gave the
+/// terminal its platform, and its copy or its question went unanswered).
+#[cfg(unix)]
+#[test]
+fn a_programs_first_output_copies_to_the_clipboard() {
+    let mut app = Harness::new();
+    let selections = Rc::new(Selections::default());
+    let platform = zgx::platform::PlatformService(selections.clone());
+    // OSC 52: copy "secret" (c2VjcmV0), first thing.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(r#"printf '\033]52;c;c2VjcmV0\007'; exec sleep 30"#),
+    );
+    app.mount(provide(
+        platform,
+        zgx_terminal::terminal_view(&term).w(600.).h(300.),
+    ));
+    app.until("the copy", |_| {
+        selections.clipboard.borrow().as_deref() == Some("secret")
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_program_reads_the_clipboard_when_the_app_allows_it() {
+    for allow in [true, false] {
+        let mut app = Harness::new();
+        let selections = Rc::new(Selections::default());
+        *selections.clipboard.borrow_mut() = Some("secret".into());
+        let platform = zgx::platform::PlatformService(selections.clone());
+        // Ask for the clipboard (OSC 52) and show the answer's bytes.
+        let term = Terminal::new(
+            &app.ui.runtime,
+            session(
+                r#"exec sh -c 'stty raw -echo; printf "\033]52;c;?\007"; head -c 8 | od -An -c | tr -d " \n"; printf "\r\n"; exec sleep 30'"#,
+            ),
+        );
+        let asked = Rc::new(std::cell::Cell::new(0));
+        let counted = asked.clone();
+        term.on_clipboard_read(Some(move |request: zgx::terminal::ClipboardRead| {
+            counted.set(counted.get() + 1);
+            if allow {
+                request.allow();
+            } else {
+                request.deny();
+            }
+        }));
+        app.mount(provide(
+            platform,
+            zgx_terminal::terminal_view(&term).w(600.).h(300.),
+        ));
+        // The answer's first eight bytes: the clipboard's text in base64
+        // starting ("secret" is c2VjcmV0), or the answer ending empty.
+        let expected = if allow { r"033]52;c;c" } else { r"033]52;c;\a" };
+        app.until("the answer", |app| {
+            app.texts().iter().any(|t| t.starts_with(expected))
+        });
+        assert_eq!(asked.get(), 1, "the app's reader was asked once");
+    }
+}
+
+/// A program's underline styles (SGR 4:2 to 4:5) and underline colour
+/// (SGR 58) are drawn as shapes under their cells, a curly one as a wave;
+/// a plain underline in the text's colour is still the text's own, with no
+/// shapes of its own.
+#[cfg(unix)]
+#[test]
+fn styled_and_coloured_underlines_are_drawn_under_their_cells() {
+    use zgx::scene::Color;
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"printf '\033[4:3m\033[58;2;255;0;0mcurly\033[0m \033[4:2mdouble\033[0m \033[4:4mdotted\033[0m \033[4:5mdashed\033[0m\r\n\033[4mplain\033[0m\r\n'; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    // Drawn by shapes, not their text, the four words are one run of it.
+    let styled = "curly double dotted dashed";
+    app.until("the output", |app| app.shows("plain") && app.shows(styled));
+    let marks = underline_marks(&app);
+    let red = Color(255, 0, 0, 255);
+    assert!(
+        marks.contains(&(red, true)),
+        "the curly underline, a red wave: {marks:?}"
+    );
+    let ink: Vec<_> = marks
+        .iter()
+        .filter(|(color, stroked)| !stroked && *color != red)
+        .collect();
+    // A double underline's two lines, a dotted one's dots and a dashed one's
+    // dashes, all in the text's colour.
+    assert!(
+        ink.len() > 8,
+        "the double, dotted and dashed underlines: {marks:?}"
+    );
+    // The plain one is the text's: underlined in its font, and nothing more.
+    let scene = app.ui.scene.borrow();
+    let plain = scene
+        .paint_items()
+        .find(|item| matches!(item.kind, NodeKind::Text { text, .. } if &**text == "plain"))
+        .expect("the plain line");
+    assert!(
+        plain.font.underline.is_some(),
+        "a plain underline is its text's"
+    );
+    let others = scene
+        .paint_items()
+        .filter(|item| matches!(item.kind, NodeKind::Text { text, .. } if &**text == styled))
+        .filter(|item| item.font.underline.is_some())
+        .count();
+    assert_eq!(others, 0, "a styled underline isn't drawn by its text too");
+    drop(term);
+}
+
+/// Every run is drawn on the grid of cells (`LetterSpacing::cells`, the
+/// cell measured for the font), so a glyph from a fallback font a little
+/// wider or narrower than a cell (a braille spinner on macOS) moves nothing
+/// after it; the spinner stays in the run.
+#[test]
+#[cfg(unix)]
+fn runs_are_drawn_on_the_grid_of_cells() {
+    let mut app = Harness::new();
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(r"printf '\342\240\213 Loading 21\342\204\203 done\r\n'; sleep 30"),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    let line = "\u{280b} Loading 21\u{2103} done";
+    app.until("the output", |app| app.shows(line));
+    let spacing = {
+        let scene = app.ui.scene.borrow();
+        scene.paint_items().find_map(|item| match item.kind {
+            NodeKind::Text { text, .. } if &**text == line => Some(item.font.letter_spacing),
+            _ => None,
+        })
+    };
+    let cell = spacing.and_then(|spacing| spacing.cell());
+    assert!(cell.is_some_and(|cell| cell > 0.), "on a grid: {spacing:?}");
+}
+
+/// A replayed terminal (the gate's bench) draws what it is fed, on the
+/// feeding thread, with no program, pty or task behind it: each feed read
+/// and drawn at once.
+#[test]
+fn a_replayed_terminal_draws_what_it_is_fed() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    // No task runner: nothing reads it but a feed.
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(b"\x1b[1;32mbuilt\x1b[0m in 2s\r\n");
+    app.ui.prepare_frame();
+    assert!(app.shows("built"), "{:?}", app.texts());
+    assert!(app.shows("in 2s"), "{:?}", app.texts());
+    replay.feed(b"\x1b[2J\x1b[Hagain");
+    app.ui.prepare_frame();
+    assert!(
+        app.shows("again") && !app.shows("built"),
+        "{:?}",
+        app.texts()
+    );
+    assert_eq!(term.state().get().pid, 0);
+}
+
+/// The pictures drawn, in paint order: each one's bounds, and whether a
+/// row's canvas was drawn before it.
+#[cfg(unix)]
+fn pictures_drawn(app: &Harness) -> Vec<(zgx::scene::Rect, bool)> {
+    let scene = app.ui.scene.borrow();
+    let mut canvas_before = false;
+    let mut pictures = Vec::new();
+    for item in scene.paint_items() {
+        match item.kind {
+            NodeKind::Canvas(_) => canvas_before = true,
+            NodeKind::Image(_) => pictures.push((scene.transformed_bounds(item.id), canvas_before)),
+            _ => {}
+        }
+    }
+    pictures
+}
+
+/// A picture a program places (the kitty graphics protocol) is drawn over
+/// the cells it covers, stretched to the columns and rows it asked for;
+/// under the text when its z is negative; and it scrolls away with its
+/// lines.
+#[cfg(unix)]
+#[test]
+fn a_placed_picture_is_drawn_over_its_cells_and_scrolls_with_them() {
+    let mut app = Harness::new();
+    // Ten lines down, 2 by 2 red pixels over 3 by 2 cells below "top";
+    // again under the text after "next". Then, asked, four lines (the
+    // screen scrolls, the pictures still on it), and forty.
+    let term = Terminal::new(
+        &app.ui.runtime,
+        session(
+            r"i=0; while [ $i -lt 10 ]; do echo; i=$((i+1)); done; printf 'top\r\n\033_Ga=T,f=32,s=2,v=2,c=3,r=2,i=1,q=2;/wAA//8AAP//AAD//wAA/w==\033\\\r\nnext\033_Ga=p,i=1,z=-1,C=1,q=2\033\\\r\n'; read x; printf 'a\nb\nc\nd'; read x; i=0; while [ $i -lt 40 ]; do echo; i=$((i+1)); done; sleep 30",
+        ),
+    );
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.until("the pictures", |app| {
+        app.shows("next") && pictures_drawn(app).len() == 2
+    });
+    let bounds = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id))
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    let check = |app: &Harness| {
+        let (top, next) = (bounds(app, "top"), bounds(app, "next"));
+        let line = (next.y - top.y) / 3.;
+        let cell = top.width / 3.;
+        let pictures = pictures_drawn(app);
+        // Under the text: drawn before the rows; over it, after them.
+        let (under, over) = (pictures[0], pictures[1]);
+        assert!(!under.1 && over.1, "{pictures:?}");
+        let over = over.0;
+        assert!(
+            near(over.x, top.x)
+                && near(over.y, top.y + line)
+                && near(over.width, 3. * cell)
+                && near(over.height, 2. * line),
+            "{over:?} for cells {cell} by {line} from {top:?}"
+        );
+        let under = under.0;
+        assert!(
+            near(under.x, top.x + 4. * cell) && near(under.y, next.y),
+            "{under:?}"
+        );
+        top.y
+    };
+    let was = check(&app);
+    // The screen scrolled: they move up with their lines.
+    term.input("\n");
+    app.until("the screen scrolled", |app| app.shows("d"));
+    assert!(check(&app) < was - 1.);
+    // Forty lines later both are in the scrollback, and drawn no more.
+    term.input("\n");
+    app.until("the pictures scrolled away", |app| {
+        !app.shows("next") && pictures_drawn(app).is_empty()
+    });
+}
+
+/// A picture keeps its nodes: scrolling carries it along with the rows,
+/// without one being made again; sending it again changes what they show;
+/// deleting it takes them away. It stays over its line throughout.
+#[test]
+fn a_picture_keeps_its_node_as_it_scrolls_and_is_replaced() {
+    use zgx::scene::NodeId;
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let drawn = |app: &Harness| -> Vec<(NodeId, u64, f32)> {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .filter_map(|item| match item.kind {
+                NodeKind::Image(image) => {
+                    Some((item.id, image.id(), scene.transformed_bounds(item.id).y))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let text_y = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id).y)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text} isn't shown"))
+    };
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    // Ten lines down, below "mark", over a cell of its own. Lines all
+    // different: a scroll moves the rows' slots and their container only
+    // where the rows show it scrolled.
+    let lines = |from: usize, count: usize| -> Vec<u8> {
+        (from..from + count)
+            .flat_map(|n| format!("line {n}\r\n").into_bytes())
+            .collect()
+    };
+    feed(&app, &lines(0, 10));
+    feed(&app, b"mark\r\n");
+    feed(
+        &app,
+        b"\x1b_Ga=T,f=24,s=1,v=1,c=1,r=1,i=7,q=2;/wAA\x1b\\\r\n",
+    );
+    let [(node, shows, first)] = drawn(&app)[..] else {
+        panic!("{:?}", drawn(&app));
+    };
+    let gap = first - text_y(&app, "mark");
+    assert!(gap > 1., "{gap}");
+    // A line a frame, then several at once: the screen scrolls, and its
+    // node goes with its line.
+    let held = |app: &Harness| {
+        let [(now, _, y)] = drawn(app)[..] else {
+            panic!("{:?}", drawn(app));
+        };
+        assert_eq!(now, node, "made again");
+        assert!(
+            (y - text_y(app, "mark") - gap).abs() < 0.01,
+            "{y} not a line below mark, at {}",
+            text_y(app, "mark")
+        );
+        y
+    };
+    for n in 0..6 {
+        feed(&app, &lines(100 + n, 1));
+        held(&app);
+    }
+    feed(&app, &lines(200, 3));
+    let y = held(&app);
+    assert!(
+        y < first - gap,
+        "the screen never scrolled: {y}, from {first}"
+    );
+    // Sent again, it shows the new pixels in the same node.
+    feed(&app, b"\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AP8A\x1b\\");
+    assert_ne!(drawn(&app)[0].1, shows);
+    held(&app);
+    // Deleted, its nodes go.
+    feed(&app, b"\x1b_Ga=d,d=i,i=7,q=2\x1b\\");
+    assert!(drawn(&app).is_empty());
+    term.close();
+}
+
+/// A cell is whole device pixels, as terminals make it, so columns' edges
+/// and glyphs sit on the pixel grid rather than each a fraction off it; and
+/// measured again as the window's scale factor changes, the grid follows.
+#[test]
+fn cells_are_whole_device_pixels_at_any_scale() {
+    let ui = Ui::new(640., 360.);
+    ui.scene.borrow_mut().set_pixel_scale(2.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    // A run in a colour of its own ten columns along: where it starts, ten
+    // cells from the row's start.
+    replay.feed(b"0123456789\x1b[31mX\x1b[0m\r\n");
+    app.ui.prepare_frame();
+    let cell = |app: &Harness| {
+        let scene = app.ui.scene.borrow();
+        let x = |shown: &str| {
+            scene
+                .paint_items()
+                .filter_map(|item| match scene.kind(item.id) {
+                    NodeKind::Text { text, .. } if &**text == shown => {
+                        Some(scene.transformed_bounds(item.id).x)
+                    }
+                    _ => None,
+                })
+                .last()
+                .unwrap_or_else(|| panic!("{shown} isn't shown"))
+        };
+        (x("X") - x("0123456789")) / 10.
+    };
+    let whole =
+        |points: f32, scale: f32| ((points * scale) - (points * scale).round()).abs() < 0.001;
+    let at_two = cell(&app);
+    assert!(
+        whole(at_two, 2.),
+        "{at_two} points is {} pixels",
+        at_two * 2.
+    );
+    // On a display of 3, measured again (23 pixels, not 2's 16).
+    app.ui.scene.borrow_mut().set_pixel_scale(3.);
+    app.ui.refresh_text_geometry();
+    app.ui.prepare_frame();
+    replay.feed(b"0123456789\x1b[31mX\x1b[0m\r\n");
+    app.ui.prepare_frame();
+    let at_three = cell(&app);
+    assert!(
+        whole(at_three, 3.),
+        "{at_three} points is {} pixels",
+        at_three * 3.
+    );
+    assert_ne!(at_two, at_three, "never measured again");
+    // The grid follows the cell.
+    let columns = term.state().get().columns;
+    assert_eq!(
+        columns as f32,
+        ((600. - 20.) / at_three).floor(),
+        "{columns} columns of {at_three}"
+    );
+    term.close();
+}
+
+/// Output read before the view's first layout (a terminal opened while its
+/// window runs, its program quick to write) makes the rows for the session's
+/// own size, from outside any reactive flush: the rows built then find the
+/// slots free to take theirs from. It used to panic, which took the tasks of
+/// that tick with it.
+#[test]
+fn output_read_before_the_first_layout_makes_the_rows() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    replay.feed(b"early\r\n");
+    app.ui.prepare_frame();
+    assert!(app.shows("early"), "{:?}", app.texts());
+    replay.feed(b"later\r\n");
+    app.ui.prepare_frame();
+    assert!(
+        app.shows("early") && app.shows("later"),
+        "{:?}",
+        app.texts()
+    );
+    term.close();
+}
+
+/// Closing a terminal asks for the idle trim: its session lets go of its
+/// screen and pictures, and a window that shows no frame (covered, hidden,
+/// minimized) would otherwise keep them, freed but not given back, until it
+/// next draws. Output asks nothing of it.
+#[test]
+fn closing_a_terminal_asks_for_the_idle_trim() {
+    let ui = Ui::new(640., 360.);
+    let runtime = ui.runtime.clone();
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(b"output\r\n");
+    assert!(
+        !zgx::idle::take_request(&runtime),
+        "output asked for a trim"
+    );
+    term.close();
+    assert!(zgx::idle::take_request(&runtime), "closing asked for none");
+    // Once.
+    assert!(!zgx::idle::take_request(&runtime));
+    drop(app);
+}

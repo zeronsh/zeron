@@ -196,6 +196,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // anything below sets a variable; started by one, the launch it
     // replaces waited out first.
     relaunch::remember();
+    // Windows has no HOME, only USERPROFILE: the scripts' `~` (a terminal's
+    // folder, in zgx-script) and the engine's paths read HOME. Set before any
+    // thread starts.
+    #[cfg(windows)]
+    if std::env::var_os("HOME").is_none()
+        && let Some(profile) = std::env::var_os("USERPROFILE")
+    {
+        // SAFETY: still one thread: nothing reads the environment meanwhile.
+        unsafe { std::env::set_var("HOME", profile) };
+    }
     // No type check after each reload unless asked (`ZGX_CHECK=1`): a debug
     // zgx host runs `luau-lsp analyze` over the whole app on every reload,
     // on a thread of its own that a newer reload doesn't stop. With several
@@ -1204,7 +1214,9 @@ fn intro_window() -> WindowOptions {
         decorations: false,
         resizable: false,
         covers_display: true,
-        level: WindowLevel::AlwaysOnTop,
+        // A topmost overlay stays over the app selected by Alt+Tab. It
+        // looks stuck, and hides that app while its keyboard has focus.
+        level: if cfg!(windows) { WindowLevel::Normal } else { WindowLevel::AlwaysOnTop },
         shadow: false,
         ..Default::default()
     }

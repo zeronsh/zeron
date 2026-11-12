@@ -1,0 +1,36 @@
+# zgx-terminal at zgx 06c6d56, vendored for Zeron's Windows build: block
+# elements and box drawing drawn to the cell (src/paint.rs), as Ghostty draws
+# them on macOS. Its zgx and alacritty are the same git revision as the app's.
+[package]
+name = "zgx-terminal"
+version = "0.1.10"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/zeronsh/zgx"
+rust-version = "1.95"
+keywords = ["terminal", "pty", "conpty", "gui", "zgx"]
+categories = ["gui", "command-line-interface"]
+description = "Terminal sessions for zgx: a shell on a pseudoterminal (openpty, ConPTY) and its screen, kept by alacritty_terminal."
+
+[dependencies]
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", default-features = false }
+# The screen model: the VT parser, grid, scrollback, selection and modes,
+# and the pseudoterminals (openpty on Unix, ConPTY on Windows).
+alacritty_terminal = { package = "zgx-alacritty-terminal", git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", default-features = false }
+# The session's I/O thread sleeps in it until the shell writes or the app does.
+polling = "3"
+# Escapes found in the output a word at a time, not a byte.
+memchr = "2.7"
+# Pictures programs send (the kitty graphics protocol): base64 in the
+# escape codes, zlib-compressed or PNG.
+base64 = "0.22"
+flate2 = "1"
+png = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# The shell's foreground descendant (Toolhelp snapshots), and Ctrl+C handling
+# restored for it.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp"] }

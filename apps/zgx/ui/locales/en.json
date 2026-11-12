@@ -3135,6 +3135,7 @@
       "stop": "Stop",
       "annotate": "Annotate",
       "annotate_tooltip": "Annotate an element  {key}",
+      "annotate_failed": "Annotation couldn't start on this page. Reload the page and try again.",
       "open_in_browser": "Open in Browser",
       "find": {
         "no_results": "No results",

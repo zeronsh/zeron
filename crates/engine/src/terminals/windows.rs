@@ -386,7 +386,12 @@ pub(super) fn open(
     let executable = wide(executable.as_os_str())?;
     let mut command = vec![b'"' as u16];
     command.extend_from_slice(&executable[..executable.len() - 1]);
-    command.extend([b'"' as u16, 0]);
+    command.push(b'"' as u16);
+    // PowerShell's prompt alone, as cmd's: no banner on every tab.
+    if super::is_powershell(shell) {
+        command.extend(" -NoLogo".encode_utf16());
+    }
+    command.push(0);
     let cwd = wide(OsStr::new(&plain_current_dir(cwd)?))?;
     let mut environment = std::collections::BTreeMap::new();
     let env_key = |key: &OsStr| -> OsString {

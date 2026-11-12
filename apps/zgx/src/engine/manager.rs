@@ -143,7 +143,7 @@ impl Config {
     /// callback port.
     pub fn from_env(edge: &str, client: &str, callback_port: u16) -> Result<Self, Refusal> {
         let var = |key: &str| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
         let exe = std::env::current_exe().ok();
         Self::from_vars(var, &home, exe.as_deref(), edge, client, callback_port)
     }
@@ -228,7 +228,9 @@ impl Config {
         }
         let bin = var("ZERON_ZGX_ENGINE_BIN").map(|p| expand(&p, home)).or_else(|| {
             // This checkout's: apps/zgx is two below the repository's root.
-            let built = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/zeron-engine");
+            let built = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug")
+                .join(format!("zeron-engine{}", std::env::consts::EXE_SUFFIX));
             built.exists().then_some(built)
         });
         Ok(Self {
@@ -373,6 +375,12 @@ fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // A development engine's worktrees in its own data, not the shipping
+    // app's ~/.zeron/worktrees (crates/engine/src/repos.rs: the engine's
+    // default whatever its data dir), unless asked for elsewhere.
+    if !config.managed && std::env::var_os("ZERON_WORKTREES_DIR").is_none_or(|dir| dir.is_empty()) {
+        command.env("ZERON_WORKTREES_DIR", config.data_dir.join("worktrees"));
+    }
     if let Some(home) = &config.home {
         let (claude, codex) = (home.join(".claude"), home.join(".codex"));
         std::fs::create_dir_all(&claude)?;

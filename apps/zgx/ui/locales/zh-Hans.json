@@ -3135,6 +3135,7 @@
       "stop": "停止",
       "annotate": "标注",
       "annotate_tooltip": "标注元素  {key}",
+      "annotate_failed": "无法在此页面启动标注。请重新加载页面后重试。",
       "open_in_browser": "在浏览器中打开",
       "find": {
         "no_results": "无结果",

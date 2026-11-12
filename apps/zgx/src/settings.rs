@@ -367,7 +367,32 @@ fn screen_pixels() -> Option<(u32, u32)> {
             .map(|mode| (mode.pixel_width() as u32, mode.pixel_height() as u32))
             .max_by_key(|(w, h)| u64::from(*w) * u64::from(*h))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{LPARAM, RECT};
+        use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+        unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> windows_sys::core::BOOL {
+            // SAFETY: `found` is the Vec passed below, alive for the call;
+            // the struct is sized as the call wants.
+            unsafe {
+                let mut info: MONITORINFO = std::mem::zeroed();
+                info.cbSize = size_of::<MONITORINFO>() as u32;
+                if GetMonitorInfoW(monitor, &mut info) != 0 {
+                    let r = info.rcMonitor;
+                    (*(found as *mut Vec<(u32, u32)>)).push(((r.right - r.left) as u32, (r.bottom - r.top) as u32));
+                }
+            }
+            1
+        }
+        let mut found: Vec<(u32, u32)> = Vec::new();
+        // SAFETY: every monitor of the desktop, each told to `each` with the
+        // Vec, which outlives the call.
+        unsafe {
+            EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut found as *mut _ as LPARAM);
+        }
+        found.into_iter().max_by_key(|(w, h)| u64::from(*w) * u64::from(*h))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     None
 }
 

@@ -1247,8 +1247,31 @@ pub(crate) fn spawn_reaped(command: &mut std::process::Command) -> std::io::Resu
     Ok(pid)
 }
 
+/// On Windows: Explorer, its folder open and the file selected.
+#[cfg(windows)]
+fn reveal_in_finder(path: &Path) -> std::io::Result<()> {
+    select_in_explorer(path)
+}
+
+/// Explorer at `path`'s folder with it selected (`explorer /select,`). Its
+/// path as Explorer takes it: canonicalize's `\\?\` prefix off, which it
+/// doesn't read. (Explorer's exit code says nothing; it isn't waited on.)
+#[cfg(windows)]
+pub(crate) fn select_in_explorer(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let shown = path.to_string_lossy();
+    let shown = match shown.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_owned(),
+        },
+        None => shown.into_owned(),
+    };
+    std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{shown}\"")).spawn().map(|_| ())
+}
+
 /// Elsewhere: its folder, opened.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn reveal_in_finder(path: &Path) -> std::io::Result<()> {
     open::that_detached(path.parent().unwrap_or(path))
 }

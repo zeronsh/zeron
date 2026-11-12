@@ -229,7 +229,7 @@ fn clamp_size(cols: u16, rows: u16) -> PtySize {
 /// The user's interactive shell: `$SHELL`, else the platform default.
 fn selected_shell() -> String {
     if cfg!(windows) {
-        return std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into());
+        return windows_shell(|name| std::env::var_os(name), |path| path.is_file());
     }
     std::env::var("SHELL")
         .ok()
@@ -241,6 +241,44 @@ fn selected_shell() -> String {
                 "/bin/bash".into()
             }
         })
+}
+
+/// Windows' interactive shell: PowerShell 7 (`pwsh.exe` on `PATH`), else
+/// the Windows PowerShell every Windows has, else `%COMSPEC%` (cmd.exe).
+/// PowerShell, not cmd: its prompt ends in a space and PSReadLine colours
+/// what's typed, as a terminal on macOS or Linux does.
+fn windows_shell(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> String {
+    let pwsh = var("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join("pwsh.exe"))
+        .find(|path| exists(path));
+    let windows_powershell = var("SystemRoot")
+        .map(|root| {
+            std::path::PathBuf::from(root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        })
+        .filter(|path| exists(path));
+    pwsh.or(windows_powershell)
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| var("COMSPEC").map(|comspec| comspec.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "cmd.exe".into())
+}
+
+/// Whether `shell` is PowerShell (7's `pwsh` or Windows PowerShell), which
+/// prints a banner as it starts unless told `-NoLogo`.
+#[cfg(any(windows, test))]
+fn is_powershell(shell: &str) -> bool {
+    let name = std::path::Path::new(shell)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase());
+    matches!(name.as_deref(), Some("pwsh" | "powershell"))
 }
 
 impl Terminals {
@@ -1089,9 +1127,14 @@ mod windows_tests {
             .subscribe(terminal_id, None)
             .expect("subscribe to startup");
         let mut events = Vec::new();
+        // `PS <cwd>>`, then the prompt's trailing space. With -NoLogo the
+        // prompt is ConPTY's first paint, which draws that space as a
+        // cursor move (`ESC[1C`), not a ' '.
         collect_until(&mut rx, &mut events, |events| {
             let output = decoded(events);
-            output.contains("PS ") && output.contains("> ")
+            output
+                .rfind("PS ")
+                .is_some_and(|start| output[start..].contains('>'))
         })
         .await;
     }
@@ -1381,6 +1424,73 @@ mod windows_tests {
         ));
         assert!(rx.recv().await.is_none());
         terminals.close(&id).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod windows_shell_tests {
+    use super::{is_powershell, windows_shell};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    const ROOT: &str = "root";
+
+    fn env(path: &[&str], comspec: Option<&str>) -> impl Fn(&str) -> Option<OsString> {
+        let path = std::env::join_paths(path.iter().map(PathBuf::from)).unwrap();
+        let comspec = comspec.map(OsString::from);
+        move |name| match name {
+            "PATH" => Some(path.clone()),
+            "SystemRoot" => Some(ROOT.into()),
+            "COMSPEC" => comspec.clone(),
+            _ => None,
+        }
+    }
+
+    fn windows_powershell() -> PathBuf {
+        Path::new(ROOT)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    }
+
+    #[test]
+    fn powershell_7_on_path_comes_first() {
+        let pwsh = Path::new("pwsh7").join("pwsh.exe");
+        let shell = windows_shell(env(&["other", "pwsh7"], Some("cmd.exe")), |p| {
+            p == pwsh || p == windows_powershell()
+        });
+        assert_eq!(shell, pwsh.to_string_lossy());
+    }
+
+    #[test]
+    fn windows_powershell_without_powershell_7() {
+        let shell = windows_shell(env(&["other"], Some("cmd.exe")), |p| {
+            p == windows_powershell()
+        });
+        assert_eq!(shell, windows_powershell().to_string_lossy());
+    }
+
+    #[test]
+    fn comspec_when_there_is_no_powershell() {
+        assert_eq!(
+            windows_shell(env(&["other"], Some("C:\\cmd.exe")), |_| false),
+            "C:\\cmd.exe"
+        );
+        assert_eq!(windows_shell(env(&[], None), |_| false), "cmd.exe");
+    }
+
+    #[test]
+    fn powershell_is_told_no_logo() {
+        // A `\` path is only a path on Windows; elsewhere build one.
+        #[cfg(windows)]
+        assert!(is_powershell(r"C:\Program Files\PowerShell\7\pwsh.exe"));
+        let pwsh = Path::new("PowerShell").join("7").join("pwsh.exe");
+        assert!(is_powershell(&pwsh.to_string_lossy()));
+        assert!(is_powershell("powershell.exe"));
+        assert!(is_powershell("PWSH"));
+        assert!(!is_powershell(r"C:\WINDOWS\system32\cmd.exe"));
+        assert!(!is_powershell("/bin/zsh"));
     }
 }
 
