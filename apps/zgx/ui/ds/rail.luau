@@ -113,13 +113,17 @@ return ui.component(function(props: Props): Node
 	-- once the view has rested LINGER.
 	local seen, moved_at = offset:peek(), 0
 	local function poll()
-		-- (Next look a poll on, or when it will have rested, if sooner.)
-		ui.after(math.max(0, math.min(POLL, moved_at + LINGER - ui.now())), function()
+		-- (Next look a poll on, or when it will have rested, if sooner; never
+		-- under a millisecond: a timer that close is due at once, where the
+		-- time hasn't moved, and it would look again and again.)
+		ui.after(math.clamp(moved_at + LINGER - ui.now(), 1, POLL), function()
 			local at = offset:peek()
 			if at ~= seen then
 				seen, moved_at = at, ui.now()
 			end
-			if ui.now() - moved_at >= LINGER then
+			-- (Within a millisecond of it is rested: the timer's time and
+			-- `ui.now()` can differ by a rounding.)
+			if ui.now() - moved_at >= LINGER - 1 then
 				recent:set(false)
 			else
 				poll()

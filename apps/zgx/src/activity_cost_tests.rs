@@ -395,6 +395,23 @@ struct Cost {
     process: Duration,
 }
 
+thread_local! {
+    /// Each frame's main-thread CPU since the last reset, in ms (the goals' `FRAMES` line).
+    static SAMPLES: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn samples_reset() {
+    SAMPLES.with(|s| s.borrow_mut().clear());
+}
+fn samples_line() -> String {
+    let mut v = SAMPLES.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    if v.is_empty() {
+        return "FRAMES none".into();
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let at = |q: f64| v[((q * v.len() as f64) as usize).min(v.len() - 1)];
+    format!("FRAMES p50={:.3}ms p99={:.3}ms max={:.3}ms over {} frames ({} over 8.33ms)", at(0.5), at(0.99), v[v.len() - 1], v.len(), v.iter().filter(|x| **x > 8.333).count())
+}
+
 impl Cost {
     fn add(&mut self, other: &Cost) {
         for (a, b) in self.phases.iter_mut().zip(other.phases) {
@@ -612,6 +629,7 @@ impl Bench {
             }
         }
         let cpu = thread_cpu() - start;
+        SAMPLES.with(|s| s.borrow_mut().push(cpu.as_secs_f64() * 1e3));
         let process = process_cpu() - process_from;
         let mut cost = Cost { cpu, process, calls: self.app.calls() - calls, frames: 1, drawn: drawn as usize, wanted: wanted as usize, spare, spare_calls, ..Cost::default() };
         for (phase, instructions, time) in profile::take() {
@@ -1017,6 +1035,7 @@ fn activity_goal() {
             cost.host.as_secs_f64() * 1e3,
             cost.spare as f64 / 1e6 / seconds,
         );
+        println!("GOAL {what}: {}", samples_line());
     };
     // (`ACTIVITY_GOAL_ONLY=scroll`: the scroll alone.)
     let streams = std::env::var("ACTIVITY_GOAL_ONLY").ok().as_deref() != Some("scroll");
@@ -1033,7 +1052,9 @@ fn activity_goal() {
             bench.toggle();
         }
         bench.settle(240);
-        let mut cost = Cost::default();
+        samples_reset();
+        samples_reset();
+    let mut cost = Cost::default();
         let (mut frames, ticks) = (0, (seconds * 120.) as usize);
         let mut next = n + 1;
         let mut finishing: Option<(usize, Json)> = None;
@@ -1079,6 +1100,7 @@ fn activity_goal() {
     bench.to_turn();
     bench.toggle();
     bench.settle(240);
+    samples_reset();
     let mut cost = Cost::default();
     let ticks = (seconds * 120.) as usize;
     for tick in 0..ticks {
@@ -1118,6 +1140,7 @@ fn activity_goal_thinking() {
             cost.host.as_secs_f64() * 1e3,
             cost.spare as f64 / 1e6 / seconds,
         );
+        println!("GOAL {what}: {}", samples_line());
     };
     let only = std::env::var("ACTIVITY_GOAL_ONLY").ok();
     for open in [true, false].into_iter().filter(|_| only.as_deref() != Some("scroll")) {
@@ -1134,7 +1157,9 @@ fn activity_goal_thinking() {
             bench.app.scroll("transcript", 100_000.);
         }
         bench.settle(240);
-        let mut cost = Cost::default();
+        samples_reset();
+        samples_reset();
+    let mut cost = Cost::default();
         let (mut frames, ticks) = (0, (seconds * 120.) as usize);
         let words = "and then the parser reads the next frame; ";
         for tick in 0..ticks {
@@ -1176,6 +1201,7 @@ fn activity_goal_thinking() {
     bench.toggle();
     bench.app.click("role:button ~\"Show all\"");
     bench.settle(240);
+    samples_reset();
     let mut cost = Cost::default();
     let ticks = 10 * 120;
     let traced = std::env::var_os("DEBUG_GOAL_TRACE").is_some();
@@ -1201,6 +1227,174 @@ fn activity_goal_thinking() {
         }
     }
     report(&format!("a {think_kb} KB thought shown whole, scrolled ({} nodes)", bench.nodes()), &cost, ticks, ticks, 10.);
+}
+
+/// Many groups open at once ("a lot of tool groups
+/// expanded"): `ACTIVITY_MANY_GROUPS` turns (60) before the one at work,
+/// each a prompt and a reply whose group holds 10 to 30 calls; scrolled
+/// through fast (`ACTIVITY_MANY_DY`, 24 points every 1/120 s, down and back)
+/// and a new turn streaming at the bottom (a call a second, finishing half
+/// a second later, its thought growing every 50 ms). Whether the groups are
+/// open is the run's activity.luau's (open with its default patched).
+#[test]
+#[ignore = "a benchmark: run it --release"]
+fn activity_goal_many() {
+    profiled();
+    // SAFETY: set before the renderer reads it, on this test's thread alone.
+    unsafe { std::env::set_var("DEBUG_SCROLL_COPY", "1") };
+    let groups: usize = std::env::var("ACTIVITY_MANY_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let dy: f32 = std::env::var("ACTIVITY_MANY_DY").ok().and_then(|v| v.parse().ok()).unwrap_or(24.);
+    let seconds: f64 = std::env::var("ACTIVITY_GOAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.);
+    let report = |what: &str, cost: &Cost, frames: usize, ticks: usize, seconds: f64| {
+        let names: String = PHASES
+            .iter()
+            .zip(cost.phases.iter())
+            .filter(|(_, p)| p.0 > 0)
+            .map(|(name, p)| format!(" {}={:.2}M/s", name.name(), p.0 as f64 / 1e6 / seconds))
+            .collect();
+        println!(
+            "GOAL {what}: {:.2}% CPU ({:.1} ms process in {seconds:.0} s; main thread {:.2}%), {frames}/{ticks} frames drawn, host {:.1} ms; spare {:.1}M/s;{names}",
+            cost.process.as_secs_f64() / seconds * 100.,
+            cost.process.as_secs_f64() * 1e3,
+            cost.cpu.as_secs_f64() / seconds * 100.,
+            cost.host.as_secs_f64() * 1e3,
+            cost.spare as f64 / 1e6 / seconds,
+        );
+        println!("GOAL {what}: {}", samples_line());
+    };
+    let mut before = Vec::new();
+    let mut calls = 0;
+    for t in 0..groups {
+        before.push(built(&prompt(&format!("u{t}m"), &format!("Turn {t}: and the next part?"))));
+        let k = 10 + (t * 7) % 21;
+        calls += k;
+        let mut parts = vec![json!({ "id": format!("g{t}r"), "kind": "reasoning", "text": prose("the plan", 600) })];
+        for i in 1..=k {
+            let mut c = call(i, 4);
+            c["id"] = json!(format!("g{t}t{i}"));
+            parts.push(c);
+        }
+        parts.push(json!({ "id": format!("g{t}x"), "kind": "text", "text": prose("the answer", 600) }));
+        before.push(built(&json!({ "id": format!("a{t}m"), "role": "assistant", "status": "complete", "durationMs": 42_000, "parts": parts, "createdAt": 1_762_000_000_000_i64 })));
+    }
+    before.push(built(&prompt("u1", "Make the group cheap.")));
+    let made = |before: &Vec<Value>| {
+        let mut bench = Bench::made_with(Some((zgx::clock::VirtualClock::new(), Duration::ZERO)), true, true);
+        bench.step = 1. / 120.;
+        bench.before = before.clone();
+        bench
+    };
+    // Scrolled through: from the top, down, and back up.
+    {
+        let mut bench = made(&before);
+        bench.publish(&turn(10, 1024, None, false));
+        bench.settle(120);
+        bench.app.scroll("transcript", -1_000_000.);
+        bench.settle(240);
+        let top_nodes = bench.nodes();
+        samples_reset();
+        let mut cost = Cost::default();
+        let ticks = (seconds * 120.) as usize;
+        let mut mid_nodes = 0;
+        for tick in 0..ticks {
+            let d = if tick < ticks / 2 { dy } else { -dy };
+            bench.app.scroll("transcript", d);
+            cost.add(&bench.frame());
+            if tick == ticks / 2 {
+                mid_nodes = bench.nodes();
+            }
+        }
+        let end_nodes = bench.nodes();
+        report(
+            &format!("{groups} groups ({calls} calls) scrolled through at {dy} pt/frame (nodes top {top_nodes}, deepest {mid_nodes}, back {end_nodes})"),
+            &cost,
+            ticks,
+            ticks,
+            seconds,
+        );
+    }
+    // A new turn streaming at the bottom, the groups above as they are.
+    {
+        let mut bench = made(&before);
+        let mut text = prose("the thought being written", 1000);
+        let mut entry = turn(5, 512, Some(&text), true);
+        bench.publish(&entry);
+        bench.settle(120);
+        bench.app.scroll("transcript", 1_000_000.);
+        bench.settle(240);
+        let nodes = bench.nodes();
+        samples_reset();
+        let mut cost = Cost::default();
+        let (mut frames, ticks) = (0, (seconds * 120.) as usize);
+        let mut next = 6;
+        let mut finishing: Option<(usize, Json)> = None;
+        let words = "and then the parser reads the next frame; ";
+        for tick in 0..ticks {
+            let mut host = Duration::ZERO;
+            let published = if tick % 120 == 0 {
+                let mut part = call(next, 4);
+                let output = part.as_object_mut().unwrap().remove("output");
+                let id = format!("t{next}");
+                let parts = entry["parts"].as_array_mut().unwrap();
+                let at = parts.len() - 1;
+                parts.insert(at, part);
+                host += bench.publish_patched(&entry, &[id]);
+                finishing = output.map(|o| (next, o));
+                next += 1;
+                true
+            } else if tick % 120 == 60
+                && let Some((i, output)) = finishing.take()
+            {
+                let parts = entry["parts"].as_array_mut().unwrap();
+                let at = parts.len() - 2;
+                parts[at]["output"] = output;
+                host += bench.publish_patched(&entry, &[format!("t{i}")]);
+                true
+            } else if tick % 6 == 0 {
+                let at = (tick / 6) % words.len().saturating_sub(20).max(1);
+                text.push_str(&words[at..(at + 20).min(words.len())]);
+                entry["parts"].as_array_mut().unwrap().last_mut().unwrap()["text"] = json!(text);
+                host += bench.publish_draft(&entry);
+                true
+            } else {
+                false
+            };
+            if published || bench.app.clock.wants_frame() {
+                let mut c = bench.frame();
+                c.host = host;
+                cost.add(&c);
+                frames += 1;
+            } else {
+                bench.tick();
+            }
+        }
+        report(&format!("{groups} groups above, a new turn streaming at the bottom (nodes {nodes} at the start, {} at the end)", bench.nodes()), &cost, frames, ticks, seconds);
+    }
+}
+
+/// The transcript's scrollbar goes once the view has rested, looking a poll
+/// at a time, never again and again in one frame as the rest's last
+/// millisecond comes: a timer under a millisecond is due at once on a frame's
+/// own time, and the rail's poll re-armed itself some 68,000 times in one
+/// frame there, a 100 ms frame as a wheel turned on against the end.
+#[test]
+fn the_scrollbar_rests_without_looking_again_and_again() {
+    let mut bench = Bench::made_with(Some((zgx::clock::VirtualClock::new(), Duration::ZERO)), false, true);
+    bench.step = 1. / 120.;
+    bench.publish(&turn(60, 4000, None, false));
+    bench.settle(120);
+    bench.app.scroll("transcript", -1_000_000.);
+    bench.settle(240);
+    // Scrolled on a wheel down to the end and on against it: the view rests
+    // there while the wheel still turns, through its rest (1.4 s) and fade.
+    let mut most = 0;
+    for _ in 0..(5 * 120) {
+        bench.app.scroll("transcript", 24.);
+        let calls = bench.app.calls();
+        bench.frame();
+        most = most.max(bench.app.calls() - calls);
+    }
+    assert!(most < 200, "a frame called the scripts {most} times");
 }
 
 #[test]
