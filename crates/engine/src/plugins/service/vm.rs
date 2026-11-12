@@ -26,6 +26,8 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use serde_json::Value as Json;
 use tokio::sync::oneshot;
 
+mod text;
+
 const PRELUDE: &str = include_str!("prelude.luau");
 /// A source file, at most.
 const MAX_SCRIPT_BYTES: usize = 1 << 20;
@@ -830,6 +832,32 @@ fn natives(
                 write_replace(path, &bytes).map_err(|e| mlua::Error::runtime(format!("zeron.store: couldn't save: {e}")))?;
             }
             Ok(())
+        })?,
+    )?;
+
+    // `zeron.measure_text` and `zeron.load_font` (vm/text.rs).
+    let text = Rc::new(text::Text::default());
+    let measure = text.clone();
+    host.set(
+        "measure_text",
+        lua.create_function(move |_, (words, options): (String, Option<Table>)| {
+            let (size, width, font) = text::style(options.as_ref())?;
+            Ok(measure.measure(&words, size, width, &font))
+        })?,
+    )?;
+    let root = spec.dir.clone();
+    host.set(
+        "load_font",
+        lua.create_function(move |_, source: Value| {
+            let loaded = match &source {
+                Value::String(rel) => text.load(&root, &rel.to_str()?),
+                Value::Table(t) => match t.get::<Option<mlua::String>>("base64")? {
+                    Some(encoded) => text::decode(&encoded.as_bytes()).and_then(|bytes| text.install(bytes, "that font")),
+                    None => Err("a table gives the font's bytes as `base64`".into()),
+                },
+                other => Err(format!("it takes a path in the plugin or {{ base64 = … }}, not a {}", other.type_name())),
+            };
+            loaded.map_err(|why| mlua::Error::runtime(format!("zeron.load_font: {why}")))
         })?,
     )?;
     Ok(host)

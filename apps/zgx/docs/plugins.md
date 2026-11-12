@@ -373,6 +373,8 @@ end)
 | `zeron.folders()` | a promise of this device's chats' and projects' folders (whole paths) | `sessions.read` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
+| `zeron.measure_text(text, { font, size, weight, italic, tabular, line_height, letter_spacing, width })` | the width and height `text` takes, as your window's canvas measures it (`c:measure_text`), with no window: the same shaper, the system's fonts and the app's. `width` wraps it; `line_height` and `letter_spacing` are in points. A family it doesn't have falls back as in a window | |
+| `zeron.load_font(path)`, `zeron.load_font { base64 }` | a font file of your plugin's own (`"fonts/Inter.ttf"`), or a font's bytes in base64 (one fetched with `binary = true`, 64 MiB at most), to measure in, beside the faces there are: its family names. Load the same font in your window (`ui.load_font`) and both measure alike | |
 | `zeron.sleep(seconds)`, `zeron.task(fn)` | a promise done later; run `fn` as a task of its own | |
 | `zeron.json.encode(v)`, `zeron.json.decode(text)`, `zeron.device` | JSON; this device's `{ id, name }` | |
 | `zeron.eval(source, { name?, env?, budget_ms? })` | run a script it was given: `true, ...` (what it returned), or `false, why`. See below | `eval` |
