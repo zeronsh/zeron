@@ -705,7 +705,7 @@ def main() -> int:
         if state != last:
             print(f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
                   f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
-                  f"priority {sorted(snap.priority) or '-'}, locked {sorted(snap.locked) or '-'}, "
+                  f"priority {sorted(map(str, snap.priority)) or '-'}, locked {sorted(map(str, snap.locked)) or '-'}, "
                   f"ignored (not taking their turn) {ignored or '-'}, API quota left {api.remaining}")
             last = state
         if decision.admit:
