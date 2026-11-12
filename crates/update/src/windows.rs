@@ -28,15 +28,40 @@ const VERSION_FILE: &str = "zeron-version";
 /// The installer's uninstall entry (`AppId` in `dist/windows/zeron.iss`, plus
 /// Inno Setup's `_is1` suffix). Settings → Apps reads `DisplayVersion` here.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1";
-/// A beta's own files beside `zeron.exe`, by version: `beta\<version>\ui`,
-/// `plugins-builtin` and `engine\zeron.exe`, the stable release's own
-/// executable. A beta can't update by swapping one file, so it updates from
-/// the package (`zeron-<version>-windows-<arch>.zip`); nothing already there
-/// is replaced, which a running engine would prevent. A stable build never
-/// reads this folder.
+/// The zgx app's own files beside `zeron.exe`, by version:
+/// `beta\<version>\ui`, `plugins-builtin` and `engine\zeron.exe` (a whole
+/// Zeron executable run as `zeron.exe engine`), for a stable release as for a
+/// beta. (Named for the betas that came first. Every beta in the field checks
+/// a package for `beta\<version>` before it installs it, and the beta channel
+/// carries stable releases too, so the one name stays.) Such an app can't
+/// update by swapping one file, so it updates from the package
+/// (`zeron-<version>-windows-<arch>.zip`); nothing already there is replaced,
+/// which a running engine would prevent. The old app (one self-contained
+/// `zeron.exe`) reads no such folder.
 const BETA: &str = "beta";
-/// Where a staged beta package unpacks, beside the staged `zeron.exe`.
+/// Where a staged package unpacks, beside the staged `zeron.exe`.
 const PACKAGE: &str = "package";
+/// Held while one process completes an install ([`complete_install`]), so a
+/// relaunched app and a restarting engine don't both unpack at once.
+const COMPLETING: &str = ".zeron-completing.lock";
+
+/// Set by an app whose `zeron.exe` needs its version's folder beside it (the
+/// zgx app): its updates come as the package on every channel.
+static PACKAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This app is a packaged one (see [`PACKAGED`]). Called first thing in `main`.
+pub fn set_packaged() {
+    PACKAGED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn packaged() -> bool {
+    PACKAGED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// `version`'s own files in the installation at `directory`.
+pub fn version_files(directory: &Path, version: &str) -> PathBuf {
+    directory.join(BETA).join(version)
+}
 
 #[derive(serde::Deserialize)]
 struct Config {
@@ -48,11 +73,31 @@ pub(super) fn is_managed(exe: &Path) -> bool {
         && exe.parent().is_some_and(|dir| dir.join(CONFIG).is_file())
 }
 
+/// The installation `exe` belongs to, if it's update-managed: the folder of
+/// its `zeron.exe`, or for the zgx app's engine
+/// (`<directory>\beta\<version>\engine\zeron.exe`), the folder its version's
+/// files are in.
+pub(super) fn managed_directory(exe: &Path) -> Option<PathBuf> {
+    if is_managed(exe) {
+        return exe.parent().map(Path::to_path_buf);
+    }
+    let engine = exe.parent()?;
+    let folder = engine.parent()?.parent()?;
+    if exe.file_name()? != "zeron.exe" || engine.file_name()? != "engine" || folder.file_name()? != BETA {
+        return None;
+    }
+    let directory = folder.parent()?;
+    is_managed(&directory.join("zeron.exe")).then(|| directory.to_path_buf())
+}
+
 pub(super) fn release_url() -> anyhow::Result<Option<String>> {
     // A new version on trial runs from beside the installation.
     let exe = match std::env::var_os(super::INSTALLED_AT_ENV) {
         Some(directory) => PathBuf::from(directory).join("zeron.exe"),
-        None => std::env::current_exe()?,
+        None => match managed_directory(&std::env::current_exe()?) {
+            Some(directory) => directory.join("zeron.exe"),
+            None => return Ok(None),
+        },
     };
     if !is_managed(&exe) {
         return Ok(None);
@@ -66,7 +111,7 @@ pub fn artifact(version: &str) -> String {
     format!("zeron-{version}-windows-{}.exe", std::env::consts::ARCH)
 }
 
-/// A beta's update: the portable package.
+/// A packaged app's update: the portable package.
 fn package(version: &str) -> String {
     format!("zeron-{version}-windows-{}.zip", std::env::consts::ARCH)
 }
@@ -116,10 +161,11 @@ async fn verify_staged_version(staged: &Path, version: &str) -> anyhow::Result<(
     Ok(())
 }
 
-/// Stage a beta from its package: the executable where the single-file path
-/// leaves one (its checksum beside it), the rest in [`PACKAGE`].
+/// Stage a release from its package: the executable where the single-file
+/// path leaves one (its checksum beside it), the rest in [`PACKAGE`].
+/// From the feed at `base` (a channel's, or one release's own).
 async fn stage_package(
-    edge_url: &str,
+    base: &str,
     manifest: &super::Manifest,
     directory: &Path,
 ) -> anyhow::Result<PathBuf> {
@@ -129,7 +175,7 @@ async fn stage_package(
         .prefix(".zeron-update-")
         .tempdir_in(directory)?;
     let archive = temporary.path().join(&file);
-    super::download_release_file(edge_url, manifest, &file, &archive).await?;
+    super::download_release_file_from(base, manifest, &file, &archive).await?;
     let unpacked = temporary.path().join(PACKAGE);
     std::fs::create_dir(&unpacked)?;
     // Windows' own tar (since Windows 10 1803), by its full path.
@@ -150,9 +196,11 @@ async fn stage_package(
         String::from_utf8_lossy(&output.stderr).trim()
     );
     std::fs::remove_file(&archive)?;
+    // The zgx app's package has its version's folder; the old app's (a
+    // release going back to it) has no such folder at all.
     ensure!(
-        unpacked.join(BETA).join(&manifest.version).is_dir(),
-        "the package has no {BETA}\\{}",
+        files_complete(&version_files(&unpacked, &manifest.version)) || !unpacked.join(BETA).exists(),
+        "the package has no {BETA}\\{}\\engine\\zeron.exe",
         manifest.version
     );
     let staged = temporary.path().join("zeron.exe");
@@ -164,10 +212,11 @@ async fn stage_package(
     Ok(staged)
 }
 
-/// A staged beta's own folder into place: under its version, so it replaces
-/// nothing in use. (Left behind if the swap then fails; the next try replaces
-/// it, and the next launch removes it.)
-fn install_beta_files(staged: &Path, directory: &Path) -> anyhow::Result<()> {
+/// A staged package's own folder into place: under its version, so it
+/// replaces nothing in use. (Left behind if the swap then fails; the next try
+/// replaces it, and the next launch removes it.) A version that's already
+/// whole there stays as it is: its engine may be running.
+fn install_version_files(staged: &Path, directory: &Path) -> anyhow::Result<()> {
     let incoming = staged.with_file_name(PACKAGE).join(BETA);
     if !incoming.is_dir() {
         return Ok(());
@@ -177,23 +226,74 @@ fn install_beta_files(staged: &Path, directory: &Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(&incoming)? {
         let entry = entry?;
         let target = installed.join(entry.file_name());
-        let _ = std::fs::remove_dir_all(&target);
+        if target.exists() {
+            if files_complete(&target) {
+                continue;
+            }
+            ensure!(remove_whole(&target), "{} is in use and incomplete", target.display());
+        }
         std::fs::rename(entry.path(), &target)
             .with_context(|| format!("moving {} into place", target.display()))?;
     }
     Ok(())
 }
 
-/// Remove every beta's folder but `keep`'s, best-effort: an engine that's
+/// A version's folder has all it runs on: its engine and its scripts. (An
+/// engine alone can be what a cleanup couldn't delete while it ran.)
+fn files_complete(files: &Path) -> bool {
+    files.join("engine").join("zeron.exe").is_file() && files.join("ui").join("app.luau").is_file()
+}
+
+/// Delete `dir` whole or not at all: it's first moved aside, which Windows
+/// refuses while anything inside is in use (a running engine), so a folder
+/// in use is never left half deleted. Whether it went.
+fn remove_whole(dir: &Path) -> bool {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return false;
+    };
+    let aside = parent.join(format!(".{}.removing-{}", name.to_string_lossy(), std::process::id()));
+    if std::fs::rename(dir, &aside).is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_dir_all(&aside);
+    true
+}
+
+/// An installation the old app's updater moved to the zgx app still names
+/// that app's feed, the GitHub release marked latest, which has no beta
+/// channel beside it: from its first launch as the zgx app it follows the
+/// edge's (stable at its root, beta in `beta/`), as a zgx package names. A
+/// feed someone set themselves stays.
+fn leave_github_feed(directory: &Path) {
+    let config = directory.join(CONFIG);
+    let on_github = std::fs::read(&config)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
+        .is_some_and(|c| c.releases_url.trim().trim_end_matches('/') == GITHUB_LATEST);
+    if !on_github {
+        return;
+    }
+    let new = directory.join(format!(".{CONFIG}.new"));
+    let json = serde_json::json!({ "releases_url": EDGE_FEED }).to_string();
+    if std::fs::write(&new, json).and_then(|()| std::fs::rename(&new, &config)).is_err() {
+        let _ = std::fs::remove_file(&new);
+    }
+}
+
+/// Remove every version's folder but `keep`'s, best-effort: an engine that's
 /// still running keeps its own executable until it stops.
-fn remove_beta_files(directory: &Path, keep: Option<&str>) {
+fn remove_version_files(directory: &Path, keep: Option<&str>) {
     let installed = directory.join(BETA);
     let Ok(entries) = std::fs::read_dir(&installed) else {
         return;
     };
     for entry in entries.flatten() {
-        if keep.is_none_or(|keep| entry.file_name() != keep) {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            // Moved aside by a removal that didn't finish: nothing runs from it.
             let _ = std::fs::remove_dir_all(entry.path());
+        } else if keep.is_none_or(|keep| name != keep) {
+            remove_whole(&entry.path());
         }
     }
     let _ = std::fs::remove_dir(&installed);
@@ -211,8 +311,14 @@ pub async fn stage(
         valid_version(&manifest.version),
         "invalid Windows release version"
     );
-    if manifest.channel == super::Channel::Beta {
-        return stage_package(edge_url, manifest, directory).await;
+    // The zgx app (this one, or the one whose engine this is: its version's
+    // folder is there) updates from the package, on every channel.
+    if manifest.channel == super::Channel::Beta
+        || packaged()
+        || version_files(directory, super::app_version()).is_dir()
+    {
+        let base = manifest.channel.base(&super::release_base(edge_url)?);
+        return stage_package(&base, manifest, directory).await;
     }
     let file = artifact(&manifest.version);
     let expected = expected_checksum(manifest, &file)?;
@@ -227,6 +333,213 @@ pub async fn stage(
     verify_staged_version(&staged, &manifest.version).await?;
     let _ = temporary.keep();
     Ok(staged)
+}
+
+/// What [`complete_install`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Completion {
+    /// The version's folder was there already (another process finished it).
+    Complete,
+    /// The version's folder is in place now, from its own package.
+    Installed,
+    /// The feed had moved on: the newer release replaced `zeron.exe` and its
+    /// folder is in place. Run the installed `zeron.exe` instead of this one.
+    Updated(String),
+}
+
+/// The installation a packaged app at `exe` must complete before it runs:
+/// its directory, when `exe` is an update-managed `zeron.exe` whose own
+/// version's folder isn't beside it.
+///
+/// That's how an updater that only swaps the one file (every Zeron before
+/// the zgx app, and the zgx app's own single-file artifact,
+/// [`artifact`]) leaves a zgx app: the executable alone. And how an update's
+/// trial starts one: staged on its own, run in place of the installation.
+pub fn incomplete_install(exe: &Path, version: &str) -> Option<PathBuf> {
+    let directory = install_directory(exe)?;
+    (is_managed(&directory.join("zeron.exe"))
+        && !files_complete(&version_files(&directory, version)))
+    .then_some(directory)
+}
+
+/// The installation the executable at `exe` belongs to: its folder, or, for a
+/// new version on trial (started from where the update staged it), the one
+/// it's going to become ([`super::INSTALLED_AT_ENV`]).
+pub fn install_directory(exe: &Path) -> Option<PathBuf> {
+    match std::env::var_os(super::INSTALLED_AT_ENV) {
+        Some(directory) => Some(PathBuf::from(directory)),
+        None => exe.parent().map(Path::to_path_buf),
+    }
+}
+
+/// Bring in this version's folder from the release feed (the one
+/// `zeron-update.json` names), as an update would: the package, its
+/// checksum from the feed's manifest, unpacked beside the installation.
+/// When the feed has a newer release by now, that one is installed instead,
+/// `zeron.exe` with it. Nothing already installed is removed or replaced
+/// unless the whole new version is in place, so a failure leaves things as
+/// they were and the next start tries again.
+pub async fn complete_install(
+    edge_url: &str,
+    directory: &Path,
+    version: &str,
+) -> anyhow::Result<Completion> {
+    ensure!(valid_version(version), "invalid Windows release version");
+    let _lock = lock_completion(directory).await?;
+    if files_complete(&version_files(directory, version)) {
+        return Ok(Completion::Complete);
+    }
+    tracing::info!(version, "completing the install: this version's files aren't here");
+    // A trial started from where an update staged it has its package beside
+    // it, verified when it was staged: no second download.
+    if let Ok(exe) = std::env::current_exe()
+        && files_complete(&version_files(&exe.with_file_name(PACKAGE), version))
+    {
+        install_version_files(&exe, directory)?;
+        return Ok(Completion::Installed);
+    }
+    // This version's own package first, wherever the feed keeps one release's
+    // files: what `latest` says can be older (a release withdrawn) or newer.
+    match pinned_release(edge_url, version).await {
+        Some((base, manifest)) => match stage_package(&base, &manifest, directory).await {
+            Ok(staged) => {
+                let result = install_version_files(&staged, directory);
+                if let Some(stage) = staged.parent() {
+                    let _ = std::fs::remove_dir_all(stage);
+                }
+                result?;
+                return Ok(Completion::Installed);
+            }
+            Err(err) => tracing::warn!(error = %format!("{err:#}"), "this version's own package didn't install; trying the latest"),
+        },
+        None => tracing::info!(version, "the feed keeps no package of this version apart; trying the latest"),
+    }
+    let manifest = super::fetch_latest_on(edge_url, super::Channel::of_version(version))
+        .await
+        .with_context(|| {
+            format!("reading the release feed (neither this version's own manifest nor the latest one could be read)")
+        })?;
+    let latest = manifest.version.trim().to_owned();
+    if latest != version && !super::version_newer(&latest, version) {
+        bail!("the release feed offers Zeron {latest}, which is older than this Zeron {version}");
+    }
+    let base = manifest.channel.base(&super::release_base(edge_url)?);
+    let staged = stage_package(&base, &manifest, directory).await?;
+    // A trial (or anything not run as the installed `zeron.exe`) can't
+    // replace the installation; it installs only its own version's files.
+    let installed = directory.join("zeron.exe");
+    let is_installed = std::env::current_exe()
+        .and_then(|exe| Ok(exe.canonicalize()? == installed.canonicalize()?))
+        .unwrap_or(false);
+    if latest != version && !is_installed {
+        if let Some(stage) = staged.parent() {
+            let _ = std::fs::remove_dir_all(stage);
+        }
+        bail!("the release feed has moved on to Zeron {latest}; this Zeron {version} can't be completed from it");
+    }
+    if latest == version {
+        let result = install_version_files(&staged, directory);
+        if let Some(stage) = staged.parent() {
+            let _ = std::fs::remove_dir_all(stage);
+        }
+        result?;
+        return Ok(Completion::Installed);
+    }
+    // (The lock is this call's already.)
+    apply_locked(&staged, directory, false)?;
+    Ok(Completion::Updated(latest))
+}
+
+/// The GitHub release marked latest, the feed the old app's Windows installs name.
+const GITHUB_LATEST: &str = "https://github.com/zeronsh/zeron/releases/latest/download";
+/// The edge's feed, the zgx app's: stable at its root, the beta channel in `beta/`.
+const EDGE_FEED: &str = "https://zeron.sh/releases";
+
+/// Where the feed keeps `version`'s own files, and its manifest: a GitHub
+/// release of its own (`releases/download/v<version>`, whose `manifest.json`
+/// is that release's), or on the edge, the files of every release side by
+/// side with `manifest-<version>.json` (release.yml). `None` when there's
+/// none to be had.
+async fn pinned_release(edge_url: &str, version: &str) -> Option<(String, super::Manifest)> {
+    let channel = super::Channel::of_version(version);
+    let feed = super::release_base(edge_url).ok()?;
+    let (base, manifest_url) = match feed.strip_suffix("/releases/latest/download") {
+        Some(repository) if channel == super::Channel::Stable => {
+            let base = format!("{repository}/releases/download/v{version}");
+            let url = format!("{base}/manifest.json");
+            (base, url)
+        }
+        _ => {
+            let base = channel.base(&feed);
+            let url = format!("{base}/manifest-{version}.json");
+            (base, url)
+        }
+    };
+    let client = super::http_client().ok()?;
+    let response = super::fetch_release_metadata(&client, &manifest_url).await.ok()?;
+    if !response.status.is_success() {
+        return None;
+    }
+    let mut manifest: super::Manifest = serde_json::from_slice(&response.body).ok()?;
+    if manifest.version.trim() != version {
+        return None;
+    }
+    manifest.channel = channel;
+    Some((base, manifest))
+}
+
+/// The completion lock if no one holds it, without waiting.
+fn try_lock_completion(directory: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(directory.join(COMPLETING))
+        .ok()
+}
+
+/// [`try_lock_completion`], waiting up to `wait` for a holder (a cleanup is
+/// brief; a completion can take a download) to let go.
+fn lock_completion_blocking(directory: &Path, wait: std::time::Duration) -> anyhow::Result<std::fs::File> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(file) = try_lock_completion(directory) {
+            return Ok(file);
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "another start of Zeron is completing this installation; try again in a moment"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// Exclusive use of the completion lock, waiting up to ten minutes for
+/// another process that holds it (a download on a slow line).
+async fn lock_completion(directory: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let path = directory.join(COMPLETING);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&path)
+        {
+            Ok(file) => return Ok(file),
+            // ERROR_SHARING_VIOLATION: someone else is completing it.
+            Err(err) if err.raw_os_error() == Some(32) && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(err) => return Err(err).with_context(|| format!("locking {}", path.display())),
+        }
+    }
 }
 
 fn verify(staged: &Path) -> anyhow::Result<()> {
@@ -267,6 +580,14 @@ fn digest(path: &Path) -> anyhow::Result<String> {
 /// and [`Self::recover_from_backup`] cover the leftovers of a hard crash
 /// between the two renames.
 pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<()> {
+    // From the new version's folder going in to the swap, no start's cleanup
+    // may take that folder for an old one (nothing runs from it yet).
+    let _lock = lock_completion_blocking(directory, std::time::Duration::from_secs(30))?;
+    apply_locked(staged, directory, relaunch)
+}
+
+/// [`apply`], the completion lock held already.
+fn apply_locked(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<()> {
     let installed = directory.join("zeron.exe");
     ensure!(
         std::env::current_exe()?.canonicalize()? == installed.canonicalize()?,
@@ -274,15 +595,17 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     );
     verify(staged)?;
     recover_from_backup(&installed)?;
-    install_beta_files(staged, directory)?;
+    let version = std::fs::read_to_string(staged.with_file_name("version")).ok();
+    let version = version.as_deref().map(str::trim);
+    install_version_files(staged, directory)?;
     swap_into_place(staged, &installed)?;
-    // Back on Stable: nothing reads a beta's folder any more.
-    if !staged.with_file_name(PACKAGE).is_dir() {
-        remove_beta_files(directory, None);
-    }
-    if let Ok(version) = std::fs::read_to_string(staged.with_file_name("version")) {
-        refresh_installer_version(directory, version.trim());
-        let _ = std::fs::write(directory.join(VERSION_FILE), version.trim());
+    // The old app (a single executable) reads no folder; the zgx app only
+    // its own version's. Others' go, except while an engine still runs them.
+    let packaged_update = staged.with_file_name(PACKAGE).join(BETA).is_dir();
+    remove_version_files(directory, version.filter(|_| packaged_update));
+    if let Some(version) = version {
+        refresh_installer_version(directory, version);
+        let _ = std::fs::write(directory.join(VERSION_FILE), version);
     }
     if relaunch {
         std::process::Command::new(&installed)
@@ -421,10 +744,18 @@ pub fn cleanup_previous_image() {
     };
     if is_managed(&exe) {
         let _ = remove_own_backup();
+        // Not while another start completes this installation: a folder it
+        // just put in place may not be running anything yet.
+        let Some(_lock) = exe.parent().and_then(try_lock_completion) else {
+            return;
+        };
         if let Some(directory) = exe.parent() {
             let own = super::app_version();
             let beta = super::Channel::of_version(own) == super::Channel::Beta;
-            remove_beta_files(directory, beta.then_some(own));
+            remove_version_files(directory, (beta || packaged()).then_some(own));
+            if packaged() {
+                leave_github_feed(directory);
+            }
         }
     }
 }
@@ -687,18 +1018,95 @@ mod tests {
         let incoming = stage.path().join(PACKAGE).join(BETA).join("0.2.137-beta.2");
         std::fs::create_dir_all(incoming.join("ui")).unwrap();
         std::fs::write(incoming.join("ui").join("app.luau"), "").unwrap();
-        install_beta_files(&staged, install.path()).unwrap();
+        install_version_files(&staged, install.path()).unwrap();
         let new = install.path().join(BETA).join("0.2.137-beta.2");
         assert!(new.join("ui").join("app.luau").is_file());
         assert!(old.is_dir(), "the running version's stays until the next launch");
-        remove_beta_files(install.path(), Some("0.2.137-beta.2"));
+        remove_version_files(install.path(), Some("0.2.137-beta.2"));
         assert!(!old.exists());
         assert!(new.is_dir());
-        // Stable's update brings no package, and there's nothing to move.
+        // The old app's update brings no package, and there's nothing to move.
         let plain = tempfile::tempdir().unwrap();
-        install_beta_files(&plain.path().join("zeron.exe"), install.path()).unwrap();
-        remove_beta_files(install.path(), None);
+        install_version_files(&plain.path().join("zeron.exe"), install.path()).unwrap();
+        remove_version_files(install.path(), None);
         assert!(!install.path().join(BETA).exists());
+    }
+
+    #[test]
+    fn a_stable_release_s_files_replace_a_beta_s() {
+        let install = tempfile::tempdir().unwrap();
+        let beta = version_files(install.path(), "0.2.139-beta.6");
+        std::fs::create_dir_all(beta.join("ui")).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let staged = stage.path().join("zeron.exe");
+        let incoming = stage.path().join(PACKAGE).join(BETA).join("0.2.139");
+        std::fs::create_dir_all(incoming.join("engine")).unwrap();
+        std::fs::create_dir_all(incoming.join("ui")).unwrap();
+        std::fs::write(incoming.join("engine").join("zeron.exe"), "").unwrap();
+        std::fs::write(incoming.join("ui").join("app.luau"), "").unwrap();
+        install_version_files(&staged, install.path()).unwrap();
+        let stable = version_files(install.path(), "0.2.139");
+        assert!(files_complete(&stable));
+        remove_version_files(install.path(), Some("0.2.139"));
+        assert!(!beta.exists());
+        assert!(stable.is_dir());
+        // Leftovers of a removal that didn't finish go too.
+        let leftover = install.path().join(BETA).join(".0.2.138.removing-1");
+        std::fs::create_dir_all(&leftover).unwrap();
+        remove_version_files(install.path(), Some("0.2.139"));
+        assert!(!leftover.exists());
+    }
+
+    /// A version folder whose engine runs can't be moved, so it isn't touched:
+    /// never left with its engine and without its scripts.
+    #[test]
+    fn a_version_in_use_is_kept_whole() {
+        let install = tempfile::tempdir().unwrap();
+        let running = version_files(install.path(), "0.2.140");
+        std::fs::create_dir_all(running.join("engine")).unwrap();
+        std::fs::create_dir_all(running.join("ui")).unwrap();
+        std::fs::write(running.join("ui").join("app.luau"), "").unwrap();
+        let engine = running.join("engine").join("zeron.exe");
+        std::fs::write(&engine, "").unwrap();
+        let lock = NoDeleteHandle::open(&engine);
+        remove_version_files(install.path(), Some("0.2.139"));
+        assert!(running.join("ui").join("app.luau").is_file(), "its scripts stay");
+        drop(lock);
+        remove_version_files(install.path(), Some("0.2.139"));
+        assert!(!running.exists());
+    }
+
+    #[test]
+    fn only_the_old_app_s_github_feed_moves_to_the_edge() {
+        let install = tempfile::tempdir().unwrap();
+        let config = install.path().join(CONFIG);
+        std::fs::write(&config, format!(r#"{{"releases_url":"{GITHUB_LATEST}/"}}"#)).unwrap();
+        leave_github_feed(install.path());
+        assert!(std::fs::read_to_string(&config).unwrap().contains(EDGE_FEED));
+        std::fs::write(&config, r#"{"releases_url":"https://example.com/feed"}"#).unwrap();
+        leave_github_feed(install.path());
+        assert!(std::fs::read_to_string(&config).unwrap().contains("example.com"));
+    }
+
+    #[test]
+    fn only_a_managed_install_without_its_files_is_incomplete() {
+        let install = tempfile::tempdir().unwrap();
+        let exe = install.path().join("zeron.exe");
+        // Not update-managed: a source build, left alone.
+        assert_eq!(incomplete_install(&exe, "0.2.139"), None);
+        std::fs::write(install.path().join(CONFIG), "{}").unwrap();
+        assert_eq!(incomplete_install(&exe, "0.2.139").as_deref(), Some(install.path()));
+        // A folder without its engine, or its engine alone, is incomplete.
+        let files = version_files(install.path(), "0.2.139");
+        std::fs::create_dir_all(files.join("ui")).unwrap();
+        assert!(incomplete_install(&exe, "0.2.139").is_some());
+        std::fs::create_dir_all(files.join("engine")).unwrap();
+        std::fs::write(files.join("engine").join("zeron.exe"), "").unwrap();
+        assert!(incomplete_install(&exe, "0.2.139").is_some());
+        std::fs::write(files.join("ui").join("app.luau"), "").unwrap();
+        assert_eq!(incomplete_install(&exe, "0.2.139"), None);
+        // Another version's files don't count.
+        assert!(incomplete_install(&exe, "0.2.140").is_some());
     }
 
     #[test]

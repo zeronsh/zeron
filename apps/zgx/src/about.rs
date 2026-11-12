@@ -136,6 +136,14 @@ impl Desktop {
                 Ok(false) => {}
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }
+        } else {
+            // A stable release has reached a beta download: it's on stable now,
+            // unless its person chose beta (crates/update `channel`).
+            match zeron_update::channel::release_claim_for_stable_build(&data_dir) {
+                Ok(true) => eprintln!("zeron-zgx: updates: this computer now gets stable updates"),
+                Ok(false) => {}
+                Err(error) => eprintln!("zeron-zgx: updates: couldn't leave the beta channel: {error}"),
+            }
         }
         let edge = crate::auth::endpoint().edge;
         let checker = {

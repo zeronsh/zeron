@@ -1,9 +1,8 @@
 name: zgx beta
 
-# Zeron's beta channel: the zgx interface (apps/zgx, its `beta` feature) as the
-# Zeron app itself, with the engine built from this same commit inside, on
-# macOS (scripts/package-zgx-beta.sh), Linux (scripts/package-linux.sh) and
-# Windows (scripts/package-windows.ps1). The point of a beta is to test what's
+# Zeron's beta channel: the next Zeron app, built as release.yml builds a
+# stable one (zgx-build.yml: apps/zgx with the engine from this same commit
+# inside, on macOS, Linux and Windows). The point of a beta is to test what's
 # next, the engine too. Testers keep their data and device; the app updates
 # itself from the beta channel and goes back to
 # Stable when they turn beta off (crates/update `channel`).
@@ -25,30 +24,6 @@ name: zgx beta
 # every job is skipped. The `apple-release` and `cloudflare` environments
 # must also admit `beta-v*` tags, or a tag's run gets no signing,
 # notarization or R2 credentials.
-#
-# The jobs. Each platform builds its two binaries at once, on runners of its
-# own, then packages them; a platform takes its slower build plus packaging:
-#
-#   admit ── version ─┬─ <platform>-engine ─────┐  the engine from the root workspace
-#                     │                         ├─ <platform>-package ─┬─ release ── channel
-#                     └─ <platform>-interface ──┘  apps/zgx --features beta (its own
-#                                                  workspace), as the scripts build it
-#
-# for macos, linux (x86_64 and aarch64, a matrix) and windows. `admit` waits
-# for the runners the whole beta needs, ahead of CI (see the job). The builds hand
-# their binaries over as `beta-build-*` artifacts (a day's retention; release
-# and channel take only the `zgx-beta-*` packages), and the packaging scripts
-# take them prebuilt (ZGX_BETA_ENGINE and ZGX_BETA_ZGX_BIN, Windows'
-# -BetaEngine and -BetaInterface), checked as they check their own.
-#
-# Only macos-package, which signs and notarizes, takes the `apple-release`
-# environment (a tag's run): the builds need no approval. It needs only
-# `version`, not the builds, because a job asks for approval only once its
-# needs are done: so it's approved while they run, then waits for them itself
-# (their artifacts land as each job ends).
-#
-# No cache is saved here: a tag's caches are its own, read by no later tag,
-# and they pushed main's out of the repository's 10 GB. Restoring is fine.
 
 on:
   push:
@@ -73,61 +48,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Waits until every runner the beta needs is free (scripts/ci/admit.py, as
-  # ci.yml's admit job; docs/reference/ci.md#releases). A tag's or a by-hand run
-  # is a release in the queue shared with CI: it goes first. Its name carries
-  # the reservation, every job below but those waiting for a reviewer:
-  #   version                                   1 Linux
-  #   linux engine, interface, package          6 Linux (2 each: x86_64, aarch64)
-  #   windows engine, interface, package        3 Windows
-  #   macos engine, interface                   2 macOS
-  #   macos package                             1 macOS by hand; not on a tag,
-  #                                             where it waits for `apple-release`'s
-  #                                             reviewers, and counts once approved
-  #   release, channel                          2 Linux, on a tag
-  # by hand, only the `platforms` asked for. Admission fails open:
-  # CI_ADMISSION=off, or API trouble, starts it at once.
-  admit:
-    if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
-    name: "admit [${{ matrix.reservation }}] release"
-    strategy:
-      # One entry: the reservation, computed once for the name and the step.
-      matrix:
-        reservation:
-          - "linux=${{ github.event_name == 'push' && 9 || (contains(inputs.platforms, 'linux') && 7 || 1) }} windows=${{ (github.event_name == 'push' || contains(inputs.platforms, 'windows')) && 3 || 0 }} macos=${{ (github.event_name == 'push' || contains(inputs.platforms, 'macos')) && (startsWith(github.ref, 'refs/tags/beta-v') && 2 || 3) || 0 }}"
-    runs-on: ubuntu-24.04
-    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
-    timeout-minutes: 330
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
-      issues: read  # when ci:lock was added
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          sparse-checkout: scripts/ci
-      - env:
-          GITHUB_TOKEN: ${{ github.token }}
-          CI_RESERVATION: ${{ matrix.reservation }}
-          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
-          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
-          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
-          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
-          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
-          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml,release.yml' }}
-          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
-          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
-          MAX_WAIT_MINUTES: 120
-        run: python3 -I scripts/ci/admit.py
-
   version:
-    needs: admit
     if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      stable: ${{ steps.version.outputs.stable }}
       engine: ${{ steps.version.outputs.engine }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -157,504 +82,82 @@ jobs:
           fi
           {
             echo "version=$version"
-            echo "stable=$stable"
             echo "engine=$version"
           } >>"$GITHUB_OUTPUT"
 
-  # Apple silicon only, as release.yml's macOS build.
-  macos-engine:
-    name: macos engine
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'macos')
-    runs-on: macos-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-beta
-          workspaces: . -> target
-          save-if: false
-      - name: the engine, from this commit
-        env:
-          ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
-          # Luau without its asserts (a fifth of script time). Here, not in a
-          # root .cargo/config.toml, so test builds keep them; the package
-          # refuses an engine that has them.
-          LUAU_CXXFLAGS: -DNDEBUG
-        run: cargo build --release --locked -p zeron --bin zeron-engine
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: beta-build-engine-macos-${{ runner.arch }}
-          path: target/release/zeron-engine
-          if-no-files-found: error
-          retention-days: 1
-
-  macos-interface:
-    name: macos interface
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'macos')
-    runs-on: macos-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      # zgx's terminals are Ghostty's, built with Zig 0.16 (zgx-ghostty-sys).
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.16.0
-          use-cache: false
-      # Restored only: zgx-tests.yml saves it.
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/Library/Caches/zgx-ghostty
-          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
-          restore-keys: zgx-ghostty-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-beta
-          workspaces: apps/zgx -> target
-          save-if: false
-      # As scripts/package-zgx-beta.sh builds it: from its folder (cargo reads
-      # apps/zgx/.cargo/config.toml, Luau's NDEBUG, by where it runs), into
-      # apps/zgx/target. The package checks what it says and carries.
-      - name: the interface, from this commit
-        working-directory: apps/zgx
-        env:
-          ZERON_BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: cargo build --release --locked --features beta --target-dir "$GITHUB_WORKSPACE/apps/zgx/target"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: beta-build-interface-macos-${{ runner.arch }}
-          path: apps/zgx/target/release/zeron-zgx
-          if-no-files-found: error
-          retention-days: 1
-
-  # Signs and notarizes: the one job with `apple-release`. It needs only
-  # `version` so it's approved while the builds run (see the header), then
-  # waits for them.
-  macos-package:
-    name: macos package
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'macos')
-    runs-on: macos-latest
-    timeout-minutes: 120
-    environment: ${{ startsWith(github.ref, 'refs/tags/beta-v') && 'apple-release' || '' }}
+  # The organization's runner queue (scripts/ci/admit.py), shared with CI here
+  # and in zeronsh/zgx: a beta goes first, as a release, and its whole run is
+  # reserved up front, so CI admitted meanwhile never takes the runners its
+  # later jobs need. What it reserves (beside this job):
+  #   version                    1 Linux
+  #   build (zgx-build.yml)      Linux x64 + arm, Windows, macOS: those
+  #                              `platforms` names; on a tag all, but macOS,
+  #                              which waits for apple-release's approval first
+  #                              (counted once it's queued, not while it waits)
+  #   release, channel           2 Linux, on a tag
+  # Admission fails open: CI_ADMISSION=off, or API trouble, starts it at once.
+  admit:
+    if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
+    name: "admit [${{ matrix.reservation }}] release"
+    strategy:
+      # One entry: the reservation, computed once for the name and the step.
+      # (Expressions can't add: each count is spelled out.)
+      matrix:
+        reservation:
+          - "${{ github.event_name == 'push' && 'linux=5 windows=1 macos=0' || format('linux={0} windows={1} macos={2}', contains(inputs.platforms, 'linux') && 3 || 1, contains(inputs.platforms, 'windows') && 1 || 0, contains(inputs.platforms, 'macos') && 1 || 0) }}"
+    runs-on: ubuntu-24.04
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
     permissions:
       contents: read
       actions: read
-    env:
-      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
-      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
-      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # The builds' jobs, each by its latest attempt, until both have
-      # succeeded; a build that ended otherwise ends this job too.
-      - name: wait for the engine and the interface
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          while :; do
-            states="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" --jq '
-              [.jobs[] | select(.name == "macos engine" or .name == "macos interface")]
-              | group_by(.name) | map(max_by(.run_attempt)) | .[]
-              | "\(.name)|\(.status)|\(.conclusion // "")"')" || states=""
-            ready=0
-            while IFS='|' read -r name status conclusion; do
-              [ -n "$name" ] && [ "$status" = completed ] || continue
-              [ "$conclusion" = success ] || { echo "$name: $conclusion"; exit 1; }
-              ready=$((ready + 1))
-            done <<<"$states"
-            [ "$ready" -eq 2 ] && break
-            sleep 20
-          done
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: beta-build-engine-macos-${{ runner.arch }}
-          path: target/release
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: beta-build-interface-macos-${{ runner.arch }}
-          path: apps/zgx/target/release
-      # (Artifacts don't keep the executable bit.)
-      - run: chmod +x target/release/zeron-engine apps/zgx/target/release/zeron-zgx
-      - name: import Developer ID certificate
-        if: env.MACOS_CERT_P12 != ''
-        run: |
-          keychain="$RUNNER_TEMP/release.keychain-db"
-          pass="$(openssl rand -hex 16)"
-          security create-keychain -p "$pass" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
-          security unlock-keychain -p "$pass" "$keychain"
-          printf '%s' "$MACOS_CERT_P12" | base64 -d >"$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$pass" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          identity="$(security find-identity -v -p codesigning "$keychain" \
-            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-          [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
-          echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
-      - name: notary credentials
-        if: env.AC_API_KEY_P8 != ''
-        run: |
-          printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
-          {
-            echo "NOTARY_KEY_PATH=$RUNNER_TEMP/ac_api_key.p8"
-            echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
-            echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
-          } >>"$GITHUB_ENV"
-      - name: package dmg
-        env:
-          BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          ZGX_BETA_ENGINE="$GITHUB_WORKSPACE/target/release/zeron-engine" \
-            ZGX_BETA_ZGX_BIN="$GITHUB_WORKSPACE/apps/zgx/target/release/zeron-zgx" \
-            scripts/package-zgx-beta.sh
-      - name: inspect the bundle
-        env:
-          BETA_VERSION: ${{ needs.version.outputs.version }}
-          ENGINE: ${{ needs.version.outputs.engine }}
-        run: |
-          app="target/package-beta/Zeron.app"
-          plist="$app/Contents/Info.plist"
-          plutil -p "$plist"
-          test "$(plutil -extract CFBundleIdentifier raw "$plist")" = sh.zeron.app
-          test "$(plutil -extract ZeronVersion raw "$plist")" = "$BETA_VERSION"
-          test "$("$app/Contents/MacOS/zeron" --version)" = "zeron $BETA_VERSION"
-          test -x "$app/Contents/MacOS/Zeron Engine"
-          test -f "$app/Contents/Resources/ui/app.luau"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -d --entitlements - "$app"
-          if [ -n "${NOTARY_KEY_PATH:-}" ]; then
-            spctl --assess --type execute --verbose=2 "$app"
-            xcrun stapler validate "$app"
-          fi
-          test "$(plutil -extract ZeronEngineVersion raw "$plist")" = "$ENGINE"
-          du -sh "$app"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: zgx-beta-macos-${{ runner.arch }}
-          path: |
-            target/package-beta/*.dmg
-            target/package-beta/*.tar.gz
-          if-no-files-found: error
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ matrix.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml,release.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I scripts/ci/admit.py
 
-  linux-engine:
-    name: linux engine (${{ matrix.runner }})
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'linux')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: system deps (release.yml's)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-beta
-          workspaces: . -> target
-          save-if: false
-      - name: the engine, from this commit
-        env:
-          ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
-          # Luau without its asserts (a fifth of script time). Here, not in a
-          # root .cargo/config.toml, so test builds keep them; the package
-          # refuses an engine that has them.
-          LUAU_CXXFLAGS: -DNDEBUG
-        run: cargo build --release --locked -p zeron --bin zeron-engine
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: beta-build-engine-linux-${{ runner.arch }}
-          path: target/release/zeron-engine
-          if-no-files-found: error
-          retention-days: 1
-
-  linux-interface:
-    name: linux interface (${{ matrix.runner }})
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'linux')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: system deps (release.yml's)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-beta
-          workspaces: apps/zgx -> target
-          save-if: false
-      # As scripts/package-linux.sh builds it: from its folder (cargo reads
-      # apps/zgx/.cargo/config.toml, Luau's NDEBUG, by where it runs), into
-      # apps/zgx/target. The package checks what it says and carries.
-      - name: the interface, from this commit
-        working-directory: apps/zgx
-        env:
-          ZERON_BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          cargo build --release --locked --features beta \
-            --manifest-path "$GITHUB_WORKSPACE/apps/zgx/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/apps/zgx/target"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: beta-build-interface-linux-${{ runner.arch }}
-          path: apps/zgx/target/release/zeron-zgx
-          if-no-files-found: error
-          retention-days: 1
-
-  linux-package:
-    name: linux package (${{ matrix.runner }})
-    needs: [version, linux-engine, linux-interface]
-    if: github.event_name == 'push' || contains(inputs.platforms, 'linux')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # The binaries' libraries, to run them below.
-      - name: system deps (release.yml's)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: beta-build-engine-linux-${{ runner.arch }}
-          path: target/release
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: beta-build-interface-linux-${{ runner.arch }}
-          path: apps/zgx/target/release
-      # (Artifacts don't keep the executable bit.)
-      - run: chmod +x target/release/zeron-engine apps/zgx/target/release/zeron-zgx
-      - name: package
-        env:
-          BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          ZGX_BETA_ENGINE="$GITHUB_WORKSPACE/target/release/zeron-engine" \
-            ZGX_BETA_ZGX_BIN="$GITHUB_WORKSPACE/apps/zgx/target/release/zeron-zgx" \
-            scripts/package-linux.sh
-      - name: inspect and install the tarball
-        env:
-          BETA_VERSION: ${{ needs.version.outputs.version }}
-          ENGINE: ${{ needs.version.outputs.engine }}
-        run: |
-          home="$RUNNER_TEMP/home"
-          mkdir -p "$RUNNER_TEMP/unpacked" "$home"
-          tar -xzf "target/package/zeron-$BETA_VERSION-linux-$(uname -m).tar.gz" -C "$RUNNER_TEMP/unpacked"
-          dir="$RUNNER_TEMP/unpacked/zeron-$BETA_VERSION-linux-$(uname -m)"
-          test "$("$dir/zeron" --version)" = "zeron $BETA_VERSION"
-          test "$("$dir/zeron-engine" --version)" = "zeron-engine $ENGINE"
-          test -f "$dir/ui/app.luau"
-          test -d "$dir/plugins-builtin"
-          test ! -e "$dir/ui/tests"
-          # Its install.sh, in a home of its own: a beta's directory, `current` on it.
-          HOME="$home" "$dir/install.sh"
-          test "$(basename "$(readlink "$home/.zeron/app/current")")" = "beta-$BETA_VERSION"
-          test "$("$home/.zeron/app/current/zeron" --version)" = "zeron $BETA_VERSION"
-          du -sh "$dir"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: zgx-beta-linux-${{ runner.arch }}
-          path: target/package/*.tar.gz
-          if-no-files-found: error
-
-  # (A Windows release has no separate engine: it runs as `zeron.exe engine`.)
-  windows-engine:
-    name: windows engine
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'windows')
-    runs-on: windows-2022
-    timeout-minutes: 150
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      # The scripts ship as they are on the other platforms: no CRLF.
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate Windows SDK shader compiler
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-beta
-          workspaces: . -> target
-          save-if: false
-      - name: the engine, from this commit
-        env:
-          ZERON_ENGINE_VERSION: ${{ needs.version.outputs.version }}
-          # Luau without its asserts (a fifth of script time). Here, not in a
-          # root .cargo/config.toml, so test builds keep them; the package
-          # refuses an engine that has them.
-          LUAU_CXXFLAGS: -DNDEBUG
-        run: |
-          cargo build --release --locked -p zeron
-          if ($LASTEXITCODE -ne 0) { throw 'the engine failed to build' }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: beta-build-engine-windows-${{ runner.arch }}
-          path: target/release/zeron.exe
-          if-no-files-found: error
-          retention-days: 1
-
-  windows-interface:
-    name: windows interface
-    needs: version
-    if: github.event_name == 'push' || contains(inputs.platforms, 'windows')
-    runs-on: windows-2022
-    timeout-minutes: 150
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: zgx-beta
-          workspaces: apps/zgx -> target
-          save-if: false
-      # As scripts/package-windows.ps1 builds it: from its folder (cargo reads
-      # apps/zgx/.cargo/config.toml, Luau's NDEBUG, by where it runs), into
-      # apps/zgx/target. The package checks what it says and carries.
-      - name: the interface, from this commit
-        working-directory: apps/zgx
-        env:
-          ZERON_BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
-          if ($LASTEXITCODE -ne 0) { throw 'the interface failed to build' }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: beta-build-interface-windows-${{ runner.arch }}
-          path: apps/zgx/target/release/zeron-zgx.exe
-          if-no-files-found: error
-          retention-days: 1
-
-  windows-package:
-    name: windows package
-    needs: [version, windows-engine, windows-interface]
-    if: github.event_name == 'push' || contains(inputs.platforms, 'windows')
-    runs-on: windows-2022
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: beta-build-engine-windows-${{ runner.arch }}
-          path: target/release
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: beta-build-interface-windows-${{ runner.arch }}
-          path: apps/zgx/target/release
-      # The feed's base is the edge's: its `beta/` is the beta channel, and
-      # stable's manifest and files, for going back, are beside it.
-      - name: package installer and portable app
-        env:
-          BETA_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          ./scripts/package-windows.ps1 -ReleasesUrl https://zeron.sh/releases -BetaVersion $env:BETA_VERSION `
-            -BetaEngine (Resolve-Path -LiteralPath './target/release/zeron.exe').Path `
-            -BetaInterface (Resolve-Path -LiteralPath './apps/zgx/target/release/zeron-zgx.exe').Path
-      - name: inspect the package
-        env:
-          BETA_VERSION: ${{ needs.version.outputs.version }}
-          ENGINE: ${{ needs.version.outputs.engine }}
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'unpacked'
-          Expand-Archive -LiteralPath "target/package/zeron-$env:BETA_VERSION-windows-x86_64.zip" -DestinationPath $dir
-          $interface = (& "$dir/zeron.exe" --version | Out-String).Trim()
-          if ($interface -ne "zeron $env:BETA_VERSION") { throw "the interface says '$interface'" }
-          $beta = "$dir/beta/$env:BETA_VERSION"
-          $engine = (& "$beta/engine/zeron.exe" --version | Out-String).Trim()
-          if ($engine -ne "zeron $env:ENGINE") { throw "the engine says '$engine'" }
-          foreach ($path in @("$beta/ui/app.luau", "$beta/plugins-builtin", "$dir/zeron-update.json")) {
-            if (-not (Test-Path -LiteralPath $path)) { throw "no $path in the package" }
-          }
-          if (Test-Path -LiteralPath "$beta/ui/tests") { throw 'the tests are in the package' }
-          $feed = (Get-Content -Raw "$dir/zeron-update.json" | ConvertFrom-Json).releases_url
-          if ($feed -ne 'https://zeron.sh/releases') { throw "the feed is $feed" }
-          Get-ChildItem target/package -File | Select-Object Name, Length
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: zgx-beta-windows-${{ runner.arch }}
-          path: |
-            target/package/*.zip
-            target/package/*.exe
-          if-no-files-found: error
+  # Built as a stable release is (zgx-build.yml), with the beta's version.
+  build:
+    needs: [version, admit]
+    uses: ./.github/workflows/zgx-build.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platforms: ${{ github.event_name == 'push' && 'macos linux windows' || inputs.platforms }}
+      # The edge's: its `beta/` is the beta channel, and stable's manifest
+      # and files, for going back, are beside it.
+      windows-feed: https://zeron.sh/releases
 
   # The GitHub pre-release: never the latest release (Zeron's updater and
   # download links follow releases/latest), with the beta's manifest.
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/beta-v')
-    needs: [version, macos-package, linux-package, windows-package]
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      ENGINE: ${{ needs.version.outputs.stable }}
+      # The engine inside is this commit's, the beta's own version.
+      ENGINE: ${{ needs.version.outputs.engine }}
     steps:
-      # The packages only, not the builds' `beta-build-*` binaries.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: zgx-beta-*
           path: dist
           merge-multiple: true
       - name: artifacts and the beta manifest
@@ -669,8 +172,7 @@ jobs:
               || { echo "missing artifact for $VERSION: $platform"; exit 1; }
           done
           # crates/update's Manifest: the beta's version, the engine it
-          # carries (a switch back to Stable weighs it) and its macOS floor,
-          # which only macOS reads.
+          # carries and its macOS floor, which only macOS reads.
           manifest=$(jq -n --arg version "$VERSION" --arg engine "$ENGINE" \
             '{version: $version, engineVersion: $engine, minimumMacOS: "13.0", files: {}}')
           for f in dist/*; do
@@ -720,7 +222,7 @@ jobs:
   # `beta/`: never the stable manifest.json or latest.txt.
   channel:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/beta-v')
-    needs: [version, macos-package, linux-package, windows-package, release]
+    needs: [version, build, release]
     runs-on: ubuntu-latest
     environment: cloudflare
     env:
@@ -729,7 +231,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: zgx-beta-*
           path: dist
           merge-multiple: true
       - name: the manifest the release carries
@@ -755,5 +256,9 @@ jobs:
           for f in dist/*; do
             put "beta/$(basename "$f")" "$f"
           done
-          # Last, so no reader sees a version before its files.
+          # This beta's own, beside its files (crates/update
+          # `windows::pinned_release`), then, last, so no reader sees a
+          # version before its files, the channel's.
+          VERSION="${GITHUB_REF_NAME#beta-v}"
+          put "beta/manifest-$VERSION.json" beta-manifest.json
           put beta/manifest.json beta-manifest.json

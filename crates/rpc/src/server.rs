@@ -14,14 +14,48 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use crate::ipc_auth::IpcTokens;
 use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
 
+/// The terminal a call must take effect in order for: its input and size.
+/// Each other call runs on a task of its own, and tasks spawned back to back
+/// start in no set order (tokio runs the newest first), so two writes would
+/// reach the terminal swapped: keys typed or pasted out of order, and a
+/// viewer's answers to a program's queries (a colour, then the cursor) read
+/// the wrong way round, the rest left as typed keys.
+fn ordered(method: &str, params: &serde_json::Value) -> Option<String> {
+    matches!(
+        method,
+        crate::methods::WRITE_TERMINAL | crate::methods::RESIZE_TERMINAL
+    )
+    .then(|| params["terminalId"].as_str().unwrap_or_default().to_owned())
+}
+
+/// One terminal's [`ordered`] calls, in the order the connection sent them.
+type Lane = mpsc::UnboundedSender<(u64, String, serde_json::Value)>;
+
+/// Runs a lane's calls one after another; each answer is sent beside it, so
+/// a client slow to read answers doesn't hold the next write back. Ends once
+/// its sender is gone and what was queued has run.
+fn lane(service: Arc<dyn RpcService>, out: mpsc::Sender<String>) -> Lane {
+    let (lane, mut queued) = mpsc::unbounded_channel::<(u64, String, serde_json::Value)>();
+    tokio::spawn(async move {
+        while let Some((id, method, params)) = queued.recv().await {
+            let result = service.handle(&method, params).await;
+            tokio::spawn(respond(out.clone(), id, method, result));
+        }
+    });
+    lane
+}
+
 /// Serve one connection: read client frames from `inbound`, write server frames to `out`.
-/// Returns when `inbound` closes; all in-flight request tasks are aborted on exit.
+/// Returns when `inbound` closes; all in-flight request tasks are aborted on exit, but
+/// a terminal's input already sent still goes in ([`ordered`] calls: one lane a
+/// terminal, each one after another in the order sent, beside the rest).
 pub async fn serve_connection(
     service: Arc<dyn RpcService>,
     out: mpsc::Sender<String>,
     mut inbound: mpsc::Receiver<String>,
 ) {
     let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
+    let mut lanes: HashMap<String, Lane> = HashMap::new();
     while let Some(payload) = inbound.recv().await {
         // ndjson: a transport may batch several frames per message.
         for line in payload.lines() {
@@ -47,6 +81,13 @@ pub async fn serve_connection(
                 tracing::warn!(id = frame.id, "rpc: frame has neither method nor cancel");
                 continue;
             };
+            if let Some(terminal) = ordered(&method, &frame.params) {
+                let queue = lanes
+                    .entry(terminal)
+                    .or_insert_with(|| lane(service.clone(), out.clone()));
+                let _ = queue.send((frame.id, method, frame.params));
+                continue;
+            }
             let task = tokio::spawn(handle_request(
                 service.clone(),
                 out.clone(),
@@ -60,6 +101,8 @@ pub async fn serve_connection(
     for (_, task) in running {
         task.abort();
     }
+    // (Each lane ends once what was queued has gone in.)
+    drop(lanes);
 }
 
 async fn handle_request(
@@ -68,6 +111,17 @@ async fn handle_request(
     id: u64,
     method: String,
     params: serde_json::Value,
+) {
+    let result = service.handle(&method, params).await;
+    respond(out, id, method, result).await;
+}
+
+/// Send a call's answer: its value, its stream's items, or its error.
+async fn respond(
+    out: mpsc::Sender<String>,
+    id: u64,
+    method: String,
+    result: Result<RpcReply, RpcError>,
 ) {
     let send = |frame: ServerFrame| {
         let out = out.clone();
@@ -81,7 +135,7 @@ async fn handle_request(
             }
         }
     };
-    match service.handle(&method, params).await {
+    match result {
         Ok(RpcReply::Value(value)) => {
             let _ = send(ServerFrame {
                 id,
@@ -282,4 +336,118 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
     };
     serve_connection(service, out_tx, in_rx).await;
     pump.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// Records the order calls reach it in, by terminal; a call for the
+    /// terminal "stuck" never finishes (a write to a program that never
+    /// reads).
+    struct Recorder(Mutex<Vec<(String, u64)>>);
+
+    #[async_trait::async_trait]
+    impl RpcService for Recorder {
+        async fn handle(
+            &self,
+            _method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            let terminal = params["terminalId"].as_str().unwrap_or_default().to_owned();
+            if terminal == "stuck" {
+                std::future::pending::<()>().await;
+            }
+            // (A call that yields first, as a real one may.)
+            tokio::task::yield_now().await;
+            let n = params["n"].as_u64().unwrap_or_default();
+            self.0.lock().unwrap().push((terminal, n));
+            Ok(RpcReply::Value(serde_json::json!({})))
+        }
+    }
+
+    fn connect() -> (Arc<Recorder>, mpsc::Sender<String>, mpsc::Receiver<String>) {
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let (to_server, server_in) = mpsc::channel::<String>(4096);
+        let (server_out, from_server) = mpsc::channel::<String>(4096);
+        tokio::spawn(serve_connection(recorder.clone(), server_out, server_in));
+        (recorder, to_server, from_server)
+    }
+
+    fn call(id: u64, method: &str, terminal: &str, n: u64) -> String {
+        serde_json::json!({ "id": id, "method": method, "params": { "terminalId": terminal, "n": n } })
+            .to_string()
+    }
+
+    fn seen(recorder: &Recorder, terminal: &str) -> Vec<u64> {
+        let calls = recorder.0.lock().unwrap();
+        calls.iter().filter(|(t, _)| t == terminal).map(|(_, n)| *n).collect()
+    }
+
+    /// A terminal's input and size reach the service in the order sent,
+    /// however many come back to back, two terminals' interleaved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_terminal_s_writes_and_resizes_arrive_in_the_order_sent() {
+        let (recorder, to_server, mut from_server) = connect();
+        const CALLS: u64 = 400;
+        for n in 0..CALLS {
+            let method = if n % 7 == 3 {
+                crate::methods::RESIZE_TERMINAL
+            } else {
+                crate::methods::WRITE_TERMINAL
+            };
+            let terminal = if n % 3 == 0 { "b" } else { "a" };
+            to_server.send(call(n + 1, method, terminal, n)).await.unwrap();
+        }
+        for _ in 0..CALLS {
+            tokio::time::timeout(Duration::from_secs(10), from_server.recv())
+                .await
+                .expect("every call answered")
+                .expect("connection up");
+        }
+        assert_eq!(seen(&recorder, "a"), (0..CALLS).filter(|n| n % 3 != 0).collect::<Vec<_>>());
+        assert_eq!(seen(&recorder, "b"), (0..CALLS).filter(|n| n % 3 == 0).collect::<Vec<_>>());
+    }
+
+    /// A write that never finishes holds back its own terminal only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stuck_terminal_holds_back_no_other() {
+        let (recorder, to_server, mut from_server) = connect();
+        let write = crate::methods::WRITE_TERMINAL;
+        to_server.send(call(1, write, "stuck", 0)).await.unwrap();
+        to_server.send(call(2, write, "stuck", 1)).await.unwrap();
+        for n in 0..20 {
+            to_server.send(call(10 + n, write, "free", n)).await.unwrap();
+        }
+        for _ in 0..20 {
+            tokio::time::timeout(Duration::from_secs(10), from_server.recv())
+                .await
+                .expect("the free terminal's calls answered")
+                .expect("connection up");
+        }
+        assert_eq!(seen(&recorder, "free"), (0..20).collect::<Vec<_>>());
+        assert!(seen(&recorder, "stuck").is_empty());
+    }
+
+    /// Input sent just before the connection ends still goes in, in order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn input_sent_before_the_connection_ends_still_goes_in() {
+        let (recorder, to_server, from_server) = connect();
+        for n in 0..50 {
+            to_server
+                .send(call(n + 1, crate::methods::WRITE_TERMINAL, "a", n))
+                .await
+                .unwrap();
+        }
+        drop(to_server);
+        drop(from_server);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while seen(&recorder, "a").len() < 50 {
+            assert!(tokio::time::Instant::now() < deadline, "{:?}", seen(&recorder, "a"));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(seen(&recorder, "a"), (0..50).collect::<Vec<_>>());
+    }
 }

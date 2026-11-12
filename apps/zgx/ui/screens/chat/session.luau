@@ -313,7 +313,7 @@ local function Session(id: Id?): Node
 							-- its working word (screens/chat/turn_state).
 							turn_state = TurnGlue.of(function(): any
 								return store.session:get()
-							end),
+							end, store.messages),
 							on_retry = function(message: string)
 								local s = which()
 								if s then
