@@ -256,6 +256,17 @@ end }
 
 `run` returns the answer, or `error()` fails the call. It runs as a task, so it can await (`ui.fetch`). `call.chat` is the chat that called. Tools run while Zeron is open on this device; a plugin with a [service](#services) can answer them there instead, with no window open.
 
+To show the agent pictures (a screenshot of what it made, a chart), put them in the answer's `imageContent`, base64 each. The agent sees them as images, and the rest of the answer as text:
+
+```lua
+return {
+	screen = "Home",
+	imageContent = { { type = "image", data = png_base64, mimeType = "image/png" } },
+}
+```
+
+PNG, JPEG, WebP or GIF, 5 MB each and about 8 MB together at most. An image that doesn't fit is left out, and the agent is told which and why.
+
 ### Review comments on the composer
 
 `zeron.compose_comment` leaves a review comment on a file or a diff on a chat's draft (`session`; without one, the draft shown), as the files pane leaves its own: a chip in the composer naming the file and lines (`graph.rs:10–12`), its note under it. Nothing goes until the person sends. Then, after their words, every comment goes in Zeron's review comments block, as production's composer writes it (crates/ui `comments.rs`), so the agent reads each as its file, its lines, its side and its note, with the code under it:
