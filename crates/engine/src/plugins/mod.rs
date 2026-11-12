@@ -67,6 +67,10 @@ pub const REMOVED_DIR: &str = ".removed";
 /// with none of it.
 pub(crate) fn forget_storage(plugins_dir: &Path, id: &str) {
     let storage = plugins_dir.join(".storage");
+    // Its service's connection first: an open database can't be deleted.
+    if let Some(db) = zeron_plugin_db::path_in(&storage, id) {
+        zeron_plugin_db::close(&db);
+    }
     for end in ["json", "settings.json", "sqlite3", "sqlite3-wal", "sqlite3-shm"] {
         let _ = std::fs::remove_file(storage.join(format!("{id}.{end}")));
     }

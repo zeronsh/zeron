@@ -13752,6 +13752,7 @@ dependencies = [
  "zeron-launch",
  "zeron-mcp",
  "zeron-notify",
+ "zeron-plugin-db",
  "zeron-plugin-guard",
  "zeron-preview",
  "zeron-proto",
@@ -13884,6 +13885,14 @@ dependencies = [
 [[package]]
 name = "zeron-orb"
 version = "0.3.0"
+
+[[package]]
+name = "zeron-plugin-db"
+version = "0.3.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+]
 
 [[package]]
 name = "zeron-plugin-guard"

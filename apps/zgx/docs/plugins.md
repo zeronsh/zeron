@@ -312,7 +312,7 @@ end)
 - A run waits `timeout` seconds at most (60 unless you say, 300 at most), then is stopped (`status` -1). What it prints is kept up to 16 MB.
 - Only the programs you named run; anything else is refused.
 
-**A database** (`zeron.db`, no permission). Your plugin's own SQLite file: removed with the plugin, 100 MB at most, and no other file reachable through it. Use it for a cache, an index or a history, anything past what `zeron.store`'s small JSON file holds.
+**A database** (`zeron.db`, no permission). Your plugin's own SQLite file: removed with the plugin, 100 MB at most, and no other file reachable through it. Use it for a cache, an index or a history, anything past what `zeron.store`'s small JSON file holds. Your windows and your service (below) open the same file: what one writes, the other reads. Each write is its own transaction; one that meets the other side's write waits for it (up to 5 s) rather than failing.
 
 ```lua
 zeron.db.exec("CREATE TABLE IF NOT EXISTS seen (url TEXT PRIMARY KEY, at INTEGER)")
@@ -376,6 +376,7 @@ end)
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
 | `zeron.measure_text(text, { font, size, weight, italic, tabular, line_height, letter_spacing, width })` | the width and height `text` takes, as your window's canvas measures it (`c:measure_text`), with no window: the same shaper, the system's fonts and the app's. `width` wraps it; `line_height` and `letter_spacing` are in points. A family it doesn't have falls back as in a window | |
 | `zeron.load_font(path)`, `zeron.load_font { base64 }` | a font file of your plugin's own (`"fonts/Inter.ttf"`), or a font's bytes in base64 (one fetched with `binary = true`, 64 MiB at most), to measure in, beside the faces there are: its family names. Load the same font in your window (`ui.load_font`) and both measure alike | |
+| `zeron.db.exec(sql, params)`, `zeron.db.query(sql, params)` | its own SQLite database, the same file its windows' `zeron.db` opens: promises of `{ changes, last_id }` and of rows | |
 | `zeron.sleep(seconds)`, `zeron.task(fn)` | a promise done later; run `fn` as a task of its own | |
 | `zeron.json.encode(v)`, `zeron.json.decode(text)`, `zeron.device` | JSON; this device's `{ id, name }` | |
 | `zeron.eval(source, { name?, env?, budget_ms? })` | run a script it was given: `true, ...` (what it returned), or `false, why`. See below | `eval` |

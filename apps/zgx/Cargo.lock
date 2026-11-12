@@ -7264,6 +7264,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-plugin-db"
+version = "0.3.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "zeron-plugin-guard"
 version = "0.3.0"
 dependencies = [
@@ -7381,7 +7389,6 @@ dependencies = [
  "open",
  "png 0.18.1",
  "resvg",
- "rusqlite",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -7398,6 +7405,7 @@ dependencies = [
  "zeron-cli",
  "zeron-launch",
  "zeron-notify",
+ "zeron-plugin-db",
  "zeron-plugin-guard",
  "zeron-preview-label",
  "zeron-proto",

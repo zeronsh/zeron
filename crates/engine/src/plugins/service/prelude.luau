@@ -443,6 +443,18 @@ local function service(id: string): any
 		task(fn)
 	end
 
+	-- Its own SQLite database (no permission), the same file its windows'
+	-- `zeron.db` opens: promises of { changes, last_id } and of rows.
+	-- Parameters are always bound (`?`); `exec` with none runs a script.
+	M.db = {
+		exec = function(sql: string, params: { any }?): any
+			return op("db", { op = "exec", sql = sql, params = params or {} })
+		end,
+		query = function(sql: string, params: { any }?): any
+			return op("db", { op = "query", sql = sql, params = params or {} })
+		end,
+	}
+
 	-- What the service keeps between runs, on this device (1 MB at most).
 	function M.store(key: string, default: any): any
 		local box = {}

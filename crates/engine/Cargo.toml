@@ -59,6 +59,8 @@ reqwest.workspace = true
 bytes = "1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
+# A plugin's `zeron.db` in its service: the file its windows open too.
+zeron-plugin-db.workspace = true
 ignore.workspace = true
 fff-search.workspace = true
 
