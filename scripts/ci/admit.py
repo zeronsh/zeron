@@ -148,7 +148,7 @@ KEEP_WAITING_SHARE = 4
 PRIORITY_LABEL = "ci:priority"
 LOCK_LABEL = "ci:lock"
 LOCK_HOURS = 6
-PR_CLAIM = re.compile(r"#(\d{1,4})\s*$")
+PR_CLAIM = re.compile(r"#(\d{1,7})\s*$")  # (pull request numbers: zgx grows ~70 a day; never thousands of digits)
 RELEASE_CLAIM = re.compile(r"\]\s*release\s*$")
 # Every repository's admitted CI workflow.
 CI_WORKFLOW = "ci.yml"
