@@ -572,6 +572,87 @@ async fn revoked_refresh_token_signs_out() {
     assert!(!dir.path().join("session.json").exists());
 }
 
+/// The session `dir` keeps, as written.
+fn kept_session(dir: &std::path::Path) -> serde_json::Value {
+    let raw = std::fs::read_to_string(dir.join("session.json")).expect("session kept");
+    serde_json::from_str(&raw).expect("session json")
+}
+
+/// A session another edge or WorkOS client issued isn't this engine's to use:
+/// it starts signed out, never presents that refresh token here (where a
+/// refusal would sign out and delete a session that still works where it came
+/// from), and leaves the file as it is.
+#[tokio::test]
+async fn a_session_another_edge_issued_is_left_as_it_is() {
+    let edge = StubEdge::start().await;
+    let other_edge = "https://edge.other.example".to_string();
+    let issuers = [
+        ("another edge", other_edge, "client_test"),
+        ("another client", edge.url(), "client_other"),
+    ];
+    for (what, edge_url, client) in issuers {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_file = dir.path().join("session.json");
+        // A refresh token this edge turns down, which would sign out.
+        let seeded = serde_json::json!({
+            "refreshToken": "dead",
+            "user": { "id": "user_1", "email": "w@example.com" },
+            "orgId": "org_1",
+            "edgeUrl": edge_url,
+            "workosClientId": client,
+        })
+        .to_string();
+        std::fs::write(&session_file, &seeded).expect("seed session");
+        let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+        assert_eq!(auth.state(), AuthState::SignedOut, "{what}");
+        assert!(!auth.loaded_workos_session(), "{what}");
+        assert_eq!(auth.access_token().await, Err(TokenError::SignedOut));
+        assert!(
+            edge.state.refresh_tokens.lock().expect("lock").is_empty(),
+            "{what}: its refresh token went to this edge"
+        );
+        let kept = std::fs::read_to_string(&session_file).expect("session kept");
+        assert_eq!(kept, seeded, "{what}");
+    }
+}
+
+/// A sign-in's session says which edge and client issued it, and an engine
+/// of that edge uses it, its URL written with a trailing slash or not.
+#[tokio::test]
+async fn a_session_says_which_edge_and_client_issued_it() {
+    let edge = StubEdge::start().await;
+    *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state");
+    auth.complete_sign_in(&format!("{state}.code1"))
+        .await
+        .expect("sign in");
+    let kept = kept_session(dir.path());
+    assert_eq!(kept["edgeUrl"], edge.url());
+    assert_eq!(kept["workosClientId"], "client_test");
+
+    let again = Auth::new(workos_config(&format!("{}/", edge.url()), dir.path()));
+    assert!(again.loaded_workos_session(), "its own edge uses it");
+    assert!(again.state().is_signed_in());
+}
+
+/// A session kept before sessions said where they came from is taken as this
+/// engine's, as before, and says so once this edge has refreshed it.
+#[tokio::test]
+async fn a_session_from_before_learns_its_issuer_on_its_first_refresh() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = persisted_auth(&edge, dir.path());
+    assert!(auth.loaded_workos_session());
+    auth.access_token().await.expect("refreshed");
+    let kept = kept_session(dir.path());
+    assert_eq!(kept["refreshToken"], "rotated-1");
+    assert_eq!(kept["edgeUrl"], edge.url());
+    assert_eq!(kept["workosClientId"], "client_test");
+}
+
 #[tokio::test]
 async fn offline_refresh_loop_backs_off_without_revoking_session() {
     let edge = StubEdge::start().await;
