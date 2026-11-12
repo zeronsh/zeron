@@ -35,6 +35,8 @@ pub const MAX_STORE_BYTES: usize = 1 << 20;
 const MAX_DEPTH: usize = 64;
 /// What Luau says when an allocation fails (the memory cap).
 const OUT_OF_MEMORY: &str = "not enough memory";
+/// A service's heap unless its manifest asks more (`limits.memory_mb`).
+pub const DEFAULT_MEMORY_MB: u32 = 64;
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -49,7 +51,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            memory: 64 << 20,
+            memory: (DEFAULT_MEMORY_MB as usize) << 20,
             slice: Duration::from_secs(2),
             drain: Duration::from_secs(60),
         }
@@ -404,6 +406,11 @@ fn run(
         status.touch();
         if let Err(mlua::Error::MemoryError(_)) = &result {
             state.dead.set(true);
+        } else if !status.busy() && lua.used_memory() > limits.memory / 2 {
+            // Luau collects only as it allocates, and never before failing
+            // an allocation: what a big call left would count against the
+            // next. Collected while nothing waits on it.
+            let _ = lua.gc_collect();
         }
         result
     };

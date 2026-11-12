@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value as Json, json};
 use zeron_plugin_guard::net;
 
-pub use vm::{Described, Failure, Kind, Limits};
+pub use vm::{DEFAULT_MEMORY_MB, Described, Failure, Kind, Limits};
 use vm::{Done, Ops, Spec, Vm};
 
 /// Why a call didn't get an answer from the service, as callers branch on.
@@ -106,6 +106,8 @@ pub struct Plan {
     pub commands: Vec<String>,
     /// The hosts its manifest names (`network.hosts`; none: any public).
     pub hosts: Vec<String>,
+    /// The heap its manifest asks (`limits.memory_mb`; none: the config's).
+    pub memory_mb: Option<u32>,
 }
 
 impl Plan {
@@ -416,7 +418,12 @@ impl Services {
             entry: plan.entry.clone(),
             device: hooks.device(),
             store: Some(Self::store_path(&self.inner.store_dir, &plan.plugin)),
-            limits: self.inner.config.limits.clone(),
+            limits: Limits {
+                memory: plan
+                    .memory_mb
+                    .map_or(self.inner.config.limits.memory, |mb| (mb as usize) << 20),
+                ..self.inner.config.limits.clone()
+            },
         };
         let (vm, loaded) = Vm::start(spec, ops);
         let outcome = match tokio::time::timeout(self.inner.config.load_timeout, loaded).await {

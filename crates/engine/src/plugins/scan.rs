@@ -163,6 +163,10 @@ pub struct PluginItem {
     /// (plugins/service) while it's on and allowed `service`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
+    /// The memory its service asks (`limits.memory_mb`), named on its
+    /// consent; none, the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_memory_mb: Option<u32>,
     pub mcp: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -289,6 +293,7 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
         commands: manifest.map(|m| m.commands.clone()).unwrap_or_default(),
         network_hosts: manifest.map(|m| m.network_hosts.clone()).unwrap_or_default(),
         service: manifest.and_then(|m| m.service.clone()),
+        service_memory_mb: manifest.and_then(|m| m.memory_mb),
         mcp: manifest.is_some_and(|m| m.mcp.is_some()),
         error: inspected.error.clone(),
         builtin: false,

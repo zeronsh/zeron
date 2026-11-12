@@ -14,6 +14,8 @@
 //! - its service file and its entry (recorded; moving them is code
 //!   changing, which never asks: a service where there was none does);
 //! - the hosts it reaches, if it names them;
+//! - its service's memory, if it asks more than the default (absent
+//!   otherwise, so a record from before it is unchanged);
 //! - the settings that grant anything.
 //!
 //! A decision keeps the record it was made for (`status::Decision::grants`).
@@ -29,6 +31,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::manifest::Manifest;
+use super::service::DEFAULT_MEMORY_MB;
 use super::signing;
 
 /// The record's version, inside it: a new kind of power changes what's
@@ -94,7 +97,7 @@ pub fn record(manifest: &Manifest) -> Value {
         .cloned()
         .collect();
     settings.sort_by_key(|s| signing::canonical_json(s));
-    json!({
+    let mut record = json!({
         "v": VERSION,
         "permissions": sorted_unique(&manifest.permissions),
         "commands": sorted_unique(&manifest.commands),
@@ -108,7 +111,16 @@ pub fn record(manifest: &Manifest) -> Value {
         "entry": manifest.entry,
         "network": hosts,
         "settings": settings,
-    })
+    });
+    if let Some(mb) = manifest.memory_mb {
+        record["memory_mb"] = json!(mb);
+    }
+    record
+}
+
+/// A record's `memory_mb`, in MB (null: the default).
+fn memory_mb(value: &Value) -> u64 {
+    value.as_u64().unwrap_or(u64::from(DEFAULT_MEMORY_MB))
 }
 
 /// The empty record: nothing granted (what a plugin that can't be read has).
@@ -206,6 +218,8 @@ pub struct Diff {
     pub service_changed: Option<Before<Value>>,
     pub entry_changed: Option<Before<Value>>,
     pub network_added: Vec<String>,
+    /// Its service's memory in MB, when that changed (null: the default).
+    pub memory_changed: Option<Before<Value>>,
     pub settings_changed: bool,
 }
 
@@ -224,6 +238,10 @@ impl Diff {
             || !self.tools_changed.is_empty()
             || self.service_changed.as_ref().is_some_and(|c| c.before.is_null() && !c.after.is_null())
             || !self.network_added.is_empty()
+            || self
+                .memory_changed
+                .as_ref()
+                .is_some_and(|c| memory_mb(&c.after) > memory_mb(&c.before))
             || self.settings_changed
     }
 
@@ -290,6 +308,7 @@ pub fn diff(before: &Value, after: &Value) -> Diff {
                 .filter(|h| !any || h == ANY_HOST || zeron_plugin_guard::net::names_exactly(h) || zeron_plugin_guard::net::risky(h))
                 .collect()
         },
+        memory_changed: changed("memory_mb"),
         settings_changed,
     }
 }
@@ -393,6 +412,22 @@ mod tests {
         assert!(!d.grew() && d.removed_commands == ["gh"]);
         let d = grows(json!({ "tools": [] }));
         assert!(!d.grew() && d.tools_removed == ["count"]);
+    }
+
+    #[test]
+    fn plugins_capability_more_service_memory_grows() {
+        let service = |limits: Value| {
+            manifest(json!({ "permissions": ["service"], "service": "service.luau", "limits": limits }))
+        };
+        let default = record(&service(Value::Null));
+        assert!(default.get("memory_mb").is_none(), "not asked: the record is as before");
+        let more = record(&service(json!({ "memory_mb": 256 })));
+        let d = diff(&default, &more);
+        assert!(d.grew() && d.memory_changed.as_ref().unwrap().after == json!(256), "asking more asks");
+        assert!(diff(&more, &record(&service(json!({ "memory_mb": 512 })))).grew(), "and more again");
+        let d = diff(&more, &record(&service(json!({ "memory_mb": 128 }))));
+        assert!(!d.grew() && d.memory_changed.is_some(), "less doesn't ask, but is said");
+        assert!(!diff(&more, &default).grew(), "back to the default doesn't ask");
     }
 
     #[test]
