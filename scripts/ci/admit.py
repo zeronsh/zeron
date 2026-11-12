@@ -100,7 +100,9 @@ RUNNERS = ("linux", "windows", "macos")
 RESOURCES = ("total", "macos", "windows")
 ADMIT_PREFIX = "admit"
 UNRESERVED_JOBS = ("plan",)  # jobs that run before admission and are not in reservations
-RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d+)\b")
+# At most 4 digits (as PR_CLAIM): a name comes from another run's editable ci.yml,
+# and int() of a number thousands of digits long raises (its str digits limit).
+RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d{1,4})\b")
 # At least the largest reservation plan.py makes: every suite, on main (checked by
 # test_ci_admit.py). One cap for every branch and repository sharing the queue
 # (main, zeron/zgx with its zgx suite, zeronsh/zgx): this file is the same in each.
@@ -122,7 +124,7 @@ KEEP_WAITING_SHARE = 4
 PRIORITY_LABEL = "ci:priority"
 LOCK_LABEL = "ci:lock"
 LOCK_HOURS = 6
-PR_CLAIM = re.compile(r"#(\d+)\s*$")
+PR_CLAIM = re.compile(r"#(\d{1,4})\s*$")
 
 
 def parse_reservation(name: str) -> dict[str, int] | None:
@@ -230,10 +232,15 @@ def bigger(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
 
 
 def rank(w: Waiter, snapshot: Snapshot) -> tuple:
-    """Queue order: locked runs (oldest lock first), then ci:priority, then everyone, each first come first served."""
+    """Queue order: locked runs (oldest lock first), then ci:priority, then everyone, each first come first served.
+
+    Locks added in the same second go in the order of their keys as text, the
+    tiebreak decide()'s lock_is_older uses: if the two orders disagreed, two
+    such locks would each wait for the other.
+    """
     if w.pr in snapshot.locked:
-        return (0, snapshot.lock_times.get(w.pr, ""), w.key)
-    return (1 if w.pr in snapshot.priority else 2, "", w.key)
+        return (0, snapshot.lock_times.get(w.pr, ""), str(w.pr), w.key)
+    return (1 if w.pr in snapshot.priority else 2, "", "", w.key)
 
 
 def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, int]) -> Decision:
@@ -257,7 +264,8 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
     my_lock = self_.pr if self_ is not None and self_.pr in snapshot.locked else None
 
     def lock_is_older(pr) -> bool:
-        # (Keys are numbers here and `owner/repo#n` from a peer: compared as text on a tie.)
+        # (Keys are numbers here and `owner/repo#n` from a peer: compared as text on a tie,
+        # as rank() orders them.)
         return (snapshot.lock_times.get(pr, ""), str(pr)) < (snapshot.lock_times.get(my_lock, ""), str(my_lock))
 
     lock_use = {pr: dict(zero) for pr in snapshot.locked}
