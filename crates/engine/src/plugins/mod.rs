@@ -2674,6 +2674,7 @@ fn service_plan(entry: &Entry) -> Option<Plan> {
         allowed: item.allowed.clone(),
         commands: item.commands.clone(),
         hosts: item.network_hosts.clone(),
+        memory_mb: item.service_memory_mb,
     })
 }
 

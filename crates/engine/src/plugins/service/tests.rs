@@ -61,6 +61,7 @@ impl Rig {
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
             commands: vec!["echo".into()],
             hosts: Vec::new(),
+            memory_mb: None,
         }
     }
 
@@ -220,6 +221,47 @@ fn small() -> Config {
         },
         ..Config::default()
     }
+}
+
+/// Holds 96 MB at once: past the default 64 MB.
+const BIG: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("big", function()
+	local t = {}
+	for i = 1, 96 do t[i] = string.rep("x", 1048576 - 8) .. i end
+	return #t
+end)
+"#;
+
+#[tokio::test]
+async fn a_service_gets_the_memory_its_manifest_asks() {
+    let r = rig(quick());
+    let mut plan = r.plan("1.0.0", BIG, &["service"]);
+    assert!(r.ask(&plan, "big", json!({})).await.is_err(), "64 MB unless it asks");
+    plan.memory_mb = Some(256);
+    plan.hash = "hash-more".into();
+    assert_eq!(r.ask(&plan, "big", json!({})).await.unwrap(), json!(96));
+}
+
+/// Holds 40 MB during the call and lets it go: garbage once it answers.
+const CHURN: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("churn", function()
+	local t = {}
+	for i = 1, 40 do t[i] = string.rep("x", 1048576 - 8) .. i end
+	return #t
+end)
+"#;
+
+#[tokio::test]
+async fn a_big_calls_garbage_leaves_room_for_the_next() {
+    let r = rig(quick());
+    let plan = r.plan("1.0.0", CHURN, &["service"]);
+    for call in 1..=3 {
+        let answer = r.ask(&plan, "churn", json!({})).await;
+        assert_eq!(answer, Ok(json!(40)), "call {call}");
+    }
+    assert_eq!(r.starts(), 1, "the same VM served them all");
 }
 
 #[tokio::test]

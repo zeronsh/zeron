@@ -55,6 +55,11 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "messages.send",
 ];
 
+/// The most memory a service may ask (`limits.memory_mb`): 8× the default,
+/// room for a large document and the garbage of a big call, while a few
+/// such services still fit on a laptop.
+pub const MAX_SERVICE_MEMORY_MB: u32 = 512;
+
 /// Ids the app keeps for itself.
 pub const RESERVED_IDS: &[&str] = &["templates", "zeron", "app"];
 
@@ -214,6 +219,10 @@ pub struct Manifest {
     /// with the permission): none named, any public host; named, those
     /// alone, a private one (`localhost:8080`) only so (plugin-guard's `net`).
     pub network_hosts: Vec<String>,
+    /// Its service's memory, in MB (`"limits": { "memory_mb": 256 }`, with a
+    /// service): none, the default; more than [`MAX_SERVICE_MEMORY_MB`] is
+    /// a problem, never cut down to it.
+    pub memory_mb: Option<u32>,
     /// `None` when absent; `Some(Err)` when present but malformed.
     pub signature: Option<Result<SignatureSpec, ()>>,
     /// The first thing wrong with it, in plain words.
@@ -407,6 +416,27 @@ impl Manifest {
                 Vec::new()
             }
         };
+        let memory_mb = match object.get("limits") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Object(limits)) => match limits.get("memory_mb") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(mb) => match mb.as_u64() {
+                    Some(mb) if (1..=u64::from(MAX_SERVICE_MEMORY_MB)).contains(&mb) => {
+                        Some(mb as u32)
+                    }
+                    _ => {
+                        problems.push(format!(
+                            "Its \"limits.memory_mb\" must be a whole number from 1 to {MAX_SERVICE_MEMORY_MB}"
+                        ));
+                        None
+                    }
+                },
+            },
+            Some(_) => {
+                problems.push("Its \"limits\" must be an object (\"memory_mb\": 256)".into());
+                None
+            }
+        };
         let signature = object.get("signature").map(parse_signature);
         let mut manifest = Manifest {
             raw: raw.clone(),
@@ -423,6 +453,7 @@ impl Manifest {
             commands,
             service,
             network_hosts,
+            memory_mb,
             signature,
             problem: None,
         };
@@ -478,6 +509,11 @@ impl Manifest {
                 ));
             }
             _ => {}
+        }
+        if self.memory_mb.is_some() && self.service.is_none() {
+            return Some(
+                "It asks for service memory (\"limits.memory_mb\") but has no service".into(),
+            );
         }
         if !self.ui.change.is_empty() && !asks("ui.change") {
             return Some("It changes parts of Zeron but doesn't ask for \"ui.change\"".into());
@@ -606,6 +642,31 @@ mod tests {
         ] {
             assert!(change(bad).is_some(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn plugins_manifest_a_service_may_ask_for_more_memory_up_to_the_cap() {
+        let limits = |limits: serde_json::Value| {
+            let mut m = with("limits", limits);
+            m["permissions"] = serde_json::json!(["service"]);
+            m["service"] = serde_json::json!("service.luau");
+            Manifest::from_value(m).unwrap()
+        };
+        let none = limits(serde_json::Value::Null);
+        assert_eq!((none.problem(), none.memory_mb), (None, None), "not asked: the default");
+        let asked = limits(serde_json::json!({ "memory_mb": 256 }));
+        assert_eq!((asked.problem(), asked.memory_mb), (None, Some(256)));
+        let most = limits(serde_json::json!({ "memory_mb": MAX_SERVICE_MEMORY_MB }));
+        assert_eq!((most.problem(), most.memory_mb), (None, Some(MAX_SERVICE_MEMORY_MB)));
+        // Past the cap is refused, never cut down to it.
+        for bad in [serde_json::json!(513), serde_json::json!(0), serde_json::json!(-1), serde_json::json!(256.5), serde_json::json!("256")] {
+            let m = limits(serde_json::json!({ "memory_mb": bad }));
+            assert!(m.problem().unwrap().contains("limits.memory_mb"), "{bad}");
+            assert_eq!(m.memory_mb, None);
+        }
+        assert!(limits(serde_json::json!(256)).problem().is_some(), "not an object");
+        let no_service = with("limits", serde_json::json!({ "memory_mb": 256 }));
+        assert!(problem(no_service).unwrap().contains("has no service"));
     }
 
     #[test]

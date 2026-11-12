@@ -3505,7 +3505,8 @@
         "service": {
           "title": "Run in the background on this device",
           "title_on": "Run in the background on {device}",
-          "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it."
+          "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it.",
+          "detail_memory": "So its windows and your agents can use it from any of your devices. It does only what else you allow it, and may use up to {mb} MB of memory."
         }
       },
       "author": {
@@ -3544,6 +3545,7 @@
         "service": "Run a different background service",
         "entry": "Start from a different file",
         "network": "Connect to more places",
+        "memory": "Use up to {mb} MB of memory in the background",
         "settings": "Its settings changed",
         "ui_replace": "Replace {places} with its own"
       },
