@@ -213,7 +213,7 @@
     // Once that day has come, leave it alone: moving or removing it re-prices
     // the days in between.
     "CLOUD_CREDIT_SECONDS": "30",
-    "CLOUD_CREDIT_RATE_FROM": "SET-AT-DEPLOY",
+    "CLOUD_CREDIT_RATE_FROM": "2026-11-13",
     // Where session engines reach the edge when no request names it (a wake
     // that re-provisions a session whose first provision failed).
     "CLOUD_EDGE_URL": "https://edge.zeron.sh",
