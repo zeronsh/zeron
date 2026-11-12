@@ -182,12 +182,12 @@
     "AUTH_MODE": "workos",
     // Who the chat rooms offer the relay layer to (docs/design/relay-layer.md):
     // "1" for everyone, a comma-separated list of WorkOS user ids (each room
-    // checks its owner), or "" for nobody. Now: Wing's account only. Taking
+    // checks its owner), or "" for nobody. Now: everyone (Nov 12). Taking
     // a user off is safe at any time: each of their hosts, as it next opens a
     // chat, stores a checkpoint and moves the chat back to stored rows.
     // Never deploy edge code older than this release while any room may still
     // hold a relay queue or an unhealed chat (14 days after turning it off).
-    "CHAT_RELAY_LAYER": "user_01KWJQ70QFDCVFWVAH359DYCV2",
+    "CHAT_RELAY_LAYER": "1",
     // Sandbox provider for NEW Cloud devices (src/cloud/providers): "boat".
     // Existing sandboxes keep the provider they were created on.
     "SANDBOX_PROVIDER": "boat",
