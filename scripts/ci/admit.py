@@ -6,7 +6,9 @@ gets a few of its jobs going and holds those runners while its other jobs wait
 behind other runs' jobs: every run is slow, none finishes. Instead, the
 `admit` job of .github/workflows/ci.yml runs this script, which waits until
 the runners the whole run needs (its reservation, computed by plan.py) fit in
-the runner budget, and only then lets the run's jobs start.
+the runner budget, and only then lets the run's jobs start. The heavy release
+workflows (RELEASE_WORKFLOWS: releases, betas) have an `admit` job too, and
+join the same queue ahead of everyone (see Releases below).
 
 Bookkeeping lives in GitHub itself, so nothing needs write access (pull
 requests from forks only get a read-only token):
@@ -46,12 +48,13 @@ MAX_WAIT_MINUTES timeout.
 Priority and locks (labels; adding a label needs the triage role or above):
 
   - `ci:priority` on a pull request puts its runs at the front of the queue
-    (after locked ones): the runners that free up go to it first, since nobody
-    behind it may take what it waits for.
+    (after releases and locked ones): the runners that free up go to it
+    first, since nobody behind it may take what it waits for.
   - `ci:lock` on a pull request keeps a full run's worth of runners
-    (MAX_RESERVATION) out of everyone else's budget while the pull request is
-    open, whether or not it is running anything; its own runs are admitted as
-    soon as their runners are free, ahead of every queue. It ends when the
+    (MAX_RESERVATION) out of everyone else's budget but releases' while the
+    pull request is open, whether or not it is running anything; its own runs
+    are admitted as soon as their runners are free, ahead of every queue but
+    the releases'. It ends when the
     label is removed, the pull request is merged or closed, or LOCK_HOURS
     after the label was added (add it again to extend).
   - A run claims its pull request in its admit job's name ("... #123"); the
@@ -70,10 +73,28 @@ Resources: `total` (every hosted job, the org-wide concurrency limit), and
 `macos` and `windows`. Budgets default to the organization's runner limits
 (20 jobs, 5 on macOS; Windows capped at 10 so Linux keeps half), overridable
 with the repository variables CI_BUDGET_TOTAL / CI_BUDGET_MACOS /
-CI_BUDGET_WINDOWS. Runners this script cannot see (other repositories of the
-organization, release and deploy workflows) can still take a free runner
-first, which is why admission is "all runners were free when the run
-started", not a hard guarantee.
+CI_BUDGET_WINDOWS. Runs of workflows that aren't admitted (deploys, uploads,
+the cache janitor) are seen as holding what their jobs run or queue for
+(Scheduler `outside`), but runners this script cannot see (repositories that
+aren't peers) can still take a free runner first, which is why admission is
+"all runners were free when the run started", not a hard guarantee.
+
+Releases (the `release` class):
+
+  - A run of one of its repository's release workflows claims the class in its
+    admit job's name ("admit [linux=5 windows=1 macos=0] release"). The claim
+    only counts when the run was started by pushing a tag or by hand
+    (workflow_dispatch), never by a pull request, which can edit any workflow
+    file (Scheduler.verified_release). Otherwise the run is an ordinary one.
+  - Verified releases go first, first come first served among themselves. A
+    lock's standing reservation doesn't count against them, only what its
+    runs hold: its runs wait behind the release, which must not wait for them.
+  - Their reservation leaves out the jobs behind an environment's required
+    reviewers (macOS signing): such a job counts once it is queued or running,
+    never while it waits for approval. Their packaging jobs start only once
+    their builds are done, hours after admission, so a verified release's
+    jobs not created yet stay reserved for RELEASE_GRACE rather than
+    CREATE_GRACE: its reservation is trusted, as only write access starts one.
 
 The GITHUB_TOKEN may make 1000 API requests an hour per repository, shared by
 every job. The script uses conditional requests (a 304 is free), refetches a
@@ -123,6 +144,21 @@ PRIORITY_LABEL = "ci:priority"
 LOCK_LABEL = "ci:lock"
 LOCK_HOURS = 6
 PR_CLAIM = re.compile(r"#(\d+)\s*$")
+RELEASE_CLAIM = re.compile(r"\]\s*release\s*$")
+# Every repository's admitted CI workflow.
+CI_WORKFLOW = "ci.yml"
+# Each repository's release workflows: admitted as CI is, and the only ones whose runs
+# may claim the release class (Scheduler.verified_release). This file is the same in
+# every repository, so one table for all; CI_RELEASE_WORKFLOWS replaces a repository's
+# entry (release_workflows).
+RELEASE_WORKFLOWS = {
+    "zeronsh/zeron": ("release.yml", "zgx-beta.yml"),
+    "zeronsh/zgx": ("release.yml",),
+}
+# How long a verified release's not-yet-created jobs stay reserved after admission: its
+# packaging and publishing start only once its builds are done (a hosted job's limit).
+RELEASE_GRACE = 6 * 3600
+WORKFLOW_FILE = re.compile(r"[\w.-]+\.ya?ml")
 
 
 def parse_reservation(name: str) -> dict[str, int] | None:
@@ -149,11 +185,14 @@ def is_admit(job: dict) -> bool:
     return job["name"].startswith(ADMIT_PREFIX)
 
 
-def held(declared: dict[str, int], jobs: list[dict], since_admitted: float = 0) -> dict[str, int]:
-    """Runners an admitted run still holds: its reservation minus its finished jobs.
+def held(declared: dict[str, int], jobs: list[dict], since_admitted: float = 0,
+         release: bool = False) -> dict[str, int]:
+    """Runners an admitted run still holds: its reservation minus its finished jobs,
+    or its jobs queued or running if that is more.
 
     After CREATE_GRACE, jobs not created yet count only up to LATE_JOBS; after
-    UNSEEN_GRACE only jobs that exist and have not finished count.
+    UNSEEN_GRACE only jobs that exist and have not finished count. A verified
+    `release` keeps its whole reservation until RELEASE_GRACE.
     """
     done = {r: 0 for r in RUNNERS}
     active = {r: 0 for r in RUNNERS}
@@ -164,11 +203,15 @@ def held(declared: dict[str, int], jobs: list[dict], since_admitted: float = 0) 
         # off. (One skipped because a job it needs failed stays reserved until the run ends.)
         if job.get("conclusion") == "skipped":
             continue
-        bucket = done if job["status"] == "completed" else active
-        bucket[runner_of(job)] += 1
-    if since_admitted > UNSEEN_GRACE:
+        if job["status"] == "completed":
+            done[runner_of(job)] += 1
+        elif job["status"] in ("queued", "in_progress"):
+            active[runner_of(job)] += 1
+        # (`waiting` is for an environment's approval, which holds no runner: a release's
+        # signing job, left out of its reservation, counts once it's approved and queued.)
+    if since_admitted > (RELEASE_GRACE if release else UNSEEN_GRACE):
         return active
-    if since_admitted > CREATE_GRACE:
+    if since_admitted > CREATE_GRACE and not release:
         return {r: active[r] + min(max(declared[r] - done[r] - active[r], 0), LATE_JOBS[r]) for r in RUNNERS}
     return {r: max(declared[r] - done[r], active[r], 0) for r in RUNNERS}
 
@@ -195,6 +238,7 @@ class Waiter:
     running: bool  # its admit job holds a runner
     pr: int | None = None  # its pull request, when verified
     ignored: bool = False  # does not take its turn (mark_unresponsive): nobody waits for it
+    release: bool = False  # a verified release (Scheduler.verified_release): first in the queue
 
 
 @dataclass
@@ -230,23 +274,28 @@ def bigger(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
 
 
 def rank(w: Waiter, snapshot: Snapshot) -> tuple:
-    """Queue order: locked runs (oldest lock first), then ci:priority, then everyone, each first come first served."""
+    """Queue order: verified releases, then locked runs (oldest lock first), then
+    ci:priority, then everyone, each first come first served."""
+    if w.release:
+        return (0, "", w.key)
     if w.pr in snapshot.locked:
-        return (0, snapshot.lock_times.get(w.pr, ""), w.key)
-    return (1 if w.pr in snapshot.priority else 2, "", w.key)
+        return (1, snapshot.lock_times.get(w.pr, ""), w.key)
+    return (2 if w.pr in snapshot.priority else 3, "", w.key)
 
 
 def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, int]) -> Decision:
     """Whether run `me` may start.
 
-    Every wait points forward in one order (locked runs by lock age, then
-    ci:priority, then first come first served), so no cycle, and so no deadlock,
-    can form:
+    Every wait points forward in one order (verified releases, then locked runs
+    by lock age, then ci:priority, then first come first served), so no cycle,
+    and so no deadlock, can form:
       - a waiting run's admit job holds a runner until it is admitted, so a run
         counts the admit runners of the runs *ahead* of it, never of those
         behind it (they wait for it; counting them was a circular wait);
-      - a lock's standing reservation counts against everyone except the
-        older locks: two locks never wait for each other.
+      - a lock's standing reservation counts against everyone except releases
+        and the older locks: two locks never wait for each other, and a
+        release never waits for a lock, whose runs queue behind it (only for
+        what those runs hold, which they give back by finishing).
     """
     zero = {r: 0 for r in RESOURCES}
     full = need_of(MAX_RESERVATION)
@@ -254,11 +303,16 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
     self_ = next((w for w in order if w.run_id == me), None)
     position = order.index(self_) if self_ is not None else len(order)
     ahead_of_me = order[:position]
+    my_release = self_ is not None and self_.release
     my_lock = self_.pr if self_ is not None and self_.pr in snapshot.locked else None
 
     def lock_is_older(pr) -> bool:
         # (Keys are numbers here and `owner/repo#n` from a peer: compared as text on a tie.)
         return (snapshot.lock_times.get(pr, ""), str(pr)) < (snapshot.lock_times.get(my_lock, ""), str(my_lock))
+
+    def lock_stands(pr) -> bool:
+        # Whether the lock's standing reservation counts against this run.
+        return not my_release and (my_lock is None or (pr != my_lock and lock_is_older(pr)))
 
     lock_use = {pr: dict(zero) for pr in snapshot.locked}
     used = dict(zero)
@@ -268,11 +322,11 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
         else:
             used = add(used, h.need)
     for pr in snapshot.locked:
-        if my_lock is None or (pr != my_lock and lock_is_older(pr)):
+        if lock_stands(pr):
             # A full run held for the lock, or what its runs hold if that is more.
             used = add(used, bigger(full, lock_use[pr]))
         else:
-            # Our own lock, or a newer one: only what its runs really hold.
+            # Our own lock, a newer one, or any for a release: only what its runs really hold.
             used = add(used, lock_use[pr])
     for w in ahead_of_me:
         if w.running:
@@ -282,7 +336,7 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
     for w in ahead_of_me:
         if w.ignored:
             continue  # it does not take its turn; only its admit runner counts (above)
-        if w.pr in snapshot.locked and (my_lock is None or lock_is_older(w.pr)):
+        if w.pr in snapshot.locked and lock_stands(w.pr):
             continue  # its need is already in `used` as the lock's standing reservation
         ahead = add(ahead, w.need)
 
@@ -391,15 +445,44 @@ class Api:
             self.requests += 1
 
 
-def parse_peers(text: str) -> list[tuple[str, str]]:
-    """CI_PEERS: "owner/repo:workflow.yml ..." (spaces or commas), the other
-    repositories whose admitted CI shares this organization's runner pool."""
-    peers = []
+def parse_workflows(text: str, repo: str | None = None) -> list[tuple[str, str]]:
+    """A list of workflows, "owner/repo:a.yml,b.yml ..." (spaces or commas), as
+    (repository, workflow) pairs. A bare file name is the repository's before
+    it, or `repo`'s."""
+    pairs = []
     for item in re.split(r"[\s,]+", text.strip()):
-        repo, _, workflow = item.partition(":")
-        if re.fullmatch(r"[\w.-]+/[\w.-]+", repo) and workflow:
-            peers.append((repo, workflow))
-    return peers
+        name, colon, workflow = item.partition(":")
+        if colon:
+            repo = name if re.fullmatch(r"[\w.-]+/[\w.-]+", name) else None
+            ok = re.fullmatch(r"[\w.-]+", workflow)
+        else:
+            workflow, ok = item, WORKFLOW_FILE.fullmatch(item)
+        if repo and ok:
+            pairs.append((repo, workflow))
+    return pairs
+
+
+def parse_peers(text: str) -> list[tuple[str, str]]:
+    """CI_PEERS: "owner/repo:ci.yml ..." (spaces or commas), the other
+    repositories whose admitted CI shares this organization's runner pool, as
+    (repository, workflow) pairs. More of a peer's workflows may follow its CI's
+    ("owner/repo:ci.yml,release.yml"); its release workflows are read anyway
+    (release_workflows)."""
+    return parse_workflows(text)
+
+
+def release_workflows(repo: str, override: str, repos: list[str]) -> dict[str, tuple[str, ...]]:
+    """The release workflows of this repository and its peers (`repos`):
+    RELEASE_WORKFLOWS, each repository's replaced by CI_RELEASE_WORKFLOWS
+    (`override`) when that names it. There, bare file names are this
+    repository's ("release.yml zgx-beta.yml") and "owner/repo:a.yml,b.yml"
+    another's."""
+    found = {r: tuple(RELEASE_WORKFLOWS.get(r, ())) for r in repos}
+    given: dict[str, list[str]] = {}
+    for r, workflow in parse_workflows(override, repo):
+        given.setdefault(r, []).append(workflow)
+    found.update((r, tuple(workflows)) for r, workflows in given.items())
+    return found
 
 
 def outside_need(jobs: list[dict]) -> dict[str, int]:
@@ -417,33 +500,41 @@ class Scheduler:
     """Builds Snapshots, refetching a run's jobs only when the run changed.
 
     The organization's hosted runners are one pool for all its repositories.
-    Besides this repository's admitted CI workflow (`workflow_id`), it reads:
-      - `peers`: other repositories' admitted CI workflows (CI_PEERS), which
-        join the same queue: their waiting runs wait in it, their admitted
-        runs hold what they hold, and their ci:priority / ci:lock labels
-        count as this repository's do;
+    Every admitted workflow joins the same queue: its waiting runs wait in it,
+    its admitted runs hold what they hold, and the ci:priority / ci:lock
+    labels of every repository read count as this repository's do. Those are,
+    besides this run's own workflow (`workflow_id`):
+      - `peers`: more admitted workflows, (repository, file) pairs: other
+        repositories' CI (CI_PEERS), and this one's CI when this run is a
+        release's;
+      - `releases`: each repository's release workflows (release_workflows),
+        whose runs may claim the release class (verified_release);
       - with `outside`, every other run in this repository and the peers
-        (releases, betas, deploys, a peer's CI before it adopts admission):
-        what their jobs run or wait for counts as held. They're never
-        admitted, only seen, so a release's queued jobs get the next runners
-        and admitted CI never takes them.
+        (deploys, uploads, the cache janitor, a workflow before it adopts
+        admission): what their jobs run or wait for counts as held. They're
+        never admitted, only seen, so their queued jobs get the next runners
+        and admitted runs never take them.
     Another repository's runs are read at most every OUTSIDE_REFRESH seconds,
     to spare the API quota.
     """
 
     REFRESH = 300  # refetch unchanged runs' jobs at least this often (seconds)
     OUTSIDE_REFRESH = 120  # ...and runs outside this workflow at most this often
+    RECENT_RELEASES = 30  # a release workflow's latest runs, read whatever their status
 
     def __init__(self, api: Api, repo: str, workflow_id: int,
-                 peers: list[tuple[str, str]] = (), outside: bool = False):
+                 peers: list[tuple[str, str]] = (), outside: bool = False,
+                 releases: dict[str, tuple[str, ...]] | None = None):
         self.api = api
         self.repo = repo
         self.workflow_id = workflow_id
         self.peers = list(peers)
         self.outside = outside
+        self.releases = dict(releases or {})
         self.jobs: dict[int, tuple[str, float, list[dict]]] = {}  # run -> (updated_at, fetched, jobs)
-        self.peer_ids: dict[str, int] = {}  # peer repo -> its CI workflow's id
+        self.peer_ids: dict[tuple[str, str], int] = {}  # (repo, workflow file) -> the workflow's id
         self.listed: dict[str, tuple[float, list[dict]]] = {}  # list path -> (fetched, runs)
+        self.tags: dict[int, bool] = {}  # push run -> whether it pushed a tag (verified_release)
 
     def key(self, repo: str, number: int):
         """A pull request's key: its number in this repository, `owner/repo#n` in a peer."""
@@ -468,10 +559,15 @@ class Scheduler:
         self.jobs[run["id"]] = (run["updated_at"], now, jobs)
         return jobs
 
-    def list_runs(self, path: str, stale_ok: float = 0) -> list[dict]:
+    def list_runs(self, path: str, stale_ok: float = 0, recent: int = 0) -> list[dict]:
+        """Every run `path` lists, or with `recent` only that many of the latest."""
         cached = self.listed.get(path)
         if cached and time.time() - cached[0] < stale_ok:
             return cached[1]
+        if recent:
+            runs = self.api.get(f"{path}&per_page={recent}")["workflow_runs"]
+            self.listed[path] = (time.time(), runs)
+            return runs
         runs: list[dict] = []
         page = 1
         while True:
@@ -484,20 +580,29 @@ class Scheduler:
         return runs
 
     def peer_workflow(self, repo: str, workflow: str) -> int | None:
-        if repo not in self.peer_ids:
+        if (repo, workflow) not in self.peer_ids:
             try:
-                self.peer_ids[repo] = int(self.api.get(f"/repos/{repo}/actions/workflows/{workflow}")["id"])
+                self.peer_ids[repo, workflow] = int(self.api.get(f"/repos/{repo}/actions/workflows/{workflow}")["id"])
             except (OSError, KeyError, ValueError, TypeError):
                 return None  # not there (yet): its runs count as outside ones
-        return self.peer_ids[repo]
+        return self.peer_ids[repo, workflow]
 
-    def snapshot(self) -> Snapshot:
-        admitted = [(self.repo, self.workflow_id, 0.0)]
-        for repo, workflow in self.peers:
+    def admitted(self) -> dict[tuple[str, int], tuple[float, bool]]:
+        """Every admitted workflow, (repo, id) -> (how stale its runs may be, whether a release workflow)."""
+        admitted = {(self.repo, self.workflow_id): (0.0, False)}
+        wanted = [(repo, workflow, False) for repo, workflow in self.peers]
+        wanted += [(repo, workflow, True) for repo, workflows in self.releases.items() for workflow in workflows]
+        for repo, workflow, release in wanted:
             workflow_id = self.peer_workflow(repo, workflow)
             if workflow_id is not None:
-                admitted.append((repo, workflow_id, self.OUTSIDE_REFRESH))
-        repos = [self.repo] + [repo for repo, _ in self.peers]
+                default = (0.0 if repo == self.repo else self.OUTSIDE_REFRESH, False)
+                stale_ok, known = admitted.get((repo, workflow_id), default)
+                admitted[repo, workflow_id] = (stale_ok, known or release)
+        return admitted
+
+    def snapshot(self) -> Snapshot:
+        admitted = self.admitted()
+        repos = list(dict.fromkeys([self.repo] + [repo for repo, _ in self.peers] + list(self.releases)))
 
         lock_times: dict = {}
         priority: set = set()
@@ -508,30 +613,45 @@ class Scheduler:
         special = snap.priority | snap.locked
 
         live: set[int] = set()
-        for repo, workflow_id, stale_ok in admitted:
-            runs = self.list_runs(f"/repos/{repo}/actions/workflows/{workflow_id}/runs?status=in_progress", stale_ok)
+        for (repo, workflow_id), (stale_ok, release_workflow) in admitted.items():
+            path = f"/repos/{repo}/actions/workflows/{workflow_id}/runs"
+            if release_workflow:
+                # Its admit job is its first: a run waiting for a runner for it is still
+                # `queued`, one waiting for an approval `waiting`. Releases are few: the latest
+                # page, whatever the status. (exclude_pull_requests only trims the response.)
+                runs = [run for run in self.list_runs(f"{path}?exclude_pull_requests=true", stale_ok,
+                                                      recent=self.RECENT_RELEASES)
+                        if run.get("status") != "completed"]
+            else:
+                runs = self.list_runs(f"{path}?status=in_progress", stale_ok)
             for run in runs:
                 live.add(run["id"])
                 jobs = self.run_jobs(run, repo, stale_ok)
                 admit = next((j for j in jobs if is_admit(j)), None)
                 if admit is None:
-                    if repo != self.repo and self.outside:
-                        # A peer's run without admission (its CI before adopting it): seen as is.
-                        snap.holding.append(Holding(outside_need(jobs)))
-                    continue  # still planning: not asking for anything yet
+                    if (repo != self.repo or release_workflow) and self.outside:
+                        # A run without admission (a peer's CI before adopting it, a release
+                        # workflow's version without it): seen as is.
+                        need = outside_need(jobs)
+                        if need["total"]:
+                            snap.holding.append(Holding(need))
+                    continue  # (this repository's CI: still planning, not asking for anything yet)
                 declared = parse_reservation(admit["name"])
                 if declared is None:
                     continue
-                pr = self.verified_pr(admit["name"], run, special, repo)
+                release = self.verified_release(admit["name"], run, release_workflow, repo)
+                pr = None if release else self.verified_pr(admit["name"], run, special, repo)
                 if admit["status"] != "completed":
                     snap.waiters.append(Waiter(run["id"], (admit["created_at"], admit["id"]),
-                                               need_of(declared), admit["status"] == "in_progress", pr))
+                                               need_of(declared), admit["status"] == "in_progress", pr,
+                                               release=release))
                 elif admit["conclusion"] == "success":
                     since = seconds_since(admit.get("completed_at"))
-                    snap.holding.append(Holding(need_of(held(declared, jobs, since)), pr, stalled_for(jobs)))
+                    snap.holding.append(Holding(need_of(held(declared, jobs, since, release)), pr,
+                                                stalled_for(jobs)))
 
         if self.outside:
-            mine = {(repo, workflow_id) for repo, workflow_id, _ in admitted}
+            mine = set(admitted)
             for repo in repos:
                 stale_ok = 0.0 if repo == self.repo else self.OUTSIDE_REFRESH
                 for status in ("queued", "in_progress"):
@@ -543,6 +663,7 @@ class Scheduler:
                         if need["total"]:
                             snap.holding.append(Holding(need))
         self.jobs = {k: v for k, v in self.jobs.items() if k in live}
+        self.tags = {k: v for k, v in self.tags.items() if k in live}
         return snap
 
     def labelled(self, label: str, repo: str | None = None) -> set:
@@ -591,6 +712,39 @@ class Scheduler:
             return None
         pull = self.api.get(f"/repos/{repo}/pulls/{number}")
         return key if pull.get("head", {}).get("sha") == run.get("head_sha") else None
+
+    def verified_release(self, admit_name: str, run: dict, release_workflow: bool, repo: str | None = None) -> bool:
+        """Whether a run's release claim counts: a run of one of its repository's
+        release workflows, started by hand or by pushing a tag. Never a pull
+        request's, which can edit any workflow, nor a branch push's."""
+        if not release_workflow or not RELEASE_CLAIM.search(admit_name):
+            return False
+        if run.get("event") == "workflow_dispatch":
+            return True  # (dispatching needs write access)
+        if run.get("event") != "push":
+            return False
+        if run["id"] not in self.tags:
+            pushed = self.pushed_tag(run, repo or self.repo)
+            if pushed is None:
+                return False  # unknown for now: an ordinary run until the next poll
+            self.tags[run["id"]] = pushed
+        return self.tags[run["id"]]
+
+    def pushed_tag(self, run: dict, repo: str) -> bool | None:
+        """Whether a push run's ref is a tag of its commit (a run names its ref,
+        `head_branch`, but not whether it's a branch or a tag); None if unknown."""
+        name = run.get("head_branch") or ""
+        if not name:
+            return False
+        try:
+            target = self.api.get(f"/repos/{repo}/git/ref/tags/{quote(name)}")["object"]
+            if target.get("type") == "tag":  # an annotated tag: its object names the commit
+                target = self.api.get(f"/repos/{repo}/git/tags/{target['sha']}")["object"]
+        except urllib.error.HTTPError as error:
+            return False if error.code == 404 else None
+        except (OSError, KeyError, ValueError, TypeError):
+            return None
+        return target.get("sha") == run.get("head_sha")
 
 
 def superseded(api: "Api", repo: str) -> bool:
@@ -663,13 +817,16 @@ def main() -> int:
         print(f"::warning::admission unavailable ({error}); starting at once")
         return 0
     # The organization's other repositories with admitted CI on the same runners
-    # (zeronsh/zgx), and every run admission doesn't schedule: seen as holding what
-    # they run and queue.
+    # (zeronsh/zgx), every repository's release workflows, and every run admission
+    # doesn't schedule: seen as holding what they run and queue. This repository's
+    # CI too, for a release's admission (this run's own workflow is then the release's).
     peers = parse_peers(os.environ.get("CI_PEERS", ""))
-    scheduler = Scheduler(api, repo, workflow_id, peers=peers,
+    repos = list(dict.fromkeys([repo] + [r for r, _ in peers]))
+    releases = release_workflows(repo, os.environ.get("CI_RELEASE_WORKFLOWS", ""), repos)
+    scheduler = Scheduler(api, repo, workflow_id, peers=[(repo, CI_WORKFLOW)] + peers, releases=releases,
                           outside=os.environ.get("CI_SEE_OUTSIDE", "on").lower() not in ("off", "false", "0"))
 
-    print(f"Reservation {mine}; budget {budget}; peers {[p for p, _ in peers] or '-'}")
+    print(f"Reservation {mine}; budget {budget}; peers {repos[1:] or '-'}; release workflows {releases}")
     failures = 0
     last = None
     admissible_since: dict[int, float] = {}  # mark_unresponsive's memory

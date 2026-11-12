@@ -22,10 +22,56 @@ permissions:
   contents: write
 
 jobs:
+  # Waits until every runner the release needs is free (scripts/ci/admit.py, as
+  # ci.yml's admit job; docs/reference/ci.md#releases). A tag's or a dispatched
+  # run is a release in the queue shared with CI: it goes first. Its name carries
+  # the reservation, every job below:
+  #   cursor-compatibility  2 Linux (its two jobs)
+  #   linux                 2 Linux (x86_64, aarch64)
+  #   windows               1
+  #   macos                 1, but not on a tag or main: there it waits for
+  #                         `apple-release`'s reviewers, and counts once approved
+  #   publish               1 Linux, on a tag
+  # Admission fails open: CI_ADMISSION=off, or API trouble, starts it at once.
+  admit:
+    name: "admit [${{ matrix.reservation }}] release"
+    strategy:
+      # One entry: the reservation, computed once for the name and the step.
+      matrix:
+        reservation:
+          - "linux=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 5 || 4 }} windows=1 macos=${{ !(startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main') && 1 || 0 }}"
+    runs-on: ubuntu-24.04
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ matrix.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml,release.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I scripts/ci/admit.py
+
   cursor-compatibility:
+    needs: admit
     uses: ./.github/workflows/cursor-compatibility.yml
 
   linux:
+    needs: admit
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +117,7 @@ jobs:
   # main may use: a run from any other branch gets no environment, so no
   # credentials, and builds ad-hoc-signed.
   macos:
+    needs: admit
     runs-on: macos-latest # Apple silicon
     environment: ${{ (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main') && 'apple-release' || '' }}
     env:
@@ -128,6 +175,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: admit
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:

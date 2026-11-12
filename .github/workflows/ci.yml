@@ -30,6 +30,8 @@ name: CI
 #   CI_ADMISSION         off: start at once, as before
 #   CI_DEBOUNCE_SECONDS  wait for further pushes to a pull request first (60)
 #   CI_LOCK_HOURS        how long a ci:lock label holds runners (6)
+#   CI_PEERS             the other repositories in the queue (zeronsh/zgx:ci.yml,release.yml)
+#   CI_RELEASE_WORKFLOWS the release workflows, first in the queue (admit.py RELEASE_WORKFLOWS)
 #   CI_FORK_REUSE        own: fork pull requests also reuse their own earlier passes
 #                        (safe once the merge queue, which reuses nothing, is required)
 #
@@ -123,9 +125,12 @@ jobs:
           CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
           CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
           # The organization's other repositories with CI on the same runners: one queue, one
-          # budget. (Read with this token: they're public. Their other workflows, and this
-          # one's, count as holding what they run; CI_SEE_OUTSIDE=off ignores them.)
-          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml' }}
+          # budget, their release workflows ahead of everyone, as this repository's
+          # (release.yml, zgx-beta.yml; CI_RELEASE_WORKFLOWS). (Read with this token: they're
+          # public. Their other workflows, and this one's, count as holding what they run;
+          # CI_SEE_OUTSIDE=off ignores them.)
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml,release.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
           CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
           # The pull request's head as this run tests it: a newer push supersedes the run.
           CI_PR: ${{ needs.plan.outputs.pr }}
