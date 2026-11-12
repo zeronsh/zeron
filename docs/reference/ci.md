@@ -282,7 +282,13 @@ it will run but the admit job, and but those waiting for a reviewer.
   so its reservation is trusted: its jobs not created yet stay reserved for 6
   hours, where CI's stop counting after 10 minutes.
 - No debounce. Admission fails open as CI's does: `CI_ADMISSION=off`, API
-  trouble or a 2-hour wait start the release at once.
+  trouble or a 2-hour wait start the release at once. So does a crash: the
+  admit step has `continue-on-error: true` (a step that fails with it has
+  outcome `failure` but conclusion `success`, so its job succeeds and every
+  job with `needs: admit` runs; on the step rather than the job, since
+  what `needs` sees of a failed job with it isn't documented) and a timeout
+  of its own, shorter than the job's (which would cancel the job), so a hang
+  ends the same way.
 
 The rest is seen, not admitted: the Google Play upload, TestFlight, deploys,
 the cache janitor (`ci-caches.yml`), `ci-supersede.yml` and CI emergency.

@@ -33,6 +33,8 @@ jobs:
   #                         `apple-release`'s reviewers, and counts once approved
   #   publish               1 Linux, on a tag
   # Admission fails open: CI_ADMISSION=off, or API trouble, starts it at once.
+  # So does a crash, or a hang: the step continues on error (its job succeeds, so
+  # every `needs: admit` runs), and its own timeout ends before the job's.
   admit:
     name: "admit [${{ matrix.reservation }}] release"
     strategy:
@@ -64,6 +66,8 @@ jobs:
           CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
           CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
           MAX_WAIT_MINUTES: 120
+        continue-on-error: true
+        timeout-minutes: 320
         run: python3 -I scripts/ci/admit.py
 
   cursor-compatibility:

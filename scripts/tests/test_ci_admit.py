@@ -700,6 +700,33 @@ class SharedPoolTests(unittest.TestCase):
         self.assertEqual(sorted(c.split("event=")[1].split("&")[0] for c in listed), ["push", "workflow_dispatch"])
 
 
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_admission_never_blocks_a_release(self):
+        """Admission fails open: a crash or a hang in a release's admit step still lets every
+        job that needs it run (a step's continue-on-error makes its job succeed)."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        workflows = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows"
+        checked = 0
+        for name in sorted({n for names in admit.RELEASE_WORKFLOWS.values() for n in names}):  # (either repository)
+            path = workflows / name
+            if not path.exists():
+                continue
+            jobs = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+            if "admit" not in jobs:
+                continue
+            steps = [s for s in jobs["admit"]["steps"] if "admit.py" in s.get("run", "")]
+            self.assertEqual(len(steps), 1, name)
+            self.assertIs(steps[0].get("continue-on-error"), True, name)
+            self.assertLess(steps[0]["timeout-minutes"], jobs["admit"]["timeout-minutes"], name)
+            needs = [job.get("needs") or [] for job in jobs.values()]
+            self.assertTrue(any("admit" in ([n] if isinstance(n, str) else n) for n in needs), name)
+            checked += 1
+        self.assertGreater(checked, 0)
+
+
 class SupersededTests(unittest.TestCase):
     """A pull request run whose commit a newer push replaced stops waiting (ci-supersede.yml)."""
 
