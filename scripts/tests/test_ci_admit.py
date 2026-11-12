@@ -532,8 +532,10 @@ class SharedPoolTests(unittest.TestCase):
             if "/workflows/" in path:
                 wid = int(path.split("/workflows/")[1].split("/")[0])
                 status = path.split("status=")[1].split("&")[0] if "status=" in path else None
-                return {"workflow_runs": [r for r in self.runs[repo]
-                                          if r["workflow_id"] == wid and status in (None, r["status"])]}
+                event = path.split("event=")[1].split("&")[0] if "event=" in path else None
+                per_page = int(path.split("per_page=")[1].split("&")[0]) if "per_page=" in path else 30
+                return {"workflow_runs": [r for r in self.runs[repo] if r["workflow_id"] == wid
+                                          and status in (None, r["status"]) and event in (None, r["event"])][:per_page]}
             if "/actions/runs?" in path:
                 status = path.split("status=")[1].split("&")[0]
                 return {"workflow_runs": [r for r in self.runs[repo] if r["status"] == status]}
@@ -646,10 +648,11 @@ class SharedPoolTests(unittest.TestCase):
                                     releases={"o/r": ("release.yml",), "z/gx": ("release.yml",)})
         snap = scheduler.snapshot()
         releases = {w.run_id: w.release for w in snap.waiters}
-        # Only the tag's run is a release: not the pull request's, nor CI's, nor the branch push's.
-        self.assertEqual(releases, {10: True, 11: False, 12: False, 13: False})
+        # Only the tag's run is a release: not CI's, nor the branch push's. The pull request's
+        # isn't listed with the release workflow's runs at all (it's an outside run).
+        self.assertEqual(releases, {10: True, 12: False, 13: False})
         order = sorted(snap.waiters, key=lambda w: admit.rank(w, snap))
-        self.assertEqual([w.run_id for w in order], [10, 11, 12, 13])  # though its admit job is the newest
+        self.assertEqual([w.run_id for w in order], [10, 12, 13])  # though its admit job is the newest
         self.assertFalse(order[0].running)
         # The tag is looked up once per run.
         scheduler.snapshot()
@@ -662,8 +665,9 @@ class SharedPoolTests(unittest.TestCase):
         snap = scheduler.snapshot()
         held_needs = sorted(tuple(h.need.values()) for h in snap.holding)
         # The peer's admitted release holds its reservation (its signing job, waiting, nothing); its
-        # release without admission what it runs; the deploy what it runs. Each once.
-        self.assertEqual(held_needs, sorted([(2, 0, 1), (1, 1, 0), (1, 0, 0)]))
+        # release without admission what it runs; the deploy what it runs; the pull request's
+        # run of release.yml what it runs (its admit job). Each once.
+        self.assertEqual(held_needs, sorted([(2, 0, 1), (1, 1, 0), (1, 0, 0), (1, 0, 0)]))
         # Without release workflows, the same runs are all outside ones: seen as what they run.
         scheduler = admit.Scheduler(self.release_org(), "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"),
                                     outside=True)
@@ -672,6 +676,28 @@ class SharedPoolTests(unittest.TestCase):
         # (10, 11, 13: an admit job queued or running; 30; 20 and 21 as they are.)
         self.assertEqual(sorted(tuple(h.need.values()) for h in snap.holding),
                          sorted([(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (2, 0, 1), (1, 1, 0)]))
+
+
+    def test_pull_request_runs_of_a_release_workflow_cannot_hide_a_release(self):
+        # A fork's pull requests edit release.yml to run on pull_request: more of them than a
+        # page of the workflow's latest runs, all newer than the tag's release.
+        flood = [self.wfrun(200 + n, 7, event="pull_request") for n in range(admit.Scheduler.RECENT_RELEASES + 5)]
+        api = self.OrgApi(
+            workflows={("o/r", "ci.yml"): 9, ("o/r", "release.yml"): 7},
+            runs={"o/r": flood + [self.wfrun(10, 7, "queued", ref="v1.0")]},
+            jobs={10: [dict(job("admit [linux=2 macos=1] release", "ubuntu-24.04", "queued", None),
+                            created_at="2026-10-27T00:00:09Z", id=100)],
+                  **{r["id"]: [dict(job("admit [linux=1] release", "ubuntu-24.04", "in_progress", None),
+                                    created_at="2026-10-27T00:00:01Z", id=r["id"] * 10)] for r in flood}},
+            tags={("o/r", "v1.0"): "h"},
+        )
+        scheduler = admit.Scheduler(api, "o/r", 9, outside=True, releases={"o/r": ("release.yml",)})
+        snap = scheduler.snapshot()
+        self.assertEqual([(w.run_id, w.release) for w in snap.waiters], [(10, True)])
+        # Each pull request run counts as what it runs (its admit job), never as a waiter.
+        self.assertEqual(len(snap.holding), len(flood))
+        listed = [c for c in api.calls if "/workflows/7/runs" in c]
+        self.assertEqual(sorted(c.split("event=")[1].split("&")[0] for c in listed), ["push", "workflow_dispatch"])
 
 
 class SupersededTests(unittest.TestCase):

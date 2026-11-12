@@ -265,7 +265,10 @@ it will run but the admit job, and but those waiting for a reviewer.
   `CI_RELEASE_WORKFLOWS` replaces them), started by pushing a tag or by hand.
   A pull request can edit any workflow, so its run is never a release,
   whatever its admit job says; neither is a branch push. Unverified, the run
-  is an ordinary one.
+  is an ordinary one. A release workflow's runs are read from the latest 30
+  of each of those two events (`push`, `workflow_dispatch`), so a fork's
+  pull requests running an edited copy can't push a real release out of the
+  window; their runs are seen as what they run, as outside runs are.
 - **Releases go first**, first come first served among themselves. A lock's
   standing reservation doesn't count against them, only what the locked pull
   request's runs hold (see [No deadlocks](#no-deadlocks)).
