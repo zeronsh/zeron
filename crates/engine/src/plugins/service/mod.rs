@@ -424,6 +424,7 @@ impl Services {
                     .map_or(self.inner.config.limits.memory, |mb| (mb as usize) << 20),
                 ..self.inner.config.limits.clone()
             },
+            eval: plan.allows("eval"),
         };
         let (vm, loaded) = Vm::start(spec, ops);
         let outcome = match tokio::time::timeout(self.inner.config.load_timeout, loaded).await {

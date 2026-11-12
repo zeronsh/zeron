@@ -3507,6 +3507,10 @@
           "title_on": "Run in the background on {device}",
           "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it.",
           "detail_memory": "So its windows and your agents can use it from any of your devices. It does only what else you allow it, and may use up to {mb} MB of memory."
+        },
+        "eval": {
+          "title": "Run scripts its agents write",
+          "detail": "In its background service, with only what the plugin gives them. They can't do more than the plugin can."
         }
       },
       "author": {

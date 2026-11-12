@@ -62,6 +62,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `native` | run a program of its own (the manifest's `mcp`) |
 | `commands` | run the programs its manifest's `commands` names, as you, on this device (`zeron.run`) |
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
+| `eval` | run scripts it's given in its service (`zeron.eval`), such as code its agents write, with only what it hands them. Needs `service`. See [Running agents' scripts](#running-agents-scripts) |
 | `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
 | `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
 | `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
@@ -374,6 +375,7 @@ end)
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
 | `zeron.sleep(seconds)`, `zeron.task(fn)` | a promise done later; run `fn` as a task of its own | |
 | `zeron.json.encode(v)`, `zeron.json.decode(text)`, `zeron.device` | JSON; this device's `{ id, name }` | |
+| `zeron.eval(source, { name?, env?, budget_ms? })` | run a script it was given: `true, ...` (what it returned), or `false, why`. See below | `eval` |
 
 Handlers, tools, timers and `:after` callbacks each run as a task, so `:await()` works in them. A service shares nothing with your windows but what it answers and emits.
 
@@ -401,6 +403,26 @@ The one exception: when the service stops during a call (it ran out of memory, o
 **When it runs.** A service starts on its first call, tool call or timer, and stops after 5 minutes with nothing to do. An update loads the new version beside the old one, which answers until the new one has loaded and finishes the calls it has. Each call or resumed task has 2 seconds of work before it fails (await between parts: waiting costs nothing), and the service has 64 MB, or what its manifest asks in `limits.memory_mb` (512 at most). `plugin_status` shows the service on this device: running or not, what it serves, its last log lines (`print`) and why it didn't load.
 
 A service has `zeron.on(event, fn, opts)` and the agent calls of [Your agents](#your-agents-usage-accounts-and-models) too: register listeners at the top level, in the same order each time (they're known by their place, as timers are), and Zeron starts the service to tell it, with no window open.
+
+### Running agents' scripts
+
+With `eval`, a service runs code it's given, such as a script an agent sends through one of its tools (a design tool's "draw this", or a query). The script sees only `env`: no `zeron`, `require`, `getfenv`/`setfenv`, `debug` or `print`, and none of Luau's libraries unless you hand them in. So it can do what the functions you give it do, and nothing more.
+
+```lua
+local api = { math = math, string = string, table = table, rect = rect, text = text }
+
+zeron.tool { name = "draw", run = function(args)
+	local ok, result = zeron.eval(args.script, { name = "agent", env = api, budget_ms = 1000 })
+	if not ok then error(result, 0) end        -- "agent:3: attempt to index nil with 'w'"
+	return result
+end }
+```
+
+- **Errors come back, with lines.** A syntax error, an `error()` or a runtime error is `false, "agent:3: …"` (`name` is `"script"` unless you say). The service goes on.
+- **A runaway stops.** Past `budget_ms` (1000 unless said; your call's own 2 s still applies) it's `false, "agent: the script ran past its time budget (1000 ms)"`, even if you gave it `pcall`.
+- **It runs to its end at once.** It can't `:await()`; one script can't run another.
+- **What it sets stays its own.** Its globals are a fresh table that reads through to `env`, so the next script doesn't see them. Tables inside `env` are shared, so they're changed for real.
+- Source text only (no bytecode), 1 MB at most. A script that runs the service out of memory stops the service, as any call would.
 
 Zeron's Git plugin (`plugins-builtin/git`) is built this way: its service does every piece of git work on the device a chat's checkout is on (status, what changed through an index of its own via `GIT_INDEX_FILE`, diffs, staging, commits, pushes, branches, history), and its window says each refusal in its own words. `plugins-dev/checkout-status` is the small version, whole: a session row's menu asks the service on that session's device for the checkout's branch and changes, and agents get the same through a tool.
 

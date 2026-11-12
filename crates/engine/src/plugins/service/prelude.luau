@@ -283,6 +283,24 @@ local function service(id: string): any
 		return op("fetch", { url = url, method = o.method, headers = o.headers, body = o.body, timeout = o.timeout })
 	end
 
+	-- A script it was given (an agent's), run here at once ("eval"):
+	-- `ok, ...` (what it returned), or `false, why` for a syntax error, an
+	-- error, or running past `budget_ms` (1000 unless said). It sees only
+	-- `env`'s fields as its globals (no `zeron`, `require`, `getfenv`, …;
+	-- pass `math` and the like if it should have them), and what it sets
+	-- stays its own. Errors name it by `name` ("agent:3: …"). It runs to
+	-- its end: it can't await.
+	function M.eval(source: string, opts: { name: string?, env: { [string]: any }?, budget_ms: number? }?): (boolean, ...any)
+		if not host.eval then
+			error('zeron.eval needs the "eval" permission', 2)
+		end
+		assert(type(source) == "string", "zeron.eval(source, opts): the script's text")
+		local o = opts or {}
+		assert(o.env == nil or type(o.env) == "table", "zeron.eval: env is a table")
+		assert(o.budget_ms == nil or type(o.budget_ms) == "number", "zeron.eval: budget_ms is a number")
+		return host.eval(source, tostring(o.name or "script"), o.env or {}, o.budget_ms or 1000)
+	end
+
 	-- A notification, as Zeron's own ("notifications"): a promise of
 	-- "posted", "off", "held", "paced" or "unavailable".
 	function M.notify(n: { title: string, body: string?, session: string? }): any

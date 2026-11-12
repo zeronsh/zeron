@@ -70,6 +70,8 @@ pub struct Spec {
     /// `zeron.store`'s file (`None`: kept in memory only).
     pub store: Option<PathBuf>,
     pub limits: Limits,
+    /// `zeron.eval`: it may run scripts it's given ("eval").
+    pub eval: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +307,12 @@ struct State {
     /// `zeron.watch`es, by id.
     watches: RefCell<HashMap<u64, Watching>>,
     next_watch: Cell<u64>,
+    /// The `zeron.eval` script running: its deadline and what it says
+    /// past it.
+    script: RefCell<Option<(Instant, String)>>,
+    /// That script ran past its deadline: every safepoint stops it now, so
+    /// a `pcall` it was given can't keep it going.
+    script_over: Cell<bool>,
 }
 
 impl State {
@@ -389,6 +397,8 @@ fn run(
         status: status.clone(),
         watches: RefCell::default(),
         next_watch: Cell::new(1),
+        script: RefCell::default(),
+        script_over: Cell::new(false),
     });
     let deadline: Rc<Cell<Option<Instant>>> = Rc::default();
     let (lua, entry) = match setup(&spec, &ops, &tx, &state, &deadline) {
@@ -576,11 +586,21 @@ fn setup(
     lua.set_memory_limit(spec.limits.memory).map_err(fail)?;
     let ticks = Cell::new(0u32);
     let watched = deadline.clone();
+    let script = state.clone();
     lua.set_interrupt(move |_| {
+        if script.script_over.get() {
+            return Err(script_over(&script));
+        }
         // The clock every 256th safepoint: a runaway loop stops within a
         // few milliseconds of its budget.
         let tick = ticks.get().wrapping_add(1);
         ticks.set(tick);
+        if tick.is_multiple_of(256)
+            && script.script.borrow().as_ref().is_some_and(|(at, _)| Instant::now() > *at)
+        {
+            script.script_over.set(true);
+            return Err(script_over(&script));
+        }
         if tick.is_multiple_of(256)
             && let Some(deadline) = watched.get()
             && Instant::now() > deadline
@@ -775,6 +795,10 @@ fn natives(
         })?,
     )?;
 
+    if spec.eval {
+        host.set("eval", eval(lua, state)?)?;
+    }
+
     let get_state = state.clone();
     host.set(
         "store_get",
@@ -809,6 +833,56 @@ fn natives(
         })?,
     )?;
     Ok(host)
+}
+
+/// The error a `zeron.eval` script past its budget stops with.
+fn script_over(state: &State) -> mlua::Error {
+    let said = state.script.borrow().as_ref().map(|(_, said)| said.clone());
+    mlua::Error::RuntimeError(said.unwrap_or_else(|| "the script ran past its time budget".into()))
+}
+
+/// `zeron.eval`'s native: `source` compiled as a chunk named `name` whose
+/// globals are only `env`'s fields (read through, so what it sets stays
+/// its own), run to its end within `budget_ms`. `true, ...` (what it
+/// returned) or `false, why`; running out of memory fails the whole call.
+fn eval(lua: &Lua, state: &Rc<State>) -> mlua::Result<Function> {
+    let state = state.clone();
+    lua.create_function(move |lua, (source, name, env, budget_ms): (mlua::LuaString, String, Table, f64)| {
+        let failed = |why: String| Ok(mlua::MultiValue::from_iter([Value::Boolean(false), Value::String(lua.create_string(why)?)]));
+        if state.script.borrow().is_some() {
+            return failed("zeron.eval: a script can't run another script".into());
+        }
+        if source.as_bytes().len() > MAX_SCRIPT_BYTES {
+            return failed(format!("{name}: the script is over 1 MB"));
+        }
+        let globals = lua.create_table()?;
+        let read = lua.create_table()?;
+        read.raw_set("__index", env)?;
+        globals.set_metatable(Some(read))?;
+        // Text only, never bytecode (as `require`); the environment is set
+        // as it loads, so its globals stay fast (no `setfenv` after).
+        let chunk = lua
+            .load(&source.as_bytes()[..])
+            .set_name(format!("={name}"))
+            .set_mode(ChunkMode::Text)
+            .set_environment(globals)
+            .into_function();
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return failed(lua_message(&error)),
+        };
+        let budget = Duration::from_secs_f64(budget_ms.clamp(1.0, 60_000.0) / 1000.0);
+        let said = format!("{name}: the script ran past its time budget ({} ms)", budget.as_millis());
+        *state.script.borrow_mut() = Some((Instant::now() + budget, said));
+        let ran = chunk.call::<mlua::MultiValue>(());
+        *state.script.borrow_mut() = None;
+        state.script_over.set(false);
+        match ran {
+            Ok(values) => Ok(std::iter::once(Value::Boolean(true)).chain(values).collect()),
+            Err(error @ mlua::Error::MemoryError(_)) => Err(error),
+            Err(error) => failed(lua_message(&error)),
+        }
+    })
 }
 
 /// `require("./x")`: a `.luau` file of the plugin's own, relative to the file
