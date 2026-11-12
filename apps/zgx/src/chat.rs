@@ -45,6 +45,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::{Rc, Weak},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -236,6 +237,68 @@ fn sum_of(json: &Json) -> u64 {
 struct FoldedEntry {
     bytes: Box<[u8]>,
     context: Rc<RowContext>,
+    /// The chat's dictionary the bytes were made with, or none: LZ4 alone.
+    dict: Option<Arc<RowDict>>,
+}
+
+/// A chat's own dictionary for its folded rows: LZ4's, which is only bytes
+/// a row's matches may reach back into. The fold worker makes it as the
+/// chat opens, of the openings of rows spread over the chat (`RowDict::of`):
+/// the shape and words its rows share. The rows made with it take 28% less
+/// than LZ4 alone makes of them (measured on a 15,443-row chat's rows: 14.6
+/// MB against 20.4) and open in 0.8 µs a row rather than 0.55. In the
+/// program's allocator, and in memory only: never written or sent.
+struct RowDict {
+    bytes: Box<[u8]>,
+}
+
+/// Rows a chat needs before a dictionary is worth its bytes and the time it
+/// adds to folding.
+const DICT_FOR_CHATS_OF: usize = 2000;
+/// A dictionary's size. LZ4 hashes it again for each row it makes, so a
+/// larger one costs folding time for less gain (measured on that chat: 8 KB
+/// saves 4.9 MB, 16 KB 5.4, 32 KB 5.8, 60 KB 6.1; folding all its rows took
+/// 68, 80, 115 and 164 ms, and 35 without).
+const DICT_BYTES: usize = 32 * 1024;
+/// How much of a row the dictionary takes: its opening, which holds its
+/// shape (its kind, its parts', its tool's).
+const DICT_ROW_BYTES: usize = 1024;
+
+impl RowDict {
+    /// For a chat of `entries`, if it has enough: the openings of rows spread
+    /// evenly over it.
+    fn of(entries: &[(usize, String, Json)]) -> Option<Self> {
+        if entries.len() < DICT_FOR_CHATS_OF {
+            return None;
+        }
+        let step = (entries.len() / (DICT_BYTES / DICT_ROW_BYTES)).max(1);
+        let mut bytes = Vec::with_capacity(DICT_BYTES);
+        for (_, _, entry) in entries.iter().step_by(step) {
+            let room = DICT_BYTES - bytes.len();
+            if room == 0 {
+                break;
+            }
+            if let Ok(json) = serde_json::to_vec(entry) {
+                bytes.extend_from_slice(&json[..json.len().min(DICT_ROW_BYTES).min(room)]);
+            }
+        }
+        Some(Self { bytes: Box::from(bytes.as_slice()) })
+    }
+
+    /// What it holds, for what a kept chat weighs (`let_go_weight`).
+    fn bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// `json` compressed with it, held at its own length (as `compressed`).
+    fn compress(&self, json: &[u8]) -> Box<[u8]> {
+        Box::from(lz4_flex::block::compress_prepend_size_with_dict(json, &self.bytes).as_slice())
+    }
+
+    /// What `compress` made, opened.
+    fn decompress(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+        lz4_flex::block::decompress_size_prepended_with_dict(bytes, &self.bytes).ok()
+    }
 }
 
 /// What a chat's rows are built with (`built_entry`).
@@ -247,7 +310,10 @@ struct RowContext {
 
 impl zgx_script::Unfold for FoldedEntry {
     fn unfold(&self) -> Value {
-        let json = lz4_flex::block::decompress_size_prepended(&self.bytes).ok();
+        let json = match &self.dict {
+            Some(dict) => dict.decompress(&self.bytes),
+            None => lz4_flex::block::decompress_size_prepended(&self.bytes).ok(),
+        };
         let entry = json.and_then(|bytes| serde_json::from_slice::<Json>(&bytes).ok()).unwrap_or(Json::Null);
         let RowContext { doc, device, model } = &*self.context;
         built_entry(&entry, doc, device.as_deref(), model.as_deref()).unwrap_or(Value::Nil)
@@ -275,6 +341,9 @@ struct Built {
     subagents: Option<Rc<[Value]>>,
     /// Folded, its compressed bytes' length (what a chat kept is weighed by).
     folded: usize,
+    /// The dictionary its folded row was made with, if any (counted once a
+    /// chat, however many rows share it: `let_go_weight`).
+    dict: Option<Arc<RowDict>>,
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
@@ -295,13 +364,15 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
                         bytes
                     },
                     context: context.clone(),
+                    // (A row settling as the chat is read: LZ4, as the worker's dictionary isn't here.)
+                    dict: None,
                 },
             )),
             _ => row,
         },
         row => row,
     };
-    Built { row, subagents, folded }
+    Built { row, subagents, folded, dict: None }
 }
 
 /// A long chat's settled entries, as a worker thread makes them: what they fold
@@ -319,6 +390,8 @@ struct FoldedOff {
     id: String,
     /// None: it shows nothing.
     bytes: Option<Box<[u8]>>,
+    /// The dictionary `bytes` were made with, if the chat has one.
+    dict: Option<Arc<RowDict>>,
     subagents: Vec<SubagentOff>,
     sum: u64,
     /// The plan in it, if there is one (`Open::older_todo`).
@@ -383,13 +456,18 @@ fn names_subagent(entry: &Json) -> bool {
 }
 
 /// `entry`, as the worker folds it.
-fn fold_off(at: usize, id: String, entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> FoldedOff {
+fn fold_off(at: usize, id: String, entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>, dict: Option<&Arc<RowDict>>) -> FoldedOff {
     // (Its row is built here only if what's wanted of it isn't plain from its parts.)
     let plain = plainly_has_row(entry) && !names_subagent(entry);
     let row = (!plain).then(|| built_entry(entry, doc, device, model)).flatten();
     let subagents = row.as_ref().and_then(subagents_in).map_or(Vec::new(), |found| found.iter().filter_map(SubagentOff::of).collect());
-    let bytes = (plain || row.is_some()).then(|| serde_json::to_vec(entry).ok()).flatten().map(|bytes| compressed(&bytes));
-    FoldedOff { at, id, bytes, subagents, sum: sum_of(entry), todo: latest_todo(std::iter::once(entry)).cloned() }
+    let json = (plain || row.is_some()).then(|| serde_json::to_vec(entry).ok()).flatten();
+    let (bytes, dict) = match (json, dict) {
+        (Some(json), Some(dict)) => (Some(dict.compress(&json)), Some(dict.clone())),
+        (Some(json), None) => (Some(compressed(&json)), None),
+        (None, _) => (None, None),
+    };
+    FoldedOff { at, id, bytes, dict, subagents, sum: sum_of(entry), todo: latest_todo(std::iter::once(entry)).cloned() }
 }
 
 /// How many entries the worker sends at a time.
@@ -401,8 +479,9 @@ fn folding(entries: Vec<(usize, String, Json)>, context: &RowContext) -> Folding
     let (doc, device, model) = (context.doc.clone(), context.device.clone(), context.model.clone());
     let spawned = std::thread::Builder::new().name("zeron-fold".into()).spawn(move || {
         let mut batch = Vec::with_capacity(FOLDED_AT_ONCE);
+        let dict = RowDict::of(&entries).map(Arc::new);
         for (at, id, entry) in entries {
-            batch.push(fold_off(at, id, &entry, &doc, device.as_deref(), model.as_deref()));
+            batch.push(fold_off(at, id, &entry, &doc, device.as_deref(), model.as_deref(), dict.as_ref()));
             if batch.len() == FOLDED_AT_ONCE {
                 // (The chat has gone, or a reset replaced them: nothing wants the rest.)
                 if sender.send(std::mem::take(&mut batch)).is_err() {
@@ -484,12 +563,20 @@ const LET_GO_PER_ENTRY: usize = 512;
 /// from it.
 fn let_go_weight(entries: &[Entry], built: &HashMap<Rc<str>, Built>) -> usize {
     let folded: usize = built.values().map(|b| b.folded).sum();
+    let mut dicts: Vec<*const RowDict> = Vec::new();
+    let mut dict_bytes = 0;
+    for dict in built.values().filter_map(|b| b.dict.as_ref()) {
+        if !dicts.contains(&Arc::as_ptr(dict)) {
+            dicts.push(Arc::as_ptr(dict));
+            dict_bytes += dict.bytes();
+        }
+    }
     let whole: usize = entries
         .iter()
         .filter_map(|e| e.json.as_ref())
         .map(|json| serde_json::to_vec(json).map_or(0, |b| b.len()))
         .sum();
-    folded + entries.len() * LET_GO_PER_ENTRY + 2 * whole
+    folded + dict_bytes + entries.len() * LET_GO_PER_ENTRY + 2 * whole
 }
 
 /// The chats let go of that are still kept: none older than `LET_GO_KEPT`,
@@ -4086,7 +4173,7 @@ fn latest_todo<'a>(newest_first: impl Iterator<Item = &'a Json>) -> Option<&'a J
 /// What the worker made of an entry, kept: its row folded, as `built_for` and
 /// `settle` would have left it.
 fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
-    let FoldedOff { at, id, bytes, subagents, sum, todo } = folded;
+    let FoldedOff { at, id, bytes, dict, subagents, sum, todo } = folded;
     // (Where it stood, unless a frame has moved it. Gone: nothing to keep.)
     let Open { entries, built, older_todo, .. } = open;
     let found = entries.get(at).filter(|e| *e.id == *id).map(|_| at).or_else(|| entries.iter().position(|e| *e.id == *id));
@@ -4103,9 +4190,9 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
         *older_todo = Some((place, part));
     }
     let folded = bytes.as_ref().map_or(0, |bytes| bytes.len());
-    let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
+    let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone(), dict: dict.clone() }));
     let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
-    built.insert(entry.id.clone(), Built { row, subagents, folded });
+    built.insert(entry.id.clone(), Built { row, subagents, folded, dict });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
@@ -6246,6 +6333,98 @@ mod tests {
         assert_eq!(open.entries[0].sum, super::sum_of(&entry));
     }
 
+    /// A chat's rows, as a transcript's are: words from a working vocabulary,
+    /// tool calls and paths (made up here, none of anyone's chats).
+    fn transcript_rows(n: usize) -> Vec<(usize, String, Json)> {
+        let words = ["the", "row", "tool", "output", "src/chat.rs", "cargo", "test", "fold", "error[E0308]", "warning", "fn", "let", "passed", "mismatched types", "apps/zgx", "a chat's rows"];
+        let mut seed = 11u32;
+        (0..n)
+            .map(|i| {
+                let mut text = String::new();
+                for _ in 0..(40 + i % 160) {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    text.push_str(words[(seed >> 16) as usize % words.len()]);
+                    text.push(' ');
+                }
+                let entry = json!({ "id": format!("e{i}"), "role": "assistant", "status": "complete", "parts": [{ "kind": "text", "text": text }, { "kind": "tool", "call": { "kind": "shell", "command": format!("cargo test -p zgx-script --test anime {}", i % 7) }, "output": text.len() }] });
+                (i, format!("e{i}"), entry)
+            })
+            .collect()
+    }
+
+    /// A long chat's dictionary is the openings of rows spread over it, at
+    /// most `DICT_BYTES`; its rows open to what they were with it and take
+    /// less than LZ4 alone makes of them. A short chat has none.
+    #[test]
+    fn a_long_chats_rows_fold_with_its_own_dictionary() {
+        let rows = transcript_rows(super::DICT_FOR_CHATS_OF + 500);
+        let dict = super::RowDict::of(&rows).expect("a long chat's dictionary");
+        // (A row shorter than `DICT_ROW_BYTES` gives what it has.)
+        assert!(dict.bytes() <= super::DICT_BYTES && dict.bytes() > super::DICT_BYTES * 3 / 4, "{} bytes of rows spread over the chat", dict.bytes());
+        let (mut with, mut lz4) = (0, 0);
+        for (_, _, entry) in &rows {
+            let json = serde_json::to_vec(entry).unwrap();
+            let folded = dict.compress(&json);
+            assert_eq!(dict.decompress(&folded).as_deref(), Some(json.as_slice()), "opens to what it was");
+            with += folded.len();
+            lz4 += super::compressed(&json).len();
+        }
+        assert!(with * 10 < lz4 * 9, "{with} bytes with the dictionary against LZ4's {lz4}");
+        assert!(super::RowDict::of(&transcript_rows(super::DICT_FOR_CHATS_OF - 1)).is_none(), "none for a short chat");
+    }
+
+    /// The worker's rows, settled as the window keeps them.
+    fn folded_chat(rows: &[(usize, String, Json)], context: &Rc<super::RowContext>) -> (super::Open, Vec<usize>, Vec<usize>) {
+        let mut open = super::Open { entries: rows.iter().map(|(_, _, e)| super::Entry::new(e.clone())).collect(), ..super::Open::default() };
+        for entry in &mut open.entries {
+            entry.json = None;
+        }
+        let folding = super::folding(rows.to_vec(), context);
+        let (mut with_dict, mut lz4) = (Vec::new(), Vec::new());
+        while let Ok(batch) = folding.results.recv() {
+            for folded in batch {
+                if folded.bytes.is_some() {
+                    if folded.dict.is_some() { with_dict.push(folded.at) } else { lz4.push(folded.at) }
+                }
+                super::settle_off(&mut open, folded, context);
+            }
+        }
+        (open, with_dict, lz4)
+    }
+
+    /// Through the worker, as the app runs it: a long chat's every row is
+    /// made with its dictionary, a short chat's with LZ4 alone. Both open as
+    /// the window builds them; what a kept chat weighs counts the dictionary
+    /// once, however many rows share it.
+    #[test]
+    fn the_worker_folds_both_kinds_as_the_window_would() {
+        let context = Rc::new(super::RowContext { doc: "chat".into(), device: None, model: Some("Opus".into()) });
+        let long = transcript_rows(super::DICT_FOR_CHATS_OF + 300);
+        let short = transcript_rows(300);
+        for rows in [&long, &short] {
+            let (open, with_dict, lz4) = folded_chat(rows, &context);
+            let every = (0..rows.len()).collect::<Vec<_>>();
+            if rows.len() >= super::DICT_FOR_CHATS_OF {
+                assert!(lz4.is_empty() && with_dict == every, "a long chat: every row with its dictionary");
+            } else {
+                assert!(with_dict.is_empty() && lz4 == every, "a short chat: LZ4 alone");
+            }
+            for at in [0, rows.len() / 2, rows.len() - 1] {
+                let (_, id, entry) = &rows[at];
+                let here = super::built_for(entry, &context, false);
+                let there = open.built.get(id.as_str()).expect("kept");
+                assert_eq!(there.row.as_ref().unwrap().to_json(), here.row.as_ref().unwrap().to_json(), "row {at} of {}", rows.len());
+            }
+            let Some(dict) = open.built.values().find_map(|b| b.dict.clone()) else { continue };
+            let mut without = open.built.clone();
+            for built in without.values_mut() {
+                built.dict = None;
+            }
+            let weight = super::let_go_weight(&open.entries, &open.built);
+            assert_eq!(weight, super::let_go_weight(&open.entries, &without) + dict.bytes(), "the dictionary once, for {} rows", with_dict.len());
+        }
+    }
+
     /// A folded row's bytes take their own length, not LZ4's worst-case
     /// buffer: rows compressing as real ones do (about a third smaller) kept
     /// that buffer, as a shrinking realloc left it where it was.
@@ -6271,6 +6450,13 @@ mod tests {
         // SAFETY: mimalloc reports the size of the block it gave the box.
         let held = unsafe { mi_usable_size(folded.as_ptr().cast()) };
         assert!(held <= folded.len() + folded.len() / 8 + 16, "held {held} for {} bytes ({} raw)", folded.len(), raw.len());
+        // And with a chat's dictionary.
+        let dict = super::RowDict::of(&transcript_rows(super::DICT_FOR_CHATS_OF)).unwrap();
+        let folded = dict.compress(&raw);
+        // SAFETY: as above.
+        let held = unsafe { mi_usable_size(folded.as_ptr().cast()) };
+        // (mimalloc's size classes are at most a quarter apart; LZ4's buffer is the raw size and more.)
+        assert!(held <= folded.len() + folded.len() / 4 && held < raw.len(), "with the dictionary: held {held} for {} bytes ({} raw)", folded.len(), raw.len());
     }
 
     /// A row out of view holds what makes it, not itself: what it opens to is
