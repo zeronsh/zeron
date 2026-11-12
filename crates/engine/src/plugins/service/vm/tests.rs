@@ -423,4 +423,6 @@ async fn a_service_measures_in_its_plugins_fonts() {
     assert!(refused.as_str().unwrap().contains("invalid or unsupported"), "{refused}");
     let outside = load("../outside.ttf").await;
     assert!(outside.as_str().unwrap().contains("isn't in the plugin"), "{outside}");
+    let missing = load("fonts/Missing.ttf").await;
+    assert!(missing.as_str().unwrap().contains("the plugin has no fonts/Missing.ttf"), "{missing}");
 }

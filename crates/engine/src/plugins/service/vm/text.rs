@@ -76,7 +76,12 @@ impl Text {
     pub(super) fn load(&self, root: &Path, rel: &str) -> Result<Vec<String>, String> {
         let path = root.join(rel);
         // (A link inside the snapshot can't lead out of it.)
-        let canonical = std::fs::canonicalize(&path).map_err(|_| format!("{rel} isn't in the plugin"))?;
+        let inside = Path::new(rel)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
+        let canonical = std::fs::canonicalize(&path).map_err(|_| {
+            if inside { format!("the plugin has no {rel}") } else { format!("{rel} isn't in the plugin") }
+        })?;
         let root = std::fs::canonicalize(root).map_err(|_| format!("{rel} isn't in the plugin"))?;
         if !canonical.starts_with(&root) {
             return Err(format!("{rel} isn't in the plugin"));
