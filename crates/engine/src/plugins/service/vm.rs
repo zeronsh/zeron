@@ -817,8 +817,16 @@ fn natives(
     let root = spec.dir.clone();
     host.set(
         "load_font",
-        lua.create_function(move |_, rel: String| {
-            text.load(&root, &rel).map_err(|why| mlua::Error::runtime(format!("zeron.load_font: {why}")))
+        lua.create_function(move |_, source: Value| {
+            let loaded = match &source {
+                Value::String(rel) => text.load(&root, &rel.to_str()?),
+                Value::Table(t) => match t.get::<Option<mlua::String>>("base64")? {
+                    Some(encoded) => text::decode(&encoded.as_bytes()).and_then(|bytes| text.install(bytes, "that font")),
+                    None => Err("a table gives the font's bytes as `base64`".into()),
+                },
+                other => Err(format!("it takes a path in the plugin or {{ base64 = … }}, not a {}", other.type_name())),
+            };
+            loaded.map_err(|why| mlua::Error::runtime(format!("zeron.load_font: {why}")))
         })?,
     )?;
     Ok(host)

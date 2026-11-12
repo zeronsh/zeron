@@ -1,7 +1,8 @@
 //! `zeron.measure_text` and `zeron.load_font`: text measured as the plugin's
 //! window measures it (a canvas's `c:measure_text`), with no window. zgx's
 //! own shaper, over the fonts a window has: the system's, the app's (Geist,
-//! Instrument Serif), and those the service loaded from its plugin's files.
+//! Instrument Serif), and those the service loaded: its plugin's files, or
+//! bytes it fetched (`{ base64 = … }`).
 //! A family it doesn't have falls back as in a window.
 //!
 //! Each VM has its own, made on its first use, so a font one plugin loads
@@ -87,13 +88,35 @@ impl Text {
             return Err(format!("{rel} isn't in the plugin"));
         }
         let bytes = std::fs::read(&canonical).map_err(|_| format!("{rel} can't be read"))?;
-        let font = FontData::new(bytes).map_err(|why| format!("{rel}: {why}"))?;
+        self.install(bytes, rel)
+    }
+
+    /// The font in `bytes` (`what` names it in an error), beside the faces
+    /// it has: the family names it holds.
+    pub(super) fn install(&self, bytes: Vec<u8>, what: &str) -> Result<Vec<String>, String> {
+        let font = FontData::new(bytes).map_err(|why| format!("{what}: {why}"))?;
         let (services, _) = self.ready();
         font.install(&mut services.text_system().borrow_mut());
         // Text shaped before in a family that fell back shapes in it now.
         services.release_unused();
         Ok(font.families().to_vec())
     }
+}
+
+/// The largest font `zeron.load_font` takes from bytes, as a window's
+/// `ui.load_font` (zgx-script's `FONT_LIMIT`).
+const FONT_LIMIT: usize = 64 << 20;
+
+/// A font's bytes from base64 (`zeron.fetch`'s `binary` body), at most
+/// `FONT_LIMIT` of them.
+pub(super) fn decode(encoded: &[u8]) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    if encoded.len() / 4 * 3 > FONT_LIMIT {
+        return Err("a font is 64 MiB at most".into());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|why| format!("`base64` isn't base64 ({why})"))
 }
 
 /// A canvas text's size and font from its options, as zgx-script reads them

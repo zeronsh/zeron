@@ -426,3 +426,30 @@ async fn a_service_measures_in_its_plugins_fonts() {
     let missing = load("fonts/Missing.ttf").await;
     assert!(missing.as_str().unwrap().contains("the plugin has no fonts/Missing.ttf"), "{missing}");
 }
+
+/// A font fetched with `binary = true` loads from its bytes in base64, as
+/// its file would.
+#[tokio::test]
+async fn a_service_measures_in_a_font_from_its_bytes() {
+    use base64::Engine as _;
+    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../ui/assets/fonts/Geist-BoldItalic.ttf");
+    let dir = folder(&[("service.luau", MEASURING)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let text = "Find your still point";
+    let opts = json!({ "font": "Geist", "size": 34, "weight": 700, "italic": true });
+    let style = font(zgx::text_layout::FontFamily::Named("Geist".into()), 700, true);
+    let load = async |source: Json| ask(&vm, "load", json!({ "path": source })).await.unwrap().unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(BOLD_ITALIC);
+
+    assert_eq!(load(json!({ "base64": encoded })).await, json!(["Geist"]));
+    let after = ask(&vm, "measure", json!({ "text": text, "opts": opts })).await.unwrap().unwrap();
+    assert_eq!(after, as_a_window_measures(text, 34., None, &style, &[BOLD_ITALIC]));
+
+    let not_font = load(json!({ "base64": "aGVsbG8=" })).await;
+    assert!(not_font.as_str().unwrap().contains("invalid or unsupported"), "{not_font}");
+    let not_base64 = load(json!({ "base64": "not base64!" })).await;
+    assert!(not_base64.as_str().unwrap().contains("isn't base64"), "{not_base64}");
+    let no_bytes = load(json!({ "bytes": "x" })).await;
+    assert!(no_bytes.as_str().unwrap().contains("`base64`"), "{no_bytes}");
+}

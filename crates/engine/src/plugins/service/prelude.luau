@@ -406,11 +406,12 @@ local function service(id: string): any
 		return host.measure_text(text, opts)
 	end
 
-	-- A font file of the plugin's own ("fonts/Inter.ttf"), for measuring
-	-- beside the faces there are: its family names. Load the same file in
-	-- your window (`ui.load_font`) and both measure alike.
-	function M.load_font(path: string): { string }
-		return host.load_font(path)
+	-- A font file of the plugin's own ("fonts/Inter.ttf"), or one's bytes in
+	-- base64 (`{ base64 = r.body }` from `zeron.fetch(url, { binary = true })`),
+	-- for measuring beside the faces there are: its family names. Load the
+	-- same font in your window (`ui.load_font`) and both measure alike.
+	function M.load_font(source: string | { base64: string }): { string }
+		return host.load_font(source)
 	end
 
 	-- A promise done after `seconds`.
