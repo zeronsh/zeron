@@ -3484,6 +3484,10 @@
         "windows": {
           "title": "Open windows of its own"
         },
+        "fonts": {
+          "title": "Add fonts of its own",
+          "detail": "Text in a font it adds, Zeron's included, may draw in its version of that font"
+        },
         "tools": {
           "title": "Give your agents tools"
         },

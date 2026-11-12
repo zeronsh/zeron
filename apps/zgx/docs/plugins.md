@@ -57,6 +57,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
+| `fonts` | load font files of its own folder (`ui.load_font`) for its windows' text. A loaded font reaches every window's text, Zeron's included, so the person is asked. Its service measures in fonts of its own (`zeron.load_font`) with no permission |
 | `tools` | tools for agents (the manifest's `tools`) |
 | `devices` | send data to itself on your other devices |
 | `native` | run a program of its own (the manifest's `mcp`) |

@@ -33,6 +33,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "files",
     "web",
     "windows",
+    // Font files of its own for its windows' text (`ui.load_font`), which
+    // reach every window's text, Zeron's too.
+    "fonts",
     "tools",
     "devices",
     "native",
@@ -604,6 +607,11 @@ mod tests {
         for bad in ["/usr/bin/gh", "../gh", "gh git", "", "-rf"] {
             assert!(problem(with(serde_json::json!(["commands"]), serde_json::json!([bad]))).is_some(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_plugin_may_ask_for_fonts() {
+        assert_eq!(problem(with("permissions", serde_json::json!(["fonts"]))), None);
     }
 
     fn with(key: &str, value: serde_json::Value) -> serde_json::Value {
