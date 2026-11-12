@@ -28,7 +28,9 @@ local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
 local FoldButton = require("@self/fold_button")
 
-export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought"
+-- (`cloud`, `git`: a Cloud machine's own setup steps, the machine and its
+-- checkout.)
+export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought" | "cloud" | "git"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
 -- edit the lines it added and removed; `failed` tints its glyph.
 export type Tool = {
@@ -109,6 +111,8 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	todo = "checklist",
 	agent = "side-chat",
 	thought = "chat-round-line",
+	cloud = "cloud",
+	git = "git-branch",
 }
 
 -- The tree, in points: the trunk's x (under the working loader's middle, so
@@ -584,6 +588,15 @@ local function row(
 	-- (Only a subagent's spawn says more than its line: one that may open
 	-- its lane follows it.)
 	local label: string | () -> string = if t.target then `{t.verb} {line_of(t)}` else t.verb
+	-- A Cloud machine's step says how far it is as it goes ("Waking its Cloud
+	-- machine — cloning the repository…"): its words follow it.
+	local verb: string | () -> string = t.verb
+	if t.kind == "cloud" or t.kind == "git" then
+		verb = function(): string
+			return now().verb
+		end
+		label = verb
+	end
 	if open_subagent and t.kind == "agent" then
 		label = function(): string
 			local sub = lane()
@@ -671,7 +684,7 @@ local function row(
 				gap = "$space.1",
 				items = "center",
 				ui.text {
-					t.verb,
+					verb,
 					literal = true,
 					shrink = 0,
 					text_size = "$font.size.sm",

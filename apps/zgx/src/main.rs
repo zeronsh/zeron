@@ -28,6 +28,8 @@
 #![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
 
 mod about;
+#[cfg(all(windows, feature = "beta"))]
+mod windows_install;
 mod acp_registry;
 mod agents;
 mod appshots;
@@ -237,11 +239,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
-    // The Windows beta's engine is the stable release's whole `zeron.exe`, in
-    // the beta's folder (scripts/package-windows.ps1).
+    // The Zeron app's updater follows the channel on record on every
+    // platform, a stable build's too (crates/update `follows_channels`).
+    #[cfg(feature = "beta")]
+    zeron_update::set_app_follows_channels();
+    // On Windows this app's engine is a whole Zeron `zeron.exe`, in this
+    // version's folder (scripts/package-windows.ps1), which an older updater
+    // may not have brought: bring it in first (src/windows_install.rs).
     #[cfg(all(windows, feature = "beta"))]
-    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
-        zeron_launch::set_full_app_engine(dir.join("beta").join(about::APP_VERSION).join("engine").join("zeron.exe"));
+    {
+        windows_install::complete_if_needed(&argv);
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
+            zeron_launch::set_full_app_engine(
+                zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
+            );
+        }
     }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
@@ -1313,13 +1325,24 @@ fn bundled_ui() -> Option<PathBuf> {
             let ui = if cfg!(target_os = "macos") {
                 dir.parent()?.join("Resources").join("ui")
             } else if cfg!(windows) {
-                dir.join("beta").join(about::APP_VERSION).join("ui")
+                windows_version_files(dir)?.join("ui")
             } else {
                 dir.join("ui")
             };
             ui.join("app.luau").is_file().then_some(ui)
         })
         .clone()
+}
+
+/// This version's own folder beside the executable on Windows.
+fn windows_version_files(dir: &std::path::Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    return Some(zeron_update::windows::version_files(dir, about::APP_VERSION));
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// Geist (the iOS app's, copied into `fonts/` so this folder builds on its

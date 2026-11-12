@@ -352,8 +352,48 @@ end)
 test("a prompt on its way says its machine is waking, and otherwise keeps Sending", function()
 	expect(turn({ sending = true })).to_be(nil)
 	expect(turn({ sending = true, cloud = session({ state = "starting" }) })).to_be("Waking its Cloud machine…")
-	expect(turn({ sending = true, cloud = session({ state = "sleeping" }) })).to_be(nil)
+	-- Asleep, the send wakes it: said at once, before the edge says so.
+	expect(turn({ sending = true, cloud = session({ state = "sleeping" }) })).to_be("Waking its Cloud machine…")
 	expect(turn({ sending = true, host_unreachable = true })).to_be(nil)
+end)
+
+test("a prompt's machine coming up is its first setup step, starting or waking, with its stage", function()
+	local function step(s: any, extra: { [string]: any }?): any
+		local t: { [string]: any } = { streaming = true, live = false, now = NOW, sending = true, cloud = s }
+		for k, v in extra or {} do
+			t[k] = v
+		end
+		return TurnState.of(t :: any)
+	end
+	local waking = step(session({ state = "starting" }))
+	expect(waking.step).to_be("wake")
+	expect(waking.summary).to_be("Woke the Cloud machine")
+	expect(waking.spinner).to_be(true)
+	local new = step(session({ state = "provisioning" }))
+	expect(new.step).to_be("start")
+	expect(new.text).to_be("Starting a Cloud machine…")
+	expect(new.summary).to_be("Set up the Cloud machine")
+	-- Not known yet (a new chat's): starting.
+	expect(step({ state = "provisioning", unknown = true }).text).to_be("Starting a Cloud machine…")
+	expect(step(session({ state = "starting", stage = "clone" })).text).to_be("Waking its Cloud machine — cloning the repository…")
+	expect(step(session({ state = "starting", stage = "slow" })).step).to_be("wake")
+	-- Up, it says nothing; a failure, nothing either (the deck says why).
+	expect(step(session({ state = "ready" }))).to_be(nil)
+	expect(step(session({ state = "error" }))).to_be(nil)
+	expect(step(session({ state = "sleeping" }), { wake_failed = true })).to_be(nil)
+	expect(step(session({ state = "data_expired" }))).to_be(nil)
+	-- One that can't wake holds the send (the deck says so): nothing spins.
+	expect(step(session({ state = "sleeping", wake_blocked = { reason = "disk_too_small", needed = 150 } }))).to_be(nil)
+	-- Still uploading its files in the outbox: nothing's gone to the machine.
+	expect(step(session({ state = "sleeping" }), { held = true })).to_be(nil)
+	-- The machine's own setup steps under it say how it's coming up: their
+	-- reply's foot doesn't say it again.
+	local function foot(s: any): any
+		return TurnState.of({ streaming = true, live = false, now = NOW, cloud = s, setup = true } :: any)
+	end
+	expect(foot(session({ state = "starting" }))).to_be(nil)
+	expect(foot(session({ state = "ready", stage = "updating" }))).to_be(nil)
+	expect(foot(session({ state = "sleeping" })).text).to_be("Interrupted — its Cloud machine went to sleep")
 end)
 
 test("a prompt waiting on a slow wake says so", function()
@@ -1499,4 +1539,87 @@ test("an old edge offers no choice, and no section", function()
 	local app = settings(true)
 	expect(showing(app, `{PAGE} >> role:radiogroup "Default machine"`)).to_be(false)
 	expect(app:has(`{PAGE} >> ~"credits used"`)).to_be(true)
+end)
+
+-- ── A send's machine coming up, in the transcript ─────────────────────────
+
+-- A step's tool row under the prompt (ds/activity's, the reply's own): its
+-- words, findable in the transcript.
+local function step_row(words: string): string
+	return `#transcript >> role:button "{words}"`
+end
+
+-- Sent, a frame or two on: what shows at once.
+local function send_now(app: any, words: string)
+	app:type('role:textbox "Message"', words)
+	app:key("Enter")
+	app:frames(3)
+end
+
+test("a send to a sleeping machine shows its wake under it at once, as a tool row, and no alert", function()
+	local app = on_cloud("sleeping")
+	send_now(app, "Ship it")
+	expect(sent(app, "Ship it")).to_be(true)
+	expect(showing(app, step_row("Waking its Cloud machine…"))).to_be(true)
+	expect(says(app, "Woke the Cloud machine")).to_be(true)
+	app:frames(30)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a send while it starts a new machine says so under it, and no alert", function()
+	local app = on_cloud("provisioning")
+	expect(app:has('role:button "Open Alerts"')).to_be(true)
+	send_now(app, "Ship it")
+	expect(showing(app, step_row("Starting a Cloud machine…"))).to_be(true)
+	expect(says(app, "Set up the Cloud machine")).to_be(true)
+	app:frames(30)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("waking, the row says its stage as it goes, and the deck stays away", function()
+	local app = on_cloud("waking")
+	send_now(app, "Ship it")
+	expect(showing(app, step_row("Waking its Cloud machine…"))).to_be(true)
+	to_case(app, "staged")
+	expect(showing(app, step_row("Waking its Cloud machine — cloning the repository…"))).to_be(true)
+	to_case(app, "slow")
+	expect(showing(app, step_row("Waking its Cloud machine is taking longer than usual…"))).to_be(true)
+	to_case(app, "updating")
+	expect(showing(app, step_row("Updating its Cloud machine…"))).to_be(true)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("the row gives way to the machine's own setup steps, then the reply", function()
+	local app = on_cloud("waking")
+	send_now(app, "Ship it")
+	expect(showing(app, step_row("Waking its Cloud machine…"))).to_be(true)
+	app:command("cloud_setup_lands")
+	to_case(app, "ready")
+	expect(app:has(step_row("Waking its Cloud machine…"))).to_be(false)
+	expect(says(app, "Woke the Cloud machine")).to_be(true)
+	expect(app:has('#transcript >> ~"Woke the machine"')).to_be(true)
+	expect(app:has('#transcript >> ~"Cloning acme/atlas"')).to_be(true)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a wake that fails still says why, in the deck, and the row goes", function()
+	local app = on_cloud("sleeping")
+	send_now(app, "Ship it")
+	expect(showing(app, step_row("Waking its Cloud machine…"))).to_be(true)
+	to_case(app, "failed")
+	expect(app:has(step_row("Waking its Cloud machine…"))).to_be(false)
+	expect(app:has('role:button "Open Alerts"')).to_be(true)
+	open_deck(app)
+	expect(showing(app, in_deck('~"The provider ran out of machines in this region."'))).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("with nothing sent, a machine waking still says so in the deck", function()
+	local app = on_cloud("waking", true)
+	expect(showing(app, in_deck('~"Waking its Cloud machine…"'))).to_be(true)
+	expect(app:has(step_row("Waking its Cloud machine…"))).to_be(false)
 end)

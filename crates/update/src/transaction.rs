@@ -214,9 +214,16 @@ impl Layout {
                 #[cfg(not(windows))]
                 let recorded: Option<String> = None;
                 let current = recorded.unwrap_or_else(|| transaction.from.clone());
-                let me = if inside(incoming) {
+                // The zgx app runs its engine from its version's folder beside
+                // `zeron.exe` (crates/update `windows::version_files`): the new
+                // version's while it's tried, the installed one's after.
+                #[cfg(windows)]
+                let files = |version: &str| inside(&crate::windows::version_files(directory, version));
+                #[cfg(not(windows))]
+                let files = |_: &str| false;
+                let me = if inside(incoming) || files(&transaction.target) {
                     transaction.target.clone()
-                } else if inside(&directory.join("zeron.exe")) {
+                } else if inside(&directory.join("zeron.exe")) || files(&current) {
                     current.clone()
                 } else {
                     return None;
@@ -1947,6 +1954,34 @@ mod tests {
         let trial = root.path().join(".Zeron.app.new-next/Contents/MacOS/Zeron Engine");
         std::fs::write(&trial, "").unwrap();
         assert_eq!(update.layout.whoami_of(&trial, &update), Some(who("2.0.0", "1.0.0")));
+    }
+
+    /// The zgx app on Windows runs its engine from its version's folder
+    /// (`app\<version>\engine\zeron.exe`): there it's the new version on
+    /// trial, or the installed one asked for the next update.
+    #[cfg(windows)]
+    #[test]
+    fn a_zgx_engine_in_its_version_s_folder_is_part_of_the_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().to_path_buf();
+        std::fs::write(directory.join("zeron.exe"), "").unwrap();
+        std::fs::write(directory.join("zeron-version"), "1.0.0").unwrap();
+        let incoming = directory.join(".zeron-update-x").join("zeron.exe");
+        std::fs::create_dir_all(incoming.parent().unwrap()).unwrap();
+        std::fs::write(&incoming, "").unwrap();
+        let engine = |version: &str| {
+            let exe = crate::windows::version_files(&directory, version).join("engine").join("zeron.exe");
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, "").unwrap();
+            exe
+        };
+        let mut update = transaction(Phase::Requested);
+        update.layout = Layout::WindowsFolder { directory: directory.clone(), incoming: incoming.clone() };
+        assert_eq!(update.layout.whoami_of(&engine("1.0.0"), &update), Some(who("1.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&directory.join("zeron.exe"), &update), Some(who("1.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&engine("2.0.0"), &update), Some(who("2.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&incoming, &update), Some(who("2.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&engine("3.0.0"), &update), None);
     }
 
     /// What isn't the installation stays out of its update: a build beside

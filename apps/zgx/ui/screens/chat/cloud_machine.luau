@@ -30,7 +30,9 @@ local function say(key: string, english: string, args: { [string]: any }?): stri
 	return ui.t(`chat.cloud_machine.{key}`, args):get()
 end
 
-export type Notice = { text: string, tone: string?, spinner: boolean?, action: string?, quiet: boolean? }
+-- (`boot`: its machine coming up, which a send waiting for it says in the
+-- transcript instead, as the machine's first setup step: ds/transcript.)
+export type Notice = { text: string, tone: string?, spinner: boolean?, action: string?, quiet: boolean?, boot: boolean? }
 
 -- How long a queued message may wait before it's said, before a waking machine
 -- runs it.
@@ -118,23 +120,24 @@ function M.line(s: any, opts: { intent: boolean? }?): Notice?
 	end
 	if s.stage == "updating" and (state == "ready" or state == "starting" or state == "provisioning") then
 		-- Woken for a message, it installs a release before it answers.
-		return { text = say("updating", "Updating its Cloud machine…"), spinner = true }
+		return { text = say("updating", "Updating its Cloud machine…"), spinner = true, boot = true }
 	elseif s.stage == "slow" and (state == "ready" or state == "starting" or state == "provisioning") then
 		-- Far slower than a normal wake (the edge kicks it meanwhile): said
 		-- plainly, never as a failure.
-		return { text = say("slow", "Waking its Cloud machine is taking longer than usual…"), spinner = true }
+		return { text = say("slow", "Waking its Cloud machine is taking longer than usual…"), spinner = true, boot = true }
 	elseif state == "sleeping" then
 		return { text = say("asleep", "Cloud machine asleep — it wakes when you send"), action = say("wake", "Wake"), quiet = not intent }
 	elseif state == "provisioning" or state == "starting" then
 		local stage = stage_words(s.stage)
 		if stage then
-			return { text = say("waking_stage", `Waking its Cloud machine — {stage}…`, { stage = stage }), spinner = true }
+			return { text = say("waking_stage", `Waking its Cloud machine — {stage}…`, { stage = stage }), spinner = true, boot = true }
 		end
 		return {
 			text = if state == "provisioning"
 				then say("provisioning", "Starting a Cloud machine…")
 				else say("waking", "Waking its Cloud machine…"),
 			spinner = true,
+			boot = true,
 		}
 	elseif state == "stopping" then
 		return { text = say("stopping", "Its Cloud machine is going to sleep…"), spinner = true }
@@ -142,6 +145,14 @@ function M.line(s: any, opts: { intent: boolean? }?): Notice?
 		return { text = say("deleting", "Deleting its Cloud machine…"), spinner = true }
 	end
 	return nil
+end
+
+-- Whether a transcript's newest message is a prompt on its way (its reply
+-- not begun): its machine coming up is said under it then, not in the deck.
+function M.sending_last(list: any): boolean
+	local n = list:len()
+	local last = if n > 0 then list:at(n) else nil
+	return last ~= nil and last.role == "user" and last.waiting == "sending"
 end
 
 -- ── Held sends ─────────────────────────────────────────────────────────────

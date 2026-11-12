@@ -95,6 +95,13 @@ struct Chats {
     /// Chats this window made that the engine's list may not have yet
     /// (`made`): its next list replaces them, or lets them go.
     made_here: RefCell<Vec<String>>,
+    /// New chats on Cloud this window opened before Cloud made them (the
+    /// shipping app's optimistic new chat): shown at once, their first message
+    /// sending, watched once made (`chat.created`).
+    creating: RefCell<HashMap<String, Json>>,
+    /// Sends to a chat still being made (its first message not gone yet):
+    /// shown, sending, and sent in order once its first message has gone.
+    after_create: RefCell<HashMap<String, Vec<Value>>>,
     rpc: RefCell<Option<Rpc>>,
     /// What each chat waiting on its person asks: "approval" or
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
@@ -604,6 +611,9 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &chats)),
             ("waiting", Value::from(self.waiting)),
+            // Still in the engine's outbox, its files uploading: nothing has
+            // gone to its chat yet (a Cloud machine isn't woken for it).
+            ("held", Value::Bool(self.held)),
             // (This device's own copy: its pictures are the files it was
             // sent from, here, which the chat's device never had. The
             // chat's copy, once it comes, is marked `waiting` too until
@@ -777,6 +787,64 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let on = compact.get().truthy();
         c.compact_shown(on);
     }));
+    // A new chat on Cloud, opened before Cloud has made it (the shipping app
+    // selects a new chat and shows its first message at once): known here as
+    // a chat on Cloud, its first message sending (`req`: the send it will
+    // get, `session` its id). `chat.created` watches it once Cloud has made
+    // it; `chat.create_failed` lets it go.
+    let (c, pick) = (chats.clone(), which.clone());
+    host.action("chat.creating", move |req| {
+        let id = req.field("session").map(text).unwrap_or_default();
+        let message_id = req.field("message_id").map(text).unwrap_or_default();
+        if id.is_empty() || message_id.is_empty() {
+            return;
+        }
+        let mut row = json!({ "id": id, "cloud": true });
+        if let Some(project) = req.field("project").map(text).filter(|p| !p.is_empty()) {
+            row["spaceId"] = Json::from(project);
+        }
+        c.creating.borrow_mut().insert(id.clone(), row.clone());
+        c.made(&id, row);
+        let view = pick(&req);
+        let mut pending = view.pending.borrow_mut();
+        let prompts = pending.entry(id).or_default();
+        prompts.retain(|p| p.id != message_id);
+        prompts.push(Pending {
+            id: message_id,
+            words: req.field("text").map(text).unwrap_or_default(),
+            paths: local_paths(&req),
+            waiting: "sending",
+            retry: None,
+            at: stamp(now_seconds()),
+            held: false,
+            row: false,
+            transfers: Vec::new(),
+        });
+    });
+    let c = chats.clone();
+    host.action("chat.created", move |id| {
+        let id = text(&id);
+        if c.creating.borrow_mut().remove(&id).is_none() {
+            return;
+        }
+        for view in c.views() {
+            if view.open_id().as_deref() == Some(id.as_str()) {
+                view.subscribe();
+                view.publish_session();
+            }
+        }
+    });
+    let c = chats.clone();
+    host.action("chat.create_failed", move |id| {
+        let id = text(&id);
+        c.creating.borrow_mut().remove(&id);
+        c.after_create.borrow_mut().remove(&id);
+        c.made_here.borrow_mut().retain(|m| *m != id);
+        c.chats.borrow_mut().remove(&id);
+        for view in c.views() {
+            view.pending.borrow_mut().remove(&id);
+        }
+    });
     let c = chats.clone();
     host.action("chat.catalog", move |_| {
         let c = c.clone();
@@ -792,7 +860,26 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move { crate::plugins::preview::refuse("chat.send")?; v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
+        async move {
+            crate::plugins::preview::refuse("chat.send")?;
+            let first = req.field("fresh").is_some_and(Value::truthy);
+            let id = req.field("session").map(text).unwrap_or_default();
+            let sent = v.send(req).await;
+            // A new chat's first message gone: what was sent to it meanwhile
+            // goes now, in order.
+            if first {
+                loop {
+                    let next = CHATS.with(|c| c.after_create.borrow_mut().remove(&id)).unwrap_or_default();
+                    if next.is_empty() {
+                        break;
+                    }
+                    for later in next {
+                        let _ = v.send(later).await;
+                    }
+                }
+            }
+            sent.map(|_| Value::Nil).map_err(String::from)
+        }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -971,12 +1058,20 @@ impl Chats {
                 frame.apply_to_map(&mut chats);
                 // (One made here and still not in the list goes, as it did
                 // when each list replaced them all.)
+                let creating = me.creating.borrow();
+                let mut kept = Vec::new();
                 for id in me.made_here.borrow_mut().drain(..) {
                     let listed = frame.list.as_array().is_some_and(|rows| rows.iter().any(|r| r["id"].as_str() == Some(&id)));
-                    if !listed && frame.changes.is_some() {
+                    // (One still being made on Cloud stays until the list has it.)
+                    if !listed && let Some(row) = creating.get(&id) {
+                        // (Put back if the list came whole: it replaced them all.)
+                        chats.entry(id.clone()).or_insert_with(|| row.clone());
+                        kept.push(id);
+                    } else if !listed && frame.changes.is_some() {
                         chats.remove(&id);
                     }
                 }
+                me.made_here.borrow_mut().extend(kept);
             }
             me.chats_heard.set(true);
             me.publish_views();
@@ -1734,7 +1829,12 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let was_snapshot = self.snapshot.replace(false);
         self.generation.set(self.generation.get() + 1);
-        let next = id.map(|id| chats.take_let_go(&id).unwrap_or(Open { id, ..Open::default() }));
+        let next = id.map(|id| {
+            // A chat being made has nothing more to come yet: its rows (its
+            // first message) are all there is.
+            let heard = chats.creating.borrow().contains_key(&id);
+            chats.take_let_go(&id).unwrap_or(Open { id, heard, ..Open::default() })
+        });
         let has_rows = next.as_ref().is_some_and(|o| o.heard);
         let old = self.open.replace(next);
         if !was_snapshot {
@@ -1810,6 +1910,10 @@ impl View {
             return;
         };
         let Some(id) = self.open_id() else { return };
+        // (Not made yet: nothing to watch until it is, `chat.created`.)
+        if CHATS.with(|c| c.creating.borrow().contains_key(&id)) {
+            return;
+        }
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
         // (`partPatches`: a long reply's changed parts alone, `apply`'s
@@ -2214,9 +2318,14 @@ impl View {
                 let turn = seconds(&session["startedAt"]).map(|t| t as f64);
                 let running = chats.running(&open.id);
                 let fresh = now_seconds() as f64 - sent < SEND_GRACE_SECONDS;
+                // Still on its way as the engine says (a Cloud machine coming
+                // up for it can take longer than the grace).
+                let awaited = open.waiting.iter().any(|w| {
+                    w["messageId"].as_str().is_some_and(|m| Some(m) == last["id"].as_str()) && w["failure"].is_null()
+                });
                 let waiting = match turn {
                     Some(turn) if running && turn + 1. >= sent => Some(("working", turn)),
-                    _ if running || fresh => Some(("sending", sent)),
+                    _ if running || fresh || awaited => Some(("sending", sent)),
                     _ => None,
                 };
                 if let Some((waiting, since)) = waiting
@@ -2290,7 +2399,11 @@ impl View {
             .unwrap_or_else(new_id);
         // Shown until the transcript has it (the page's own copy kept in
         // step as the list is published again meanwhile), sending.
-        self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending {
+        let mut pending = self.pending.borrow_mut();
+        let prompts = pending.entry(id.clone()).or_default();
+        // (Shown already while its chat was being made: `chat.creating`.)
+        prompts.retain(|p| p.id != message_id);
+        prompts.push(Pending {
             id: message_id.clone(),
             words: words.clone(),
             paths: local_paths(&req),
@@ -2301,7 +2414,14 @@ impl View {
             row: false,
             transfers: Vec::new(),
         });
+        drop(pending);
         self.publish_messages();
+        // To a chat Cloud is still making: after its first message, which
+        // goes once it's made (`chat.send`'s flush).
+        if !fresh && chats.creating.borrow().contains_key(&id) {
+            chats.after_create.borrow_mut().entry(id).or_default().push(req);
+            return Ok(());
+        }
         // What it carries, uploaded to the chat's host.
         let mut paths = Vec::new();
         let mut images = 0;
@@ -4945,6 +5065,10 @@ enum CallKind {
     Fetch,
     Todo,
     Other,
+    /// A Cloud machine's own setup step (`woke`: its wake).
+    Cloud {
+        woke: bool,
+    },
 }
 impl Tally {
     fn of(p: &Json) -> Tally {
@@ -4967,7 +5091,10 @@ impl Tally {
                     "search" | "glob" | "webSearch" => (CallKind::Search, None),
                     "webFetch" => (CallKind::Fetch, None),
                     "todo" => (CallKind::Todo, None),
-                    _ => (CallKind::Other, None),
+                    _ => match cloud_setup_step(p) {
+                        Some(step) => (CallKind::Cloud { woke: step == "wake" }, None),
+                        None => (CallKind::Other, None),
+                    },
                 };
                 Tally::Call {
                     kind,
@@ -4992,6 +5119,9 @@ struct GroupTally {
     fetches: usize,
     todos: usize,
     other: usize,
+    /// A Cloud machine's setup steps (counted in `other` too), and its wakes.
+    cloud: usize,
+    woke: usize,
     failed: usize,
     /// Each file once, however often it was edited: how many edits each.
     edited: HashMap<String, usize>,
@@ -5030,6 +5160,13 @@ impl GroupTally {
                     CallKind::Fetch => step(&mut self.fetches),
                     CallKind::Todo => step(&mut self.todos),
                     CallKind::Other => step(&mut self.other),
+                    CallKind::Cloud { woke } => {
+                        step(&mut self.other);
+                        step(&mut self.cloud);
+                        if *woke {
+                            step(&mut self.woke);
+                        }
+                    }
                     CallKind::Edit => {
                         let path = edited.clone().unwrap_or_default();
                         if add {
@@ -5048,6 +5185,15 @@ impl GroupTally {
     /// The line: its thinking, then what its tools did, then how many failed;
     /// the first letter raised.
     fn text(&self) -> String {
+        // A Cloud machine's setup alone reads as what happened to the machine,
+        // as the shipping app's (zeron_proto `tool_group_summary`).
+        if self.calls > 0 && self.cloud == self.calls && self.thoughts == 0 {
+            let mut line = if self.woke > 0 { "Woke the Cloud machine" } else { "Set up the Cloud machine" }.to_owned();
+            if self.failed > 0 {
+                line.push_str(&format!(" · {} failed", self.failed));
+            }
+            return line;
+        }
         let mut segments: Vec<String> = Vec::new();
         match self.thoughts {
             0 => {}
@@ -5179,6 +5325,16 @@ fn live_tool(id: &str, part: &Json, live: bool) -> Option<Value> {
     built
 }
 
+/// The Cloud machine setup step a tool part records ("start", "wake",
+/// "clone", "branch"), if it is one (zeron_proto `cloud_setup_step`).
+fn cloud_setup_step(part: &Json) -> Option<&str> {
+    let call = &part["call"];
+    if call["kind"].as_str() != Some("unknown") {
+        return None;
+    }
+    call["input"][zeron_proto::CLOUD_SETUP_KEY].as_str()
+}
+
 fn tool_row(part: &Json, live: bool) -> Option<Value> {
     let id = part["id"].as_str()?;
     let (kind, verb, target): (&str, String, Option<String>) = match part["kind"].as_str()? {
@@ -5211,6 +5367,13 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                 "webFetch" => ("web", "Fetched".into(), s("url")),
                 "webSearch" => ("web", "Searched the web".into(), s("query")),
                 "todo" => ("todo", "Updated the plan".into(), None),
+                // A Cloud machine's own setup ("Woke the machine", "Cloned
+                // acme/app"): its name is what it did, the machine's glyph
+                // (git's for its checkout), as the shipping app draws it.
+                "unknown" if cloud_setup_step(part).is_some() => {
+                    let kind = if matches!(cloud_setup_step(part), Some("clone" | "branch")) { "git" } else { "cloud" };
+                    (kind, s("name").unwrap_or_default(), None)
+                }
                 "mcp" => {
                     let tool = s("tool").unwrap_or_default();
                     if tool == "Agent" || tool.starts_with("Agent: ") {
@@ -5288,6 +5451,11 @@ fn call_text(part: &Json) -> Option<String> {
         return None;
     }
     let call = &part["call"];
+    // A Cloud setup step opens to the command it ran (a clone's), never the
+    // step's own bookkeeping.
+    if cloud_setup_step(part).is_some() {
+        return call["input"]["command"].as_str().filter(|c| !c.trim().is_empty()).map(str::to_owned);
+    }
     let s = |k: &str| call[k].as_str().filter(|v| !v.trim().is_empty());
     let input = |head: String| match call.get("input").filter(|v| !v.is_null()) {
         Some(v) => format!("{head}\n{}", serde_json::to_string_pretty(v).unwrap_or_default()),
@@ -5533,6 +5701,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("ask", ask),
         ("queue", Value::List(queue.into())),
         ("waiting", waiting_value(&open.waiting)),
+        // A new chat on Cloud before its machine is known (`chat.creating`).
+        ("cloud", Value::Bool(chat["cloud"].as_bool() == Some(true))),
         ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
     ];
@@ -7155,6 +7325,45 @@ mod tests {
         let (words, paths) = split_attachments(&prompt);
         assert_eq!(words, "");
         assert_eq!(paths, ["/tmp/a.png"]);
+    }
+
+    /// A Cloud machine's own setup (the entry its engine writes under the
+    /// message that woke it) reads as what happened to the machine: each step
+    /// by its name, the machine's glyph or git's, and a clone opening to its
+    /// command, never the step's bookkeeping.
+    #[test]
+    fn a_cloud_machines_setup_reads_as_the_machine() {
+        let step = |id: &str, name: &str, step: &str, command: Option<&str>, error: bool| {
+            let mut input = json!({ "cloudSetup": step });
+            if let Some(c) = command {
+                input["command"] = json!(c);
+            }
+            json!({ "kind": "tool", "id": id, "call": { "kind": "unknown", "name": name, "input": input }, "resolved": true, "isError": error })
+        };
+        let woke = json!({ "id": "m.cloud-setup", "role": "assistant", "status": "streaming", "parts": [
+            step("m.cloud-machine", "Woke the machine", "wake", None, false),
+            step("m.cloud-clone", "Cloned acme/app", "clone", Some("git clone acme/app"), false),
+        ] });
+        let Value::List(woke) = blocks(&woke) else { panic!("no blocks") };
+        assert_eq!(text_of(&woke[0], "summary"), "Woke the Cloud machine");
+        let Some(Value::List(tools)) = woke[0].field("tools") else { panic!("no tools") };
+        assert_eq!(text_of(&tools[0], "kind"), "cloud");
+        assert_eq!(text_of(&tools[0], "verb"), "Woke the machine");
+        assert!(tools[0].field("target").is_none() && tools[0].field("call").is_none());
+        assert_eq!(text_of(&tools[1], "kind"), "git");
+        assert_eq!(text_of(&tools[1], "call"), "git clone acme/app");
+        let started = json!({ "id": "n.cloud-setup", "role": "assistant", "status": "done", "parts": [
+            step("n.cloud-machine", "Started a machine", "start", None, false),
+            step("n.cloud-clone", "Couldn't clone acme/app", "clone", None, true),
+        ] });
+        let Value::List(started) = blocks(&started) else { panic!("no blocks") };
+        assert_eq!(text_of(&started[0], "summary"), "Set up the Cloud machine · 1 failed");
+        // An agent's own unknown tool is still one.
+        let other = json!({ "id": "o", "role": "assistant", "status": "done", "parts": [
+            { "kind": "tool", "id": "t", "call": { "kind": "unknown", "name": "Frobnicate", "input": { "x": 1 } }, "resolved": true, "isError": false },
+        ] });
+        let Value::List(other) = blocks(&other) else { panic!("no blocks") };
+        assert_eq!(text_of(&other[0], "summary"), "Called 1 tool");
     }
 
     #[test]

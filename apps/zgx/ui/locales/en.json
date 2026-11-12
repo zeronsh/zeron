@@ -3047,6 +3047,12 @@
       "slow": "Waking its Cloud machine is taking longer than usual…",
       "resuming_slow": "Resuming — its Cloud machine is taking longer than usual to wake…",
       "the_host": "its computer",
+      "starting": "Starting a Cloud machine…",
+      "waking_stage": "Waking its Cloud machine — {stage}…",
+      "stage_clone": "cloning the repository",
+      "stage_branch": "checking out the branch",
+      "setup_summary": "Set up the Cloud machine",
+      "woke_summary": "Woke the Cloud machine",
       "unreachable": "Interrupted — can't reach {host}"
     }
   },

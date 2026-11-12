@@ -19,7 +19,7 @@ name = "zeron-zgx"
 path = "src/main.rs"
 
 [features]
-# Zeron.app's beta (scripts/package-zgx-beta.sh): this interface as the
+# Zeron.app's beta (scripts/package-zgx-macos.sh): this interface as the
 # Zeron app itself, with the production edge and sign-in only (nothing of
 # staging's built in) and Zeron.app's own engine (the bundle's `Zeron Engine`,
 # ~/.zeron, port 27654), managed as Zeron.app manages it. Without it, the app
@@ -172,8 +172,15 @@ zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
 # (And the terminal bridge's console, src/terminal.rs.)
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["webview2"] }
+
+# zgx's D-Bus (menus, portals) linked in rather than loaded: `zeron` is also
+# what a headless Linux server and every Cloud machine runs (`zeron
+# headless`, which only hands over to `zeron-engine`), and those needn't have
+# libdbus-1.so.3, which the old Zeron never required.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
