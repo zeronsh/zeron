@@ -80,6 +80,7 @@ jobs:
       skip: ${{ steps.plan.outputs.skip }}
       flags: ${{ steps.plan.outputs.flags }}
       pr: ${{ steps.plan.outputs.pr }}
+      integration-trusted: ${{ steps.plan.outputs.integration-trusted }}
     steps:
       # The Rust sources too: the fingerprints scan them for files they read from
       # outside their packages. (~30 MB; root files such as Cargo.lock come with cone mode.)
@@ -247,6 +248,8 @@ jobs:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
       skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).zgx || fromJSON('[]')) }}
       engine-plugins: ${{ contains(fromJSON(needs.plan.outputs.flags).zgx || fromJSON('[]'), 'engine-plugins') }}
+      # zeron/zgx protected as main is (plan.py integration_trusted): only then are its caches saved.
+      integration-trusted: ${{ needs.plan.outputs.integration-trusted == 'true' }}
 
   result:
     name: CI result

@@ -23,6 +23,9 @@ name: zgx tests
 # Caches: written from zeron/zgx only (the integration branch these pull
 # requests go into; main never runs this suite), read by everything. A pull
 # request's own entries would only evict the shared ones (docs/reference/ci.md).
+# And only while zeron/zgx is protected as main is (pull request required, no
+# force push; plan.py integration_trusted): otherwise anyone who can push to it
+# could save what the pull requests into it restore and run.
 on:
   workflow_call:
     inputs:
@@ -38,6 +41,10 @@ on:
         description: Also the engine's plugin tests on macOS.
         type: boolean
         default: true
+      integration-trusted:
+        description: zeron/zgx is protected as main is (plan.py), so a push to it may save the caches.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,8 +54,8 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   # The zgx CLI without Luau's asserts (they slow scripts by about a fifth).
   LUAU_CXXFLAGS: -DNDEBUG
-  # Who may write the shared caches: the integration branch.
-  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' }}
+  # Who may write the shared caches: the integration branch, while it's protected.
+  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}
 
 jobs:
   zgx-linux:

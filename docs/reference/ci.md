@@ -115,6 +115,28 @@ tier, so each merge costs what its pull request did. Its passes and caches
 serve the pull requests into it, which reuse its passes as well as `main`'s.
 Its zgx caches (`zgx-tests`, the zgx CLI, Ghostty) are saved from there only.
 
+**Only while it's protected as `main` is.** Anyone who can push to an
+unprotected branch could record a pass, or save a cache, that every pull
+request into it then trusts, and runs. So `plan.py` (`integration_trusted`)
+reads the branch's rules on each push to it and each pull request into it
+(`GET /repos/{repo}/rules/branches/zeron%2Fzgx`; readable with the plan job's
+token, as the repository is public, so no extra permission) and trusts it
+only if they include both `pull_request` (changes only through a pull
+request) and `non_fast_forward` (no force push), or, if readable, classic
+branch protection requires pull request reviews and blocks force pushes. On
+any error it doesn't (fail closed). Otherwise pull requests into it reuse
+`main`'s passes only, its pushes record passes nobody trusts, and its caches
+aren't saved: `plan` outputs `integration-trusted`, which `ci.yml` passes to
+`zgx-tests.yml`, whose
+`SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}`.
+
+An admin has to set this up: give `zeron/zgx` `main`'s ruleset ("Protect
+main": add `refs/heads/zeron/zgx` to its target branches, or a ruleset of its
+own targeting it, enforcement active) with at least **Require a pull request
+before merging** and **Block force pushes** (`main`'s also restricts
+deletions and updates). Until then (no ruleset targets it today) its passes
+and caches don't count.
+
 The `zgx` suite (`zgx-tests.yml`):
 
 | Job | Runs on a pull request |
@@ -440,7 +462,9 @@ after Linux core.
 The keep set adds up to about 9.4 GB, so the budget is 9.5 GB of the 10:
 `test_ci_caches.py` fails if the declared sizes exceed it. The zgx families
 are saved only from `zeron/zgx` (zgx's suite isn't on `main` yet), through
-`zgx-tests.yml`'s `SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' }}`.
+`zgx-tests.yml`'s
+`SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}`,
+and only while it's protected (see [The zgx interface](#the-zgx-interface-zeronzgx)).
 Pass records are a few hundred bytes and needed wherever CI runs, pull
 requests included, so any ref may save them. They don't count against the
 budget (any pull request, a fork's too, can save any number of them, and they

@@ -196,6 +196,64 @@ class PlanTests(unittest.TestCase):
                          {"linux": 1, "windows": 0, "macos": 0})
 
 
+class IntegrationTrustTests(unittest.TestCase):
+    """zeron/zgx's passes and caches count only while it is protected as main is."""
+
+    MAIN_RULES = [{"type": "deletion"}, {"type": "non_fast_forward"},
+                  {"type": "pull_request", "parameters": {"required_approving_review_count": 1}}, {"type": "update"}]
+
+    def test_protected_needs_a_pull_request_and_no_force_push(self):
+        self.assertTrue(plan.protected(self.MAIN_RULES))
+        self.assertTrue(plan.protected([{"type": "pull_request"}, {"type": "non_fast_forward"}]))
+        self.assertFalse(plan.protected([]))  # no ruleset (zeron/zgx today)
+        self.assertFalse(plan.protected([{"type": "pull_request"}]))  # force pushes allowed
+        self.assertFalse(plan.protected([{"type": "non_fast_forward"}, {"type": "deletion"}]))  # direct pushes
+        for unreadable in (None, {"message": "Not Found"}, "x", [None, "pull_request"]):
+            self.assertFalse(plan.protected(unreadable), unreadable)
+        # Classic branch protection, when readable.
+        classic = {"required_pull_request_reviews": {"required_approving_review_count": 1},
+                   "allow_force_pushes": {"enabled": False}}
+        self.assertTrue(plan.protected([], classic))
+        self.assertFalse(plan.protected([], dict(classic, allow_force_pushes={"enabled": True})))
+        self.assertFalse(plan.protected([], {"allow_force_pushes": {"enabled": False}}))
+        self.assertFalse(plan.protected([], {"required_pull_request_reviews": {}}))
+
+    def check(self, responses, ref="refs/heads/zeron/zgx"):
+        calls = []
+
+        def fake(path):
+            calls.append(path)
+            for part, answer in responses.items():
+                if part in path:
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+            raise AssertionError(path)
+
+        old = plan.api
+        plan.api = fake
+        try:
+            return plan.integration_trusted("o/r", ref), calls
+        finally:
+            plan.api = old
+
+    def test_integration_trusted(self):
+        import urllib.error
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        trusted, calls = self.check({"/rules/branches/": self.MAIN_RULES})
+        self.assertTrue(trusted)
+        self.assertEqual(calls, ["/repos/o/r/rules/branches/zeron%2Fzgx?per_page=100"])
+        self.assertEqual(self.check({"/rules/branches/": [], "/protection": not_found})[0], False)
+        self.assertEqual(self.check({"/rules/branches/": not_found, "/protection": not_found})[0], False)
+        self.assertEqual(self.check({"/rules/branches/": OSError("timeout"), "/protection": OSError("x")})[0],
+                         False)  # fail closed
+        classic = {"required_pull_request_reviews": {}, "allow_force_pushes": {"enabled": False}}
+        self.assertEqual(self.check({"/rules/branches/": [], "/protection": classic})[0], True)
+        # Main needs no lookup; other branches are never integration branches.
+        self.assertEqual(self.check({}, "refs/heads/main"), (True, []))
+        self.assertEqual(self.check({}, "refs/heads/feature"), (False, []))
+
+
 class WorkflowConsistencyTests(unittest.TestCase):
     """SUITE_JOBS must match the jobs the reusable workflows start."""
 

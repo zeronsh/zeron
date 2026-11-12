@@ -275,7 +275,8 @@ class ReusePlanTests(unittest.TestCase):
 class PlanMainTests(unittest.TestCase):
     """plan.py end to end on a fake repository and API."""
 
-    def run_plan(self, event, payload, caches, labels=(), files=None, head_repo="o/r", extra_env=None):
+    def run_plan(self, event, payload, caches, labels=(), files=None, head_repo="o/r", extra_env=None,
+                 base="main", ref="refs/pull/3/merge", rules=None):
         repo = FakeRepo()
         self.addCleanup(repo.dir.cleanup)
         out = pathlib.Path(repo.root, "out")
@@ -286,14 +287,18 @@ class PlanMainTests(unittest.TestCase):
         def fake_api(path):
             if "/actions/caches" in path:
                 return {"actions_caches": caches}
+            if "/rules/branches/" in path:
+                return rules if rules is not None else []
+            if path.endswith("/protection"):
+                raise OSError("HTTP 404")
             if path.endswith("/files?per_page=100&page=1"):
                 return files
             if "/pulls/" in path:
                 return {"number": 3, "changed_files": 1, "labels": [{"name": n} for n in labels],
-                        "head": {"repo": {"full_name": head_repo} if head_repo else None}}
+                        "head": {"repo": {"full_name": head_repo} if head_repo else None}, "base": {"ref": base}}
             return {"files": files}
 
-        env = {"GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": "refs/pull/3/merge",
+        env = {"GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": ref,
                "GITHUB_EVENT_PATH": str(event_path), "GITHUB_OUTPUT": str(out), "GITHUB_TOKEN": "t"}
         old_env, old_api, cwd = dict(os.environ), plan.api, os.getcwd()
         packages, inputs = dict(reuse.SUITE_PACKAGES), dict(reuse.SUITE_INPUTS)
@@ -371,6 +376,29 @@ class PlanMainTests(unittest.TestCase):
         self.assertTrue(json.loads(full["suites"])["core"])
         main = self.run_plan("push", {"before": "a" * 40, "after": "b" * 40}, caches)
         self.assertTrue(json.loads(main["suites"])["core"])
+
+    def test_zeron_zgx_passes_count_only_while_it_is_protected(self):
+        protected = [{"type": "pull_request"}, {"type": "non_fast_forward"}]
+        pull = {"pull_request": {"number": 3}}
+        first = self.run_plan("pull_request", pull, [], base="zeron/zgx")
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/heads/zeron/zgx"}]
+        into = self.run_plan("pull_request", pull, caches, base="zeron/zgx", rules=protected)
+        self.assertFalse(json.loads(into["suites"])["core"])  # zeron/zgx's pass reused
+        self.assertEqual(into["integration-trusted"], "true")
+        unprotected = self.run_plan("pull_request", pull, caches, base="zeron/zgx", rules=[])
+        self.assertTrue(json.loads(unprotected["suites"])["core"])
+        self.assertEqual(unprotected["integration-trusted"], "false")
+        # A push to it: its own passes only when protected (main's always), and the flag that
+        # lets zgx-tests.yml save its caches.
+        push = {"before": "a" * 40, "after": "b" * 40}
+        on = self.run_plan("push", push, caches, ref="refs/heads/zeron/zgx", rules=protected)
+        self.assertEqual((json.loads(on["suites"])["core"], on["integration-trusted"]), (False, "true"))
+        off = self.run_plan("push", push, caches, ref="refs/heads/zeron/zgx", rules=[{"type": "pull_request"}])
+        self.assertEqual((json.loads(off["suites"])["core"], off["integration-trusted"]), (True, "false"))
+        mains = [dict(caches[0], ref="refs/heads/main")]
+        self.assertFalse(json.loads(self.run_plan("push", push, mains, ref="refs/heads/zeron/zgx",
+                                                  rules=[])["suites"])["core"])
+        self.assertEqual(self.run_plan("push", push, [], ref="refs/heads/main")["integration-trusted"], "false")
 
 
 if __name__ == "__main__":

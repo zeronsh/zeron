@@ -18,6 +18,11 @@ environment (see main()); outputs are written to $GITHUB_OUTPUT:
   flags        JSON object, suite -> optional steps to run (fast tier: only
                for their own files): ui "browser", macos "fixtures"
   pr           the pull request number (pull requests only), for the admit job name
+  integration-trusted
+               "true" when the run is a push to, or a pull request into, an
+               integration branch other than main (zeron/zgx) that is protected
+               as main is (integration_trusted): only then do its passes count
+               and its caches get saved (zgx-tests.yml's SAVE_CACHES)
 
 Reuse. A selected suite whose inputs (scripts/ci/reuse.py) are unchanged since
 its jobs passed, on this pull request or on main, is skipped, as are single
@@ -44,6 +49,7 @@ import re
 import subprocess
 import sys
 import urllib.request
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reuse  # noqa: E402
@@ -81,6 +87,11 @@ SPLITTABLE = ("voice", "windows", "zgx")
 # to one records its suites' passes and saves their caches; a pull request
 # into one reuses its passes (and main's).
 INTEGRATION = ("refs/heads/main", "refs/heads/zeron/zgx")
+# ...but one other than main only when it is protected as main is: changes only
+# through a pull request, and no force push (integration_trusted). Otherwise
+# anyone who can push to it could record a pass, or save a cache, that the pull
+# requests into it trust. Rule types of GET /repos/{repo}/rules/branches/{branch}.
+PROTECTION_RULES = frozenset({"pull_request", "non_fast_forward"})
 
 CARGO = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 CI_SELF = [
@@ -400,6 +411,51 @@ def api(path: str):
         return json.load(response)
 
 
+def protected(rules, classic=None) -> bool:
+    """Whether a branch is protected as main is: changes only through a pull
+    request and no force push.
+
+    `rules`: what GET /repos/{repo}/rules/branches/{branch} returned (the active
+    rulesets' rules for it), which must include both PROTECTION_RULES. `classic`:
+    GET /repos/{repo}/branches/{branch}/protection (classic branch protection,
+    readable only with administration access): required pull request reviews
+    and force pushes off. Anything else, or unreadable (None): not protected.
+    """
+    if isinstance(rules, list):
+        types = {rule.get("type") for rule in rules if isinstance(rule, dict)}
+        if PROTECTION_RULES <= types:
+            return True
+    if isinstance(classic, dict):
+        reviews = classic.get("required_pull_request_reviews")
+        force = classic.get("allow_force_pushes")
+        if isinstance(reviews, dict) and isinstance(force, dict) and force.get("enabled") is False:
+            return True
+    return False
+
+
+def integration_trusted(repo: str, ref: str) -> bool:
+    """Whether `ref`'s passes and caches count: main always, another INTEGRATION
+    branch only while protected (fail closed: an API error is no)."""
+    if ref == "refs/heads/main":
+        return True
+    if ref not in INTEGRATION:
+        return False
+    branch = quote(ref.removeprefix("refs/heads/"), safe="")
+    try:
+        # (Public repositories: readable with any token; the job's metadata permission.)
+        rules = api(f"/repos/{repo}/rules/branches/{branch}?per_page=100")
+    except (OSError, ValueError) as error:
+        print(f"::warning::could not read {ref}'s rules ({error})")
+        rules = None
+    if protected(rules):
+        return True
+    try:
+        classic = api(f"/repos/{repo}/branches/{branch}/protection")
+    except (OSError, ValueError):
+        classic = None  # (404 without protection, 403/404 without administration access)
+    return protected(rules, classic)
+
+
 def pull_request_files(repo: str, number: int, expected: int) -> list[dict] | None:
     files: list[dict] = []
     page = 1
@@ -438,6 +494,8 @@ def main() -> int:
     why = ""
     # Refs whose recorded passes this run may reuse (none: run everything selected).
     trusted: set[str] = set()
+    # A push to, or pull request into, a protected integration branch other than main.
+    integration_ok = False
     try:
         if event == "pull_request":
             # The pull request as it is now (not as in the event), so adding `ci:full`
@@ -456,9 +514,17 @@ def main() -> int:
                 head_repo = (pr.get("head", {}).get("repo") or {}).get("full_name")
                 fork = head_repo != repo
                 own = not fork or os.environ.get("CI_FORK_REUSE", "") == "own"
-                # Main's passes, and those of the integration branch it goes into (zeron/zgx).
+                # Main's passes, and those of the integration branch it goes into (zeron/zgx)
+                # if it's protected as main is.
                 base = f"refs/heads/{(pr.get('base') or {}).get('ref', '')}"
-                integration = {"refs/heads/main"} | ({base} if base in INTEGRATION else set())
+                integration = {"refs/heads/main"}
+                if base in INTEGRATION and base != "refs/heads/main":
+                    integration_ok = integration_trusted(repo, base)
+                    if integration_ok:
+                        integration.add(base)
+                    else:
+                        print(f"::notice::{base} isn't protected as main is (pull request required, no "
+                              "force push): only main's passes are reused")
                 trusted = ({ref} | integration) if own else integration
                 if os.environ.get("CI_PR_TIER", "fast") == "full":
                     why = "CI_PR_TIER=full"
@@ -466,7 +532,13 @@ def main() -> int:
                     tier = "fast"
             files = pull_request_files(repo, pr["number"], pr.get("changed_files", 0))
         elif event == "push":
-            trusted = {ref} if ref in INTEGRATION else {"refs/heads/main"}
+            # An unprotected integration branch's pushes record passes nobody trusts.
+            if ref in INTEGRATION and ref != "refs/heads/main":
+                integration_ok = integration_trusted(repo, ref)
+                if not integration_ok:
+                    print(f"::notice::{ref} isn't protected as main is (pull request required, no force "
+                          "push): its passes aren't trusted and its caches aren't saved")
+            trusted = {ref} if ref == "refs/heads/main" or integration_ok else {"refs/heads/main"}
             # zeron/zgx: the pull request rules (platform suites only for platform
             # changes), so each merge costs what its pull request did; its passes
             # and caches serve the next pull requests into it. Main stays full.
@@ -531,6 +603,8 @@ def main() -> int:
         "flags": json.dumps(flags, separators=(",", ":")),
         # The admit job names its pull request, for ci:priority and ci:lock (scripts/ci/admit.py).
         "pr": str(payload["pull_request"]["number"]) if event == "pull_request" else "",
+        # zgx-tests.yml saves its caches only on a protected zeron/zgx (SAVE_CACHES).
+        "integration-trusted": "true" if integration_ok else "false",
     }
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         for key, value in out.items():

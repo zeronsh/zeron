@@ -155,6 +155,11 @@ class Lint(unittest.TestCase):
         self.assertCaught(self.one(steps, name="zgx-linux"), "SAVE_CACHES isn't defined", count=2)
         errors = self.one(steps, name="zgx-linux", header="env:\n  SAVE_CACHES: true\n")
         self.assertIn("SAVE_CACHES must be", errors[0])
+        # Narrowed to a protected zeron/zgx (plan.py integration_trusted): the same ref.
+        narrowed = "env:\n  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}\n"
+        self.assertEqual(self.one(steps, name="zgx-linux", header=narrowed), [])
+        widened = "env:\n  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' || inputs.integration-trusted }}\n"
+        self.assertIn("SAVE_CACHES must be", self.one(steps, name="zgx-linux", header=widened)[0])
 
     def test_actions_cache_is_refused(self):
         self.assertCaught(self.one(f"""

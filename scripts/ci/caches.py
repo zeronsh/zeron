@@ -562,9 +562,11 @@ REF_GATES = {
     "github.ref == 'refs/heads/main'": MAIN,
     "env.SAVE_CACHES == 'true'": "env.SAVE_CACHES",
 }
-# SAVE_CACHES (zgx-tests.yml on zeron/zgx): the ref it names.
+# SAVE_CACHES (zgx-tests.yml on zeron/zgx): the ref it names. (`&& inputs.integration-trusted`:
+# only while zeron/zgx is protected, plan.py's integration_trusted; it narrows, never widens.)
 SAVE_CACHES_VALUES = {
     "github.ref == 'refs/heads/zeron/zgx'": ZGX,
+    "github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted": ZGX,
     "github.ref == 'refs/heads/main'": MAIN,
 }
 TOGGLE = re.compile(r"^inputs\.([\w-]+) == 'true'$")
