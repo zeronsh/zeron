@@ -318,6 +318,10 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "global", "plugins.words.permission.web.title")
 	elseif permission == "windows" then
 		return line(false, "monitor", "plugins.words.permission.windows.title")
+	elseif permission == "fonts" then
+		-- (A family Zeron draws in, given a face of the plugin's, changes
+		-- how Zeron's own text looks: said so.)
+		return line(false, "wrap-text", "plugins.words.permission.fonts.title", "plugins.words.permission.fonts.detail")
 	elseif permission == "tools" then
 		-- Each tool by name, with what it tells your agents (their words
 		-- reach every agent's list of tools).
