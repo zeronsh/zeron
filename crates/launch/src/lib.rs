@@ -219,10 +219,61 @@ pub fn exec_helper(app_exe: &Path, args: impl IntoIterator<Item = OsString>) -> 
     }
     #[cfg(not(unix))]
     {
-        match command.status() {
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => return error,
+        };
+        // Only for an update's trial (`ZERON_INSTALLED_AT`, crates/update):
+        // otherwise this one must outlive the helper's own clean shutdown
+        // (Ctrl+C reaches both, and a job would cut the helper's short).
+        #[cfg(windows)]
+        if std::env::var_os("ZERON_INSTALLED_AT").is_some() {
+            ends_with_this_process(&child);
+        }
+        match child.wait() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(error) => error,
         }
+    }
+}
+
+/// Windows can't replace a process, so this one waits on the helper in its
+/// place. In an update's trial, whatever stops this one must stop the helper
+/// too: the watchdog ends a failed trial by terminating the process it
+/// started, which is this one, and the helper (the engine) must not outlive
+/// it to hold the data the old version is restoring. A job that ends with this process does
+/// it, however it ends. What the helper starts in turn (agents, its own
+/// successor) leaves the job. Best effort: without a job, it's as before.
+#[cfg(windows)]
+fn ends_with_this_process(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    // SAFETY: plain Win32 calls on a job handle created here and the child's
+    // live process handle; the information struct is zeroed and sized.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if set == 0 || AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
+            CloseHandle(job);
+        }
+        // Otherwise the handle stays open for this process's life: closing it,
+        // at its end, is what ends the helper.
     }
 }
 

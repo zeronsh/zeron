@@ -130,9 +130,7 @@ failures are in `scripts/ci/zgx-known-failures.txt`, Windows' under
 Windows-specific regressions go in `zgx-windows-tests.txt`, not a workflow of
 their own, so they run under plan and admission.
 
-Betas (`zgx-beta.yml`) build each platform's engine and interface in parallel
-jobs, then package. On macOS only the signing job waits for `apple-release`'s
-approval, so it can be approved while the builds run. Betas save no GitHub
+Betas and stable releases build through `zgx-build.yml` and save no GitHub
 caches: a tag run can't read another tag's, and theirs evicted `main`'s.
 
 ### Scheduled runs
