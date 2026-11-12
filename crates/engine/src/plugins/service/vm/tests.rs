@@ -295,3 +295,132 @@ fn json_round_trips_through_luau() {
         assert_eq!(back, expected);
     }
 }
+
+const MEASURING: &str = r#"
+local zeron = require("./zeron")("svc")
+
+zeron.serve("measure", function(args)
+	local w, h = zeron.measure_text(args.text, args.opts)
+	return { w, h }
+end)
+
+zeron.serve("load", function(args)
+	local ok, families = pcall(zeron.load_font, args.path)
+	return if ok then families else tostring(families)
+end)
+"#;
+
+/// The width and height a window's canvas measures (`c:measure_text`:
+/// `Scene::measure_text_with_font` on a scene with zgx-gpu's text, over the
+/// system's fonts and the app's), with `more` fonts beside them.
+fn as_a_window_measures(text: &str, size: f32, width: Option<f32>, font: &zgx::text_layout::FontStyle, more: &[&[u8]]) -> Json {
+    let services = zgx_gpu::TextServices::new();
+    for bytes in text::APP_FONTS.iter().chain(more) {
+        let font = zgx_gpu::text::FontData::new(Arc::<[u8]>::from(*bytes)).unwrap();
+        font.install(&mut services.text_system().borrow_mut());
+    }
+    let mut scene = zgx::scene::Scene::new(0., 0.);
+    services.install(&mut scene);
+    let (w, h) = scene.measure_text_with_font(text, size, width, font);
+    // As the service answers: whole numbers as integers.
+    json!([number(w as f64), number(h as f64)])
+}
+
+fn font(family: zgx::text_layout::FontFamily, weight: u16, italic: bool) -> zgx::text_layout::FontStyle {
+    zgx::text_layout::FontStyle {
+        family,
+        weight,
+        italic,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_service_measures_text_as_a_window_does() {
+    use zgx::text_layout::{FontFamily, LetterSpacing, LineHeight};
+    let dir = folder(&[("service.luau", MEASURING)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let measure = async |text: &str, opts: Json| ask(&vm, "measure", json!({ "text": text, "opts": opts })).await.unwrap().unwrap();
+
+    // What Zeron's window measured on a canvas for the app's Geist: 29.58 by 23.
+    let time = measure("9:41", json!({ "font": "Geist", "size": 16 })).await;
+    assert!((time[0].as_f64().unwrap() - 29.58).abs() < 0.01, "{time}");
+    assert_eq!(time[1], 23, "{time}");
+
+    let line = "The quick brown fox jumps over the lazy dog";
+    let geist = || FontFamily::Named("Geist".into());
+    let serif = || FontFamily::Named("Instrument Serif".into());
+    for (opts, size, width, style) in [
+        (json!({ "font": "Geist", "size": 12 }), 12., None, font(geist(), 400, false)),
+        (json!({ "font": "Geist", "size": 34, "weight": 700 }), 34., None, font(geist(), 700, false)),
+        (json!({ "font": "Geist", "size": 16, "italic": true }), 16., None, font(geist(), 400, true)),
+        (json!({ "font": "Instrument Serif", "size": 48 }), 48., None, font(serif(), 400, false)),
+        (json!({ "font": "mono", "size": 13 }), 13., None, font(FontFamily::Monospace, 400, false)),
+        (json!({}), 12., None, font(FontFamily::SansSerif, 400, false)),
+        (json!({ "font": "Geist", "size": 14, "width": 120 }), 14., Some(120.), font(geist(), 400, false)),
+        (
+            json!({ "font": "Geist", "size": 14, "width": 120, "line_height": 30, "letter_spacing": 2 }),
+            14.,
+            Some(120.),
+            zgx::text_layout::FontStyle {
+                line_height: LineHeight::px(30.),
+                letter_spacing: LetterSpacing::px(2.),
+                ..font(geist(), 400, false)
+            },
+        ),
+    ] {
+        let window = as_a_window_measures(line, size, width, &style, &[]);
+        assert_eq!(measure(line, opts.clone()).await, window, "{opts}");
+    }
+
+    // Wrapped, it's taller than one line, and each line is 30 points apart.
+    let tall = measure(line, json!({ "font": "Geist", "size": 14, "width": 120, "line_height": 30 })).await;
+    assert_eq!(tall[1].as_f64().unwrap() % 30., 0., "{tall}");
+    assert!(tall[1].as_f64().unwrap() >= 90., "{tall}");
+}
+
+#[tokio::test]
+async fn a_family_it_lacks_falls_back_as_in_a_window() {
+    let dir = folder(&[("service.luau", MEASURING)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let measure = async |opts: Json| ask(&vm, "measure", json!({ "text": "WWWWiiii 0123", "opts": opts })).await.unwrap();
+    let missing = measure(json!({ "font": "NoSuchFontXYZ", "size": 20 })).await.unwrap();
+    let style = font(zgx::text_layout::FontFamily::Named("NoSuchFontXYZ".into()), 400, false);
+    assert_eq!(missing, as_a_window_measures("WWWWiiii 0123", 20., None, &style, &[]));
+    // Every family it lacks falls back to the same face.
+    assert_eq!(missing, measure(json!({ "font": "AnotherMissingFamily", "size": 20 })).await.unwrap());
+
+    match measure(json!({ "width": 0 })).await {
+        Err(Failure::Error(why)) => assert!(why.contains("`width` is a number of points above 0"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_service_measures_in_its_plugins_fonts() {
+    // Geist's bold italic: not among the app's fonts.
+    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../ui/assets/fonts/Geist-BoldItalic.ttf");
+    let dir = folder(&[("service.luau", MEASURING), ("fonts/not-a-font.ttf", "hello")]);
+    std::fs::write(dir.path().join("fonts/Geist-BoldItalic.ttf"), BOLD_ITALIC).unwrap();
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let text = "Find your still point";
+    let opts = json!({ "font": "Geist", "size": 34, "weight": 700, "italic": true });
+    let style = font(zgx::text_layout::FontFamily::Named("Geist".into()), 700, true);
+    let measure = async || ask(&vm, "measure", json!({ "text": text, "opts": opts })).await.unwrap().unwrap();
+    let load = async |path: &str| ask(&vm, "load", json!({ "path": path })).await.unwrap().unwrap();
+
+    let before = measure().await;
+    assert_eq!(before, as_a_window_measures(text, 34., None, &style, &[]));
+    assert_eq!(load("fonts/Geist-BoldItalic.ttf").await, json!(["Geist"]));
+    let after = measure().await;
+    assert_ne!(after, before);
+    assert_eq!(after, as_a_window_measures(text, 34., None, &style, &[BOLD_ITALIC]));
+
+    let refused = load("fonts/not-a-font.ttf").await;
+    assert!(refused.as_str().unwrap().contains("invalid or unsupported"), "{refused}");
+    let outside = load("../outside.ttf").await;
+    assert!(outside.as_str().unwrap().contains("isn't in the plugin"), "{outside}");
+}

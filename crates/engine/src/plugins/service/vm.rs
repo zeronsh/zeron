@@ -26,6 +26,8 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use serde_json::Value as Json;
 use tokio::sync::oneshot;
 
+mod text;
+
 const PRELUDE: &str = include_str!("prelude.luau");
 /// A source file, at most.
 const MAX_SCRIPT_BYTES: usize = 1 << 20;
@@ -799,6 +801,24 @@ fn natives(
                 write_replace(path, &bytes).map_err(|e| mlua::Error::runtime(format!("zeron.store: couldn't save: {e}")))?;
             }
             Ok(())
+        })?,
+    )?;
+
+    // `zeron.measure_text` and `zeron.load_font` (vm/text.rs).
+    let text = Rc::new(text::Text::default());
+    let measure = text.clone();
+    host.set(
+        "measure_text",
+        lua.create_function(move |_, (words, options): (String, Option<Table>)| {
+            let (size, width, font) = text::style(options.as_ref())?;
+            Ok(measure.measure(&words, size, width, &font))
+        })?,
+    )?;
+    let root = spec.dir.clone();
+    host.set(
+        "load_font",
+        lua.create_function(move |_, rel: String| {
+            text.load(&root, &rel).map_err(|why| mlua::Error::runtime(format!("zeron.load_font: {why}")))
         })?,
     )?;
     Ok(host)
