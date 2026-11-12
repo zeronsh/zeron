@@ -23,10 +23,18 @@
 //! The engine's edge, sign-in client and loopback port come from here (the
 //! engine this app starts is given them, src/engine/manager.rs).
 //!
-//! Zeron.app's beta (the `beta` feature) is production's only: edge.zeron.sh,
-//! its client and port 27641 (the only loopback production's WorkOS client
-//! accepts, shared with Zeron.app). It has no staging built in, and the
-//! variables below do nothing in it.
+//! Zeron.app's beta (the `beta` feature) is production's: edge.zeron.sh, its
+//! client and port 27641 (the only loopback production's WorkOS client
+//! accepts, shared with Zeron.app), unless the engine's own variables name
+//! another, as they do for `zeron` itself (crates/cli's env.rs: self-hosting):
+//!   ZERON_EDGE_URL=<url>           the edge
+//!   ZERON_WORKOS_CLIENT_ID=<id>    the sign-in client
+//!   ZERON_CALLBACK_PORT=<n>        the loopback port that client redirects to
+//! The engine it starts on Zeron.app's data is given the same, so a session
+//! `zeron` keeps there goes on working: started with production's instead,
+//! the engine handed that session to production, which turned it down, and
+//! signed out. It has no staging built in, and the variables below do nothing
+//! in it.
 //!
 //! Development builds are staging's by default, production one variable
 //! away:
@@ -129,17 +137,30 @@ pub fn endpoint() -> Endpoint {
     endpoint_with(|key| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty()))
 }
 
-/// The beta's: production's, whatever the environment says. Nothing
-/// of staging's is built into it (`STAGING` isn't), and no variable reaches
-/// another edge, client or port.
+/// The beta's: production's, or the edge, sign-in client and loopback port
+/// the engine's own variables name, as `zeron` reads them (an edge alone
+/// keeps production's client and port). Nothing of staging's is built into
+/// it (`STAGING` isn't), and the development variables reach nothing.
 #[cfg(feature = "beta")]
-fn endpoint_with(_var: impl Fn(&str) -> Option<String>) -> Endpoint {
-    production()
+pub(crate) fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
+    let edge = var("ZERON_EDGE_URL").unwrap_or_else(|| PRODUCTION.edge.into());
+    let edge = edge.trim_end_matches('/').to_owned();
+    let client = var("ZERON_WORKOS_CLIENT_ID").unwrap_or_else(|| PRODUCTION.client.into());
+    let port = var("ZERON_CALLBACK_PORT").and_then(|p| p.parse().ok());
+    let port = port.unwrap_or(PRODUCTION.port);
+    let custom = (edge.as_str(), client.as_str(), port)
+        != (PRODUCTION.edge, PRODUCTION.client, PRODUCTION.port);
+    Endpoint {
+        name: if custom { "custom" } else { PRODUCTION.name },
+        edge,
+        client,
+        port,
+    }
 }
 
 /// A development build's: staging's by default, or as the variables say.
 #[cfg(not(feature = "beta"))]
-fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
+pub(crate) fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
     let base = match var("ZERON_ZGX_ENV").as_deref() {
         Some("production" | "prod") => &PRODUCTION,
         _ => &STAGING,
@@ -157,6 +178,7 @@ fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
 }
 
 /// Production's edge, sign-in client and loopback port.
+#[cfg(test)]
 pub fn production() -> Endpoint {
     Endpoint {
         name: PRODUCTION.name,
@@ -183,7 +205,8 @@ mod endpoint_tests {
 
     #[cfg(feature = "beta")]
     #[test]
-    fn a_beta_build_is_production_only() {
+    fn a_beta_build_is_production_unless_the_engines_variables_say() {
+        // Staging's development variables reach nothing.
         for vars in [staging_vars as fn(&str) -> Option<String>, |_: &str| None] {
             let at = endpoint_with(vars);
             assert_eq!(
@@ -191,7 +214,29 @@ mod endpoint_tests {
                 ("production", "https://edge.zeron.sh", "client_01KWD0EAKZKD50YCQJNYSRE4BY", 27641)
             );
         }
-        assert_eq!(endpoint().edge, "https://edge.zeron.sh");
+        // `zeron`'s own (self-hosting): the engine this app starts keeps
+        // the session `zeron` signed in to there.
+        let at = endpoint_with(|key| match key {
+            "ZERON_EDGE_URL" => Some("https://edge.example.com/".into()),
+            "ZERON_WORKOS_CLIENT_ID" => Some("client_self_hosted".into()),
+            "ZERON_CALLBACK_PORT" => Some("27700".into()),
+            _ => None,
+        });
+        assert_eq!(at.name, "custom");
+        assert_eq!(at.edge, "https://edge.example.com");
+        assert_eq!(at.client, "client_self_hosted");
+        assert_eq!(at.port, 27700);
+        // An edge alone keeps production's client and port, as the engine does.
+        fn edge_only(edge: &'static str) -> impl Fn(&str) -> Option<String> {
+            move |key| (key == "ZERON_EDGE_URL").then(|| edge.into())
+        }
+        let at = endpoint_with(edge_only("https://edge.example.com"));
+        assert_eq!(at.name, "custom");
+        assert_eq!(at.client, PRODUCTION.client);
+        assert_eq!(at.port, PRODUCTION.port);
+        // Production's, named: production.
+        let at = endpoint_with(edge_only("https://edge.zeron.sh/"));
+        assert_eq!(at.name, "production");
     }
 
     #[cfg(not(feature = "beta"))]

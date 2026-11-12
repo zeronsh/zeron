@@ -9,12 +9,12 @@
 //! data in `ZERON_DATA_DIR` or ~/.zeron (crates/cli's paths), on
 //! `ZERON_IPC_PORT` or 27654. One already serving that port is used as it is
 //! (the shipping app's, before this one was installed). It signs in against
-//! production only (src/auth.rs), and a staging engine (port 27871,
-//! ~/.zeron-staging) or any other edge is refused. No more devices, no other
-//! data: the same engine as before the beta. When the bundle is replaced by a
-//! newer one, the engine restarts into it by itself once nothing runs
-//! (crates/update `SupersededRestart`, weighing the bundle's
-//! `ZeronEngineVersion`).
+//! production, or the edge the engine's own variables name, as `zeron` does
+//! (src/auth.rs); a staging engine (port 27871, ~/.zeron-staging) or any
+//! other edge is refused. No more devices, no other data: the same engine as
+//! before the beta. When the bundle is replaced by a newer one, the engine
+//! restarts into it by itself once nothing runs (crates/update
+//! `SupersededRestart`, weighing the bundle's `ZeronEngineVersion`).
 //!
 //! **Development builds** work through a staging engine: the one at
 //! `ZERON_ZGX_ENGINE_PORT` (27871) with its data in `ZERON_ZGX_ENGINE_DATA`
@@ -163,7 +163,9 @@ impl Config {
         }
     }
 
-    /// The beta's: Zeron.app's engine, resolved as Zeron.app resolves it.
+    /// The beta's: Zeron.app's engine, resolved as Zeron.app resolves it,
+    /// signing in where the environment says (production's, unless the
+    /// engine's own variables name another: src/auth.rs).
     fn zeron_app(
         var: impl Fn(&str) -> Option<String>,
         home: &Path,
@@ -172,9 +174,12 @@ impl Config {
         client: &str,
         callback_port: u16,
     ) -> Result<Self, Refusal> {
-        let production = crate::auth::production();
-        if (edge, client, callback_port) != (production.edge.as_str(), production.client.as_str(), production.port) {
-            return Err(format!("{edge} isn't production's edge and sign-in"));
+        let named = crate::auth::endpoint_with(&var);
+        if edge != named.edge || client != named.client || callback_port != named.port {
+            return Err(format!(
+                "{edge} isn't the edge and sign-in this environment names ({})",
+                named.edge
+            ));
         }
         let port = zeron_cli::ipc_port_from(var("ZERON_IPC_PORT").as_deref());
         let data_dir = zeron_cli::paths::resolve_data_dir(|key| match key {
@@ -486,6 +491,27 @@ mod tests {
         assert!(config_of(&[("ZERON_DATA_DIR", "/Users/someone/.zeron-staging")], home, Some(&exe), &prod.edge).is_err());
         assert!(config_of(&[], home, Some(&exe), "https://staging.zeron.sh").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Self-hosting: the beta starts Zeron.app's engine against the edge
+    /// `zeron`'s own variables name, not production, which would turn the
+    /// session kept there down and sign it out.
+    #[cfg(feature = "beta")]
+    #[test]
+    fn a_beta_build_starts_the_engine_against_the_edge_zeron_s_variables_name() {
+        let home = Path::new("/Users/someone");
+        let prod = crate::auth::production();
+        let named = [("ZERON_EDGE_URL", "https://edge.example.com")];
+        let custom = config_of(&named, home, None, "https://edge.example.com").unwrap();
+        assert_eq!(custom.edge, "https://edge.example.com");
+        assert_eq!(custom.client, prod.client);
+        assert_eq!(custom.callback_port, prod.port);
+        // Zeron.app's engine still: its port and data.
+        assert_eq!(custom.port, 27654);
+        assert_eq!(custom.data_dir, home.join(".zeron"));
+        assert!(custom.follows_bundle());
+        // Production's, where the variables name another edge: refused.
+        assert!(config_of(&named, home, None, &prod.edge).is_err());
     }
 
     /// An engine holding the data dir is on its way in or out: no second one
