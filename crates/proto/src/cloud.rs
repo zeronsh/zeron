@@ -198,7 +198,8 @@ pub struct CloudUsage {
     pub available: bool,
 }
 
-/// One monthly plan. A credit is a minute of the default machine.
+/// One monthly plan. A credit is a minute of a small machine (from the
+/// edge's `CLOUD_CREDIT_RATE_FROM` day on; before it, of a default machine).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingPlan {

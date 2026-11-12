@@ -425,7 +425,7 @@ pub fn group_number(value: f64) -> String {
     }
 }
 
-/// "1,240 credits" — whole credits (a minute each), with a decimal only
+/// "1,240 credits" — whole credits, with a decimal only
 /// under ten so a short session still reads as something.
 pub fn format_credits(credits: f64) -> String {
     let negative = credits < 0.0;
