@@ -267,6 +267,12 @@ impl Services {
         store_dir.join(format!("{plugin}.service.json"))
     }
 
+    /// `zeron.db`'s file for `plugin`: the one its windows open
+    /// (`<data>/plugins/.storage/<id>.sqlite3`, the app's `plugins/db.rs`).
+    pub fn db_path(store_dir: &Path, plugin: &str) -> Option<PathBuf> {
+        zeron_plugin_db::path_in(store_dir, plugin)
+    }
+
     fn slot(&self, plugin: &str) -> Arc<Slot> {
         lock(&self.inner.slots)
             .entry(plugin.to_owned())
@@ -402,6 +408,7 @@ impl Services {
         }
         let ops = Arc::new(PluginOps {
             plan: plan.clone(),
+            db: Self::db_path(&self.inner.store_dir, &plan.plugin),
             hooks: hooks.clone(),
             http: match guarded_client(&plan.hosts) {
                 Ok(http) => http,
@@ -706,6 +713,8 @@ async fn supervisor(slot: Weak<Slot>, shared: Weak<Shared>) {
 /// The world, as one plugin's permissions on this device let it reach it.
 struct PluginOps {
     plan: Plan,
+    /// Its `zeron.db`: the file its windows open too (none in memory-only runs).
+    db: Option<PathBuf>,
     hooks: Arc<dyn Hooks>,
     http: reqwest::Client,
     runtime: tokio::runtime::Handle,
@@ -736,6 +745,14 @@ impl Ops for PluginOps {
                 }
                 let (http, policy) = (self.http.clone(), self.policy());
                 self.runtime.spawn(async move { done(fetch(&http, &policy, &args).await) });
+            }
+            "db" => {
+                // Its own database, as its windows have it: no permission.
+                let Some(path) = self.db.clone() else {
+                    return done(Err("There's nowhere to keep it".into()));
+                };
+                // Off the VM's thread: a write may wait on a window's.
+                self.runtime.spawn_blocking(move || done(zeron_plugin_db::call(&path, &args)));
             }
             "folders" => {
                 // (Where its chats are: as much as "sessions.read" says.)

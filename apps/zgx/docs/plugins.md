@@ -298,7 +298,7 @@ end)
 - A run waits `timeout` seconds at most (60 unless you say, 300 at most), then is stopped (`status` -1). What it prints is kept up to 16 MB.
 - Only the programs you named run; anything else is refused.
 
-**A database** (`zeron.db`, no permission). Your plugin's own SQLite file: removed with the plugin, 100 MB at most, and no other file reachable through it. Use it for a cache, an index or a history, anything past what `zeron.store`'s small JSON file holds.
+**A database** (`zeron.db`, no permission). Your plugin's own SQLite file: removed with the plugin, 100 MB at most, and no other file reachable through it. Use it for a cache, an index or a history, anything past what `zeron.store`'s small JSON file holds. Your windows and your service (below) open the same file: what one writes, the other reads. Each write is its own transaction; one that meets the other side's write waits for it (up to 5 s) rather than failing.
 
 ```lua
 zeron.db.exec("CREATE TABLE IF NOT EXISTS seen (url TEXT PRIMARY KEY, at INTEGER)")
@@ -360,6 +360,7 @@ end)
 | `zeron.folders()` | a promise of this device's chats' and projects' folders (whole paths) | `sessions.read` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
+| `zeron.db.exec(sql, params)`, `zeron.db.query(sql, params)` | its own SQLite database, the same file its windows' `zeron.db` opens: promises of `{ changes, last_id }` and of rows | |
 | `zeron.sleep(seconds)`, `zeron.task(fn)` | a promise done later; run `fn` as a task of its own | |
 | `zeron.json.encode(v)`, `zeron.json.decode(text)`, `zeron.device` | JSON; this device's `{ id, name }` | |
 

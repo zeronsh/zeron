@@ -2955,6 +2955,12 @@ impl Bridge {
                 async move { crate::plugins::preview::refuse("plugins.remove")?;
                     let (id, device) = remote::id_and_device(&arg);
                     let elsewhere = device.is_some();
+                    // (Its windows' connection to its database first: the engine deletes it.)
+                    if device.is_none()
+                        && let Some(db) = db::path(&id)
+                    {
+                        zeron_plugin_db::close(&db);
+                    }
                     call_on(&me, device, "RemovePlugin", json!({ "id": id })).await?;
                     // Its settings go with it (they're this device's: another
                     // device's removal leaves them).

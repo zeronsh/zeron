@@ -326,6 +326,11 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         out.set(shown(&b, &id, &None, true, None));
         let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
         engine::get().spawn(async move {
+            // (Its windows' connection to its database first: the engine
+            // deletes the file, which can't go while it's open.)
+            if let Some(db) = super::db::path(&id) {
+                zeron_plugin_db::close(&db);
+            }
             let result = engine::get().call("RemovePlugin", json!({ "id": id })).await;
             let Some(b) = weak.upgrade() else { return };
             match result {

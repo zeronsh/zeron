@@ -497,3 +497,40 @@ async fn fetch_never_reaches_this_device_or_metadata_unless_named() {
     let auth = r.ask(&open, "get", json!({ "url": "https://example.invalid/", "headers": { "Authorization": "Bearer x" } })).await;
     assert!(auth.unwrap_err().message.contains("Authorization"));
 }
+
+const DB: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("put", function(args)
+	zeron.db.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)"):await()
+	return zeron.db.exec("INSERT OR REPLACE INTO kv VALUES (?, ?)", { args.k, args.v }):await()
+end)
+zeron.serve("get", function(args)
+	local rows = zeron.db.query("SELECT v FROM kv WHERE k = ?", { args.k }):await()
+	return rows[1] and rows[1].v
+end)
+zeron.serve("bad", function()
+	return zeron.db.exec("ATTACH DATABASE 'x.sqlite3' AS x"):await()
+end)
+"#;
+
+/// A service's `zeron.db` is its windows' database: the same file
+/// (`<storage>/<id>.sqlite3`), so what one writes the other reads.
+#[tokio::test]
+async fn a_service_and_its_windows_share_one_database() {
+    let r = rig(quick());
+    let plan = r.plan("1.0.0", DB, &["service"]);
+    let put = r.ask(&plan, "put", json!({ "k": "a", "v": "from the service" })).await.unwrap();
+    assert_eq!(put["changes"], 1);
+    // The window's side: zeron.db in the app opens this path.
+    let path = Services::db_path(&r.dir.path().join(".storage"), "svc").unwrap();
+    assert!(path.exists(), "{}", path.display());
+    let rows = zeron_plugin_db::call(&path, &json!({ "op": "query", "sql": "SELECT v FROM kv WHERE k = 'a'" })).unwrap();
+    assert_eq!(rows, json!([{ "v": "from the service" }]));
+    zeron_plugin_db::call(&path, &json!({ "op": "exec", "sql": "INSERT INTO kv VALUES ('b', 'from a window')" })).unwrap();
+    assert_eq!(r.ask(&plan, "get", json!({ "k": "b" })).await.unwrap(), json!("from a window"));
+    // Kept across the service's stops, and held to the same limits.
+    until("it stops when idle", || !r.running()).await;
+    assert_eq!(r.ask(&plan, "get", json!({ "k": "a" })).await.unwrap(), json!("from the service"));
+    let bad = r.ask(&plan, "bad", json!({})).await;
+    assert!(bad.is_err(), "{bad:?}");
+}
