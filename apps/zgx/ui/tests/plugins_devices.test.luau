@@ -62,6 +62,20 @@ test("choosing another computer shows its plugins, and this computer's again", f
 	expect(app:tree()).never.to_contain("Checkout status")
 end)
 
+-- A plugin declined ("Not now") stays off and asking: its row offers
+-- Review, never a switch that fails, and Review reopens its sheet on that
+-- device.
+test("a declined plugin on another computer can be reviewed again", function()
+	local app = open()
+	pick(app, "devbox")
+	app:command("devbox_declined")
+	app:frames(20)
+	app:click('role:button "Review"')
+	app:frames(10)
+	expect(calls(app)).to_contain("review:ping@devbox:devbox")
+	expect(calls(app)).never.to_contain("set_off:ping")
+end)
+
 test("every action on another computer names it", function()
 	local app = open()
 	pick(app, "devbox")

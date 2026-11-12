@@ -164,6 +164,16 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "devbox_declined",
+	title = "Ping on the devbox declined (Not now): off, still asking",
+	run = function()
+		local ping = find(DEVBOX, "ping")
+		ping.status = "off"
+		ping.ask = { "ui.add" }
+		publish_remote(state.device())
+	end,
+}
+ui.command {
 	id = "switch_here",
 	title = "This computer's plugins shown",
 	run = function()

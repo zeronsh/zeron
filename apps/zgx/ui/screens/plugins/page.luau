@@ -328,6 +328,13 @@ local Control = ui.component(function(props: { now: State<any>, on: string? }): 
 						if on:peek() ~= value then
 							return
 						end
+						-- Not allowed (yet): turning it on asks, opening its review
+						-- (the same window as its Review button), not the engine.
+						if value and kind(now:peek()) == "review" then
+							on:set(false)
+							state.review(id, on_device, if on_device then device_name() else nil)
+							return
+						end
 						local p: any = state.set_off(id, not value, on_device)
 						if p ~= nil then
 							-- (Not done, as on a device out of reach: back as it is.)
