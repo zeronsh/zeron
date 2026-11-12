@@ -48,10 +48,20 @@ jobs:
           set -euo pipefail
           # A fork's runs don't list their pull request (GitHub leaves
           # `pull_requests` empty for them): matched by head repository and branch.
+          # The branch and repository names are the pull request author's: they
+          # only ever reach jq as --arg values (data, never filter text) and the
+          # URL percent-encoded, and only a run ID of digits is cancelled. A
+          # crafted fork branch name can't widen the match to other runs.
+          branch=$(printf %s "$HEAD_REF" | jq -sRr @uri)
           for status in requested waiting pending action_required queued in_progress; do
-            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&status=$status&branch=$(printf %s "$HEAD_REF" | jq -sRr @uri)&per_page=100" \
-              --jq ".workflow_runs[] | select(.head_repository.full_name == \"$HEAD_REPO\" and .head_branch == \"$HEAD_REF\" and .head_sha != \"$KEEP_SHA\") | .id"
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&status=$status&branch=$branch&per_page=100" |
+              jq -r --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" --arg keep "$KEEP_SHA" \
+                '.workflow_runs[]
+                 | select(.event == "pull_request" and .path == ".github/workflows/ci.yml")
+                 | select(.head_repository.full_name == $repo and .head_branch == $ref and .head_sha != $keep)
+                 | .id'
           done | sort -u | while read -r run; do
+            [[ "$run" =~ ^[0-9]+$ ]] || { echo "::warning::not a run ID: $run"; continue; }
             echo "force-cancelling run $run"
             gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/force-cancel" >/dev/null || echo "::warning::could not cancel run $run"
           done
