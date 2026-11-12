@@ -115,6 +115,37 @@ tier, so each merge costs what its pull request did. Its passes and caches
 serve the pull requests into it, which reuse its passes as well as `main`'s.
 Its zgx caches (`zgx-tests`, the zgx CLI, Ghostty) are saved from there only.
 
+**Only while it's protected as `main` is.** Anyone who can push to an
+unprotected branch could record a pass, or save a cache, that every pull
+request into it then trusts, and runs. So `plan.py` (`integration_trusted`)
+reads the branch's rules on each push to it and each pull request into it
+(`GET /repos/{repo}/rules/branches/zeron%2Fzgx`; readable with the plan job's
+token, as the repository is public, so no extra permission) and trusts it
+only if they include both `pull_request` (changes only through a pull
+request) and `non_fast_forward` (no force push), or, if readable, classic
+branch protection requires pull request reviews and blocks force pushes. On
+any error it doesn't (fail closed). Otherwise pull requests into it reuse
+`main`'s passes only, its pushes record passes nobody trusts, and its caches
+aren't saved: `plan` outputs `integration-trusted`, which `ci.yml` passes to
+`zgx-tests.yml`, whose
+`SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}`.
+
+An admin has to set this up: give `zeron/zgx` `main`'s ruleset ("Protect
+main": add `refs/heads/zeron/zgx` to its target branches, or a ruleset of its
+own targeting it, enforcement active) with at least **Require a pull request
+before merging** and **Block force pushes** (`main`'s also restricts
+deletions and updates). Until then (no ruleset targets it today) its passes
+and caches don't count.
+
+A pull request's runs also restore from the pull request's own cache scope,
+which its earlier commits can write (an edited workflow saves anything): a
+fake zgx CLI saved there would be run by every later commit's tests. So on a
+pull request, `zgx-tests.yml` first lists the entries with the key in that
+scope (`actions/caches?key=…&ref=refs/pull/<n>/merge`, with `actions: read`)
+and, if there is one, or the API fails, builds the CLI rather than restore
+it; Ghostty's restore (any `zgx-ghostty-` entry, since it has restore keys)
+likewise.
+
 The `zgx` suite (`zgx-tests.yml`):
 
 | Job | Runs on a pull request |
@@ -495,14 +526,22 @@ after Linux core.
 | 9 | apt-ui-browser | `apt-debs-v1-ui-browser-…` (`linux-ci`) | main | 0.26 GB | |
 | 10 | zgx-ghostty | `zgx-ghostty-…` | zeron/zgx | 0.49 GB | |
 | 11, 12 | zgx-cli-macos, zgx-cli-linux | `zgx-cli-macOS-ARM64-…`, `zgx-cli-Linux-X64-…` | zeron/zgx | 20 MB each | |
-| | pass records | `ci-pass-v1-…` (see [Reuse](#reuse)) | any ref | ~240 B each | |
+| | pass records | `ci-pass-v1-…` (see [Reuse](#reuse)) | any ref (kept: main, zeron/zgx, pull requests) | ~240 B each | |
 
 The keep set adds up to about 9.4 GB, so the budget is 9.5 GB of the 10:
 `test_ci_caches.py` fails if the declared sizes exceed it. The zgx families
 are saved only from `zeron/zgx` (zgx's suite isn't on `main` yet), through
-`zgx-tests.yml`'s `SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' }}`.
+`zgx-tests.yml`'s
+`SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}`,
+and only while it's protected (see [The zgx interface](#the-zgx-interface-zeronzgx)).
 Pass records are a few hundred bytes and needed wherever CI runs, pull
-requests included, so any ref may save them.
+requests included, so any ref may save them. They don't count against the
+budget (any pull request, a fork's too, can save any number of them, and they
+must not push out a cache), and the janitor keeps only those of refs some run
+trusts: `main`, `zeron/zgx` and pull requests' merge refs
+(`refs/pull/<n>/merge`). The rest (a run by hand on a side branch, the merge
+queue, a tag) nothing reads. A fork's pull request can't be told from a
+same-repository one by its ref, so every pull request's records stay.
 
 Not saved any more (each still restores whatever is there, so nothing else
 changes):
@@ -561,12 +600,13 @@ workflows run only from the default branch. It lists every ref's entries
 
 1. entries no family declares;
 2. entries saved from a ref their family doesn't allow (pull requests, tags,
-   side branches); pass records are exempt;
+   side branches); pass records only from refs no run trusts (anything but
+   `main`, `zeron/zgx` and `refs/pull/<n>/merge`);
 3. older generations: only the newest entry of a family per ref stays.
    rust-cache's key changes with the lockfile, so `main`'s previous cache
    would otherwise linger until GitHub evicts something;
 4. while what's left is still over the 9.5 GB budget, whole families, from
-   the lowest priority up.
+   the lowest priority up. Pass records don't count against it.
 
 The run's summary lists what it kept and deleted, with sizes. To see what it
 would delete now, without deleting anything:

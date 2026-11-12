@@ -25,6 +25,36 @@ class Workflows(unittest.TestCase):
         errors = caches.lint(ROOT)
         self.assertEqual(errors, [], "\n" + "\n".join(errors))
 
+    def test_zgx_never_restores_what_the_pull_request_saved_itself(self):
+        """zgx-tests.yml runs the zgx CLI and links the Ghostty build it restores: on a pull
+        request, each restore waits for a check that the pull request's own scope has none."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        spec = yaml.safe_load((ROOT / ".github" / "workflows" / "zgx-tests.yml").read_text(encoding="utf-8"))
+        guarded = 0
+        for name, job in spec["jobs"].items():
+            steps = job["steps"]
+            ids = {s.get("id"): s for s in steps if s.get("id")}
+            for step in steps:
+                if not step.get("uses", "").startswith("actions/cache/restore@"):
+                    continue
+                if not step["with"]["key"].startswith(("zgx-cli-", "zgx-ghostty-")):
+                    continue
+                check = ids.get(f"{step['id']}-own")
+                self.assertIsNotNone(check, (name, step["id"]))
+                self.assertEqual(check["if"], "github.event_name == 'pull_request'")
+                self.assertIn("refs/pull/${{ github.event.pull_request.number }}/merge", check["env"]["REF"])
+                self.assertIn("&ref=$REF", check["run"])
+                self.assertIn('echo "restore=false"', check["run"])  # an API error too (fail closed)
+                self.assertLess(steps.index(check), steps.index(step))
+                self.assertEqual(step["if"], f"github.event_name != 'pull_request' || "
+                                             f"steps.{step['id']}-own.outputs.restore == 'true'")
+                self.assertEqual(job["permissions"].get("actions"), "read", name)
+                guarded += 1
+        self.assertEqual(guarded, 3)  # the CLI on Linux and macOS, Ghostty on macOS
+
 
 def lint(workflows: dict[str, str], actions: dict[str, str] = None) -> list[str]:
     with tempfile.TemporaryDirectory() as root:
@@ -155,6 +185,11 @@ class Lint(unittest.TestCase):
         self.assertCaught(self.one(steps, name="zgx-linux"), "SAVE_CACHES isn't defined", count=2)
         errors = self.one(steps, name="zgx-linux", header="env:\n  SAVE_CACHES: true\n")
         self.assertIn("SAVE_CACHES must be", errors[0])
+        # Narrowed to a protected zeron/zgx (plan.py integration_trusted): the same ref.
+        narrowed = "env:\n  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted }}\n"
+        self.assertEqual(self.one(steps, name="zgx-linux", header=narrowed), [])
+        widened = "env:\n  SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' || inputs.integration-trusted }}\n"
+        self.assertIn("SAVE_CACHES must be", self.one(steps, name="zgx-linux", header=widened)[0])
 
     def test_actions_cache_is_refused(self):
         self.assertCaught(self.one(f"""
@@ -356,11 +391,18 @@ class Janitor(unittest.TestCase):
             e(ghostty, ref=MAIN),
             e(f"v0-rust-zgx-tests-zgx-linux-Linux-x64-{H}", ref="refs/heads/zeron/linux-headless-fixes"),
             e(PASS_KEY, ref="refs/pull/1219/merge"),
-            e(PASS_KEY, ref="refs/heads/gh-readonly-queue/main/pr-1-abc"),
         ])
-        self.assertEqual(self.kept(sel), {(ghostty, ZGX), (PASS_KEY, "refs/pull/1219/merge"),
-                                          (PASS_KEY, "refs/heads/gh-readonly-queue/main/pr-1-abc")})
+        self.assertEqual(self.kept(sel), {(ghostty, ZGX), (PASS_KEY, "refs/pull/1219/merge")})
         self.assertTrue(all("may not save" in why for _, why in sel.delete))
+
+    def test_pass_records_stay_only_where_a_run_trusts_them(self):
+        trusted = (MAIN, ZGX, "refs/pull/1219/merge", "refs/pull/7/merge")
+        never = ("refs/heads/gh-readonly-queue/main/pr-1-abc",  # the merge queue reuses nothing
+                 "refs/heads/zeron/some-branch",  # a run by hand
+                 "refs/tags/v0.2.140", "refs/pull/7/head", "refs/heads/main-copy", "")
+        sel = caches.select([e(PASS_KEY, ref=r) for r in trusted + never])
+        self.assertEqual(self.kept(sel), {(PASS_KEY, r) for r in trusted})
+        self.assertEqual(self.deleted(sel), {(PASS_KEY, r) for r in never})
 
     def test_only_the_newest_generation_per_family_and_ref_stays(self):
         old = e(f"v0-rust-windows-Windows_NT-x64-15d0a0c1-00000001", created="2026-11-10T09:00:00Z")
@@ -390,6 +432,15 @@ class Janitor(unittest.TestCase):
         self.assertLessEqual(sel.kept_bytes, 7 * GB)
         self.assertIn((PASS_KEY, MAIN), self.kept(sel))
         self.assertTrue(all("budget" in why for _, why in sel.delete))
+
+    def test_pass_records_do_not_count_against_the_budget(self):
+        # Pull requests (a fork's too) can save any number of them: they never push out a cache.
+        windows = e(f"v0-rust-windows-Windows_NT-x64-{H}", size=GB)
+        passes = [e(PASS_KEY.replace("core-tests", f"job{n}"), ref=f"refs/pull/{n}/merge", size=60 * 1024)
+                  for n in range(1, 200)]
+        sel = caches.select([windows] + passes, budget=GB + 10**6)
+        self.assertEqual(sel.delete, [])
+        self.assertEqual(len(sel.keep), 200)
 
     def test_within_budget_nothing_declared_goes(self):
         entries = [e(f"v0-rust-windows-Windows_NT-x64-{H}", size=GB), e(f"ci-linux-v1-ui-Linux-x64-{H}", size=GB)]

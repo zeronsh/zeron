@@ -25,7 +25,9 @@ Two things hold the line:
 
 Pass records (scripts/ci/reuse.py, `ci-pass-...`) are a few hundred bytes each
 and may be saved from any ref, pull requests included: CI skips what already
-passed on the same inputs.
+passed on the same inputs. They never count against the budget, and the
+janitor keeps only those of refs some run trusts (PASS_REFS): main, zeron/zgx
+and pull requests' merge refs.
 
 Usage:
   caches.py janitor [--dry-run] [--repo OWNER/REPO] [--from-json FILE]
@@ -67,12 +69,13 @@ def rust(name: str, platform: str) -> str:
 class Family:
     name: str
     pattern: str
-    refs: tuple[str, ...] | None  # None: any ref
+    refs: tuple[str, ...] | None  # None: any ref (see ref_pattern)
     rank: int  # 1 is kept first; 0 never counts against the budget
     size_gb: float
     saved_by: str
     value: int | None = None  # minutes saved per month per GB, as measured
     max_entry_bytes: int | None = None
+    ref_pattern: str | None = None  # refs None: only refs matching this, whole (None: any)
     regex: re.Pattern = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -82,12 +85,23 @@ class Family:
         return self.regex.fullmatch(key) is not None
 
     def allows(self, ref: str) -> bool:
-        return self.refs is None or ref in self.refs
+        if self.refs is None:
+            return self.ref_pattern is None or re.fullmatch(self.ref_pattern, ref) is not None
+        return ref in self.refs
 
+
+# The refs whose pass records some run trusts (plan.py): main, zeron/zgx (the zgx
+# interface's integration branch) and a pull request's merge ref (its own later
+# runs). Saved from anywhere else (a run by hand on a side branch, the merge
+# queue, a tag), nobody reads them. A fork's pull request's records can't be
+# told from a same-repository one's by ref, so every pull request's stay; none
+# count against the budget, so they can't push out a cache.
+PASS_REFS = rf"{re.escape(MAIN)}|{re.escape(ZGX)}|refs/pull/\d+/merge"
 
 PASS = Family(
     "pass-records", r"ci-pass-v\d+-[a-z0-9_-]+-[0-9a-f]{40}-[a-z0-9-]+", None, 0, 0.0,
-    "every CI job's last step (scripts/ci/reuse.py), from any ref", max_entry_bytes=64 * 1024)
+    "every CI job's last step (scripts/ci/reuse.py), from any ref", max_entry_bytes=64 * 1024,
+    ref_pattern=PASS_REFS)
 
 # In priority order. Keep `rank` in step with the order (test_ci_caches.py checks).
 FAMILIES: tuple[Family, ...] = (
@@ -176,10 +190,13 @@ def select(entries: list[Entry], families: tuple[Family, ...] = ALL_FAMILIES,
     """What to keep and what to delete:
 
     (a) entries no family declares;
-    (b) entries saved from a ref their family doesn't allow (pass records may come from any);
+    (b) entries saved from a ref their family doesn't allow (pass records: from a ref no run
+        trusts, PASS_REFS);
     (c) older generations: only the newest entry of a family per ref stays (rust-cache's key
         changes with the lockfile, so main's previous cache lingers until evicted);
-    (d) while the rest exceeds `budget`, whole families, lowest priority first.
+    (d) while the rest exceeds `budget`, whole families, lowest priority first. Pass records
+        (rank 0) don't count: any pull request, a fork's too, can save any number of
+        them, and they must not push out a cache.
     """
     delete: list[tuple[Entry, str]] = []
     candidates: list[tuple[Entry, Family]] = []
@@ -206,7 +223,7 @@ def select(entries: list[Entry], families: tuple[Family, ...] = ALL_FAMILIES,
             newest[slot] = e
             keep.append((e, family))
 
-    total = sum(e.size for e, _ in keep)
+    total = sum(e.size for e, f in keep if f.rank > 0)
     for family in sorted({f for _, f in keep if f.rank > 0}, key=lambda f: f.rank, reverse=True):
         if total <= budget:
             break
@@ -545,9 +562,11 @@ REF_GATES = {
     "github.ref == 'refs/heads/main'": MAIN,
     "env.SAVE_CACHES == 'true'": "env.SAVE_CACHES",
 }
-# SAVE_CACHES (zgx-tests.yml on zeron/zgx): the ref it names.
+# SAVE_CACHES (zgx-tests.yml on zeron/zgx): the ref it names. (`&& inputs.integration-trusted`:
+# only while zeron/zgx is protected, plan.py's integration_trusted; it narrows, never widens.)
 SAVE_CACHES_VALUES = {
     "github.ref == 'refs/heads/zeron/zgx'": ZGX,
+    "github.ref == 'refs/heads/zeron/zgx' && inputs.integration-trusted": ZGX,
     "github.ref == 'refs/heads/main'": MAIN,
 }
 TOGGLE = re.compile(r"^inputs\.([\w-]+) == 'true'$")

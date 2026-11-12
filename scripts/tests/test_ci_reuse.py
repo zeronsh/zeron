@@ -212,6 +212,41 @@ class LookupTests(unittest.TestCase):
         self.assertEqual(reuse.passed_jobs(api, "o/r", key, {"refs/pull/7/merge", "refs/heads/main"}), {"tests"})
         self.assertEqual(reuse.passed_jobs(api, "o/r", key, set()), set())
 
+    class CacheApi:
+        """The Actions cache list: `key` a prefix, `ref` exact, 100 entries a page at most."""
+
+        def __init__(self, caches):
+            self.caches, self.paths = caches, []
+
+        def __call__(self, path):
+            from urllib.parse import parse_qs, urlsplit
+            self.paths.append(path)
+            query = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+            found = [c for c in self.caches if c["key"].startswith(query.get("key", ""))
+                     and ("ref" not in query or c["ref"] == query["ref"])]
+            per_page, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+            return {"total_count": len(found), "actions_caches": found[(page - 1) * per_page:page * per_page]}
+
+    def test_entries_of_other_refs_cannot_push_trusted_ones_off_the_page(self):
+        key = "ci-pass-v1-windows-abc"
+        # A fork's pull requests saved 150 entries under the key, listed before the trusted ones.
+        forged = [{"key": f"{key}-tests", "ref": f"refs/pull/{n}/merge"} for n in range(100, 250)]
+        api = self.CacheApi(forged + [{"key": f"{key}-tests", "ref": "refs/heads/main"},
+                                      {"key": f"{key}-app", "ref": "refs/pull/7/merge"}])
+        self.assertEqual(api(f"/repos/o/r/actions/caches?key={key}-&per_page=100")["actions_caches"][-1]["ref"],
+                         "refs/pull/199/merge")  # one query for every ref: neither trusted entry is listed
+        self.assertEqual(reuse.passed_jobs(api, "o/r", key, {"refs/pull/7/merge", "refs/heads/main"}),
+                         {"tests", "app"})
+        self.assertTrue(all("&ref=refs%2F" in p for p in api.paths[1:]))
+        self.assertEqual(len(api.paths), 3)  # one page per trusted ref
+
+    def test_a_trusted_ref_with_more_than_a_page_is_read_to_the_end(self):
+        key = "ci-pass-v1-core-abc"
+        many = [{"key": f"{key}-job{n}", "ref": "refs/heads/main"} for n in range(230)]
+        api = self.CacheApi(many)
+        self.assertEqual(len(reuse.passed_jobs(api, "o/r", key, {"refs/heads/main"})), 230)
+        self.assertEqual(len(api.paths), 3)
+
 
 class ReusePlanTests(unittest.TestCase):
     def test_whole_suites(self):
@@ -240,7 +275,8 @@ class ReusePlanTests(unittest.TestCase):
 class PlanMainTests(unittest.TestCase):
     """plan.py end to end on a fake repository and API."""
 
-    def run_plan(self, event, payload, caches, labels=(), files=None, head_repo="o/r", extra_env=None):
+    def run_plan(self, event, payload, caches, labels=(), files=None, head_repo="o/r", extra_env=None,
+                 base="main", ref="refs/pull/3/merge", rules=None):
         repo = FakeRepo()
         self.addCleanup(repo.dir.cleanup)
         out = pathlib.Path(repo.root, "out")
@@ -251,14 +287,18 @@ class PlanMainTests(unittest.TestCase):
         def fake_api(path):
             if "/actions/caches" in path:
                 return {"actions_caches": caches}
+            if "/rules/branches/" in path:
+                return rules if rules is not None else []
+            if path.endswith("/protection"):
+                raise OSError("HTTP 404")
             if path.endswith("/files?per_page=100&page=1"):
                 return files
             if "/pulls/" in path:
                 return {"number": 3, "changed_files": 1, "labels": [{"name": n} for n in labels],
-                        "head": {"repo": {"full_name": head_repo} if head_repo else None}}
+                        "head": {"repo": {"full_name": head_repo} if head_repo else None}, "base": {"ref": base}}
             return {"files": files}
 
-        env = {"GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": "refs/pull/3/merge",
+        env = {"GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": ref,
                "GITHUB_EVENT_PATH": str(event_path), "GITHUB_OUTPUT": str(out), "GITHUB_TOKEN": "t"}
         old_env, old_api, cwd = dict(os.environ), plan.api, os.getcwd()
         packages, inputs = dict(reuse.SUITE_PACKAGES), dict(reuse.SUITE_INPUTS)
@@ -336,6 +376,29 @@ class PlanMainTests(unittest.TestCase):
         self.assertTrue(json.loads(full["suites"])["core"])
         main = self.run_plan("push", {"before": "a" * 40, "after": "b" * 40}, caches)
         self.assertTrue(json.loads(main["suites"])["core"])
+
+    def test_zeron_zgx_passes_count_only_while_it_is_protected(self):
+        protected = [{"type": "pull_request"}, {"type": "non_fast_forward"}]
+        pull = {"pull_request": {"number": 3}}
+        first = self.run_plan("pull_request", pull, [], base="zeron/zgx")
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/heads/zeron/zgx"}]
+        into = self.run_plan("pull_request", pull, caches, base="zeron/zgx", rules=protected)
+        self.assertFalse(json.loads(into["suites"])["core"])  # zeron/zgx's pass reused
+        self.assertEqual(into["integration-trusted"], "true")
+        unprotected = self.run_plan("pull_request", pull, caches, base="zeron/zgx", rules=[])
+        self.assertTrue(json.loads(unprotected["suites"])["core"])
+        self.assertEqual(unprotected["integration-trusted"], "false")
+        # A push to it: its own passes only when protected (main's always), and the flag that
+        # lets zgx-tests.yml save its caches.
+        push = {"before": "a" * 40, "after": "b" * 40}
+        on = self.run_plan("push", push, caches, ref="refs/heads/zeron/zgx", rules=protected)
+        self.assertEqual((json.loads(on["suites"])["core"], on["integration-trusted"]), (False, "true"))
+        off = self.run_plan("push", push, caches, ref="refs/heads/zeron/zgx", rules=[{"type": "pull_request"}])
+        self.assertEqual((json.loads(off["suites"])["core"], off["integration-trusted"]), (True, "false"))
+        mains = [dict(caches[0], ref="refs/heads/main")]
+        self.assertFalse(json.loads(self.run_plan("push", push, mains, ref="refs/heads/zeron/zgx",
+                                                  rules=[])["suites"])["core"])
+        self.assertEqual(self.run_plan("push", push, [], ref="refs/heads/main")["integration-trusted"], "false")
 
 
 if __name__ == "__main__":
