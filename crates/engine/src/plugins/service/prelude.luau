@@ -278,9 +278,10 @@ local function service(id: string): any
 	end
 
 	-- The internet ("network"): a promise of { status, headers, body }.
-	function M.fetch(url: string, opts: { method: string?, headers: { [string]: string }?, body: string?, timeout: number? }?): any
+	-- `binary = true` gives `body` in base64 (a font, a picture), whole.
+	function M.fetch(url: string, opts: { method: string?, headers: { [string]: string }?, body: string?, timeout: number?, binary: boolean? }?): any
 		local o = opts or {}
-		return op("fetch", { url = url, method = o.method, headers = o.headers, body = o.body, timeout = o.timeout })
+		return op("fetch", { url = url, method = o.method, headers = o.headers, body = o.body, timeout = o.timeout, binary = o.binary })
 	end
 
 	-- A notification, as Zeron's own ("notifications"): a promise of
