@@ -39,12 +39,31 @@ class ReservationTests(unittest.TestCase):
         # Another run's admit name comes from its own (editable) ci.yml.
         self.assertEqual(parse_reservation("admit [linux=999 windows=50 macos=40]"), admit.MAX_RESERVATION)
 
+    def test_giant_numbers_in_a_name_are_not_read(self):
+        # int() of a number this long raises ValueError (Python's int max str digits):
+        # more than 4 digits is no reservation or claim at all.
+        giant = "9" * 5000
+        self.assertIsNone(parse_reservation(f"admit [linux={giant}]"))
+        self.assertEqual(parse_reservation(f"admit [linux={giant} macos=1]"), {"linux": 0, "windows": 0, "macos": 1})
+        self.assertEqual(parse_reservation("admit [linux=9999]")["linux"], admit.MAX_RESERVATION["linux"])
+        self.assertIsNone(parse_reservation("admit [linux=12345]"))
+        self.assertIsNone(admit.PR_CLAIM.search(f"admit [linux=2] #{giant}"))
+        self.assertEqual(admit.PR_CLAIM.search("admit [linux=2] #1356").group(1), "1356")
+        self.assertEqual(admit.PR_CLAIM.search("admit [linux=2] #123456").group(1), "123456")
+        scheduler = admit.Scheduler(None, "o/r", 1)
+        run = {"event": "pull_request", "head_sha": "abc"}
+        self.assertIsNone(scheduler.verified_pr(f"admit [linux=2] #{giant}", run, {77}))
+
     def test_cap_is_the_largest_plan(self):
         sys.path.insert(0, str(pathlib.Path(admit.__file__).parent))
         import plan
         everything = plan.reservation(plan.jobs_to_run({s: True for s in plan.SUITE_JOBS}), "push",
                                       "refs/heads/main")
-        self.assertEqual(everything, admit.MAX_RESERVATION)
+        # The cap is shared by every branch and repository in the queue: this branch's
+        # largest plan fits under it, and it isn't loose by more than a job per runner type.
+        for r in admit.RUNNERS:
+            self.assertLessEqual(everything[r], admit.MAX_RESERVATION[r], r)
+            self.assertLessEqual(admit.MAX_RESERVATION[r] - everything[r], 1, r)
 
     def test_held_releases_finished_jobs(self):
         declared = {"linux": 3, "windows": 2, "macos": 1}
@@ -314,8 +333,29 @@ class PriorityAndLockTests(unittest.TestCase):
         # The older lock keeps its runners until it is released; then the newer one goes.
         snap.waiters = [w for w in snap.waiters if w.run_id == 2]
         snap.locked, snap.lock_times = {91}, {91: "2026-10-27T10:05:00Z"}
-        snap.holding = [held_(pr=90, linux=2)]
+        # (One job left of the older lock's run: a full run, 19 runners, still fits in 20.)
+        snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
+
+    def test_two_locks_added_in_the_same_second_do_not_wait_for_each_other(self):
+        # The queue order (rank) and the lock order (lock_is_older) break the tie the
+        # same way: by the key as text, not by when each admit job was created.
+        big = {"total": 20, "macos": 5, "windows": 10}
+        full_counts = admit.MAX_RESERVATION
+        full = need_of(full_counts)
+        same = "2026-10-27T10:00:00Z"
+        # #91's admit job was created first, but #90 sorts first as text.
+        snap = Snapshot([waiter(1, 2, pr=90, **full_counts), waiter(2, 1, pr=91, **full_counts)], [],
+                        locked={90, 91}, lock_times={90: same, 91: same})
+        first, second = decide(1, full, snap, big), decide(2, full, snap, big)
+        self.assertTrue(first.admit)
+        self.assertEqual(first.position, 0)
+        self.assertFalse(second.admit)
+        self.assertEqual(second.position, 1)
+        # A peer's key (`owner/repo#n`) against a number: still one order.
+        snap = Snapshot([waiter(1, 1, pr="o/zgx#5", **full_counts), waiter(2, 2, pr=90, **full_counts)], [],
+                        locked={90, "o/zgx#5"}, lock_times={90: same, "o/zgx#5": same})
+        self.assertEqual([decide(r, full, snap, big).admit for r in (1, 2)], [False, True])
 
     def test_an_unverified_claim_is_an_ordinary_run(self):
         snap = Snapshot([waiter(1, 1, linux=2), waiter(2, 2, pr=None, linux=2)], [], priority={77})
@@ -415,6 +455,117 @@ class SchedulerTests(unittest.TestCase):
         runs[0]["updated_at"] = "b"
         scheduler.snapshot()
         self.assertEqual(len(api.calls), 7)
+
+
+class SharedPoolTests(unittest.TestCase):
+    """One queue across the organization's repositories (CI_PEERS), and runs
+    admission doesn't schedule (releases, a peer's CI without admission) seen
+    as holding what they run or queue."""
+
+    class OrgApi:
+        def __init__(self, workflows, runs, jobs, labels=None):
+            self.workflows, self.runs, self.jobs = workflows, runs, jobs
+            self.labels = labels or {}
+
+        def get(self, path):
+            repo = "/".join(path.split("/")[2:4])
+            if "/issues?" in path:
+                label = path.split("labels=")[1].split("&")[0].replace("%3A", ":")
+                return [{"number": n, "pull_request": {}} for n in self.labels.get((repo, label), [])]
+            if "/pulls/" in path:
+                return {"head": {"sha": "h"}}
+            if path.endswith(".yml"):
+                return {"id": self.workflows[repo]}
+            if "/workflows/" in path:
+                wid = int(path.split("/workflows/")[1].split("/")[0])
+                return {"workflow_runs": [r for r in self.runs[repo]
+                                          if r["workflow_id"] == wid and r["status"] == "in_progress"]}
+            if "/actions/runs?" in path:
+                status = path.split("status=")[1].split("&")[0]
+                return {"workflow_runs": [r for r in self.runs[repo] if r["status"] == status]}
+            run = int(path.split("/runs/")[1].split("/")[0])
+            return {"jobs": self.jobs[run]}
+
+    def wfrun(self, rid, wid, status="in_progress", event="push"):
+        return {"id": rid, "workflow_id": wid, "status": status, "updated_at": "a", "event": event, "head_sha": "h"}
+
+    def test_peer_queue_priority_and_outside_runs(self):
+        api = self.OrgApi(
+            workflows={"z/gx": 50},
+            runs={
+                "o/r": [self.wfrun(1, 9), self.wfrun(2, 7)],  # 2: this repo's release (another workflow)
+                "z/gx": [self.wfrun(3, 50, event="pull_request"), self.wfrun(4, 50), self.wfrun(5, 60, "queued")],
+            },
+            jobs={
+                1: [dict(job("admit [linux=2]", "ubuntu-24.04", "in_progress", None),
+                         created_at="2026-10-27T00:00:02Z", id=10)],
+                2: [job("build", "macos-latest", "in_progress", None), job("approve", "ubuntu", "waiting", None)],
+                # A peer's waiting run claiming its pull request #1 (labelled ci:priority there).
+                3: [dict(job("admit [linux=1 windows=1] #1", "ubuntu-24.04", "in_progress", None),
+                         created_at="2026-10-27T00:00:01Z", id=30)],
+                # A peer CI run without admission: what it runs and queues counts.
+                4: [job("linux", "ubuntu-latest", "in_progress", None), job("windows", "windows-latest", "queued", None)],
+                # A peer's release, queued for runners.
+                5: [job("macos", "macos-latest", "queued", None)],
+            },
+            labels={("z/gx", "ci:priority"): [1]},
+        )
+        scheduler = admit.Scheduler(api, "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"), outside=True)
+        snap = scheduler.snapshot()
+        self.assertEqual(sorted(w.run_id for w in snap.waiters), [1, 3])
+        peer = next(w for w in snap.waiters if w.run_id == 3)
+        self.assertEqual(peer.pr, "z/gx#1")  # a peer's pull request, never confused with this repo's #1
+        self.assertIn("z/gx#1", snap.priority)
+        held_needs = sorted(tuple(h.need.values()) for h in snap.holding)
+        # This repo's release (macOS; its approval wait holds nothing), the peer's run without
+        # admission (Linux + Windows), the peer's queued release (macOS).
+        self.assertEqual(held_needs, sorted([(1, 1, 0), (2, 0, 1), (1, 1, 0)]))
+        # The peer's prioritised run goes first, ahead of this repo's older-by-nothing one.
+        order = sorted(snap.waiters, key=lambda w: admit.rank(w, snap))
+        self.assertEqual([w.run_id for w in order], [3, 1])
+
+    def test_peers_parse(self):
+        self.assertEqual(admit.parse_peers("a/b:ci.yml, c/d:x.yml bad z/y:"), [("a/b", "ci.yml"), ("c/d", "x.yml")])
+        self.assertEqual(admit.parse_peers(""), [])
+
+
+class SupersededTests(unittest.TestCase):
+    """A pull request run whose commit a newer push replaced stops waiting (ci-supersede.yml)."""
+
+    class PullApi:
+        def __init__(self, pull=None, error=None):
+            self.pull, self.error = pull, error
+
+        def get(self, path):
+            if self.error:
+                raise self.error
+            assert path == "/repos/o/r/pulls/7", path
+            return self.pull
+
+    def check(self, api, pr="7", head="abc"):
+        env = {"CI_PR": pr, "CI_PR_HEAD": head}
+        saved = {k: admit.os.environ.get(k) for k in env}
+        admit.os.environ.update(env)
+        try:
+            return admit.superseded(api, "o/r")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    admit.os.environ.pop(k, None)
+                else:
+                    admit.os.environ[k] = v
+
+    def test_head_moved_or_closed(self):
+        self.assertFalse(self.check(self.PullApi({"state": "open", "head": {"sha": "abc"}})))
+        self.assertTrue(self.check(self.PullApi({"state": "open", "head": {"sha": "def"}})))
+        self.assertTrue(self.check(self.PullApi({"state": "closed", "head": {"sha": "abc"}})))
+
+    def test_not_a_pull_request_or_unknown(self):
+        # main, the merge queue, schedules: no pull request to follow.
+        self.assertFalse(self.check(self.PullApi({"state": "closed"}), pr="", head=""))
+        # The API failing never stops a run.
+        self.assertFalse(self.check(self.PullApi(error=OSError("down"))))
+        self.assertFalse(self.check(self.PullApi({"state": "open"})))
 
 
 if __name__ == "__main__":

@@ -71,8 +71,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: edge/vault/package-lock.json
       - name: install
         run: npm ci
       - name: typecheck
@@ -124,8 +122,6 @@ jobs:
         if: steps.changed.outputs.changed == 'true'
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: edge/package-lock.json
       - name: install
         if: steps.changed.outputs.changed == 'true'
         working-directory: edge

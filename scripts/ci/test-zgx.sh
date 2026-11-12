@@ -8,18 +8,28 @@
 #   scripts/ci/test-zgx.sh ui [zgx]  zgx test ui (the Luau UI tests), with the
 #                                    zgx CLI given or on PATH; fails on any FAIL
 #                                    not listed, and names listed ones that pass
+#   scripts/ci/test-zgx.sh windows   the Windows tests scripts/ci/zgx-windows-tests.txt
+#                                    names (`test <integration test>` lines run with
+#                                    --features beta, `package <crate>` lines run that
+#                                    crate's tests), nothing when it names none
 #
-# apps/zgx/tests/*.rs (the app's integration tests) aren't run here.
+# On Windows, `rust` also skips the `rust-windows:` known failures.
+# apps/zgx/tests/*.rs (the app's integration tests) aren't run here, but for
+# the Windows ones listed.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 known="$root/scripts/ci/zgx-known-failures.txt"
 
 listed() { sed -n "s/^$1: //p" "$known"; }
+windows() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac; }
 
 case "${1:-}" in
   rust)
     skips=()
     while IFS= read -r name; do skips+=(--skip "$name"); done < <(listed rust)
+    if windows; then
+      while IFS= read -r name; do skips+=(--skip "$name"); done < <(listed rust-windows)
+    fi
     cd "$root/apps/zgx"
     # (`${a[@]+…}`: an empty list under `set -u`, which macOS's bash 3.2
     # calls unbound.)
@@ -53,8 +63,28 @@ case "${1:-}" in
       exit 1
     fi
     ;;
+  windows)
+    list="$root/scripts/ci/zgx-windows-tests.txt"
+    tests=() packages=()
+    while read -r kind name _; do
+      case "$kind" in
+        test) tests+=(--test "$name") ;;
+        package) packages+=(-p "$name") ;;
+      esac
+    done < <(sed 's/#.*//' "$list")
+    cd "$root/apps/zgx"
+    status=0
+    if [ "${#tests[@]}" -gt 0 ]; then
+      cargo test --locked --features beta "${tests[@]}" || status=$?
+    fi
+    if [ "${#packages[@]}" -gt 0 ]; then
+      cargo test --locked "${packages[@]}" || status=$?
+    fi
+    [ "${#tests[@]}" -gt 0 ] || [ "${#packages[@]}" -gt 0 ] || echo "no Windows tests listed in $list"
+    exit "$status"
+    ;;
   *)
-    echo "usage: $0 rust | ui [zgx]" >&2
+    echo "usage: $0 rust | ui [zgx] | windows" >&2
     exit 2
     ;;
 esac

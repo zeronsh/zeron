@@ -105,6 +105,35 @@ class PlanTests(unittest.TestCase):
         # Without the workspace's closure: the static list.
         self.assertIn("zgx", selected(plan.plan(files("crates/visual/src/lib.rs"), "fast")))
 
+    def test_zgx_platform_jobs_only_for_platform_changes(self):
+        def off(change, tier="fast"):
+            suites = plan.plan(change, tier)
+            return plan.gated(change, tier, suites)[0].get("zgx", [])
+
+        # Luau and platform-neutral Rust: Linux only.
+        self.assertEqual(off(files("apps/zgx/ui/app.luau")), ["zgx-macos", "zgx-windows"])
+        self.assertEqual(off(files("apps/zgx/src/chat.rs", patch="+    let x = 1;\n")),
+                         ["zgx-macos", "zgx-windows"])
+        # Windows code in the app: its Windows job too.
+        self.assertEqual(off(files("apps/zgx/src/terminal.rs", patch="+#[cfg(windows)]\n+fn f() {}\n")),
+                         ["zgx-macos"])
+        # A platform conditional decides what both compile.
+        self.assertEqual(off(files("apps/zgx/src/main.rs", patch='+    if cfg!(target_os = "macos") {}\n')), [])
+        # The app's lockfile and its vendored patches: every platform.
+        self.assertEqual(off(files("apps/zgx/Cargo.lock")), [])
+        self.assertEqual(off(files("apps/zgx/patches/zgx-terminal/src/paint.rs", patch="+x\n")), [])
+        # The full tier (main, ci:full): everything.
+        self.assertEqual(off(files("apps/zgx/ui/app.luau"), "full"), [])
+
+    def test_zgx_engine_plugin_tests_on_macos_only_for_the_plugin_host(self):
+        def flags(change, tier="fast"):
+            suites = plan.plan(change, tier)
+            return plan.gated(change, tier, suites)[1].get("zgx", [])
+
+        self.assertEqual(flags(files("apps/zgx/ui/app.luau")), [])
+        self.assertEqual(flags(files("crates/engine/src/plugins/host.rs")), ["engine-plugins"])
+        self.assertEqual(flags(files("apps/zgx/ui/app.luau"), "full"), ["engine-plugins"])
+
     def test_edge_and_installer(self):
         self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
         self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer"})
@@ -153,18 +182,76 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + ui + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
-        # native + ios-tests + zgx-macos
-        self.assertEqual(counts, {"linux": 8, "windows": 3, "macos": 3})
+        # result + core + ui + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2
+        # + zgx-windows; native + ios-tests + zgx-macos
+        self.assertEqual(counts, {"linux": 8, "windows": 4, "macos": 3})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
         self.assertEqual(main["linux"], 9)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=3 macos=3")
+        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=4 macos=3")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
-        self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
+        self.assertEqual(daytime, {"linux": 8, "windows": 3, "macos": 3})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
+
+
+class IntegrationTrustTests(unittest.TestCase):
+    """zeron/zgx's passes and caches count only while it is protected as main is."""
+
+    MAIN_RULES = [{"type": "deletion"}, {"type": "non_fast_forward"},
+                  {"type": "pull_request", "parameters": {"required_approving_review_count": 1}}, {"type": "update"}]
+
+    def test_protected_needs_a_pull_request_and_no_force_push(self):
+        self.assertTrue(plan.protected(self.MAIN_RULES))
+        self.assertTrue(plan.protected([{"type": "pull_request"}, {"type": "non_fast_forward"}]))
+        self.assertFalse(plan.protected([]))  # no ruleset (zeron/zgx today)
+        self.assertFalse(plan.protected([{"type": "pull_request"}]))  # force pushes allowed
+        self.assertFalse(plan.protected([{"type": "non_fast_forward"}, {"type": "deletion"}]))  # direct pushes
+        for unreadable in (None, {"message": "Not Found"}, "x", [None, "pull_request"]):
+            self.assertFalse(plan.protected(unreadable), unreadable)
+        # Classic branch protection, when readable.
+        classic = {"required_pull_request_reviews": {"required_approving_review_count": 1},
+                   "allow_force_pushes": {"enabled": False}}
+        self.assertTrue(plan.protected([], classic))
+        self.assertFalse(plan.protected([], dict(classic, allow_force_pushes={"enabled": True})))
+        self.assertFalse(plan.protected([], {"allow_force_pushes": {"enabled": False}}))
+        self.assertFalse(plan.protected([], {"required_pull_request_reviews": {}}))
+
+    def check(self, responses, ref="refs/heads/zeron/zgx"):
+        calls = []
+
+        def fake(path):
+            calls.append(path)
+            for part, answer in responses.items():
+                if part in path:
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return answer
+            raise AssertionError(path)
+
+        old = plan.api
+        plan.api = fake
+        try:
+            return plan.integration_trusted("o/r", ref), calls
+        finally:
+            plan.api = old
+
+    def test_integration_trusted(self):
+        import urllib.error
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        trusted, calls = self.check({"/rules/branches/": self.MAIN_RULES})
+        self.assertTrue(trusted)
+        self.assertEqual(calls, ["/repos/o/r/rules/branches/zeron%2Fzgx?per_page=100"])
+        self.assertEqual(self.check({"/rules/branches/": [], "/protection": not_found})[0], False)
+        self.assertEqual(self.check({"/rules/branches/": not_found, "/protection": not_found})[0], False)
+        self.assertEqual(self.check({"/rules/branches/": OSError("timeout"), "/protection": OSError("x")})[0],
+                         False)  # fail closed
+        classic = {"required_pull_request_reviews": {}, "allow_force_pushes": {"enabled": False}}
+        self.assertEqual(self.check({"/rules/branches/": [], "/protection": classic})[0], True)
+        # Main needs no lookup; other branches are never integration branches.
+        self.assertEqual(self.check({}, "refs/heads/main"), (True, []))
+        self.assertEqual(self.check({}, "refs/heads/feature"), (False, []))
 
 
 class WorkflowConsistencyTests(unittest.TestCase):
@@ -183,7 +270,7 @@ class WorkflowConsistencyTests(unittest.TestCase):
         "frame_source": ("macos.yml", ["macos-frame-source"]),
         "ios": ("macos.yml", ["ios-core", "ios-tests"]),
         "android": ("android.yml", ["apk"]),
-        "zgx": ("zgx-tests.yml", ["zgx-macos", "zgx-linux"]),
+        "zgx": ("zgx-tests.yml", ["zgx-macos", "zgx-linux", "zgx-windows"]),
     }
 
     def test_job_runners_match(self):
@@ -220,6 +307,27 @@ class WorkflowConsistencyTests(unittest.TestCase):
         for suite in plan.SUITE_JOBS:
             self.assertIn(f"suites).{suite}", ci, suite)
             self.assertIn(f"keys).{suite} ||", ci, suite)
+
+
+class AndroidPlayTests(unittest.TestCase):
+    def test_only_a_trusted_upload_joins_the_concurrency_group(self):
+        """Every CI run on a branch named main starts android-play.yml (a fork's pull
+        request from its own main, the nightly, a run by hand): only the `play` job,
+        which needs a trusted push's bundle, may cancel the upload waiting for approval."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        spec = yaml.safe_load((ROOT / ".github" / "workflows" / "android-play.yml").read_text())
+        self.assertNotIn("concurrency", spec)
+        jobs = spec["jobs"]
+        self.assertEqual(jobs["play"]["concurrency"], {"group": "android-google-play", "cancel-in-progress": True})
+        self.assertEqual([name for name, job in jobs.items() if "concurrency" in job], ["play"])
+        self.assertEqual(jobs["play"]["needs"], "bundle")
+        gate = " ".join(jobs["bundle"]["if"].split())
+        for condition in ("github.event.workflow_run.event == 'push'",
+                          "github.event.workflow_run.head_repository.full_name == github.repository"):
+            self.assertIn(condition, gate)
 
 
 if __name__ == "__main__":

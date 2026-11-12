@@ -2,8 +2,33 @@
 # its CI job (zgx-tests.yml) gates everything else. Every other failure fails the
 # job. A known one that passes again is reported: then delete its line.
 #
-#   rust: <test path>     `cargo test --bin zeron-zgx` (skipped, exact name)
-#   luau: <test name>     `zgx test ui` (run; its FAIL line accepted)
+#   rust: <test path>          `cargo test --bin zeron-zgx` (skipped, exact name)
+#   rust-windows: <test path>  the same, on Windows only (zgx-windows)
+#   luau: <test name>          `zgx test ui` (run; its FAIL line accepted)
 #
-# None now (2026-11-11): every test passes on macOS and Linux. A test that
-# can't pass yet goes here only with why, and whose fix it waits on.
+# None on macOS and Linux now (2026-11-11): every test passes there. A test
+# that can't pass yet goes here only with why, and whose fix it waits on.
+#
+# Windows (2026-11-11, zeron/zgx at fbb89b20a, Windows 11, run locally): the
+# unit tests had never run on Windows; these 16 of 682 fail there. Most
+# measure layout and paint headless at fixed pixel sizes (split, transcript
+# paint, menu insets), which differ with Windows' fonts; the others read
+# paths the Unix way (a `/` state key, `/` as absolute, a junction). Each
+# wants a Windows-aware fix; until then they're let through so zgx-windows
+# gates every other test.
+rust-windows: images::tests::only_absolute_paths_are_files_here
+rust-windows: menu_tests::every_menu_is_concentric_and_evenly_inset
+rust-windows: plugins::file_events::tests::a_folder_reached_through_a_junction_is_heard
+rust-windows: plugins::preview::tests::a_preview_runs_nothing_and_borrows_nothing
+rust-windows: shell_tests::a_tab_carried_near_an_end_of_its_strip_scrolls_it
+rust-windows: split_tests::a_divider_bounces_at_a_pane_s_least_and_double_clicked_evens_the_panes
+rust-windows: split_tests::a_dragged_edge_reflows_the_page_live_keeping_the_reading_place
+rust-windows: split_tests::a_dragged_sidebar_edge_builds_no_list
+rust-windows: split_tests::a_side_giving_way_steps_nothing
+rust-windows: split_tests::resizing_split_panes_costs_each_about_what_one_chat_does
+rust-windows: split_tests::the_side_opened_wins_in_a_split
+rust-windows: split_tests::what_is_being_read_stands_still_at_every_frame_of_a_drag
+rust-windows: transcript_paint_tests::a_long_chat_come_back_to_mid_scroll_draws_what_a_whole_repaint_draws
+rust-windows: transcript_paint_tests::a_long_chat_of_other_chats_messages_opened_and_scrolled_draws_what_a_whole_repaint_draws
+rust-windows: transcript_paint_tests::a_long_chat_opened_and_scrolled_draws_what_a_whole_repaint_draws
+rust-windows: transcript_paint_tests::rows_that_come_whole_after_they_show_stay_apart_and_drawn

@@ -41,7 +41,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # zeron/zgx: the zgx interface's integration branch (plan.py INTEGRATION), on the
+    # pull request tier: its passes and caches serve the pull requests into it.
+    branches: [main, zeron/zgx]
   merge_group:
   workflow_dispatch:
   # Nightly: every suite and job in full (slow tests and fixtures included), nothing reused.
@@ -52,10 +54,15 @@ permissions:
   contents: read
 
 concurrency:
-  # A new push to a pull request cancels its previous run, admitted or still
-  # waiting, which releases everything that run held.
-  group: ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A pull request's run in a group of its own: a new push never waits for an
+  # older run to finish. (In one group per pull request it did: the older run,
+  # cancelled, still had to run `CI result` (`if: always()`), which queued for a
+  # runner like any job while the new run waited behind it.) ci-supersede.yml
+  # force-cancels the older runs instead, and an older run still waiting for
+  # admission stops by itself once its commit isn't the head (admit.py).
+  # main and the merge queue queue as before, never cancelled.
+  group: ci-${{ github.event.pull_request.number && format('pr-{0}-{1}', github.event.pull_request.number, github.run_id) || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   plan:
@@ -73,6 +80,7 @@ jobs:
       skip: ${{ steps.plan.outputs.skip }}
       flags: ${{ steps.plan.outputs.flags }}
       pr: ${{ steps.plan.outputs.pr }}
+      integration-trusted: ${{ steps.plan.outputs.integration-trusted }}
     steps:
       # The Rust sources too: the fingerprints scan them for files they read from
       # outside their packages. (~30 MB; root files such as Cargo.lock come with cone mode.)
@@ -117,6 +125,14 @@ jobs:
           CI_ADMISSION: ${{ vars.CI_ADMISSION }}
           CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
           CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          # The organization's other repositories with CI on the same runners: one queue, one
+          # budget. (Read with this token: they're public. Their other workflows, and this
+          # one's, count as holding what they run; CI_SEE_OUTSIDE=off ignores them.)
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml' }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          # The pull request's head as this run tests it: a newer push supersedes the run.
+          CI_PR: ${{ needs.plan.outputs.pr }}
+          CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
           MAX_WAIT_MINUTES: 120
         run: python3 -I scripts/ci/admit.py
 
@@ -227,9 +243,16 @@ jobs:
   zgx:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).zgx
+    permissions:
+      contents: read
+      actions: read  # zgx-tests.yml lists the pull request's own cache entries (not restored)
     uses: ./.github/workflows/zgx-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).zgx || fromJSON('[]')) }}
+      engine-plugins: ${{ contains(fromJSON(needs.plan.outputs.flags).zgx || fromJSON('[]'), 'engine-plugins') }}
+      # zeron/zgx protected as main is (plan.py integration_trusted): only then are its caches saved.
+      integration-trusted: ${{ needs.plan.outputs.integration-trusted == 'true' }}
 
   result:
     name: CI result

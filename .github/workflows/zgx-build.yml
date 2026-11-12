@@ -54,7 +54,10 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          use-cache: false
+      # (Restored only: zgx-tests saves it, from zeron/zgx. A tag's would be read
+      # by nothing else and evict the caches CI uses; docs/reference/ci.md#caches.)
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/Library/Caches/zgx-ghostty
           key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
@@ -65,6 +68,9 @@ jobs:
           workspaces: |
             . -> target
             apps/zgx -> target
+          # Releases and betas save none: run from tags, which no other run can
+          # read, their caches only evicted the ones CI uses (docs/reference/ci.md#caches).
+          save-if: false
       - name: the engine, from this commit
         env:
           ZERON_ENGINE_VERSION: ${{ inputs.version }}
@@ -169,6 +175,9 @@ jobs:
           workspaces: |
             . -> target
             apps/zgx -> target
+          # Releases and betas save none: run from tags, which no other run can
+          # read, their caches only evicted the ones CI uses (docs/reference/ci.md#caches).
+          save-if: false
       - name: the engine, from this commit
         env:
           ZERON_ENGINE_VERSION: ${{ inputs.version }}
@@ -239,6 +248,9 @@ jobs:
           workspaces: |
             . -> target
             apps/zgx -> target
+          # Releases and betas save none: run from tags, which no other run can
+          # read, their caches only evicted the ones CI uses (docs/reference/ci.md#caches).
+          save-if: false
       # (A Windows release has no separate engine: it runs as `zeron.exe engine`.)
       - name: the engine, from this commit
         env:
