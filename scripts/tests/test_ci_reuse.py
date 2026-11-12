@@ -212,6 +212,41 @@ class LookupTests(unittest.TestCase):
         self.assertEqual(reuse.passed_jobs(api, "o/r", key, {"refs/pull/7/merge", "refs/heads/main"}), {"tests"})
         self.assertEqual(reuse.passed_jobs(api, "o/r", key, set()), set())
 
+    class CacheApi:
+        """The Actions cache list: `key` a prefix, `ref` exact, 100 entries a page at most."""
+
+        def __init__(self, caches):
+            self.caches, self.paths = caches, []
+
+        def __call__(self, path):
+            from urllib.parse import parse_qs, urlsplit
+            self.paths.append(path)
+            query = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+            found = [c for c in self.caches if c["key"].startswith(query.get("key", ""))
+                     and ("ref" not in query or c["ref"] == query["ref"])]
+            per_page, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+            return {"total_count": len(found), "actions_caches": found[(page - 1) * per_page:page * per_page]}
+
+    def test_entries_of_other_refs_cannot_push_trusted_ones_off_the_page(self):
+        key = "ci-pass-v1-windows-abc"
+        # A fork's pull requests saved 150 entries under the key, listed before the trusted ones.
+        forged = [{"key": f"{key}-tests", "ref": f"refs/pull/{n}/merge"} for n in range(100, 250)]
+        api = self.CacheApi(forged + [{"key": f"{key}-tests", "ref": "refs/heads/main"},
+                                      {"key": f"{key}-app", "ref": "refs/pull/7/merge"}])
+        self.assertEqual(api(f"/repos/o/r/actions/caches?key={key}-&per_page=100")["actions_caches"][-1]["ref"],
+                         "refs/pull/199/merge")  # one query for every ref: neither trusted entry is listed
+        self.assertEqual(reuse.passed_jobs(api, "o/r", key, {"refs/pull/7/merge", "refs/heads/main"}),
+                         {"tests", "app"})
+        self.assertTrue(all("&ref=refs%2F" in p for p in api.paths[1:]))
+        self.assertEqual(len(api.paths), 3)  # one page per trusted ref
+
+    def test_a_trusted_ref_with_more_than_a_page_is_read_to_the_end(self):
+        key = "ci-pass-v1-core-abc"
+        many = [{"key": f"{key}-job{n}", "ref": "refs/heads/main"} for n in range(230)]
+        api = self.CacheApi(many)
+        self.assertEqual(len(reuse.passed_jobs(api, "o/r", key, {"refs/heads/main"})), 230)
+        self.assertEqual(len(api.paths), 3)
+
 
 class ReusePlanTests(unittest.TestCase):
     def test_whole_suites(self):

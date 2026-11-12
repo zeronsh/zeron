@@ -46,6 +46,7 @@ import posixpath
 import re
 import subprocess
 import tomllib
+from urllib.parse import quote
 
 VERSION = "v1"
 
@@ -304,11 +305,25 @@ def covered(path: str, inputs: dict[str, tuple[list[str], set[str]]]) -> bool:
 BUILD_PATHS = ["crates/**", "apps/zeron/**", "apps/zgx/**", "Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml"]
 
 
+MAX_PAGES = 10  # per trusted ref: a suite has a few jobs, so one page is the norm
+
+
 def passed_jobs(api, repo: str, key: str, trusted_refs: set[str]) -> set[str]:
-    """Jobs recorded as passed under `key` on a trusted ref."""
-    data = api(f"/repos/{repo}/actions/caches?key={key}-&per_page=100")
+    """Jobs recorded as passed under `key` on a trusted ref.
+
+    One query per trusted ref (`&ref=`): listed for every ref at once, entries
+    any pull request saves under the same key (a fork's, for instance) could
+    fill the page and push the trusted ones off it.
+    """
     jobs = set()
-    for cache in data.get("actions_caches", []):
-        if cache.get("ref") in trusted_refs and cache["key"].startswith(key + "-"):
-            jobs.add(cache["key"][len(key) + 1:])
+    for ref in sorted(trusted_refs):
+        for page in range(1, MAX_PAGES + 1):
+            data = api(f"/repos/{repo}/actions/caches?key={quote(key + '-', safe='')}"
+                       f"&ref={quote(ref, safe='')}&per_page=100&page={page}")
+            caches = data.get("actions_caches", [])
+            for cache in caches:
+                if cache.get("ref") == ref and cache["key"].startswith(key + "-"):
+                    jobs.add(cache["key"][len(key) + 1:])
+            if len(caches) < 100:
+                break
     return jobs
