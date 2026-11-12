@@ -409,14 +409,20 @@ after Linux core.
 | 9 | apt-ui-browser | `apt-debs-v1-ui-browser-…` (`linux-ci`) | main | 0.26 GB | |
 | 10 | zgx-ghostty | `zgx-ghostty-…` | zeron/zgx | 0.49 GB | |
 | 11, 12 | zgx-cli-macos, zgx-cli-linux | `zgx-cli-macOS-ARM64-…`, `zgx-cli-Linux-X64-…` | zeron/zgx | 20 MB each | |
-| | pass records | `ci-pass-v1-…` (see [Reuse](#reuse)) | any ref | ~240 B each | |
+| | pass records | `ci-pass-v1-…` (see [Reuse](#reuse)) | any ref (kept: main, zeron/zgx, pull requests) | ~240 B each | |
 
 The keep set adds up to about 9.4 GB, so the budget is 9.5 GB of the 10:
 `test_ci_caches.py` fails if the declared sizes exceed it. The zgx families
 are saved only from `zeron/zgx` (zgx's suite isn't on `main` yet), through
 `zgx-tests.yml`'s `SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' }}`.
 Pass records are a few hundred bytes and needed wherever CI runs, pull
-requests included, so any ref may save them.
+requests included, so any ref may save them. They don't count against the
+budget (any pull request, a fork's too, can save any number of them, and they
+must not push out a cache), and the janitor keeps only those of refs some run
+trusts: `main`, `zeron/zgx` and pull requests' merge refs
+(`refs/pull/<n>/merge`). The rest (a run by hand on a side branch, the merge
+queue, a tag) nothing reads. A fork's pull request can't be told from a
+same-repository one by its ref, so every pull request's records stay.
 
 Not saved any more (each still restores whatever is there, so nothing else
 changes):
@@ -475,12 +481,13 @@ workflows run only from the default branch. It lists every ref's entries
 
 1. entries no family declares;
 2. entries saved from a ref their family doesn't allow (pull requests, tags,
-   side branches); pass records are exempt;
+   side branches); pass records only from refs no run trusts (anything but
+   `main`, `zeron/zgx` and `refs/pull/<n>/merge`);
 3. older generations: only the newest entry of a family per ref stays.
    rust-cache's key changes with the lockfile, so `main`'s previous cache
    would otherwise linger until GitHub evicts something;
 4. while what's left is still over the 9.5 GB budget, whole families, from
-   the lowest priority up.
+   the lowest priority up. Pass records don't count against it.
 
 The run's summary lists what it kept and deleted, with sizes. To see what it
 would delete now, without deleting anything:
