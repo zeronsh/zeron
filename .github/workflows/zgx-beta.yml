@@ -85,9 +85,55 @@ jobs:
             echo "engine=$version"
           } >>"$GITHUB_OUTPUT"
 
+  # The organization's runner queue (scripts/ci/admit.py), shared with CI here
+  # and in zeronsh/zgx: a beta goes first, as a release, and its whole run is
+  # reserved up front, so CI admitted meanwhile never takes the runners its
+  # later jobs need. What it reserves (beside this job):
+  #   version                    1 Linux
+  #   build (zgx-build.yml)      Linux x64 + arm, Windows, macOS: those
+  #                              `platforms` names; on a tag all, but macOS,
+  #                              which waits for apple-release's approval first
+  #                              (counted once it's queued, not while it waits)
+  #   release, channel           2 Linux, on a tag
+  # Admission fails open: CI_ADMISSION=off, or API trouble, starts it at once.
+  admit:
+    if: github.repository == 'zeronsh/zeron' && vars.ZGX_BETA_ENABLED == 'true'
+    name: "admit [${{ matrix.reservation }}] release"
+    strategy:
+      # One entry: the reservation, computed once for the name and the step.
+      # (Expressions can't add: each count is spelled out.)
+      matrix:
+        reservation:
+          - "${{ github.event_name == 'push' && 'linux=5 windows=1 macos=0' || format('linux={0} windows={1} macos={2}', contains(inputs.platforms, 'linux') && 3 || 1, contains(inputs.platforms, 'windows') && 1 || 0, contains(inputs.platforms, 'macos') && 1 || 0) }}"
+    runs-on: ubuntu-24.04
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ matrix.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zgx:ci.yml,release.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I scripts/ci/admit.py
+
   # Built as a stable release is (zgx-build.yml), with the beta's version.
   build:
-    needs: version
+    needs: [version, admit]
     uses: ./.github/workflows/zgx-build.yml
     secrets: inherit
     with:
