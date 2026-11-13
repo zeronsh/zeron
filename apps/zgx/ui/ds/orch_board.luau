@@ -8,11 +8,12 @@
 -- Each column is a lane of its own, its name, glyph and count at its head;
 -- an empty one stands slim, its head alone, so the columns with work in
 -- them take the room (and a board with nothing on it says so). A card:
--- its orchestrator's hue as a stripe at its leading edge, how its lead
--- thread stands (Zeron's status glyph, held 300 ms at least), its title,
+-- how its lead thread stands (Zeron's status glyph, held 300 ms at least), its title,
 -- how far along it is (its threads' todo as segmented cells, else its own
 -- progress), its threads as dots when it has several, its pull request,
--- and its priority when that is high or urgent. A card in Review or Done
+-- its priority when that is high or urgent, and, where the board holds
+-- more than one orchestrator's work, whose it is (its hue's dot and name,
+-- quiet; a loose item says none). A card in Review or Done
 -- carries its outcome, two lines of it until it's opened: the answer or
 -- result, where it is read. Each card is a plugin slot
 -- (`orchestration.item`, `provide = { item = id }`).
@@ -119,7 +120,7 @@ local COLUMN_INK: { [string]: string } = {
 	review = "$zeron.status.input",
 	done = "$zeron.status.done",
 }
--- A card's corner, and the stripe's room inside it.
+-- A card's corner.
 local CARD_RADIUS = "$radius.lg"
 local DRAG_TAG = "orch-item"
 
@@ -315,21 +316,6 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local function orchestrators(): { Orchestrator }
 		return (control.value(props.orchestrators) :: { Orchestrator }?) or {}
 	end
-	local function hue_of(id: string?): number?
-		if not id then
-			return nil
-		end
-		for _, o in orchestrators() do
-			if o.id == id then
-				return o.hue
-			end
-		end
-		return nil
-	end
-	local function ink_of(id: string?): string
-		local h = hue_of(id)
-		return if h then hue.paint(h) else "$text.tertiary"
-	end
 
 	local columns: { Column } = if props.inbox then { INBOX, table.unpack(COLUMNS) } else table.clone(COLUMNS)
 	-- The items shown, by column, each sorted (filtered first).
@@ -355,6 +341,24 @@ local OrchBoard = ui.component(function(props: Props): Node
 			out[k] = sorted(l)
 		end
 		return out
+	end)
+
+	-- Whether the board shows more than one orchestrator's work: then each
+	-- card says whose it is.
+	local mixed = ui.computed(function(): boolean
+		local seen: string? = nil
+		for _, l in shown:get() do
+			for _, it in l do
+				local o = it.orchestrator_id
+				if o then
+					if seen and seen ~= o then
+						return true
+					end
+					seen = o
+				end
+			end
+		end
+		return false
 	end)
 
 	-- A drag under way: the card's id; where it would land.
@@ -463,8 +467,18 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local hovered = ui.use_state(false)
 		local open = ui.use_state(false)
 		local pad = if compact then "$space.2" else ui.raw(10, "a card's even inset, between the steps")
-		local function ink(): string
-			return ink_of(item().orchestrator_id)
+		-- Whose it is, said where the board holds more than one's.
+		local function owner(): Orchestrator?
+			local o = item().orchestrator_id
+			if not o or not mixed:get() then
+				return nil
+			end
+			for _, x in orchestrators() do
+				if x.id == o then
+					return x
+				end
+			end
+			return nil
 		end
 		local function progress(): number?
 			return progress_of(item(), props.todo_of)
@@ -548,6 +562,29 @@ local OrchBoard = ui.component(function(props: Props): Node
 				if compact then priority_mark(function(): string
 					return item().priority
 				end) else nil,
+				ui.show(function(): boolean
+					return owner() ~= nil
+				end, ui.row {
+					class = "orch-card-owner",
+					gap = "$zeron.space.tight",
+					items = "center",
+					min_w = 0,
+					shrink = 1,
+					hue.Dot { hue = function(): number?
+						local o = owner()
+						return o and o.hue
+					end, size = 6 },
+					ui.text {
+						function(): string
+							local o = owner()
+							return if o then o.name else ""
+						end,
+						truncate = true,
+						min_w = 0,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					},
+				}),
 				ui.each(ui.computed(function(): { string }
 					-- (One thread: its status leads the title already.)
 					local threads = item().threads or {}
@@ -640,7 +677,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			progress_bar,
 			-- (Its marks, where it has any: several threads, a pull request.)
 			if compact then nil else ui.show(function(): boolean
-				return #(item().threads or {}) > 1 or #prs() > 0
+				return #(item().threads or {}) > 1 or #prs() > 0 or owner() ~= nil
 			end, marks),
 			-- Its outcome: two lines, or all of it opened.
 			ui.show(
@@ -798,10 +835,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			ui.row {
 				w_full = true,
 				p = pad,
-				gap = if compact then "$space.2" else ui.raw(10, "the stripe's gap, the card's inset"),
 				items = "stretch",
-				-- The stripe: its orchestrator's hue, a pill set in the card.
-				ui.div { w = 3, shrink = 0, rounded = "$radius.full", bg = ink },
 				body,
 			},
 			line_at("before"),
