@@ -88,7 +88,8 @@ test("orch crew: an activity moving changes its words in place", function()
 		end
 	end
 	app:set_state("crew_members", changed)
-	app:frames(10)
+	-- (A status or an activity shows 300 ms at least: ds/orch_hold.)
+	app:wait(`{CREW} >> ~"git push -u origin HEAD"`)
 	expect(app:has(`{CREW} >> ~"git push -u origin HEAD"`)).to_be(true)
 	expect(app:has(`{CREW} >> ~"cargo test -p zeron-engine"`)).to_be(false)
 	expect(app:has(`{CREW} >> ~"6/8"`)).to_be(true)

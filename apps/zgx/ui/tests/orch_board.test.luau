@@ -42,10 +42,11 @@ test("orch board: the sample's columns, priority first", function()
 	expect(now[2]).to_be("Engine: orchestration state + RPC")
 	expect(now[3]).to_be("Reports, asks, MCP tools")
 	expect(now[4]).to_be("Merge phase-1 fixes")
-	-- Progress from its threads' todo (Control room's 2 of 7), or its own
-	-- (Moscow's, all of it).
-	expect(app:has('#orch-col-now >> "29%"')).to_be(true)
-	expect(app:has('#orch-col-review >> "100%"')).to_be(true)
+	-- Progress from its threads' todo (Control room's 2 of 7, as cells and
+	-- its count; Moscow's, all three of three).
+	expect(app:has('#orch-col-now >> "2/7"')).to_be(true)
+	expect(app:has("#orch-col-now >> .orch-card-progress")).to_be(true)
+	expect(app:has('#orch-col-review >> "3/3"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 

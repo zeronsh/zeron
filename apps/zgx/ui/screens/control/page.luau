@@ -24,6 +24,8 @@ local Machines = require("@ds/orch_machines")
 local Comms = require("@ds/orch_comms")
 local OrchBoard = require("@ds/orch_board")
 local Links = require("@ds/links")
+local Block = require("@ds/orch_block")
+local Counter = require("@ds/orch_counter")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
@@ -33,7 +35,9 @@ local M = {}
 -- Where the page goes to two columns.
 M.WIDE = 1100
 -- The right column's width, wide.
-local SIDE_W = 400
+local SIDE_W = 420
+-- Between blocks: enough that each reads as its own.
+local GAP = "$space.4"
 
 -- The widgets: each one's column when wide.
 M.WIDGETS = { "capture", "needs", "map", "board", "machines", "comms" }
@@ -493,22 +497,113 @@ end
 
 local BUILD: { [string]: () -> Node } = { capture = capture, needs = needs, map = map, board = board, machines = machines, comms = comms }
 
--- What a widget's title has beside it: how many wait, how many work.
-local function count_of(id: string): string
+-- How many of the crew work now.
+local function working_now(): number
+	local working = 0
+	for _, m in orchestration.now:get().crew or {} do
+		local c = chats_now:get()[m.chat_id]
+		if not m.released and c and c.status == "working" then
+			working += 1
+		end
+	end
+	return working
+end
+
+-- A figure that shows only while it has something to say.
+local function figure_if(text: () -> string, tone: string?): Node
+	return ui.show(function(): boolean
+		return text() ~= ""
+	end, Block.figure(text, tone))
+end
+
+-- The board's items by column today, counted.
+local function board_counts(): { [string]: number }
+	local out: { [string]: number } = {}
+	local today = os.time() - 86400
+	for _, it in orchestration.now:get().items or {} do
+		if it.state ~= "done" or (it.done or it.updated or 0) >= today then
+			out[it.state] = (out[it.state] or 0) + 1
+		end
+	end
+	return out
+end
+
+-- What a widget's head says beside its title: its live figures.
+local function figures_of(id: string): Node?
 	if id == "needs" then
-		local n = #data.needs(orchestration.now:get(), sessions.now:get())
-		return if n > 0 then tostring(n) else ""
+		local function n(urgent: boolean): number
+			local k = 0
+			for _, need in data.needs(orchestration.now:get(), sessions.now:get()) do
+				if not urgent or need.urgent then
+					k += 1
+				end
+			end
+			return k
+		end
+		return ui.row {
+			gap = "$space.2",
+			items = "center",
+			ui.show(function(): boolean
+				return n(false) > 0
+			end, Counter { value = function(): number
+				return n(false)
+			end, text_size = "$font.size.xs", color = "$text.secondary" }),
+			figure_if(function(): string
+				local u = n(true)
+				return if u > 0 then locale.s("control.figures.urgent", { n = u }) else ""
+			end, "failed"),
+		}
 	elseif id == "map" then
-		local working = 0
-		for _, m in orchestration.now:get().crew or {} do
-			local c = chats_now:get()[m.chat_id]
-			if not m.released and c and c.status == "working" then
-				working += 1
+		return figure_if(function(): string
+			local w = working_now()
+			return if w > 0 then locale.s("control.map.working", { n = w }) else ""
+		end)
+	elseif id == "board" then
+		local function count(state: string, key: string): () -> string
+			return function(): string
+				local n = board_counts()[state] or 0
+				return if n > 0 then locale.s(key, { n = n }) else ""
 			end
 		end
-		return if working > 0 then locale.s("control.map.working", { n = working }) else ""
+		return ui.row {
+			gap = "$space.3",
+			items = "center",
+			figure_if(count("active", "control.figures.now")),
+			figure_if(count("blocked", "control.figures.blocked"), "failed"),
+			figure_if(count("review", "control.figures.review"), "input"),
+			figure_if(count("done", "control.figures.done"), "done"),
+		}
+	elseif id == "machines" then
+		return ui.row {
+			gap = "$space.3",
+			items = "center",
+			figure_if(function(): string
+				local n = 0
+				for _, d in sessions.devices:get() or {} do
+					if d.online ~= false then
+						n += 1
+					end
+				end
+				return if n > 0 then locale.s("control.figures.online", { n = n }) else ""
+			end),
+			figure_if(function(): string
+				local n = 0
+				for _, c in chats_now:get() do
+					if c.status == "working" then
+						n += 1
+					end
+				end
+				return if n > 0 then locale.s("control.figures.running", { n = n }) else ""
+			end),
+		}
+	elseif id == "comms" then
+		return figure_if(function(): string
+			local list = orchestration.comms:get()
+			local last = list[#list]
+			return if last then status.ago(status.since(last.at or 0)) else ""
+		end)
 	end
-	return ""
+	return nil
 end
 
 -- A menu opened under an element of ours (a ⋯), as from a click there.
@@ -527,7 +622,8 @@ local function opens_under(): (((x: number, y: number) -> boolean) -> (), (_v: b
 	end
 end
 
--- One widget: its title (a count beside it, its menu at its end) over it.
+-- One widget, a block of its own: its title, its live figures beside it,
+-- its menu at its end; it over them.
 local function widget(id: string, wide: boolean): Node
 	local hook, seen, open = opens_under()
 	local function entries(): { any }
@@ -549,44 +645,31 @@ local function widget(id: string, wide: boolean): Node
 		end
 		return out
 	end
-	return ui.column {
+	return Block.Block {
 		id = `control-widget-{id}`,
 		class = "control-widget",
-		w_full = true,
-		gap = "$space.3",
-		ContextMenu {
-			items = entries,
-			hook = hook,
-			label = locale.t(`control.widget.{id}`),
-			w_full = true,
-			ui.row {
-				w_full = true,
-				h = 24,
-				gap = "$space.2",
-				items = "center",
-				ds.SectionTitle { locale.t(`control.widget.{id}`) },
-				ui.text {
-					function(): string
-						return count_of(id)
-					end,
-					tabular = true,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				},
-				ui.div { grow = 1 },
-				ui.div {
-					class = "control-widget-menu",
-					on_visible = seen,
-					IconButton {
-						icon = "more-horizontal",
-						label = locale.t("control.widgets.menu"),
-						size = "sm",
-						tone = "quiet",
-						on_click = open,
-					},
-				},
+		title = locale.t(`control.widget.{id}`),
+		figures = figures_of(id),
+		menu = ui.div {
+			class = "control-widget-menu",
+			on_visible = seen,
+			IconButton {
+				icon = "more-horizontal",
+				label = locale.t("control.widgets.menu"),
+				size = "sm",
+				tone = "quiet",
+				on_click = open,
 			},
 		},
+		head = function(row: Node): Node
+			return ContextMenu {
+				items = entries,
+				hook = hook,
+				label = locale.t(`control.widget.{id}`),
+				w_full = true,
+				row,
+			}
+		end,
 		BUILD[id](),
 	}
 end
@@ -614,7 +697,7 @@ local function slot(): Node
 	return ui.column {
 		id = "control-plugin-widgets",
 		w_full = true,
-		ui.slot("zeron.orchestration.widgets", { direction = "column", gap = "$space.7", w_full = true }),
+		ui.slot("zeron.orchestration.widgets", { direction = "column", gap = GAP, w_full = true }),
 	}
 end
 
@@ -623,29 +706,29 @@ local function layout(kind: string): Node
 	local function list(column: string?): Node
 		return ui.each(shown_of(column), function(w: { id: string }): Node
 			return widget(w.id, wide)
-		end, { key = by_id, w_full = true, gap = "$space.7" })
+		end, { key = by_id, w_full = true, gap = GAP })
 	end
 	if wide then
 		return ui.column {
 			id = "control-columns",
 			class = "control-wide",
 			w_full = true,
-			gap = "$space.7",
+			gap = GAP,
 			ui.row {
 				w_full = true,
-				gap = "$space.7",
+				gap = GAP,
 				items = "start",
-				ui.column { id = "control-left", grow = 1, basis = 0, min_w = 0, gap = "$space.7", list("left") },
-				ui.column { id = "control-right", w = SIDE_W, shrink = 0, gap = "$space.7", list("right"), slot() },
+				ui.column { id = "control-left", grow = 1, basis = 0, min_w = 0, gap = GAP, list("left") },
+				ui.column { id = "control-right", w = SIDE_W, shrink = 0, gap = GAP, list("right"), slot() },
 			},
-			ui.column { id = "control-full", w_full = true, gap = "$space.7", list("full") },
+			ui.column { id = "control-full", w_full = true, gap = GAP, list("full") },
 		}
 	end
 	return ui.column {
 		id = "control-columns",
 		class = "control-narrow",
 		w_full = true,
-		gap = "$space.7",
+		gap = GAP,
 		list(nil),
 		slot(),
 	}

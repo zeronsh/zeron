@@ -243,6 +243,41 @@ local comms = {
 	{ id = "cm-7", kind = "spawn", from = "orc-vpn", to = "th-vpn-merge", summary = "Merge phase-1 fixes", at = ago(1800) },
 }
 
+-- Each device's CPU over the last six minutes, one sample every 5 s, as
+-- the bridge keeps it from `WatchDeviceLoads` (`history`, oldest first):
+-- a wander around where it stands now, with a burst or two.
+local function history_of(cpu: number, seed: number): { { at: number, cpu: number } }
+	local out = {}
+	local n = 72
+	for i = 1, n do
+		local t = i + seed * 13
+		local wave = math.sin(t * 0.31) * 0.09 + math.sin(t * 1.13) * 0.05 + math.sin(t * 2.7) * 0.025
+		local burst = if (i + seed * 7) % 29 < 5 then 0.18 else 0
+		local v = cpu + wave + burst - 0.06 + (cpu - 0.3) * (i / n - 1) * 0.4
+		table.insert(out, { at = NOW - (n - i) * 5, cpu = math.clamp(v, 0.02, 0.98) })
+	end
+	out[n].cpu = cpu
+	return out
+end
+loads["dev-desk"].history = history_of(loads["dev-desk"].cpu, 1)
+loads["dev-mac"].history = history_of(loads["dev-mac"].cpu, 2)
+loads["dev-cloud"].history = history_of(loads["dev-cloud"].cpu, 3)
+
+-- More comms, for a feed with bursts in it.
+for _, c in {
+	{ id = "cm-8", kind = "report", from = "th-engine-state", to = "orc-orch", summary = "Registry kinds in; ops next", at = ago(600) },
+	{ id = "cm-9", kind = "message", from = "orc-orch", to = "th-engine-state", summary = "Good. Ops, then the stream", at = ago(590) },
+	{ id = "cm-10", kind = "report", from = "th-vpn-moscow", to = "orc-vpn", summary = "Reboot plan ready", at = ago(3500) },
+	{ id = "cm-11", kind = "ask", from = "orc-vpn", to = "you", summary = "Reboot Moscow at 02:00 MSK?", at = ago(3400) },
+	{ id = "cm-12", kind = "message", from = "orc-orch", to = "th-engine-flow", summary = "Coalesce wakes within 2 s", at = ago(5) },
+	{ id = "cm-13", kind = "report", from = "th-vpn-merge", to = "orc-vpn", summary = "Checks green, merging #412", at = ago(10) },
+} do
+	table.insert(comms, c)
+end
+table.sort(comms, function(a: any, b: any): boolean
+	return a.at < b.at
+end)
+
 local sample = {
 	NOW = NOW,
 	now = {
