@@ -17,8 +17,10 @@ end
 test("the newest dump's parts each have a chip saying where they went", function()
 	local app = open()
 	expect(app:error()).to_be_nil()
-	-- Its text, whole.
-	expect(app:text("#control-capture >> role:document")).to_contain("is the engine state thread still on the registry part?")
+	-- Its text, whole (its label), each part's words under the pointer's
+	-- reach.
+	expect(app:has('#control-capture >> .orch-receipt-text >> "registry "')).to_be(true)
+	expect(app:count("#control-capture >> .orch-part") >= 5).to_be(true)
 	expect(app:has('#control-capture >> role:button "Orchestrator screen, Context, Delivered"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "Inbox, Task, Delivered"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
@@ -33,6 +35,8 @@ test("a question's answer comes back as a reply line, with a way into its thread
 	-- There without a click: the answer, quiet, under the chips.
 	expect(app:has('#control-capture >> .orch-answer >> ~"waiting on your approval"')).to_be(true)
 	expect(app:count("#control-capture >> .orch-answer")).to_be(1)
+	-- One line: the condensed answer, never the whole reply.
+	expect(app:has('#control-capture >> .orch-answer >> ~"wg show"')).to_be(false)
 	app:click('#control-capture >> .orch-answer-open')
 	app:frames(5)
 	expect(app:error()).to_be_nil()
@@ -188,4 +192,103 @@ test("a dump's text is cut at its parts' spans, each underlined part naming its 
 	expect(#found).to_be(3)
 	expect(found[2].text).to_be("beta")
 	expect(found[2].route).to_be(1)
+end)
+
+-- A node's box from the tree: x, y, w, h.
+local function box(app: any, target: string): (number, number, number, number)
+	local line = app:tree(target):match("[^\n]+") or ""
+	local x, y, w, h = line:match(" (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+	return tonumber(x) or -1, tonumber(y) or -1, tonumber(w) or -1, tonumber(h) or -1
+end
+local LAST = '#orch-chips >> role:button "Engine: orchestration state, Question, Delivered"'
+local FIRST = '#orch-chips >> role:button "Orchestrator screen, Context, Delivered"'
+
+test("the chips stand in one row at any width, never wrapping", function()
+	local app = open()
+	for _, size in { { 1440, 900 }, { 900, 900 }, { 700, 900 }, { 520, 900 } } do
+		app:resize(size[1], size[2])
+		app:frames(10)
+		local _, sy, _, sh = box(app, "#orch-chips")
+		expect(sh < 40).to_be(true)
+		local _, fy = box(app, FIRST)
+		local _, ly = box(app, LAST)
+		expect(fy).to_be(ly)
+		expect(fy >= sy).to_be(true)
+	end
+end)
+
+test("the chips scroll sideways past the room: dragged across", function()
+	local app = open()
+	app:resize(700, 900)
+	app:frames(10)
+	local before, by = box(app, FIRST)
+	app:drag('#orch-chips >> role:button "CI speed, Priority, Delivered"', FIRST)
+	app:frames(10)
+	local after, ay = box(app, FIRST)
+	-- Moved along, not down; and a drag opens no chip's menu.
+	expect(after < before).to_be(true)
+	expect(ay).to_be(by)
+	expect(app:has('role:menuitem "Move to"')).to_be(false)
+end)
+
+test("the pointer on a part lights its chip and brings it into view", function()
+	local app = open()
+	app:resize(700, 900)
+	app:frames(10)
+	local vx, _, vw = box(app, "#orch-chips")
+	local lx, _, lw = box(app, LAST)
+	-- Past the strip's end at first.
+	expect(lx + lw > vx + vw).to_be(true)
+	app:hover('#control-capture >> .orch-part >> "registry "')
+	app:frames(20)
+	expect(app:state("orch_receipt_hovered")).to_be("rt-9")
+	lx, _, lw = box(app, LAST)
+	expect(lx >= vx and lx + lw <= vx + vw + 0.5).to_be(true)
+	-- The pointer on a chip lights its part, as before.
+	app:hover(LAST)
+	app:frames(5)
+	expect(app:state("orch_receipt_hovered")).to_be("rt-9")
+	app:hover('#orch-chips >> role:button "CI speed, Priority, Delivered"')
+	app:frames(5)
+	expect(app:state("orch_receipt_hovered")).to_be("rt-8")
+end)
+
+test("a part's hover card: where it went, how it stands, what was sent, the answer, the way in", function()
+	local app = mount("orch_part_card_fixture.luau")
+	app:resize(900, 500)
+	app:frames(10)
+	expect(app:has('#card-answered >> "Exnomic VPN"')).to_be(true)
+	expect(app:has('#card-answered >> "Question"')).to_be(true)
+	expect(app:has('#card-answered >> "Answered"')).to_be(true)
+	expect(app:has('#card-answered >> ~"Did the Moscow node reboot cleanly?"')).to_be(true)
+	-- The whole reply, its markdown drawn (no raw marks).
+	expect(app:has('#card-answered >> .orch-part-answer >> ~"scheduled for 02:00 MSK"')).to_be(true)
+	expect(app:has('#card-answered >> .orch-part-answer >> ~"wg show"')).to_be(true)
+	expect(app:has('#card-answered >> .orch-part-answer >> ~"**"')).to_be(false)
+	app:click("#card-answered >> .orch-part-open")
+	app:frames(2)
+	expect(app:state("opened")).to_be("orchestrator:orc-vpn")
+	-- Unsure: no way in, its state said.
+	expect(app:has('#card-unsure >> "Unsure"')).to_be(true)
+	expect(app:has("#card-unsure >> .orch-part-open")).to_be(false)
+end)
+
+test("an answer's one line: the engine's own, or a whole reply's first sentence", function()
+	local data = require("@ds/orch_data")
+	expect(data.answer_line({ answer = "Short and `done`.", answer_full = "# Long\n\nall of it" })).to_be("Short and `done`.")
+	expect(data.answer_line({ answer = "## Status\n- **Yes.** It ran `cargo test` fine. More after." })).to_be("Status **Yes.**")
+	expect(data.answer_line({})).to_be("")
+end)
+
+test("the history: a row an earlier dump, opened in place", function()
+	local app = open()
+	app:click("#control-history-toggle")
+	app:frames(10)
+	expect(app:count(".control-history-row")).to_be(1)
+	expect(app:has(".control-history-receipt")).to_be(false)
+	app:click(".control-history-row")
+	app:frames(10)
+	expect(app:has('.control-history-receipt >> role:button "Unsure, Task, Unsure"')).to_be(true)
+	-- The newest stays where it was, above.
+	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
 end)

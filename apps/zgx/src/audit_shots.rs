@@ -19,6 +19,8 @@
 //! What's transparent (the window's glass) is laid on `AUDIT_BACKDROP`
 //! (`#e9e9ee` light, `#1d1d22` dark), the same under both. `AUDIT_WAIT_MS`
 //! lets real time pass before the picture, for what comes over the network.
+//! `AUDIT_MID=1` draws the picture right after the last step (no settling):
+//! with a `+<ms>` wait, an animation caught partway.
 //!
 //! Plugins too: `ZERON_ZGX_DEV_PLUGINS` loads plugin folders into each shot
 //! (lent the design system, as the app lends it), and `ZERON_ZGX_DEV_GITHUB`
@@ -152,6 +154,7 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         }
     };
     wait(&mut app);
+    let mid = std::env::var("AUDIT_MID").is_ok_and(|v| v == "1");
     for step in &shot.steps {
         match step {
             Step::Wait(ms) => {
@@ -183,11 +186,17 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
                     .map_err(|e| format!("{}: {name}: {e}", shot.name))?;
             }
         }
-        app.settle();
-        app.frames(10);
+        // (`AUDIT_MID=1`: no settling after a step, so a `+<ms>` wait's
+        // frames are all an animation gets: a picture mid-roll.)
+        if !mid {
+            app.settle();
+            app.frames(10);
+        }
     }
     // Long enough for entrances and springs to finish.
-    app.frames(90);
+    if !mid {
+        app.frames(90);
+    }
     wait(&mut app);
     if let Some(error) = app.error() {
         eprintln!("audit_shots: {}: script error: {error}", shot.name);

@@ -92,6 +92,11 @@ pub async fn file_report(
             doc.upsert_work_item(&item);
         });
     }
+    // A report is a step of the thread's own work (its host is this engine:
+    // its agent's Zeron server dials it).
+    orchestration
+        .progress()
+        .on_report(orchestration, caller_chat, report.state, report.at);
     orchestration.comms().say(
         CommKind::Report,
         caller_chat,

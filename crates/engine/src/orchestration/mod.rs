@@ -7,7 +7,8 @@
 //! ([`ChatRole`]), the coalesced state watch, the comms feed, and the few
 //! writes other parts of the engine make. The `Orchestrate` ops live in
 //! [`ops`], the Brain dump's routing in [`brain`], scheduled wakes in
-//! [`wake`], machine load in [`loads`], crew reports in [`report`].
+//! [`wake`], machine load in [`loads`], crew reports in [`report`], how far
+//! each chat's work has got in [`progress`].
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub(crate) mod brain;
 pub mod comms;
 pub(crate) mod loads;
 pub(crate) mod ops;
+pub(crate) mod progress;
 pub mod report;
 pub(crate) mod scope;
 pub(crate) mod stale_dumps;
@@ -86,6 +88,8 @@ struct Inner {
     /// The newest RPC service: what scheduled wakes send through.
     rpc: Mutex<Weak<crate::rpc::EngineRpc>>,
     wake_started: std::sync::atomic::AtomicBool,
+    /// Progress of the chats this engine hosts.
+    progress: progress::ProgressBook,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -124,6 +128,7 @@ impl Orchestration {
                 state_rx,
                 rpc: Mutex::new(Weak::new()),
                 wake_started: std::sync::atomic::AtomicBool::new(false),
+                progress: progress::ProgressBook::default(),
             }),
         }
     }
@@ -160,6 +165,18 @@ impl Orchestration {
                 Some((value, rx))
             }))
             .boxed()
+    }
+
+    /// How far the chats hosted here have got.
+    pub(crate) fn progress(&self) -> &progress::ProgressBook {
+        &self.inner.progress
+    }
+
+    /// Turn the automatic progress notes on or off (on unless
+    /// `ZERON_PROGRESS_NOTES=0`). On-demand notes and the deterministic
+    /// fields stay on.
+    pub fn set_auto_progress_notes(&self, on: bool) {
+        self.inner.progress.set_auto_notes(on);
     }
 
     pub fn comms(&self) -> &CommBus {
@@ -239,6 +256,7 @@ impl Orchestration {
         {
             wake::start(self.clone());
             watchers::start(self.clone());
+            progress::start(self.clone());
         }
     }
 

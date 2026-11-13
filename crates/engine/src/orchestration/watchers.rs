@@ -6,7 +6,10 @@
 //!   show).
 //! - **Route answers**: a Brain dump route with intent `question` that was
 //!   delivered to a chat hosted here takes that chat's reply as its answer
-//!   once the turn after the delivery ends (`answered` + `answer`).
+//!   once the turn after the delivery ends: `answered`, the whole reply as
+//!   `answerFull`, and `answer` one line the receipt shows (the reply's
+//!   first real sentence at once, then the cheap one-shot model's one-line
+//!   answer to the question when it can make one).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,8 +25,10 @@ use super::Orchestration;
 pub(crate) const ASK_FRESH: TimeDelta = TimeDelta::minutes(10);
 /// The most ask ids kept as shown.
 const SHOWN_KEPT: usize = 1000;
-/// The most an answer keeps.
-const ANSWER_MAX: usize = 8000;
+/// The most a whole reply (`answerFull`) keeps.
+const FULL_MAX: usize = 8000;
+/// The most of a reply the condensing run reads.
+const CONDENSE_INPUT_MAX: usize = 4000;
 
 /// How long after a start dumps left routing are swept (queued sends
 /// drain first).
@@ -174,12 +179,12 @@ pub(crate) fn reply_to(entries: &[SessionMessageEntry], message: &str) -> Option
         return None;
     }
     let answer = turn.iter().rev().map(|e| texts(e)).find(|t| !t.trim().is_empty())?;
-    Some(answer.trim().chars().take(ANSWER_MAX).collect())
+    Some(answer.trim().chars().take(FULL_MAX).collect())
 }
 
-/// `(dump id, route id, chat, message)` of every question route waiting on
-/// an answer from `chat`.
-fn waiting_on<'a>(dumps: &'a [Dump], chat: &str) -> Vec<(&'a str, &'a str, String)> {
+/// `(dump id, route id, message, question)` of every question route
+/// waiting on an answer from `chat`.
+fn waiting_on<'a>(dumps: &'a [Dump], chat: &str) -> Vec<(&'a str, &'a str, String, &'a str)> {
     dumps
         .iter()
         .flat_map(|d| d.routes.iter().map(move |r| (d, r)))
@@ -187,7 +192,7 @@ fn waiting_on<'a>(dumps: &'a [Dump], chat: &str) -> Vec<(&'a str, &'a str, Strin
         .filter(|(_, r)| target_chat(&r.target) == Some(chat))
         .map(|(d, r)| {
             let message = if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() };
-            (d.id.as_str(), r.id.as_str(), message)
+            (d.id.as_str(), r.id.as_str(), message, r.excerpt.as_str())
         })
         .collect()
 }
@@ -201,6 +206,73 @@ fn ended(before: Option<&Session>, now: &Session) -> bool {
             b.last_completed_turn != now.last_completed_turn
                 || matches!(b.status, SessionStatus::Working | SessionStatus::AwaitingInput)
         })
+}
+
+/// `full`, `chat`'s reply to a question route, recorded as its answer: at
+/// once the reply's first real sentence ([`plain_answer`]), then the cheap
+/// one-shot model's one-line answer to `question` from it (the title path
+/// on `chat`'s harness's fastest model; quoted data), when it makes one.
+/// `false` when the route had no answer waiting.
+pub(crate) async fn record_answer(
+    orchestration: &Orchestration,
+    rpc: &crate::rpc::EngineRpc,
+    chat: &str,
+    dump_id: &str,
+    route_id: &str,
+    question: &str,
+    full: String,
+) -> bool {
+    use zeron_proto::orchestration::{ANSWER_MAX, model_answer, plain_answer, prompt_text::one_line};
+    let quick = Some(plain_answer(&full)).filter(|a| !a.is_empty()).unwrap_or_else(|| one_line(&full, ANSWER_MAX));
+    let recorded = orchestration.workspace().write_orchestration(|doc| {
+        let Some(mut dump) = doc.dump(dump_id) else { return false };
+        let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) else { return false };
+        if route.state != RouteState::Delivered {
+            return false;
+        }
+        route.state = RouteState::Answered;
+        route.answer = Some(quick.clone());
+        route.answer_full = Some(full.clone());
+        dump.updated_at = Utc::now();
+        doc.upsert_dump(&dump);
+        true
+    });
+    if !recorded {
+        return false;
+    }
+    orchestration.comms().say(zeron_proto::orchestration::CommKind::Answer, chat, super::comms::YOU, &quick);
+    let reply: String = zeron_proto::redact::redact_command_output(&full).chars().take(CONDENSE_INPUT_MAX).collect();
+    let data = serde_json::json!({ "question": one_line(question, 600), "reply": reply });
+    let prompt = format!(
+        "{}\n\nQuestion and reply (JSON):\n{}",
+        zeron_harness::ANSWER_INSTRUCTIONS,
+        serde_json::to_string_pretty(&data).unwrap_or_default()
+    );
+    let harness = rpc
+        .workspace_host()
+        .chat(chat)
+        .ok()
+        .flatten()
+        .and_then(|c| c.config.map(|c| c.harness))
+        .unwrap_or_else(|| rpc.doc_host_ref().default_harness());
+    let condensed = orchestration.progress().one_shot(rpc)(harness, prompt)
+        .await
+        .map(|raw| model_answer(&raw))
+        .filter(|a| !a.is_empty());
+    if let Some(condensed) = condensed {
+        orchestration.workspace().write_orchestration(|doc| {
+            let Some(mut dump) = doc.dump(dump_id) else { return };
+            let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) else { return };
+            // Only over the answer it condenses (not one a reroute replaced).
+            if route.state != RouteState::Answered || route.answer_full.as_deref() != Some(full.as_str()) {
+                return;
+            }
+            route.answer = Some(condensed);
+            dump.updated_at = Utc::now();
+            doc.upsert_dump(&dump);
+        });
+    }
+    true
 }
 
 async fn route_answers(orchestration: Orchestration) {
@@ -235,25 +307,14 @@ async fn route_answers(orchestration: Orchestration) {
             }
             let Ok(handle) = rpc.doc_host_ref().open(&chat) else { continue };
             let Ok(entries) = handle.doc().read_entries() else { continue };
-            for (dump_id, route_id, message) in waiting {
-                let Some(answer) = reply_to(&entries, &message) else { continue };
-                orchestration.workspace().write_orchestration(|doc| {
-                    let Some(mut dump) = doc.dump(dump_id) else { return };
-                    let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) else { return };
-                    if route.state != RouteState::Delivered {
-                        return;
-                    }
-                    route.state = RouteState::Answered;
-                    route.answer = Some(answer.clone());
-                    dump.updated_at = Utc::now();
-                    doc.upsert_dump(&dump);
+            for (dump_id, route_id, message, question) in waiting {
+                let Some(full) = reply_to(&entries, &message) else { continue };
+                let (orchestration, rpc) = (orchestration.clone(), rpc.clone());
+                let (chat, dump_id, route_id, question) =
+                    (chat.clone(), dump_id.to_owned(), route_id.to_owned(), question.to_owned());
+                tokio::spawn(async move {
+                    record_answer(&orchestration, &rpc, &chat, &dump_id, &route_id, &question, full).await;
                 });
-                orchestration.comms().say(
-                    zeron_proto::orchestration::CommKind::Answer,
-                    &chat,
-                    super::comms::YOU,
-                    &super::excerpt(&answer, 140),
-                );
             }
         }
     }

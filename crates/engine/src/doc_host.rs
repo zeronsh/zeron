@@ -290,6 +290,9 @@ struct DocHostInner {
     /// run they start is registered — and Working — by then).
     dispatching: Arc<AtomicUsize>,
     workspace: OnceLock<WorkspaceHost>,
+    /// What a `ProgressCheck` command calls with its chat id (set by
+    /// orchestration; absent in bare tests).
+    progress_checks: OnceLock<Arc<dyn Fn(&str) + Send + Sync>>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
@@ -1281,6 +1284,7 @@ impl DocHost {
                 wake_checks: AtomicUsize::new(0),
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
+                progress_checks: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 shutdown: CancellationToken::new(),
@@ -1703,6 +1707,12 @@ impl DocHost {
                 host.drain_queue(&handle).await;
             });
         }
+    }
+
+    /// What a `ProgressCheck` command on a chat hosted here calls (first set
+    /// wins).
+    pub(crate) fn set_progress_checks(&self, check: Arc<dyn Fn(&str) + Send + Sync>) {
+        let _ = self.inner.progress_checks.set(check);
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -6634,6 +6644,16 @@ impl DocHost {
             }
             SessionCommandPayload::CrewReport { report } => {
                 self.file_crew_report(sessions, handle, report)
+            }
+            SessionCommandPayload::ProgressCheck {} => {
+                // The chat's agent never sees it: its progress row does.
+                match self.inner.progress_checks.get() {
+                    Some(check) => {
+                        check(chat_id);
+                        Ok((SessionCommandStatus::Applied, Some("progress note asked for".into())))
+                    }
+                    None => Ok((SessionCommandStatus::Rejected, Some("no progress here".into()))),
+                }
             }
         }
     }
