@@ -30,8 +30,8 @@ test("a thread's activity reaches its pill in place", function()
 	local app = open()
 	local before = app:tree('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Editing"'):match("@(%d+)")
 	app:command("fixture.activity")
-	app:frames(10)
-	expect(app:has('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Merging"')).to_be(true)
+	-- (Shown once its last state has had its 300 ms.)
+	expect(app:wait('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Merging"', { timeout_ms = 1500 })).to_be(true)
 	local after = app:tree('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Merging"'):match("@(%d+)")
 	expect(after).to_be(before)
 end)
@@ -51,7 +51,7 @@ test("a station opens its orchestrator's page", function()
 	expect(app:state("shell_route_path")).to_be("/orchestrator/orc-vpn")
 end)
 
-test("the layout puts every line's end at a station or a pill", function()
+test("the layout puts every line's end at a row, every row inside the width", function()
 	local map = require("@ds/orch_map_layout")
 	local data = require("@ds/orch_data")
 	local sample = require("@account/orchestration_sample")
@@ -61,9 +61,19 @@ test("the layout puts every line's end at a station or a pill", function()
 	end
 	local l = map.layout({ now = sample.now, chats = data.chats(sessions_now), devices = sample.devices, loads = sample.loads, here = "dev-desk" }, 900)
 	expect(#l.lanes).to_be(3)
-	for _, p in l.pills do
-		expect(l.routes[p.id] ~= nil).to_be(true)
-		expect(p.x + p.w <= 900).to_be(true)
+	local mids: { [number]: boolean } = {}
+	for _, r in l.rows do
+		expect(r.x + r.w <= 900).to_be(true)
+		mids[r.mid] = true
+		if r.kind == "crew" then
+			expect(l.routes[r.id] ~= nil).to_be(true)
+		end
+	end
+	for _, rail in l.rails do
+		for _, b in rail.branches do
+			expect(mids[b.y]).to_be(true)
+			expect(b.to).to_be(l.content_x - map.GAP)
+		end
 	end
 end)
 

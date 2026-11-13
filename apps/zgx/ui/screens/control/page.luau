@@ -103,6 +103,7 @@ local function world(): any
 		now = orchestration.now:get(),
 		chats = chats_now:get(),
 		devices = sessions.devices:get(),
+		projects = sessions.projects:get(),
 		loads = orchestration.loads:get(),
 		here = sessions.here:get(),
 	}
@@ -431,9 +432,19 @@ local function needs(): Node
 	}
 end
 
+-- The Map's view (Topology, Timeline or Machines, and the Timeline's
+-- span), on this device; what each thread did lately, as the host keeps it
+-- (src/orchestration_timeline.rs).
+M.map_view = ui.persist("control_map", OrchMap.DEFAULT)
+local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
+
 local function map(): Node
 	return OrchMap.Map {
 		world = world,
+		view = M.map_view,
+		timeline = function(): { [string]: { any } }
+			return timeline:get()
+		end,
 		comms = function(): { any }
 			return orchestration.comms:get()
 		end,
@@ -520,7 +531,9 @@ end
 local function widget(id: string, wide: boolean): Node
 	local hook, seen, open = opens_under()
 	local function entries(): { any }
-		return {
+		-- (The Map's own first: which view.)
+		local out = if id == "map" then OrchMap.menu(M.map_view) else {}
+		for _, e in {
 			{ label = locale.s("control.widgets.up"), icon = "arrow-up", on_select = function()
 				M.move(id, -1, wide)
 			end },
@@ -531,7 +544,10 @@ local function widget(id: string, wide: boolean): Node
 			{ label = locale.s("control.widgets.hide"), icon = "eye-closed", on_select = function()
 				M.toggle(id)
 			end },
-		}
+		} do
+			table.insert(out, e)
+		end
+		return out
 	end
 	return ui.column {
 		id = `control-widget-{id}`,

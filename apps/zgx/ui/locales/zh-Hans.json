@@ -1185,7 +1185,26 @@
         "cpu": "CPU {percent}%",
         "offline": "Offline",
         "paused": "Paused",
-        "empty": "No machines online"
+        "empty": "No machines online",
+        "idle": "Nothing running",
+        "now": "now",
+        "view": "View",
+        "variant": {
+          "topology": "Topology",
+          "timeline": "Timeline",
+          "machines": "Machines"
+        },
+        "window_15": "Last 15 minutes",
+        "window_60": "Last hour",
+        "span_15": "15m",
+        "span_60": "1h",
+        "crew_working": "{working}/{total} working",
+        "tick": {
+          "report": "Report",
+          "ask": "Ask",
+          "failed": "Failed",
+          "merged": "Merged"
+        }
       },
       "machines": {
         "running": "{n} running",
