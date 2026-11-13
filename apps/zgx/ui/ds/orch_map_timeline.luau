@@ -20,7 +20,7 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
-local Counter = require("@self/orch_counter")
+local MachineHead = require("@self/orch_machine_head")
 
 local TOP_H = 34
 local AXIS_H = 34
@@ -153,6 +153,18 @@ M.View = ui.component(function(props: {
 		local b, g = built:get(), geom:get()
 		local x0, x1 = g.x0, g.x1
 		local faint = kit.ink("text.primary", 0.05)
+		-- (Down the lanes, under the machines' heads: their lines stay clear.)
+		local under: { { number } } = {}
+		for _, row in b.rows do
+			if row.kind ~= "machine" then
+				local last = under[#under]
+				if last and math.abs(last[2] - row.y) < 0.5 then
+					last[2] = row.y + row.h
+				else
+					table.insert(under, { row.y, row.y + row.h })
+				end
+			end
+		end
 		-- The minutes: a hairline down at each mark, the axis under them.
 		local step = if (b.t1 - b.t0) > 1800 then 300 else 60
 		local major = if step == 300 then 900 else 300
@@ -164,7 +176,9 @@ M.View = ui.component(function(props: {
 			local ago_s = b.t1 - t
 			local is_major = ago_s % major == 0
 			if is_major and ago_s > 0 then
-				c:line(x, 0, x, b.h, faint, 1)
+				for _, span in under do
+					c:line(x, span[1], x, span[2], faint, 1)
+				end
 			end
 			c:line(x, axis_y, x, axis_y + (if is_major then 5 else 3), kit.ink("text.primary", if is_major then 0.3 else 0.16), 1)
 			if is_major then
@@ -174,7 +188,9 @@ M.View = ui.component(function(props: {
 			t -= step
 		end
 		-- Now: a dotted line down every lane.
-		c:line(x1, 0, x1, b.h, kit.ink("text.primary", 0.14), 1, { dash = { 1, 3 } })
+		for _, span in under do
+			c:line(x1, span[1], x1, span[2], kit.ink("text.primary", 0.14), 1, { dash = { 1, 3 } })
+		end
 
 		for _, row in b.rows do
 			if row.kind ~= "lane" then
@@ -217,11 +233,9 @@ M.View = ui.component(function(props: {
 		end
 	end
 
+	-- A machine: a hairline above it, its head (as every view has it).
 	local function machine_row(row: State<any>): Node
-		local function load(): any
-			return ((props.world().loads or {}) :: any)[row:get().machine]
-		end
-		return ui.row {
+		return ui.column {
 			class = "orch-tl-machine",
 			absolute = true,
 			left = 0,
@@ -230,45 +244,26 @@ M.View = ui.component(function(props: {
 				return row:get().y
 			end,
 			h = MACHINE_H,
-			gap = "$space.2",
-			items = "center",
 			ui.show(function(): boolean
 				return row:get().y > 0
-			end, ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1, bg = "$border.subtle" }),
-			ui.div { color = "$text.tertiary", shrink = 0, Icon { name = function(): any
-				return kit.platform_icon(row:get().device)
-			end, size = 14 } },
-			ui.text {
-				function(): string
-					return row:get().name or ""
-				end,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.medium",
-				color = "$text.primary",
-				shrink = 0,
-			},
-			ui.text {
-				function(): string
-					local d = row:get().device
-					local word = kit.platform_word(d)
-					local here = d and (d.here == true or d.id == props.world().here)
-					return if here then `{word} · {locale.s("ds.orch.map.here")}` else word
-				end,
-				text_size = "$font.size.xs",
-				color = "$text.tertiary",
-				truncate = true,
-				min_w = 0,
-			},
-			ui.div { grow = 1 },
-			Counter {
-				value = function(): number?
-					local l = load()
-					return if l and l.cpu then l.cpu * 100 else nil
-				end,
-				suffix = "%",
-				text_size = "$font.size.xs",
-				color = "$text.secondary",
-				anchor = "end",
+			end, ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1, bg = "$border" }),
+			ui.column {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = spans.MACHINE_Y,
+				MachineHead.MachineHead {
+					device = function(): any
+						return row:get().device
+					end,
+					here = function(): boolean
+						local d = row:get().device
+						return d ~= nil and (d.here == true or d.id == props.world().here)
+					end,
+					load = function(): any
+						return ((props.world().loads or {}) :: any)[row:get().machine]
+					end,
+				},
 			},
 		}
 	end

@@ -21,7 +21,7 @@ local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
 local kit = require("@self/orch_map_kit")
 local Cells = require("@self/orch_cells")
-local Counter = require("@self/orch_counter")
+local MachineHead = require("@self/orch_machine_head")
 local Layout = require("@self/orch_map_layout")
 
 export type Props = {
@@ -158,12 +158,8 @@ return ui.component(function(props: Props): Node
 		end
 	end
 
-	-- A machine's lane: a hairline above it, and in its column its glyph,
-	-- name, where it is and its load.
+	-- A machine's lane: a hairline above it, its head across its top.
 	local function lane_row(_l: Layout.Lane, _i: number, row: State<any>): Node
-		local function load(): any
-			return ((props.world().loads or {}) :: any)[row:get().id]
-		end
 		return ui.column {
 			class = "orch-lane",
 			absolute = true,
@@ -181,84 +177,21 @@ return ui.component(function(props: Props): Node
 			ui.column {
 				absolute = true,
 				left = 0,
-				top = Layout.LANE_TOP + 4,
-				w = function(): number
-					return layout:get().lane_w - 14
-				end,
-				gap = 3,
+				right = 0,
+				top = Layout.HEAD_Y,
 				opacity = function(): number
 					return if row:get().online then 1 else 0.5
 				end,
-				ui.row {
-					w_full = true,
-					gap = 6,
-					items = "center",
-					ui.div {
-						color = "$text.secondary",
-						shrink = 0,
-						Icon {
-							name = function(): any
-								return kit.platform_icon(row:get())
-							end,
-							size = 14,
-						},
-					},
-					ui.text {
-						function(): string
-							return row:get().name
-						end,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.semibold",
-						color = "$text.primary",
-						truncate = true,
-						min_w = 0,
-					},
-				},
-				ui.text {
-					function(): string
-						return kit.platform_word(row:get().device)
+				MachineHead.MachineHead {
+					device = function(): any
+						return row:get().device
 					end,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-					truncate = true,
-					pl = 20,
-				},
-				ui.show(function(): boolean
-					return row:get().here == true
-				end, ui.text { locale.t("ds.orch.map.here"), text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, pl = 20 }),
-				ui.row {
-					w_full = true,
-					pl = 20,
-					gap = 6,
-					items = "center",
-					ui.canvas {
-						class = "orch-lane-load",
-						grow = 1,
-						max_w = 48,
-						h = 3,
-						label = function(): string
-							local l = load()
-							return if l and l.cpu then locale.s("ds.orch.map.cpu", { percent = math.floor(l.cpu * 100 + 0.5) }) else ""
-						end,
-						draw = function(c: any, w: number, h: number)
-							local l = load()
-							c:rect(0, 0, w, h, kit.ink("text.primary", 0.1), h / 2)
-							local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
-							if f > 0 then
-								c:rect(0, 0, math.max(h, w * f), h, if f > 0.85 then kit.ink("warning", 0.9) else kit.ink("text.primary", 0.5), h / 2)
-							end
-						end,
-					},
-					Counter {
-						value = function(): number?
-							local l = load()
-							return if row:get().online and l and l.cpu then l.cpu * 100 else nil
-						end,
-						suffix = "%",
-						text_size = "$font.size.xs",
-						color = "$text.secondary",
-						anchor = "end",
-					},
+					here = function(): boolean
+						return row:get().here == true
+					end,
+					load = function(): any
+						return ((props.world().loads or {}) :: any)[row:get().id]
+					end,
 				},
 			},
 			-- A machine with nothing at work.
@@ -270,7 +203,7 @@ return ui.component(function(props: Props): Node
 				left = function(): number
 					return layout:get().content_x + 4
 				end,
-				top = Layout.LANE_TOP + 4,
+				top = Layout.HEAD_H + 6,
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
 			}),

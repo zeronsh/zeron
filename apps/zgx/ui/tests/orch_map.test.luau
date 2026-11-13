@@ -99,8 +99,9 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 			-- stretch of it (it goes by a channel left of the rows there).
 			local ends = 0
 			for _, pts in Layout.lines(rail) do
-				expect(pts[1]).to_be(rail.x)
-				if pts[#pts - 1] ~= rail.x then
+				-- (Or in its channel, after going under a machine's head.)
+				expect(pts[1] == rail.x or pts[1] < l.content_x).to_be(true)
+				if pts[#pts - 1] > rail.x then
 					ends += 1
 				else
 					for _, y in { pts[2], pts[#pts] } do
@@ -128,6 +129,45 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 			expect(ends).to_be(#rail.branches)
 			-- Every orchestrator starts where its peers do.
 			expect(n.x).to_be(l.content_x)
+		end
+	end
+end)
+
+test("a machine's head is the same line in every view, never wrapped", function()
+	local PARTS = { "orch-machine-head", "orch-machine-head-icon", "orch-machine-head-name", "orch-machine-head-meter", "orch-machine-head-figure" }
+	for _, w in { 1440, 900 } do
+		local app = open(w, 2400)
+		local function boxes(within: string): { { number } }
+			local out = {}
+			for _, part in PARTS do
+				local head = `{within} >> .orch-machine-head "desk"`
+				local x, y, bw, bh = box(app, if part == "orch-machine-head" then head else `{head} >> .{part}`)
+				table.insert(out, { x, y, bw, bh })
+			end
+			return out
+		end
+		view(app, "topology")
+		local topo = boxes("#control-widget-map")
+		view(app, "timeline")
+		local tl = boxes("#control-widget-map")
+		view(app, "machines")
+		local mc = boxes("#control-widget-map")
+		local block = boxes("#control-widget-machines")
+		-- One line: its height, its name's a single line.
+		expect(topo[1][4]).to_be(28)
+		expect(topo[3][4] <= 20).to_be(true)
+		for i = 1, #PARTS do
+			-- Topology and Timeline: the very same place and size.
+			expect(tl[i][1]).to_be(topo[i][1])
+			expect(tl[i][3]).to_be(topo[i][3])
+			expect(tl[i][4]).to_be(topo[i][4])
+			-- In a block (the Map's Machines, the Control room's): the same
+			-- line from its own left edge.
+			for _, other: { { number } } in { mc, block } :: { { { number } } } do
+				expect(other[i][1] - other[1][1]).to_be(topo[i][1] - topo[1][1])
+				expect(other[i][4]).to_be(topo[i][4])
+				expect(other[i][2] - other[1][2]).to_be(topo[i][2] - topo[1][2])
+			end
 		end
 	end
 end)

@@ -2,9 +2,10 @@
 -- world and a width. Pure, so it can be worked out and checked apart from
 -- drawing.
 --
--- Every machine is a lane across the width, its name and load in a column
--- of their own at its left (`lane_w`); in the lane, its projects, and in
--- each the orchestrators and threads at work there, one row each. An
+-- Every machine is a lane across the width, its head (ds/orch_machine_head,
+-- one line) across its top; under it, its projects, and in each the
+-- orchestrators and threads at work there, one row each, an orchestrator's
+-- dot under the machine's name. An
 -- orchestrator leads its crew: its rail drops from under its own dot, and
 -- its crew sit indented to the right of it, an elbow from the rail into
 -- each, ending `GAP` short of the row at its middle, whatever the width.
@@ -24,14 +25,16 @@ local model = require("@ds/orch_map_model")
 local M = {}
 
 -- Geometry (points).
-M.LANE_TOP = 10
-M.LANE_MIN = 76
+-- A machine's head: its band (the head's line, room above and below).
+M.HEAD_H = 40
+M.HEAD_Y = 6
 M.PROJECT_H = 24
 M.ROW_H = 30
 M.NODE_H = 32
 M.LANE_PAD = 10
--- Where the rows start, past the machines' column.
-M.PAD = 10
+-- Where the rows start: an orchestrator's dot under the machine's name
+-- (its head's mark, 14, and a gap, 8).
+M.INSET = 22 - 9
 -- An orchestrator's dot: its centre from its row's left edge, its radius.
 M.DOT = 9
 M.DOT_R = 5
@@ -43,8 +46,8 @@ M.CHANNEL = 10
 M.CORNER = 7
 M.GAP = 3
 
-local LANE_TOP, LANE_MIN, PROJECT_H, ROW_H, NODE_H, LANE_PAD = M.LANE_TOP, M.LANE_MIN, M.PROJECT_H, M.ROW_H, M.NODE_H, M.LANE_PAD
-local PAD, DOT, DOT_R, INDENT, CHANNEL, CORNER, GAP = M.PAD, M.DOT, M.DOT_R, M.INDENT, M.CHANNEL, M.CORNER, M.GAP
+local HEAD_H, PROJECT_H, ROW_H, NODE_H, LANE_PAD = M.HEAD_H, M.PROJECT_H, M.ROW_H, M.NODE_H, M.LANE_PAD
+local INSET, DOT, DOT_R, INDENT, CHANNEL, CORNER, GAP = M.INSET, M.DOT, M.DOT_R, M.INDENT, M.CHANNEL, M.CORNER, M.GAP
 
 export type Lane = { id: string, name: string, y: number, h: number, online: boolean, here: boolean, platform: string?, cloud: boolean, device: any, count: number }
 export type Label = { id: string, lane: string, name: string, y: number, x: number }
@@ -70,8 +73,7 @@ export type Rail = {
 export type Layout = {
 	h: number,
 	width: number,
-	-- The machines' column, and where the rows start.
-	lane_w: number,
+	-- Where the rows start (the orchestrators' left edge).
 	content_x: number,
 	lanes: { Lane },
 	labels: { Label },
@@ -83,10 +85,48 @@ export type Layout = {
 	routes: { [string]: { number } },
 }
 
+-- Polylines with their straight upright pieces cut where they cross a
+-- band (y ranges): what's left, as polylines. (Corners never sit in one.)
+local function cut(lines: { { number } }, bands: { { number } }): { { number } }
+	local out: { { number } } = {}
+	for _, pts in lines do
+		local cur = { pts[1], pts[2] }
+		for i = 3, #pts - 1, 2 do
+			local x0, y0, x1, y1 = pts[i - 2], pts[i - 1], pts[i], pts[i + 1]
+			if x0 == x1 and y0 ~= y1 then
+				local dir = if y1 > y0 then 1 else -1
+				local hits = {}
+				for _, b in bands do
+					local a, z = math.max(b[1], math.min(y0, y1)), math.min(b[2], math.max(y0, y1))
+					if z > a then
+						table.insert(hits, if dir > 0 then { a, z } else { z, a })
+					end
+				end
+				table.sort(hits, function(p: { number }, q: { number }): boolean
+					return (p[1] - q[1]) * dir < 0
+				end)
+				for _, h in hits do
+					table.insert(cur, x0)
+					table.insert(cur, h[1])
+					if #cur >= 4 then
+						table.insert(out, cur)
+					end
+					cur = { x0, h[2] }
+				end
+			end
+			table.insert(cur, x1)
+			table.insert(cur, y1)
+		end
+		if #cur >= 4 then
+			table.insert(out, cur)
+		end
+	end
+	return out
+end
+
 function M.layout(world: any, width: number): Layout
 	local fleet = model.fleet(world)
-	local lane_w = math.clamp(math.floor(width * 0.13), 100, 150)
-	local out: Layout = { h = 0, width = width, lane_w = lane_w, content_x = 0, lanes = {}, labels = {}, rows = {}, rails = {}, anchors = {}, routes = {} }
+	local out: Layout = { h = 0, width = width, content_x = 0, lanes = {}, labels = {}, rows = {}, rails = {}, anchors = {}, routes = {} }
 
 	-- Which machine each orchestrator lives on, and the last its crew are on.
 	local lane_index: { [string]: number } = {}
@@ -129,7 +169,7 @@ function M.layout(world: any, width: number): Layout
 	for li, m in fleet.machines do
 		local lane: Lane = { id = m.id, name = m.name, y = y, h = 0, online = m.online, here = m.here, platform = m.platform, cloud = m.cloud, device = m.device, count = m.count }
 		local top = y
-		y += LANE_TOP
+		y += HEAD_H
 		local groups = table.clone(m.groups)
 		local score: { [string]: number } = {}
 		for _, g in groups do
@@ -178,8 +218,10 @@ function M.layout(world: any, width: number): Layout
 				y += h
 			end
 		end
+		if m.count == 0 then
+			y += ROW_H
+		end
 		y += LANE_PAD
-		y = math.max(y, top + LANE_MIN)
 		lane.h = y - top
 		table.insert(out.lanes, lane)
 	end
@@ -258,7 +300,7 @@ function M.layout(world: any, width: number): Layout
 	end
 	channels = #ends
 	-- (The channels, then a little room before the rows.)
-	local base = lane_w + PAD + channels * CHANNEL + (if channels > 0 then 6 else 0)
+	local base = INSET + channels * CHANNEL
 	out.content_x = base
 	for _, r in out.rows do
 		r.x = if r.kind == "crew" and r.orchestrator and span_of[r.orchestrator] then base + DOT + INDENT else base
@@ -267,6 +309,12 @@ function M.layout(world: any, width: number): Layout
 	end
 
 	local clear = DOT_R + 3
+	local bands: { { number } } = {}
+	for _, lane in out.lanes do
+		if lane.y > 0 then
+			table.insert(bands, { lane.y + 2, lane.y + HEAD_H - 4 })
+		end
+	end
 	for _, sp in spans do
 		local x = base + DOT
 		sp.x = x
@@ -291,7 +339,7 @@ function M.layout(world: any, width: number): Layout
 			end
 			local p = pass_at[a.bottom]
 			if p then
-				local ch = lane_w + PAD + (channels - p[3]) * CHANNEL + CHANNEL / 2
+				local ch = INSET + (channels - p[3]) * CHANNEL + CHANNEL / 2 - 4
 				local ya, yb = p[1], p[2]
 				table.insert(paths, {
 					x, y1, x, ya - CORNER, x, ya, x - CORNER, ya,
@@ -303,6 +351,8 @@ function M.layout(world: any, width: number): Layout
 				table.insert(paths, { x, y1, x, y2 })
 			end
 		end
+		-- (Past another machine's head it goes under it: a break in the line.)
+		paths = cut(paths, bands)
 		local branches: { Branch } = {}
 		for _, r in sp.crew do
 			table.insert(branches, { y = r.mid, to = r.x - GAP })
