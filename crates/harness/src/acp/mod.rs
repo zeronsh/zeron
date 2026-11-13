@@ -2834,7 +2834,7 @@ impl AcpHarness {
                 .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
             if self.spec.id == HarnessId::Hermes {
-                hermes_names::name_models(&mut models);
+                hermes_names::fold_context_variants(&mut models);
             }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
@@ -2857,7 +2857,29 @@ impl AcpHarness {
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
         drain.abort();
         client.close_stdin_for_teardown();
-        child.shutdown(self.kill_grace).await;
+        // Hermes's names come from a file, read on a blocking thread while
+        // the agent shuts down: neither waits on the other, and no async
+        // worker is held by file reads.
+        let result = match result {
+            Ok(Ok(models)) if self.spec.id == HarnessId::Hermes => {
+                let naming = tokio::task::spawn_blocking(move || {
+                    let mut models = models;
+                    hermes_names::name_models(&mut models);
+                    models
+                });
+                child.shutdown(self.kill_grace).await;
+                match naming.await {
+                    Ok(models) => Ok(Ok(models)),
+                    Err(error) => Ok(Err(HarnessError::Protocol(format!(
+                        "naming Hermes models failed: {error}"
+                    )))),
+                }
+            }
+            result => {
+                child.shutdown(self.kill_grace).await;
+                result
+            }
+        };
         match result {
             Ok(inner) => inner,
             Err(_) => {
@@ -3727,14 +3749,24 @@ fn strip_trailing_parenthetical(name: &str) -> &str {
 /// variants in either hint spelling. Exact match first (with the 1M compose
 /// when the run selects the 1M window), then a family-token fallback that
 /// prefers a variant matching the requested context window.
-fn pick_model_value(requested: &str, available: &[&str], context_1m: bool) -> Option<String> {
-    if context_1m {
-        for composed in [format!("{requested}[1m]"), format!("{requested}-1m")] {
+fn pick_model_value(requested: &str, available: &[&str], window: Option<&str>) -> Option<String> {
+    // The chosen window's variant when the agent lists one: `<model>[1m]` /
+    // `<model>-1m` (Claude), `<model>-900k` (Hermes's Codex variants). The
+    // default window has none, and runs the model itself.
+    if let Some(window) = window
+        .map(str::to_ascii_lowercase)
+        .filter(|w| !w.is_empty())
+    {
+        for composed in [
+            format!("{requested}[{window}]"),
+            format!("{requested}-{window}"),
+        ] {
             if available.contains(&composed.as_str()) {
                 return Some(composed);
             }
         }
     }
+    let context_1m = window.is_some_and(|w| w.eq_ignore_ascii_case("1m"));
     if available.contains(&requested) {
         return Some(requested.to_owned());
     }
@@ -3835,11 +3867,8 @@ fn validate_config_model_selection(
         .iter()
         .filter_map(|choice| choice.get("value").and_then(Value::as_str))
         .collect();
-    let context_1m = model_options
-        .get("contextWindow")
-        .and_then(Value::as_str)
-        .is_some_and(|window| window.eq_ignore_ascii_case("1m"));
-    if pick_model_value(requested, &available, context_1m).is_some() {
+    let window = model_options.get("contextWindow").and_then(Value::as_str);
+    if pick_model_value(requested, &available, window).is_some() {
         return Ok(());
     }
     Err(HarnessError::Protocol(format!(
@@ -3905,10 +3934,7 @@ fn config_option_sets(
     else {
         return Vec::new();
     };
-    let context_1m = model_options
-        .get("contextWindow")
-        .and_then(Value::as_str)
-        .is_some_and(|w| w.eq_ignore_ascii_case("1m"));
+    let window = model_options.get("contextWindow").and_then(Value::as_str);
     let mut sets = Vec::new();
     for option in options {
         let Some(config_id) = option.get("id").and_then(Value::as_str) else {
@@ -3928,7 +3954,7 @@ fn config_option_sets(
 
         let wanted: Option<Value> = match (kind, category) {
             ("select", Some("model")) => model
-                .and_then(|m| pick_model_value(m, &available, context_1m))
+                .and_then(|m| pick_model_value(m, &available, window))
                 .map(Value::String),
             // Full access: unattended parity with the retired custom
             // adapters (claude bypassPermissions / codex approvalPolicy
