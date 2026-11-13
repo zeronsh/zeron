@@ -240,6 +240,7 @@ mod tests {
             waiting: None,
             moved_at: None,
             moved_route_state: None,
+            approved_at: None,
         }
     }
 

@@ -574,6 +574,7 @@ mod tests {
             waiting: None,
             moved_at: None,
             moved_route_state: None,
+            approved_at: None,
         }
     }
 
@@ -590,6 +591,7 @@ mod tests {
             candidates: vec![],
             answer: None,
             answer_full: None,
+            review: None,
             answered_at: None,
             item_id: None,
             space_id: None,

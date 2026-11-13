@@ -246,6 +246,18 @@ impl EngineRpc {
                 });
                 Ok(serde_json::to_value(settings).unwrap_or(Value::Null))
             }
+            OrchestrateOp::ApproveItem { id } => {
+                self.approve_item(&id, now)?;
+                Ok(json!({ "id": id }))
+            }
+            OrchestrateOp::RequestChanges { id, text } => {
+                let text = text.trim().to_owned();
+                if text.is_empty() {
+                    return Err(RpcError::BadParams("Say what to change".into()));
+                }
+                self.request_changes(&id, &text)?;
+                Ok(json!({ "id": id }))
+            }
             OrchestrateOp::RemoveItem { id } => {
                 self.remove_item(&id)?;
                 Ok(json!({ "id": id }))
@@ -737,6 +749,9 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         OrchestrateOp::AddToBoard { .. } => refuse("Only the person puts a chat on the board"),
         OrchestrateOp::RemoveItem { .. } => refuse("Only the person takes a card off the board"),
         OrchestrateOp::UpdateSettings { .. } => refuse("Only the person changes orchestration settings"),
+        OrchestrateOp::ApproveItem { .. } | OrchestrateOp::RequestChanges { .. } => {
+            refuse("Only the person approves a card or asks for changes")
+        }
         OrchestrateOp::UpdateOrchestrator {
             id,
             name,

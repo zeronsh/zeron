@@ -374,7 +374,8 @@ pub(crate) fn latest_reply_until(entries: &[SessionMessageEntry], message: &str,
 
 /// Where a task route stands once its target's turn ended, from the
 /// target's session: failed when the turn errored; done when it went idle
-/// with nothing running or left on its todo list; else still going.
+/// with nothing running or left on its todo list; else still going
+/// (`Answered`: an outcome so far, its card in Now, never Review).
 pub(crate) fn task_state(session: &Session) -> RouteState {
     if session
         .last_turn_outcome
@@ -471,6 +472,37 @@ pub(crate) async fn record_outcome_at(
     // A later turn that only says it sent its result (to the Brain dump)
     // keeps the outcome it sent; only the state moves.
     let keeps_outcome = task.is_some() && plain.is_none();
+    // Finished (its thread at rest): a decision or question for the person
+    // means it isn't (its card stays in Now, the question an ask, raised
+    // below); else what it leaves them to evaluate (an open PR, a result to
+    // check, screenshots) puts its card in Review, and nothing, Done. From
+    // this reply, else (a turn that only says it sent its result) the
+    // outcome it sent.
+    let (state, review) = if task == Some(RouteState::Done) {
+        let sent = orchestration
+            .workspace()
+            .read_orchestration_with(|doc| doc.dump(dump_id))
+            .and_then(|d| d.routes.into_iter().find(|r| r.id == route_id))
+            .and_then(|r| r.answer_full)
+            .filter(|_| keeps_outcome);
+        let texts: Vec<&str> = std::iter::once(full.as_str()).chain(sent.as_deref()).collect();
+        let mut decided = None;
+        for text in &texts {
+            if waits_on_decision(orchestration, rpc, chat, text).await {
+                decided = Some((RouteState::Answered, None));
+                break;
+            }
+        }
+        match decided {
+            Some(d) => d,
+            None => (
+                RouteState::Done,
+                texts.iter().find_map(|t| zeron_proto::turn_question::review_of(t)).map(|r| r.line()),
+            ),
+        }
+    } else {
+        (state, None)
+    };
     let recorded = orchestration.workspace().write_orchestration(|doc| {
         let Some(mut dump) = doc.dump(dump_id) else { return false };
         let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) else { return false };
@@ -483,6 +515,11 @@ pub(crate) async fn record_outcome_at(
             return false;
         }
         route.state = state;
+        if task.is_some() {
+            route.review = review.clone();
+        }
+        // (A decision left the route going: it stays open for the turns
+        // after the person's answer.)
         if route.answered_at.is_none() {
             route.answered_at = Some(at.unwrap_or_else(Utc::now));
         }
@@ -558,6 +595,27 @@ pub(crate) async fn record_outcome_at(
         });
     }
     true
+}
+
+/// Whether a finished turn's `text` ends waiting on a decision or answer
+/// from the person ([`zeron_proto::turn_question::detect`]): plainly, or a
+/// borderline one the cheap model confirms (it stands when the model can't
+/// be asked, as for asks).
+pub(crate) async fn waits_on_decision(
+    orchestration: &Orchestration,
+    rpc: &crate::rpc::EngineRpc,
+    chat: &str,
+    text: &str,
+) -> bool {
+    let harness = rpc
+        .workspace_host()
+        .chat(chat)
+        .ok()
+        .flatten()
+        .and_then(|c| c.config.map(|c| c.harness))
+        .unwrap_or_else(|| rpc.doc_host_ref().default_harness());
+    let one_shot = orchestration.progress().one_shot(rpc);
+    super::turn_asks::settle_verdict(text, |prompt| one_shot(harness, prompt)).await.is_some()
 }
 
 /// Whether the engine hosting a chat on `device_id` files what comes of
@@ -670,6 +728,18 @@ async fn route_answers(orchestration: Orchestration) {
 }
 
 /// Take in what came of the routes to chats whose turn ended.
+/// Whether this engine launched `chat`: a dump of its own routed to it, or
+/// it is in the crew of an orchestrator whose chat runs here.
+pub(crate) fn launched_here(orchestration: &Orchestration, dumps: &[Dump], chat: &str) -> bool {
+    let here = orchestration.device_id();
+    if dumps.iter().any(|d| d.device_id == here && d.routes.iter().any(|r| target_chat(&r.target) == Some(chat))) {
+        return true;
+    }
+    orchestration.crew_of(chat).is_some_and(|m| {
+        orchestration.workspace().chat(&m.orchestrator_id).ok().flatten().is_some_and(|o| o.device_id == here)
+    })
+}
+
 fn turns_ended(
     orchestration: &Orchestration,
     rpc: &std::sync::Arc<crate::rpc::EngineRpc>,
@@ -691,6 +761,18 @@ fn turns_ended(
         }
         if hosted == Hosted::Older && files_own_routes(orchestration, &session.device_id) {
             continue;
+        }
+        // A thread on an older host (no turn-end asks of its own) that this
+        // engine launched: a dump here routed to it, or it is in the crew of
+        // an orchestrator hosted here. Its question is raised here, once its
+        // transcript has synced in; the ask's id is the chat and the asking
+        // message, so another engine raising it too makes the same row.
+        if hosted == Hosted::Older && just_now && launched_here(orchestration, &dumps, &chat) {
+            let (o, r, c, s) = (orchestration.clone(), rpc.clone(), chat.clone(), session.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(SYNC_RETRIES[0] + SYNC_RETRIES[1]).await;
+                super::turn_asks::after_turn(&o, &r, &c, &s).await;
+            });
         }
         let waiting: Vec<_> = waiting_on(&dumps, &chat)
             .into_iter()
