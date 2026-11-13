@@ -45,6 +45,11 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+mod orchestration;
+pub use orchestration::{
+    KIND_ASKS, KIND_CREW, KIND_DUMPS, KIND_ORCHESTRATORS, KIND_WORK_ITEMS, MAX_DUMPS_IN_STATE,
+    MAX_TEXT_FIELD_BYTES, ORCHESTRATION_KINDS,
+};
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;

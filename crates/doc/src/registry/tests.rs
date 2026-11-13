@@ -388,7 +388,7 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
 
 /// Stand-in for the server: applies every pushable batch from `docs` to a row
 /// table with the SAME merge fn, acks, and broadcasts merged rows to all.
-fn server_round(
+pub(super) fn server_round(
     server: &mut HashMap<(String, String), RegistryRow>,
     seq: &mut u64,
     docs: &mut [&mut RegistryDoc],
