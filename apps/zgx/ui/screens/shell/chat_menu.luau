@@ -2,7 +2,8 @@
 -- rows (Zeron's sidebar chat menu, as the gallery's), the panel's side chat
 -- rows and tabs, the Control room's map. Rename, pin, copy (its folder,
 -- links, ids), move into one of your sections, sleep or wake, make it an
--- orchestrator, archive (kept: Settings → Archived lists it), delete (for
+-- orchestrator, put it on the board (when it has no card there not done),
+-- archive (kept: Settings → Archived lists it), delete (for
 -- good, asked once more); then plugins' items, under their names
 -- (screens/plugins/menus: the app's registry of them, read as the menu
 -- opens). A side chat's without Pin and Move to.
@@ -21,6 +22,7 @@ local sessions = require("@account/sessions")
 local activity = require("@app/screens/shell/activity")
 local boundary = require("@app/screens/shell/boundary")
 local orch_actions = require("@app/screens/orchestrator/actions")
+local orchestration = require("@account/orchestration")
 
 local M = {}
 
@@ -241,6 +243,20 @@ function M.entries(id: string, opts: Options?): { any }?
 				icon = "users-group-rounded",
 				on_select = function()
 					orch_actions.promote(id)
+				end,
+			},
+		-- (Not an orchestrator's own chat, nor one with a card not done.)
+		if h.is_orchestrator(id) or orchestration.on_board(id)
+			then false
+			else {
+				label = locale.s("orch.sidebar.add_to_board"),
+				icon = "checklist",
+				on_select = function()
+					orchestration.add_to_board(id):after(function()
+						ds.toast.show { title = locale.s("orch.sidebar.added_to_board"), tone = "success" }
+					end, function()
+						ds.toast.show { title = locale.s("orch.sidebar.add_to_board_failed"), tone = "danger" }
+					end)
 				end,
 			},
 		{ separator = true },

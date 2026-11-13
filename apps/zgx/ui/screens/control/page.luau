@@ -95,6 +95,11 @@ function M.move(id: string, by: number, wide: boolean)
 	M.widgets:set({ order = list, hidden = table.clone(hidden) })
 end
 
+-- Where a dump's receipt stands, for a board card's source to show it: the
+-- newest's, and each earlier one's row, by id.
+local newest_ref = ui.ref()
+local history_refs: { [string]: any } = {}
+
 local history_open = ui.state("control_history_open", false)
 -- The earlier dumps opened in the history, by id.
 local history_opened = ui.state("control_history_opened", {} :: { [string]: boolean })
@@ -221,6 +226,17 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 		gap = "$space.2",
 		ui.button {
 			class = "control-history-row",
+			ref = (function(): any
+				local r = ui.ref()
+				local key = row:peek().id
+				history_refs[key] = r
+				ui.on_cleanup(function()
+					if history_refs[key] == r then
+						history_refs[key] = nil
+					end
+				end)
+				return r
+			end)(),
 			label = function(): string
 				return row:get().text or ""
 			end,
@@ -352,6 +368,7 @@ local function capture(): Node
 		ui.show(function(): boolean
 			return newest:get() ~= nil
 		end, ui.column {
+			ref = newest_ref,
 			w_full = true,
 			gap = "$space.3",
 			ui.text {
@@ -426,6 +443,33 @@ local function capture(): Node
 	} }
 end
 
+-- A dump's receipt brought into view (a board card's source): the newest
+-- where it stands, an earlier one opened in the history first. From
+-- another page, `orchestration.reveal_dump` asks it as this one opens.
+function M.show_dump(id: string?)
+	if not id then
+		return
+	end
+	local dumps = orchestration.now:peek().dumps or {}
+	local first = dumps[1]
+	local function focus(r: any): boolean
+		local el = if r then r:peek() else nil
+		return el ~= nil and el:focus() == true
+	end
+	if first and first.id == id then
+		focus(newest_ref)
+		return
+	end
+	ui.batch(function()
+		history_open:set(true)
+		history_opened:set_key({ id }, true)
+	end)
+	-- (Once the history's row is there.)
+	ui.after(0, function()
+		focus(history_refs[id])
+	end)
+end
+
 -- The board: every orchestrator's work, its filter over it, loose items in
 -- an Inbox first.
 local function board(): Node
@@ -467,6 +511,9 @@ local function board(): Node
 			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
 		end,
 		on_open_thread = M.open_chat,
+		on_source = function(src: any)
+			M.show_dump(src.dump_id)
+		end,
 		progress = function(chat: string): Node
 			return Progress.strip(chat, { lean = true })
 		end,
@@ -877,6 +924,16 @@ end
 
 M.Page = ui.component(function(): Node
 	local width = ui.use_state(0)
+	-- A dump asked to be shown from another page (a board card's source).
+	ui.effect(function()
+		local id = orchestration.reveal_dump:get()
+		if id then
+			ui.after(0, function()
+				orchestration.reveal_dump:set(nil)
+				M.show_dump(id)
+			end)
+		end
+	end)
 	-- Loads are sampled only while the page shows (Machines, the Map's lanes).
 	orchestration.loads_wanted(true)
 	ui.on_cleanup(function()

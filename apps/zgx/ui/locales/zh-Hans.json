@@ -4044,7 +4044,8 @@
       "outcome": "Outcome",
       "card_actions": "Card actions",
       "threads": "{n, plural, one {# thread} other {# threads}}",
-      "empty": "看板上没有内容"
+      "empty": "看板上没有内容",
+      "from_dump": "From a dump"
     },
     "reports": {
       "title": "Crew updates",
@@ -4066,7 +4067,10 @@
       "resume": "Resume",
       "settings": "Settings…",
       "archive": "Archive",
-      "make_orchestrator": "Make orchestrator"
+      "make_orchestrator": "Make orchestrator",
+      "add_to_board": "Add to board",
+      "added_to_board": "Added to the board",
+      "add_to_board_failed": "Couldn't add it to the board"
     },
     "palette": {
       "new_orchestrator": "New orchestrator",

@@ -126,6 +126,31 @@ function M.set_priority(id: string, priority: string): any
 	return M.op({ op = "upsertItem", item = { id = id, priority = priority } })
 end
 
+-- A chat put on the board: its card (the one it has when one isn't done
+-- yet, else a new one). A promise of the card's `{ id }`.
+function M.add_to_board(chat_id: string): any
+	return M.op({ op = "addToBoard", chatId = chat_id })
+end
+
+-- Whether a chat has a card on the board not done yet.
+function M.on_board(chat_id: string): boolean
+	for _, it in M.now:peek().items or {} do
+		if it.state ~= "done" then
+			for _, t in it.threads or {} do
+				if t == chat_id then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+-- A dump asked to be shown (its id): the Control room brings its receipt
+-- into view, opened, and clears it. Set by a board card's source, from any
+-- page (the page goes to the Control room as it sets it).
+M.reveal_dump = ui.state("orchestration_reveal_dump", nil :: string?)
+
 -- How far each chat's work has got, by chat id.
 M.progress = ui.shared("orchestration.progress", {} :: { [string]: any })
 

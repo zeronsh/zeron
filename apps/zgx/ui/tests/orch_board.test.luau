@@ -310,3 +310,31 @@ test("orch board: two orchestrators of one name, their chips say their projects"
 	app:frames(10)
 	expect(app:has('.orch-board-filter >> .orch-filter-project >> "zeron"')).to_be(true)
 end)
+
+test("orch board: a card made from a dump's part shows that dump", function()
+	local app = board()
+	expect(app:has(".orch-card-source")).to_be(false)
+	app:set_state("orch_board_items", {
+		{ id = "it-d", orchestrator_id = "orc-orch", title = "From what was said", state = "planned", priority = "normal", source = { dump_id = "dp-2", route_id = "rt-5" } },
+		{ id = "it-e", orchestrator_id = "orc-orch", title = "Made by hand", state = "planned", priority = "normal" },
+	})
+	app:frames(10)
+	expect(app:has('#orch-col-next >> role:button "From what was said" >> .orch-card-source')).to_be(true)
+	expect(app:has('#orch-col-next >> role:button "Made by hand" >> .orch-card-source')).to_be(false)
+	app:click('#orch-col-next >> role:button "From what was said" >> role:button "From a dump"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("source:dp-2")
+	-- (Its own click, not the card's: no thread opened.)
+	expect(app:state("calls")).never.to_contain("open:")
+end)
+
+test("orch board: in the Control room, a card's dump is brought into view", function()
+	local app = mount("control_page_fixture.luau")
+	app:resize(1440, 2600)
+	app:frames(30)
+	-- The loose item the newest dump made, in the Inbox.
+	expect(app:has("#control-board-inbox >> .orch-card-source")).to_be(true)
+	app:click('#control-board-inbox >> role:button "From a dump"')
+	app:frames(10)
+	expect(app:error()).to_be_nil()
+end)
