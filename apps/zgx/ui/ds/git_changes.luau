@@ -37,6 +37,7 @@ local ContextMenu = require("@self/context_menu")
 local ToggleButton = require("@self/toggle_button")
 local git = require("@self/git")
 local locale = require("@self/locale")
+local material = require("@self/material")
 
 local M = {}
 
@@ -416,6 +417,20 @@ local List = ui.component(function(props: ListProps): Node
 		return out
 	end)
 	local inset = git.gutter(one_column)
+	-- Cache the file tops when geometry changes, not on every scroll frame.
+	-- The list builds the same row for its sticky overlay and its body.
+	local file_tops = ui.computed(function(): { [string]: number }
+		local tops: { [string]: number } = {}
+		local hs = heights:get()
+		local y = 0
+		for i, r in rows:get() do
+			if r.kind == "file" then
+				tops[(r.file :: File).path] = y
+			end
+			y += hs[i] or r.h
+		end
+		return tops
+	end)
 	local function build(key: string): Node
 		rows:peek()
 		local r = row_of[key]
@@ -429,7 +444,37 @@ local List = ui.component(function(props: ListProps): Node
 		elseif r.kind == "file" then
 			local f = r.file :: File
 			local function slot(node: Node): Node
-				return node
+				if bare or not narrow or not open then
+					return node
+				end
+				local function pinned(): boolean
+					local top = file_tops:get()[f.path]
+					return open:get()[f.path] == true and top ~= nil and offset:get() > top
+				end
+				-- Inset glass with the card's nested corner. Clip the row's hover
+				-- wash too, so the whole header keeps the same soft silhouette.
+				local function radius(): any
+					return ui.raw(control.nest(git.RADIUS, git.EDGE, "$space.1"), "the card's radius minus its border and the header's inset")
+				end
+				return ui.div {
+					w_full = true,
+					h = M.FILE,
+					px = "$space.1",
+					ui.div {
+						w_full = true,
+						h = M.FILE,
+						relative = true,
+						rounded = radius,
+						overflow = "hidden",
+						bg = function(): string
+							return if pinned() then (if material.see_through() then "$zeron.diff.sticky.tint" else "$zeron.diff.sticky.solid") else "transparent"
+						end,
+						backdrop_blur = function(): any
+							return if pinned() and material.see_through() then "$zeron.diff.sticky.blur" else 0
+						end,
+						node,
+					},
+				}
 			end
 			local row = git.file_row(f, if props.box then props.box(f) else nil, r.label, { h = M.FILE })
 			local trail = if props.trail then props.trail(f) else nil
