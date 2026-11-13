@@ -1,7 +1,8 @@
 -- Settings → Voice: a row a speech model (ui/settings_stub.luau lists
 -- Parakeet Ultra here and in use, Cohere Transcribe not downloaded, slower
 -- here). Removing the model in use leaves dictation without one, as before
--- any download; a model downloaded but not in use offers Use.
+-- any download; a model downloaded but not in use offers Use. How long the
+-- model stays ready is chosen under them.
 
 local PAGE = "#settings-page"
 
@@ -28,6 +29,10 @@ test("each model says its size and languages, the one in use marked", function()
 	expect(shows(app, "1.8 GB · 14 languages · Slower on this computer")).to_be(true)
 	expect(shows(app, "In use")).to_be(true)
 	expect(app:has(`{PAGE} >> role:button "Download"`)).to_be(true)
+	-- How long it stays ready, 5 minutes unless chosen, and what that holds.
+	expect(shows(app, "Keep the model ready")).to_be(true)
+	expect(shows(app, "5 minutes")).to_be(true)
+	expect(shows(app, "Parakeet Ultra holds 1.1 GB of memory")).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 

@@ -37,6 +37,9 @@ M.dictation = ui.persist("settings_dictation", false)
 M.dictation_input = ui.persist("settings_dictation_input", "system")
 -- The speech model dictation uses, by id ("" for the default, the first).
 M.dictation_model = ui.persist("settings_dictation_model", "")
+-- How long the model stays ready after a dictation, in seconds: 0 released
+-- at once, -1 while Zeron is open.
+M.dictation_keep = ui.persist("settings_dictation_keep", 300)
 M.escape_stops = ui.persist("settings_escape_stops", false)
 -- Whether closing a panel's last tab closes the panel too (off: it stays
 -- open on its home). On by default: an empty panel is one nobody's using.

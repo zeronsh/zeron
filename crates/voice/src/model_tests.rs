@@ -4,7 +4,6 @@
 //!
 //!     cargo test -p zeron-voice --release model_ -- --ignored --nocapture
 use super::*;
-use std::path::PathBuf;
 
 fn clip(wav: &[u8]) -> (Vec<f32>, u32) {
     let wav = hound::WavReader::new(wav).unwrap();
