@@ -751,6 +751,11 @@ enum MutateParams {
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
         cloud: bool,
+        /// Its title, on the row from the first write (the Zeron MCP's
+        /// `create_chat` `title`): a crew thread is named from the moment
+        /// it joins its crew, not once a later rename lands.
+        #[serde(default)]
+        title: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -2036,6 +2041,7 @@ impl EngineRpc {
                 parent_chat_id,
                 child_kind,
                 cloud: _,
+                title,
             } => {
                 // A voice orchestrator and the Brain dump are hidden, so the
                 // chats they create are the user's top-level sessions rather
@@ -2076,7 +2082,7 @@ impl EngineRpc {
                     crate::orchestration::ops::crew_join_permitted(&who, orchestrator, &chat_id, None, true, self)?;
                 }
                 self.workspace
-                    .create_chat_hosted(
+                    .create_chat_titled(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
@@ -2085,6 +2091,7 @@ impl EngineRpc {
                         cwd,
                         parent_chat_id,
                         child_kind,
+                        title.as_deref(),
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -4370,6 +4377,7 @@ impl RpcService for EngineRpc {
                     parent_chat_id,
                     child_kind,
                     cloud,
+                    title,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,
@@ -4391,7 +4399,7 @@ impl RpcService for EngineRpc {
                     // computer it lives on.
                     let cwd = host.cwd.clone().or_else(|| cwd.clone());
                     self.workspace
-                        .create_chat_hosted(
+                        .create_chat_titled(
                             chat_id,
                             space_id.as_deref(),
                             device_id.as_deref(),
@@ -4400,6 +4408,7 @@ impl RpcService for EngineRpc {
                             cwd.clone(),
                             parent_chat_id.clone(),
                             *child_kind,
+                            title.as_deref(),
                         )
                         .map_err(failed)?;
                     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {

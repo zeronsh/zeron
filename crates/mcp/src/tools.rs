@@ -1366,6 +1366,17 @@ impl Tools {
         if let Some(space) = &space {
             mutate["spaceId"] = json!(space.id);
         }
+        let title = args
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
+        // Named on its row from the first write: a crew thread shows its
+        // name (the Map, the sidebar) from the moment it joins its crew.
+        if let Some(title) = &title {
+            mutate["title"] = json!(title);
+        }
         if let Some(parent) = &parent_chat_id {
             mutate["parentChatId"] = json!(parent);
             mutate["childKind"] = json!(match kind {
@@ -1439,12 +1450,9 @@ impl Tools {
         } else {
             (device_id, cwd)
         };
-        if let Some(title) = args
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
+        // (A Cloud chat's row may be written by the machine's host, which
+        // an older one does without its title: named again here.)
+        if let Some(title) = title.as_deref().filter(|_| args.cloud) {
             self.zeron
                 .mutate(json!({ "op": "renameChat", "chatId": chat_id, "title": title }))
                 .await?;
@@ -2706,7 +2714,7 @@ mod tests {
             .unwrap();
         let chat_id = created["chatId"].as_str().unwrap().to_owned();
         let writes = world.writes.lock().unwrap();
-        assert_eq!(writes.len(), 3, "createChat, renameChat, run");
+        assert_eq!(writes.len(), 2, "createChat (named), run");
         assert_eq!(writes[0].1["op"], "createChat");
         assert_eq!(writes[0].1["chatId"], chat_id);
         assert_eq!(writes[0].1["spaceId"], "space-1");
@@ -2716,9 +2724,10 @@ mod tests {
         );
         assert_eq!(writes[0].1["config"]["harness"], "claude-code");
         assert_eq!(writes[0].1["config"]["model"], "sonnet");
-        assert_eq!(writes[1].1["op"], "renameChat");
-        assert_eq!(writes[2].0, methods::QUEUE_COMMAND);
-        assert_eq!(writes[2].1["command"]["request"]["prompt"], "go");
+        // Named in the createChat itself: no untitled row is ever written.
+        assert_eq!(writes[0].1["title"], "Review");
+        assert_eq!(writes[1].0, methods::QUEUE_COMMAND);
+        assert_eq!(writes[1].1["command"]["request"]["prompt"], "go");
     }
 
     #[tokio::test]
