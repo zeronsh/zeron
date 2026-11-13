@@ -447,17 +447,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 			return out
 		end
 		local line = (ui.theme.get("font.line.sm") :: number?) or 16
-		local body = ui.column {
-			w_full = true,
-			min_w = 0,
-			gap = if compact then "$space.1" else "$zeron.space.snug",
-			-- Its title: two lines at most.
-			ui.text {
+		-- Its title: two lines at most.
+		local title = ui.text {
 				function(): string
 					return item().title
 				end,
 				wrap = true,
-				w_full = true,
+				w_full = not compact,
+				grow = if compact then 1 else nil,
+				min_w = 0,
 				max_h = line * 2,
 				overflow = "hidden",
 				text_size = "$font.size.sm",
@@ -466,13 +464,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 				color = function(): string
 					return if item().state == "done" then "$text.secondary" else "$text.primary"
 				end,
-			},
-			ui.show(function(): boolean
-				return progress() ~= nil and item().state ~= "done"
-			end, bar(progress, ink)),
-			-- Its marks: priority, threads, pull request.
-			ui.row {
-				w_full = true,
+			}
+		-- Its marks: priority, threads, pull request.
+		local marks = ui.row {
+				w_full = not compact,
+				shrink = 0,
+				h = line,
 				gap = "$space.1",
 				items = "center",
 				priority_mark(function(): string
@@ -485,7 +482,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end, { key = function(chat: string): string
 					return chat
 				end }),
-				ui.div { grow = 1 },
+				if compact then nil else ui.div { grow = 1 },
 				ui.each(ui.computed(prs), function(l: Link): Node
 					local n = tonumber(string.match(l.label, "%d+"))
 					return ui.button {
@@ -514,7 +511,18 @@ local OrchBoard = ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 				},
-			},
+			}
+		local progress_bar = ui.show(function(): boolean
+				return progress() ~= nil and item().state ~= "done"
+			end, bar(progress, ink))
+		-- (Compact, its marks stand at its title's end, the bar under both.)
+		local body = ui.column {
+			w_full = true,
+			min_w = 0,
+			gap = if compact then "$space.1" else "$zeron.space.snug",
+			if compact then ui.row { w_full = true, gap = "$space.3", items = "start", title, marks } else title,
+			progress_bar,
+			if compact then nil else marks,
 			-- Its outcome: two lines, or all of it opened.
 			ui.show(
 				has_outcome,
@@ -593,6 +601,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return item().title
 			end,
 			w_full = true,
+			p = 0,
 			relative = true,
 			rounded = CARD_RADIUS,
 			bg = function(): string

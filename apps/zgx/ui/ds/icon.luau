@@ -95,6 +95,7 @@ export type Name =
 	| "download"
 	| "alt-arrow-up"
 	| "stop"
+	| "action-pause"
 	| "action-play"
 	| "action-test"
 	| "action-lint"

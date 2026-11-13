@@ -1088,6 +1088,30 @@ local GROUPS: { Group } = {
 		},
 	},
 	{
+		-- Orchestration's pieces (demos/orch_*.luau), each loaded on its own
+		-- so a slip there shows in its place.
+		title = "Orchestration",
+		pages = (function(): { Page }
+			local out: { Page } = {}
+			for _, name in { "orch_board", "orch_crew", "orch_reports" } do
+				local ok, result = pcall(function()
+					return (require :: any)(`@demos/{name}`)
+				end)
+				table.insert(out, if ok
+					then result
+					else {
+						id = name,
+						title = name,
+						about = "This page didn't load.",
+						demo = function()
+							return ui.text { tostring(result), literal = true, wrap = true, font = "$font.mono", text_size = "$font.size.sm", color = "$danger" }
+						end,
+					})
+			end
+			return out
+		end)(),
+	},
+	{
 		title = "Commands",
 		pages = { context_menu_page :: Page, command_palette_page :: Page },
 	},
