@@ -144,7 +144,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ios-core
-          cache-on-failure: true
+          # Restored, never saved: a TestFlight build's cache saved the least build
+          # time per GB of the repository's 10 GB (docs/reference/ci.md#caches).
+          save-if: false
 
       # The image defaults to Xcode 27.0. Select 27.1 globally rather than via
       # DEVELOPER_DIR: build-core.sh runs cargo under `env -i`.

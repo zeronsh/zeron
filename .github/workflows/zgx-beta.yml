@@ -99,10 +99,14 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       # zgx's terminals are Ghostty's, built with Zig 0.16 (zgx-ghostty-sys).
+      # Neither the beta's Zig, Ghostty nor Rust builds are saved to the cache: a tag's
+      # entries are never restored by anything else and pushed main's out of the
+      # repository's 10 GB (docs/reference/ci.md#caches). zgx's tests save Ghostty's.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          use-cache: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/Library/Caches/zgx-ghostty
           key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
@@ -113,6 +117,7 @@ jobs:
         with:
           key: zgx-beta
           workspaces: apps/zgx -> target
+          save-if: false
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |

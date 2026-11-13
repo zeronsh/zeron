@@ -16,6 +16,65 @@ Pull requests, `main` and the merge queue all go through one workflow,
 4. **CI result** passes when no suite failed or was cancelled. This is the
    check to require in the ruleset and the merge queue.
 
+Around it:
+
+- [`ci-supersede.yml`](../../.github/workflows/ci-supersede.yml) stops a pull
+  request's runs that a newer push or closing it made pointless (see
+  [Pull request runs](#pull-request-runs)).
+- [`android-play.yml`](../../.github/workflows/android-play.yml) uploads main's
+  Android bundle to Google Play once CI has passed (see
+  [Google Play upload](#google-play-upload)).
+- [`ci-caches.yml`](../../.github/workflows/ci-caches.yml) keeps the Actions
+  cache for the caches CI uses (see [Caches](#caches)).
+
+### Pull request runs
+
+Each pull request run has a concurrency group of its own
+(`ci-pr-<number>-<run id>`), so a new push never waits for an older run.
+In one group per pull request it did: the older run, cancelled, still had to
+run `CI result` (`if: always()`), which queued for a runner like any job, and
+the new run waited behind it ("waiting for CI #610 to complete"). `main` and
+the merge queue keep one group per ref and are never cancelled.
+
+Older runs are stopped instead:
+
+- [`ci-supersede.yml`](../../.github/workflows/ci-supersede.yml) runs on every
+  push to a pull request (`synchronize`, `reopened`) and when it closes. It
+  force-cancels the pull request's CI runs that aren't on its head commit (all
+  of them once it's closed), which also skips their `CI result`. It uses
+  `pull_request_target`, so its token can cancel runs of a fork's pull request
+  too; it never checks out the pull request's code, it only reads and cancels
+  runs through the API.
+- If that job is slow to get a runner, nothing waits on it: a run still
+  waiting for admission checks the pull request on every poll and stops by
+  itself once its commit is no longer the head, or the pull request is closed
+  (`superseded` in `admit.py`, from `CI_PR` and `CI_PR_HEAD`).
+
+### Google Play upload
+
+[`android-play.yml`](../../.github/workflows/android-play.yml) uploads main's
+signed Android bundle (`android-aab`, built by `android.yml` inside `ci.yml`)
+to a Google Play testing track. It runs on `workflow_run` when CI completes
+successfully on a push to `main`, and downloads the bundle from that run.
+
+It is a workflow of its own, not a job of `ci.yml`, because the upload waits
+for a reviewer (the `google-play` environment). As a job of `ci.yml`, that
+wait kept the run open, and with it `main`'s concurrency group: from Nov 5 to
+Nov 11 one wait held every later `main` run and nightly, which were cancelled
+unstarted, and `main` saved no caches or passes all that time.
+
+- Only the newest build waits for approval: the workflow's concurrency group
+  (`android-google-play`) cancels an older run still waiting.
+- A CI run that reused Android's pass built no bundle: the first job checks
+  for the artifact without asking a reviewer, and the upload is skipped.
+- The bundle must carry the release key: `android.yml` marks a bundle signed
+  with it (`release-signed` in the artifact), and the upload refuses one
+  signed with a debug key.
+- Armed by `PLAY_UPLOAD_ENABLED=true`; the track and status come from
+  `PLAY_TRACK` (`beta`, or `internal`) and `PLAY_RELEASE_STATUS` (`draft`, or
+  `completed`). An upload by hand with other choices is `android.yml`'s
+  manual run (Upload this build to Google Play).
+
 ## Which suites run
 
 | | Pull request (fast tier) | `main`, merge queue, manual run (full tier) |
@@ -190,7 +249,7 @@ these. A fork's author can't label their own pull request.
   wait for, so the next runners to free up go to them. Running jobs are never
   stopped.
 - **`ci:lock`**: while the pull request is open, admission treats a full run's
-  worth of runners (10 Linux, 3 Windows, 3 macOS) as taken, whether or not
+  worth of runners (`MAX_RESERVATION`: 11 Linux, 4 Windows, 4 macOS) as taken, whether or not
   the pull request is running anything. Its own runs skip the queue and are
   admitted as soon as their runners are free. The lock ends when:
   - the label is removed;
@@ -220,16 +279,25 @@ Repository variables:
 | `CI_BUDGET_TOTAL` | 20 | Hosted runners all CI runs may hold at once: the organization's concurrency limit |
 | `CI_BUDGET_MACOS` | 5 | macOS runners: the organization's macOS limit |
 | `CI_BUDGET_WINDOWS` | 10 | Windows runners: half the pool, so Linux keeps the other half |
-| `CI_DEBOUNCE_SECONDS` | 60 | How long a pull request run waits before queueing. A push within that time cancels it. |
+| `CI_DEBOUNCE_SECONDS` | 60 | How long a pull request run waits before queueing. A push within that time supersedes it. |
 | `CI_ADMISSION` | on | `off` starts every run at once |
 | `CI_PR_TIER` | fast | `full` runs everything on pull requests |
 | `CI_LOCK_HOURS` | 6 | How long a `ci:lock` label holds runners |
 | `CI_FORK_REUSE` | (unset) | `own`: fork pull requests also reuse their own earlier passes. Set it once the merge queue is required |
+| `CI_PEERS` | `zeronsh/zgx:ci.yml` | Other repositories' admitted CI workflows sharing the runner pool (`owner/repo:workflow.yml`, separated by spaces or commas) |
+| `CI_SEE_OUTSIDE` | on | `off`: ignore runs outside admitted CI (releases, betas, deploys, a peer's other workflows) |
+| `PLAY_UPLOAD_ENABLED` | (unset) | `true`: `android-play.yml` uploads main's bundle to Google Play after CI passes |
+| `PLAY_TRACK` | beta | Google Play testing track for that upload (`beta` or `internal`) |
+| `PLAY_RELEASE_STATUS` | draft | Release status for that upload (`draft` or `completed`) |
 
 A pull request can edit its own copy of `ci.yml`, so the reservation other runs
 read from its admit job is not trusted:
 
-- it is capped at a full run (`MAX_RESERVATION`);
+- it is capped at a full run (`MAX_RESERVATION`). The cap is the largest
+  reservation of any branch or repository sharing the queue (`main`,
+  `zeron/zgx` with its zgx suite, `zeronsh/zgx`), since `admit.py` is the
+  same file in each: 11 Linux, 4 Windows, 4 macOS. `test_ci_admit.py` checks
+  this branch's largest plan fits under it, within a job per runner type;
 - jobs an admitted run reserved but never created stop counting 10 minutes
   after admission, except the `CI result` job and Android publishing, which
   start late (90 minutes);
@@ -237,10 +305,32 @@ read from its admit job is not trusted:
   (an edited admit step that never finishes) is ignored: the runs behind it
   stop waiting for it.
 
-Admission ensures that all of a run's runners were free when it started. It
-can't stop jobs it doesn't see from taking runners in the meantime: other
-repositories of the organization, release and deploy workflows. Those can
-still take a free runner first.
+### Across repositories
+
+The organization's 20 hosted runners (5 macOS) are one pool for `zeronsh/zeron`
+and `zeronsh/zgx`. On Nov 10, zgx's CI alone held a median 18 of the 20 for
+half a day, while admission here, seeing only this repository's CI, admitted
+runs as if every runner were free; they then queued for hours. So admission
+reads, besides this repository's `ci.yml`:
+
+- **Peers** (`CI_PEERS`, `zeronsh/zgx:ci.yml` by default): other repositories'
+  admitted CI joins the same queue. Their waiting runs wait in it, their
+  admitted runs hold what they hold, and their `ci:priority` and `ci:lock`
+  labels count as this repository's do. A peer's pull request is keyed
+  `owner/repo#n`, never confused with a pull request number here.
+- **Everything else** (`CI_SEE_OUTSIDE`, on by default): every other run in
+  this repository and the peers (releases, betas, deploys, a peer's CI before
+  it adopts admission). What its jobs run or queue for counts as held, so a
+  release's queued jobs get the next free runners and admitted CI doesn't
+  take them. A job waiting for an environment's approval holds no runner and
+  doesn't count.
+
+Another repository's runs are read at most every 2 minutes, to spare the
+token's API quota. The peers are public, so the run's own token reads them.
+
+Admission ensures that all of a run's runners were free when it started. Jobs
+it can't see (a repository that isn't a peer) can still take a free runner
+first.
 
 ### No deadlocks
 
@@ -288,11 +378,142 @@ admission:
 
 ## Caches
 
-The repository has 10 GB of Actions cache. When it is full, GitHub evicts the
-least recently used entries. Only `main` saves caches, so pull requests can't
-push out the caches that `main` seeds. There is one cache per build: Linux
-core, Linux UI, Linux voice, one shared by the Windows jobs, macOS native, iOS
-core and simulator, and Android.
+The repository has GitHub's free 10 GB of Actions cache. When it's full,
+GitHub evicts the least recently used entries, whoever saved them. Caches
+saved from tags and side branches (`release.yml`, `zgx-beta.yml`: 5 to 9 GB a
+run, never restored by anything) and from pull requests (`actions/cache`,
+which saves by default, setup-node's `cache: npm`, setup-zig's own cache)
+evicted the caches `main`'s CI restores on every run.
+
+So every cache is declared, in one allowlist:
+[`scripts/ci/caches.py`](../../scripts/ci/caches.py). A family is a pattern
+its keys match, the refs allowed to save it, a priority and an expected size.
+A lint enforces it on the workflows, and a janitor removes everything else.
+
+### What is kept
+
+In priority order, highest first. Value is the build minutes a cache saved
+per month per GB it takes, as measured; zgx's suite, not on `main` yet, comes
+after Linux core.
+
+| Priority | Family | Key | Saved from | Size | Value |
+|---|---|---|---|---|---|
+| 1 | windows | `v0-rust-windows-Windows_NT-x64-…` (`windows-ci-setup`, shared key `windows`) | main | 1.25 GB | 7,640 |
+| 2 | linux-ui | `ci-linux-v1-ui-Linux-x64-…` (`linux-ci`) | main | 1.15 GB | 7,200 |
+| 3 | linux-core | `ci-linux-v1-core-Linux-x64-…` (`linux-ci`) | main | 0.68 GB | 6,350 |
+| 4 | zgx-tests-macos | `v0-rust-zgx-tests-zgx-macos-Darwin-arm64-…` | zeron/zgx | 1.4 GB | |
+| 5 | zgx-tests-linux | `v0-rust-zgx-tests-zgx-linux-Linux-x64-…` | zeron/zgx | 0.8 GB | |
+| 6 | ios-tests | `v0-rust-ios-tests-Darwin-arm64-…` (`macos.yml`) | main | 0.76 GB | 3,840 |
+| 7 | macos-native | `v0-rust-macos-native-Darwin-arm64-…` (`macos.yml`) | main | 1.79 GB | 3,170 |
+| 8 | ios-core | `v0-rust-ios-core-Linux-x64-…` (`macos.yml`) | main | 0.81 GB | 2,950 |
+| 9 | apt-ui-browser | `apt-debs-v1-ui-browser-…` (`linux-ci`) | main | 0.26 GB | |
+| 10 | zgx-ghostty | `zgx-ghostty-…` | zeron/zgx | 0.49 GB | |
+| 11, 12 | zgx-cli-macos, zgx-cli-linux | `zgx-cli-macOS-ARM64-…`, `zgx-cli-Linux-X64-…` | zeron/zgx | 20 MB each | |
+| | pass records | `ci-pass-v1-…` (see [Reuse](#reuse)) | any ref (kept: main, zeron/zgx, pull requests) | ~240 B each | |
+
+The keep set adds up to about 9.4 GB, so the budget is 9.5 GB of the 10:
+`test_ci_caches.py` fails if the declared sizes exceed it. The zgx families
+are saved only from `zeron/zgx` (zgx's suite isn't on `main` yet), through
+`zgx-tests.yml`'s `SAVE_CACHES: ${{ github.ref == 'refs/heads/zeron/zgx' }}`.
+Pass records are a few hundred bytes and needed wherever CI runs, pull
+requests included, so any ref may save them. They don't count against the
+budget (any pull request, a fork's too, can save any number of them, and they
+must not push out a cache), and the janitor keeps only those of refs some run
+trusts: `main`, `zeron/zgx` and pull requests' merge refs
+(`refs/pull/<n>/merge`). The rest (a run by hand on a side branch, the merge
+queue, a tag) nothing reads. A fork's pull request can't be told from a
+same-repository one by its ref, so every pull request's records stay.
+
+Not saved any more (each still restores whatever is there, so nothing else
+changes):
+
+- Android (0.9 GB, value 2,120), the GPUI frame-source job (270), TestFlight's
+  `ios-core` (190), Linux voice and voice's `windows-runtime`, and voice's
+  `.deb` directory: `save-if: false`, or no `save-apt-cache`.
+- `release.yml` and `zgx-beta.yml`: their Rust caches were saved from a tag
+  and never restored by anything else. `save-if: false`; zgx-beta's Ghostty
+  build is restored only (`zgx-tests.yml` on `zeron/zgx` saves it), and its
+  setup-zig has `use-cache: false`. Release and beta builds don't use the
+  GitHub cache; stage 2 will give them, and CI, a shared compile cache on R2.
+- setup-node's npm cache (`node-cache-…`), `cache: npm` removed: `npm ci` is
+  quick, and the cache was saved from every ref.
+
+### Who may save what
+
+The lint (`scripts/tests/test_ci_caches.py`, run by `plan` in every CI run,
+which reads the workflows and actions by indentation, without PyYAML) fails
+when:
+
+- a `Swatinem/rust-cache` step has no `save-if` (rust-cache saves from every
+  ref by default), or one other than: `false`; main only,
+  `${{ github.ref == 'refs/heads/main' }}`; zgx's
+  `${{ env.SAVE_CACHES == 'true' }}`; or, in `linux-ci` and
+  `windows-ci-setup`, an input and main,
+  `${{ inputs.save-rust-cache == 'true' && github.ref == 'refs/heads/main' }}`;
+- a step that saves (a rust-cache step that can, an `actions/cache/save`)
+  saves a key no family declares, or from a ref its family doesn't allow. The
+  lint works the key out as rust-cache does (prefix, shared key or key and
+  job id, the runner's OS and architecture) and, through a composite action,
+  from the caller's inputs. So voice's job `windows-runtime`, whose key starts
+  `v0-rust-windows-runtime-`, is not the `windows` family;
+- `actions/cache@` (restore and save in one) is used anywhere: use
+  `actions/cache/restore`, and `actions/cache/save` with an `if:`;
+- an `actions/cache/save` step's `if:` doesn't limit it to one allowed ref
+  (`github.ref == 'refs/heads/main'` or `env.SAVE_CACHES == 'true'`, joined
+  to the rest with `&&`, never `||`), unless it's a pass record
+  (`key: ${{ inputs.pass-key }}-<job>`, `path: rust-toolchain.toml`);
+- setup-node, setup-python, setup-java or setup-go has a `cache:` input
+  (setup-go needs `cache: false`; setup-node v5 needs
+  `package-manager-cache: false`);
+- `mlugg/setup-zig` lacks `use-cache: false`.
+
+In the composite actions, the job given `save-rust-cache: 'true'` (one per
+key) saves the Rust cache, and the job given `save-apt-cache: 'true'` (one
+per `apt-cache`) saves the `.deb` directory; every other job only restores.
+
+### The janitor
+
+[`ci-caches.yml`](../../.github/workflows/ci-caches.yml) runs every 6 hours
+(and by hand, with `dry-run` to delete nothing) from `main`, since scheduled
+workflows run only from the default branch. It lists every ref's entries
+(`main`, `zeron/zgx`, pull requests, tags) and deletes, with
+`python3 scripts/ci/caches.py janitor`:
+
+1. entries no family declares;
+2. entries saved from a ref their family doesn't allow (pull requests, tags,
+   side branches); pass records only from refs no run trusts (anything but
+   `main`, `zeron/zgx` and `refs/pull/<n>/merge`);
+3. older generations: only the newest entry of a family per ref stays.
+   rust-cache's key changes with the lockfile, so `main`'s previous cache
+   would otherwise linger until GitHub evicts something;
+4. while what's left is still over the 9.5 GB budget, whole families, from
+   the lowest priority up. Pass records don't count against it.
+
+The run's summary lists what it kept and deleted, with sizes. To see what it
+would delete now, without deleting anything:
+
+```sh
+gh cache list -R zeronsh/zeron --limit 1000 --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt > caches.json
+python3 scripts/ci/caches.py janitor --from-json caches.json
+```
+
+### Adding a cache
+
+1. Measure it: its size, and the minutes it saves on the runs that restore it.
+2. Declare its family in `FAMILIES` in `scripts/ci/caches.py`: the key
+   pattern, the refs that may save it (`main` unless it's a branch's suite),
+   its expected size, and its priority among the others (renumber the ranks
+   below it). If the declared sizes no longer fit the budget, drop or lower
+   another family: the janitor would drop the lowest priority anyway.
+3. Save it from that ref only: rust-cache with a `save-if` of that form, or
+   `actions/cache/restore` plus an `actions/cache/save` whose `if:` names the
+   ref.
+
+Or don't save it: `save-if: false` for rust-cache, `actions/cache/restore`
+alone otherwise. A cache restored from `main` costs nothing.
+
+`python3 scripts/ci/caches.py lint` runs the lint alone, and
+`python3 scripts/ci/caches.py families` prints the allowlist.
 
 ## Locally
 

@@ -46,6 +46,10 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # A tag's cache is never restored by anything else and pushed main's out
+          # of the repository's 10 GB (docs/reference/ci.md#caches).
+          save-if: false
       - name: package
         run: scripts/package-linux.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -80,6 +84,10 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # A tag's cache is never restored by anything else and pushed main's out
+          # of the repository's 10 GB (docs/reference/ci.md#caches).
+          save-if: false
       - name: import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |
@@ -136,6 +144,10 @@ jobs:
           if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # A tag's cache is never restored by anything else and pushed main's out
+          # of the repository's 10 GB (docs/reference/ci.md#caches).
+          save-if: false
       - name: package installer and portable app
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
