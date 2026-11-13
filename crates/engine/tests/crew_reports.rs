@@ -593,6 +593,11 @@ async fn a_task_with_no_owner_starts_a_thread_in_the_project_it_names() {
     assert_eq!(chat.space_id.as_deref(), Some(space.as_str()));
     assert_eq!(chat.device_id, core.device_id, "on that project's device");
     assert!(chat.parent_chat_id.is_none(), "a standalone thread");
+    // Started by the Brain dump, for this route: a link, not a parent.
+    let started = chat.started_by.clone().expect("started_by");
+    assert_eq!(started.chat_id, brain_of(&core));
+    assert_eq!(started.dump_id.as_deref(), Some(dump_id.as_str()));
+    assert_eq!(started.route_id.as_deref(), Some(route.id.as_str()));
     wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains(message)), "its first prompt").await;
     assert!(
         core.workspace.read_orchestration_with(|d| d.read_asks()).is_empty(),
@@ -649,6 +654,28 @@ async fn unsure_between_owners_asks_and_the_answer_starts_the_work() {
         DumpState::Routed
     );
     assert_eq!(core.workspace.read_orchestration_with(|d| d.ask(&ask.id)).unwrap().state, AskState::Answered);
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crew_thread_an_orchestrator_spawns_records_who_started_it() {
+    let Setup { core, rpc, finish, .. } = setup().await;
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(ORCH.into()) },
+        methods::MUTATE,
+        json!({ "op": "createChat", "chatId": "spawned", "deviceId": core.device_id, "parentChatId": ORCH,
+            "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" } }),
+    )
+    .await;
+    let chat = core.workspace.chat("spawned").unwrap().unwrap();
+    assert_eq!(chat.parent_chat_id.as_deref(), Some(ORCH));
+    let started = chat.started_by.expect("started_by");
+    assert_eq!((started.chat_id.as_str(), started.dump_id, started.route_id), (ORCH, None, None));
+    // And the chats watch carries it.
+    let chats = core.workspace.watch_chats().borrow().clone();
+    assert!(chats.iter().any(|c| c.id == "spawned" && c.started_by.is_some()));
     let _ = finish.send(());
     core.shutdown().await;
 }

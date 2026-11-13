@@ -127,6 +127,23 @@ impl EngineRpc {
         })
     }
 
+    /// Record that `by` started `chat` for the person (provenance, not
+    /// parenthood: [`zeron_proto::Chat::started_by`]).
+    pub(crate) fn mark_started_by(&self, chat: &str, by: &str, dump_id: Option<&str>, route_id: Option<&str>) {
+        let started = zeron_proto::StartedBy {
+            chat_id: by.to_owned(),
+            dump_id: dump_id.map(str::to_owned),
+            route_id: route_id.map(str::to_owned),
+        };
+        let marked = self
+            .orchestration()
+            .workspace()
+            .write_orchestration(|doc| doc.set_chat_started_by(chat, &started));
+        if !matches!(marked, Ok(true)) {
+            tracing::warn!(chat = %chat, "started-by not recorded");
+        }
+    }
+
     /// The existing places among `candidates` (orchestrators, live chats,
     /// board items), each once.
     pub(crate) fn existing_candidates(&self, candidates: Vec<RouteTarget>) -> Vec<RouteTarget> {

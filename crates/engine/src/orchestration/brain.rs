@@ -450,6 +450,9 @@ impl EngineRpc {
                     })
                     .await?
                 };
+                if let Some(brain) = brain {
+                    self.mark_started_by(&id, brain, Some(&dump.id), Some(&route.id));
+                }
                 deliver(self, &id, &message, brain, When::Now)?;
                 route.target = RouteTarget::NewOrchestrator { id };
                 route.state = RouteState::Delivered;
@@ -475,6 +478,9 @@ impl EngineRpc {
                         None,
                         None,
                     )?;
+                    if let Some(brain) = brain {
+                        self.mark_started_by(&id, brain, Some(&dump.id), Some(&route.id));
+                    }
                     if !title.is_empty() {
                         self.workspace_host()
                             .rename_chat(&id, &title)

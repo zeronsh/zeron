@@ -2090,6 +2090,8 @@ impl EngineRpc {
                 }
                 if let Some(orchestrator) = crew_of {
                     self.add_to_crew(&orchestrator, &chat_id, "", None)?;
+                    // Started by its orchestrator (besides being its child).
+                    self.mark_started_by(&chat_id, &orchestrator, None, None);
                 }
                 Ok(())
             }

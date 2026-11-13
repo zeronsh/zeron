@@ -780,6 +780,9 @@ pub(crate) struct RawChat {
     slept_at: Option<i64>,
     #[serde(default)]
     sleep_woke_at: Option<i64>,
+    /// LENIENT: who started it ([`zeron_proto::Chat::started_by`]).
+    #[serde(default, deserialize_with = "zeron_proto::lenient_started_by")]
+    started_by: Option<zeron_proto::StartedBy>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -828,6 +831,7 @@ impl From<RawChat> for Chat {
                 at: dt(raw.slept_at.unwrap_or(until)),
                 woke_at: raw.sleep_woke_at.map(dt),
             }),
+            started_by: raw.started_by,
         }
     }
 }
@@ -983,6 +987,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sleep: None,
+            started_by: None,
         }
     }
 

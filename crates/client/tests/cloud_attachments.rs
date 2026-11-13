@@ -57,6 +57,7 @@ fn chat() -> Chat {
         parent_chat_id: None,
         child_kind: None,
         sleep: None,
+        started_by: None,
     }
 }
 

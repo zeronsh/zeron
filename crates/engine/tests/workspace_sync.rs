@@ -764,6 +764,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
                 sleep: None,
+                started_by: None,
             })
             .unwrap();
         legacy
