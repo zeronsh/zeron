@@ -21,8 +21,10 @@
 
 use serde::Deserialize;
 
+use crate::orchestration::{AskOption, AskRecommendation, LinkKind, Score, Scores, WorkLink};
+
 /// What the end of a turn asks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// A question for the person, plainly.
     Ask(Found),
@@ -33,13 +35,60 @@ pub enum Verdict {
 }
 
 /// A question found at a turn's end.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Found {
     /// The question, as the thread put it (its paragraph, capped).
     pub question: String,
-    /// The choices it names (2 to 4), else empty.
+    /// The choices it names (2 to 4; up to 6 lettered variants), else empty.
     pub options: Vec<String>,
     pub kind: FoundKind,
+    /// Each option's detail, pictures and scores, by index (may be
+    /// shorter than `options`).
+    pub extras: Vec<Extra>,
+    /// Pictures the message shows that aren't one option's.
+    pub images: Vec<String>,
+    /// What the thread recommends ("I recommend (a)…").
+    pub recommendation: Option<AskRecommendation>,
+    /// The branch and PRs it names.
+    pub links: Vec<WorkLink>,
+    /// What the person reads to decide (markdown): the message's summary,
+    /// and any other decision it leaves open.
+    pub context: Option<String>,
+}
+
+/// An option's detail, pictures and scores.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Extra {
+    pub detail: String,
+    pub images: Vec<String>,
+    pub scores: Scores,
+}
+
+impl Found {
+    pub fn new(question: impl Into<String>, options: Vec<String>, kind: FoundKind) -> Self {
+        Found {
+            question: question.into(),
+            options,
+            kind,
+            extras: Vec::new(),
+            images: Vec::new(),
+            recommendation: None,
+            links: Vec::new(),
+            context: None,
+        }
+    }
+
+    /// Its options as an ask has them.
+    pub fn ask_options(&self) -> Vec<AskOption> {
+        self.options
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let extra = self.extras.get(i).cloned().unwrap_or_default();
+                AskOption { label: label.clone(), detail: extra.detail, images: extra.images, scores: extra.scores }
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,7 +407,12 @@ pub fn detect(text: &str) -> Verdict {
     let question = cap(&question, QUESTION_MAX);
     let items: Vec<String> = all.iter().filter(|a| a.item && a.para == s.para || a.item && a.para == s.para + 1).map(|a| plain(&a.text)).collect();
     let (options, kind) = options_of(&s.text, &items);
-    let found = Found { question, options, kind };
+    let mut found = Found::new(question, options, kind);
+    // Options from its list: each item's words after the label are its detail.
+    if (2..=4).contains(&items.len()) && found.options.len() == items.len() && found.kind == FoundKind::Decision {
+        found.extras = items.iter().map(|i| Extra { detail: upper_first(split_label(i).1), ..Default::default() }).collect();
+    }
+    enrich(text, &mut found);
     if strong { Verdict::Ask(found) } else { Verdict::Borderline(found) }
 }
 
@@ -496,12 +550,519 @@ fn split_or(body: &str) -> Vec<String> {
 
 /// A list item's label: the part before its explanation.
 fn cut_label(item: &str) -> &str {
+    split_label(item).0
+}
+
+/// A list item's label and its explanation ("Patch the parser — smallest
+/// change": both sides).
+fn split_label(item: &str) -> (&str, &str) {
     for sep in [" — ", " – ", " - ", ": "] {
         if let Some(at) = item.find(sep) {
-            return &item[..at];
+            return (&item[..at], item[at + sep.len()..].trim());
         }
     }
-    item
+    (item, "")
+}
+
+// ── What a decision carries: variants, pictures, a pick ────────────────────
+
+/// The most options a lettered set gives an ask.
+const VARIANTS_MAX: usize = 6;
+/// The most pictures an option keeps, and the ask's own.
+const OPTION_IMAGES_MAX: usize = 6;
+const ASK_IMAGES_MAX: usize = 12;
+/// The most of the message's summary an ask keeps as its context.
+const CONTEXT_MAX: usize = 800;
+/// File endings of a picture.
+pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+/// Whether `path` (a path or URL) names a picture.
+pub fn is_image(path: &str) -> bool {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    path.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// One lettered variant of a message: "(a) inline tag, no lines" in a list
+/// or a table's first column.
+#[derive(Debug, Clone)]
+struct Variant {
+    /// Its letter or number, lower case: "a", "2".
+    key: String,
+    label: String,
+    extra: Extra,
+    /// The raw line it is on.
+    line: String,
+}
+
+/// "(a) rest", "a) rest", "Option A: rest", "Variant 2 — rest": the key and
+/// the rest.
+fn marker(s: &str) -> Option<(String, &str)> {
+    let t = s.trim_start().trim_start_matches("**").trim_start();
+    let key_ok = |k: &str| k.chars().count() == 1 && k.chars().all(|c| c.is_ascii_alphabetic() && "abcdefghABCDEFGH".contains(c) || c.is_ascii_digit() && c != '0');
+    if let Some(rest) = t.strip_prefix('(')
+        && let Some(close) = rest.find(')')
+        && key_ok(&rest[..close])
+    {
+        return Some((rest[..close].to_ascii_lowercase(), rest[close + 1..].trim_start_matches("**").trim()));
+    }
+    if let Some(close) = t.find(") ")
+        && close == 1
+        && key_ok(&t[..1])
+    {
+        return Some((t[..1].to_ascii_lowercase(), t[close + 2..].trim()));
+    }
+    let l = t.to_lowercase();
+    for word in ["option ", "variant ", "version "] {
+        if l.starts_with(word) {
+            let rest = &t[word.len()..];
+            let key: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            if key_ok(&key) {
+                let rest = rest[key.len()..].trim_start_matches("**").trim_start_matches([':', '.', ')']).trim();
+                let rest = rest.strip_prefix("— ").or(rest.strip_prefix("– ")).or(rest.strip_prefix("- ")).unwrap_or(rest);
+                return Some((key.to_ascii_lowercase(), rest.trim()));
+            }
+        }
+    }
+    None
+}
+
+/// A variant's label ("(a) Inline tag") and detail from its words.
+fn variant_label(key: &str, rest: &str) -> (String, String) {
+    let rest = plain(&without_images(rest));
+    let (mut label, mut detail) = split_label(&rest);
+    if detail.is_empty()
+        && label.chars().count() > 28
+        && let Some(at) = label.find(", ")
+    {
+        (label, detail) = (&rest[..at], rest[at + 2..].trim());
+    }
+    let label = label.trim().trim_end_matches(['.', ',', ':']);
+    (format!("({key}) {}", upper_first(label)), upper_first(detail.trim().trim_end_matches('.')))
+}
+
+/// `s` without its markdown pictures (`![alt](path)`).
+fn without_images(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(at) = rest.find("![") {
+        let tail = &rest[at..];
+        let Some(end) = tail.find("](").and_then(|o| tail[o..].find(')').map(|c| o + c)) else { break };
+        out.push_str(&rest[..at]);
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn cells(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_owned()).collect()
+}
+
+fn score_of(cell: &str) -> Option<f64> {
+    let c = plain(cell).replace('*', "");
+    let c = c.trim().trim_end_matches("/10").trim_end_matches('%').trim();
+    c.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+/// The message's lettered variants: a table's rows whose first cell is
+/// marked, else marked list lines. Two at least, each key once.
+fn variants(text: &str) -> Vec<Variant> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<Variant> = Vec::new();
+    // Tables.
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].trim_start().starts_with('|') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < lines.len() && lines[i].trim_start().starts_with('|') {
+            i += 1;
+        }
+        let table = &lines[start..i];
+        let header = cells(table[0]);
+        let ruled = table.get(1).is_some_and(|l| cells(l).iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' '))));
+        let rows = if ruled { &table[2..] } else { &table[1..] };
+        let mut found = Vec::new();
+        for row in rows {
+            let cs = cells(row);
+            let Some((key, rest)) = cs.first().and_then(|c| marker(c)) else { continue };
+            let (label, detail) = variant_label(&key, rest);
+            let mut extra = Extra { detail, ..Default::default() };
+            let mut notes = Vec::new();
+            for (j, cell) in cs.iter().enumerate().skip(1) {
+                let name = header.get(j).map(|h| plain(h)).filter(|h| !h.is_empty() && ruled);
+                match (score_of(cell), name) {
+                    (Some(n), Some(name)) => extra.scores.0.push((name, Score::Number(n))),
+                    _ if !plain(cell).is_empty() => notes.push(plain(cell)),
+                    _ => {}
+                }
+            }
+            if !notes.is_empty() {
+                let notes = notes.join(" ");
+                extra.detail = if extra.detail.is_empty() { notes } else { format!("{}. {notes}", extra.detail) };
+            }
+            found.push(Variant { key, label, extra, line: row.to_string() });
+        }
+        if found.len() >= 2 {
+            out = found;
+            break;
+        }
+    }
+    if out.is_empty() {
+        for line in &lines {
+            let t = line.trim_start();
+            let body = ["- ", "* ", "• "].iter().find_map(|m| t.strip_prefix(m)).unwrap_or(t);
+            let Some((key, rest)) = marker(body) else { continue };
+            if rest.is_empty() {
+                continue;
+            }
+            let (label, detail) = variant_label(&key, rest);
+            out.push(Variant { key, label, extra: Extra { detail, ..Default::default() }, line: line.to_string() });
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|v| seen.insert(v.key.clone()));
+    if out.len() < 2 {
+        return Vec::new();
+    }
+    out.truncate(VARIANTS_MAX);
+    out
+}
+
+/// What a real choice is: two options or more, not a yes/no.
+fn real(options: &[String]) -> bool {
+    options.len() >= 2 && !(options.len() == 2 && options[0] == "Yes")
+}
+
+/// The key of a variant's label: "(a) …" → "a".
+fn key_of(label: &str) -> Option<String> {
+    marker(label).map(|(k, _)| k)
+}
+
+/// Fill `found`'s extras from the whole of `text`: its lettered variants
+/// (when the question named no choice of its own), their scores, the
+/// pictures and who they belong to, the pick and its why, links, context.
+fn enrich(text: &str, found: &mut Found) {
+    let body = prose(text);
+    let paras = paragraphs(&body);
+    let all = sentences(&paras);
+    let asked = found.question.clone();
+    // Lettered variants decide a question that names no choice itself.
+    let set = variants(&body);
+    let mut from_set = false;
+    if !set.is_empty() && !real(&found.options) {
+        let pick = all.iter().rev().find(|s| {
+            let l = lower(&plain(&s.text));
+            !s.item && decides(&s.text) && ["which", "pick", "choose", "choice", "prefer", "version", "variant", "option"].iter().any(|w| l.contains(w))
+        });
+        if pick.is_some() || recommendation(&all, &set.iter().map(|v| v.label.clone()).collect::<Vec<_>>()).is_some() {
+            if let Some(p) = pick {
+                found.question = cap(&plain(&p.text), QUESTION_MAX);
+            }
+            found.options = set.iter().map(|v| v.label.clone()).collect();
+            found.extras = set.iter().map(|v| v.extra.clone()).collect();
+            found.kind = FoundKind::Decision;
+            from_set = true;
+        }
+    }
+    found.recommendation = recommendation(&all, &found.options);
+    // Pictures, each with the line it is on.
+    let mut refs: Vec<(String, String)> = Vec::new();
+    for p in &paras {
+        let dir = dir_of(p);
+        for line in p.lines() {
+            for image in images_in(line, dir.as_deref()) {
+                if !refs.iter().any(|(r, _)| *r == image) {
+                    refs.push((image, line.to_owned()));
+                }
+            }
+        }
+    }
+    if found.extras.len() < found.options.len() {
+        found.extras.resize(found.options.len(), Extra::default());
+    }
+    for (image, line) in refs {
+        match owner(&image, &line, &found.options, if from_set { &set } else { &[] }) {
+            Some(i) if found.extras[i].images.len() < OPTION_IMAGES_MAX => found.extras[i].images.push(image),
+            Some(_) => {}
+            None if found.images.len() < ASK_IMAGES_MAX => found.images.push(image),
+            None => {}
+        }
+    }
+    if found.extras.iter().all(|e| *e == Extra::default()) {
+        found.extras.clear();
+    }
+    found.links = links_in(&body);
+    // Context: the message's opening summary (when it says more than the
+    // question), and any other decision it leaves open.
+    let mut context = Vec::new();
+    if paras.len() >= 3 {
+        let first = &paras[0];
+        if !first.contains(found.question.trim_end_matches('?')) && !first.trim_start().starts_with('|') {
+            context.push(cap(first, CONTEXT_MAX));
+        }
+    }
+    if found.question != asked {
+        context.push(format!("Also waiting on you: {asked}"));
+    }
+    found.context = (!context.is_empty()).then(|| context.join("\n\n"));
+}
+
+/// Where a recommendation starts, in lower-cased words.
+const RECOMMENDS: &[&str] = &[
+    "i'd recommend", "i would recommend", "i recommend", "recommended:", "recommendation:", "my recommendation is",
+    "my recommendation", "my pick:", "my pick is", "my pick", "my vote:", "my vote is", "my vote", "i'd go with",
+    "i would go with", "i'd pick", "i would pick", "i lean toward", "i lean towards", "i'd lean toward", "i'd suggest",
+    "i suggest", "recommends", "recommend",
+];
+
+/// The pick a message names among `options`: "I recommend (a) with all
+/// three" → option 0, why "with all three".
+fn recommendation(all: &[Sentence], options: &[String]) -> Option<AskRecommendation> {
+    for (si, s) in all.iter().enumerate() {
+        if s.question {
+            continue;
+        }
+        // (Quotes made plain first, so the lower-cased words line up with
+        // the original's bytes.)
+        let text = plain(&s.text).replace(['\u{2019}', '\u{2018}'], "'").replace(['\u{201c}', '\u{201d}'], "\"");
+        let l = text.to_lowercase();
+        let Some((at, lead)) = RECOMMENDS.iter().find_map(|r| l.find(r).map(|at| (at, *r))) else { continue };
+        let after_l = &l[at + lead.len()..];
+        let after = if l.len() == text.len() { text.get(at + lead.len()..).unwrap_or(after_l) } else { after_l };
+        let after_t = after.trim_start_matches([' ', ':', ',']);
+        // Which option: its key ("(a)", "option B", "B"), else its words.
+        let mut pick: Option<(usize, usize)> = None; // (option, where its mention ends in `after_t`)
+        if let Some((k, rest)) = marker(after_t) {
+            if let Some(i) = options.iter().position(|o| key_of(o).as_deref() == Some(k.as_str())) {
+                pick = Some((i, after_t.len() - rest.len()));
+            }
+        }
+        if pick.is_none() {
+            let word: String = after_t.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            if word.len() == 1 && word.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+                let k = word.to_ascii_lowercase();
+                let by_key = options.iter().position(|o| key_of(o).as_deref() == Some(k.as_str()));
+                let by_place = k.chars().next().and_then(|c| match c {
+                    'a'..='h' => Some(c as usize - 'a' as usize),
+                    '1'..='9' => Some(c as usize - '1' as usize),
+                    _ => None,
+                }).filter(|i| *i < options.len());
+                if let Some(i) = by_key.or(by_place) {
+                    pick = Some((i, 1));
+                }
+            }
+        }
+        if pick.is_none() {
+            let al = after_t.to_lowercase();
+            for (place, i) in [("the first", 0), ("the second", 1), ("the third", 2), ("the fourth", 3)] {
+                if al.starts_with(place) && i < options.len() {
+                    pick = Some((i, place.len()));
+                }
+            }
+            if pick.is_none() {
+                pick = options.iter().enumerate().find_map(|(i, o)| {
+                    let bare = marker(o).map_or(o.as_str(), |(_, r)| r).to_lowercase();
+                    let bare = bare.trim();
+                    (!bare.is_empty() && al.starts_with(bare)).then_some((i, bare.len())).or_else(|| {
+                        let head: Vec<&str> = bare.split_whitespace().take(3).collect();
+                        (head.len() >= 2 && al.contains(&head.join(" "))).then(|| (i, al.find(&head.join(" ")).unwrap() + head.join(" ").len()))
+                    })
+                });
+            }
+        }
+        let why_from = |rest: &str| -> Option<String> {
+            let w = rest.trim().trim_start_matches([',', ':', ';', '—', '–', '-', ' ']).trim().trim_end_matches(['.', ':']).trim();
+            (w.chars().filter(|c| c.is_alphanumeric()).count() >= 3).then(|| upper_first(w))
+        };
+        let next = all.get(si + 1).filter(|n| n.para == s.para && !n.question && !n.item && !decides(&n.text)).map(|n| plain(&n.text));
+        match pick {
+            Some((i, end)) => {
+                let rest = after_t.get(end.min(after_t.len())..).unwrap_or("");
+                let why = why_from(rest).or_else(|| next.as_deref().and_then(why_from));
+                return Some(AskRecommendation { option: Some(i), label: Some(options[i].clone()), why: why.map(|w| cap(&w, 300)) });
+            }
+            // Recommends something it didn't list: its words.
+            None if options.is_empty() || !real(options) => {
+                let what = why_from(after_t)?;
+                return Some(AskRecommendation { option: None, label: Some(cap(&what, 120)), why: None });
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+/// A directory a paragraph names for its pictures (`shots/`, `~/x/shots/`).
+fn dir_of(p: &str) -> Option<String> {
+    spans(p).into_iter().chain(p.split_whitespace().map(str::to_owned)).find_map(|t| {
+        let t = t.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | ';'));
+        let t = t.strip_suffix(':').unwrap_or(t);
+        (t.ends_with('/') && t.len() > 1 && !t.contains("://")).then(|| t.to_owned())
+    })
+}
+
+/// `text`'s backticked spans.
+fn spans(text: &str) -> Vec<String> {
+    text.split('`').skip(1).step_by(2).map(str::to_owned).collect()
+}
+
+/// The pictures one line names: `![..](x)`, backticked or bare paths and
+/// URLs with a picture's ending (`{a,b}` groups expanded), names joined to
+/// the paragraph's directory.
+fn images_in(line: &str, dir: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    let mut words = String::new();
+    while let Some(at) = rest.find("![") {
+        words.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        match tail.find("](").and_then(|o| tail[o..].find(')').map(|c| (o, o + c))) {
+            Some((open, close)) => {
+                let target = tail[open + 2..close].split_whitespace().next().unwrap_or("");
+                if !target.is_empty() {
+                    out.push(target.to_owned());
+                }
+                rest = &tail[close + 1..];
+            }
+            None => {
+                rest = &tail[2..];
+            }
+        }
+    }
+    words.push_str(rest);
+    for token in words.split(|c: char| c.is_whitespace() || c == '`') {
+        let t = token.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '<' | '>' | '[' | ']' | ',' | ';' | '*'));
+        let t = t.trim_end_matches([':', '.', ')']);
+        if t.is_empty() {
+            continue;
+        }
+        for name in expand(t) {
+            if !is_image(&name) {
+                continue;
+            }
+            let url = name.starts_with("http://") || name.starts_with("https://");
+            if name.contains("://") && !url {
+                continue;
+            }
+            let rooted = url || name.starts_with('/') || name.starts_with("~/") || name.starts_with("./") || name.starts_with("../");
+            let full = match dir {
+                Some(d) if !rooted && !name.contains('/') => format!("{}/{name}", d.trim_end_matches('/')),
+                _ => name,
+            };
+            out.push(full);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|i| seen.insert(i.clone()));
+    out
+}
+
+/// `a-{x,y}-{1,2}.png` → its four names (at most 48); none of it braced:
+/// itself.
+fn expand(t: &str) -> Vec<String> {
+    let Some(open) = t.find('{') else { return vec![t.to_owned()] };
+    let Some(close) = t[open..].find('}').map(|c| open + c) else { return vec![t.to_owned()] };
+    let (head, alts, tail) = (&t[..open], &t[open + 1..close], &t[close + 1..]);
+    let mut out = Vec::new();
+    for alt in alts.split(',') {
+        for rest in expand(tail) {
+            out.push(format!("{head}{alt}{rest}"));
+            if out.len() >= 48 {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Which option a picture belongs to: the variant or list item its line
+/// is, else the one option its file name's words name (`…-tag-dark.png`
+/// for "(a) Inline tag").
+fn owner(image: &str, line: &str, options: &[String], set: &[Variant]) -> Option<usize> {
+    if !set.is_empty() {
+        if let Some(i) = set.iter().position(|v| v.line == line) {
+            return Some(i);
+        }
+    } else if let Some(item) = list_item(line) {
+        let label = lower(&tidy(cut_label(&plain(item))));
+        if let Some(i) = options.iter().position(|o| lower(o) == label) {
+            return Some(i);
+        }
+    }
+    if let Some((k, _)) = list_item(line).or(Some(line)).and_then(marker) {
+        if let Some(i) = options.iter().position(|o| key_of(o).as_deref() == Some(k.as_str())) {
+            return Some(i);
+        }
+    }
+    if !real(options) {
+        return None;
+    }
+    let name = image.rsplit('/').next().unwrap_or(image);
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s).to_lowercase();
+    // Each label's words, its head (the first two after its key) apart.
+    let label_words: Vec<Vec<String>> = options
+        .iter()
+        .map(|o| {
+            let bare = marker(o).map_or(o.as_str(), |(_, r)| r);
+            lower(bare).split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_owned).collect()
+        })
+        .collect();
+    let mut hits = std::collections::BTreeSet::new();
+    let mut heads = std::collections::BTreeSet::new();
+    for token in stem.split(['-', '_', '.', ' ']).filter(|w| w.len() >= 3 && !w.chars().all(|c| c.is_ascii_digit())) {
+        for (i, words) in label_words.iter().enumerate() {
+            if let Some(at) = words.iter().position(|w| w == token) {
+                hits.insert(i);
+                if at < 2 {
+                    heads.insert(i);
+                }
+            }
+        }
+    }
+    // One option named, or one whose head names it ("tag" heads "(a)
+    // Inline tag", not "(d) Coloured edge plus the tag").
+    let one = |s: &std::collections::BTreeSet<usize>| (s.len() == 1).then(|| *s.iter().next().unwrap());
+    one(&hits).or_else(|| one(&heads))
+}
+
+/// The branch and PRs a message names: `on `orch/x``, a pull request's
+/// URL. At most four.
+fn links_in(text: &str) -> Vec<WorkLink> {
+    let mut out: Vec<WorkLink> = Vec::new();
+    for token in text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '`' | '"')) {
+        let t = token.trim_end_matches(['.', ',', ';', ':']);
+        if (t.starts_with("https://") || t.starts_with("http://"))
+            && let Some(at) = t.find("/pull/")
+        {
+            let n: String = t[at + 6..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !n.is_empty() && !out.iter().any(|l| l.target == t) {
+                out.push(WorkLink { kind: LinkKind::Pr, label: format!("#{n}"), target: t.to_owned() });
+            }
+        }
+    }
+    let parts: Vec<&str> = text.split('`').collect();
+    for i in (1..parts.len()).step_by(2) {
+        let span = parts[i].trim();
+        let before = lower(parts[i - 1]);
+        let lead = before.trim_end().rsplit(|c: char| c.is_whitespace()).next().unwrap_or("");
+        let branchy = !span.is_empty()
+            && span.contains('/')
+            && span.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+            && !span.starts_with(['/', '.', '~'])
+            && !span.ends_with('/')
+            && !span.rsplit('/').next().is_some_and(|last| last.rsplit_once('.').is_some_and(|(_, e)| e.chars().all(|c| c.is_ascii_alphabetic())));
+        if branchy && ["on", "branch", "against", "into", "onto", "from"].contains(&lead) && !out.iter().any(|l| l.target == span) {
+            out.push(WorkLink { kind: LinkKind::Branch, label: span.to_owned(), target: span.to_owned() });
+        }
+    }
+    out.truncate(4);
+    out
 }
 
 /// Whether two asks are the same question asked again: the same options,
@@ -807,10 +1368,24 @@ pub fn parse_model(raw: &str, fallback: &Found) -> Option<Option<Found>> {
         return Some(None);
     }
     let options: Vec<String> = says.options.iter().map(|o| tidy(o)).filter(|o| !o.is_empty()).take(4).collect();
-    let options = if options.len() >= 2 { options } else { fallback.options.clone() };
-    let question = if says.question.trim().is_empty() { fallback.question.clone() } else { cap(says.question.trim(), QUESTION_MAX) };
+    // The heuristic's lettered variants stand: they carry their pictures
+    // and scores, which the model never sees.
+    let keep = fallback.options.len() >= 2 && !fallback.extras.is_empty();
+    let options = if options.len() >= 2 && !keep { options } else { fallback.options.clone() };
+    let question = if says.question.trim().is_empty() || keep { fallback.question.clone() } else { cap(says.question.trim(), QUESTION_MAX) };
     let kind = if options.len() >= 2 && options[0] != "Yes" { FoundKind::Decision } else { fallback.kind };
-    Some(Some(Found { question, options, kind }))
+    let mut found = Found { question, options, kind, ..fallback.clone() };
+    if found.options != fallback.options {
+        // Other options: their pictures are the ask's, the pick is by name.
+        found.images.extend(fallback.extras.iter().flat_map(|e| e.images.iter().cloned()));
+        found.extras.clear();
+        if let Some(r) = &mut found.recommendation {
+            let label = r.option.and_then(|i| fallback.options.get(i)).cloned().or(r.label.clone());
+            r.option = label.as_ref().and_then(|l| found.options.iter().position(|o| o == l));
+            r.label = label;
+        }
+    }
+    Some(Some(found))
 }
 
 #[cfg(test)]
@@ -820,6 +1395,74 @@ mod tests {
     /// The real one: thread f3d1b425 ("Codex Slash Commands Missing"), the
     /// end of its final message.
     pub(crate) const CODEX: &str = "I fixed the Codex `/` menu: a Codex chat now lists `/compact`, `/review` and Codex's skills, then Zeron's own commands. The change is tested but not committed, and the running app needs a rebuild to pick it up. I sent the same summary to Brain dump.\n\n**Tests:**\n- The new UI test fails without the fix and passes with it.\n- The related Rust tests pass and lint is clean on the changed files.\n\n`/compact` and `/review` are the only Codex slash commands that work through Zeron. Codex's other built-in commands, like `/model` and `/status`, aren't available through `codex app-server`, and you have no custom prompts in `~/.codex/prompts`.\n\nShould I commit and open a PR against `zeron/zgx`, or merge it into `zeron/orchestrators`?";
+
+    /// The real one: thread 9ad131f1 ("Redesign Map Graph Mode"), its
+    /// Topology turn's final message, verbatim.
+    pub(crate) const TOPOLOGY: &str = "The four Topology variations are built and scored, and they're waiting for your pick. Nothing is merged. They sit behind a fixture switch on `orch/topo-variants` (commit `c1e090c7e`); the 29 map tests pass, and the current view, which stays the default, is unchanged.\n\n| Version | Claude | GPT | Grok |\n|---|---:|---:|---:|\n| Current: a gutter column per rail | 5 | 6 | 5 |\n| (a) inline tag \"↳ Brain dump\", no cross-machine lines | **8** | **8.5** | 8 |\n| (b) line in its dot's column, stepping aside | 5 | 5.5 | 4 |\n| (c) cross-machine lines on hover only | 4 | 7 | 6 |\n| (d) coloured edge plus the tag | 7 | 8 | **8.5** |\n\n- **Picks:** Claude and GPT chose (a). Grok chose (d) because dashed versus solid keeps \"started\" apart from \"leads\".\n- **Flaw in (c):** hiding the cross-machine rail also hides the Brain dump's line to its thread on the same machine, because the whole rail is drawn as one shape.\n\nEach reviewer suggested one improvement to their pick, and the three fit together on top of (a):\n- **Claude:** make the link two-way. The orchestrator row says where its work runs (\"on M2A, honeypot\"), and hovering either end highlights the other.\n- **GPT:** use plain words instead of the arrow: \"Started by Brain dump\" versus \"Led by Zeron fixes\".\n- **Grok:** drop the edge bar and show the difference in the tag's dot instead: a dashed ring for \"started\", a solid disc for \"leads\".\n\nI recommend (a) with all three. Tell me which version you want and I'll polish it and merge it. I sent the same summary to the Brain dump chat.\n\nScreenshots are in `~/Documents/dev/tmp/orch/ui-map/shots/`:\n- orch_map-topo-{columns,tag,dotcol,hover,edge}-{dark,light}-{1440,900}-v2.png\n- orch_map-topo-hover-pointed-{dark,light}-1440-v2.png (variation (c) with a row hovered)\n\nThe graph label decision (accept round 9, or keep iterating) is also still yours to make.";
+
+    #[test]
+    fn the_topology_pick_carries_its_variants_scores_pictures_and_pick() {
+        let f = ask(TOPOLOGY);
+        assert_eq!(f.kind, FoundKind::Decision);
+        assert!(f.question.starts_with("Tell me which version you want"), "{}", f.question);
+        assert_eq!(f.options.len(), 4, "{f:?}");
+        assert_eq!(f.options[0], "(a) Inline tag \"↳ Brain dump\"");
+        assert_eq!(f.options[1], "(b) Line in its dot's column");
+        assert_eq!(f.options[2], "(c) Cross-machine lines on hover only");
+        assert_eq!(f.options[3], "(d) Coloured edge plus the tag");
+        let opts = f.ask_options();
+        assert_eq!(opts[0].detail, "No cross-machine lines");
+        assert_eq!(opts[1].detail, "Stepping aside");
+        let names: Vec<&str> = opts[0].scores.0.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Claude", "GPT", "Grok"]);
+        assert_eq!(opts[0].scores.0[1].1, crate::orchestration::Score::Number(8.5));
+        assert_eq!(opts[3].scores.0[2].1, crate::orchestration::Score::Number(8.5));
+        // The pick and why.
+        let r = f.recommendation.clone().unwrap();
+        assert_eq!(r.option, Some(0));
+        assert_eq!(r.why.as_deref(), Some("With all three"));
+        // The pictures: in the shots directory, each variant's by its name.
+        let shots = "~/Documents/dev/tmp/orch/ui-map/shots/";
+        assert!(opts[0].images.iter().all(|i| i.starts_with(shots) && i.contains("-tag-")), "{:?}", opts[0].images);
+        assert_eq!(opts[0].images.len(), 4);
+        assert!(opts[2].images.iter().any(|i| i.ends_with("orch_map-topo-hover-pointed-dark-1440-v2.png")), "{:?}", opts[2].images);
+        assert!(opts[3].images.iter().all(|i| i.contains("-edge-")));
+        // Not one variant's (the current one, and (b)'s "dotcol"): the ask's.
+        assert!(f.images.iter().any(|i| i.contains("-columns-")) && f.images.iter().any(|i| i.contains("-dotcol-")), "{:?}", f.images);
+        // Its branch, its summary and the other decision it leaves open.
+        assert_eq!(f.links.len(), 1);
+        assert_eq!(f.links[0].target, "orch/topo-variants");
+        let context = f.context.clone().unwrap();
+        assert!(context.starts_with("The four Topology variations are built"), "{context}");
+        assert!(context.contains("Also waiting on you: The graph label decision"), "{context}");
+    }
+
+    #[test]
+    fn pictures_and_picks_in_other_shapes() {
+        let text = "Two ways to lay out the header:\n\n- (a) Compact — one row ![compact](shots/compact.png)\n- (b) Tall — two rows, see `/home/me/shots/tall.webp`\n\nOverview: https://x.dev/both.jpg\n\nRecommended: (b) because it fits the logo. Which one should I build?";
+        let f = ask(text);
+        assert_eq!(f.options, ["(a) Compact", "(b) Tall"]);
+        let o = f.ask_options();
+        assert_eq!(o[0].detail, "One row");
+        assert_eq!(o[0].images, ["shots/compact.png"]);
+        assert_eq!(o[1].images, ["/home/me/shots/tall.webp"]);
+        assert_eq!(f.images, ["https://x.dev/both.jpg"]);
+        let r = f.recommendation.unwrap();
+        assert_eq!((r.option, r.why.as_deref()), (Some(1), Some("Because it fits the logo")));
+        // "My pick: B" among plain options.
+        let f = ask("Should I bump the version to 0.3, or keep 0.2.x? My pick: B, nothing depends on 0.3 yet.");
+        let r = f.recommendation.unwrap();
+        assert_eq!(r.option, Some(1));
+        assert_eq!(r.why.as_deref(), Some("Nothing depends on 0.3 yet"));
+        // A plain list keeps its detail.
+        let f = ask("I found two ways to fix it.\n\nWhich one should I take?\n1. Patch the parser — smallest change\n2. Rewrite the tokenizer — cleaner");
+        assert_eq!(f.ask_options()[0].detail, "Smallest change");
+        assert!(f.recommendation.is_none() && f.images.is_empty());
+        // Nothing of the sort: none of it.
+        let f = ask(CODEX);
+        assert!(f.extras.is_empty() && f.images.is_empty() && f.recommendation.is_none());
+        assert!(is_image("a/b.PNG") && is_image("https://x/y.webp?raw=1") && !is_image("a.rs") && !is_image(".png"));
+    }
 
     fn ask(text: &str) -> Found {
         match detect(text) {
