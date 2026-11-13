@@ -117,6 +117,10 @@ struct DocPartJson {
     from_harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     to_harness: Option<String>,
+    /// Crew reports (`kind: "crewReports"`, additive): the reports as JSON.
+    /// Read leniently, one report at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reports: Option<serde_json::Value>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,6 +289,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             to_harness: to_harness.clone(),
             ..Default::default()
         },
+        MessagePart::CrewReports { id, reports } => DocPartJson {
+            id: id.clone(),
+            kind: "crewReports".into(),
+            reports: Some(serde_json::to_value(reports)?),
+            ..Default::default()
+        },
     })
 }
 
@@ -361,6 +371,18 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             to: p.to_provider.unwrap_or_default(),
             from_harness: p.from_harness,
             to_harness: p.to_harness,
+        },
+        // A report a newer peer wrote that this build can't read costs that
+        // report, not the card.
+        "crewReports" => MessagePart::CrewReports {
+            id: p.id,
+            reports: match p.reports {
+                Some(serde_json::Value::Array(items)) => items
+                    .into_iter()
+                    .filter_map(|r| serde_json::from_value(r).ok())
+                    .collect(),
+                _ => Vec::new(),
+            },
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -1280,6 +1302,44 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Rewrite an existing entry's parts in place (an orchestrator's open
+    /// "Crew updates" message gaining a report). Returns `false` when no
+    /// entry has that id.
+    pub fn replace_message_parts(
+        &self,
+        message_id: &str,
+        parts: &[MessagePart],
+    ) -> Result<bool, DocError> {
+        let messages = self.doc.get_list("messages");
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let id_matches = matches!(
+                entry.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == message_id
+            );
+            if !id_matches {
+                continue;
+            }
+            let list = match entry.get("parts") {
+                Some(loro::ValueOrContainer::Container(loro::Container::List(list))) => list,
+                _ => entry.insert_container("parts", LoroList::new())?,
+            };
+            if !list.is_empty() {
+                list.delete(0, list.len())?;
+            }
+            for part in parts {
+                push_part(&list, part)?;
+            }
+            self.commit();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Append an error part to an existing entry (crash recovery: the aborted
     /// entry must SAY why it ended — "Run interrupted by engine restart…" —
     /// not just truncate silently). Returns `false` when no entry matches.
@@ -1559,6 +1619,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
+    }
+    if let Some(reports) = &doc_part.reports {
+        map.insert("reports", loro_value_from_json(reports))?;
     }
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
@@ -2092,6 +2155,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
+    }
+    if let Some(reports) = &doc_part.reports {
+        map.insert("reports", loro_value_from_json(reports))?;
     }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
@@ -2677,6 +2743,105 @@ mod tests {
         doc.mark_provider_switched().unwrap();
         assert_eq!(doc.read_entries().unwrap()[0].parts, vec![seam]);
         assert!(doc.provider_switched());
+    }
+
+    fn crew_report(id: &str, state: zeron_proto::orchestration::ReportState) -> zeron_proto::orchestration::Report {
+        zeron_proto::orchestration::Report {
+            id: id.into(),
+            orchestrator_id: "orch".into(),
+            from_chat: "crew-chat-1".into(),
+            item_id: Some("item-1".into()),
+            state,
+            summary: format!("summary {id}"),
+            detail: "**detail**".into(),
+            links: vec![zeron_proto::orchestration::WorkLink {
+                kind: zeron_proto::orchestration::LinkKind::Pr,
+                label: "#12".into(),
+                target: "https://example.invalid/pr/12".into(),
+            }],
+            progress: Some(0.5),
+            at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn crew_reports_round_trip_and_extend_in_place() {
+        use zeron_proto::orchestration::ReportState;
+        let doc = SessionDoc::init("orch").unwrap();
+        let first = vec![crew_report("r1", ReportState::Done)];
+        let parts = |reports: &[zeron_proto::orchestration::Report]| {
+            vec![
+                MessagePart::Text {
+                    id: "t0".into(),
+                    text: crate::parts::crew_reports_fallback_text(reports),
+                },
+                MessagePart::CrewReports {
+                    id: "crew".into(),
+                    reports: reports.to_vec(),
+                },
+            ]
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "crew:1".into(),
+            role: MessageRole::User,
+            parts: parts(&first),
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts(&first));
+        let both = vec![first[0].clone(), crew_report("r2", ReportState::Blocked)];
+        assert!(doc.replace_message_parts("crew:1", &parts(&both)).unwrap());
+        assert!(!doc.replace_message_parts("nope", &parts(&both)).unwrap());
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 1, "extended in place, not a new message");
+        assert_eq!(entries[0].parts, parts(&both));
+        // A fresh reader of the exported doc sees the same.
+        let copy = SessionDoc::from_doc(LoroDoc::new());
+        copy.import(&doc.export_snapshot().unwrap()).unwrap();
+        assert_eq!(copy.read_entries().unwrap()[0].parts, parts(&both));
+    }
+
+    #[test]
+    fn crew_reports_degrade_for_old_peers_and_newer_reports() {
+        // What an older build reads: an unknown kind with no `text` is an
+        // empty (invisible) text part; the message's fallback text part
+        // still says what happened.
+        let unknown = serde_json::json!({ "id": "crew", "kind": "crewReports", "reports": [] });
+        let old_reader = from_doc_part(DocPartJson {
+            kind: "someNewerKind".into(),
+            ..serde_json::from_value(unknown).unwrap()
+        });
+        assert_eq!(
+            old_reader,
+            MessagePart::Text {
+                id: "crew".into(),
+                text: String::new()
+            }
+        );
+        // A report this build can't read costs that report, not the part;
+        // unknown enum values decode as `other`.
+        let mut good = serde_json::to_value(crew_report("r1", zeron_proto::orchestration::ReportState::Done)).unwrap();
+        good["state"] = serde_json::json!("celebrating");
+        let part = from_doc_part(
+            serde_json::from_value(serde_json::json!({
+                "id": "crew",
+                "kind": "crewReports",
+                "reports": [good, { "id": "broken" }],
+            }))
+            .unwrap(),
+        );
+        let MessagePart::CrewReports { reports, .. } = part else {
+            panic!("expected crew reports, got {part:?}");
+        };
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, zeron_proto::orchestration::ReportState::Other);
+        // No reports field at all: an empty card, never a lost message.
+        let bare = from_doc_part(serde_json::from_value(serde_json::json!({ "id": "c", "kind": "crewReports" })).unwrap());
+        assert_eq!(bare, MessagePart::CrewReports { id: "c".into(), reports: vec![] });
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

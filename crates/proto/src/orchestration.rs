@@ -206,6 +206,57 @@ impl ReportState {
     pub fn wakes(self) -> bool {
         !matches!(self, ReportState::Progress | ReportState::Other)
     }
+
+    /// The wire word (`done`, `blocked`…).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportState::Progress => "progress",
+            ReportState::Done => "done",
+            ReportState::Blocked => "blocked",
+            ReportState::Failed => "failed",
+            ReportState::Message => "message",
+            ReportState::Other => "other",
+        }
+    }
+}
+
+impl Report {
+    /// The report as an agent reads it: one header line with ids, then the
+    /// detail and links indented under it.
+    pub fn compact(&self) -> String {
+        let mut out = format!("- [{}] chat {}", self.state.as_str(), self.from_chat);
+        if let Some(item) = &self.item_id {
+            out.push_str(&format!(" item {item}"));
+        }
+        if let Some(progress) = self.progress {
+            out.push_str(&format!(" ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0));
+        }
+        out.push_str(&format!(": {}", self.summary.trim()));
+        for line in self.detail.trim().lines() {
+            out.push_str("\n    ");
+            out.push_str(line);
+        }
+        for link in &self.links {
+            out.push_str(&format!("\n    {}: {}", link.label, link.target));
+        }
+        out
+    }
+}
+
+/// The prompt a wake turn gives the orchestrator's harness: every unread
+/// report, compact.
+pub fn reports_prompt(reports: &[Report]) -> String {
+    let mut out = format!(
+        "[Crew updates] {} report{} from your crew since your last turn:",
+        reports.len(),
+        if reports.len() == 1 { "" } else { "s" }
+    );
+    for report in reports {
+        out.push('\n');
+        out.push_str(&report.compact());
+    }
+    out.push_str("\nAct on what needs it (board items, next steps, asks). Don't echo these back.");
+    out
 }
 
 // ── Board ───────────────────────────────────────────────────────────────────
