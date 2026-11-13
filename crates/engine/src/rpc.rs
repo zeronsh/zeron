@@ -3232,6 +3232,7 @@ impl RpcService for EngineRpc {
         let mut params = params;
         self.with_crew_rules(method, &mut params);
         let params = self.agent_gate(method, params)?;
+        self.note_agent_message(method, &params);
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {

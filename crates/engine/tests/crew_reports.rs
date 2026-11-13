@@ -369,6 +369,10 @@ async fn crew_rules_ride_an_orchestrators_send_once_until_they_change() {
     let first = prompts.lock().unwrap()[0].clone();
     assert!(first.contains("[Crew rules from Ops]\nRun the tests before you report done."), "{first}");
     assert!(first.contains("first task"));
+    // The send shows in the comms feed, and so does a report.
+    assert!(core.orchestration.comms().recent().iter().any(|e| {
+        e.kind == zeron_proto::orchestration::CommKind::Message && e.from == ORCH && e.to == CREW && e.summary.contains("first task")
+    }));
     let _ = finish.send(());
     wait_for(|| !core.sessions.turn_in_flight(CREW), "its turn to end").await;
     send("second task").await;

@@ -73,6 +73,23 @@ fn text_slot<'a>(method: &str, params: &'a mut Value) -> Option<&'a mut Value> {
 }
 
 impl EngineRpc {
+    /// An agent's message to another chat, for the comms feed.
+    pub(super) fn note_agent_message(&self, method: &str, params: &Value) {
+        let Caller::Agent { chat: Some(caller) } = zeron_rpc::caller() else {
+            return;
+        };
+        let (Some(target), Some(text)) = (params["chatId"].as_str(), sent_text(method, params)) else {
+            return;
+        };
+        if target == caller {
+            return;
+        }
+        let summary = zeron_proto::orchestration::prompt_text::one_line(&text, 140);
+        self.orchestration()
+            .comms()
+            .say(zeron_proto::orchestration::CommKind::Message, &caller, target, &summary);
+    }
+
     /// An orchestrator's send to a thread in its own crew starts with its
     /// crew rules (`[Crew rules from <name>]`) the first time, and again
     /// whenever they change.
