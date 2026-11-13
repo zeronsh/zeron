@@ -39,8 +39,12 @@ local function down(app: any)
 	app:frames(30)
 end
 
+-- (Back up with the wheel over the right column: scrolled down, the
+-- page's middle is the Scratchpad's notes, a field that keeps a wheel
+-- over it once anything has been pressed (`overscroll = "contain"`), the
+-- page not moving, as a person's wheel over it wouldn't.)
 local function up(app: any)
-	app:scroll("#control-scroll", -2000)
+	app:scroll("#control-widget-machines", -2000)
 	app:frames(30)
 end
 
