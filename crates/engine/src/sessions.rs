@@ -38,6 +38,8 @@ use crate::doc_host::{ChatDocHandle, DocHost};
 
 #[path = "session_activity.rs"]
 mod activity;
+#[path = "live_activity.rs"]
+mod live;
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -2574,6 +2576,7 @@ impl Inner {
                 entry.last_completed_turn = Some(turn);
             }
             entry.status = status;
+            live::settle(entry, status, now);
             if let Some(outcome) = outcome {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
@@ -4137,6 +4140,8 @@ async fn drive_run(
         .filter(|h| h.run_id == run_id)
         .map(|h| h.open_tools.clone())
         .unwrap_or_default();
+    // What the agent is doing and its todo progress, for the session row.
+    let mut live = live::LiveTracker::new(inner.live_todo(&chat_id));
     let publish_open = |open: &std::collections::HashSet<String>| {
         open_count.store(open.len(), std::sync::atomic::Ordering::Release);
     };
@@ -5296,6 +5301,9 @@ async fn drive_run(
                 continue;
             }
             _ => {}
+        }
+        if let Some(update) = live.observe(&event, Utc::now(), std::time::Instant::now()) {
+            inner.set_live(&chat_id, update);
         }
         match &event {
             AgentEvent::ToolCall { id, .. }

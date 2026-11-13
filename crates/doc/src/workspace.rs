@@ -513,6 +513,14 @@ impl WorkspaceDoc {
             )?,
             None => row.delete("terminalActivity")?,
         }
+        match &session.activity {
+            Some(activity) => row.insert("activity", LoroValue::from(serde_json::to_value(activity)?))?,
+            None => row.delete("activity")?,
+        }
+        match &session.todo {
+            Some(todo) => row.insert("todo", LoroValue::from(serde_json::to_value(todo)?))?,
+            None => row.delete("todo")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -1085,6 +1093,31 @@ mod tests {
             .delete("lastCompletedTurn")
             .unwrap();
         assert_eq!(ws.read_sessions().unwrap()[0].last_completed_turn, None);
+    }
+
+    #[test]
+    fn live_activity_and_todo_round_trip_and_bad_values_cost_only_themselves() {
+        use zeron_proto::orchestration::{ActivityKind, ChatActivity, TodoProgress};
+        let ws = WorkspaceDoc::new();
+        let mut row = session("chat-1", "dev-a", SessionStatus::Working);
+        row.activity = Some(ChatActivity {
+            kind: ActivityKind::Testing,
+            label: "cargo test".into(),
+            since: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        });
+        row.todo = Some(TodoProgress { done: 2, total: 5, current: Some("wire it".into()) });
+        ws.upsert_session(&row).unwrap();
+        assert_eq!(ws.read_sessions().unwrap(), vec![row.clone()]);
+        // A newer peer's shape this build can't read: the row survives.
+        ws.row("sessions", "chat-1").unwrap().insert("activity", "not an object").unwrap();
+        let read = ws.read_sessions().unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].activity, None);
+        assert_eq!(read[0].todo, row.todo);
+        row.activity = None;
+        row.todo = None;
+        ws.upsert_session(&row).unwrap();
+        assert_eq!(ws.read_sessions().unwrap(), vec![row]);
     }
 
     #[test]

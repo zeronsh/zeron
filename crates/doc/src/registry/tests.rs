@@ -344,6 +344,32 @@ fn background_processes_replicate_and_clear() {
 }
 
 #[test]
+fn live_activity_and_todo_replicate_and_clear() {
+    use zeron_proto::orchestration::{ActivityKind, ChatActivity, TodoProgress};
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Working);
+    row.activity = Some(ChatActivity {
+        kind: ActivityKind::Merging,
+        label: "gh pr merge 12".into(),
+        since: ts(3_000),
+    });
+    row.todo = Some(TodoProgress { done: 1, total: 4, current: None });
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    // The turn ended: activity clears, todo progress stays.
+    row.status = SessionStatus::Idle;
+    row.activity = None;
+    row.updated_at = ts(3_600);
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
 fn program_activity_and_native_outcome_survive_replication_and_restart() {
     use zeron_proto::{
         DoneStatus, ProgramInputKind, ProgramState, ProgramStatus, TerminalActivity,
