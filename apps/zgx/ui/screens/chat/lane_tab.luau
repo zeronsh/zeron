@@ -31,7 +31,7 @@ local Completions = require("@app/screens/chat/completions")
 local Find = require("@app/screens/chat/find")
 local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
-local look = require("@app/screens/shell/project_look")
+local SessionRow = require("@ds/session_row")
 local Appshots = require("@app/screens/chat/appshots")
 local DropOverlay = require("@ds/drop_overlay")
 
@@ -90,71 +90,58 @@ function M.icon(tab: any): string
 	return if tab.kind == "subagent" then "bot" else "side-chat"
 end
 
--- A side chat's project: where its composer has it before its first message,
--- then its chat's; its parent's while neither is known.
-local function project_of(tab: any, picked: State<string?>): any
-	local chat = tab.chat
-	local parent = lanes.unsent:get()[chat]
-	local id: string? = nil
-	if parent then
-		id = picked:get()
-	else
-		local s = lanes.view(tab.id).session:get()
-		if s and s.id == chat and s.harness then
-			id = s.project
-			parent = nil
-		else
-			local row = row_of(chat)
-			parent = if row then row.parent else nil
-		end
-	end
-	local now = sessions.now:get()
-	if not id and parent then
-		for _, c in now.chats do
-			if c.id == parent then
-				id = c.project
+-- The same harness mark as the sidebar, in the tab's existing 20pt slot.
+-- Follow the composer's pick even before the chat's first message; while
+-- loading, the session list (or an unsent chat's parent) supplies its mark.
+function M.tile(tab: any): Node
+	local picked = ui.state(`chat_lane_model_{tab.chat}`, nil :: string?)
+	local function current(): any
+		local row = row_of(tab.chat)
+		local session = lanes.view(tab.id).session:get()
+		local harness = if session and session.id == tab.chat then session.harness else nil
+		harness = harness or (if row then row.harness else nil)
+		local parent = lanes.unsent:get()[tab.chat]
+		if not harness and parent then
+			local open = store.session:get()
+			if open and open.id == parent then
+				harness = open.harness
+			end
+			for _, c in sessions.now:get().chats do
+				if c.id == parent then
+					row = c
+					harness = harness or c.harness
+					break
+				end
 			end
 		end
-	end
-	for _, p in now.projects do
-		if p.id == id then
-			return p
+		local catalog = store.catalog:get()
+		for _, m in catalog.models do
+			if m.value == picked:get() then
+				harness = m.harness
+				break
+			end
 		end
-	end
-	return nil
-end
-
--- A side chat's tile in its tab: its project's, as a chat's on the top bar (one
--- with no project, the side chat's glyph, there too).
-function M.tile(tab: any): Node
-	local picked = ui.state(`chat_lane_project_{tab.chat}`, nil :: string?)
-	return ui.presence(function(): string
-		local p = project_of(tab, picked)
-		return if p then p.id else ""
-	end, function(which: string): Node
-		if which == "" then
-			return ds.Tile { size = 20, inside = ds.Icon { name = "side-chat", size = 14 } }
+		local agent = if row and (not harness or row.harness == harness) then row.agent else nil
+		local icon = if row and row.harness == harness then row.agent_icon else nil
+		for _, h in catalog.harnesses do
+			if h.id == harness then
+				agent = h.mark or agent
+				icon = h.icon or icon
+				break
+			end
 		end
-		return ds.Tile {
-			size = 20,
-			label = function(): string?
-				local p = project_of(tab, picked)
-				return if p then p.name else nil
-			end,
-			hue = function(): string?
-				local p = project_of(tab, picked)
-				return if p then look.of(p).hue else nil
-			end,
-			src = function(): string?
-				local p = project_of(tab, picked)
-				return if p then look.of(p).src else nil
-			end,
-			emoji = function(): string?
-				local p = project_of(tab, picked)
-				return if p then look.of(p).emoji else nil
-			end,
-		}
-	end, { w = 20, h = 20, shrink = 0 })
+		return { harness = harness, agent = agent, agent_icon = icon }
+	end
+	return ui.div {
+		w = 20,
+		h = 20,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		SessionRow.mark(current, function(): boolean
+			return true
+		end),
+	}
 end
 
 -- What a side chat's tab says at its end: whether it awaits a person or is at
