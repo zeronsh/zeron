@@ -4054,6 +4054,10 @@
       "undo": "Undo",
       "delete_failed": "Couldn't delete it",
       "undo_failed": "Couldn't put it back",
+      "start_now": "Start now",
+      "starting": "Starting…",
+      "queued": "Queued",
+      "start_failed": "Couldn't start it",
       "needs_you": "Needs you"
     },
     "reports": {

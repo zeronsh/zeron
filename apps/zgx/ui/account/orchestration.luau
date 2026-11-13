@@ -132,6 +132,16 @@ function M.add_to_board(chat_id: string): any
 	return M.op({ op = "addToBoard", chatId = chat_id })
 end
 
+-- An Inbox or Next card started: its thread made (in its project), the
+-- card in Now; at `order` when given (where it was dropped: the person
+-- moving a card with no thread to Now starts it). A promise.
+function M.start_item(id: string, order: number?): any
+	if order then
+		return M.op({ op = "upsertItem", item = { id = id, state = "active", order = order } })
+	end
+	return M.op({ op = "startItem", id = id })
+end
+
 -- A card taken off the board (kept, marked removed; its chat untouched).
 function M.remove_item(id: string): any
 	return M.op({ op = "removeItem", id = id })

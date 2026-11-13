@@ -191,6 +191,35 @@ return function()
 				n.dumps = dumps
 			end)
 			return settled(nil)
+		elseif kind == "startItem" or (kind == "upsertItem" and op.item.state == "active" and op.item.id) then
+			-- (The person starting a card with no thread, as the engine
+			-- would: its thread made, the card in Now.)
+			local id = op.id or op.item.id
+			local card: any = nil
+			for _, it in orchestration.now:peek().items or {} do
+				if it.id == id then
+					card = it
+				end
+			end
+			if kind == "startItem" or (card and #(card.threads or {}) == 0) then
+				note(`start:{id}:{if op.item then op.item.order else ""}`)
+				republish(function(n)
+					local items = {}
+					for _, it in n.items do
+						if it.id == id then
+							it = table.clone(it)
+							it.state = "active"
+							it.order = if op.item then op.item.order else it.order
+							if #(it.threads or {}) == 0 then
+								it.threads = { `th-start-{id}` }
+							end
+						end
+						table.insert(items, it)
+					end
+					n.items = items
+				end)
+				return settled({ id = id, threadId = `th-start-{id}` })
+			end
 		end
 		note(`{kind}`)
 		return settled(nil)

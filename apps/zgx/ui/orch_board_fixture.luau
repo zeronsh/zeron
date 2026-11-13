@@ -23,6 +23,7 @@ local items = ui.state("orch_board_items", sample.now.items :: { any })
 local orchestrators = ui.state("orch_board_orchestrators", sample.now.orchestrators :: { any })
 local filter = ui.state("filter", nil :: string?)
 local compact = ui.state("compact", false)
+local start_fails = ui.state("start_fails", false)
 
 -- (The theme, for pictures: `theme_dark`, `theme_light`.)
 for _, t in { "dark", "light" } do
@@ -33,6 +34,15 @@ for _, t in { "dark", "light" } do
 end
 
 local PROJECTS: { [string]: string } = { ["orc-orch"] = "zeron", ["orc-vpn"] = "exnomic", ["orc-ci"] = "zeron", ["th-loose"] = "dotfiles" }
+-- (Waiting cards, for pictures: one in a project, one queued on a machine.)
+ui.command { id = "fixture.waiting", title = "Waiting cards", run = function()
+	items:set({
+		{ id = "it-p", orchestrator_id = "orc-orch", title = "Add --json output to tally", state = "planned", priority = "normal", order = 1, space_id = "p-tally" },
+		{ id = "it-m", orchestrator_id = "orc-vpn", title = "Rotate the Moscow keys", state = "planned", priority = "high", order = 2, device_id = "dev-cloud", waiting = "Ops's crew is full: 2 of 2 working" },
+		{ id = "it-a", orchestrator_id = "orc-orch", title = "Control room", state = "active", priority = "normal", order = 1, threads = { "th-ui-control" } },
+	})
+end }
+
 local chats: { [string]: any } = { ["th-loose"] = { id = "th-loose", title = "Loose thread", status = "done" } }
 -- (A thread's todo from the sample as written: `at` shifts every `done`
 -- key as a time, its todo's count among them.)
@@ -113,6 +123,31 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 					note(`remove:{id}`)
 					update(id, { removed = true })
 					return nil
+				end,
+				-- (Started as the engine would, a beat later: its thread made;
+				-- `start_fails` set, refused.)
+				on_start = function(id: string, order: number?): any
+					note(`start:{id}:{order or ""}`)
+					return {
+						after = function(_self: any, done: (any) -> (), failed: ((any) -> ())?)
+							ui.after(50, function()
+								if start_fails:peek() then
+									if failed then
+										failed("no")
+									end
+									return
+								end
+								update(id, { state = "active", order = order or 99, threads = { `th-{id}` } })
+								done({ id = id })
+							end)
+						end,
+					}
+				end,
+				space_name = function(id: string): string?
+					return ({ ["p-zeron"] = "zeron", ["p-tally"] = "tally" } :: { [string]: string })[id]
+				end,
+				device_name = function(id: string): string?
+					return ({ ["dev-cloud"] = "Cloud" } :: { [string]: string })[id]
 				end,
 				on_restore = function(it: any)
 					note(`restore:{it.id}:{it.title}`)
