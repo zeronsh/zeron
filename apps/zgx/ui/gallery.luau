@@ -1093,7 +1093,7 @@ local GROUPS: { Group } = {
 		title = "Orchestration",
 		pages = (function(): { Page }
 			local out: { Page } = {}
-			for _, name in { "orch_board", "orch_crew", "orch_reports" } do
+			for _, name in { "orch_board", "orch_crew", "orch_reports", "orch_live" } do
 				local ok, result = pcall(function()
 					return (require :: any)(`@demos/{name}`)
 				end)

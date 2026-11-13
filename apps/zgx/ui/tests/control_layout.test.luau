@@ -89,3 +89,43 @@ test("in the window, the Control room is a page of its own: no composer over it"
 		expect(app:has("#control-room")).to_be(true)
 	end
 end)
+
+test("each widget is a block of its own, its title and live figures in its head", function()
+	local app = open(1440, 900)
+	for _, id in { "capture", "needs", "map", "board", "machines", "comms" } do
+		expect(app:has(`#control-widget-{id} >> .orch-block-head`)).to_be(true)
+	end
+	expect(app:has('#control-widget-needs >> .orch-block-head >> ~"1 urgent"')).to_be(true)
+	expect(app:has('#control-widget-board >> .orch-block-head >> ~"2 blocked"')).to_be(true)
+end)
+
+test("comms is a feed: newest first, a burst's time said once", function()
+	local app = open(1440, 900)
+	-- The latest eight, newest on top.
+	expect(app:count("#control-widget-comms >> .orch-comm")).to_be(8)
+	local first: string? = nil
+	for line in app:tree("#control-widget-comms"):gmatch("[^\n]+") do
+		local label = line:match('button "([^"]+)"')
+		if label and label ~= "Widget menu" then
+			first = label
+			break
+		end
+	end
+	expect(first).to_be("Coalesce wakes within 2 s")
+	-- The newest five came within a minute: one time between them.
+	local times = 0
+	for line in app:tree("#control-widget-comms >> .orch-comms"):gmatch("[^\n]+") do
+		if line:find('text "now"', 1, true) then
+			times += 1
+		end
+	end
+	expect(times).to_be(1)
+end)
+
+test("machines: each device's live line, memory, and the threads running there", function()
+	local app = open(1440, 900)
+	expect(app:count("#control-widget-machines >> .orch-machine")).to_be(3)
+	expect(app:count("#control-widget-machines >> .orch-machine-line")).to_be(3)
+	expect(app:has('#control-widget-machines >> .orch-machine-job >> ~"cargo test -p zeron-engine --lib orchestration"')).to_be(true)
+	expect(app:has('#control-widget-machines >> ~"41 / 62 GB"')).to_be(true)
+end)

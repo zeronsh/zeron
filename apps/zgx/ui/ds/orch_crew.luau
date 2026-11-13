@@ -1,12 +1,15 @@
 --!strict
--- An orchestrator's crew: a card a thread, so where each one stands reads
--- at a glance. Each says how it stands (its status dot), its name and
--- role, the machine it runs on and its agent, what it's doing now (the
--- activity's glyph and words, and for how long), how far through its todo
--- (a thin bar in the orchestrator's hue, "5/8" and the step under way),
--- and the last thing it reported (a chip for how that stood, its one line,
--- when). Those that need you come first, then those working, then the rest,
--- the latest moved first. A card opens its thread.
+-- An orchestrator's crew: a unit a thread, so where each one stands reads
+-- at a glance. Its head: its agent's mark on a tile, its name, its role,
+-- machine and model, and how far through its todo ("5/8") at the end.
+-- Under it, in Zeron's own words for it: working (the roller and its
+-- time), or how else it stands (needs you, failed, done); what it's doing
+-- now (the activity's glyph and command); its todo as segmented cells with
+-- the step under way; the last thing it reported (a badge for how that
+-- stood, its one line, when). A status shows at least 300 ms
+-- (ds/orch_hold). Those that need you come first, then those working, then
+-- the rest, the latest moved first; a hairline between. A unit opens its
+-- thread.
 --
 --   OrchCrew {
 --     members = function() return { { member = CrewRow, chat = ChatRow? } } end,
@@ -14,22 +17,23 @@
 --     device_name = function(device_id) return "desk" end,
 --     on_open = function(chat_id) end,
 --     now = function() return os.time() end,
---     columns = 2,             -- else one under 520 wide, two above
+--     columns = 2,             -- side by side (one by default)
 --   }
 --
--- A card is made once a thread and follows it: its activity, todo, status
+-- A unit is made once a thread and follows it: its activity, todo, status
 -- or report moving reaches only what shows them.
 
 local Icon = require("@self/icon")
 local Mark = require("@self/mark")
 local Badge = require("@self/badge")
+local Working = require("@self/working")
 local status = require("@self/status")
 local control = require("@self/control")
 local locale = require("@self/locale")
-local motion = require("@self/motion")
-local material = require("@self/material")
 local data = require("@self/orch_data")
 local hue = require("@self/orch_hue")
+local Cells = require("@self/orch_cells")
+local hold = require("@self/orch_hold")
 
 export type Member = { member: { [string]: any }, chat: { [string]: any }? }
 export type Props = {
@@ -41,27 +45,15 @@ export type Props = {
 	columns: number?,
 }
 
--- Two cards a row from this wide.
-local TWO_AT = 520
--- A card's corner and inset (one value: rule 6), and the gap between cards.
-local RADIUS = "$radius.lg"
-local INSET = "$space.3"
+-- The gap between units side by side.
 local GAP = 8 -- ($space.2)
+-- The tile's size, and where the lines under the head start (past it).
+local TILE = 28
+local INDENT = 36
 
--- How a thread stands, as its dot says it: needs you (asks or approves),
--- under way, failed, done, or idle.
+-- How a thread stands: needs you (asks or approves), under way, or not.
 local UNDER_WAY: { [string]: boolean } = { working = true, connecting = true, waiting = true }
 local NEEDS: { [string]: boolean } = { input = true, approval = true }
-local DOT: { [string]: boolean } = {
-	working = true,
-	connecting = true,
-	waiting = true,
-	input = true,
-	approval = true,
-	done = true,
-	failed = true,
-	limited = true,
-}
 
 local function rank(m: Member): number
 	local st = m.chat and m.chat.status
@@ -73,7 +65,7 @@ local function rank(m: Member): number
 	return 2
 end
 
--- A report's chip: its words and tone.
+-- A report's badge: its tone.
 local CHIP: { [string]: Badge.Tone } = {
 	done = "success",
 	blocked = "warning",
@@ -109,39 +101,6 @@ local function short_model(model: string?): string
 	return model
 end
 
-local function idle_dot(size: number): Node
-	return ui.div { w = size, h = size, shrink = 0, rounded = "$radius.full", border = 1, border_color = "$text.tertiary" }
-end
-
--- A thin bar of how far along, in the hue, easing as it moves.
-local function bar(value: () -> number?, ink: () -> any): Node
-	local track_w = ui.use_state(0)
-	return ui.div {
-		w_full = true,
-		h = 3,
-		relative = true,
-		rounded = "$radius.full",
-		bg = "$zeron.slider.track",
-		overflow = "hidden",
-		on_resize = function(size: { w: number, h: number })
-			if math.abs(size.w - track_w:peek()) >= 0.5 then
-				track_w:set(size.w)
-			end
-		end,
-		ui.div {
-			absolute = true,
-			left = 0,
-			top = 0,
-			h = 3,
-			rounded = "$radius.full",
-			bg = ink,
-			w = motion.tween(ui.computed(function(): number
-				return math.clamp(value() or 0, 0, 1) * track_w:get()
-			end), { duration = 320, ease = "out(3)" }),
-		},
-	}
-end
-
 local function small(text: () -> string, props: { [string]: any }?): Node
 	local p: { [any]: any } = {
 		text,
@@ -160,10 +119,6 @@ return ui.component(function(props: Props): Node
 	local width = ui.use_state(0)
 	local function now_s(): number
 		return if props.now then props.now() else os.time()
-	end
-	local function ink(): any
-		local h = if props.hue then control.value(props.hue) :: number? else nil
-		return if h then hue.paint(h) else "$text.secondary"
 	end
 	local shown = ui.computed(function(): { Member }
 		local out: { Member } = {}
@@ -187,10 +142,7 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local function columns(): number
-		if props.columns then
-			return props.columns
-		end
-		return if width:get() >= TWO_AT then 2 else 1
+		return math.max(1, props.columns or 1)
 	end
 	local function card_w(): number
 		local n = columns()
@@ -200,7 +152,6 @@ return ui.component(function(props: Props): Node
 
 	local function card(first: Member, _i: number, row: State<Member>): Node
 		local id = first.member.chat_id
-		local hovered = ui.use_state(false)
 		local function chat(): { [string]: any }
 			return row:get().chat or {}
 		end
@@ -211,18 +162,22 @@ return ui.component(function(props: Props): Node
 			local t = chat().title
 			return if t and t ~= "" then t else locale.s("ds.orch.crew.thread")
 		end
-		local function dot_kind(): string
+		-- How it stands, held 300 ms at least.
+		local kind = hold.value(function(): string
 			local st = chat().status
-			return if st and DOT[st] then st else "idle"
-		end
-		local function activity(): { [string]: any }?
+			if st and UNDER_WAY[st] then
+				return "working"
+			end
+			return if st and status.KINDS[st] then st else "idle"
+		end)
+		local activity = hold.value(function(): { [string]: any }?
 			local a = chat().activity
 			local st = chat().status
 			if type(a) ~= "table" or not (st and UNDER_WAY[st]) then
 				return nil
 			end
 			return a
-		end
+		end)
 		local function todo(): { [string]: any }?
 			local t = chat().todo
 			return if data.todo_fraction(t) ~= nil then t else nil
@@ -247,149 +202,211 @@ return ui.component(function(props: Props): Node
 			end
 			return table.concat(parts, " · ")
 		end
-		local dots: { [string]: Node } = { idle = idle_dot(8) }
-		for k in DOT do
-			dots[k] = status.StatusDot { kind = k :: any, size = 8 }
+		local function since(): number
+			local a = activity()
+			return (a and type(a.since) == "number" and a.since) or chat().updated or now_s()
 		end
 
-		-- Its head: the dot, the name, its agent's mark.
+		-- Its head: the agent's tile, the name over where it runs, its todo's
+		-- count at the end.
 		local head = ui.row {
 			w_full = true,
 			gap = "$space.2",
 			items = "center",
-			ui.div { w = 8, h = 8, shrink = 0, ui.switch(dot_kind, dots :: any) },
-			ui.text {
-				title,
-				class = "orch-crew-title",
+			ui.div {
+				w = TILE,
+				h = TILE,
+				shrink = 0,
+				rounded = "$radius.md",
+				bg = "$hover",
+				items = "center",
+				justify = "center",
+				color = "$text.secondary",
+				ui.presence(function(): string
+					return MARKS[chat().agent or ""] or ""
+				end, function(name: string): Node
+					if name == "" then
+						return Icon { name = "chat-round-line", size = 14 }
+					end
+					return Mark { name = name, size = 15, bare = true }
+				end),
+			},
+			ui.column {
 				grow = 1,
 				min_w = 0,
-				truncate = true,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.medium",
-				color = "$text.primary",
-			},
-			ui.presence(function(): string
-				return MARKS[chat().agent or ""] or ""
-			end, function(name: string): Node
-				if name == "" then
-					return ui.div {}
-				end
-				return ui.div { shrink = 0, color = "$text.secondary", Mark { name = name, size = 12, bare = true } }
-			end, { shrink = 0 }),
-		}
-		-- Its role, machine and model, quiet.
-		local sub = ui.show(function(): boolean
-			return where() ~= ""
-		end, small(where, { class = "orch-crew-where", pl = ui.raw(16, "under the name, past the dot") }))
-		-- What it's doing now: the glyph, the words, for how long.
-		local doing = ui.show(
-			function(): boolean
-				return activity() ~= nil
-			end,
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
-				items = "center",
-				class = "orch-crew-activity",
-				ui.presence(function(): string
-					local a = activity()
-					return (a and (data.ACTIVITY :: { [string]: string })[a.kind]) or "terminal"
-				end, function(glyph: string): Node
-					return ui.div { color = "$text.secondary", Icon { name = glyph :: any, size = 12 } }
-				end, { shrink = 0 }),
-				ui.text {
-					function(): string
-						local a = activity()
-						if not a then
-							return ""
-						end
-						if a.label and a.label ~= "" then
-							return a.label
-						end
-						return locale.s(`ds.orch.activity.{a.kind}`)
-					end,
-					class = "orch-crew-activity-label",
-					grow = 1,
-					min_w = 0,
-					truncate = true,
-					font = "$font.mono",
-					text_size = "$font.size.xs",
-					color = "$text.secondary",
-				},
-				small(function(): string
-					local a = activity()
-					if not a or type(a.since) ~= "number" then
-						return ""
-					end
-					return status.elapsed(math.max(0, now_s() - a.since))
-				end, { shrink = 0, tabular = true, truncate = false }),
-			}
-		)
-		-- How far through its todo.
-		local progress = ui.show(
-			function(): boolean
-				return todo() ~= nil
-			end,
-			ui.column {
-				w_full = true,
-				gap = "$space.1",
-				class = "orch-crew-todo",
-				bar(function(): number?
-					return data.todo_fraction(todo())
-				end, ink),
+				gap = "$zeron.space.hair",
 				ui.row {
 					w_full = true,
 					gap = "$space.2",
 					items = "center",
-					small(function(): string
-						local t = todo()
-						return if t then locale.s("ds.orch.crew.todo", { done = t.done or 0, total = t.total or 0 }) else ""
-					end, { shrink = 0, tabular = true, truncate = false, color = "$text.secondary" }),
-					small(function(): string
-						local t = todo()
-						return (t and t.current) or ""
-					end, { grow = 1 }),
+					ui.text {
+						title,
+						class = "orch-crew-title",
+						min_w = 0,
+						truncate = true,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+					hue.Dot { hue = function(): number?
+						return if props.hue then control.value(props.hue) :: number? else nil
+					end, size = 6 },
 				},
-			}
-		)
-		-- The last thing it reported.
-		local said = ui.show(
-			function(): boolean
-				return report() ~= nil
-			end,
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
+				ui.show(function(): boolean
+					return where() ~= ""
+				end, small(where, { class = "orch-crew-where" })),
+			},
+			ui.show(function(): boolean
+				return todo() ~= nil
+			end, ui.text {
+				function(): string
+					local t = todo()
+					return if t then locale.s("ds.orch.crew.todo", { done = t.done or 0, total = t.total or 0 }) else ""
+				end,
+				class = "orch-crew-count",
+				shrink = 0,
+				tabular = true,
+				text_size = "$font.size.sm",
+				weight = "$font.weight.medium",
+				color = "$text.primary",
+			}),
+		}
+
+		-- How it stands: working, the roller and its time; else its state in
+		-- its hue (nothing, idle).
+		local state = ui.switch(function(): string
+			local k = kind()
+			if k == "working" then
+				return "working"
+			end
+			return if k == "idle" then "idle" else "other"
+		end, {
+			working = Working { since = since, seed = #id, size = "sm" },
+			other = ui.row {
+				h = 20,
+				gap = "$zeron.space.tight",
 				items = "center",
-				class = "orch-crew-report",
-				ui.presence(function(): string
-					local r = report()
-					return (r and r.state) or ""
-				end, function(state: string): Node
-					return Badge.Badge {
-						locale.s(`ds.orch.crew.report.{if CHIP[state] then state else "progress"}`),
-						tone = CHIP[state] or "neutral",
-						size = "sm",
-						class = "orch-crew-report-state",
-					}
-				end, { shrink = 0 }),
+				status.StatusIcon { kind = kind :: any, size = 14 },
 				ui.text {
 					function(): string
-						local r = report()
-						return (r and r.summary) or ""
+						local k = kind()
+						local info = status.KINDS[k :: any]
+						return if info then info.long else ""
 					end,
-					grow = 1,
-					min_w = 0,
-					truncate = true,
-					text_size = "$font.size.xs",
-					color = "$text.secondary",
+					text_size = "$font.size.sm",
+					color = function(): string
+						return `$zeron.status.{kind()}`
+					end,
 				},
-				small(function(): string
+			},
+			idle = ui.div {},
+		})
+
+		-- What it's doing now: the glyph and the command.
+		local doing = ui.show(function(): boolean
+			return activity() ~= nil
+		end, ui.row {
+			w_full = true,
+			gap = "$space.1",
+			items = "center",
+			class = "orch-crew-activity",
+			ui.div {
+				color = "$text.tertiary",
+				shrink = 0,
+				Icon {
+					name = function(): Icon.Name
+						local a = activity()
+						return ((a and (data.ACTIVITY :: { [string]: string })[a.kind]) or "terminal") :: any
+					end,
+					size = 12,
+				},
+			},
+			ui.text {
+				function(): string
+					local a = activity()
+					if not a then
+						return ""
+					end
+					if a.label and a.label ~= "" then
+						return a.label
+					end
+					return locale.s(`ds.orch.activity.{a.kind}`)
+				end,
+				class = "orch-crew-activity-label",
+				grow = 1,
+				min_w = 0,
+				truncate = true,
+				font = "$font.mono",
+				text_size = "$font.size.xs",
+				color = "$text.secondary",
+			},
+		})
+
+		-- How far through its todo: a cell a step, and the one under way.
+		local progress = ui.show(function(): boolean
+			return todo() ~= nil
+		end, ui.row {
+			w_full = true,
+			gap = "$space.2",
+			items = "center",
+			class = "orch-crew-todo",
+			Cells {
+				done = function(): number
+					local t = todo()
+					return if t then t.done or 0 else 0
+				end,
+				total = function(): number
+					local t = todo()
+					return if t then t.total or 0 else 0
+				end,
+				current = function(): boolean
+					return kind() == "working"
+				end,
+				cell = 5,
+				h = 10,
+			},
+			small(function(): string
+				local t = todo()
+				return (t and t.current) or ""
+			end, { grow = 1 }),
+		})
+
+		-- The last thing it reported.
+		local said = ui.show(function(): boolean
+			return report() ~= nil
+		end, ui.row {
+			w_full = true,
+			gap = "$space.2",
+			items = "center",
+			class = "orch-crew-report",
+			ui.presence(function(): string
+				local r = report()
+				return (r and r.state) or ""
+			end, function(st: string): Node
+				return Badge.Badge {
+					locale.s(`ds.orch.crew.report.{if CHIP[st] then st else "progress"}`),
+					tone = CHIP[st] or "neutral",
+					size = "sm",
+					class = "orch-crew-report-state",
+				}
+			end, { shrink = 0 }),
+			ui.text {
+				function(): string
 					local r = report()
-					return if r and type(r.at) == "number" then status.ago(math.max(0, now_s() - r.at)) else ""
-				end, { shrink = 0, tabular = true, truncate = false }),
-			}
-		)
+					return (r and r.summary) or ""
+				end,
+				grow = 1,
+				min_w = 0,
+				truncate = true,
+				text_size = "$font.size.xs",
+				color = "$text.secondary",
+			},
+			small(function(): string
+				local r = report()
+				return if r and type(r.at) == "number" then status.ago(math.max(0, now_s() - r.at)) else ""
+			end, { shrink = 0, tabular = true, truncate = false }),
+		})
+
 		return ui.button {
 			class = "orch-crew-card",
 			provide = { session = id },
@@ -399,30 +416,28 @@ return ui.component(function(props: Props): Node
 			w = card_w,
 			shrink = 0,
 			direction = "column",
-			p = INSET,
+			p = "$space.2",
 			gap = "$space.2",
 			items = "stretch",
-			rounded = RADIUS,
-			bg = function(): string
-				if hovered:get() then
-					return "$hover"
-				end
-				return material.pick("$zeron.settings.note", "$zeron.settings.card")()
-			end,
-			hover = {},
+			rounded = "$radius.lg",
+			bg = "#00000000",
+			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
-			on_hover = function(inside: boolean)
-				hovered:set(inside)
-			end,
 			on_click = function()
 				if props.on_open then
 					props.on_open(id)
 				end
 			end,
-			ui.column { w_full = true, gap = "$space.1", head, sub },
-			doing,
-			progress,
-			said,
+			head,
+			ui.column {
+				w_full = true,
+				pl = ui.raw(INDENT, "under the name, past the tile"),
+				gap = "$zeron.space.tight",
+				state,
+				doing,
+				progress,
+				said,
+			},
 		}
 	end
 
@@ -445,7 +460,18 @@ return ui.component(function(props: Props): Node
 				color = "$text.tertiary",
 			}
 		),
-		ui.each(shown, card, {
+		ui.each(shown, function(m: Member, i: number, row: State<Member>): Node
+			return ui.column {
+				w = card_w,
+				shrink = 0,
+				-- (A hairline over each but the first, one column.)
+				ui.show(function(): boolean
+					local top = shown:get()[1]
+					return columns() == 1 and top ~= nil and top.member.chat_id ~= row:get().member.chat_id
+				end, ui.div { w_full = true, h = 1, my = "$space.1", bg = "$border.subtle" }),
+				card(m, i, row),
+			}
+		end, {
 			key = function(m: Member): string
 				return m.member.chat_id
 			end,

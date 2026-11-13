@@ -28,12 +28,14 @@ test("the newest dump's parts each have a chip saying where they went", function
 	expect((app:state("orch_receipt_lit") or {})["dp-2"]).to_be(5)
 end)
 
-test("a question's answer opens under its chip", function()
+test("a question's answer comes back as a reply line, with a way into its thread", function()
 	local app = open()
-	expect(app:has("#control-capture >> .orch-answer")).to_be(false)
-	app:click('#control-capture >> role:button "Answer"')
-	app:frames(10)
-	expect(app:text("#control-capture >> .orch-answer")).to_contain("waiting on your approval")
+	-- There without a click: the answer, quiet, under the chips.
+	expect(app:has('#control-capture >> .orch-answer >> ~"waiting on your approval"')).to_be(true)
+	expect(app:count("#control-capture >> .orch-answer")).to_be(1)
+	app:click('#control-capture >> .orch-answer-open')
+	app:frames(5)
+	expect(app:error()).to_be_nil()
 end)
 
 test("a new dump is sent with Enter and its parts light one after another", function()

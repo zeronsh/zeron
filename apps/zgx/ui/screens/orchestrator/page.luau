@@ -17,6 +17,8 @@ local OrchBoard = require("@ds/orch_board")
 local OrchCrew = require("@ds/orch_crew")
 local Asks = require("@ds/orch_asks")
 local Links = require("@ds/links")
+local Block = require("@ds/orch_block")
+local Counter = require("@ds/orch_counter")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
@@ -70,26 +72,17 @@ local function needs_of(id: string?): { any }
 	return out
 end
 
--- A section of the live state: its title and count over what it holds.
+-- A section of the live state, a block of its own: its title and count
+-- over what it holds.
 local function Section(title: any, count: (() -> number)?, body: Node, id: string): Node
-	return ui.column {
+	return Block.Block {
 		id = id,
-		w_full = true,
-		gap = "$space.3",
-		ds.SectionTitle {
-			title,
-			trail = if count
-				then ui.text {
-					function(): string
-						local n = count()
-						return if n > 0 then tostring(n) else ""
-					end,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-					tabular = true,
-				}
-				else nil,
-		},
+		title = title,
+		figures = if count
+			then ui.show(function(): boolean
+				return count() > 0
+			end, Counter { value = count, text_size = "$font.size.xs", color = "$text.secondary" })
+			else nil,
 		body,
 	}
 end
@@ -326,8 +319,8 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 			fade_overflow = true,
 			ui.column {
 				w_full = true,
-				gap = "$space.6",
-				px = "$space.5",
+				gap = "$space.4",
+				px = "$space.4",
 				pt = "$space.2",
 				pb = "$space.6",
 				Section(ui.t("orch.page.needs_you"), function(): number
