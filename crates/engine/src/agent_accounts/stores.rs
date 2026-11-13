@@ -169,9 +169,8 @@ pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous", "xai-oauth"]
 
 pub(super) fn unsupported_login(harness: HarnessId, provider: &str) -> EngineError {
     let reason = match (harness, provider) {
-        (HarnessId::Pi, "anthropic") => {
-            "Claude logins for Pi stay with pi's own /login — zeron only mints Claude Code \
-             logins for Claude Code."
+        (HarnessId::Opencode, "anthropic") => {
+            "OpenCode has no Claude sign-in of its own — add an Anthropic API key instead."
                 .to_string()
         }
         _ => format!(
@@ -592,6 +591,18 @@ pub(super) fn merge_json_entry(
     entry: Option<&serde_json::Value>,
     lock: StoreLock,
 ) -> Result<(), EngineError> {
+    merge_json_entry_with(file, key, entry, lock, &mut |_| {})
+}
+
+/// [`merge_json_entry`], showing `before_write` the entry being replaced
+/// (under the lock, on the read the write is compared against).
+pub(super) fn merge_json_entry_with(
+    file: &Path,
+    key: &str,
+    entry: Option<&serde_json::Value>,
+    lock: StoreLock,
+    before_write: &mut dyn FnMut(Option<&serde_json::Value>),
+) -> Result<(), EngineError> {
     // Held for its Drop (the unlock) only.
     #[allow(dead_code)]
     enum Guard {
@@ -624,6 +635,7 @@ pub(super) fn merge_json_entry(
                 })?,
             None => serde_json::json!({}),
         };
+        before_write(store.get(key));
         if let Some(map) = store.as_object_mut() {
             match entry {
                 Some(entry) => {
@@ -839,7 +851,7 @@ impl AgentAccounts {
         }
     }
 
-    /// The live entry under `store_key`, if it's an OAuth login.
+    /// The live entry under `store_key`, if it's an OAuth login or an API key.
     pub(super) fn live_keyed_entry(
         &self,
         harness: HarnessId,
@@ -847,8 +859,40 @@ impl AgentAccounts {
     ) -> Option<serde_json::Value> {
         read_json(&self.keyed_file(harness))?
             .get(store_key)
-            .filter(|entry| oauth_entry(entry))
+            .filter(|entry| {
+                oauth_entry(entry) || api_keys::key_entry_secret(harness, entry).is_some()
+            })
             .cloned()
+    }
+
+    /// [`Self::write_keyed_entry`] for a switch: `before_write` sees the
+    /// entry being replaced, under the agent's own lock, right before the
+    /// write — where a refresh the agent made since the last list (a
+    /// rotated, single-use refresh token) is saved into its slot instead of
+    /// being lost.
+    pub(super) fn swap_keyed_entry(
+        &self,
+        harness: HarnessId,
+        store_key: &str,
+        entry: &serde_json::Value,
+        before_write: &mut dyn FnMut(Option<&serde_json::Value>),
+    ) -> Result<(), EngineError> {
+        let file = self.keyed_file(harness);
+        merge_json_entry_with(
+            &file,
+            store_key,
+            Some(entry),
+            self.keyed_lock(harness),
+            before_write,
+        )
+    }
+
+    fn keyed_lock(&self, harness: HarnessId) -> StoreLock {
+        let file = self.keyed_file(harness);
+        match harness {
+            HarnessId::Pi => StoreLock::Dir(lock_path(&file)),
+            _ => StoreLock::File(file.with_file_name("auth.json.zeron-lock")),
+        }
     }
 
     /// Replace ONE provider's entry in OpenCode's / Pi's store, keeping every
@@ -863,11 +907,7 @@ impl AgentAccounts {
         entry: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
         let file = self.keyed_file(harness);
-        let lock = match harness {
-            HarnessId::Pi => StoreLock::Dir(lock_path(&file)),
-            _ => StoreLock::File(file.with_file_name("auth.json.zeron-lock")),
-        };
-        merge_json_entry(&file, store_key, entry, lock)
+        merge_json_entry(&file, store_key, entry, self.keyed_lock(harness))
     }
 
     /// The live per-provider logins of OpenCode / Pi: `(identified,
@@ -891,6 +931,15 @@ impl AgentAccounts {
                 None => unidentified.push(unresolved(store_key, upstream)),
             }
         }
+        // API keys, whichever provider: identified locally by a digest of
+        // the key, never by sending it anywhere.
+        if let Some(map) = store.as_object() {
+            for (store_key, entry) in map {
+                if let Some(detected) = api_keys::key_detected(harness, store_key, entry) {
+                    resolved.push(detected);
+                }
+            }
+        }
         (resolved, unidentified)
     }
 
@@ -901,8 +950,11 @@ impl AgentAccounts {
         harness: HarnessId,
         store_key: &str,
     ) -> Option<Option<Detected>> {
-        let upstream = upstream_of(harness, store_key)?;
         let entry = self.live_keyed_entry(harness, store_key)?;
+        if api_keys::key_entry_secret(harness, &entry).is_some() {
+            return Some(api_keys::key_detected(harness, store_key, &entry));
+        }
+        let upstream = upstream_of(harness, store_key)?;
         Some(
             self.identify_entry(harness, store_key, upstream, &entry)
                 .await,
@@ -983,7 +1035,7 @@ impl AgentAccounts {
     }
 
     /// Claude's profile for a live access token (`user:profile` scope).
-    async fn anthropic_identity(
+    pub(super) async fn anthropic_identity(
         &self,
         store_key: &str,
         access_token: &str,
@@ -1114,9 +1166,12 @@ impl AgentAccounts {
             let Some(entries) = pool.get(provider).and_then(|e| e.as_array()) else {
                 continue;
             };
+            // Only what Hermes itself would use: an entry it borrowed (the
+            // GitHub CLI's token, Claude Code's login) it never picks.
             let mut entries: Vec<&serde_json::Value> = entries
                 .iter()
                 .filter(|e| str_field(e, "id").is_some())
+                .filter(|e| hermes_entry_is_explicit(e, &self.inner.config.hermes_home))
                 .collect();
             entries.sort_by_key(|e| {
                 e.get("priority")
@@ -1185,7 +1240,7 @@ impl AgentAccounts {
         Ok(dirs)
     }
 
-    async fn cli_command(
+    pub(super) async fn cli_command(
         &self,
         harness: HarnessId,
         args: &[&str],
@@ -1407,6 +1462,53 @@ pub(super) struct DevinLoginDirs {
     pub(super) url_file: PathBuf,
 }
 
+/// The pool sources Hermes counts as the user's own (hermes_cli/auth.py
+/// `_EXPLICIT_POOL_SOURCES`): what a Hermes sign-in or `hermes auth add`
+/// made. Anything else it found itself (`gh_cli`, `claude_code`,
+/// `qwen-cli`) is "ambient borrowed": Hermes never offers or picks it.
+const HERMES_EXPLICIT_SOURCES: &[&str] = &["device_code", "loopback_pkce", "hermes_pkce", "manual"];
+
+/// Hermes' own `_pool_entry_is_explicit`: an entry it made, or one seeded
+/// from an environment variable that still holds a key — in Hermes' `.env`
+/// (read first, as Hermes reads it) or the environment.
+pub(super) fn hermes_entry_is_explicit(entry: &serde_json::Value, hermes_home: &Path) -> bool {
+    let raw = str_field(entry, "source").unwrap_or_default();
+    let source = raw.trim().to_ascii_lowercase();
+    if source.starts_with("env:") {
+        // (The variable as written: names are case-sensitive.)
+        let var = raw.trim().get(4..).unwrap_or_default().trim();
+        return !var.is_empty() && hermes_env_secret(var, hermes_home);
+    }
+    !source.is_empty()
+        && (HERMES_EXPLICIT_SOURCES.contains(&source.as_str()) || source.starts_with("manual:"))
+}
+
+/// Whether `var` holds a key for Hermes: its `.env` first, then the
+/// environment (Hermes' `get_env_value_prefer_dotenv`).
+fn hermes_env_secret(var: &str, hermes_home: &Path) -> bool {
+    let usable = |value: &str| {
+        let value = value.trim().trim_matches(['"', '\'']).trim();
+        !value.is_empty()
+    };
+    if let Ok(text) = std::fs::read_to_string(hermes_home.join(".env")) {
+        for line in text.lines() {
+            let line = line.trim();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            if let Some((name, value)) = line.split_once('=')
+                && name.trim() == var
+            {
+                return usable(value);
+            }
+        }
+    }
+    std::env::var(var).is_ok_and(|value| usable(&value))
+}
+
+/// A Hermes pool entry's secret (`access_token`, an API key's too).
+fn access_key(entry: &serde_json::Value) -> Option<String> {
+    str_field(entry, "access_token")
+}
+
 fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotProfile {
     let access = str_field(entry, "access_token")
         .and_then(|t| jwt_claims(&t))
@@ -1424,8 +1526,19 @@ fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotP
         other => title_words(other),
     };
     let api_key = str_field(entry, "auth_type").as_deref() == Some("api_key");
+    // A key goes by its label (Hermes' own name for it); its line says
+    // whose it is and its last four characters, never more.
+    let plan = if api_key {
+        Some(api_keys::key_line(
+            &zeron_proto::providers::account_group_label(HarnessId::Hermes, provider),
+            access_key(entry).as_deref(),
+        ))
+    } else {
+        plan
+    };
+    let label = str_field(entry, "label");
     SlotProfile {
-        email: str_field(entry, "label")
+        email: label
             .or_else(|| {
                 access
                     .get("https://api.openai.com/profile")

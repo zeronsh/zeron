@@ -26,21 +26,24 @@ local CATALOG = {
 		{ value = "pi/anthropic/opus-5", label = "Opus 5", harness = "pi", provider = provider("anthropic", "Anthropic") },
 		{ value = "pi/github-copilot/gpt-6", label = "GPT-6", harness = "pi", provider = provider("github-copilot", "Copilot") },
 		{ value = "pi/openrouter/kimi", label = "Kimi", harness = "pi", provider = provider("openrouter", "OpenRouter") },
+		{ value = "pi/groq/llama", label = "Llama", harness = "pi", provider = provider("groq", "Groq") },
 	},
 }
 
 local function pi_accounts(): { any }
 	return {
 		{ id = "o1", email = "ada@chatgpt.test", plan = "ChatGPT Plus", active = true, can_switch = true, provider = "openai-codex", group = "ChatGPT", windows = { window("5h", 0.3) } },
-		{ id = "c1", email = "ada@claude.test", plan = "Claude Max", active = true, can_switch = true, provider = "anthropic", group = "Claude", windows = { window("Week", 0.6) } },
+		{ id = "c1", email = "ada@claude.test", plan = "Claude Max", active = true, can_switch = true, provider = "anthropic", group = "Anthropic", windows = { window("Week", 0.6) } },
 		{ id = "o2", email = "work@chatgpt.test", plan = "ChatGPT Pro", active = false, can_switch = true, provider = "openai-codex", group = "ChatGPT", windows = { window("5h", 0.05) } },
 	}
 end
 
 local LOGINS = {
 	pi = {
-		["openai-codex"] = { name = "ChatGPT", add = "Add ChatGPT account" },
-		["github-copilot"] = { name = "GitHub Copilot", add = "Add GitHub Copilot account" },
+		["openai-codex"] = { name = "ChatGPT", login = "ChatGPT" },
+		anthropic = { name = "Anthropic", login = "Claude", key = "Anthropic" },
+		["github-copilot"] = { name = "GitHub Copilot", login = "GitHub Copilot" },
+		openrouter = { name = "OpenRouter", key = "OpenRouter" },
 	},
 }
 
@@ -82,19 +85,33 @@ test("a ChatGPT model's row is its ChatGPT account, and lists ChatGPT's alone", 
 	expect(app:state("calls")).to_contain("switch_on::pi:o2")
 end)
 
-test("a Claude model's row is its Claude account; switching ChatGPT never touched it", function()
+test("a Claude model's row is its Anthropic account; switching ChatGPT never touched it", function()
 	local app = with_model("pi/anthropic/opus-5")
 	open_panel(app)
 	local row = app:tree("#model-picker-account")
-	expect(row).to_contain("Claude account")
+	expect(row).to_contain("Anthropic account")
 	expect(row).to_contain("ada@claude.test")
 	expect(row).to_contain("60%")
 	app:click("#model-picker-account")
 	app:frames(30)
 	local all = app:tree()
 	expect(string.find(all, "work@chatgpt.test", 1, true)).to_be(nil)
-	-- Pi's own /login adds Claude accounts: nothing to add from here.
-	expect(string.find(all, "Add Claude account", 1, true)).to_be(nil)
+	-- Another Claude sign-in, from here.
+	expect(app:has('"Add Claude account"')).to_be(true)
+end)
+
+test("a provider Zeron adds keys for offers its key, on this Mac", function()
+	local app = with_model("pi/openrouter/kimi")
+	open_panel(app)
+	local row = app:tree("#model-picker-account")
+	expect(row).to_contain("OpenRouter account")
+	expect(row).to_contain("None")
+	app:click("#model-picker-account")
+	app:frames(30)
+	app:click('"Add OpenRouter API key"')
+	app:frames(30)
+	expect(app:state("calls")).to_contain("target:")
+	expect(app:state("agents_key_request")).to_be("pi:openrouter")
 end)
 
 test("a provider with no account yet says None and offers to add one", function()
@@ -114,8 +131,8 @@ test("a provider with no account yet says None and offers to add one", function(
 	expect(calls).to_contain("sign_in_to:pi:github-copilot")
 end)
 
-test("a provider with no account and no sign-in of Zeron's has no row", function()
-	local app = with_model("pi/openrouter/kimi")
+test("a provider with no account and nothing Zeron adds has no row", function()
+	local app = with_model("pi/groq/llama")
 	expect(app:has("#model-picker-usage")).to_be(false)
 	open_panel(app)
 	expect(app:has("#model-picker-account")).to_be(false)

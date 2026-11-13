@@ -10,6 +10,14 @@
 //!   Each login is a fresh grant: a refresh token is never shared with the
 //!   Codex slots (OpenAI rotates them, so sharing one logs the other out).
 //!   The callback port is reported, so a remote login tunnels it.
+//! - **Claude** (Pi `anthropic`): the Claude Pro/Max sign-in pi's `/login`
+//!   runs — Claude Code's public client, PKCE against our own loopback on
+//!   any free port, the code redeemed at Anthropic's token endpoint — saved
+//!   as pi saves it (`{type: "oauth", refresh, access, expires}`, `expires`
+//!   five minutes early). A fresh grant of its own: never Claude Code's
+//!   refresh token (single-use: sharing one would log the other out). Pi
+//!   refreshes it under its own lock, which every zeron swap takes too.
+//!   (OpenCode has no Claude sign-in: none offered.)
 //! - **GitHub Copilot** (`github-copilot`, OpenCode and Pi): GitHub's
 //!   device flow (scope `read:user`) — the dialog shows the code; no
 //!   loopback, so a remote login needs no tunnel. Each agent signs in with
@@ -48,6 +56,12 @@ const PI_COPILOT_HEADERS: [(&str, &str); 4] = [
     ("Editor-Plugin-Version", "copilot-chat/0.35.0"),
     ("Copilot-Integration-Id", "vscode-chat"),
 ];
+/// Pi's Claude Pro/Max sign-in (pi-ai `auth/oauth/anthropic`): Claude
+/// Code's public client, claude.ai's authorize page, the scopes pi asks
+/// for. Any loopback port is accepted by the client registration.
+const PI_CLAUDE_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+const PI_CLAUDE_SCOPES: &str = "org:create_api_key user:profile user:inference \
+     user:sessions:claude_code user:mcp_servers user:file_upload";
 /// Where an individual Copilot account's API is when its token names none.
 const COPILOT_INDIVIDUAL_API: &str = "https://api.individual.githubcopilot.com";
 /// How long a sign-in waits on the browser before giving up.
@@ -251,6 +265,167 @@ impl AgentAccounts {
                 EngineError::Other("Could not identify the signed-in ChatGPT account.".into())
             })?;
         self.save_new_login(harness, &detected).await
+    }
+
+    /// Claude for Pi: pi's own Claude Pro/Max sign-in, on our loopback.
+    pub(super) async fn start_pi_claude_login(&self) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Pi);
+        let listener = bind_loopback(0).await.map_err(|err| {
+            EngineError::Other(format!("Could not open the sign-in callback: {err}"))
+        })?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| EngineError::Other(format!("sign-in callback has no port: {e}")))?
+            .port();
+        let login_id = new_id();
+        let (verifier, challenge) = pkce_pair();
+        let state = random_url_token();
+        let redirect = format!("http://localhost:{port}/callback");
+        let url = format!(
+            "{PI_CLAUDE_AUTHORIZE_URL}?code=true&client_id={CLAUDE_CLIENT_ID}\
+             &response_type=code&redirect_uri={}&scope={}&code_challenge={challenge}\
+             &code_challenge_method=S256&state={state}",
+            urlencode(&redirect),
+            urlencode(PI_CLAUDE_SCOPES),
+        );
+        let task_state = Arc::new(Mutex::new(TaskLoginState {
+            url: Some(url.clone()),
+            ..Default::default()
+        }));
+        let this = self.clone();
+        let outcome_state = task_state.clone();
+        let handle = tokio::spawn(async move {
+            let outcome = tokio::time::timeout(
+                LOGIN_WAIT,
+                this.finish_pi_claude_login(listener, &state, &verifier, &redirect),
+            )
+            .await
+            .unwrap_or_else(|_| Err(EngineError::Other("The sign-in timed out.".into())));
+            lock(&outcome_state).outcome = Some(outcome.map_err(|e| e.to_string()));
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Pi,
+                started_at: Instant::now(),
+                state: task_state,
+                handle,
+                home: None,
+                port: Some(port),
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: Some(port),
+        })
+    }
+
+    async fn finish_pi_claude_login(
+        &self,
+        listener: tokio::net::TcpListener,
+        state: &str,
+        verifier: &str,
+        redirect: &str,
+    ) -> Result<(), EngineError> {
+        use tokio::io::AsyncWriteExt as _;
+        let (callback, mut browser) = await_claude_callback(&listener, state).await;
+        drop(listener);
+        let result = match callback {
+            Ok(code) => {
+                self.redeem_pi_claude_code(&code, state, verifier, redirect)
+                    .await
+            }
+            Err(message) => Err(EngineError::Other(message)),
+        };
+        let (status, body) = match &result {
+            Ok(()) => (
+                "200 OK",
+                "<!doctype html><title>Signed in</title><p>Signed in to Claude for Pi.</p>\
+                 <p>You can close this tab and return to Zeron.</p>"
+                    .to_string(),
+            ),
+            Err(error) => (
+                "400 Bad Request",
+                format!(
+                    "<!doctype html><title>Sign-in failed</title><p>{}</p>\
+                     <p>Return to Zeron to try again.</p>",
+                    html_escape(&error.to_string())
+                ),
+            ),
+        };
+        let response = http_response(
+            status,
+            &[("Content-Type", "text/html; charset=utf-8")],
+            &body,
+        );
+        let _ = browser.write_all(response.as_bytes()).await;
+        let _ = browser.shutdown().await;
+        result
+    }
+
+    /// Redeem the code as pi does and save the login in pi's entry format.
+    async fn redeem_pi_claude_code(
+        &self,
+        code: &str,
+        state: &str,
+        verifier: &str,
+        redirect: &str,
+    ) -> Result<(), EngineError> {
+        let response = self
+            .inner
+            .http
+            .post(&self.inner.endpoints.claude_loopback_token)
+            .json(&serde_json::json!({
+                "grant_type": "authorization_code",
+                "client_id": CLAUDE_CLIENT_ID,
+                "code": code,
+                "state": state,
+                "redirect_uri": redirect,
+                "code_verifier": verifier,
+            }))
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| EngineError::Other(format!("token exchange failed: {e}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            // Never echo the body: it can carry token material on odd errors.
+            return Err(EngineError::Other(format!(
+                "Anthropic rejected the sign-in ({status}) — try again."
+            )));
+        }
+        let tokens: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| EngineError::Other(format!("token exchange returned junk: {e}")))?;
+        let (Some(access), Some(refresh)) = (
+            str_field(&tokens, "access_token"),
+            str_field(&tokens, "refresh_token"),
+        ) else {
+            return Err(EngineError::Other(
+                "Anthropic returned no usable tokens — try signing in again.".into(),
+            ));
+        };
+        let expires_in = tokens
+            .get("expires_in")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3600);
+        let entry = serde_json::json!({
+            "type": "oauth",
+            "refresh": refresh,
+            "access": access,
+            "expires": now_ms() + expires_in * 1000 - 5 * 60 * 1000,
+        });
+        let (account_key, profile) = self
+            .anthropic_identity("anthropic", &access)
+            .await
+            .ok_or_else(|| {
+                EngineError::Other("Could not identify the signed-in Claude account.".into())
+            })?;
+        let detected = Detected::known(account_key, profile, entry).keyed("anthropic");
+        self.save_new_login(HarnessId::Pi, &detected).await
     }
 
     /// GitHub Copilot for OpenCode / Pi: GitHub's device flow, with the

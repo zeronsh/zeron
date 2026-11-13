@@ -29,10 +29,14 @@
 -- when each starts over (seconds since the epoch).
 --
 -- An agent that keeps a login per model provider (Pi, OpenCode, Hermes)
--- also has `groups`: its accounts by provider, `{ id, name, accounts, add?,
--- hint?, read_only }` (`add`, what its add row says; nil: Zeron can't sign
--- in to it, and `hint` says how the agent does), and its sign-in's
--- provider, `login_for`. Its accounts each say their `provider`.
+-- also has `groups`: its accounts by provider, `{ id, name, accounts,
+-- login?, key?, hint?, read_only }` (`login`, who Zeron signs you in to for
+-- it; `key`, who issues the API key Zeron adds; neither: `hint` says how the
+-- agent does), and its sign-in's provider, `login_for`. Its accounts each
+-- say their `provider`.
+--   agents.add_key(id, provider, key)  an API key for one such provider on
+--                        this Mac's agent (a promise; rejects with why not —
+--                        "remote" while another device is shown)
 --
 -- A Codex account also has what it banks: `banked` (how many resets) and
 -- `resets`, soonest to expire first ({ id, title, scope?, expires? },
@@ -67,7 +71,8 @@ export type Group = {
 	id: string,
 	name: string,
 	accounts: { Account },
-	add: string?,
+	login: string?,
+	key: string?,
 	hint: string?,
 	read_only: boolean?,
 }
@@ -110,6 +115,22 @@ end
 function M.sign_in_to(id: string, provider: string)
 	ui.call("agents.sign_in", { id = id, provider = provider }):after(function() end, quietly())
 end
+
+-- An API key for one provider of an agent that keeps a login per provider,
+-- on this Mac (a key is never sent to another device): a promise.
+function M.add_key(id: string, provider: string, key: string, name: string?): any
+	return ui.call("agents.add_key", { id = id, provider = provider, key = key, name = name or "" })
+end
+
+-- An API key's name (empty: its default, "<Provider> ···<last4>"): a promise.
+function M.rename(id: string, account: string, name: string): any
+	return ui.call("agents.rename", { id = id, account = account, name = name })
+end
+
+-- A key asked for from elsewhere (the model picker's Account row): which
+-- agent's which provider ("pi:openrouter"), for its card to open its key
+-- field; "" once it has.
+M.key_request = ui.state("agents_key_request", "")
 
 -- Again, the sign-in that failed: to the provider it was for, if it was for
 -- one.
@@ -160,8 +181,10 @@ function M.set_enabled(id: string, on: boolean)
 	ui.call("agents.set_enabled", { id = id, enabled = on }):after(function() end, quietly())
 end
 
-function M.switch(id: string, account: string)
-	ui.call("agents.switch", { id = id, account = account }):after(function() end, quietly())
+-- That account in use: a promise, rejecting with why not (the engine's
+-- words, or "offline").
+function M.switch(id: string, account: string): any
+	return ui.call("agents.switch", { id = id, account = account })
 end
 
 -- Each device's accounts for its composers, by device id ("": this one's),
@@ -169,9 +192,10 @@ end
 -- plan, active, can_switch, error?, windows = { { label, used } } }`.
 M.on_device = ui.shared("agents.on_device", {} :: { [string]: { [string]: { any } } })
 
--- Each per-provider agent's sign-ins, by provider: `{ [harness] = {
--- [provider] = { name, add } } }` (`add`: what adding one says).
-M.logins = ui.shared("agents.logins", {} :: { [string]: { [string]: { name: string, add: string } } })
+-- Each per-provider agent's providers Zeron adds to, by provider: `{
+-- [harness] = { [provider] = { name, login?, key? } } }` (who it signs you
+-- in to, who issues the key it adds).
+M.logins = ui.shared("agents.logins", {} :: { [string]: { [string]: { name: string, login: string?, key: string? } } })
 
 -- Their accounts, on first sight of a device. (A host with no accounts to
 -- say, a fixture's: none come.)

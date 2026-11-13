@@ -1,17 +1,14 @@
 -- Settings → Providers for an agent that keeps a login per model provider
--- (Pi, OpenCode, Hermes): its accounts under a heading per provider, each
--- group with its own one in use and its own "Add <provider> account"; a
--- provider with none yet is a Connect row at the card's foot; one Zeron
--- can't sign in to says how the agent does. A sign-in shows in its own
--- provider's row, a switch moves the one in use within its group alone,
--- Hermes' own pool has no actions, and an agent with one login looks as it
--- always has. On ui/provider_groups_fixture.luau.
+-- (Pi, OpenCode, Hermes): the same card as Claude Code's and Codex's — a
+-- row per account (a provider's together, its plan line saying whose), the
+-- one in use marked per provider, and every add row at the foot ("Add
+-- ChatGPT account", "Add Claude account", …, "Add API key"). A sign-in or a
+-- key takes its add row's place; a key is typed on this Mac only and never
+-- shown again; a switch moves the one in use within its provider alone;
+-- Hermes' own pool has no actions. On ui/provider_groups_fixture.luau.
 
 local PAGE = "#page"
-local PI_CHATGPT = "#account-group-pi-openai-codex"
-local PI_CLAUDE = "#account-group-pi-anthropic"
-local PI_COPILOT = "#account-group-pi-github-copilot"
-local PI_CONNECT_COPILOT = "#account-connect-pi-github-copilot"
+local KEY = "sk-good-ZEROTESTsecret-WXYZ"
 
 local function settle(app: any)
 	app:frames(30)
@@ -19,76 +16,228 @@ end
 
 local function open(): any
 	local app = mount("provider_groups_fixture.luau")
-	app:resize(900, 2000)
+	app:resize(900, 2600)
 	settle(app)
 	return app
 end
 
--- How many times `text` shows under `scope`.
-local function count(app: any, scope: string, text: string): number
-	local _, n = string.gsub(app:tree(scope), text:gsub("%p", "%%%0"), "")
-	return n
-end
-
 local function shows(app: any, scope: string, text: string): boolean
-	return count(app, scope, text) > 0
+	return app:has(scope) and string.find(app:tree(scope), text, 1, true) ~= nil
 end
 
-test("a per-provider agent's accounts are grouped by provider, each with its own in use and add row", function()
+-- Whether the key dialog is open (a closed one stays in the tree, hidden,
+-- as it leaves: a test host's frames pass no time).
+local function key_dialog_open(app: any): boolean
+	local line = app:tree():match('[^\n]*dialog "Add API key"[^\n]*')
+	return line ~= nil and line:find(" hidden", 1, true) == nil
+end
+
+-- A node's line in the tree (`kind "label"` under `scope`), shown (not
+-- leaving, hidden): nil if there's none.
+local function line_of(app: any, scope: string, kind: string, label: string): string?
+	for line in (if scope == "" then app:tree() else app:tree(scope)):gmatch("[^\n]+") do
+		if line:find(` {kind} "{label}"`, 1, true) and not line:find(" hidden", 1, true) then
+			return line
+		end
+	end
+	return nil
+end
+
+local function in_use(app: any, row: string): boolean
+	return shows(app, `#account-row-{row}`, "In use")
+end
+
+-- The rows' ids under `scope`, top to bottom (`#account-row-<id>`,
+-- `#account-add-…`).
+local function order(app: any, scope: string): { string }
+	local out = {}
+	for line in app:tree(scope):gmatch("[^\n]+") do
+		local id = line:match("#account%-row%-([%w%-]+)") or line:match("#(account%-add%-[%w%-]+)")
+		if id then
+			table.insert(out, id)
+		end
+	end
+	return out
+end
+
+test("a per-provider agent's card is Claude Code's card: its accounts, a provider's together, then every add row", function()
 	local app = open()
-	-- ChatGPT: its heading, both accounts, one in use, its own add row.
-	expect(shows(app, PI_CHATGPT, "ChatGPT")).to_be(true)
-	expect(shows(app, PI_CHATGPT, "ada@chatgpt.test")).to_be(true)
-	expect(shows(app, PI_CHATGPT, "work@chatgpt.test")).to_be(true)
-	expect(shows(app, PI_CHATGPT, "ada@claude.test")).to_be(false)
-	expect(count(app, PI_CHATGPT, "In use")).to_be(1)
-	expect(app:has(PI_CHATGPT .. ' >> role:button "Add ChatGPT account"')).to_be(true)
-	-- Claude: in use in its own group too, and no add row: Pi's /login adds
-	-- them, and it says so.
-	expect(shows(app, PI_CLAUDE, "Claude")).to_be(true)
-	expect(count(app, PI_CLAUDE, "In use")).to_be(1)
-	expect(shows(app, PI_CLAUDE, "To add another Claude account, run /login in Pi.")).to_be(true)
-	expect(shows(app, PI_CLAUDE, "Add ")).to_be(false)
-	-- No Copilot account yet: a Connect row at the foot, no heading.
-	expect(app:has(PI_COPILOT)).to_be(false)
-	expect(app:has(PI_CONNECT_COPILOT .. ' >> role:button "Connect GitHub Copilot"')).to_be(true)
-	-- (No card-wide "Add account" for it.)
-	expect(app:has('#account-group-pi-openai-codex >> role:button "Add account"')).to_be(false)
+	local pi = order(app, PAGE)
+	-- (From Pi's first row on.)
+	local from = table.find(pi, "o1") :: number
+	local rows = table.move(pi, from, from + 10, 1, {})
+	expect(table.concat(rows, ",")).to_be(
+		"o1,o2,o3,c1,k9,account-add-pi-openai-codex,account-add-pi-anthropic,account-add-pi-github-copilot,account-add-key-pi,h1,h2"
+	)
+	-- Whose each is, on its plan line, as any account's plan.
+	expect(shows(app, "#account-row-o1", "ChatGPT Plus")).to_be(true)
+	expect(shows(app, "#account-row-c1", "Claude Max")).to_be(true)
+	-- One in use per provider.
+	expect(in_use(app, "o1")).to_be(true)
+	expect(in_use(app, "o2")).to_be(false)
+	expect(in_use(app, "c1")).to_be(true)
+	expect(app:has('#account-add-pi-openai-codex >> role:button "Add ChatGPT account"')).to_be(true)
+	expect(app:has('#account-add-pi-anthropic >> role:button "Add Claude account"')).to_be(true)
+	expect(app:has('#account-add-key-pi >> role:button "Add API key"')).to_be(true)
+	-- No section chrome, no CLI hints.
+	expect(string.find(app:tree(PAGE), "2 accounts", 1, true)).to_be(nil)
+	expect(app:has("#account-group-pi-openai-codex")).to_be(false)
+	expect(string.find(app:tree(PAGE), "/login", 1, true)).to_be(nil)
 end)
 
-test("an add row signs in to its own provider, the sign-in in that row alone", function()
+test("an add row's sign-in takes its place, the others standing", function()
 	local app = open()
-	app:click(PI_CHATGPT .. ' >> role:button "Add ChatGPT account"')
+	app:click('#account-add-pi-openai-codex >> role:button "Add ChatGPT account"')
 	settle(app)
 	expect(app:state("groups_calls")).to_contain("sign_in_to:pi:openai-codex")
-	expect(shows(app, PI_CHATGPT, "Signing in to ChatGPT")).to_be(true)
-	-- The other providers' rows stay as they were.
-	expect(app:has(PI_CONNECT_COPILOT .. ' >> role:button "Connect GitHub Copilot"')).to_be(true)
-	expect(shows(app, PI_CLAUDE, "Signing in")).to_be(false)
-	app:click(PI_CHATGPT .. ' >> role:button "Cancel"')
+	expect(shows(app, "#account-add-pi-openai-codex", "Signing in to ChatGPT")).to_be(true)
+	expect(app:has('#account-add-pi-anthropic >> role:button "Add Claude account"')).to_be(true)
+	app:click('#account-add-pi-openai-codex >> role:button "Cancel"')
 	settle(app)
 	expect(app:state("groups_calls")).to_contain("cancel:pi")
-	expect(app:has(PI_CHATGPT .. ' >> role:button "Add ChatGPT account"')).to_be(true)
+	expect(app:has('#account-add-pi-openai-codex >> role:button "Add ChatGPT account"')).to_be(true)
 end)
 
-test("connecting a provider's first account brings its group, with its own add row", function()
+test("a provider's first account joins the list, in use for its provider alone", function()
 	local app = open()
-	app:click(PI_CONNECT_COPILOT .. ' >> role:button "Connect GitHub Copilot"')
+	app:click('#account-add-pi-github-copilot >> role:button "Add GitHub Copilot account"')
 	settle(app)
 	expect(app:state("groups_calls")).to_contain("sign_in_to:pi:github-copilot")
-	expect(shows(app, PI_CONNECT_COPILOT, "Signing in to GitHub Copilot")).to_be(true)
-	-- (ChatGPT's own add row is untouched.)
-	expect(app:has(PI_CHATGPT .. ' >> role:button "Add ChatGPT account"')).to_be(true)
+	expect(shows(app, "#account-add-pi-github-copilot", "Signing in to GitHub Copilot")).to_be(true)
 	app:command("groups.copilot_lands")
 	settle(app)
-	expect(app:has(PI_CONNECT_COPILOT)).to_be(false)
-	expect(shows(app, PI_COPILOT, "GitHub Copilot")).to_be(true)
-	expect(shows(app, PI_COPILOT, "octo")).to_be(true)
-	expect(count(app, PI_COPILOT, "In use")).to_be(1)
-	expect(app:has(PI_COPILOT .. ' >> role:button "Add GitHub Copilot account"')).to_be(true)
-	-- Each group still has exactly its own one in use.
-	expect(count(app, PI_CHATGPT, "In use")).to_be(1)
-	expect(count(app, PI_CLAUDE, "In use")).to_be(1)
+	expect(shows(app, "#account-row-g1", "octo")).to_be(true)
+	expect(in_use(app, "g1")).to_be(true)
+	expect(in_use(app, "o1")).to_be(true)
+	expect(in_use(app, "c1")).to_be(true)
+	expect(app:has('#account-add-pi-github-copilot >> role:button "Add GitHub Copilot account"')).to_be(true)
+end)
+
+test("Add API key opens a dialog: a provider select, the key; Save waits for a key; a refused key says why and stays", function()
+	local app = open()
+	app:click('#account-add-key-pi >> role:button "Add API key"')
+	settle(app)
+	local dialog = "#key-dialog-pi"
+	expect(key_dialog_open(app)).to_be(true)
+	-- The first provider Pi has no key for yet, chosen.
+	expect(shows(app, dialog .. ' >> role:button "Provider"', "Anthropic")).to_be(true)
+	expect(shows(app, 'role:dialog "Add API key"', "Pi uses this key for Anthropic models.")).to_be(true)
+	-- Nothing typed: Save waits.
+	expect((line_of(app, 'role:dialog "Add API key"', "button", "Save") or ""):find("disabled", 1, true) ~= nil).to_be(true)
+	-- Every provider Pi takes a key for, in the select.
+	app:click(dialog .. ' >> role:button "Provider"')
+	settle(app)
+	for _, name in { "Anthropic", "OpenAI", "OpenRouter", "Google Gemini", "xAI", "DeepSeek" } do
+		expect(app:has(`role:menuitem "{name}"`)).to_be(true)
+	end
+	app:key("Escape")
+	settle(app)
+	local field = dialog .. ' >> role:textbox "API key"'
+	app:type(field, "sk-bad-0000")
+	app:click('role:button "Save"')
+	settle(app)
+	expect(app:state("groups_calls")).to_contain("add_key:pi:anthropic:refused")
+	expect(key_dialog_open(app)).to_be(true)
+	expect(shows(app, dialog, "Anthropic didn't accept that key")).to_be(true)
+end)
+
+test("while a key is checked, Save spins and the inputs hold still", function()
+	local app = open()
+	app:click('#account-add-key-pi >> role:button "Add API key"')
+	settle(app)
+	app:type('#key-dialog-pi >> role:textbox "API key"', "sk-slow-0000")
+	app:key("Enter")
+	settle(app)
+	expect(app:state("groups_calls")).to_contain("add_key:pi:anthropic:checking")
+	expect(key_dialog_open(app)).to_be(true)
+	-- (The provider holds still while its key is checked.)
+	expect((line_of(app, "#key-dialog-pi", "button", "Provider") or ""):find("disabled", 1, true) ~= nil).to_be(true)
+end)
+
+test("a key that's taken closes the dialog and lists by its default name, the key itself nowhere", function()
+	local app = open()
+	app:click('#account-add-key-pi >> role:button "Add API key"')
+	settle(app)
+	app:click('#key-dialog-pi >> role:button "Provider"')
+	settle(app)
+	app:click('role:menuitem "OpenRouter"')
+	settle(app)
+	app:type('#key-dialog-pi >> role:textbox "API key"', KEY)
+	app:key("Enter")
+	app:frames(60)
+	expect(app:state("groups_calls")).to_contain("add_key:pi:openrouter:ok")
+	expect(key_dialog_open(app)).to_be(false)
+	local row = "#account-row-key-openrouter-WXYZ"
+	-- Named for its provider and last four; its line says whose.
+	expect(shows(app, row, "OpenRouter ···WXYZ")).to_be(true)
+	expect(shows(app, row, "OpenRouter · API key ···WXYZ")).to_be(true)
+	expect(in_use(app, "key-openrouter-WXYZ")).to_be(true)
+	-- (A key has no plan: no meters on its row.)
+	expect(shows(app, row, "Session")).to_be(false)
+	expect(string.find(app:tree(), "ZEROTESTsecret", 1, true)).to_be(nil)
+	expect(string.find(app:state("groups_calls"), "ZEROTEST", 1, true)).to_be(nil)
+	-- Opened again: nothing typed is kept.
+	app:click('#account-add-key-pi >> role:button "Add API key"')
+	settle(app)
+	expect(string.find(app:tree(), "ZEROTESTsecret", 1, true)).to_be(nil)
+end)
+
+test("a key named as it's added, a second of one provider its own row, and a rename with no key asked", function()
+	local app = open()
+	local function add(key: string, name: string?)
+		app:click('#account-add-key-pi >> role:button "Add API key"')
+		settle(app)
+		app:click('#key-dialog-pi >> role:button "Provider"')
+		settle(app)
+		app:click('role:menuitem "OpenRouter"')
+		settle(app)
+		app:type('#key-dialog-pi >> role:textbox "API key"', key)
+		if name then
+			app:type('#key-dialog-pi >> role:textbox "Name"', name)
+		end
+		app:click('role:button "Save"')
+		app:frames(60)
+	end
+	add("sk-good-one-AAAA", "Work")
+	add("sk-good-two-BBBB", nil)
+	expect(shows(app, "#account-row-key-openrouter-AAAA", "Work")).to_be(true)
+	expect(shows(app, "#account-row-key-openrouter-AAAA", "OpenRouter · API key ···AAAA")).to_be(true)
+	expect(shows(app, "#account-row-key-openrouter-BBBB", "OpenRouter ···BBBB")).to_be(true)
+	-- Two keys of one provider: two rows, one in use.
+	expect(in_use(app, "key-openrouter-AAAA")).to_be(true)
+	expect(in_use(app, "key-openrouter-BBBB")).to_be(false)
+	-- Renamed from its menu: just its name.
+	app:click('#account-row-key-openrouter-BBBB >> role:button "Account actions"')
+	settle(app)
+	app:click('"Rename"')
+	settle(app)
+	local field = '#rename-dialog-pi >> role:textbox "Name"'
+	expect(app:has(field)).to_be(true)
+	expect(app:has('#rename-dialog-pi >> role:textbox "API key"')).to_be(false)
+	-- A name holding part of a key: refused, said why, still open.
+	app:key("cmd+a")
+	app:type(field, "my sk-good key")
+	app:click('role:button "Save"')
+	settle(app)
+	expect(shows(app, "#rename-dialog-pi", "part of the key")).to_be(true)
+	app:key("cmd+a")
+	app:type(field, "Personal")
+	app:click('role:button "Save"')
+	app:frames(60)
+	expect(app:state("groups_calls")).to_contain("rename:pi:key-openrouter-BBBB:Personal")
+	expect(shows(app, "#account-row-key-openrouter-BBBB", "Personal")).to_be(true)
+	-- (Logins aren't renamed: no Rename in their menu.)
+	app:click('#account-row-o1 >> role:button "Account actions"')
+	settle(app)
+	expect(line_of(app, PAGE, "menuitem", "Rename") == nil and line_of(app, "", "menuitem", "Rename") == nil).to_be(true)
+end)
+
+test("another device's agents take sign-ins, never keys", function()
+	local app = open()
+	app:command("groups.remote")
+	settle(app)
+	expect(app:has("#account-add-key-pi")).to_be(false)
+	expect(app:has('#account-add-pi-anthropic >> role:button "Add Claude account"')).to_be(true)
 end)
 
 test("switching a ChatGPT account moves the one in use within ChatGPT alone", function()
@@ -98,32 +247,48 @@ test("switching a ChatGPT account moves the one in use within ChatGPT alone", fu
 	app:click('"Switch to this account"')
 	settle(app)
 	expect(app:state("groups_calls")).to_contain("switch:pi:o2")
-	expect(count(app, PI_CHATGPT, "In use")).to_be(1)
-	expect(count(app, PI_CLAUDE, "In use")).to_be(1)
-	expect(shows(app, PI_CLAUDE, "ada@claude.test")).to_be(true)
+	expect(in_use(app, "o2")).to_be(true)
+	expect(in_use(app, "o1")).to_be(false)
+	expect(in_use(app, "c1")).to_be(true)
 end)
 
-test("Hermes' own pool is grouped and read-only, adding through Hermes", function()
+test("Switch is offered only to an account that can be put in use and isn't; a refusal is said", function()
 	local app = open()
-	local chatgpt = "#account-group-hermes-openai-codex"
-	expect(shows(app, chatgpt, "first@chatgpt.test")).to_be(true)
-	expect(count(app, chatgpt, "In use")).to_be(1)
-	-- No actions on Hermes' accounts: Hermes chooses among them itself.
+	-- In use already: no Switch.
+	app:click('#account-row-o1 >> role:button "Account actions"')
+	settle(app)
+	expect(line_of(app, "", "menuitem", "Switch to this account")).to_be(nil)
+	app:key("Escape")
+	settle(app)
+	-- Refused by the engine: a toast says why.
+	app:click('#account-row-o3 >> role:button "Account actions"')
+	settle(app)
+	app:click('"Switch to this account"')
+	settle(app)
+	expect(app:state("groups_calls")).to_contain("switch:pi:o3")
+	expect(app:has('"Couldn\'t switch accounts"')).to_be(true)
+	expect(app:has('~"no longer exists"')).to_be(true)
+end)
+
+test("Hermes' own pool is read-only, its add rows Hermes' own sign-ins and keys", function()
+	local app = open()
+	expect(in_use(app, "h1")).to_be(true)
 	expect(app:has('#account-row-h1 >> role:button "Account actions"')).to_be(false)
-	expect(app:has('#account-row-o1 >> role:button "Account actions"')).to_be(true)
-	expect(app:has(chatgpt .. ' >> role:button "Add ChatGPT account"')).to_be(true)
-	expect(shows(app, "#account-group-hermes-openrouter", "To add another OpenRouter account, run")).to_be(true)
-	expect(app:has('#account-connect-hermes-xai-oauth >> role:button "Connect xAI"')).to_be(true)
-	app:click('#account-connect-hermes-nous >> role:button "Connect Nous Portal"')
+	expect(shows(app, "#account-row-h3", "OPENROUTER_API_KEY")).to_be(true)
+	expect(shows(app, "#account-row-h3", "OpenRouter · API key ···k-or")).to_be(true)
+	expect(app:has('#account-add-hermes-nous >> role:button "Add Nous Portal account"')).to_be(true)
+	expect(app:has('#account-add-hermes-xai-oauth >> role:button "Add xAI account"')).to_be(true)
+	expect(app:has('#account-add-key-hermes >> role:button "Add API key"')).to_be(true)
+	app:click('#account-add-hermes-nous >> role:button "Add Nous Portal account"')
 	settle(app)
 	expect(app:state("groups_calls")).to_contain("sign_in_to:hermes:nous")
 end)
 
 test("an agent with one login looks as it always has", function()
 	local app = open()
-	expect(app:has('#account-group-claude-code-')).to_be(false)
+	expect(app:has("#account-add-key-claude-code")).to_be(false)
 	expect(shows(app, PAGE, "bo@example.com")).to_be(true)
-	app:click('role:button "Add account"')
-	settle(app)
-	expect(app:state("groups_calls")).to_contain("sign_in:claude-code")
+	-- (Claude Code's and Codex's foot: "Add account", as ever.)
+	local _, n = string.gsub(app:tree(PAGE), 'button "Add account"', "")
+	expect(n).to_be(2)
 end)

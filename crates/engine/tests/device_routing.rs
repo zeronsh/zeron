@@ -50,6 +50,14 @@ struct RelayState {
 }
 
 async fn fake_device_room() -> (String, tokio::task::JoinHandle<()>) {
+    fake_device_room_recording(None).await
+}
+
+/// [`fake_device_room`], keeping every frame's bytes that passes through
+/// it in `seen` (what the edge's relay would have had in memory).
+async fn fake_device_room_recording(
+    seen: Option<Arc<Mutex<Vec<u8>>>>,
+) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
     let url = format!(
         "http://127.0.0.1:{}",
@@ -62,6 +70,7 @@ async fn fake_device_room() -> (String, tokio::task::JoinHandle<()>) {
                 break;
             };
             let state = state.clone();
+            let seen = seen.clone();
             tokio::spawn(async move {
                 let mut uri = String::new();
                 let Ok(ws) = tokio_tungstenite::accept_hdr_async(
@@ -103,6 +112,9 @@ async fn fake_device_room() -> (String, tokio::task::JoinHandle<()>) {
                     let WsMessage::Binary(bytes) = message else {
                         continue;
                     };
+                    if let Some(seen) = &seen {
+                        seen.lock().expect("lock").extend_from_slice(&bytes);
+                    }
                     let Ok((header, payload)) = decode_device_frame(&bytes) else {
                         break;
                     };
@@ -2831,4 +2843,165 @@ async fn device_stats_of_a_device_that_never_answers_stop_at_the_deadline() {
     let took = started.elapsed();
     assert!(took >= Duration::from_millis(4900) && took < Duration::from_secs(7), "took {took:?}");
     assert!(error.contains("stuck-name didn't answer within 5 s") && error.contains("last seen"), "{error}");
+}
+
+
+/// An agent with a login per model provider, on another device: its
+/// accounts listed and switched there per provider, and a sign-in to one
+/// provider started there with the provider riding along. An API key is
+/// never carried there: refused here before anything is sent, refused there
+/// if a peer sends one anyway, and in no file, frame or log on either side.
+#[tokio::test]
+async fn per_provider_accounts_are_managed_on_the_device_that_runs_the_agent() {
+    use zeron_engine::{AgentAccounts, AgentAccountsConfig};
+    const KEY: &str = "sk-or-v1-REMOTEZEROTESTkey0123456789abcd";
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (relay_url, _relay) = fake_device_room_recording(Some(seen.clone())).await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let jwt = |email: &str, account: &str| {
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": account, "chatgpt_plan_type": "plus" },
+            "https://api.openai.com/profile": { "email": email },
+        });
+        format!("e30.{}.sig", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string()))
+    };
+    let chatgpt = |email: &str, account: &str| {
+        serde_json::json!({ "type": "oauth", "access": jwt(email, account),
+            "refresh": format!("refresh-{account}"), "expires": 1, "accountId": account })
+    };
+    // B: Pi with two ChatGPT logins seen (b in use) and an Anthropic key.
+    // Every agent store in a temp dir — never this machine's.
+    let accounts_b = AgentAccountsConfig::isolated(&dirs.path().join("b-agents"));
+    let pi_b = accounts_b.pi_agent_dir.join("auth.json");
+    let mut core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b.agent_accounts = AgentAccounts::new(accounts_b.clone());
+    let anthropic_key = serde_json::json!({ "type": "api_key", "key": "sk-ant-api03-keepKEEPkeep" });
+    let write_pi = |entry: serde_json::Value| {
+        std::fs::create_dir_all(pi_b.parent().unwrap()).unwrap();
+        std::fs::write(
+            &pi_b,
+            serde_json::json!({ "openai-codex": entry, "anthropic": anthropic_key }).to_string(),
+        )
+        .unwrap();
+    };
+    write_pi(chatgpt("a@example.com", "acct-a"));
+    core_b.agent_accounts.list(false).await.expect("seed a");
+    write_pi(chatgpt("b@example.com", "acct-b"));
+    let _host = core_b.start_host_relay(&relay_url);
+
+    let mut core_a = assemble(&dirs.path().join("a"), "device-a");
+    core_a.agent_accounts = AgentAccounts::new(AgentAccountsConfig::isolated(&dirs.path().join("a-agents")));
+    let mut link_config =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+    let remote = |extra: serde_json::Value| {
+        let mut params = serde_json::json!({ "targetDeviceId": "device-b" });
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        params
+    };
+
+    // B's accounts, through the relay: grouped by provider, one in use each.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let listed = loop {
+        match client.call(methods::LIST_AGENT_ACCOUNTS, remote(serde_json::json!({}))).await {
+            Ok(value) => break value,
+            Err(error) => {
+                assert!(tokio::time::Instant::now() < deadline, "relay never came up: {error}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let pi: Vec<serde_json::Value> = listed["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["harness"] == "pi")
+        .cloned()
+        .collect();
+    let in_use = |rows: &[serde_json::Value], provider: &str| -> Vec<String> {
+        rows.iter()
+            .filter(|a| a["provider"] == provider && a["active"] == true)
+            .map(|a| a["email"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(in_use(&pi, "openai-codex"), ["b@example.com"]);
+    assert_eq!(in_use(&pi, "anthropic"), ["Anthropic ···keep"]);
+    assert!(!listed.to_string().contains("keepKEEPkeep"), "a key's secret never leaves B");
+
+    // Switch B's ChatGPT account from A: B's ChatGPT entry alone changes.
+    let a_id = pi.iter().find(|a| a["email"] == "a@example.com").unwrap()["id"].clone();
+    let switched = client
+        .call(
+            methods::ACTIVATE_AGENT_ACCOUNT,
+            remote(serde_json::json!({ "harness": "pi", "accountId": a_id })),
+        )
+        .await
+        .expect("remote switch");
+    let live: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pi_b).unwrap()).unwrap();
+    assert_eq!(live["openai-codex"]["accountId"], "acct-a");
+    assert_eq!(live["anthropic"], anthropic_key);
+    let pi: Vec<serde_json::Value> = switched["accounts"].as_array().unwrap().iter().filter(|a| a["harness"] == "pi").cloned().collect();
+    assert_eq!(in_use(&pi, "openai-codex"), ["a@example.com"]);
+    assert_eq!(in_use(&pi, "anthropic"), ["Anthropic ···keep"]);
+
+    // A sign-in for one provider of B's agent, from A: the provider rides
+    // along to B's own handler (B answers for that provider: OpenCode has
+    // no Claude sign-in, and B says what works instead). The loopback
+    // sign-ins themselves then finish through the P2P callback tunnel, and
+    // the browser callback B replays (`relay_callback`) — covered for Pi's
+    // Claude in agent_accounts' `claude_for_pi_signs_in_…_for_another`.
+    let refused = client
+        .call(
+            methods::START_AGENT_LOGIN,
+            remote(serde_json::json!({ "harness": "opencode", "provider": "anthropic" })),
+        )
+        .await
+        .expect_err("B refuses a provider its OpenCode can't sign in to");
+    assert!(refused.to_string().contains("Anthropic API key"), "{refused}");
+
+    // An API key for B's Pi, asked of A: refused here, nothing sent.
+    let before = seen.lock().unwrap().len();
+    let refused = client
+        .call(
+            methods::ADD_AGENT_API_KEY,
+            remote(serde_json::json!({ "harness": "pi", "provider": "openrouter", "key": KEY })),
+        )
+        .await
+        .expect_err("a key is never carried to another device");
+    assert!(refused.to_string().contains("device that runs the agent"), "{refused}");
+    assert!(!refused.to_string().contains(KEY));
+    assert_eq!(seen.lock().unwrap().len(), before, "nothing went to the relay");
+    // A peer that sends one through the relay anyway is refused by B.
+    let mut peer_config =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    peer_config.probe_timeout = Duration::from_secs(5);
+    let peer_links = LinkCache::new(peer_config);
+    let peer = peer_links.client("device-b").await.expect("peer link");
+    let refused = peer
+        .call(
+            methods::ADD_AGENT_API_KEY,
+            serde_json::json!({ "harness": "pi", "provider": "openrouter", "key": KEY }),
+        )
+        .await
+        .expect_err("B answers keys over its own IPC only");
+    assert!(refused.to_string().contains("local IPC"), "{refused}");
+    let live: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pi_b).unwrap()).unwrap();
+    assert!(live.get("openrouter").is_none());
+    // In no file on either device (their data, docs, journals, slots and
+    // the agents' stores).
+    fn holds(dir: &std::path::Path, needle: &str) -> bool {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                holds(&path, needle)
+            } else {
+                std::fs::read(&path).is_ok_and(|bytes| {
+                    bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+                })
+            }
+        })
+    }
+    assert!(!holds(dirs.path(), KEY), "the key is in a file");
 }

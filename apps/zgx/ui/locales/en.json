@@ -884,7 +884,8 @@
       "not_found": "No models found",
       "not_found_hint": "Nothing in {where} matches “{q}”",
       "where_starred": "starred models",
-      "where_models": "models"
+      "where_models": "models",
+      "add_key": "Add {name} API key"
     },
     "effort_slider": {
       "reasoning": "Reasoning"
@@ -971,7 +972,22 @@
       "paste_key_hint": "{name} reads it as {var}. It's kept on this device and never shown again.",
       "key_name": "{var}",
       "get_key": "Get a key",
-      "save_key": "Save"
+      "save_key": "Save",
+      "add_named_account": "Add {name} account",
+      "add_api_key": "Add API key",
+      "key_offline": "Zeron's engine isn't answering — try again in a moment.",
+      "key_remote": "API keys are added on the computer that runs {name}.",
+      "key_failed": "The key couldn't be added — try again.",
+      "key_title": "Add API key",
+      "key_provider": "Provider",
+      "key_body": "{agent} uses this key for {name} models.",
+      "key_field": "API key",
+      "key_kept": "Stored on this Mac in {agent}'s settings.",
+      "key_name_label": "Name",
+      "key_name_placeholder": "Work, Personal…",
+      "rename": "Rename",
+      "rename_title": "Rename API key",
+      "rename_hint": "Leave it blank for its default name."
     },
     "command_palette": {
       "scope": {
@@ -1613,7 +1629,8 @@
           "label": "{name}'s sign-in"
         },
         "remove_row_description": "Chats that used it stay."
-      }
+      },
+      "couldnt_switch": "Couldn't switch accounts"
     },
     "devices": {
       "title": "Devices",

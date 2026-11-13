@@ -884,7 +884,8 @@
       "not_found": "未找到模型",
       "not_found_hint": "{where}中没有与“{q}”匹配的内容",
       "where_starred": "已加星标的模型",
-      "where_models": "模型"
+      "where_models": "模型",
+      "add_key": "添加 {name} API 密钥"
     },
     "effort_slider": {
       "reasoning": "推理强度"
@@ -971,7 +972,22 @@
       "paste_key_hint": "{name} 以 {var} 读取它。它保存在此设备上，不会再次显示。",
       "key_name": "{var}",
       "get_key": "获取密钥",
-      "save_key": "保存"
+      "save_key": "保存",
+      "add_named_account": "添加 {name} 账户",
+      "add_api_key": "添加 API 密钥",
+      "key_offline": "Zeron 引擎没有响应——请稍后再试。",
+      "key_remote": "API 密钥需在运行 {name} 的电脑上添加。",
+      "key_failed": "无法添加该密钥——请重试。",
+      "key_title": "添加 API 密钥",
+      "key_provider": "提供方",
+      "key_body": "{agent} 会用这个密钥调用 {name} 的模型。",
+      "key_field": "API 密钥",
+      "key_kept": "保存在这台 Mac 上 {agent} 的设置中。",
+      "key_name_label": "名称",
+      "key_name_placeholder": "工作、个人…",
+      "rename": "重命名",
+      "rename_title": "重命名 API 密钥",
+      "rename_hint": "留空则使用默认名称。"
     },
     "command_palette": {
       "scope": {
@@ -1613,7 +1629,8 @@
           "label": "{name} 的登录"
         },
         "remove_row_description": "使用过它的对话会保留。"
-      }
+      },
+      "couldnt_switch": "无法切换账户"
     },
     "devices": {
       "title": "设备",

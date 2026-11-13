@@ -6,11 +6,13 @@
 -- keeps one login, as ever. The groups are published as the host words
 -- them (src/agents.rs `provider_groups`), and account/agents' calls are
 -- answered as it would: `sign_in_to` starts that provider's sign-in,
--- `switch` moves the one in use within its provider's group alone. What
+-- `switch` moves the one in use within its provider's group alone,
+-- `add_key` takes a key starting "sk-good" and refuses any other. What
 -- was asked, in order, is `groups_calls`. Here, beside app.luau, as a
 -- mounted script loads modules from its own directory down.
 --
 --   groups.copilot_lands   the Copilot sign-in under way lands: its account
+--   groups.remote          the page shows another device's agents
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -37,6 +39,14 @@ local function account(id: string, email: string, plan: string, provider: string
 	}
 end
 
+-- An API key's row: no plan, no windows.
+local function key_account(a: any): any
+	a.key = true
+	a.session = 0
+	a.week = 0
+	return a
+end
+
 local function agent(id: string, name: string, mark: string, accounts: { any }): any
 	return {
 		id = id,
@@ -52,21 +62,33 @@ local function agent(id: string, name: string, mark: string, accounts: { any }):
 	}
 end
 
--- Each per-provider agent's providers, in the host's order: Zeron's own
--- sign-ins first (`add`, as the host words it with and without accounts),
--- then any other its accounts are on (`hint`: how the agent adds one).
-type Provider = { id: string, name: string, add: { string }?, hint: string? }
+-- Each per-provider agent's providers, in the host's order (src/agents.rs
+-- `provider_groups`): who Zeron signs you in to for each (`login`), who
+-- issues the key it adds (`key`), and how the agent adds one where Zeron
+-- can do neither (`hint`).
+type Provider = { id: string, name: string, login: string?, key: string?, hint: string? }
 local PROVIDERS: { [string]: { Provider } } = {
 	pi = {
-		{ id = "openai-codex", name = "ChatGPT", add = { "Connect ChatGPT", "Add ChatGPT account" } },
-		{ id = "github-copilot", name = "GitHub Copilot", add = { "Connect GitHub Copilot", "Add GitHub Copilot account" } },
-		{ id = "anthropic", name = "Claude", hint = "To add another Claude account, run /login in Pi." },
+		{ id = "openai-codex", name = "ChatGPT", login = "ChatGPT" },
+		{ id = "anthropic", name = "Anthropic", login = "Claude", key = "Anthropic" },
+		{ id = "github-copilot", name = "GitHub Copilot", login = "GitHub Copilot" },
+		{ id = "openai", name = "OpenAI", key = "OpenAI" },
+		{ id = "openrouter", name = "OpenRouter", key = "OpenRouter" },
+		{ id = "google", name = "Google Gemini", key = "Google Gemini" },
+		{ id = "xai", name = "xAI", key = "xAI" },
+		{ id = "deepseek", name = "DeepSeek", key = "DeepSeek" },
+		{ id = "kimi-coding", name = "Kimi" },
 	},
 	hermes = {
-		{ id = "openai-codex", name = "ChatGPT", add = { "Connect ChatGPT", "Add ChatGPT account" } },
-		{ id = "nous", name = "Nous Portal", add = { "Connect Nous Portal", "Add Nous Portal account" } },
-		{ id = "xai-oauth", name = "xAI", add = { "Connect xAI", "Add xAI account" } },
-		{ id = "openrouter", name = "OpenRouter", hint = "To add another OpenRouter account, run `hermes auth add openrouter`." },
+		{ id = "openai-codex", name = "ChatGPT", login = "ChatGPT" },
+		{ id = "nous", name = "Nous Portal", login = "Nous Portal" },
+		{ id = "xai-oauth", name = "xAI", login = "xAI" },
+		{ id = "anthropic", name = "Anthropic", key = "Anthropic" },
+		{ id = "openai-api", name = "OpenAI", key = "OpenAI" },
+		{ id = "openrouter", name = "OpenRouter", key = "OpenRouter" },
+		{ id = "gemini", name = "Google Gemini", key = "Google Gemini" },
+		{ id = "xai", name = "xAI", key = "xAI" },
+		{ id = "deepseek", name = "DeepSeek", key = "DeepSeek" },
 	},
 }
 
@@ -74,15 +96,21 @@ local model: { any } = {
 	agent("claude-code", "Claude Code", "claude", {
 		account("cl1", "bo@example.com", "Max", nil, true),
 	}),
+	agent("codex", "Codex", "openai", {
+		account("cx1", "ada@example.com", "Pro", nil, true),
+		account("cx2", "work@example.com", "Plus", nil, false),
+	}),
 	agent("pi", "Pi", "pi", {
 		account("o1", "ada@chatgpt.test", "ChatGPT Plus", "openai-codex", true),
 		account("c1", "ada@claude.test", "Claude Max", "anthropic", true),
 		account("o2", "work@chatgpt.test", "ChatGPT Pro", "openai-codex", false),
+		account("o3", "old@chatgpt.test", "ChatGPT Plus", "openai-codex", false),
+		account("k9", "kimi@example.test", "Kimi", "kimi-coding", true),
 	}),
 	agent("hermes", "Hermes", "hermes", {
 		account("h1", "first@chatgpt.test", "ChatGPT Pro", "openai-codex", true, false),
 		account("h2", "second@chatgpt.test", "ChatGPT Plus", "openai-codex", false, false),
-		account("h3", "OPENROUTER_API_KEY", "OpenRouter", "openrouter", true, false),
+		key_account(account("h3", "OPENROUTER_API_KEY", "OpenRouter · API key ···k-or", "openrouter", true, false)),
 	}),
 }
 
@@ -109,12 +137,13 @@ local function groups_of(a: any, accounts: { any }): { any }?
 				table.insert(mine, acc)
 			end
 		end
-		if #mine > 0 or p.add then
+		if #mine > 0 or p.login or p.key then
 			table.insert(out, {
 				id = p.id,
 				name = p.name,
 				accounts = mine,
-				add = if p.add then (if #mine == 0 then p.add[1] else p.add[2]) else nil,
+				login = p.login,
+				key = p.key,
 				hint = if #mine > 0 then p.hint else nil,
 				read_only = a.id == "hermes",
 			})
@@ -122,6 +151,9 @@ local function groups_of(a: any, accounts: { any }): { any }?
 	end
 	return out
 end
+
+-- Whose agents show: this Mac's (nil), or another device's (`groups.remote`).
+local target = ui.state("groups_target", nil :: string?)
 
 local function publish()
 	local list = {}
@@ -135,7 +167,7 @@ local function publish()
 		item.groups = groups_of(a, accounts)
 		table.insert(list, item)
 	end
-	agents.now:set({ state = "ready", list = list } :: any)
+	agents.now:set({ state = "ready", list = list, target = target:peek() } :: any)
 end
 
 local said: { string } = {}
@@ -175,8 +207,16 @@ stub.dismiss = function(id: string)
 	a.login_for = nil
 	publish()
 end
-stub.switch = function(id: string, account_id: string)
+-- A switch: o3's is refused, in the engine's words; any other taken.
+stub.switch = function(id: string, account_id: string): any
 	note(`switch:{id}:{account_id}`)
+	if account_id == "o3" then
+		return {
+			after = function(_: any, _done: (any) -> (), failed: (any) -> ())
+				failed({ message = "That saved login no longer exists — refresh and try again." })
+			end,
+		}
+	end
 	local a = find(id)
 	local provider: string? = nil
 	for _, acc in a.accounts do
@@ -190,17 +230,83 @@ stub.switch = function(id: string, account_id: string)
 		end
 	end
 	publish()
+	return { after = function(_: any, done: (any) -> ()) done(nil) end }
+end
+-- A key's name: an empty one its default; one holding "sk-" refused (as the
+-- engine refuses a name with part of the key in it).
+stub.rename = function(id: string, account_id: string, name: string): any
+	note(`rename:{id}:{account_id}:{name}`)
+	local refused = string.find(name, "sk-", 1, true) ~= nil
+	if not refused then
+		for _, acc in find(id).accounts do
+			if acc.id == account_id then
+				acc.email = if name == "" then string.match(acc.plan, "^(.-) ·") .. " ···" .. string.sub(acc.plan, -4) else name
+			end
+		end
+		publish()
+	end
+	return {
+		after = function(_: any, done: (any) -> (), failed: (any) -> ())
+			if refused then
+				failed({ message = "That name holds part of the key — name it something else." })
+			else
+				done(nil)
+			end
+		end,
+	}
 end
 stub.remove = function(id: string, account_id: string)
 	note(`remove:{id}:{account_id}`)
 end
 stub.set_enabled = function() end
+-- A key: one starting "sk-good" is taken (its row, by its last four); one
+-- starting "sk-slow" is still being checked (for as long as the test
+-- likes); anything else is refused in the provider's words. What was typed
+-- is never noted: only that a key was added, and for which provider.
+-- (Who each provider is, as the host names it in a row.)
+local VENDOR_NAME = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google Gemini", gemini = "Google Gemini", xai = "xAI", deepseek = "DeepSeek" }
+local VENDOR = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google", gemini = "Google", xai = "xAI", deepseek = "DeepSeek" }
+stub.add_key = function(id: string, provider: string, key: string, name: string?): any
+	if string.sub(key, 1, 7) == "sk-slow" then
+		note(`add_key:{id}:{provider}:checking`)
+		return { after = function() end }
+	end
+	local ok = string.sub(key, 1, 7) == "sk-good"
+	note(`add_key:{id}:{provider}:{if ok then "ok" else "refused"}`)
+	if ok then
+		local a = find(id)
+		local live = true
+		for _, acc in a.accounts do
+			if acc.provider == provider and acc.active then
+				live = false
+			end
+		end
+		local who = VENDOR_NAME[provider] or provider
+		local tail = string.sub(key, -4)
+		table.insert(a.accounts, key_account(account(`key-{provider}-{tail}`, name or `{who} ···{tail}`, `{who} · API key ···{tail}`, provider, live)))
+		publish()
+	end
+	return {
+		after = function(_: any, done: (any) -> (), failed: (any) -> ())
+			if ok then
+				done(nil)
+			else
+				failed({ message = `{VENDOR[provider] or provider} didn't accept that key — check it and try again.` })
+			end
+		end,
+	}
+end
 
 ui.command {
 	id = "groups.copilot_lands",
 	title = "The Copilot sign-in lands",
 	run = function()
 		local pi = find("pi")
+		for _, acc in pi.accounts do
+			if acc.id == "g1" then
+				return
+			end
+		end
 		table.insert(pi.accounts, account("g1", "octo", "GitHub Copilot", "github-copilot", true))
 		pi.login = "idle"
 		pi.login_for = nil
@@ -208,12 +314,42 @@ ui.command {
 	end,
 }
 
+ui.command {
+	id = "groups.clear_keys",
+	title = "Forget the keys added here",
+	run = function()
+		for _, a in model do
+			local kept = {}
+			for _, acc in a.accounts do
+				if not (acc.key and string.sub(acc.id, 1, 4) == "key-") then
+					table.insert(kept, acc)
+				end
+			end
+			a.accounts = kept
+		end
+		publish()
+	end,
+}
+ui.command {
+	id = "groups.remote",
+	title = "Show another device's agents",
+	run = function()
+		target:set("box")
+		publish()
+	end,
+}
+
 publish()
 
-return ui.scroll {
-	id = "page",
+return ui.column {
 	w_full = true,
 	h_full = true,
-	bg = "$zeron.window",
-	ui.column { w_full = true, px = "$space.6", py = "$space.6", providers.view() },
+	ds.toast.Host {},
+	ui.scroll {
+		id = "page",
+		w_full = true,
+		h_full = true,
+		bg = "$zeron.window",
+		ui.column { w_full = true, px = "$space.6", py = "$space.6", providers.view() },
+	},
 }

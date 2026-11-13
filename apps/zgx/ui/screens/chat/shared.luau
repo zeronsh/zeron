@@ -1081,8 +1081,8 @@ function M.model_accounts(device: () -> string?): any
 			if not provider or not per_provider(harness, listed(harness)) then
 				return nil
 			end
-			local login = (agents.logins:get()[harness] or {})[provider]
-			local name = if login then login.name else nil
+			local offer = (agents.logins:get()[harness] or {})[provider]
+			local name = if offer then offer.name else nil
 			for _, a in listed(harness) or {} do
 				if not name and a.provider == provider then
 					name = a.group
@@ -1091,18 +1091,32 @@ function M.model_accounts(device: () -> string?): any
 			if not name then
 				return nil
 			end
-			return {
-				name = name,
-				add = if login then login.add else nil,
-				on_add = if login
-					then function()
-						local key = account_key(device())
+			local key = account_key(device())
+			-- Another account: a sign-in, on the composer's device; else an
+			-- API key, typed in Settings — on this Mac alone (a key never
+			-- travels to another device).
+			if offer and offer.login then
+				return {
+					name = name,
+					add = locale.s("ds.provider_card.add_named_account", { name = offer.login }),
+					on_add = function()
 						agents.target(if key == "" then nil else key)
 						route.settings("providers")
 						agents.sign_in_to(harness, provider)
-					end
-					else nil,
-			}
+					end,
+				}
+			elseif offer and offer.key and key == "" then
+				return {
+					name = name,
+					add = locale.s("ds.model_picker.add_key", { name = offer.key }),
+					on_add = function()
+						agents.target(nil)
+						route.settings("providers")
+						agents.key_request:set(`{harness}:{provider}`)
+					end,
+				}
+			end
+			return { name = name }
 		end,
 		on_account = function(harness: string, id: string)
 			agents.switch_on(account_key(device()), harness, id):after(function() end, function()

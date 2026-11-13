@@ -40,7 +40,9 @@ local M = {}
 -- `keep_open`: the confirm leaves it open (the caller closes it once its
 -- work is done); `busy`, while true, the confirm spins in its label's
 -- place and takes no click (an install on its way).
-export type Action = { label: string | Message | () -> string, on_click: (() -> ())?, keep_open: boolean?, busy: (() -> boolean)? }
+-- `disabled`, while true, the confirm takes no click and no Enter (nothing
+-- typed yet).
+export type Action = { label: string | Message | () -> string, on_click: (() -> ())?, keep_open: boolean?, busy: (() -> boolean)?, disabled: (() -> boolean)? }
 export type DialogProps = {
 	open: State<boolean>,
 	title: string | Message | () -> string,
@@ -150,6 +152,10 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 	local danger = props.tone == "danger"
 	local typed = ui.use_state("")
 	local function ready(): boolean
+		local confirm = props.confirm
+		if confirm and confirm.disabled and confirm.disabled() then
+			return false
+		end
 		return props.confirm_text == nil or typed:get() == props.confirm_text
 	end
 	local function go()

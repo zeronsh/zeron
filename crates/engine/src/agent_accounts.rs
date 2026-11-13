@@ -112,6 +112,7 @@ pub struct RelayedCallback {
     pub location: Option<String>,
 }
 
+mod api_keys;
 mod muse;
 mod pins;
 mod oauth;
@@ -735,6 +736,9 @@ struct ProbeEndpoints {
     /// A Copilot session's API root (`/models`): `None` in production, where
     /// it's read from the session token itself.
     copilot_api: Option<String>,
+    /// Where API keys are checked: `None` in production (each provider's
+    /// own host, `api_keys::key_check`), a mock in tests.
+    api_key_check: Option<String>,
     /// OpenAI's OAuth root (`/oauth/authorize`, `/oauth/token`).
     openai_auth: String,
     /// The ChatGPT sign-in's loopback port — FIXED at 1455 by the client
@@ -763,6 +767,7 @@ impl Default for ProbeEndpoints {
             github_api: "https://api.github.com".into(),
             github_login: "https://github.com".into(),
             copilot_api: None,
+            api_key_check: None,
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
@@ -1049,6 +1054,15 @@ impl AgentAccounts {
             live(*harness, detected);
             self.snapshot_detected(*harness, detected)?;
         }
+        if self.opencode_keeps_its_own_store() {
+            warnings.push(AgentAccountWarning {
+                harness: HarnessId::Opencode,
+                message: "This OpenCode keeps its logins in its own database: switching or adding \
+                          them here doesn't reach it yet — use `opencode auth switch` / \
+                          `opencode auth login`."
+                    .into(),
+            });
+        }
         if let Some(message) = stores::opencode_env_warning() {
             warnings.push(AgentAccountWarning {
                 harness: HarnessId::Opencode,
@@ -1254,7 +1268,7 @@ impl AgentAccounts {
                 let key = slot.store_key.as_deref().ok_or_else(|| {
                     EngineError::Other("That saved login names no provider.".into())
                 })?;
-                self.write_keyed_entry(harness, key, Some(&slot.credentials))?;
+                self.swap_keyed(harness, key, &slot).await?;
             }
             other => {
                 return Err(EngineError::Other(format!(
@@ -1264,6 +1278,37 @@ impl AgentAccounts {
         }
         *lock(&self.inner.claude_credentials) = None;
         self.list_locked(false).await
+    }
+
+    /// Point OpenCode's / Pi's entry for `key` at `slot`'s login, under the
+    /// agent's own lock (Pi's is the one it refreshes under). The entry it
+    /// replaces is the live login the list just saved into its slot — but
+    /// the agent may have refreshed it since, and Claude's and ChatGPT's
+    /// refresh tokens are single-use: the replaced entry, read under the
+    /// lock, goes into its slot, so switching back never installs a spent
+    /// grant.
+    async fn swap_keyed(&self, harness: HarnessId, key: &str, slot: &Slot) -> Result<(), EngineError> {
+        let live = self.live_account_key(harness, Some(key)).await;
+        let live_slot = live
+            .filter(|account| *account != slot.account_key)
+            .and_then(|account| self.read_slot(harness, &slot_id_for(harness, &account)));
+        let mut rotated: Option<serde_json::Value> = None;
+        self.swap_keyed_entry(harness, key, &slot.credentials, &mut |old| {
+            rotated = match (old, &live_slot) {
+                (Some(old), Some(live))
+                    if old != &live.credentials && same_login(old, &live.credentials) =>
+                {
+                    Some(old.clone())
+                }
+                _ => None,
+            };
+        })?;
+        if let (Some(credentials), Some(mut live)) = (rotated, live_slot) {
+            live.credentials = credentials;
+            live.saved_at = now_ms();
+            self.write_slot(&live)?;
+        }
+        Ok(())
     }
 
     /// Claude Code's own refresh lock (see
@@ -1673,6 +1718,7 @@ impl AgentAccounts {
                         .await?
                 }
                 "github-copilot" => self.start_copilot_login(HarnessId::Pi).await?,
+                "anthropic" => self.start_pi_claude_login().await?,
                 other => return Err(stores::unsupported_login(harness, other)),
             },
             HarnessId::Hermes => {
@@ -3889,6 +3935,14 @@ fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String>
     )
     .then(|| store_key.map(str::to_string))
     .flatten()
+}
+
+/// Whether two per-provider entries are one login at two moments (its
+/// tokens refreshed between): both OAuth, and naming the same ChatGPT
+/// account where they name one. Two keys are never one login.
+fn same_login(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    let oauth = |e: &serde_json::Value| e.get("type").and_then(|t| t.as_str()) == Some("oauth");
+    oauth(a) && oauth(b) && str_field(a, "accountId") == str_field(b, "accountId")
 }
 
 fn harness_slug(harness: HarnessId) -> &'static str {
