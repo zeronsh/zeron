@@ -967,6 +967,7 @@ pub(super) fn progress_result(reply: &Value, title: Option<&str>, now: chrono::D
         "etaSecs": progress.eta_secs.map(|e| (e as i64 - (now - progress.updated_at).num_seconds()).max(0)),
         "noteAt": progress.note_at,
         "refreshing": progress.refreshing,
+        "proxy": progress.proxy,
         "summary": progress.for_agent(now),
     }))
 }

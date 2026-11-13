@@ -187,6 +187,17 @@ change, never deleted (`crates/engine/src/orchestration/progress.rs`).
   they started, an orchestrator's crew; the Brain dump any): the row with its note made fresh now.
   For a chat hosted on another device it queues a `ProgressCheck` command in that chat's doc (its host
   makes the note; the agent never sees it) and replies with the synced row and `refreshing: true`.
+- **Progress by proxy** (`progress/proxy.rs`): a host advertises `orchestration-progress-v1` in its
+  device row. A chat on a host without it (an older build writes no row and ignores
+  `ProgressCheck`) has its progress worked out by the engine someone watches from, while
+  `WatchProgress` has a subscriber and only for chats working (or waiting to go on) or finished in
+  the last 24 h. It is made from the synced session row and transcript (the newest todo list for
+  steps and the current item, the newest unresolved tool call for what's running; a change counts
+  as a step when it's seen). A working chat's transcript is read at most every 10 s; finished ones
+  come from their session row alone. These rows are never written to the registry (several devices
+  may watch, and none is the host). They ride `WatchProgress` with `proxy: true`. `progressCheck`
+  on such a chat makes the note here from the synced transcript, with the same instructions, limits
+  and redaction; there are no automatic notes.
 - **`progress(chat)`** MCP tool for every role: the clocks as numbers and the note fenced. The
   orchestrator prompt says to check crew with it, never by messaging them.
 - **Brain dump**: a question about how a thread is going is checked with `progress` and routed as a
@@ -293,7 +304,7 @@ orchestration.comms:get() = { { id, kind, from, to, summary, at } }   -- newest 
 -- WatchProgress (suggested shape for the UI stream):
 orchestration.progress:get() = { [chat_id] = { state, device_id, started?, last_step?, step?,
                                   steps? = { done, total }, note?, note_at?, stalled, tool?, tool_since?,
-                                  refreshing, eta_secs?, updated } }
+                                  refreshing, proxy, eta_secs?, updated } }
 ```
 
 Enum strings are snake_case (`brain_dump`, `needs_you`, `new_orchestrator`…). Chats come from

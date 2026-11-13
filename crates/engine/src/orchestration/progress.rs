@@ -277,6 +277,15 @@ impl Tracker {
         }
     }
 
+    /// A step seen before this engine followed the chat (a proxy's first
+    /// read of the transcript), when it knows of none since the stretch
+    /// began.
+    pub(crate) fn seed_step(&mut self, at: DateTime<Utc>) {
+        if self.last_step_at.is_none() && self.started_at.is_none_or(|start| at >= start) {
+            self.last_step_at = Some(at);
+        }
+    }
+
     pub(crate) fn set_note(&mut self, note: String, at: DateTime<Utc>) {
         self.note = Some(note);
         self.note_at = Some(at);
@@ -382,6 +391,7 @@ impl Tracker {
             tool: tool.map(|(label, _)| live_label(label)).filter(|l| !l.is_empty()),
             tool_since: tool.map(|(_, since)| since),
             refreshing: false,
+            proxy: false,
             eta_secs: self.eta_secs(now),
             updated_at: now,
         }
@@ -649,6 +659,7 @@ pub(crate) struct ProgressBook {
     chats: Mutex<HashMap<String, Entry>>,
     auto_notes: std::sync::atomic::AtomicBool,
     note_fn: Mutex<Option<NoteFn>>,
+    proxies: proxy::Proxies,
 }
 
 impl Default for ProgressBook {
@@ -659,6 +670,7 @@ impl Default for ProgressBook {
             chats: Mutex::new(HashMap::new()),
             auto_notes: std::sync::atomic::AtomicBool::new(!off),
             note_fn: Mutex::new(None),
+            proxies: proxy::Proxies::default(),
         }
     }
 }
@@ -872,17 +884,38 @@ impl ProgressBook {
             let entry = chats.get(chat_id)?;
             (entry.tracker.snapshot(now), entry.tracker.started_at())
         };
+        let note = self.note_from(orch, &rpc, chat_id, &entries, &progress, started, now).await;
+        if note.is_none() {
+            tracing::debug!(chat = %chat_id, ?why, "progress note: nothing written");
+        }
+        Some((note, fp))
+    }
+
+    /// A note for `chat_id` from its transcript `entries` and `progress`:
+    /// the prompt (quoted data) through the cheap one-shot run on the chat's
+    /// harness, cleaned.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn note_from(
+        &self,
+        orch: &Orchestration,
+        rpc: &EngineRpc,
+        chat_id: &str,
+        entries: &[SessionMessageEntry],
+        progress: &Progress,
+        started: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
         let item = orch
             .crew_of(chat_id)
             .and_then(|m| m.item_id)
             .and_then(|id| orch.item(&id))
             .map(|i| redacted(&format!("{}: {}", i.title, i.detail), GOAL_MAX_CHARS));
         let prompt = note_prompt(
-            &request_of(&entries, started),
+            &request_of(entries, started),
             item.as_deref(),
-            &todo_items(&entries),
-            &transcript_tail(&entries, TAIL_MAX_CHARS),
-            &progress,
+            &todo_items(entries),
+            &transcript_tail(entries, TAIL_MAX_CHARS),
+            progress,
             now,
         );
         let harness = rpc
@@ -892,12 +925,13 @@ impl ProgressBook {
             .flatten()
             .and_then(|c| c.config.map(|c| c.harness))
             .unwrap_or_else(|| rpc.doc_host_ref().default_harness());
-        let raw = self.one_shot(&rpc)(harness, prompt).await;
-        let note = raw.map(|r| progress_note(&r)).filter(|n| !n.is_empty());
-        if note.is_none() {
-            tracing::debug!(chat = %chat_id, ?why, "progress note: nothing written");
-        }
-        Some((note, fp))
+        let raw = self.one_shot(rpc)(harness, prompt).await;
+        raw.map(|r| progress_note(&r)).filter(|n| !n.is_empty())
+    }
+
+    /// Chats on hosts that predate progress, worked out here.
+    pub(crate) fn proxies(&self) -> &proxy::Proxies {
+        &self.proxies
     }
 }
 
@@ -940,6 +974,7 @@ pub(crate) fn start(orch: Orchestration) {
                 spawn_note(checks.clone(), chat.to_owned(), Why::OnDemand);
             }));
         }
+        proxy::start(orch.clone());
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let device = orch.device_id().to_owned();
@@ -1032,6 +1067,11 @@ pub(crate) async fn check(rpc: &EngineRpc, chat_id: &str) -> Result<(Progress, b
             }
         };
     }
+    // A host that predates progress writes no row and ignores the command:
+    // worked out here instead.
+    if proxy::needs_proxy(orch, &chat.device_id) {
+        return proxy::check(rpc, chat_id).await.ok_or_else(nothing);
+    }
     let row = orch
         .workspace()
         .read_orchestration_with(|doc| doc.progress(chat_id))
@@ -1082,37 +1122,58 @@ pub(crate) fn visible(
 
 fn frame(rpc: &EngineRpc, viewer: Option<&Who>) -> Value {
     let orch = rpc.orchestration();
-    let (rows, crew) = orch.workspace().read_orchestration_with(|doc| {
+    let (mut rows, crew) = orch.workspace().read_orchestration_with(|doc| {
         let crew: HashSet<String> = doc.read_crew().into_iter().filter(|m| !m.released).map(|m| m.chat_id).collect();
         (doc.read_progress(), crew)
     });
+    // Chats on older hosts: their progress as worked out here.
+    for row in orch.progress().proxies().rows() {
+        match rows.iter_mut().find(|r| r.chat_id == row.chat_id) {
+            Some(synced) if synced.updated_at >= row.updated_at => {}
+            Some(synced) => *synced = row,
+            None => rows.push(row),
+        }
+    }
     let allowed: &dyn Fn(&str) -> bool = &|chat: &str| viewer.is_none_or(|who| may_check(rpc, who, chat));
     let rows = visible(&rows, &crew, Some(allowed), Utc::now());
     serde_json::to_value(rows).unwrap_or(Value::Array(Vec::new()))
 }
 
 /// `WatchProgress`: the rows now, then on every change (≤ 4/s). `viewer`
-/// is an agent's caller; `None` is the person.
+/// is an agent's caller; `None` is the person. While anyone watches, this
+/// engine works out the progress of chats on older hosts (by proxy).
 pub(crate) fn stream(rpc: EngineRpc, viewer: Option<Who>) -> futures::stream::BoxStream<'static, Value> {
     use futures::StreamExt;
-    let mut rx = rpc.orchestration().workspace().watch_progress_rows();
+    let orch = rpc.orchestration().clone();
+    let watching = proxy::Watching::new(&orch);
+    let mut rx = orch.workspace().watch_progress_rows();
     rx.mark_unchanged();
+    let mut proxy_rx = orch.progress().proxies().subscribe();
+    proxy_rx.mark_unchanged();
+    // The first frame has them already.
+    orch.progress().proxies().pass(&orch, &rpc, Utc::now());
     let first = frame(&rpc, viewer.as_ref());
+    let state = (rx, proxy_rx, rpc, viewer, None::<Value>, watching);
     futures::stream::iter([first])
-        .chain(futures::stream::unfold((rx, rpc, viewer, None::<Value>), |(mut rx, rpc, viewer, mut last)| async move {
+        .chain(futures::stream::unfold(state, |(mut rx, mut proxy_rx, rpc, viewer, mut last, watching)| async move {
             loop {
-                rx.changed().await.ok()?;
+                tokio::select! {
+                    changed = rx.changed() => changed.ok()?,
+                    changed = proxy_rx.changed() => changed.ok()?,
+                }
                 tokio::time::sleep(super::PUBLISH_EVERY).await;
                 rx.mark_unchanged();
+                proxy_rx.mark_unchanged();
                 let next = frame(&rpc, viewer.as_ref());
                 if last.as_ref() != Some(&next) {
                     last = Some(next.clone());
-                    return Some((next, (rx, rpc, viewer, last)));
+                    return Some((next, (rx, proxy_rx, rpc, viewer, last, watching)));
                 }
             }
         }))
         .boxed()
 }
 
+mod proxy;
 #[cfg(test)]
 mod tests;
