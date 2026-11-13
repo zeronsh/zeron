@@ -1,5 +1,6 @@
 -- How a thread's work is going (ds/orch_progress, ui/orch_progress_fixture):
--- the clocks tick from the row's times on the fixture's clock, the steps
+-- the clocks read from the row's times on the fixture's clock, to the
+-- minute and moving only as one turns, the steps
 -- and the time left read as the row says (none without an ETA), stalled
 -- in the warning's words, a fresh note on its way shown, "What's up?"
 -- asked once then resting, each variant drawn and resized.
@@ -16,20 +17,7 @@ local function open(w: number?, h: number?): any
 end
 
 local ENGINE = "#fx-full-th-engine-state"
-
--- What a rolling number shows: its cells' figures at rest on its line.
-local function face(app: any, target: string): string
-	local tree = app:tree(target)
-	local top = tree:match(" %-?%d+,(%-?%d+) ")
-	local out = {}
-	for line in tree:gmatch("[^\n]+") do
-		local t, y = line:match('text "(.-)" %-?%d+,(%-?%d+) ')
-		if t and y == top and not line:find(" hidden") then
-			table.insert(out, t)
-		end
-	end
-	return table.concat(out)
-end
+-- The sample's now (on a minute's start).
 local NOW = 1794470400
 
 test("orch progress: the clocks, as the contract has them", function()
@@ -54,9 +42,11 @@ test("orch progress: the clocks, as the contract has them", function()
 	expect(Unit.clocks(done, NOW).tool).to_be(nil)
 	-- Waiting on you or on background work: still on it, still running.
 	expect(Unit.clocks({ state = "awaiting_input", started = NOW - 60, updated = NOW - 50 }, NOW).elapsed).to_be(60)
-	expect(Unit.clock(42)).to_be("0:42")
-	expect(Unit.clock(21 * 60 + 3)).to_be("21:03")
-	expect(Unit.clock(3600 + 4 * 60 + 12)).to_be("1:04:12")
+	-- The minute a moment falls in, and the seconds till the next.
+	expect(Unit.minute(NOW + 59)).to_be(NOW)
+	expect(Unit.minute(NOW + 60)).to_be(NOW + 60)
+	expect(Unit.until_minute(NOW)).to_be(60)
+	expect(Unit.until_minute(NOW + 45)).to_be(15)
 end)
 
 test("orch progress: what it is on, the live label while a command runs", function()
@@ -78,7 +68,7 @@ test("orch progress: a full unit's figures, and its clocks ticking", function()
 	local app = open()
 	-- Elapsed, steps, time left, the command and how long it has run, the
 	-- last step, the note.
-	expect(face(app, `{ENGINE}-elapsed`)).to_be("41:00")
+	expect(app:text(`{ENGINE}-elapsed`)).to_be("41m")
 	expect(app:has(`{ENGINE} >> .orch-progress-steps >> ~"5/8"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"~20m left"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> .orch-progress-doing >> ~"cargo test -p zeron-engine --lib orchestration"`)).to_be(true)
@@ -86,29 +76,73 @@ test("orch progress: a full unit's figures, and its clocks ticking", function()
 	expect(app:has(`{ENGINE} >> ~"last step 2m ago"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"Registry kinds and the watch are in"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"Orchestrators · desk"`)).to_be(true)
-	-- A minute and five seconds on.
+	-- A minute and five seconds on: to the minute.
 	app:set_state("now", NOW + 65)
-	app:frames(60)
-	expect(face(app, `{ENGINE}-elapsed`)).to_be("42:05")
+	app:frames(5)
+	expect(app:text(`{ENGINE}-elapsed`)).to_be("42m")
 	expect(app:has(`{ENGINE} >> ~"last step 3m ago"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"~19m left"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"· 10m"`)).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 
-test("orch progress: the elapsed clock keeps its width as it ticks", function()
+test("orch progress: the clocks move once a minute, on the minute, quietly", function()
 	local app = open()
+	-- Every clock it shows, as text.
+	local function clocks(): string
+		local out: { string } = {}
+		for _, sel in { `{ENGINE}-elapsed`, `{ENGINE} >> .orch-progress-since`, `{ENGINE} >> .orch-progress-left`, `{ENGINE} >> .orch-progress-tool-time`,
+			"#fx-strip-th-engine-state >> .orch-progress-elapsed", "#fx-chip-th-engine-state >> .orch-progress-elapsed" } do
+			table.insert(out, tostring(app:text(sel)))
+		end
+		return table.concat(out, "|")
+	end
 	local function box(): string?
-		local line = app:tree(`#fx-full-th-engine-state-elapsed`):match("[^\n]+")
+		local line = app:tree(`{ENGINE}-elapsed`):match("[^\n]+")
 		return line and line:match("(%d+x%d+)")
 	end
-	local before = box()
-	expect(before).never.to_be(nil)
-	for i = 1, 12 do
-		app:set_state("now", NOW + i * 7)
+	local before, width = clocks(), box()
+	-- Within the minute: nothing moves, nothing's laid out again.
+	for _, s in { 1, 15, 30, 59 } do
+		app:set_state("now", NOW + s)
 		app:frames(4)
-		expect(box()).to_be(before)
+		expect(clocks()).to_be(before)
+		expect(box()).to_be(width)
 	end
+	-- Across its boundary: each moves once.
+	app:set_state("now", NOW + 60)
+	app:frames(4)
+	local after = clocks()
+	expect(after ~= before).to_be(true)
+	expect(app:text(`{ENGINE}-elapsed`)).to_be("42m")
+	app:set_state("now", NOW + 100)
+	app:frames(4)
+	expect(clocks()).to_be(after)
+	-- Plain words: no rolling counter, no stopwatch.
+	expect(app:has(`{ENGINE} >> .orch-counter`)).to_be(false)
+	expect(app:has(`{ENGINE} >> .orch-progress-stopwatch`)).to_be(false)
+	local face: string = tostring(app:text(`{ENGINE}-elapsed`))
+	expect(string.find(face, ":", 1, true) == nil).to_be(true)
+end)
+
+test("orch progress: durations to the minute, in Zeron's short words", function()
+	local app = open()
+	local rows: any = table.clone(app:state("rows") :: any)
+	local function at(started: number)
+		local r = table.clone(rows["th-engine-state"])
+		r.started = NOW - started
+		local copy = table.clone(rows)
+		copy["th-engine-state"] = r
+		app:set_state("rows", copy)
+		app:frames(4)
+		return app:text(`{ENGINE}-elapsed`)
+	end
+	expect(at(0)).to_be("<1m")
+	expect(at(59)).to_be("<1m")
+	expect(at(9 * 60 + 59)).to_be("9m")
+	expect(at(72 * 60)).to_be("1h 12m")
+	expect(at(3 * 3600)).to_be("3h")
+	expect(at(12 * 3600 + 30 * 60)).to_be("12h")
 end)
 
 test("orch progress: without an ETA, no time left", function()

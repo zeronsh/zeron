@@ -1,13 +1,13 @@
 -- How a thread's work is going, read and never asked of it: the progress
 -- the engine keeps for each chat (`orchestration.progress`, docs/design/
 -- orchestrators.md "Progress") drawn as live telemetry. How long it has
--- been at it (rolling digits), how far through its steps (segmented
--- cells, "3/5"), what it is on now (or the command running, "cargo test ·
--- 9m"), how long since its last step, the time left when the engine knows
--- it, and a one-line note. Stalled, it says so in the warning's ink, not
+-- been at it, how far through its steps (segmented cells, "3/5"), what it
+-- is on now (or the command running, "cargo test · 9m"), how long since its
+-- last step, the time left when the engine knows it, and a one-line note. Stalled, it says so in the warning's ink, not
 -- an alarm's. "What's up?" asks the host for a fresh note (never the
--- agent); while it's written, a spinner. The clocks tick here, once a
--- second, in tabular figures that keep their width.
+-- agent); while it's written, a spinner. The clocks are plain words to the
+-- minute ("<1m", "9m", "1h 12m"), in tabular figures, and move once a
+-- minute, on the minute: nothing ticks by the second.
 --
 --   Progress {
 --     variant = "full",            -- "full" (a widget's unit), "strip" (one
@@ -40,10 +40,9 @@ local ContextMenu = require("@self/context_menu")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local Cells = require("@self/orch_cells")
-local Counter = require("@self/orch_counter")
 local hold = require("@self/orch_hold")
 local Tooltip = require("@self/tooltip")
-local clocks = require("@self/orch_progress_clocks")
+local pure = require("@self/orch_progress_clocks")
 
 local M = {}
 
@@ -71,14 +70,13 @@ export type Props = {
 	min_w: number?,
 }
 
-M.ACTIVE = clocks.ACTIVE
-M.kind = clocks.kind
-M.stalled = clocks.stalled
-M.clocks = clocks.clocks
-M.clock = clocks.clock
-M.doing = clocks.doing
-M.step = clocks.step
-type Clocks = clocks.Clocks
+M.ACTIVE = pure.ACTIVE
+M.kind = pure.kind
+M.stalled = pure.stalled
+M.clocks = pure.clocks
+M.doing = pure.doing
+M.step = pure.step
+type Clocks = pure.Clocks
 
 -- The tile, its size, and where the lines under a full unit's head start.
 local TILE = 28
@@ -101,11 +99,12 @@ local MARKS: { [string]: string } = {
 	muse = "muse",
 }
 
--- A duration in a few characters: "42s", "9m", "1h 5m".
+-- A duration to the minute, in Zeron's short words: "<1m", "9m", "1h 12m"
+-- ("3h" on the hour, and from ten hours on).
 function M.short(seconds: number): string
 	local t = math.max(0, math.floor(seconds))
 	if t < 60 then
-		return locale.s("time.short.seconds", { n = t })
+		return locale.s("ds.orch.progress.under_minute")
 	elseif t < 3600 then
 		return locale.s("time.short.minutes", { n = t // 60 })
 	end
@@ -138,80 +137,33 @@ local function small(text: any, extra: { [string]: any }?): Node
 	return ui.text(p :: any)
 end
 
--- A stopwatch of rolling figures: hours (once it has run one), minutes and
--- seconds each a counter of their own, the colons still between them, so
--- only the figures that change roll and the colons keep their places.
-local function Stopwatch(props: { id: string?, seconds: () -> number?, text_size: string, weight: string?, color: any }): Node
-	local function part(f: (t: number) -> number): () -> number?
-		return function(): number?
-			local t = props.seconds()
-			return if t then f(math.max(0, math.floor(t))) else nil
-		end
-	end
-	local function hours(): boolean
-		return (props.seconds() or 0) >= 3600
-	end
-	local function face(text: string): Node
-		return ui.text { text, shrink = 0, tabular = true, text_size = props.text_size, weight = props.weight, color = props.color }
-	end
-	local function counter(value: () -> number?, format: ((n: number) -> string)?, max: number): Node
-		return Counter {
-			value = value,
-			format = format,
-			max = max,
-			text_size = props.text_size,
-			weight = props.weight,
-			color = props.color,
-		}
-	end
-	local two = function(n: number): string
-		return string.format("%02d", n)
-	end
-	return ui.row {
-		id = props.id,
-		class = "orch-progress-stopwatch",
-		label = locale.t("ds.orch.progress.elapsed"),
-		shrink = 0,
-		items = "center",
-		ui.show(hours, ui.row {
-			shrink = 0,
-			items = "center",
-			counter(part(function(t: number): number
-				return t // 3600
-			end), nil, 9),
-			face(":"),
-		}),
-		ui.switch(function(): string
-			return if hours() then "two" else "one"
-		end, {
-			two = counter(part(function(t: number): number
-				return (t // 60) % 60
-			end), two, 59),
-			one = counter(part(function(t: number): number
-				return (t // 60) % 60
-			end), nil, 59),
-		}),
-		face(":"),
-		counter(part(function(t: number): number
-			return t % 60
-		end), two, 59),
-	}
-end
-
 M.Progress = ui.component(function(props: Props): Node
 	local variant: Variant = props.variant or "full"
-	local tick = ui.use_state(os.time())
-	if not props.now then
-		-- Once a second: the clocks show whole seconds.
-		ui.every(1000, function()
-			tick:set(os.time())
+	-- The clocks move by the minute, on the minute: the moment they're read
+	-- at is kept, and taken again only once a new minute has begun (one
+	-- timer a unit, asleep till then; none while a test's clock drives it,
+	-- whose changes within a minute are let pass).
+	local at = ui.use_state(if props.now then props.now() else os.time())
+	if props.now then
+		local given: () -> number = props.now
+		ui.effect(function()
+			local t = given()
+			if pure.minute(t) ~= pure.minute(at:peek()) then
+				at:set(t)
+			end
+		end)
+	else
+		ui.effect(function()
+			-- (Each turn of the minute sets the next: owned by this run, gone
+			-- with the unit.)
+			at:get()
+			ui.after(pure.until_minute(os.time()) * 1000, function()
+				at:set(math.max(os.time(), at:peek() + 1))
+			end)
 		end)
 	end
 	local function now(): number
-		if props.now then
-			return props.now()
-		end
-		return tick:get()
+		return at:get()
 	end
 	local function row(): Row?
 		return props.row()
@@ -285,7 +237,7 @@ M.Progress = ui.component(function(props: Props): Node
 	end
 	local function left_text(): string
 		local l = clocks().left
-		return if l then locale.s("ds.orch.progress.left", { t = M.short(l) }) else ""
+		return if l then locale.s("ds.orch.progress.left", { t = M.short(math.max(60, l)) }) else ""
 	end
 	-- What it says it's on: the command or activity working, else its
 	-- state's name.
@@ -560,13 +512,13 @@ M.Progress = ui.component(function(props: Props): Node
 			})),
 			ui.show(function(): boolean
 				return clocks().elapsed ~= nil
-			end, Stopwatch {
-				seconds = function(): number?
-					return clocks().elapsed
-				end,
-				text_size = "$font.size.xs",
+			end, small(function(): string
+				local e = clocks().elapsed
+				return if e then M.short(e) else ""
+			end, {
+				class = "orch-progress-elapsed",
 				color = "$text.secondary",
-			}),
+			})),
 			menu(),
 		}
 	end
@@ -645,11 +597,15 @@ M.Progress = ui.component(function(props: Props): Node
 			gap = "$zeron.space.hair",
 			ui.show(function(): boolean
 				return clocks().elapsed ~= nil
-			end, Stopwatch {
-				id = if props.id then `{props.id}-elapsed` else nil,
-				seconds = function(): number?
-					return clocks().elapsed
+			end, ui.text {
+				function(): string
+					local e = clocks().elapsed
+					return if e then M.short(e) else ""
 				end,
+				id = if props.id then `{props.id}-elapsed` else nil,
+				class = "orch-progress-elapsed",
+				tabular = true,
+				shrink = 0,
 				text_size = "$font.size.sm",
 				weight = "$font.weight.medium",
 				color = function(): string

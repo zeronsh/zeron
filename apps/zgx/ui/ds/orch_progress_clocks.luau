@@ -2,8 +2,8 @@
 -- progress row's state in Zeron's status words, its clocks at a moment
 -- (the contract's: elapsed = now − started, stopped at `updated` once over;
 -- since the last step = now − last_step; time left = eta_secs − (now −
--- updated), only while working, none when none is left), a stopwatch's
--- face, and what it is on.
+-- updated), only while working, none when none is left), the minute a
+-- moment falls in, and what it is on.
 
 local M = {}
 
@@ -58,16 +58,6 @@ function M.clocks(r: Row?, now: number): Clocks
 	return out
 end
 
--- A stopwatch's face: "0:42", "21:03", "1:04:12".
-function M.clock(seconds: number): string
-	local t = math.max(0, math.floor(seconds))
-	local h, m, s = t // 3600, (t // 60) % 60, t % 60
-	if h > 0 then
-		return string.format("%d:%02d:%02d", h, m, s)
-	end
-	return string.format("%d:%02d", m, s)
-end
-
 -- What it is on this moment: the command running (the session row's live
 -- label for it), else, working, what its agent is doing; nil when the row
 -- says nothing more than its state.
@@ -89,6 +79,16 @@ function M.step(r: Row?): string?
 		return nil
 	end
 	return r.step :: string
+end
+
+-- The minute `t` (Unix seconds) falls in, as its first second; and how
+-- many seconds till the next one begins (1–60).
+function M.minute(t: number): number
+	return math.floor(t) - math.floor(t) % 60
+end
+
+function M.until_minute(t: number): number
+	return 60 - math.floor(t) % 60
 end
 
 return M

@@ -993,6 +993,7 @@ return {
 	["ds.orch.progress.menu"] = "Progress actions",
 	["ds.orch.progress.refreshing"] = "Writing a fresh note",
 	["ds.orch.progress.pinned"] = "Pinned",
+	["ds.orch.progress.under_minute"] = "<1m",
 	["common.loading"] = "Loading…",
 	["common.something_went_wrong"] = "Something went wrong.",
 	["common.open"] = "Open",
