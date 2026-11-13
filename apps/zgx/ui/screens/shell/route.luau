@@ -43,6 +43,9 @@
 --                           settings shows: `project` and `session` follow it
 --   route.control()         to the Control room (`control`)
 --   route.orchestrator(id)  to an orchestrator's page (`orchestrator`, its id)
+--   route.find_chat(id)     a chat wherever it's listed: top-level, archived,
+--                           or under another (a crew thread opens as a chat
+--                           of its own); nil for none
 --   route.own_page(name)    whether a route is a page of its own, with no chat
 --                           under it (a plugin's page, the Control room, an
 --                           orchestrator's)
@@ -297,6 +300,24 @@ local function chat_of(id: string?): sessions.Chat?
 			return c
 		end
 	end
+	-- A chat under another, opened as a chat of its own: an orchestrator's
+	-- crew thread (from the Control room, a crew card, a crew update), a
+	-- side chat. It works where its parent does unless it says otherwise.
+	for parent_id, kids in now.children or {} do
+		for _, k in kids do
+			if k.id == id then
+				local c: any = table.clone(k)
+				if c.project == nil then
+					for _, p in now.chats do
+						if p.id == parent_id then
+							c.project = p.project
+						end
+					end
+				end
+				return c
+			end
+		end
+	end
 	return nil
 end
 local function project_of(id: string?): sessions.Project?
@@ -310,6 +331,10 @@ local function project_of(id: string?): sessions.Project?
 	end
 	return nil
 end
+
+-- A chat by its id, wherever it's listed: top-level, archived, or under
+-- another (a crew thread, a side chat). Tracked.
+M.find_chat = chat_of
 
 -- The route's ids, read once a change.
 local where = steady(function(): Current

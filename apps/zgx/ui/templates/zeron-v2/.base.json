@@ -5,6 +5,6 @@
   "screens/chat/lane_tab.luau": "70f9c26b6b08247e",
   "screens/panel/init.luau": "3d5e0c712c4dda56",
   "screens/shell/init.luau": "cbe435f045740a7a",
-  "screens/shell/page.luau": "6d4d5a005aca1990",
+  "screens/shell/page.luau": "fd77b219660616a1",
   "screens/shell/view.luau": "95dec891b31add1d"
 }

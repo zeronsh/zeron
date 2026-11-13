@@ -344,20 +344,8 @@ return function(props: Props): Node
 	-- any session does.)
 	local open_chat = ui.computed(function(): sessions.Chat?
 		local s = route.session:get()
-		if not s then
-			return nil
-		end
-		for _, c in sessions.now:get().chats do
-			if c.id == s.id then
-				return c
-			end
-		end
-		for _, c in sessions.now:get().archived or {} do
-			if c.id == s.id then
-				return c
-			end
-		end
-		return nil
+		-- (A crew thread or side chat opened as its own chat too.)
+		return if s then route.find_chat(s.id) else nil
 	end)
 	local has_chat = ui.computed(function(): boolean
 		return open_chat:get() ~= nil
