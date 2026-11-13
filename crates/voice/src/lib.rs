@@ -1,7 +1,7 @@
-//! Desktop-local Parakeet v3. No engine, document, RPC or audio persistence.
+//! Desktop-local speech recognition (transcribe.cpp, one model from
+//! `models.json`). No engine, document, RPC or audio persistence.
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use parakeet_rs::{ParakeetTDT, Transcriber};
 use sha2::{Digest, Sha256};
 use std::{
     io::Write,
@@ -10,44 +10,87 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 mod resample;
 
 pub const MAX_SECONDS: usize = 60;
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 pub struct Artifact {
     pub name: String,
     pub size: u64,
     pub sha256: String,
 }
-#[derive(serde::Deserialize)]
+/// One model Zeron can download: pinned bytes, where they come from, what they speak.
+#[derive(serde::Deserialize, Clone)]
 pub struct Manifest {
+    /// Its folder under `<data>/models`.
+    pub id: String,
+    pub name: String,
     pub repository: String,
     pub revision: String,
+    pub source: String,
+    pub license: String,
+    pub languages: Vec<String>,
+    /// The first is the weights transcribe.cpp loads.
     pub files: Vec<Artifact>,
 }
+/// The models on offer, the default first.
+pub fn models() -> Vec<Manifest> {
+    serde_json::from_str(include_str!("../models.json")).expect("pinned model list")
+}
+/// The default model.
 pub fn manifest() -> Manifest {
-    serde_json::from_str(include_str!("../model.json")).expect("pinned model manifest")
+    models().swap_remove(0)
 }
 pub fn download_size() -> u64 {
-    manifest().files.iter().map(|f| f.size).sum()
+    manifest().size()
 }
 pub fn installed(dir: &Path) -> bool {
-    manifest()
-        .files
-        .iter()
-        .all(|f| std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.len() == f.size))
-        && std::fs::read_to_string(dir.join("verified")).is_ok_and(|r| r == manifest().revision)
+    manifest().installed(dir)
+}
+pub fn download(dir: &Path, cancel: &AtomicBool, progress: impl FnMut(u64)) -> Result<()> {
+    manifest().download(dir, cancel, progress)
 }
 
-/// Called only on a worker. Temporary files never establish readiness.
-pub fn download(dir: &Path, cancel: &AtomicBool, mut progress: impl FnMut(u64)) -> Result<()> {
-    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+/// Models Zeron no longer offers, by folder.
+const RETIRED: &[&str] = &["parakeet-tdt-0.6b-v3-int8"];
+/// Frees what retired models take in `models` (Parakeet v3: 670 MB). Whoever
+/// had one is offered the current model on their next dictation, as anyone is.
+pub fn retire_old_models(models: &Path) {
+    for id in RETIRED {
+        let dir = models.join(id);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+impl Manifest {
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
+    }
+    /// Downloaded and verified: each file was hashed as it arrived, and
+    /// `verified` names the revision they matched.
+    pub fn installed(&self, dir: &Path) -> bool {
+        self.files
+            .iter()
+            .all(|f| std::fs::metadata(dir.join(&f.name)).is_ok_and(|m| m.len() == f.size))
+            && std::fs::read_to_string(dir.join("verified")).is_ok_and(|r| r == self.revision)
+    }
+    /// Called only on a worker. Temporary files never establish readiness.
+    pub fn download(
+        &self,
+        dir: &Path,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(u64),
+    ) -> Result<()> {
+        tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         std::fs::create_dir_all(dir)?;
         let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).build()?;
-        let m=manifest(); let mut total=0;
-        for file in m.files {
+        let m=self; let mut total=0;
+        for file in &m.files {
             if cancel.load(Ordering::Acquire) { bail!("Download cancelled") }
             let staging=dir.join(format!("{}.part",file.name));
             let result=async {
@@ -71,8 +114,9 @@ pub fn download(dir: &Path, cancel: &AtomicBool, mut progress: impl FnMut(u64)) 
             if result.is_err() {let _=std::fs::remove_file(staging);} result?;
         }
         if cancel.load(Ordering::Acquire) {bail!("Download cancelled")}
-        std::fs::write(dir.join("verified"),manifest().revision)?;Ok(())
+        std::fs::write(dir.join("verified"),&m.revision)?;Ok(())
     })
+    }
 }
 async fn cancelled(cancel: &AtomicBool) {
     while !cancel.load(Ordering::Acquire) {
@@ -80,21 +124,20 @@ async fn cancelled(cancel: &AtomicBool) {
     }
 }
 
-pub struct Recognizer(ParakeetTDT);
+pub struct Recognizer(transcribe_cpp::Session);
 impl Recognizer {
     pub fn load(dir: &Path) -> Result<Self> {
-        // Verify before handing bytes to the native runtime, including after restart.
-        for f in manifest().files {
-            let mut input = std::fs::File::open(dir.join(&f.name))?;
-            let mut hash = Sha256::new();
-            std::io::copy(&mut input, &mut hash)?;
-            if format!("{:x}", hash.finalize()) != f.sha256 {
-                bail!("Model is damaged. Remove it in Settings and download again.")
-            }
+        let m = manifest();
+        // Hashed once, at download: a load reads only what it needs.
+        if !m.installed(dir) {
+            bail!("Model is damaged. Remove it in Settings and download again.")
         }
-        Ok(Self(ParakeetTDT::from_pretrained(dir, None).map_err(
-            |_| anyhow::anyhow!("Could not load Parakeet v3"),
-        )?))
+        static LOGS: std::sync::Once = std::sync::Once::new();
+        LOGS.call_once(transcribe_cpp::init_logging);
+        let model = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
+            .and_then(|model| model.session())
+            .map_err(|e| anyhow::anyhow!("Could not load {}: {e}", m.name))?;
+        Ok(Self(model))
     }
     pub fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
         if !(8_000..=192_000).contains(&rate) {
@@ -103,16 +146,19 @@ impl Recognizer {
         if samples.len() > rate as usize * MAX_SECONDS {
             bail!("Recording exceeds one minute")
         }
-        if samples.len() < rate as usize / 5 || samples.iter().all(|s| s.abs() < 0.0001) {
+        if samples.len() < rate as usize / 5 || samples.iter().all(|s| s.abs() < SILENT) {
             return Ok(String::new());
         }
         let samples = resample::for_model(samples, rate)?;
         self.0
-            .transcribe_samples(samples, resample::MODEL_RATE, 1, None)
-            .map(|r| r.text)
+            .run(&samples, &transcribe_cpp::RunOptions::default())
+            .map(|r| r.text.trim().to_owned())
             .map_err(|_| anyhow::anyhow!("Could not transcribe this recording"))
     }
 }
+
+/// Below this, a sample is silence: no microphone is that quiet while it hears a room.
+const SILENT: f32 = 0.0001;
 
 struct Audio {
     /// Only the audio callback touches this until the stream is dropped.
@@ -121,6 +167,8 @@ struct Audio {
     // never make the real-time callback's `try_lock` drop a buffer.
     failed: AtomicBool,
     full: AtomicBool,
+    /// The microphone delivered its first real sound.
+    heard: AtomicBool,
 }
 impl Audio {
     fn with_capacity(capacity: usize) -> Self {
@@ -128,6 +176,7 @@ impl Audio {
             samples: Mutex::new(Vec::with_capacity(capacity)),
             failed: AtomicBool::new(false),
             full: AtomicBool::new(false),
+            heard: AtomicBool::new(false),
         }
     }
 }
@@ -163,7 +212,11 @@ where
                 a.full.store(true, Ordering::Release);
                 break;
             }
-            samples.push(frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32);
+            let s = frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32;
+            if s.abs() >= SILENT {
+                a.heard.store(true, Ordering::Release);
+            }
+            samples.push(s);
         }
     }
 }
@@ -203,13 +256,20 @@ pub fn default_input_device() -> Option<String> {
     )
 }
 
-/// The chosen device when it is connected, the system default otherwise.
-fn input_device(id: Option<&str>) -> Option<cpal::Device> {
+/// The chosen device when it is connected (and whether it is), the system
+/// default otherwise.
+fn input_device(id: Option<&str>) -> Option<(cpal::Device, bool)> {
     let host = cpal::default_host();
     id.and_then(|id| id.parse::<cpal::DeviceId>().ok())
         .and_then(|id| host.device_by_id(&id))
-        .or_else(|| host.default_input_device())
+        .map(|device| (device, true))
+        .or_else(|| Some((host.default_input_device()?, false)))
 }
+
+/// The chosen microphone as the last recording opened it. Looking it up and
+/// asking for its configuration again costs time before the first sample.
+static OPENED: Mutex<Option<(String, cpal::Device, cpal::SupportedStreamConfig)>> =
+    Mutex::new(None);
 
 pub struct Capture {
     stream: Option<cpal::Stream>,
@@ -217,9 +277,27 @@ pub struct Capture {
     rate: u32,
 }
 impl Capture {
-    pub fn start(device: Option<&str>, level: Arc<AtomicU32>) -> Result<Self> {
-        let device = input_device(device).context("No microphone available")?;
+    pub fn start(id: Option<&str>, level: Arc<AtomicU32>) -> Result<Self> {
+        let opened = OPENED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((_, device, config)) = opened.filter(|(was, ..)| Some(was.as_str()) == id) {
+            if let Ok(capture) = Self::open(&device, config, level.clone()) {
+                return Ok(capture);
+            }
+        }
+        *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let (device, chosen) = input_device(id).context("No microphone available")?;
         let config = device.default_input_config()?;
+        let capture = Self::open(&device, config.clone(), level)?;
+        if let (Some(id), true) = (id, chosen) {
+            *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some((id.into(), device, config));
+        }
+        Ok(capture)
+    }
+    fn open(
+        device: &cpal::Device,
+        config: cpal::SupportedStreamConfig,
+        level: Arc<AtomicU32>,
+    ) -> Result<Self> {
         let rate = config.sample_rate();
         let channels = config.channels() as usize;
         let audio = Arc::new(Audio::with_capacity(rate as usize * MAX_SECONDS));
@@ -231,7 +309,7 @@ impl Capture {
         macro_rules! stream {
             ($sample:ty) => {
                 device.build_input_stream(
-                    &config.into(),
+                    &config.config(),
                     move |d: &[$sample], _| {
                         meter(d, channels, &level);
                         append(d, channels, rate, &a)
@@ -295,16 +373,24 @@ struct Job {
 // remain serialized on WORKER, including after the user cancels native work.
 trait Recording {
     fn ended(&self) -> bool;
+    /// Real sound has arrived: what is said from now on is kept.
+    fn flowing(&self) -> bool;
     fn finish(self) -> Result<(Vec<f32>, u32)>;
 }
 impl Recording for Capture {
     fn ended(&self) -> bool {
         self.ended()
     }
+    fn flowing(&self) -> bool {
+        self.audio.heard.load(Ordering::Acquire)
+    }
     fn finish(self) -> Result<(Vec<f32>, u32)> {
         self.finish()
     }
 }
+
+/// The longest "Listening" waits for a first sound.
+const WARM_UP: Duration = Duration::from_millis(600);
 
 fn record<C: Recording>(
     job: &Job,
@@ -314,20 +400,31 @@ fn record<C: Recording>(
         return Ok(None);
     }
     let capture = start()?;
-    // Stop/cancel may arrive while the audio device is opening.
+    // A microphone delivers its first sound some 150 ms after it opens, and
+    // words said before it are lost: "Listening" waits for that sound, or
+    // for WARM_UP in a silent room. Stop/cancel may arrive meanwhile.
+    let opened = Instant::now();
+    while !capture.flowing()
+        && opened.elapsed() < WARM_UP
+        && !job.stop.load(Ordering::Acquire)
+        && !job.cancel.load(Ordering::Acquire)
+        && !capture.ended()
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     if job.cancel.load(Ordering::Acquire) {
         return Ok(None);
     }
     if !job.stop.load(Ordering::Acquire) {
         let _ = job.events.try_send(Event::Listening);
     }
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     while !job.stop.load(Ordering::Acquire)
         && !job.cancel.load(Ordering::Acquire)
         && !capture.ended()
         && started.elapsed().as_secs() < MAX_SECONDS as u64
     {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     }
     if job.cancel.load(Ordering::Acquire) {
         return Ok(None);
@@ -405,7 +502,9 @@ impl Drop for BusyGuard {
 }
 enum Command {
     Transcribe(Job, BusyGuard),
-    Unload,
+    /// Answers once the weights are gone: a loaded model maps its file, which
+    /// Windows won't delete while it is mapped.
+    Unload(std::sync::mpsc::SyncSender<()>),
 }
 static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Command>> =
     std::sync::OnceLock::new();
@@ -425,10 +524,11 @@ impl Session {
             std::thread::spawn(move || {
                 let mut cached: Option<(std::path::PathBuf, Recognizer)> = None;
                 loop {
-                    let (job, _admission) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                    let (job, _admission) = match rx.recv_timeout(Duration::from_secs(30)) {
                         Ok(Command::Transcribe(j, admission)) => (j, admission),
-                        Ok(Command::Unload) => {
+                        Ok(Command::Unload(done)) => {
                             cached = None;
+                            let _ = done.try_send(());
                             continue;
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -520,10 +620,13 @@ pub fn busy() -> bool {
     BUSY.load(Ordering::Acquire)
 }
 
-/// Retire cached weights on the worker, never on the UI thread.
+/// Retire cached weights on the worker, and wait (briefly) until they are.
 pub fn unload() {
     if let Some(worker) = WORKER.get() {
-        let _ = worker.try_send(Command::Unload);
+        let (done, unloaded) = std::sync::mpsc::sync_channel(1);
+        if worker.try_send(Command::Unload(done)).is_ok() {
+            let _ = unloaded.recv_timeout(Duration::from_secs(2));
+        }
     }
 }
 
@@ -565,16 +668,18 @@ mod tests {
         check::<f64>();
     }
     #[test]
-    fn manifest_pins_only_v3_artifacts_and_exact_size() {
-        let m = manifest();
-        assert_eq!(m.revision.len(), 40);
-        assert_eq!(m.files.len(), 3);
-        assert_eq!(download_size(), 670479942);
-        assert!(
-            m.files
-                .iter()
-                .all(|f| f.sha256.len() == 64 && !f.name.contains('/'))
-        );
+    fn models_pin_exact_bytes_and_ultra_is_the_default() {
+        for m in models() {
+            assert_eq!(m.revision.len(), 40);
+            assert!(!m.languages.is_empty() && !RETIRED.contains(&m.id.as_str()));
+            assert!(
+                m.files
+                    .iter()
+                    .all(|f| f.sha256.len() == 64 && !f.name.contains('/'))
+            );
+        }
+        assert_eq!(manifest().name, "Parakeet Ultra");
+        assert_eq!(download_size(), 740363168);
     }
     #[test]
     fn cancelled_download_never_establishes_readiness() {
@@ -598,5 +703,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod model_tests;
 #[cfg(test)]
 mod session_tests;

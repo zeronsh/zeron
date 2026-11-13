@@ -1,17 +1,33 @@
-# Parakeet v3 attribution and runtime
+# Dictation model attribution and runtime
 
-NVIDIA Parakeet TDT 0.6B v3 weights © NVIDIA, licensed under Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/
+## Parakeet Ultra
 
-Original model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
-Source model card inspected at revision `541d1f99c6b0c3cd0b11a95167540bb8edefd82b`.
+Parakeet Ultra weights © Moondream (post-trained from NVIDIA Parakeet TDT 0.6B v3, © NVIDIA), licensed under
+Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/
 
-ONNX conversion by Ivan Stupakov: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/tree/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce
-The conversion card identifies NVIDIA v3 as its base and documents NeMo ASRModel export and vocabulary extraction. Its exact original-weight revision and INT8 conversion tool version are not published. Zeron pins the conversion's immutable revision and SHA-256 of every consumed artifact in model.json; it does not claim independent numerical equivalence to NVIDIA's FP32 weights. The change is an INT8 ONNX conversion; no fine-tuned model is used.
+Original model: https://huggingface.co/moondream/parakeet-ultra at commit `73175eb7aeb0d82f1e2a6b53b3aabc10a90bcd0b`.
+Base model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 
-Runtime: parakeet-rs 0.3.8 (MIT OR Apache-2.0), ONNX Runtime 1.28.0 via ort/ort-sys 2.0.0-rc.13, CPU execution. Cargo.lock pins registry checksums and the transitive graph. ONNX Runtime is MIT licensed. Capture: cpal 0.17.3 (Apache-2.0). Sample-rate conversion: rubato 0.16.2 (MIT), using its anti-aliasing FFT resampler to convert device-rate mono audio to 16 kHz. Runtime libraries are linked into the application by ort-sys; model weights are an optional download, never bundled.
+GGUF conversion by handy-computer for transcribe.cpp: https://huggingface.co/handy-computer/parakeet-ultra-gguf/tree/a1539be1b849ea7463b88343e5277b373d0c4ea9
+Changes, as its NOTICE states: the conversion repackages the weights (renamed and re-laid-out tensors) and the Q8_0 file
+Zeron downloads stores them at reduced numeric precision. The weights were not retrained or fine-tuned. Zeron pins the
+conversion's revision and the SHA-256 and size of the file it uses in `models.json`, and verifies them as it downloads.
 
-TDT v3 is an offline model. Zeron records at most 60 seconds and decodes once on Stop. There are no live partial hypotheses in the production adapter. The editor's partial-result seam exists for deterministic lifecycle tests and future adapter work; it does not imply native streaming support.
+Languages: Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian,
+Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish,
+Ukrainian.
 
-Supported languages: Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish, Ukrainian.
+## Runtime
 
-Platform baseline: native CPU ONNX and CPAL on macOS, Windows, and Linux. Linux build hosts need ALSA development headers in addition to existing desktop dependencies. macOS requires a packaged app with NSMicrophoneUsageDescription and the audio-input entitlement under hardened runtime. No Apple Speech entitlement, cloud provider, Python installation, or engine-host audio transport is used. Only macOS arm64 is verified locally; other targets require their native CI/package validation.
+transcribe.cpp 0.4.2 (MIT, © The transcribe.cpp authors, https://github.com/handy-computer/transcribe.cpp) through
+the `transcribe-cpp` / `transcribe-cpp-sys` crates, built from source and linked statically. It vendors ggml (MIT,
+© The ggml authors), miniz (MIT) and Silero VAD (MIT); their texts are in the crate's `THIRD-PARTY-LICENSES.md`.
+Metal on macOS; the CPU (x86-64 with AVX2, or arm64) on Linux and Windows. Capture: cpal 0.17.3 (Apache-2.0).
+Sample-rate conversion: rubato 0.16.2 (MIT), its anti-aliasing FFT resampler, from the device's rate to 16 kHz.
+
+Parakeet Ultra is an offline model: Zeron records at most 60 seconds and decodes once on Stop. Model weights are an
+optional download, never bundled. No cloud provider, Apple Speech or engine-host audio transport is used.
+
+## Test clips
+
+`testdata/` holds one LibriSpeech clip and one FLEURS clip, both CC BY 4.0; see `testdata/README.md`.

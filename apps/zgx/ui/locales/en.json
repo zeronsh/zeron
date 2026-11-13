@@ -2307,7 +2307,7 @@
       },
       "model": {
         "label": "Speech model",
-        "description": "Parakeet v3 · {total} MB",
+        "description": "{name} · {total} MB",
         "remove": "Remove"
       }
     }

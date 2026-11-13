@@ -27,6 +27,7 @@ search.index(M.ID, ui.t("settings.voice.title"), ui.t("settings.voice.terms"), {
 
 local installed = ui.state("settings_voice_installed", false)
 local size = ui.state("settings_voice_size", 0)
+local name = ui.state("settings_voice_model", "")
 local inputs = ui.state("settings_voice_inputs", {} :: { any })
 local on = ui.state("settings_voice_on", false)
 
@@ -35,6 +36,7 @@ local function refresh()
 		ui.batch(function()
 			installed:set(s.installed)
 			size:set(s.size)
+			name:set(s.name or "")
 		end)
 	end, function() end)
 	host.call("dictation.call", { op = "inputs" }):after(function(list: any)
@@ -185,7 +187,7 @@ function M.view(): Node
 				row("model", {
 					label = ui.t("settings.voice.model.label"),
 					description = function(): string
-						return ui.t("settings.voice.model.description", { total = mb(size:get()) }):get()
+						return ui.t("settings.voice.model.description", { name = name:get(), total = mb(size:get()) }):get()
 					end,
 					control = ds.Button { ui.t("settings.voice.model.remove"), tone = "secondary", size = "sm", on_click = remove },
 				}),

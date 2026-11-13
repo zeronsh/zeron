@@ -3,7 +3,6 @@ use super::*;
 use std::{
     sync::mpsc::{self, Receiver, SyncSender},
     thread::JoinHandle,
-    time::Duration,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -15,6 +14,9 @@ struct FakeCapture {
 impl Recording for FakeCapture {
     fn ended(&self) -> bool {
         self.ended.load(Ordering::Acquire)
+    }
+    fn flowing(&self) -> bool {
+        true
     }
     fn finish(self) -> Result<(Vec<f32>, u32)> {
         Ok((vec![0.25; 3200], 16_000))
@@ -295,4 +297,137 @@ fn audio_buffer_still_caps_recording_at_sixty_seconds() {
     );
     assert_eq!(audio.samples.lock().unwrap().len(), rate as usize * 60);
     assert!(audio.full.load(Ordering::Acquire));
+}
+
+/// A microphone fed through the real audio callback, one 10 ms buffer at a
+/// time, from what the test sends it.
+struct Microphone {
+    audio: Arc<Audio>,
+    feed: Option<JoinHandle<()>>,
+}
+impl Microphone {
+    fn open(buffers: Receiver<Vec<f32>>) -> Self {
+        let audio = Arc::new(Audio::with_capacity(16_000 * MAX_SECONDS));
+        let a = audio.clone();
+        let feed = std::thread::spawn(move || {
+            for buffer in buffers {
+                append(&buffer, 1, 16_000, &a);
+            }
+        });
+        Self {
+            audio,
+            feed: Some(feed),
+        }
+    }
+}
+impl Recording for Microphone {
+    fn ended(&self) -> bool {
+        false
+    }
+    fn flowing(&self) -> bool {
+        self.audio.heard.load(Ordering::Acquire)
+    }
+    fn finish(mut self) -> Result<(Vec<f32>, u32)> {
+        self.feed.take().unwrap().join().unwrap();
+        Ok((
+            std::mem::take(&mut *self.audio.samples.lock().unwrap()),
+            16_000,
+        ))
+    }
+}
+
+/// Runs a dictation on a `Microphone`: its events, what reaches the model.
+fn dictate(
+    buffers: Receiver<Vec<f32>>,
+) -> (
+    Session,
+    Receiver<(Vec<f32>, u32)>,
+    JoinHandle<Result<Option<String>>>,
+) {
+    let (tx, events) = mpsc::sync_channel(4);
+    let session = Session {
+        stop: Arc::new(AtomicBool::new(false)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        level: Arc::new(AtomicU32::new(0)),
+        events,
+    };
+    let job = Job {
+        dir: Default::default(),
+        stop: session.stop.clone(),
+        cancel: session.cancel.clone(),
+        level: session.level.clone(),
+        device: None,
+        events: tx,
+    };
+    let (heard_tx, heard) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        run_job(
+            &job,
+            || Ok(Microphone::open(buffers)),
+            || {
+                Ok(move |samples, rate| {
+                    heard_tx.send((samples, rate)).unwrap();
+                    Ok(String::new())
+                })
+            },
+        )
+    });
+    (session, heard, worker)
+}
+
+#[test]
+fn speech_from_the_first_instant_is_kept_and_listening_waits_for_it() {
+    // Gaël presses and speaks at once. The microphone opens on digital
+    // silence, then its first real buffer already carries his first word.
+    let speech: Vec<f32> = (0..16_000).map(|i| 0.3 * (i as f32 * 0.05).cos()).collect();
+    let (mic, buffers) = mpsc::sync_channel(200);
+    let (mut session, heard, worker) = dictate(buffers);
+    for _ in 0..5 {
+        mic.send(vec![0.0; 160]).unwrap();
+    }
+    // Nothing real yet: "Listening" would ask him to speak into nothing.
+    assert!(
+        session
+            .events
+            .recv_timeout(Duration::from_millis(200))
+            .is_err()
+    );
+    let sent = Instant::now();
+    mic.send(speech[..160].to_vec()).unwrap();
+    assert!(matches!(
+        session.events.recv_timeout(WAIT).unwrap(),
+        Event::Listening
+    ));
+    // Well before the silent room's 600 ms: it was the sound that said so.
+    assert!(sent.elapsed() < WARM_UP / 4, "{:?}", sent.elapsed());
+    for buffer in speech[160..].chunks(160) {
+        mic.send(buffer.to_vec()).unwrap();
+    }
+    drop(mic);
+    session.finish();
+    let (samples, rate) = heard.recv_timeout(WAIT).unwrap();
+    assert_eq!(rate, 16_000);
+    // Every sample from the first real one on reaches the model.
+    assert_eq!(samples[800..], speech[..]);
+    assert_eq!(worker.join().unwrap().unwrap().as_deref(), Some(""));
+}
+
+#[test]
+fn a_silent_room_still_says_listening() {
+    let (mic, buffers) = mpsc::sync_channel(200);
+    let (session, _heard, worker) = dictate(buffers);
+    let opened = Instant::now();
+    mic.send(vec![0.0; 160]).unwrap();
+    assert!(matches!(
+        session.events.recv_timeout(WAIT).unwrap(),
+        Event::Listening
+    ));
+    let waited = opened.elapsed();
+    assert!(
+        waited >= WARM_UP - Duration::from_millis(50) && waited < WAIT,
+        "{waited:?}"
+    );
+    drop(mic);
+    drop(session);
+    assert_eq!(worker.join().unwrap().unwrap(), None);
 }

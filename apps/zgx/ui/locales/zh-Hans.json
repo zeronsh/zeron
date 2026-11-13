@@ -2307,7 +2307,7 @@
       },
       "model": {
         "label": "语音模型",
-        "description": "Parakeet v3 · {total} MB",
+        "description": "{name} · {total} MB",
         "remove": "移除"
       }
     }
