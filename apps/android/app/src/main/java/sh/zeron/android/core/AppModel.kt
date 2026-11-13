@@ -180,7 +180,7 @@ class AppModel(private val app: Application) {
         }
 
     /** Images staged there (this launch only). */
-    var newSessionImages: List<sh.zeron.android.ui.StagedImage> = emptyList()
+    var newSessionAttachments: List<sh.zeron.android.ui.StagedAttachment> = emptyList()
 
     /** The new-session page's options (project, host, branch, model, effort), kept across launches. */
     var lastDraft: NewSessionDraft = storedDraft()
@@ -423,7 +423,7 @@ class AppModel(private val app: Application) {
         // Nothing of the account stays in memory (or seeds the next one's new session).
         lastDraft = NewSessionDraft()
         newSessionText = ""
-        newSessionImages = emptyList()
+        newSessionAttachments = emptyList()
     }
 
     val accountName: String
