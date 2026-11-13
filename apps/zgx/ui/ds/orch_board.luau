@@ -279,22 +279,49 @@ local WAITING: { [string]: boolean } = { inbox = true, planned = true }
 local ASKED = { key = "orch.board.waiting_on_you", ink = "$zeron.status.input" }
 local ASKED_LONG = { key = "orch.board.waiting_on_you", ink = "$zeron.tone.warning.ink" }
 
--- The open ask one of its threads raised (an escalated one first), if any.
-local function asked(item: Item, ask_of: ((string) -> { [string]: any }?)?): { [string]: any }?
+-- Which card each open ask waits on, by card id: the one its `item_id`
+-- names (the card of the asking turn's own work), else its thread's newest
+-- card still at work. One card an ask: a thread's other cards, finished or
+-- not, say nothing of it. A quiet ask (a "hasn't answered" chase) marks
+-- none.
+local function asks_by_card(list: { Item }, ask_of: ((string) -> { [string]: any }?)?): { [string]: { [string]: any } }
+	local out: { [string]: { [string]: any } } = {}
 	if not ask_of then
-		return nil
+		return out
 	end
-	local found: { [string]: any }? = nil
-	for _, chat in item.threads or {} do
-		local a = ask_of(chat)
-		if a and a.state == "open" then
-			if a.escalated ~= nil then
-				return a
+	local ids: { [string]: boolean } = {}
+	for _, it in list do
+		ids[it.id] = true
+	end
+	local seen: { [string]: boolean } = {}
+	for _, it in list do
+		for _, chat in it.threads or {} do
+			local a = ask_of(chat)
+			if a and a.state == "open" and not a.quiet and not seen[a.id] then
+				seen[a.id] = true
+				local named: string? = a.item_id
+				local target: string? = if named and ids[named] then named else nil
+				if not target then
+					local newest: Item? = nil
+					for _, other in list do
+						local at_work = other.state ~= "done" and other.state ~= "review" and other.state ~= "dropped"
+						if at_work and table.find(other.threads or {}, chat) and (not newest or (other.created or 0) > (newest.created or 0)) then
+							newest = other
+						end
+					end
+					target = if newest then newest.id else nil
+				end
+				if target then
+					local had = out[target]
+					-- (An escalated one first.)
+					if not had or (a.escalated ~= nil and had.escalated == nil) then
+						out[target] = a
+					end
+				end
 			end
-			found = found or a
 		end
 	end
-	return found
+	return out
 end
 -- Its priority's word, where it says something.
 local PRIORITY_INK: { [string]: string } = { urgent = "$zeron.tone.danger.ink", high = "$zeron.tone.warning.ink" }
@@ -357,6 +384,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 		now[id] = if on then true else nil
 		starting:set(now)
 	end
+
+	-- The card each open ask waits on (asks_by_card).
+	local waits = ui.computed(function(): { [string]: { [string]: any } }
+		return asks_by_card((control.value(props.items) :: { Item }?) or {}, props.ask_of)
+	end)
 
 	-- The items shown, by column, each sorted (filtered first).
 	local shown = ui.computed(function(): { [string]: { Item } }
@@ -1008,7 +1040,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			elseif WAITING[it.state] and (it.waiting or "") ~= "" then
 				return QUEUED
 			end
-			local a = asked(it, props.ask_of)
+			local a = waits:get()[it.id]
 			if a then
 				return if a.escalated ~= nil then ASKED_LONG else ASKED
 			elseif stalled() then

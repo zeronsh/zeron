@@ -234,6 +234,8 @@ mod tests {
             space_id: None,
             device_id: None,
             waiting: None,
+            moved_at: None,
+            moved_route_state: None,
         }
     }
 

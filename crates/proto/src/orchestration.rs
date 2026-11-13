@@ -469,6 +469,15 @@ pub struct WorkItem {
     /// working"). Cleared when it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// When its column was set by hand (the person's move, or an `item_upsert`
+    /// with a state): what its route says no longer moves it, until that
+    /// route's state changes from `moved_route_state` (a failure, a reroute,
+    /// work done after).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_at: Option<DateTime<Utc>>,
+    /// Its route's state when it was moved (none for a card with no route).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_route_state: Option<RouteState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

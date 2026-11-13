@@ -24,7 +24,7 @@
 //!       asks = { { id, from_chat, orchestrator_id?, item_id?, kind, question,
 //!                  options = { { label, detail? } }, urgent, state, answer?,
 //!                  created, answered?, origin = "tool" | "turn_end", turn_id?,
-//!                  updated?, escalated?, answered_via? } },
+//!                  updated?, escalated?, answered_via?, quiet } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
 //!                   candidates = { target }, answer?, answer_full?, answered?, delivered?,
@@ -569,6 +569,8 @@ fn ask_value(a: &Ask) -> Value {
         ("updated", opt(a.updated_at.as_ref(), secs)),
         ("escalated", opt(a.escalated_at.as_ref(), secs)),
         ("answered_via", opt(a.answered_via.as_ref(), word)),
+        // Shown without a banner, and on no card ("hasn't answered").
+        ("quiet", Value::Bool(a.quiet)),
     ])
 }
 
@@ -1020,6 +1022,7 @@ mod tests {
         let v = ask_value(&tool);
         assert_eq!(text(v.field("origin")).as_deref(), Some("tool"));
         assert!(nil(v.field("escalated")) && nil(v.field("answered_via")));
+        assert!(matches!(v.field("quiet"), Some(Value::Bool(false))));
     }
 
     #[test]

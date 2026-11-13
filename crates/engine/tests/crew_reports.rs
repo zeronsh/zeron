@@ -932,7 +932,8 @@ async fn routed_tasks_land_on_the_board_and_follow_their_route() {
     // Adding the thread to the board again is the same card.
     let again = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "addToBoard", "chatId": thread })).await;
     assert_eq!(again["id"].as_str(), Some(card.id.as_str()));
-    // An ask from the thread blocks the card; its answer frees it.
+    // An ask from the thread never blocks the card (it says "Waiting on
+    // you" on it, in the board); it stays at work, asked or answered.
     let ask = call(
         &rpc,
         Caller::Agent { chat: Some(thread.clone()) },
@@ -941,7 +942,7 @@ async fn routed_tasks_land_on_the_board_and_follow_their_route() {
     )
     .await;
     let state = |id: &str| core.orchestration.item(id).unwrap().state;
-    assert_eq!(state(&card.id), WorkState::Blocked);
+    assert_eq!(state(&card.id), WorkState::Active);
     call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dismissAsk", "id": ask["id"] })).await;
     assert_eq!(state(&card.id), WorkState::Active);
     // The thread's turn ends with nothing left: the route is done, so is the card.

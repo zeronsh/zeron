@@ -1189,6 +1189,8 @@ mod tests {
             space_id: None,
             device_id: None,
             waiting: None,
+            moved_at: None,
+            moved_route_state: None,
         };
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],

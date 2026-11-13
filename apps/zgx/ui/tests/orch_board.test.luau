@@ -613,3 +613,80 @@ test("orch board cards: a thread's open ask outranks working and stalled, and go
 	expect(app:has(`{scroll} >> .orch-card-word >> "Working"`)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+-- Thread 9ad131f1, live: every card of one thread went Blocked when it had
+-- an open ask. A question waits on one card only, the one its ask names
+-- (the asking turn's own work); finished cards stay where they are.
+test("orch board cards: a thread's question waits on one card; its finished cards stay Done and Review", function()
+	local app = cards()
+	local T = 1_800_040_000
+	local function it(id: string, state: string, title: string, created: number): any
+		return {
+			id = id, orchestrator_id = "orc-fix", state = state, priority = "normal", order = created, threads = { "th-map" },
+			title = title, created = created, updated = T - 60, done = if state == "done" then T - 60 else nil,
+		}
+	end
+	app:set_state("cards_items", {
+		it("it-line", "done", "Fix the Nothing running line", T - 9000),
+		it("it-legend", "review", "Fix the Timeline legend", T - 8000),
+		it("it-topo", "active", "New Topology variants", T - 7000),
+		it("it-now", "active", "Every card in Now worked on", T - 6000),
+	})
+	local ask = { id = "ak-topo", from_chat = "th-map", item_id = "it-topo", kind = "decision", question = "Which variant?", options = {}, state = "open", origin = "turn_end", created = T - 120 }
+	app:set_state("cards_asks", { ["th-map"] = ask })
+	app:frames(10)
+	local function word(col: string, title: string): boolean
+		return app:has(`#cards-{col} >> role:button "{title}" >> .orch-card-word >> "Waiting on you"`)
+	end
+	expect(word("now", "New Topology variants")).to_be(true)
+	expect(word("now", "Every card in Now worked on")).to_be(false)
+	expect(word("review", "Fix the Timeline legend")).to_be(false)
+	expect(word("done", "Fix the Nothing running line")).to_be(false)
+	expect(app:has('#cards-blocked >> role:button "New Topology variants"')).to_be(false)
+	expect(app:count('"Waiting on you"')).to_be(1)
+	-- An ask naming no card: its thread's newest card at work, still one.
+	local loose: { [string]: any } = table.clone(ask)
+	loose.item_id = nil
+	app:set_state("cards_asks", { ["th-map"] = loose })
+	app:frames(10)
+	expect(word("now", "Every card in Now worked on")).to_be(true)
+	expect(app:count('"Waiting on you"')).to_be(1)
+	-- A quiet one ("hasn't answered") waits on no card.
+	local quiet = table.clone(loose)
+	quiet.quiet = true
+	app:set_state("cards_asks", { ["th-map"] = quiet })
+	app:frames(10)
+	expect(app:count('"Waiting on you"')).to_be(0)
+	expect(app:error()).to_be_nil()
+end)
+
+-- Any card is the person's to move, a loose Brain dump card (no
+-- orchestrator) or an orchestrator's, out of Blocked too: Move to, or drag.
+test("orch board cards: a loose card and an orchestrator's leave Blocked by Move to and by drag", function()
+	local app = cards()
+	local T = 1_800_040_000
+	local list: { any } = table.clone((app:state("cards_items") :: any) or {})
+	table.insert(list, {
+		id = "it-loose", state = "blocked", priority = "normal", order = 9, threads = { "th-map" },
+		title = "Feedback on the Map's Timeline view legend", created = T - 3000, updated = T - 600,
+	})
+	app:set_state("cards_items", list)
+	app:frames(10)
+	local loose = 'role:button "Feedback on the Map\'s Timeline view legend"'
+	expect(app:has(`#cards-blocked >> {loose}`)).to_be(true)
+	app:right_click(`#cards-blocked >> {loose}`)
+	app:frames(10)
+	app:click('role:menuitem "Move to"')
+	app:frames(10)
+	app:click('role:menuitem "Done today"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("move:it-loose:done:")
+	expect(app:has(`#cards-done >> {loose}`)).to_be(true)
+	expect(app:has(`#cards-blocked >> {loose}`)).to_be(false)
+	-- An orchestrator's Blocked card, dragged to Now.
+	app:drag('#cards-blocked >> role:button "Approve engine migration"', "#cards-now")
+	app:frames(20)
+	expect(app:state("calls")).to_contain("move:it-mig:active:")
+	expect(app:has('#cards-now >> role:button "Approve engine migration"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
