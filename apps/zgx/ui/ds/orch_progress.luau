@@ -107,7 +107,7 @@ function M.short(seconds: number): string
 		return locale.s("time.short.minutes", { n = t // 60 })
 	end
 	local m = t // 60
-	if m % 60 == 0 then
+	if m % 60 == 0 or m >= 600 then
 		return locale.s("time.short.hours", { n = m // 60 })
 	end
 	return locale.s("time.short.hours_minutes", { h = m // 60, m = m % 60 })
@@ -133,6 +133,66 @@ local function small(text: any, extra: { [string]: any }?): Node
 		p[k] = v
 	end
 	return ui.text(p :: any)
+end
+
+-- A stopwatch of rolling figures: hours (once it has run one), minutes and
+-- seconds each a counter of their own, the colons still between them, so
+-- only the figures that change roll and the colons keep their places.
+local function Stopwatch(props: { id: string?, seconds: () -> number?, text_size: string, weight: string?, color: any }): Node
+	local function part(f: (t: number) -> number): () -> number?
+		return function(): number?
+			local t = props.seconds()
+			return if t then f(math.max(0, math.floor(t))) else nil
+		end
+	end
+	local function hours(): boolean
+		return (props.seconds() or 0) >= 3600
+	end
+	local function face(text: string): Node
+		return ui.text { text, shrink = 0, tabular = true, text_size = props.text_size, weight = props.weight, color = props.color }
+	end
+	local function counter(value: () -> number?, format: ((n: number) -> string)?, max: number): Node
+		return Counter {
+			value = value,
+			format = format,
+			max = max,
+			text_size = props.text_size,
+			weight = props.weight,
+			color = props.color,
+		}
+	end
+	local two = function(n: number): string
+		return string.format("%02d", n)
+	end
+	return ui.row {
+		id = props.id,
+		class = "orch-progress-stopwatch",
+		label = locale.t("ds.orch.progress.elapsed"),
+		shrink = 0,
+		items = "center",
+		ui.show(hours, ui.row {
+			shrink = 0,
+			items = "center",
+			counter(part(function(t: number): number
+				return t // 3600
+			end), nil, 9),
+			face(":"),
+		}),
+		ui.switch(function(): string
+			return if hours() then "two" else "one"
+		end, {
+			two = counter(part(function(t: number): number
+				return (t // 60) % 60
+			end), two, 59),
+			one = counter(part(function(t: number): number
+				return (t // 60) % 60
+			end), nil, 59),
+		}),
+		face(":"),
+		counter(part(function(t: number): number
+			return t % 60
+		end), two, 59),
+	}
 end
 
 M.Progress = ui.component(function(props: Props): Node
@@ -400,7 +460,14 @@ M.Progress = ui.component(function(props: Props): Node
 			h = 22,
 			gap = "$space.2",
 			items = "center",
-			if lean then nil else glyph(14),
+			if lean
+				then ui.show(stalled, ui.div {
+					class = "orch-progress-stalled-glyph",
+					shrink = 0,
+					color = "$zeron.tone.warning.ink",
+					Icon { name = "clock-circle", size = 12 },
+				})
+				else glyph(14),
 			if lean then nil else ui.show(function(): boolean
 				return steps() ~= nil
 			end, ui.row {
@@ -482,15 +549,12 @@ M.Progress = ui.component(function(props: Props): Node
 			})),
 			ui.show(function(): boolean
 				return clocks().elapsed ~= nil
-			end, Counter {
-				value = function(): number?
+			end, Stopwatch {
+				seconds = function(): number?
 					return clocks().elapsed
 				end,
-				format = M.clock,
-				max = 3599,
 				text_size = "$font.size.xs",
 				color = "$text.secondary",
-				label = locale.t("ds.orch.progress.elapsed") :: any,
 			}),
 			menu(),
 		}
@@ -570,20 +634,17 @@ M.Progress = ui.component(function(props: Props): Node
 			gap = "$zeron.space.hair",
 			ui.show(function(): boolean
 				return clocks().elapsed ~= nil
-			end, Counter {
+			end, Stopwatch {
 				id = if props.id then `{props.id}-elapsed` else nil,
-				value = function(): number?
+				seconds = function(): number?
 					return clocks().elapsed
 				end,
-				format = M.clock,
-				max = 3599,
 				text_size = "$font.size.sm",
 				weight = "$font.weight.medium",
 				color = function(): string
 					local r: any = row() or {}
 					return if M.ACTIVE[r.state or ""] then "$text.primary" else "$text.secondary"
-				end :: any,
-				label = locale.t("ds.orch.progress.elapsed") :: any,
+				end,
 			}),
 			ui.row {
 				gap = "$space.1",
