@@ -31,7 +31,6 @@ local status = require("@self/status")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local data = require("@self/orch_data")
-local hue = require("@self/orch_hue")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
 
@@ -248,9 +247,6 @@ return ui.component(function(props: Props): Node
 						weight = "$font.weight.medium",
 						color = "$text.primary",
 					},
-					hue.Dot { hue = function(): number?
-						return if props.hue then control.value(props.hue) :: number? else nil
-					end, size = 6 },
 				},
 				ui.show(function(): boolean
 					return where() ~= ""

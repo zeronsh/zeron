@@ -122,6 +122,10 @@ export type Props = {
 	-- A step smaller (a thought's words in the work tree): the prose's small
 	-- size and line, headings at it too, blocks a little closer.
 	small: boolean?,
+	-- One line of it, cut short at the end: the first paragraph's words
+	-- (code spans, emphasis, links as a reply draws them), its blocks'
+	-- breaks read as spaces; a quiet summary line (a dump's answer).
+	inline: boolean?,
 	-- Its words' ink, where not the primary (a thought's, in the secondary).
 	ink: string?,
 }
@@ -1760,7 +1764,43 @@ local function own_list(): State<{ any }>
 	return list
 end
 
+-- One line of `text`'s first paragraph (`inline`): its runs as a reply's,
+-- not wrapping, cut short with an ellipsis.
+local function one_line(props: Props): Node
+	local function first(): { MarkdownRun }
+		local t: any = props.text
+		local src: string = if type(t) == "function" then (t :: any)() else t
+		for _, b in ui.markdown(src or "") :: any do
+			if b.t == "p" or b.t == "h" then
+				return b.s
+			end
+		end
+		return {}
+	end
+	local small = props.small == true
+	return ui.presence(function(): string
+		local t: any = props.text
+		return if type(t) == "function" then (t :: any)() else t
+	end, function(): Node
+		return runs(first(), {
+			wrap = false,
+			truncate = true,
+			lines = 1,
+			w_full = true,
+			min_w = 0,
+			color = props.ink or "$text.primary",
+			-- (Small, one line: the interface's small type, as the row it
+			-- sits in.)
+			text_size = if small then "$font.size.sm" else nil,
+			line_height = if small then "$font.line.sm" else nil,
+		}, if small then ({ tasks = {}, small = true } :: any) else nil)
+	end, { w_full = true, min_w = 0 })
+end
+
 return function(props: Props): Node
+	if props.inline then
+		return one_line(props)
+	end
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
 	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small

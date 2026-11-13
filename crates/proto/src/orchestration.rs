@@ -602,9 +602,16 @@ pub struct Route {
     /// For `Unsure`: the likely places, best first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RouteTarget>,
-    /// The target's reply, once it answered (questions).
+    /// The answer as the person reads it on the receipt, once there is one
+    /// (questions): one line of at most [`ANSWER_MAX`] chars, plain text
+    /// with inline code. The target's reply condensed (see
+    /// [`plain_answer`]), or its progress for a progress question. Display
+    /// text from an agent: fence it before another agent reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// The target's whole reply, as it came (markdown, capped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_full: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
 }
@@ -669,6 +676,161 @@ pub enum RouteState {
     Failed,
     #[serde(other)]
     Other,
+}
+
+/// The most a route's `answer` keeps.
+pub const ANSWER_MAX: usize = 160;
+
+/// Whether a sentence only talks about the answer's delivery ("I sent this
+/// answer to the Brain dump chat."), not the answer.
+fn is_meta(sentence: &str) -> bool {
+    let s = sentence.to_lowercase();
+    [
+        "brain dump",
+        "sent this answer",
+        "sent the answer",
+        "sent my answer",
+        "i sent this",
+        "i've sent",
+        "i have sent",
+        "i'll send",
+        "i forwarded",
+        "i've forwarded",
+        "i relayed",
+        "i've relayed",
+        "replied to the",
+        "sent it back",
+        "sent it to",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+
+/// Markdown dressing off one line: headings, list and quote markers,
+/// emphasis, links (their text kept). Inline code stays.
+fn strip_markdown_line(line: &str) -> String {
+    let mut line = line.trim();
+    line = line.trim_start_matches(['#', '>', ' ', '\t']);
+    for marker in ["- [ ] ", "- [x] ", "- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            line = rest;
+            break;
+        }
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 && line[digits..].starts_with(". ") {
+        line = &line[digits + 2..];
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut code = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '`' => {
+                code = !code;
+                out.push(c);
+            }
+            _ if code => out.push(c),
+            '*' | '_' if chars.peek() == Some(&c) => {
+                chars.next();
+            }
+            '*' => {}
+            '[' => {
+                // [text](url) → text
+                let mut text = String::new();
+                let mut closed = false;
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        closed = true;
+                        break;
+                    }
+                    text.push(c);
+                }
+                out.push_str(&text);
+                if closed && chars.peek() == Some(&'(') {
+                    for c in chars.by_ref() {
+                        if c == ')' {
+                            break;
+                        }
+                    }
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Sentences of `text`: split after `.`, `!` or `?` followed by a space.
+fn sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    let mut code = false;
+    while let Some(c) = chars.next() {
+        current.push(c);
+        if c == '`' {
+            code = !code;
+        }
+        if !code && matches!(c, '.' | '!' | '?') && chars.peek().is_none_or(|n| n.is_whitespace()) {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    out.push(current);
+    out.into_iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()
+}
+
+/// A reply as a receipt shows it without a model: its first sentence that
+/// isn't about the delivery, markdown stripped (inline code kept), secrets
+/// redacted, one line, at most [`ANSWER_MAX`] chars. Headings, code blocks
+/// and tables are passed over.
+pub fn plain_answer(reply: &str) -> String {
+    let mut prose = String::new();
+    let mut fenced = false;
+    for line in reply.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || trimmed.starts_with('|') || trimmed.starts_with('#') || trimmed.is_empty() {
+            if !prose.ends_with(' ') && !prose.is_empty() {
+                prose.push(' ');
+            }
+            continue;
+        }
+        let line = strip_markdown_line(trimmed);
+        if line.is_empty() {
+            continue;
+        }
+        if !prose.is_empty() && !prose.ends_with(' ') {
+            // A line without its own stop ends a sentence (a heading, a bullet).
+            if !prose.trim_end().ends_with(['.', '!', '?', ':', ',']) {
+                prose.push('.');
+            }
+            prose.push(' ');
+        }
+        prose.push_str(&line);
+    }
+    let first = sentences(&prose)
+        .into_iter()
+        .find(|s| !is_meta(s) && s.chars().any(char::is_alphanumeric))
+        .unwrap_or_default();
+    let first = first.trim_end_matches(':').trim();
+    prompt_text::one_line(&crate::redact::redact_command_output(first), ANSWER_MAX)
+}
+
+/// A model's one-line answer as a receipt keeps it: its first line,
+/// markdown stripped, nothing if it only talks about the delivery, one line
+/// of at most [`ANSWER_MAX`] chars.
+pub fn model_answer(raw: &str) -> String {
+    let first = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = strip_markdown_line(first);
+    let line = line.trim_matches(['"', '\'', ' ']);
+    if is_meta(line) {
+        return String::new();
+    }
+    prompt_text::one_line(&crate::redact::redact_command_output(line), ANSWER_MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1821,6 +1983,21 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((row.state, row.stalled, row.note), (ProgressState::Other, false, None));
+    }
+
+    #[test]
+    fn a_reply_condenses_to_its_first_real_sentence() {
+        let reply = "## Answer\n\nThe auth fix lands **Friday**, once `cargo test -p auth` passes on CI. After that I merge.\n\n- [details](https://x/y)\n\nI sent this answer to the Brain dump chat.";
+        assert_eq!(plain_answer(reply), "The auth fix lands Friday, once `cargo test -p auth` passes on CI.", "headings are passed over");
+        // Meta-chatter first, code, tables: passed over.
+        let reply = "I've sent the answer back.\n```\nlet x = 1. y\n```\n| a | b |\n1. Version 2.0 ships [today](https://x).";
+        assert_eq!(plain_answer(reply), "Version 2.0 ships today.");
+        assert!(plain_answer(&"word ".repeat(100)).chars().count() <= ANSWER_MAX);
+        assert!(!plain_answer("It uses sk-ant-abcdefghijklmnopqrstuvwxyz0123456789 now.").contains("sk-ant-abcdefghij"));
+        assert_eq!(plain_answer("I sent this answer to the Brain dump chat."), "");
+        // A model's line.
+        assert_eq!(model_answer("\"It lands **Friday** after `ci` passes.\"\nmore"), "It lands Friday after `ci` passes.");
+        assert_eq!(model_answer("I forwarded it to the Brain dump."), "");
     }
 
     #[test]

@@ -828,6 +828,12 @@ impl ProgressBook {
         }
     }
 
+    /// The cheap one-shot run (a chat's harness and a whole prompt → its
+    /// raw reply): the title path, or what a test put in its place.
+    pub(crate) fn one_shot(&self, rpc: &EngineRpc) -> NoteFn {
+        lock(&self.note_fn).clone().unwrap_or_else(|| title_path(rpc.registry_ref().clone()))
+    }
+
     fn last_fingerprint(&self, chat_id: &str) -> Option<String> {
         lock(&self.chats).get(chat_id).and_then(|e| e.clock.fingerprint.clone())
     }
@@ -886,8 +892,7 @@ impl ProgressBook {
             .flatten()
             .and_then(|c| c.config.map(|c| c.harness))
             .unwrap_or_else(|| rpc.doc_host_ref().default_harness());
-        let run = lock(&self.note_fn).clone().unwrap_or_else(|| title_path(rpc.registry_ref().clone()));
-        let raw = run(harness, prompt).await;
+        let raw = self.one_shot(&rpc)(harness, prompt).await;
         let note = raw.map(|r| progress_note(&r)).filter(|n| !n.is_empty());
         if note.is_none() {
             tracing::debug!(chat = %chat_id, ?why, "progress note: nothing written");
@@ -896,14 +901,15 @@ impl ProgressBook {
     }
 }
 
-/// Notes through the title path, on the chat's harness's cheapest model.
+/// One-shot runs through the title path, on the chat's harness's cheapest
+/// model: the raw reply (each caller cleans its own).
 fn title_path(registry: Arc<crate::registry::HarnessRegistry>) -> NoteFn {
     Arc::new(move |harness, prompt| {
         let registry = registry.clone();
         async move {
             let (harness, model) = crate::titles::side_run_harness(&registry, harness)?;
             crate::titles::one_shot(&registry, harness, model, prompt, |raw| {
-                Some(progress_note(raw)).filter(|n| !n.is_empty())
+                Some(raw.trim().to_owned()).filter(|r| !r.is_empty())
             })
             .await
         }

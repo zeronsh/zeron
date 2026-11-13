@@ -104,22 +104,6 @@ test("orch board: filtered to one orchestrator", function()
 	expect(count(app, "review")).to_be(1)
 end)
 
-test("orch board: whose a card is, only among several orchestrators'", function()
-	local app = board()
-	-- All of them: each card says whose, a hue dot and a name; no stripe.
-	expect(app:has('#orch-col-review >> .orch-card-owner >> "Exnomic VPN"')).to_be(true)
-	expect(app:has('#orch-col-now >> .orch-card-owner >> "Orchestrators"')).to_be(true)
-	-- One orchestrator's: none says.
-	app:set_state("filter", "orc-orch")
-	app:frames(10)
-	expect(app:has(".orch-card-owner")).to_be(false)
-	-- Exnomic VPN's alone, the same.
-	app:set_state("filter", "orc-vpn")
-	app:frames(10)
-	expect(count(app, "review")).to_be(1)
-	expect(app:has(".orch-card-owner")).to_be(false)
-end)
-
 test("orch board: nothing on it is one quiet line, not empty columns", function()
 	local app = board()
 	app:set_state("orch_board_items", {})
@@ -192,6 +176,7 @@ test("orch board: a card stays among its priority", function()
 	app:frames(20)
 	local now = titles(app, "now")
 	expect(now[1]).to_be("Control room")
+	expect(now[4]).to_be("Merge phase-1 fixes")
 end)
 
 test("orch board: its menu sets a priority", function()
@@ -249,4 +234,21 @@ test("orch board: side by side wide, sideways narrower, stacked narrow, and back
 	app:frames(20)
 	expect(app:has(".orch-board-side")).to_be(true)
 	expect(app:error()).to_be_nil()
+end)
+
+test("orch board: whose a card is, said only where the board holds more than one's", function()
+	local app = board()
+	-- All of them: each owned card names its orchestrator; the loose one none.
+	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-owner >> "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-owner >> "Orchestrators"')).to_be(true)
+	expect(app:has("#orch-col-inbox >> .orch-card-owner")).to_be(false)
+	-- One orchestrator's: nobody's named.
+	app:set_state("filter", "orc-orch")
+	app:frames(10)
+	expect(app:has(".orch-card-owner")).to_be(false)
+	-- Exnomic VPN's alone, the same.
+	app:set_state("filter", "orc-vpn")
+	app:frames(10)
+	expect(count(app, "review")).to_be(1)
+	expect(app:has(".orch-card-owner")).to_be(false)
 end)

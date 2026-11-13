@@ -18,6 +18,7 @@ local Icon = require("@self/icon")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
+local Block = require("@self/orch_block")
 
 export type Props = {
 	comms: () -> { any },
@@ -174,6 +175,7 @@ return ui.component(function(props: Props): Node
 							return if item:get().first then status.ago(status.since(e().at or 0)) else ""
 						end,
 						class = "orch-comm-time",
+						y = Block.baseline("$font.size.sm", "$font.size.xs"),
 						tabular = true,
 						shrink = 0,
 						text_size = "$font.size.xs",

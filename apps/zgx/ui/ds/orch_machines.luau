@@ -24,6 +24,7 @@ local Spark = require("@self/orch_spark")
 local Counter = require("@self/orch_counter")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
+local Block = require("@self/orch_block")
 
 export type Props = {
 	devices: () -> { any },
@@ -283,7 +284,15 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		},
 		ui.show(function(): boolean
 			return id() == props.here()
-		end, ui.text { locale.t("ds.orch.map.here"), shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" }),
+		end, ui.text {
+			locale.t("ds.orch.map.here"),
+			class = "orch-machine-here",
+			shrink = 0,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+			-- (On the name's baseline.)
+			y = Block.baseline("$font.size.sm", "$font.size.xs"),
+		}),
 		ui.div { grow = 1 },
 		ui.switch(function(): string
 			return if online() then "on" else "off"
@@ -292,7 +301,7 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 				gap = "$space.1",
 				items = "baseline",
 				shrink = 0,
-				ui.text { locale.t("ds.orch.machines.cpu"), text_size = "$font.size.xs", color = "$text.tertiary" },
+				ui.text { locale.t("ds.orch.machines.cpu"), text_size = "$font.size.xs", color = "$text.tertiary", y = Block.baseline("$font.size.sm", "$font.size.xs") },
 				Counter {
 					value = cpu,
 					suffix = "%",
@@ -332,26 +341,18 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		gap = "$space.2",
 		items = "center",
 		ui.text { locale.t("ds.orch.machines.memory_label"), shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" },
-		ui.div {
+		-- (Drawn, not laid out: a new reading repaints it, nothing moves.)
+		ui.canvas {
 			grow = 1,
 			h = 3,
-			relative = true,
-			rounded = "$radius.full",
-			bg = "$zeron.slider.track",
-			overflow = "hidden",
-			ui.div {
-				absolute = true,
-				left = 0,
-				top = 0,
-				bottom = 0,
-				rounded = "$radius.full",
-				bg = "$text.secondary",
-				w = function(): string
-					local l = load()
-					local f = if l and l.mem_total and l.mem_used and l.mem_total > 0 then math.clamp(l.mem_used / l.mem_total, 0, 1) else 0
-					return `{math.floor(f * 1000 + 0.5) / 10}%`
-				end,
-			},
+			draw = function(c: Canvas, w: number, h: number)
+				local l = load()
+				local f = if l and l.mem_total and l.mem_used and l.mem_total > 0 then math.clamp(l.mem_used / l.mem_total, 0, 1) else 0
+				c:rect(0, 0, w, h, "$zeron.slider.track", h / 2)
+				if f > 0 then
+					c:rect(0, 0, math.max(h, w * f), h, "$text.secondary", h / 2)
+				end
+			end,
 		},
 		ui.text {
 			function(): string

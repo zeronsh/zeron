@@ -670,17 +670,14 @@ local OrchBoard = ui.component(function(props: Props): Node
 			class = "orch-card-owner",
 			min_w = 0,
 			shrink = 1,
-			gap = "$space.1",
+			gap = "$zeron.space.tight",
 			items = "center",
-			ui.div {
-				w = 6,
-				h = 6,
-				shrink = 0,
-				rounded = "$radius.full",
-				bg = function(): any
+			hue.Dot {
+				hue = function(): number?
 					local o = owner_of(item().orchestrator_id)
-					return if o then hue.paint(o.hue) else "$text.tertiary"
+					return o and o.hue
 				end,
+				size = 6,
 			},
 			ui.text {
 				function(): string

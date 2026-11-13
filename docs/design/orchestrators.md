@@ -115,9 +115,16 @@ chats, coalesced ≤ 4/s).
    - `item` creates a loose work item;
    - `note` appends to the Brain dump's notes;
    - `unsure` delivers nothing and sets dump state `needsYou`.
-4. Routes with intent `question`: when the target's next turn ends, the engine copies the reply's
-   final text into `route.answer` and sets state `answered`, and the dump shows it. Implementation:
-   remember `(target chat, turn after delivery)` and read the last assistant text on completion.
+4. Routes with intent `question`: when the target's next turn ends, the engine keeps the reply's
+   final text as `route.answerFull` and sets state `answered`. `route.answer` is what the receipt
+   shows: one line (≤ 160 chars, plain text, inline code allowed). At once it is the reply's first
+   real sentence, markdown stripped, with headings, code, tables and talk about sending or forwarding
+   passed over. Then a cheap one-shot model (the progress-note path, the target's harness's fastest
+   model, `zeron_harness::ANSWER_INSTRUCTIONS`, the question and the reply as quoted JSON) replaces it
+   with a one-sentence answer to the question, when it makes one. Progress-answered routes are
+   already one line and stay as they are. `answer` is agent-written display text: fenced before any
+   agent reads it. Implementation: remember `(target chat, turn after delivery)` and read the last
+   assistant text on completion.
 5. `reroute` (the person): sends the new target the message, sends the old one a one-line retraction
    (`[Brain dump] Ignore the earlier note "<excerpt…>": it was meant elsewhere.`), and updates the
    route.
@@ -278,7 +285,8 @@ orchestration.now:get() = {
   asks  = { { id, from_chat, orchestrator_id?, item_id?, kind, question, options = { { label,
               detail } }, urgent, state, answer?, created, answered? } },
   dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to }, target = { kind, id? },
-              intent, message, state, candidates, answer?, item_id? } }, summary?, device, created } },
+              intent, message, state, candidates, answer?, answer_full?, item_id? } }, summary?, device,
+              created } },
 }
 orchestration.loads:get() = { [device_id] = { cpu?, mem_used?, mem_total?, load1?, cores?, online, at } }
 orchestration.comms:get() = { { id, kind, from, to, summary, at } }   -- newest last, ≤ 100

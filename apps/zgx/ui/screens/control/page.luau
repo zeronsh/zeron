@@ -25,6 +25,7 @@ local Comms = require("@ds/orch_comms")
 local OrchBoard = require("@ds/orch_board")
 local Links = require("@ds/links")
 local Block = require("@ds/orch_block")
+local HoverCard = require("@ds/hover_card")
 local Counter = require("@ds/orch_counter")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
@@ -94,9 +95,9 @@ end
 
 -- The draft, kept as the page comes and goes.
 local draft = ui.state("control_draft", "")
--- The dump shown in Capture's receipt (nil: the newest).
-local picked = ui.state("control_dump_picked", nil :: string?)
 local history_open = ui.state("control_history_open", false)
+-- The earlier dumps opened in the history, by id.
+local history_opened = ui.state("control_history_opened", {} :: { [string]: boolean })
 
 local chats_now = ui.computed(function(): { [string]: any }
 	return data.chats(sessions.now:get())
@@ -154,7 +155,6 @@ function M.send()
 		return
 	end
 	draft:set("")
-	picked:set(nil)
 	orchestration.dump(text):after(function() end, function(e: any)
 		-- (Not taken: the words back, to send again.)
 		if draft:peek() == "" then
@@ -165,24 +165,165 @@ function M.send()
 end
 
 -- Capture: the field, and the receipt of the dump shown.
-local function capture(): Node
-	local shown = ui.computed(function(): any
-		local dumps = orchestration.dumps:get()
-		local id = picked:get()
-		if id then
-			for _, d in dumps do
-				if d.id == id then
-					return d
-				end
+-- A dump's receipt (ds/orch_receipt): the newest one's, or an earlier
+-- one's opened in the history (`settled`: its parts there at once).
+local function receipt(dump: () -> any, settled: boolean?): Node
+	return Receipt {
+		dump = dump,
+		now = function(): any
+			return orchestration.now:get()
+		end,
+		chats = function(): { [string]: any }
+			return chats_now:get()
+		end,
+		on_reroute = function(dump_id: string, route_id: string, target: any)
+			orchestration.reroute(dump_id, route_id, target):after(function() end, said("control.capture.move_failed"))
+		end,
+		on_open = open_target,
+		settled = settled,
+		text_size = if settled then nil else "$font.size.lg",
+		line_height = if settled then nil else "$font.line.lg",
+	}
+end
+
+-- How a dump stands, as Zeron's status says it.
+local DUMP_STATUS: { [string]: string } = { routing = "working", routed = "done", needs_you = "input", failed = "failed" }
+
+-- An earlier dump in the history: when, how it stands, its first words,
+-- where its parts went (their hues, five at most and how many more); the
+-- whole of what was said on the pointer; opened, its receipt under it.
+local function history_row(_d: any, _i: number, row: State<any>): Node
+	local function id(): string
+		return row:peek().id
+	end
+	local function open(): boolean
+		return history_opened:get()[row:get().id] == true
+	end
+	local hues = ui.computed(function(): { { key: string, hue: number? } }
+		local out = {}
+		local seen: { [string]: boolean } = {}
+		for _, r in row:get().routes or {} do
+			local t = data.target(orchestration.now:get(), chats_now:get(), r.target, function(k: string): string
+				return k
+			end)
+			local key = `{t.kind}:{t.id or ""}`
+			if not seen[key] then
+				seen[key] = true
+				table.insert(out, { key = key, hue = t.hue })
 			end
 		end
-		return dumps[1]
+		return out
+	end)
+	return ui.column {
+		class = "control-history-item",
+		w_full = true,
+		gap = "$space.2",
+		ui.button {
+			class = "control-history-row",
+			label = function(): string
+				return row:get().text or ""
+			end,
+			expanded = open,
+			tooltip = HoverCard.Tip { max_w = 360, p = "$space.2", ui.text {
+				function(): string
+					return row:get().text or ""
+				end,
+				literal = true,
+				wrap = true,
+				text_size = "$font.size.sm",
+				color = "$text.primary",
+			} },
+			tooltip_delay = 500,
+			w_full = true,
+			h = 32,
+			px = "$space.2",
+			gap = "$space.2",
+			items = "center",
+			rounded = "$radius.md",
+			bg = function(): string
+				return if open() then "$hover" else "#00000000"
+			end,
+			hover = { bg = "$hover" },
+			on_click = function()
+				history_opened:set_key({ id() }, if open() then nil else true)
+			end,
+			status.StatusIcon {
+				kind = function(): any
+					return DUMP_STATUS[row:get().state or ""] or "waiting"
+				end,
+				size = 14,
+			},
+			ui.text {
+				function(): string
+					local t = string.gsub(row:get().text or "", "%s+", " ")
+					return t
+				end,
+				literal = true,
+				grow = 1,
+				min_w = 0,
+				truncate = true,
+				text_size = "$font.size.sm",
+				color = "$text.primary",
+			},
+			-- Where its parts went.
+			ui.each(ui.computed(function(): { any }
+				local out = {}
+				for i, h in hues:get() do
+					if i <= 5 then
+						table.insert(out, h)
+					end
+				end
+				return out
+			end), function(_h: any, _j: number, hh: State<any>): Node
+				return hue.Dot { hue = function(): number?
+					return hh:get().hue
+				end, size = 6 }
+			end, { key = function(h: any): string
+				return h.key
+			end, direction = "row", gap = "$zeron.space.hair", items = "center", shrink = 0 }),
+			ui.text {
+				function(): string
+					local n = #hues:get()
+					return if n > 5 then `+{n - 5}` else ""
+				end,
+				shrink = 0,
+				tabular = true,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			},
+			ui.text {
+				function(): string
+					return status.ago(status.since(row:get().created or 0))
+				end,
+				w = ui.raw(28, "a short time's room, so the rows' ends line up"),
+				shrink = 0,
+				tabular = true,
+				align = "end",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			},
+		},
+		ui.show(open, ui.column {
+			class = "control-history-receipt",
+			w_full = true,
+			pl = ui.raw(30, "under the words, past the status"),
+			pr = "$space.2",
+			pb = "$space.2",
+			receipt(function(): any
+				return row:get()
+			end, true),
+		}),
+	}
+end
+
+local function capture(): Node
+	local newest = ui.computed(function(): any
+		return orchestration.dumps:get()[1]
 	end)
 	local older = ui.computed(function(): { any }
-		local s = shown:get()
 		local out = {}
-		for _, d in orchestration.dumps:get() do
-			if not s or d.id ~= s.id then
+		for i, d in orchestration.dumps:get() do
+			if i > 1 then
 				table.insert(out, d)
 			end
 		end
@@ -235,53 +376,24 @@ local function capture(): Node
 			},
 		},
 		ui.show(function(): boolean
-			return shown:get() ~= nil
+			return newest:get() ~= nil
 		end, ui.column {
 			w_full = true,
 			gap = "$space.3",
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
-				items = "center",
-				ui.text {
-					function(): string
-						local d = shown:get()
-						return if d then status.ago(status.since(d.created or 0)) else ""
-					end,
-					tabular = true,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				},
-				ui.show(function(): boolean
-					return picked:get() ~= nil
-				end, ds.Button {
-					tone = "ghost",
-					size = "xs",
-					on_click = function()
-						picked:set(nil)
-					end,
-					locale.t("control.capture.newest"),
-				}),
+			ui.text {
+				function(): string
+					local d = newest:get()
+					return if d then status.ago(status.since(d.created or 0)) else ""
+				end,
+				tabular = true,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
 			},
-			Receipt {
-				dump = function(): any
-					return shown:get()
-				end,
-				now = function(): any
-					return orchestration.now:get()
-				end,
-				chats = function(): { [string]: any }
-					return chats_now:get()
-				end,
-				on_reroute = function(dump_id: string, route_id: string, target: any)
-					orchestration.reroute(dump_id, route_id, target):after(function() end, said("control.capture.move_failed"))
-				end,
-				on_open = open_target,
-				text_size = "$font.size.lg",
-				line_height = "$font.line.lg",
-			},
+			receipt(function(): any
+				return newest:get()
+			end),
 		}),
-		-- Earlier dumps, folded.
+		-- Earlier dumps, folded: a disclosure row, then a row each.
 		ui.show(function(): boolean
 			return #older:get() > 0
 		end, ui.column {
@@ -295,11 +407,15 @@ local function capture(): Node
 				expanded = function(): boolean
 					return history_open:get()
 				end,
-				h = 26,
-				px = 0,
-				gap = "$space.1",
+				h = 28,
+				px = "$space.2",
+				mx = ui.raw(-8, "its words over the rows' words, its wash out past them"),
+				gap = "$space.2",
 				items = "center",
+				rounded = "$radius.md",
 				bg = "#00000000",
+				hover = { bg = "$hover" },
+				self = "start",
 				on_click = function()
 					history_open:set(not history_open:peek())
 				end,
@@ -312,73 +428,26 @@ local function capture(): Node
 						size = 12,
 					},
 				},
+				ui.text { locale.t("control.capture.history"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
 				ui.text {
 					function(): string
-						return locale.s("control.capture.earlier", { n = #older:get() })
+						return tostring(#older:get())
 					end,
-					text_size = "$font.size.sm",
-					color = "$text.secondary",
+					tabular = true,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+					y = Block.baseline("$font.size.sm", "$font.size.xs"),
 				},
 			},
 			ui.show(function(): boolean
 				return history_open:get()
-			end, ui.each(older, function(_d: any, _i: number, row: State<any>): Node
-				return ui.button {
-					class = "control-history-row",
-					label = function(): string
-						return row:get().text or ""
-					end,
-					w_full = true,
-					h = 30,
-					px = "$space.2",
-					gap = "$space.3",
-					items = "center",
-					rounded = "$radius.md",
-					bg = "#00000000",
-					hover = { bg = "$hover" },
-					on_click = function()
-						picked:set(row:peek().id)
-					end,
-					ui.text {
-						function(): string
-							return row:get().text or ""
-						end,
-						literal = true,
-						grow = 1,
-						min_w = 0,
-						truncate = true,
-						text_size = "$font.size.sm",
-						color = "$text.secondary",
-					},
-					-- Where its parts went.
-					ui.each(ui.computed(function(): { any }
-						return row:get().routes or {}
-					end), function(_r: any, _j: number, rr: State<any>): Node
-						return hue.Dot { hue = function(): number?
-							local t = data.target(orchestration.now:get(), chats_now:get(), rr:get().target, function(k: string): string
-								return k
-							end)
-							return t.hue
-						end, size = 6 }
-					end, { key = function(r: any): string
-						return r.id
-					end, direction = "row", gap = "$space.1", items = "center", shrink = 0 }),
-					ui.show(function(): boolean
-						return row:get().state == "needs_you"
-					end, ui.div { color = "$zeron.status.input", shrink = 0, Icon { name = "status-input", size = 12 } }),
-					ui.text {
-						function(): string
-							return status.ago(status.since(row:get().created or 0))
-						end,
-						tabular = true,
-						shrink = 0,
-						text_size = "$font.size.xs",
-						color = "$text.tertiary",
-					},
-				}
-			end, { key = function(d: any): string
-				return d.id
-			end, w_full = true })),
+			end, ui.column {
+				w_full = true,
+				mx = ui.raw(-8, "the rows' wash out past the block's words, their words in line"),
+				ui.each(older, history_row, { key = function(d: any): string
+					return d.id
+				end, w_full = true, gap = "$zeron.space.hair" }),
+			}),
 		}),
 	}
 end
@@ -785,7 +854,17 @@ local function head(): Node
 			gap = "$space.3",
 			items = "center",
 			ds.Text { locale.t("control.title"), style = "heading" },
-			ui.text { summary, tabular = true, text_size = "$font.size.sm", color = "$text.tertiary", truncate = true, min_w = 0 },
+			ui.text {
+				summary,
+				id = "control-summary",
+				tabular = true,
+				text_size = "$font.size.sm",
+				color = "$text.tertiary",
+				truncate = true,
+				min_w = 0,
+				-- (On the title's baseline.)
+				y = Block.baseline("$font.size.lg", "$font.size.sm"),
+			},
 			ui.div { grow = 1 },
 			ui.div {
 				on_visible = seen,
