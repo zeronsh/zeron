@@ -737,8 +737,16 @@ const REPLY: &str = "## Auth fix\n\nIt lands **Friday**, once `cargo test -p aut
 /// A question routed to `chat` (hosted elsewhere, so nothing runs): the
 /// dump's and the route's ids.
 async fn question_to(core: &crate::EngineCore, rpc: &EngineRpc, chat_id: &str) -> (String, String) {
-    chat(rpc, chat_id, "dev-remote", None).await;
-    let dump = call(rpc, Caller::Local, methods::ORCHESTRATE, json!({"op":"dump","text":"when does the auth fix land?"})).await.unwrap()["id"]
+    question_with(core, rpc, chat_id, "when does the auth fix land?", "When does the auth fix land?").await
+}
+
+/// [`question_to`] with its own words: what the person said (`excerpt`)
+/// and what the chat is sent (`message`). The chat is made once.
+async fn question_with(core: &crate::EngineCore, rpc: &EngineRpc, chat_id: &str, excerpt: &str, message: &str) -> (String, String) {
+    if core.workspace.chat(chat_id).ok().flatten().is_none() {
+        chat(rpc, chat_id, "dev-remote", None).await;
+    }
+    let dump = call(rpc, Caller::Local, methods::ORCHESTRATE, json!({"op":"dump","text":excerpt})).await.unwrap()["id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -755,8 +763,8 @@ async fn question_to(core: &crate::EngineCore, rpc: &EngineRpc, chat_id: &str) -
         rpc,
         agent(&brain),
         methods::ORCHESTRATE,
-        json!({"op":"route","dumpId":dump,"excerpt":"when does the auth fix land?","target":{"kind":"chat","id":chat_id},
-            "intent":"question","message":"When does the auth fix land?"}),
+        json!({"op":"route","dumpId":dump,"excerpt":excerpt,"target":{"kind":"chat","id":chat_id},
+            "intent":"question","message":message}),
     )
     .await
     .unwrap()["id"]
@@ -977,6 +985,80 @@ async fn a_question_to_a_chat_on_an_older_host_is_answered_when_its_turn_ends_th
     answered_elsewhere(&core, "old", "dev-remote", "When does the auth fix land?", REPLY).await;
     wait_until(|| route_of(&core, &dump, &route).state == RouteState::Answered, "the answer from the older host").await;
     assert_eq!(route_of(&core, &dump, &route).answer_full.as_deref(), Some(REPLY));
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replies_taken_in_late_each_answer_their_own_question_at_their_own_time() {
+    use zeron_proto::orchestration::{CommKind, RouteState};
+    let (_temp, core, rpc) = core().await;
+    host(&core, "dev-remote", true); // files no routes: this engine takes them in
+    // Two questions to one long-lived thread, a third answered by a
+    // message to the Brain dump.
+    let (d1, r1) = question_with(&core, &rpc, "busy", "are Inbox and Next ever used?", "Are the Inbox and Next columns ever used?").await;
+    let (d2, r2) = question_with(&core, &rpc, "busy", "why is Progress empty?", "Why does Progress show nothing working?").await;
+    let (d3, r3) = question_with(&core, &rpc, "relay", "how many lines of code?", "Count the lines of code.").await;
+    // Its transcript, from two hours ago: each question, then its reply.
+    let row = |status, turn: Option<&str>| Session {
+        chat_id: "busy".into(),
+        device_id: "dev-remote".into(),
+        updated_at: Utc::now(),
+        last_completed_turn: turn.map(str::to_owned),
+        ..session(status)
+    };
+    core.workspace.record_session(&row(SessionStatus::Working, None));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let doc = core.doc_host.open("busy").unwrap();
+    let t0 = (Utc::now() - TimeDelta::hours(2)).timestamp_millis();
+    let said = |m: &str| zeron_proto::agent_messages::agent_message("Brain dump", "brain", m);
+    doc.doc().push_message(&entry("u1", MessageRole::User, vec![text(&said("Are the Inbox and Next columns ever used?"))], t0)).unwrap();
+    doc.doc().push_message(&entry("a1", MessageRole::Assistant, vec![text("Essentially never: cards land in Now.")], t0 + 1_000)).unwrap();
+    doc.doc().push_message(&entry("u2", MessageRole::User, vec![text(&said("Why does Progress show nothing working?"))], t0 + 60_000)).unwrap();
+    doc.doc().push_message(&entry("a2", MessageRole::Assistant, vec![text("Looking.")], t0 + 61_000)).unwrap();
+    doc.doc().push_message(&entry("a3", MessageRole::Assistant, vec![text("Its rows froze after the room was left.")], t0 + 62_000)).unwrap();
+    core.workspace.record_session(&row(SessionStatus::Idle, Some("turn-9")));
+    wait_until(
+        || route_of(&core, &d1, &r1).state == RouteState::Answered && route_of(&core, &d2, &r2).state == RouteState::Answered,
+        "both questions taken in",
+    )
+    .await;
+    let (one, two) = (route_of(&core, &d1, &r1), route_of(&core, &d2, &r2));
+    assert_eq!(one.answer_full.as_deref(), Some("Essentially never: cards land in Now."), "its own reply");
+    assert_eq!(two.answer_full.as_deref(), Some("Its rows froze after the room was left."), "its turn's last word");
+    assert_eq!(one.answered_at.map(|t| t.timestamp_millis()), Some(t0 + 1_000), "when it was written");
+    assert_eq!(two.answered_at.map(|t| t.timestamp_millis()), Some(t0 + 62_000));
+    // Old news: no Comms line (nor banner) for either.
+    assert!(
+        !core.orchestration.comms().recent().iter().any(|c| c.kind == CommKind::Answer && c.from == "busy"),
+        "taken in quietly"
+    );
+    // An answer relayed to the Brain dump counts.
+    rpc.file_with_brain("relay", "About 1.5 million lines across the three repos.");
+    wait_until(|| route_of(&core, &d3, &r3).state == RouteState::Answered, "the relayed answer").await;
+    let three = route_of(&core, &d3, &r3);
+    assert_eq!(three.answer_full.as_deref(), Some("About 1.5 million lines across the three repos."));
+    assert!(three.answered_at.is_some());
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_takes_in_a_reply_no_turn_end_brought() {
+    use zeron_proto::orchestration::RouteState;
+    let (_temp, core, rpc) = core().await;
+    host(&core, "dev-remote", true);
+    let (dump, route) = question_with(&core, &rpc, "quiet", "is the MSI signed?", "Is the Windows MSI signed yet?").await;
+    // Its reply synced in with no session row moving (after every retry).
+    let doc = core.doc_host.open("quiet").unwrap();
+    let t0 = (Utc::now() - TimeDelta::hours(1)).timestamp_millis();
+    let said = zeron_proto::agent_messages::agent_message("Brain dump", "brain", "Is the Windows MSI signed yet?");
+    doc.doc().push_message(&entry("u", MessageRole::User, vec![text(&said)], t0)).unwrap();
+    doc.doc().push_message(&entry("a", MessageRole::Assistant, vec![text("Yes, signed this morning with the EV cert.")], t0 + 5_000)).unwrap();
+    assert_eq!(route_of(&core, &dump, &route).state, RouteState::Delivered);
+    assert_eq!(super::super::watchers::sweep_questions(&core.orchestration, &rpc).await, 1);
+    let r = route_of(&core, &dump, &route);
+    assert_eq!(r.state, RouteState::Answered);
+    assert_eq!(r.answered_at.map(|t| t.timestamp_millis()), Some(t0 + 5_000));
+    assert_eq!(super::super::watchers::sweep_questions(&core.orchestration, &rpc).await, 0, "once");
     core.sessions.shutdown().await;
 }
 

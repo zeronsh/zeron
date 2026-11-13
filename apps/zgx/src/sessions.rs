@@ -200,6 +200,8 @@ struct RowWith {
     /// What its agent is doing (while it works), and its todo progress.
     activity: Option<zeron_proto::orchestration::ChatActivity>,
     todo: Option<zeron_proto::orchestration::TodoProgress>,
+    /// When the turn it's working on began (Unix seconds), while it works.
+    turn_started: Option<i64>,
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -643,6 +645,7 @@ fn child_row(
         agent_icon: harness.and_then(crate::agents::registry_icon),
         activity: activity_of(status, session),
         todo: session.and_then(|s| s.todo.clone()),
+        turn_started: turn_started(status, session),
     };
     if rows.get(id).is_some_and(|row| row.with == with) {
         return;
@@ -682,6 +685,9 @@ fn child_row(
         ("started_by", started_by_value(&c["startedBy"])),
         ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
         ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
+        // When the turn it's working on began (Unix seconds), while it works:
+        // the Q&A's "Answering" is a turn begun since its question came.
+        ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
 }
@@ -716,6 +722,7 @@ fn top_row(
         agent_icon: harness.and_then(crate::agents::registry_icon),
         activity: activity_of(status, session),
         todo: session.and_then(|s| s.todo.clone()),
+        turn_started: turn_started(status, session),
     };
     if let Some(row) = rows.get(id).filter(|row| row.with == with) {
         return row.value.clone();
@@ -764,6 +771,9 @@ fn top_row(
         // What its agent is doing while it works, and its todo progress.
         ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
         ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
+        // When the turn it's working on began (Unix seconds), while it works:
+        // the Q&A's "Answering" is a turn begun since its question came.
+        ("turn_started", with.turn_started.map_or(Value::Nil, |t| Value::from(t as f64))),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value
@@ -1943,6 +1953,11 @@ fn status_of(
 /// What a chat's agent is doing, while its row says it works.
 fn activity_of(status: Option<&str>, session: Option<&Session>) -> Option<zeron_proto::orchestration::ChatActivity> {
     session.filter(|_| status == Some("working")).and_then(|s| s.activity.clone())
+}
+
+/// When the turn a working chat is on began (Unix seconds).
+fn turn_started(status: Option<&str>, session: Option<&Session>) -> Option<i64> {
+    session.filter(|_| status == Some("working")).and_then(|s| s.started_at).map(|t| t.timestamp())
 }
 
 /// A chat's sleep at `now`: asleep until (`true`, its time), or woke and not

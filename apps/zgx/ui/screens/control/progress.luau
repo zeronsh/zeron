@@ -48,7 +48,21 @@ local clock = ui.state("progress_now", nil :: number?)
 -- The widget showing all its units, not the first few.
 local all = ui.state("progress_all", false)
 
-local chats_now = ui.computed(function(): { [string]: any }
+-- (What this module derives is worked out as it's read, never kept in a
+-- ui.computed made here: this module is first required by whichever screen
+-- shows Progress first (screens/shell/boundary builds screens), and a
+-- computed made at the top of a module required inside a build belongs to
+-- that build. Gone with it (the Control room left), it would keep its last
+-- value for every screen after: Progress showing nothing working.)
+local function derived<T>(f: () -> T): { get: (any) -> T }
+	return {
+		get = function(_self: any): T
+			return f()
+		end,
+	}
+end
+
+local chats_now = derived(function(): { [string]: any }
 	return data.chats(sessions.now:get())
 end)
 -- Chats a check found nothing to say about yet.
@@ -92,7 +106,7 @@ local function stretch_start(c: any): number?
 end
 
 -- Every chat at work now that isn't archived: a row drawn from its session.
-local stood_in = ui.computed(function(): { [string]: any }
+local stood_in = derived(function(): { [string]: any }
 	local now = sessions.now:get()
 	local out: { [string]: any } = {}
 	local function take(c: any)
@@ -128,7 +142,7 @@ end)
 -- it has none for; a thread that ended its turn asking the person (an
 -- open ask raised from its turn's end) and is at rest since (idle or done;
 -- not an orchestrator's own chat) waits on them, from when it asked.
-M.rows = ui.computed(function(): { [string]: any }
+M.rows = derived(function(): { [string]: any }
 	local out = table.clone(orchestration.progress:get())
 	for id, r in stood_in:get() do
 		if out[id] == nil then
@@ -301,7 +315,7 @@ end
 
 -- The widget's threads: those pinned first (in their order), then every
 -- one working now, the latest started first.
-M.listed = ui.computed(function(): { { id: string } }
+M.listed = derived(function(): { { id: string } }
 	local rows = M.rows:get()
 	local out, seen = {}, {}
 	for _, id in M.pins:get() do

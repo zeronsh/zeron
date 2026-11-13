@@ -27,7 +27,7 @@
 //!                  updated?, escalated?, answered_via? } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
-//!                   candidates = { target }, answer?, answer_full?, answered?,
+//!                   candidates = { target }, answer?, answer_full?, answered?, delivered?,
 //!                   direct, item_id?,
 //!                   attachments = { path } } },
 //!                   summary?, device, created, updated,
@@ -610,6 +610,9 @@ fn route_value(r: &Route) -> Value {
         ("answer", opt_str(r.answer.as_deref())),
         ("answer_full", opt_str(r.answer_full.as_deref())),
         ("answered", opt(r.answered_at.as_ref(), secs)),
+        // When it was last sent to its target (a question's "Answering" is
+        // a turn begun since).
+        ("delivered", opt(r.delivered_at.as_ref(), secs)),
         // A question the person wants answered (the Control room's Q&A):
         // tagged so, and not work or rhetoric in their words (checked here
         // too, for routes from before the engine checked).

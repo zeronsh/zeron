@@ -155,3 +155,73 @@ test("Q&A: what's read and put away is kept (the device's), and the widget can b
 	local order = w.order or {}
 	expect(table.find(order, "qa") == nil or table.find(order, "qa") == (table.find(order, "needs") or 0) + 1).to_be(true)
 end)
+
+-- Loaded as the shell loads a screen (required inside a component's
+-- build), then left and come back to: what the page made the first time
+-- must still follow what changes.
+local function screen(): any
+	local app = mount("control_qa_screen_fixture.luau")
+	app:resize(1440, 1400)
+	app:frames(30)
+	app:set_state("qa_screen_shown", false)
+	app:frames(10)
+	app:set_state("qa_screen_shown", true)
+	app:frames(30)
+	return app
+end
+
+test("Q&A: after the screen is left and come back to, a dismissed entry goes at once and Undo brings it back", function()
+	local app = screen()
+	expect(app:error()).to_be_nil()
+	expect(app:count(`{QA} >> .orch-qa-entry`)).to_be(5)
+	app:hover(`{QA} >> role:button "When does 2.0 ship?"`)
+	app:frames(5)
+	app:click(`{QA} >> role:button "Dismiss"`)
+	app:frames(5)
+	expect(marks(app).dismissed["dp-qa/rq-3"]).to_be(true)
+	expect(app:has(`{QA} >> role:button "When does 2.0 ship?"`)).to_be(false)
+	expect(app:count(`{QA} >> .orch-qa-entry`)).to_be(4)
+	-- Still gone with the screen made again.
+	app:set_state("qa_screen_shown", false)
+	app:frames(5)
+	app:set_state("qa_screen_shown", true)
+	app:frames(20)
+	expect(app:has(`{QA} >> role:button "When does 2.0 ship?"`)).to_be(false)
+	app:click('role:button "Undo"')
+	app:frames(10)
+	expect(app:has(`{QA} >> role:button "When does 2.0 ship?"`)).to_be(true)
+end)
+
+test("Q&A: after the screen is left and come back to, an answer arriving still shows", function()
+	local app = screen()
+	app:command("fixture.qa_answer")
+	app:frames(10)
+	expect(app:has(`{QA} >> .orch-qa-preview >> ~"signed this morning"`)).to_be(true)
+end)
+
+test("Progress: after the Control room is left and come back to, a thread that starts working shows", function()
+	local app = screen()
+	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(false)
+	app:command("fixture.new_worker")
+	app:frames(20)
+	expect(app:error()).to_be_nil()
+	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(true)
+end)
+
+test("Q&A: Answering only while the thread is on a turn begun since the question came; a busy thread not at it yet is Waiting", function()
+	local app = open()
+	-- The engine state thread: working, its turn begun after the question.
+	expect(app:has(`{QA} >> role:button "is the engine state thread still on the registry part?"`)).to_be(true)
+	local tree = tostring(app:tree(QA))
+	local engine = string.find(tree, "registry part?", 1, true) or 0
+	local msi = string.find(tree, "Windows MSI", 1, true) or 0
+	local first = string.find(tree, "Answering", engine, true) or 0
+	expect(first > engine and first < msi).to_be(true)
+	-- The VPN orchestrator: working, but on a turn begun before the MSI
+	-- question came.
+	local after = string.sub(tree, msi)
+	local waiting = string.find(after, "Waiting", 1, true)
+	local answering = string.find(after, "Answering", 1, true)
+	expect(waiting ~= nil).to_be(true)
+	expect(answering == nil or answering > (waiting :: number)).to_be(true)
+end)

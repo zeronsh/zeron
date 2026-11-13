@@ -117,14 +117,26 @@ local history_open = ui.state("control_history_open", false)
 -- The earlier dumps opened in the history, by id.
 local history_opened = ui.state("control_history_opened", {} :: { [string]: boolean })
 
-local chats_now = ui.computed(function(): { [string]: any }
-	return data.chats(sessions.now:get())
-end)
+-- The chats by id, and the Q&A's entries: computeds the page makes again
+-- each time it is built (`fresh`, from M.Page). The shell requires this
+-- module while it builds the screen (screens/shell/boundary), so one made
+-- here at the top would belong to that first build: gone with it, it would
+-- keep its last value, and the page built again (a thread opened and come
+-- back from) would show that forever.
+local function chats_computed(): any
+	return ui.computed(function(): { [string]: any }
+		return data.chats(sessions.now:get())
+	end)
+end
+local chats_now = chats_computed()
 -- The open asks, by the chat that asked: a card whose thread asked waits on
--- the person.
-local asks_now = ui.computed(function(): { [string]: any }
-	return data.open_asks(orchestration.now:get())
-end)
+-- the person. (Made again with each Page, as `chats_now` is.)
+local function asks_computed(): any
+	return ui.computed(function(): { [string]: any }
+		return data.open_asks(orchestration.now:get())
+	end)
+end
+local asks_now = asks_computed()
 
 local function world(): any
 	return {
@@ -141,9 +153,13 @@ local function name_of(id: string?): string?
 	return data.name_of(orchestration.now:get(), chats_now:get(), id)
 end
 -- A thread's name as the Map and the sidebar give it (ds/orch_name).
-local named = ui.computed(function(): any
-	return Name.index(orchestration.now:get())
-end)
+-- (Made again with each Page, as `chats_now` is.)
+local function named_computed(): any
+	return ui.computed(function(): any
+		return Name.index(orchestration.now:get())
+	end)
+end
+local named = named_computed()
 local function thread_name(id: string): string
 	return Name.from(named:get(), chats_now:get(), id)
 end
@@ -657,9 +673,20 @@ end
 
 -- Q&A (ds/orch_qa keeps its entries' model and what was read and put away).
 
-local qa_entries = ui.computed(function(): { QA.Entry }
-	return QA.entries(orchestration.dumps:get(), QA.marks:get(), chats_now:get())
-end)
+local function qa_computed(): any
+	return ui.computed(function(): { QA.Entry }
+		return QA.entries(orchestration.now:get().dumps or {}, QA.marks:get(), chats_now:get())
+	end)
+end
+local qa_entries = qa_computed()
+
+-- Made again for this build of the page (see `chats_computed`).
+local function fresh()
+	chats_now = chats_computed()
+	asks_now = asks_computed()
+	named = named_computed()
+	qa_entries = qa_computed()
+end
 
 local function qa(): Node
 	return QA.Section {
@@ -1060,6 +1087,7 @@ local function head(): Node
 end
 
 M.Page = ui.component(function(): Node
+	fresh()
 	local width = ui.use_state(0)
 	-- A dump asked to be shown from another page (a board card's source).
 	ui.effect(function()
