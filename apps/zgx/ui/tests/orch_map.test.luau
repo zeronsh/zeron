@@ -134,7 +134,8 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 end)
 
 test("a machine's head is the same line in every view, never wrapped", function()
-	local PARTS = { "orch-machine-head", "orch-machine-head-icon", "orch-machine-head-name", "orch-machine-head-meter", "orch-machine-head-figure" }
+	local PARTS = { "orch-machine-head", "orch-machine-head-icon", "orch-machine-head-name", "orch-machine-head-platform", "orch-machine-head-meter", "orch-machine-head-figure" }
+	local LEFT = 4
 	for _, w in { 1440, 900 } do
 		local app = open(w, 2400)
 		local function boxes(within: string): { { number } }
@@ -148,6 +149,9 @@ test("a machine's head is the same line in every view, never wrapped", function(
 		end
 		view(app, "topology")
 		local topo = boxes("#control-widget-map")
+		-- This device: its dot on the mark's corner.
+		expect(app:has('#control-widget-map >> .orch-machine-head "desk" >> .orch-machine-head-here')).to_be(true)
+		expect(app:has('#control-widget-map >> .orch-machine-head "macbook" >> .orch-machine-head-here')).to_be(false)
 		view(app, "timeline")
 		local tl = boxes("#control-widget-map")
 		view(app, "machines")
@@ -157,18 +161,27 @@ test("a machine's head is the same line in every view, never wrapped", function(
 		expect(topo[1][4]).to_be(28)
 		expect(topo[3][4] <= 20).to_be(true)
 		for i = 1, #PARTS do
-			-- Topology and Timeline: the very same place and size.
+			-- Topology and Timeline: the very same place and size, all of it.
 			expect(tl[i][1]).to_be(topo[i][1])
 			expect(tl[i][3]).to_be(topo[i][3])
 			expect(tl[i][4]).to_be(topo[i][4])
-			-- In a block (the Map's Machines, the Control room's): the same
-			-- line from its own left edge.
+			-- In a block (the Map's Machines, the Control room's): its left
+			-- part the same from its own left edge; every part on one line.
 			for _, other: { { number } } in { mc, block } :: { { { number } } } do
-				expect(other[i][1] - other[1][1]).to_be(topo[i][1] - topo[1][1])
+				if i <= LEFT then
+					expect(other[i][1] - other[1][1]).to_be(topo[i][1] - topo[1][1])
+				end
 				expect(other[i][4]).to_be(topo[i][4])
 				expect(other[i][2] - other[1][2]).to_be(topo[i][2] - topo[1][2])
 			end
 		end
+		-- …and its load at the line's end, over the end of its CPU line.
+		for _, other: { { number } } in { mc, block } :: { { { number } } } do
+			local fig = other[#PARTS]
+			expect(math.abs((fig[1] + fig[3]) - (other[1][1] + other[1][3])) < 0.5).to_be(true)
+		end
+		local lx, _ly, lw = box(app, "#control-widget-machines >> .orch-machine-line[1]")
+		expect(math.abs((lx + lw) - (block[1][1] + block[1][3])) < 0.5).to_be(true)
 	end
 end)
 
