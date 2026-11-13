@@ -440,6 +440,17 @@ pub struct WorkItem {
     pub removed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_at: Option<DateTime<Utc>>,
+    /// Where its thread starts when it's started (`startItem`, or moved to
+    /// Now): a project (space id) and its device, or a device alone. `None`:
+    /// its orchestrator's crew policy, else the best project for its text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Why a Next card waits, one line ("Auth's crew is full: 2 of 2
+    /// working"). Cleared when it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

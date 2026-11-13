@@ -1080,6 +1080,9 @@ mod tests {
             done_at: None,
             removed: Default::default(),
             removed_at: Default::default(),
+            space_id: None,
+            device_id: None,
+            waiting: None,
         };
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],

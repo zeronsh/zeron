@@ -320,6 +320,9 @@ pub(crate) fn apply_item_patch(
                 done_at: None,
                 removed: Default::default(),
                 removed_at: Default::default(),
+                space_id: None,
+                device_id: None,
+                waiting: None,
             }
         }
     };
