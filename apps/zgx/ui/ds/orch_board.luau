@@ -7,9 +7,10 @@
 --
 -- The columns share the board's width evenly, each a lane of its own, its
 -- name, glyph and count on one line across them all; an empty one keeps
--- its width, quiet. Narrower than the columns need, they scroll sideways;
--- narrower still (a page's side pane), they stack. A board with nothing on
--- it (or nothing of the orchestrator chosen) is one quiet line.
+-- its width, quiet. Narrower than the columns need, they stand in rows of
+-- three, as wide as each other still; narrower still (a page's side pane),
+-- one under another. A board with nothing on it (or nothing of the
+-- orchestrator chosen) is one quiet line.
 --
 -- A card: how its lead thread stands (Zeron's status glyph, held 300 ms at
 -- least), its title, how far along it is (its threads' todo as segmented
@@ -109,9 +110,10 @@ local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
 
 -- The least a column takes side by side: narrower than that for them all,
--- they scroll sideways; narrower than this, they stack.
-local COLUMN_MIN = 184
-local STACK_BELOW = 440
+-- they stand in rows of `PER_ROW`; narrower than that for those, one under
+-- another.
+local COLUMN_MIN = 160
+local PER_ROW = 3
 -- Each column's glyph at its head: how its cards stand.
 local COLUMN_GLYPH: { [string]: Icon.Name } = {
 	inbox = "inbox",
@@ -131,8 +133,6 @@ local CARD_RADIUS = "$radius.lg"
 local DRAG_TAG = "orch-item"
 -- An outcome longer than about two lines' words: all of it in a hover card.
 local OUTCOME_FOLD = 64
--- Carried near a sideways board's edge, it scrolls, this far in, this fast.
-local EDGE, EDGE_SPEED = 40, 700
 
 local function space(key: string, fallback: number): number
 	return (ui.theme.get(key) :: number?) or fallback
@@ -523,56 +523,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		return { col = c.col, index = index, y = top_in(c.col, c.id, c) or 0 }
 	end
 
-	-- Carried to the edge of a board that scrolls sideways, it scrolls under
-	-- the card (one steady run to that end, where it lands followed).
-	local offset = ui.use_state(0)
-	local view, content = ui.ref(), ui.ref()
-	local pointer = { x = 0, y = 0 }
-	local edge_run: any = nil
-	local edge_dir = 0
-	local function stop_edge()
-		if edge_run then
-			edge_run:cancel()
-			edge_run = nil
-		end
-		edge_dir = 0
-	end
-	local function edge_scroll()
-		local v, inner = rect_of(view), rect_of(content)
-		local dir = 0
-		local most = if v and inner then inner.width - v.width else 0
-		if v and carry:peek() and most > 0 then
-			if pointer.x < v.x + EDGE then
-				dir = -1
-			elseif pointer.x > v.x + v.width - EDGE then
-				dir = 1
-			end
-		end
-		if dir == edge_dir then
-			return
-		end
-		stop_edge()
-		edge_dir = dir
-		if dir == 0 then
-			return
-		end
-		local to = if dir < 0 then 0 else most
-		local far = math.abs(to - offset:peek())
-		if far < 1 then
-			return
-		end
-		edge_run = anime.animate(offset, {
-			value = to,
-			duration = far / EDGE_SPEED * 1000,
-			ease = "linear",
-			onUpdate = function()
-				set_target(target_at(pointer.x, pointer.y))
-			end,
-		})
-	end
-
 	local function finish(how: string)
-		stop_edge()
 		phase:set(how)
 		carry:set(nil)
 		target:set(nil)
@@ -591,7 +542,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 			return finish("idle")
 		end
 		local list = others(t.col, c)
+		-- (Its neighbours of its own priority: the board sorts by priority
+		-- first, so another's order says nothing of where it stands.)
 		local prev, nxt = list[t.index - 1], list[t.index]
+		if prev and (RANK[prev.priority] or 2) ~= c.rank then
+			prev = nil
+		end
+		if nxt and (RANK[nxt.priority] or 2) ~= c.rank then
+			nxt = nil
+		end
 		local order: number
 		if prev and nxt then
 			order = ((prev.order or 0) + (nxt.order or 0)) / 2
@@ -693,12 +652,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 	end
 
 	-- What a card shows lifted and carried: its status and title, at its
-	-- width, risen off the board.
-	local function lifted(it: Item, w: number): Node
+	-- size, risen off the board.
+	local function lifted(it: Item, w: number, h: number): Node
 		local lead = lead_status(it, props.thread_of)
 		return ui.row {
 			class = "orch-card-lifted",
 			w = w,
+			min_h = ui.raw(h, "the card's own height"),
 			p = if compact then "$space.2" else ui.raw(10, "a card's even inset"),
 			gap = "$zeron.space.tight",
 			items = "start",
@@ -715,6 +675,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				it.title,
 				wrap = true,
 				lines = 2,
+				truncate = true,
 				grow = 1,
 				min_w = 0,
 				text_size = "$font.size.sm",
@@ -817,6 +778,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end,
 			wrap = true,
 			lines = 2,
+			truncate = true,
 			grow = 1,
 			min_w = 0,
 			text_size = "$font.size.sm",
@@ -973,6 +935,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				min_w = 0,
 				wrap = true,
 				lines = 2,
+				truncate = true,
 				text_size = "$font.size.sm",
 				line_height = "$font.line.sm",
 				color = "$text.secondary",
@@ -998,12 +961,17 @@ local OrchBoard = ui.component(function(props: Props): Node
 			w_full = true,
 			min_w = 0,
 			p = pad,
-			gap = if compact then "$space.1" else "$zeron.space.snug",
-			title,
-			progress_bar,
-			outcome_text,
-			ui.show(has_meta, meta),
+			ui.column {
+				w_full = true,
+				min_w = 0,
+				gap = if compact then "$space.1" else "$zeron.space.snug",
+				title,
+				progress_bar,
+				outcome_text,
+				ui.show(has_meta, meta),
+			},
 			-- Where plugins decorate it (the github plugin: its checks).
+			-- (Outside the steps' gaps: empty, it takes no room.)
 			ui.div { hook = "orchestration.item", class = "orch-item-slot", provide = { item = id }, w_full = true },
 		}
 		local box = ui.button {
@@ -1050,7 +1018,6 @@ local OrchBoard = ui.component(function(props: Props): Node
 						w = if r then r.width else COLUMN_MIN,
 						rank = RANK[item().priority] or 2,
 					}
-					stop_edge()
 					phase:set("carrying")
 					carry:set(c)
 					target:set(home(c))
@@ -1059,7 +1026,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				else nil,
 			drag_preview = function(): Node
 				local c = carry:peek()
-				return lifted(item(), if c then c.w else COLUMN_MIN)
+				return lifted(item(), if c then c.w else COLUMN_MIN, if c then c.h else 0)
 			end,
 			on_drag_end = function()
 				-- (Let go off the board, or Escape: it goes back.)
@@ -1275,44 +1242,48 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 	end
 
-	-- Side by side where there's room; sideways scrolling where there's
-	-- less; stacked where there's little.
+	-- Side by side where there's room; in rows of three where there's
+	-- less; one under another where there's little.
 	local width = ui.use_state(0)
-	local need = #columns * COLUMN_MIN + (#columns - 1) * space("space.2", 8)
+	local function need(n: number): number
+		return n * COLUMN_MIN + (n - 1) * space("space.2", 8)
+	end
 	local mode = ui.computed(function(): string
 		local w = width:get()
-		if w <= 0 or w >= need then
+		if w <= 0 or w >= need(#columns) then
 			return "side"
 		end
-		return if w < STACK_BELOW then "stacked" else "scroll"
+		return if w >= need(PER_ROW) then "rows" else "stacked"
 	end)
 	local function lanes(k: string): Node
-		local cols: { Node } = {}
-		for _, c in columns do
-			table.insert(cols, column(c, k))
-		end
 		if k == "stacked" then
+			local cols: { Node } = {}
+			for _, c in columns do
+				table.insert(cols, column(c, k))
+			end
 			return ui.column { class = "orch-board-stacked", w_full = true, gap = "$space.3", table.unpack(cols) }
 		end
-		local row = ui.row {
-			ref = if k == "scroll" then content else nil,
-			class = "orch-board-side",
-			w_full = true,
-			min_w = if k == "scroll" then need else nil,
-			gap = "$space.2",
-			items = "stretch",
-			table.unpack(cols),
-		}
-		if k ~= "scroll" then
-			return row
+		-- (In rows, the last one's columns as wide as the rest: room kept
+		-- where it has fewer.)
+		local per = if k == "rows" then PER_ROW else #columns
+		local rows: { Node } = {}
+		for from = 1, #columns, per do
+			local cells: { [any]: any } = {
+				class = "orch-board-side",
+				w_full = true,
+				gap = "$space.2",
+				items = "stretch",
+			}
+			for i = from, from + per - 1 do
+				local c = columns[i]
+				table.insert(cells, if c then column(c, k) else ui.div { grow = 1, basis = 0, min_w = COLUMN_MIN })
+			end
+			table.insert(rows, ui.row(cells))
 		end
-		return ui.scroll_x {
-			id = if props.id then `{props.id}-scroll` else "orch-board-scroll",
-			ref = view,
-			offset = offset,
-			w_full = true,
-			row,
-		}
+		if #rows == 1 then
+			return rows[1]
+		end
+		return ui.column { class = "orch-board-rows", w_full = true, gap = "$space.2", table.unpack(rows) }
 	end
 	return ui.column {
 		id = props.id or "orch-board",
@@ -1329,14 +1300,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 		-- pointer's, column and place, whatever is under it.
 		drop_when = accepts,
 		on_drag_over = function(_payload: any, e: any)
-			pointer.x, pointer.y = e.x, e.y
 			set_target(target_at(e.x, e.y))
-			if mode:peek() == "scroll" then
-				edge_scroll()
-			end
 		end,
 		on_drag_leave = function()
-			stop_edge()
 			set_target(nil)
 		end,
 		on_drop = function(_payload: any, e: any)
