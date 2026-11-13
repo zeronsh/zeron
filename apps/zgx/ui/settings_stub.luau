@@ -144,8 +144,8 @@ local answers: { [string]: (arg: any) -> any } = {
 		return settled(if arg.op == "status"
 			then {
 				models = {
-					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, installed = true, languages = table.create(25, "") },
-					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, installed = false, slow = true, languages = table.create(14, "") },
+					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, memory = 1150000000, installed = true, languages = table.create(25, "") },
+					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, memory = 2800000000, installed = false, slow = true, languages = table.create(14, "") },
 				},
 			}
 			elseif arg.op == "inputs" then {}

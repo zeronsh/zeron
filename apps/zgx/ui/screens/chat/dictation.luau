@@ -91,6 +91,15 @@ function M.before_send(target: string?): boolean
 	return M.active:peek()
 end
 
+-- How long the model stays ready after a dictation (Settings → Voice). (A
+-- window with no dictation host, a fixture's, has nothing to tell.)
+ui.effect(function()
+	local seconds = prefs.dictation_keep:get()
+	pcall(function()
+		ui.call("dictation.call", { op = "keep", seconds = seconds }):after(function() end, function() end)
+	end)
+end)
+
 -- Holding. A tap explains the gesture; it never inserts or sends anything.
 local TAP = 300
 local starting, held, since = false, false, 0

@@ -2305,6 +2305,16 @@
         "label": "Shortcut",
         "description": "Hold to talk, release to transcribe."
       },
+      "keep": {
+        "label": "Keep the model ready",
+        "description": "While ready, {name} holds {memory} of memory. Once released, your next dictation waits a moment while it loads again.",
+        "instant": "Instant",
+        "s15": "15 seconds",
+        "m5": "5 minutes",
+        "m15": "15 minutes",
+        "h1": "1 hour",
+        "always": "Always"
+      },
       "model": {
         "title": "Speech models",
         "about": "{size} · {n, plural, one {# language} other {# languages}}",

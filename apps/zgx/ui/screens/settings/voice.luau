@@ -187,6 +187,48 @@ local function model_action(m: () -> any?): Node
 	}
 end
 
+-- How long the model in use stays ready after a dictation, what that holds,
+-- and what the wait is otherwise.
+local function holds(): string
+	local m = chosen()
+	return if m and m.memory then weight(m.memory) else ""
+end
+local function name(): string
+	local m = chosen()
+	return if m then m.name else ""
+end
+-- Seconds (prefs.dictation_keep): 0 released at once, -1 while Zeron is open.
+local keep_choices = {
+	{ value = 0, key = "settings.voice.keep.instant" },
+	{ value = 15, key = "settings.voice.keep.s15" },
+	{ value = 300, key = "settings.voice.keep.m5" },
+	{ value = 900, key = "settings.voice.keep.m15" },
+	{ value = 3600, key = "settings.voice.keep.h1" },
+	{ value = -1, key = "settings.voice.keep.always" },
+}
+local function keep_row(): Node
+	return ui.show(installed, ds.Settings.Group {
+		ds.Settings.Row {
+			label = ui.t("settings.voice.keep.label"),
+			description = function(): string
+				return ui.t("settings.voice.keep.description", { name = name(), memory = holds() }):get()
+			end,
+			control = ds.Select {
+				value = prefs.dictation_keep,
+				name = ui.t("settings.voice.keep.label"),
+				options = function(): { any }
+					local list = {}
+					for _, c in keep_choices do
+						table.insert(list, { value = c.value, label = ui.t(c.key):get() })
+					end
+					return list
+				end,
+				w = 200,
+			},
+		},
+	})
+end
+
 -- A row a model, the one in use marked.
 local function model_rows(): Node
 	return search.anchor("model", ds.Settings.Section {
@@ -212,6 +254,7 @@ local function model_rows(): Node
 				},
 			}
 		end, { key = function(m: any): string return m.id end }),
+		keep_row(),
 	})
 end
 

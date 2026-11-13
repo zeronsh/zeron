@@ -5,10 +5,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use sha2::{Digest, Sha256};
 use std::{
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -44,6 +44,9 @@ pub struct Manifest {
     pub languages: Vec<String>,
     /// The weights (the first file) and what they need beside them.
     pub files: Vec<Artifact>,
+    /// About what it holds in memory while loaded (measured on the CPU).
+    #[serde(default)]
+    pub memory: u64,
     /// Much slower where it runs on the CPU (Linux, Windows).
     #[serde(default)]
     pub cpu_slow: bool,
@@ -594,13 +597,115 @@ impl Drop for BusyGuard {
     }
 }
 enum Command {
-    Transcribe(Job, BusyGuard),
+    /// (The admission is none only in tests: it is process-wide.)
+    Transcribe(Job, Option<BusyGuard>),
+    /// How long to keep the model changed: look again.
+    Keep,
     /// Answers once the weights are gone: a loaded model maps its file, which
     /// Windows won't delete while it is mapped.
     Unload(std::sync::mpsc::SyncSender<()>),
 }
 static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Command>> =
     std::sync::OnceLock::new();
+/// How long the worker keeps a model after a dictation, in ms (0: released
+/// at once; ALWAYS: while Zeron is open).
+static KEEP_MS: AtomicU64 = AtomicU64::new(30_000);
+const ALWAYS: u64 = u64::MAX;
+
+/// Keep the model loaded this long after a dictation (zero: released at
+/// once; `None`: while Zeron is open). Reloading costs well under a second
+/// from the disk's cache, seconds from a cold one; a model held costs its
+/// memory.
+pub fn keep_ready(time: Option<Duration>) {
+    let ms = time.map_or(ALWAYS, |t| (t.as_millis() as u64).min(ALWAYS - 1));
+    KEEP_MS.store(ms, Ordering::Release);
+    if let Some(worker) = WORKER.get() {
+        let _ = worker.try_send(Command::Keep);
+    }
+}
+
+/// What the worker transcribes with: a model loaded from its folder.
+trait Model {
+    fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String>;
+}
+impl Model for Recognizer {
+    fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
+        Recognizer::transcribe(self, samples, rate)
+    }
+}
+
+/// The worker: one job at a time, the model kept between them for `keep`
+/// after the last, one model in memory at a time.
+fn serve<C: Recording, M: Model>(
+    rx: std::sync::mpsc::Receiver<Command>,
+    keep: &AtomicU64,
+    start: impl Fn(&Job) -> Result<C> + Sync,
+    mut load: impl FnMut(&Path) -> Result<M>,
+) {
+    let mut cached: Option<(PathBuf, M)> = None;
+    let mut since = Instant::now();
+    loop {
+        let keep_ms = keep.load(Ordering::Acquire);
+        let command = if cached.is_none() || keep_ms == ALWAYS {
+            rx.recv()
+                .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(Duration::from_millis(keep_ms).saturating_sub(since.elapsed()))
+        };
+        let (job, _admission) = match command {
+            Ok(Command::Transcribe(j, admission)) => (j, admission),
+            Ok(Command::Keep) => continue,
+            Ok(Command::Unload(done)) => {
+                cached = None;
+                let _ = done.try_send(());
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                cached = None;
+                continue;
+            }
+            Err(_) => break,
+        };
+        // A native panic must not take down the worker, and with it every
+        // later session, until the app restarts.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_job(
+                &job,
+                || start(&job),
+                || {
+                    if cached.as_ref().is_none_or(|(path, _)| *path != job.dir) {
+                        // One model in memory at a time: the other goes first.
+                        cached = None;
+                        let model = load(&job.dir).context(
+                            "Could not load the model. Remove it in Settings and download again.",
+                        )?;
+                        cached = Some((job.dir.clone(), model));
+                    }
+                    let model = &mut cached.as_mut().unwrap().1;
+                    Ok(move |samples, rate| model.transcribe(samples, rate))
+                },
+            )
+        }))
+        .unwrap_or_else(|_| {
+            cached = None;
+            Err(anyhow::anyhow!(
+                "Dictation stopped unexpectedly. Your draft is safe."
+            ))
+        });
+        since = Instant::now();
+        match result {
+            Ok(Some(text)) => {
+                let _ = job.events.try_send(Event::Final(text));
+            }
+            Ok(None) => {}
+            // Keep loaded weights: a microphone or recording error says
+            // nothing about the model.
+            Err(e) => {
+                let _ = job.events.try_send(Event::Failed(e.to_string()));
+            }
+        }
+    }
+}
 pub struct Session {
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -615,55 +720,12 @@ impl Session {
         let sender = WORKER.get_or_init(|| {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Command>(1);
             std::thread::spawn(move || {
-                let mut cached: Option<(std::path::PathBuf, Recognizer)> = None;
-                loop {
-                    let (job, _admission) = match rx.recv_timeout(Duration::from_secs(30)) {
-                        Ok(Command::Transcribe(j, admission)) => (j, admission),
-                        Ok(Command::Unload(done)) => {
-                            cached = None;
-                            let _ = done.try_send(());
-                            continue;
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            cached = None;
-                            continue;
-                        }
-                        Err(_) => break,
-                    };
-                    // A native panic must not take down the worker, and with
-                        // it every later session, until the app restarts.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(
-                        &job,
-                        || Capture::start(job.device.as_deref(), job.level.clone()),
-                        || {
-                            if cached.as_ref().is_none_or(|(path, _)| *path != job.dir) {
-                                // One model in memory at a time: the other goes first.
-                                cached = None;
-                                let model = Recognizer::load(&job.dir).context(
-                                    "Could not load the model. Remove it in Settings and download again.",
-                                )?;
-                                cached = Some((job.dir.clone(), model));
-                            }
-                            let model = &mut cached.as_mut().unwrap().1;
-                            Ok(move |samples, rate| model.transcribe(samples, rate))
-                        },
-                    )))
-                    .unwrap_or_else(|_| {
-                        cached = None;
-                        Err(anyhow::anyhow!("Dictation stopped unexpectedly. Your draft is safe."))
-                    });
-                    match result {
-                        Ok(Some(text)) => {
-                            let _ = job.events.try_send(Event::Final(text));
-                        }
-                        Ok(None) => {}
-                        // Keep loaded weights: a microphone or recording error says
-                        // nothing about the model, and reloading takes seconds.
-                        Err(e) => {
-                            let _ = job.events.try_send(Event::Failed(e.to_string()));
-                        }
-                    }
-                }
+                serve(
+                    rx,
+                    &KEEP_MS,
+                    |job| Capture::start(job.device.as_deref(), job.level.clone()),
+                    |dir| Recognizer::load(dir),
+                )
             });
             tx
         });
@@ -681,7 +743,7 @@ impl Session {
                     device,
                     events: tx,
                 },
-                admission,
+                Some(admission),
             ))
             .is_err()
         {

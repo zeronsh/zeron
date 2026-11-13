@@ -13,7 +13,8 @@
         "size": 740363168,
         "sha256": "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59"
       }
-    ]
+    ],
+    "memory": 1150000000
   },
   {
     "id": "cohere-transcribe-q5",
@@ -38,6 +39,7 @@
         "revision": "e59f0f3847e77723b7d58447ef9456fa0c7e9436"
       }
     ],
-    "cpu_slow": true
+    "cpu_slow": true,
+    "memory": 2800000000
   }
 ]

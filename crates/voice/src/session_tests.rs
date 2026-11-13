@@ -431,3 +431,88 @@ fn a_silent_room_still_says_listening() {
     drop(session);
     assert_eq!(worker.join().unwrap().unwrap(), None);
 }
+
+/// A model that says when it's loaded and when it's let go.
+struct Weights(SyncSender<&'static str>);
+impl Model for Weights {
+    fn transcribe(&mut self, _: Vec<f32>, _: u32) -> Result<String> {
+        Ok("words".into())
+    }
+}
+impl Drop for Weights {
+    fn drop(&mut self) {
+        let _ = self.0.send("released");
+    }
+}
+
+#[test]
+fn the_model_stays_ready_as_long_as_the_setting_says() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(500));
+    let (said, life) = mpsc::sync_channel(8);
+    let serving = {
+        let keep = keep.clone();
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: mpsc::sync_channel(1).0,
+                        ended: Arc::new(AtomicBool::new(true)),
+                    })
+                },
+                |_: &Path| {
+                    said.send("loaded").unwrap();
+                    Ok(Weights(said.clone()))
+                },
+            )
+        })
+    };
+    // A dictation, finished at once.
+    let dictate = || {
+        let (events, heard) = mpsc::sync_channel(4);
+        let job = Job {
+            dir: "models/a".into(),
+            stop: Arc::new(AtomicBool::new(true)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            level: Arc::new(AtomicU32::new(0)),
+            device: None,
+            events,
+        };
+        worker.send(Command::Transcribe(job, None)).unwrap();
+        while !matches!(heard.recv_timeout(WAIT).unwrap(), Event::Final(_)) {}
+    };
+    // Kept 500 ms after the dictation, not less, then let go.
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    let done = Instant::now();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    let held = done.elapsed();
+    assert!(
+        held >= Duration::from_millis(400) && held < WAIT,
+        "{held:?}"
+    );
+    // Always (while Zeron is open): still there long after.
+    keep.store(ALWAYS, Ordering::Release);
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    assert!(life.recv_timeout(Duration::from_millis(400)).is_err());
+    // Shortened later: let go on the new time, without another dictation.
+    keep.store(50, Ordering::Release);
+    worker.send(Command::Keep).unwrap();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    // Instant: let go as soon as the words are out.
+    keep.store(0, Ordering::Release);
+    dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    let done = Instant::now();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    assert!(
+        done.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        done.elapsed()
+    );
+    drop(worker);
+    serving.join().unwrap();
+}

@@ -165,6 +165,7 @@ impl Service {
             .map(|m| {
                 json!({"id":m.id, "name":m.name, "size":m.size(), "languages":m.languages,
                     "installed":m.installed(&models.join(&m.id)),
+                    "memory":m.memory,
                     "slow":m.cpu_slow && cfg!(not(target_os = "macos"))})
             })
             .collect();
@@ -384,6 +385,13 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                     me.service.borrow_mut().remove(&args)?;
                     Json::Null
                 }
+                // How long the model stays ready (seconds; 0: released at
+                // once; -1: while Zeron is open).
+                Some("keep") => {
+                    let seconds = args["seconds"].as_i64().unwrap_or(300);
+                    zeron_voice::keep_ready(u64::try_from(seconds).ok().map(Duration::from_secs));
+                    Json::Null
+                }
                 Some("stop") => {
                     me.service.borrow_mut().stop();
                     Json::Null
@@ -592,7 +600,9 @@ mod tests {
             host.async_action("dictation.call", move |args: Value| {
                 let args = value_json(&args);
                 let op = args["op"].as_str().unwrap_or("").to_owned();
-                asked.borrow_mut().push(op.clone());
+                if op != "keep" {
+                    asked.borrow_mut().push(op.clone());
+                }
                 let state = match op.as_str() {
                     "start" => json!({"phase":"listening", "serial":0, "hold":args["hold"], "target":"main"}),
                     "stop" => json!({"phase":"finalizing", "serial":0, "target":"main"}),
