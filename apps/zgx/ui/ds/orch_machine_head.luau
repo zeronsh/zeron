@@ -1,14 +1,16 @@
 -- A machine's head, one line, the same wherever a machine is shown (the
--- Map's three views, the Control room's Machines): its platform's mark,
--- its name, its platform quietly after it and "this one" as a small tag on
--- this device's, then its CPU as a slim fixed meter and a rolling figure
--- right after. Never wraps: with little room the platform word gives way
--- (truncated) first; nothing moves to another line or to the far edge.
+-- Map's three views, the Control room's Machines): its platform's mark
+-- (this device's with a dot on its corner), its name, its platform quietly
+-- after it, then its CPU as a ring (as the composer's context ring) and a
+-- rolling figure: right after, or at the line's end in a block whose CPU
+-- line runs under it. Never wraps: with little room the platform word
+-- gives way (truncated) first.
 --
 --   MachineHead {
 --     device = function() return { id, name, platform, cloud?, online? } end,
 --     here = function() return true end,      -- this device
 --     load = function() return orchestration.loads[id]? end,
+--     load_at_end = true,                     -- optional: over a CPU line
 --     class = "…",                             -- optional
 --   }
 --
@@ -20,13 +22,12 @@ local Icon = require("@self/icon")
 local locale = require("@self/locale")
 local Counter = require("@self/orch_counter")
 local Block = require("@self/orch_block")
-local Spark = require("@self/orch_spark")
+local ContextUsage = require("@self/context_usage")
+local Tooltip = require("@self/tooltip")
 
 local M = {}
 
 M.H = 28
--- The meter's width.
-local METER_W = 32
 
 function M.icon(d: any): Icon.Name
 	local p = d and d.platform
@@ -61,6 +62,8 @@ export type Props = {
 	here: () -> boolean,
 	load: () -> any,
 	class: string?,
+	-- Its load at the line's end (a block whose CPU line is under it).
+	load_at_end: boolean?,
 }
 
 function M.MachineHead(props: Props): Node
@@ -85,6 +88,7 @@ function M.MachineHead(props: Props): Node
 		overflow = "hidden",
 		ui.div {
 			class = "orch-machine-head-icon",
+			relative = true,
 			color = "$text.secondary",
 			shrink = 0,
 			Icon {
@@ -93,6 +97,22 @@ function M.MachineHead(props: Props): Node
 				end,
 				size = 14,
 			},
+			-- This device: a dot on its mark's corner, ringed in the card's
+			-- colour so it reads on any.
+			ui.show(props.here, ui.div {
+				class = "orch-machine-head-here",
+				absolute = true,
+				right = -3,
+				top = -3,
+				w = 8,
+				h = 8,
+				rounded = "$radius.full",
+				bg = "$zeron.tone.info.ink",
+				border = 1.5,
+				border_color = "$zeron.settings.card",
+				label = locale.t("ds.orch.map.this_device"),
+				tooltip = Tooltip { locale.t("ds.orch.map.this_device") },
+			}),
 		},
 		ui.text {
 			function(): string
@@ -119,17 +139,9 @@ function M.MachineHead(props: Props): Node
 			color = "$text.tertiary",
 			y = small,
 		},
-		ui.show(props.here, ui.row {
-			class = "orch-machine-here",
-			shrink = 0,
-			h = 18,
-			px = 6,
-			items = "center",
-			rounded = "$radius.sm",
-			bg = "$hover",
-			ui.text { locale.t("ds.orch.map.here"), text_size = "$font.size.xs", color = "$text.secondary" },
-		}),
-		-- Its load: a slim meter and the figure, right after.
+		-- (In a block over its CPU line: its load at the line's right end.)
+		if props.load_at_end then ui.div { grow = 1 } else nil,
+		-- Its load: a ring (as the composer's context ring) and the figure.
 		ui.switch(function(): string
 			return if online() then "on" else "off"
 		end, {
@@ -139,22 +151,18 @@ function M.MachineHead(props: Props): Node
 				pl = "$space.2",
 				gap = "$space.1",
 				items = "center",
-				ui.canvas {
+				ui.div {
 					class = "orch-machine-head-meter",
-					w = METER_W,
-					h = 3,
 					shrink = 0,
 					label = function(): string
 						local v = cpu()
 						return if v then locale.s("ds.orch.map.cpu", { percent = math.floor(v + 0.5) }) else ""
 					end,
-					draw = function(c: any, w: number, h: number)
-						local v = cpu()
-						c:rect(0, 0, w, h, Spark.fade("$text.primary", 0.14), h / 2)
-						if v and v > 0 then
-							c:rect(0, 0, math.max(h, w * v / 100), h, if v > 85 then "$warning" else "$text.secondary", h / 2)
-						end
-					end,
+					ContextUsage.Ring {
+						fraction = function(): number
+							return (cpu() or 0) / 100
+						end,
+					},
 				},
 				ui.div {
 					class = "orch-machine-head-figure",
@@ -174,7 +182,7 @@ function M.MachineHead(props: Props): Node
 			},
 			off = ui.text { locale.t("ds.orch.map.offline"), shrink = 0, pl = "$space.2", text_size = "$font.size.xs", color = "$text.tertiary", y = small },
 		}),
-		ui.div { grow = 1 },
+		if props.load_at_end then nil else ui.div { grow = 1 },
 	}
 end
 

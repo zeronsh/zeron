@@ -340,6 +340,7 @@ M.View = ui.component(function(props: {
 					return m().here == true
 				end,
 				load = load,
+				load_at_end = true,
 			},
 			-- Its CPU over the last minutes, as the host keeps it (once
 			-- there's a line to draw).

@@ -257,6 +257,7 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 			return id() == props.here()
 		end,
 		load = load,
+		load_at_end = true,
 	}
 
 	local line = Spark.Spark {
