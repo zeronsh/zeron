@@ -124,6 +124,8 @@ impl EngineRpc {
             return Err(RpcError::BadParams("Nothing to dump".into()));
         }
         let brain = self.ensure_brain_dump()?;
+        // A Brain dump that has never run starts on a fast model.
+        self.brain_dump_fast_model(&brain).await;
         let now = Utc::now();
         let dump = Dump {
             id: uuid::Uuid::new_v4().simple().to_string(),

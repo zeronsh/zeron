@@ -60,6 +60,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod brain_model;
 pub(crate) use agent_gate::run_as_chat_is_set;
 mod crew_messages;
 mod device_stats;
