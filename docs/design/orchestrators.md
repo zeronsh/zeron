@@ -136,6 +136,50 @@ chats, coalesced ≤ 4/s).
   Every frame is an array: the backlog first, then arrays of the events since (the backlog again
   after a lag). Clients merge frames and dedupe by `id`; a frame never replaces the list.
 
+### Progress (read it, never ask it)
+
+Asking a working agent "how's it going?" is a steer: it interrupts the work and costs a turn. So
+progress is something you **read**. `Progress` (wire type in `orchestration.rs`) is one row per chat,
+registry kind `progress`, keyed by chat id, synced, written only by the chat's host engine and only on
+change, never deleted (`crates/engine/src/orchestration/progress.rs`).
+
+- **Deterministic fields**, always on, from what the host already knows (its session row's status,
+  activity and todo list, and reports its crew threads file): `state` (working, waiting on background
+  work, awaiting input, idle, failed, done), `startedAt`, `lastStepAt`, `step` (the todo item in
+  progress, else the activity label), `steps {done, total}`, `stalled`, `etaSecs`, `updatedAt`.
+  - A **stretch** of work starts with the turn that starts it. Waiting on background work or on the
+    person keeps it; so does a turn that starts within 10 min of the last one ending, unless that
+    one finished its todo list or reported done.
+  - A **step** is a todo item started or completed, a tool call finished, or a report filed. A step
+    alone is written at most every 15 s.
+  - **Stalled**: working, with no step for longer than max(5 min, 3 × the median step interval).
+  - **ETA**: only while working with ≥ 3 todo items done and timed of a known total: the median
+    item time × the items left (less what the current item already took, never below the items after
+    it). Seconds left as of `updatedAt`.
+- **The note**: one sentence (≤ 140 chars) from a one-shot model on the title path (no tools,
+  outside the repository, read-only; `zeron_harness::PROGRESS_INSTRUCTIONS`, everything else as one
+  JSON document of quoted data): the request, the board item, the todo list, a redacted tail of the
+  transcript (≤ 4k chars) and the deterministic fields. It runs on the chat's harness's cheapest model
+  (Haiku on Claude Code, the smallest on Codex). Triggers: a todo step, a report, a turn ending, every
+  5 min while working when the transcript changed, and on demand. At most every 60 s per chat for
+  automatic notes (one held back is made once allowed), every 15 s on demand (the latest note
+  otherwise). `ZERON_PROGRESS_NOTES=0` turns the automatic ones off. The note is untrusted display
+  text: one line, redacted, no control characters, and fenced (`prompt_text::block`) whenever an agent
+  reads it.
+- **`WatchProgress`**: its own stream rather than a field of `OrchestrationState`, because it changes
+  far more often than the rest. `Vec<Progress>` for every chat working (or waiting to go on), changed
+  in the last 24 h, or in a crew, whole on subscribe and on every change (≤ 4/s). Clients tick the
+  clocks themselves. Agents see the chats they may check.
+- **`Orchestrate{op: progressCheck, chatId}`** (the person, and agents for their own chat, chats
+  they started, an orchestrator's crew; the Brain dump any): the row with its note made fresh now.
+  For a chat hosted on another device it queues a `ProgressCheck` command in that chat's doc (its host
+  makes the note; the agent never sees it) and replies with the synced row and `refreshing: true`.
+- **`progress(chat)`** MCP tool for every role: the clocks as numbers and the note fenced. The
+  orchestrator prompt says to check crew with it, never by messaging them.
+- **Brain dump**: a question about how a thread is going is checked with `progress` and routed as a
+  question with `progress: true`; when its target is working, the engine answers it from the
+  target's progress at once (`answered`, answer = the note and the clocks) and delivers nothing.
+
 ### Wake schedule
 
 A small timer in the engine. For each non-paused orchestrator **hosted here** with `wake`, it sends
@@ -154,9 +198,10 @@ Role is resolved at server start: orchestrator, Brain dump, crew or plain.
 | `crew_add(chat, role?, item?)`, `crew_release(chat)` | orchestrators | addToCrew / releaseFromCrew |
 | `notes_set(text)` | orchestrators | updateOrchestrator(notes) |
 | `world()` → orchestrators (goal, crew, items), recent top-level chats (title, status, project, device), devices | Brain dump | read |
-| `route(dump, excerpt, target, intent, message, candidates?)` | Brain dump | route |
+| `route(dump, excerpt, target, intent, message, candidates?, progress?)` | Brain dump | route |
 | `dump_done(dump, summary)` | Brain dump | dumpDone |
 | `orchestrator_create(name, goal, rules?, project?, device?, prompt?)` | Brain dump | createOrchestrator |
+| `progress(chat)` → state, clocks, steps, ETA, stalled, fenced note | everyone (in a chat) | progressCheck |
 
 `create_chat`/`create_chats` from an orchestrator default to kind `crew` and accept `item` and
 `role`. They apply the crew policy: allowed devices, `maxRunning` (refuse with a clear message when
@@ -231,6 +276,9 @@ orchestration.now:get() = {
 }
 orchestration.loads:get() = { [device_id] = { cpu?, mem_used?, mem_total?, load1?, cores?, online, at } }
 orchestration.comms:get() = { { id, kind, from, to, summary, at } }   -- newest last, ≤ 100
+-- WatchProgress (suggested shape for the UI stream):
+orchestration.progress:get() = { [chat_id] = { state, device_id, started?, last_step?, step?,
+                                  steps? = { done, total }, note?, note_at?, stalled, eta_secs?, updated } }
 ```
 
 Enum strings are snake_case (`brain_dump`, `needs_you`, `new_orchestrator`…). Chats come from
@@ -335,4 +383,5 @@ Phase 1 (after this build lands): the `Decider` seam, the key setting, the Brain
 | engine-state | registry kinds, `WorkspaceHost` state and watch, `Orchestrate` handler (all ops except report delivery), `WatchOrchestration`, crew child kind and depth rules, Brain dump creation and dump dispatch, route delivery and reroute, asks and answer delivery, wake schedule, `WatchDeviceLoads` |
 | engine-flow | `MessagePart::CrewReports` and report delivery with coalesced wake, crew `send_message` → report, `Session.activity`/`todo` projection, `WatchComms`, MCP tools and role filtering, built-in prompts, crew-policy enforcement in `create_chat`, question-answer capture for routes |
 | ui-control | bridge (`orchestration.rs`, account wrapper, sample), `/control` route and all its widgets, sidebar Control room entry |
+| progress | `Progress` rows (registry kind `progress`), the host's tracker and notes, `WatchProgress`, `progressCheck` and the `ProgressCheck` command, the `progress` MCP tool, progress questions answered in `route` (engine + MCP; a UI stream draws it) |
 | ui-orchestrator | sidebar Orchestrators section, `/orchestrator/:id`, Crew updates card in the transcript, create/promote/settings dialogs, map and board components shared with ui-control (ui-control owns `ds/orch_*` map and board; ui-orchestrator consumes them) |
