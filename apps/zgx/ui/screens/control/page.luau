@@ -153,9 +153,13 @@ local function name_of(id: string?): string?
 	return data.name_of(orchestration.now:get(), chats_now:get(), id)
 end
 -- A thread's name as the Map and the sidebar give it (ds/orch_name).
-local named = ui.computed(function(): any
-	return Name.index(orchestration.now:get())
-end)
+-- (Made again with each Page, as `chats_now` is.)
+local function named_computed(): any
+	return ui.computed(function(): any
+		return Name.index(orchestration.now:get())
+	end)
+end
+local named = named_computed()
 local function thread_name(id: string): string
 	return Name.from(named:get(), chats_now:get(), id)
 end
@@ -680,6 +684,7 @@ local qa_entries = qa_computed()
 local function fresh()
 	chats_now = chats_computed()
 	asks_now = asks_computed()
+	named = named_computed()
 	qa_entries = qa_computed()
 end
 
