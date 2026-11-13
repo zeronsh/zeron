@@ -3047,6 +3047,12 @@
       "slow": "唤醒 Cloud 机器的时间比平常长…",
       "resuming_slow": "正在恢复——唤醒 Cloud 机器的时间比平常长…",
       "the_host": "它的电脑",
+      "starting": "正在启动 Cloud 机器…",
+      "waking_stage": "正在唤醒 Cloud 机器——{stage}…",
+      "stage_clone": "正在克隆仓库",
+      "stage_branch": "正在检出分支",
+      "setup_summary": "已设置 Cloud 机器",
+      "woke_summary": "已唤醒 Cloud 机器",
       "unreachable": "已中断——无法连接到{host}"
     }
   },

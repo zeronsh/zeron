@@ -2,7 +2,7 @@
 //! place that starts, restarts and refuses engines.
 //!
 //! **Zeron.app's beta** (the `beta` feature: this interface as the Zeron app
-//! itself, scripts/package-zgx-beta.sh) manages Zeron.app's own engine, as
+//! itself, scripts/package-zgx-macos.sh) manages Zeron.app's own engine, as
 //! the shipping app does (crates/engine/src/managed.rs, through the same
 //! crates/launch): the bundle's `Contents/MacOS/Zeron Engine`, started
 //! detached with `ZERON_MANAGED_ENGINE` and the bundle as `ZERON_APP`, its

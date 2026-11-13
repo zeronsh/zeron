@@ -116,6 +116,8 @@ local function measures(): { [string]: number }
 		INSET = n("zeron.prose.picture.tray.inset", 4),
 		ROW = n("zeron.prose.picture.tray.row", 300),
 		CONTROL = n("zeron.prose.picture.control.inset", 6),
+		THUMB_W = n("zeron.prose.picture.thumb.w", 240),
+		THUMB_H = n("zeron.prose.picture.thumb.h", 160),
 	}
 end
 
@@ -374,6 +376,9 @@ type FrameProps = {
 	fixed: boolean,
 	-- (A run's tile: its place.)
 	place: (() -> Place)?,
+	-- A thumbnail (`Thumbs`): too small for the controls over it; its
+	-- menu and the lightbox have them.
+	thumb: boolean?,
 }
 
 local Frame = ui.component(function(props: FrameProps): Node
@@ -404,7 +409,7 @@ local Frame = ui.component(function(props: FrameProps): Node
 		return b.w >= 120 and b.h >= 72
 	end
 	local function controls_up(): boolean
-		return ready() and roomy() and (hovered:get() or focused:get() > 0)
+		return not props.thumb and ready() and roomy() and (hovered:get() or focused:get() > 0)
 	end
 	local inner = m.R - m.CONTROL
 	local function open()
@@ -762,6 +767,87 @@ function M.Single(props: Props): Node
 					fixed = false,
 				}
 			end),
+		}
+	end)({})
+end
+
+-- A thumbnail's size for a picture of `nw` by `nh` pixels: its own shape,
+-- at most the theme's thumbnail (zeron.prose.picture.thumb), never larger
+-- than it is; a screenshot's shape while its size isn't known.
+function M.thumb_fit(nw: number?, nh: number?): (number, number)
+	local m = measures()
+	if not nw or not nh or nw <= 0 or nh <= 0 then
+		return math.min(m.THUMB_W, m.THUMB_H * m.PLACE), m.THUMB_H
+	end
+	local k = math.min(1, m.THUMB_W / nw, m.THUMB_H / nh)
+	return math.max(1, math.floor(nw * k)), math.max(1, math.floor(nh * k))
+end
+
+-- Pictures as small thumbnails in a row (wrapping), each its own shape and
+-- opening in the lightbox among the others: a tool's result pictures,
+-- under its row, where the full size would crowd the work.
+function M.Thumbs(props: RunProps): Node
+	return ui.component(function(): Node
+		local pictures = props.pictures
+		local entries = ui.computed(props.items)
+		local function pick(failed: boolean): { Entry }
+			local out = {}
+			for _, e in entries:get() do
+				if (now_of(pictures, e.src).state == "failed") == failed then
+					table.insert(out, e)
+				end
+			end
+			return out
+		end
+		return ui.column {
+			class = "md-image tool-pictures",
+			w_full = true,
+			min_w = 0,
+			gap = "$space.2",
+			ui.each(ui.computed(function(): { Entry }
+				return pick(false)
+			end), function(e: Entry): Node
+				local function size(): (number, number)
+					local p = now_of(pictures, e.src)
+					return M.thumb_fit(size_of(if p.state == "ready" then p.src else nil))
+				end
+				local function place(): Place
+					local w, h = size()
+					return { x = 0, y = 0, w = w, h = h, crop = "none" }
+				end
+				return Frame {
+					pictures = pictures,
+					entry = e,
+					group = props.group,
+					set = props.set,
+					fixed = true,
+					thumb = true,
+					place = place,
+					size = size,
+					crop = function(): Fit
+						local w, h = size()
+						return { w = w, h = h, crop = "none" }
+					end,
+				}
+			end, {
+				key = function(e: Entry): string
+					return e.src
+				end,
+				direction = "row",
+				flex_wrap = true,
+				items = "start",
+				gap = "$space.2",
+			}),
+			ui.each(ui.computed(function(): { Entry }
+				return pick(true)
+			end), function(e: Entry): Node
+				return Missing { pictures = pictures, entry = e, open_link = props.open_link, link_menu = props.link_menu }
+			end, {
+				key = function(e: Entry): string
+					return e.src
+				end,
+				gap = "$space.2",
+			}),
 		}
 	end)({})
 end

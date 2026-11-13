@@ -365,7 +365,13 @@ stub.send = function(req: any)
 		note(`run:{req.cwd or "-"}|{if req.worktree then "worktree" else "local"}|{req.branch or "-"}`)
 	end
 	if req.fresh then
-		TRANSCRIPTS[req.session] = { { id = req.message_id or `{req.session}u`, role = "user", text = req.text } }
+		-- (On Cloud, on its way to a machine still to come: sending, as the
+		-- host's own copy says until the machine takes it.)
+		local m = META[req.session]
+		local on_cloud = m ~= nil and type(m.device) == "string" and string.sub(m.device, 1, 6) == "cloud-"
+		TRANSCRIPTS[req.session] = {
+			{ id = req.message_id or `{req.session}u`, role = "user", text = req.text, waiting = if on_cloud then "sending" else nil },
+		}
 		-- (As the host: a prompt to the chat open shows at once.)
 		if opened == req.session then
 			store.messages:set(TRANSCRIPTS[req.session])
@@ -640,6 +646,37 @@ ui.command {
 			list[#list] = { id = last.id, role = "user", text = last.text, attachments = {}, waiting = "sending" }
 			store.messages:set(list)
 		end
+	end,
+}
+-- A Cloud machine up for the newest prompt writes its own setup steps under
+-- it (the engine's `<message>.cloud-setup` entry), as src/chat.rs builds them:
+-- the prompt's line gives way to them.
+ui.command {
+	id = "cloud_setup_lands",
+	title = "The Cloud machine's own setup steps land",
+	run = function()
+		local n = store.messages:len()
+		local prompt = store.messages:peek()[n]
+		if not prompt or prompt.role ~= "user" then
+			return
+		end
+		local mid = prompt.id
+		local machine = { id = `{mid}.cloud-machine`, kind = "cloud", verb = "Woke the machine", output = "ready after 12s" }
+		local clone = { id = `{mid}.cloud-clone`, kind = "git", verb = "Cloning acme/atlas", call = "git clone acme/atlas" }
+		ui.batch(function()
+			store.messages:set_key({ n, "waiting" }, ui.null)
+			store.messages:push {
+				id = `{mid}.cloud-setup`,
+				role = "assistant",
+				text = "",
+				streaming = true,
+				started = ui.now() / 1000,
+				tools = { machine, clone },
+				blocks = {
+					{ id = `g:{mid}.cloud-machine`, kind = "tools", summary = "Woke the Cloud machine", live = true, tools = { machine, clone } },
+				},
+			}
+		end)
 	end,
 }
 -- The engine starts the turn: the newest prompt's line turns to working.
@@ -1036,16 +1073,79 @@ for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offli
 end
 local made_chats = 0
 local sessions_stub = sessions :: any
+-- A new chat on Cloud being made: `slow_cloud_create` holds Cloud's answer
+-- until `cloud_create_lands` (or `cloud_create_refused`); `cloud_creates_fail`
+-- refuses the next at once.
+local SLOW_CLOUD_CREATE = ui.state("fixture_slow_cloud_create", false)
+local CLOUD_CREATE_FAILS = ui.state("fixture_cloud_create_fails", false)
+local held_create: { ok: (any) -> (), bad: (any) -> (), value: any }? = nil
+ui.command { id = "slow_cloud_create", title = "Cloud takes a while to make a new chat", run = function()
+	SLOW_CLOUD_CREATE:set(true)
+end }
+ui.command { id = "cloud_creates_fail", title = "Cloud refuses the next new chat", run = function()
+	CLOUD_CREATE_FAILS:set(true)
+end }
+ui.command { id = "cloud_create_lands", title = "Cloud has made the new chat", run = function()
+	local h = held_create
+	held_create = nil
+	if h then
+		h.ok(h.value)
+	end
+end }
+ui.command { id = "cloud_create_refused", title = "Cloud refuses the new chat being made", run = function()
+	local h = held_create
+	held_create = nil
+	if h then
+		h.bad({ message = "Cloud is out of credits for new machines." })
+	end
+end }
+-- The host's side of a new chat on Cloud opened before Cloud has made it
+-- (src/chat.rs `chat.creating`): a chat on Cloud, its first message sending.
+stub.creating = function(req: any)
+	note(`creating:{req.session}`)
+	META[req.session] = { title = "New chat", project = req.project, cloud = true }
+	TRANSCRIPTS[req.session] = { { id = req.message_id, role = "user", text = req.text, attachments = {}, waiting = "sending" } }
+	seed()
+end
+stub.created = function(id: string)
+	note(`created:{id}`)
+	-- (The engine's list has it now: the session as made.)
+	if opened == id then
+		publish(id)
+	end
+end
+stub.create_failed = function(id: string)
+	note(`create_failed:{id}`)
+	META[id] = nil
+	TRANSCRIPTS[id] = nil
+	seed()
+end
 sessions_stub.create = function(req: any)
 	made_chats += 1
-	local id = `new{made_chats}`
+	local id = req.id or `new{made_chats}`
 	note(`create:{req.project or "none"}:{req.config and req.config.model or ""}`)
 	note(`made:{req.project or "-"}|{req.device or "-"}|{req.branch or "-"}|{req.cwd or "-"}{if req.cloud then "|cloud" else ""}`)
 	META[id] = { title = "New chat", project = req.project, model = req.config and req.config.model }
-	TRANSCRIPTS[id] = {}
+	-- (On Cloud, its machine's device, as the engine's list will say.)
+	if req.cloud then
+		META[id].device = `cloud-{id}`
+	end
+	TRANSCRIPTS[id] = TRANSCRIPTS[id] or {}
 	seed()
 	-- On Cloud: made on a machine of its own, its checkout of the repository.
 	if req.cloud then
+		if CLOUD_CREATE_FAILS:peek() then
+			CLOUD_CREATE_FAILS:set(false)
+			META[id] = nil
+			return { after = function(_self: any, _ok: any, bad: (any) -> ())
+				bad({ message = "Cloud is out of credits for new machines." })
+			end }
+		end
+		if SLOW_CLOUD_CREATE:peek() then
+			return { after = function(_self: any, ok: (any) -> (), bad: (any) -> ())
+				held_create = { ok = ok, bad = bad, value = { id = id, cwd = "/home/user/atlas" } }
+			end }
+		end
 		return settled({ id = id, cwd = "/home/user/atlas" })
 	end
 	return settled(id)
@@ -1061,6 +1161,17 @@ ui.command {
 	title = "A session with no model",
 	run = function()
 		META.s3 = { title = "No model", project = "atlas", access = "full", plan = false }
+		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
+		seed()
+	end,
+}
+-- A Codex session on its agent's default model (none set, so none the
+-- catalog names): its agent only the one its config records.
+ui.command {
+	id = "codex_model_less",
+	title = "A Codex session with no model",
+	run = function()
+		META.s3 = { title = "Codex chat", project = "atlas", agent = "codex", harness = "codex", access = "full", plan = false }
 		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
 		seed()
 	end,

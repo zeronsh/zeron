@@ -57,6 +57,9 @@ export type Session = {
 	-- Its folder on that device.
 	cwd: string?,
 	harness: string?,
+	-- The agent its config records (nil until that's known): whose `/` list
+	-- its composer reads when the catalog doesn't name its model.
+	agent: string?,
 	model: string?,
 	-- Its model's name: its catalog's, else its id (chat.rs `session_value`).
 	model_label: string?,
@@ -133,6 +136,20 @@ function M.open(id: string?)
 	end
 	watching:set(key)
 	ui.invoke("chat.open", id)
+end
+
+-- A new chat on Cloud, opened before Cloud has made it (`req`: the send it
+-- will get, its `session` the id it's made with): known to the host as a chat
+-- on Cloud, its first message showing, sending. `created` once Cloud has made
+-- it (the host watches it then); `create_failed` if Cloud didn't.
+function M.creating(req: Request)
+	ui.invoke("chat.creating", req)
+end
+function M.created(id: string)
+	ui.invoke("chat.created", id)
+end
+function M.create_failed(id: string)
+	ui.invoke("chat.create_failed", id)
 end
 
 -- A message's id, made here so its prompt shows the moment it's sent

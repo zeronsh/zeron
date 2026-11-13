@@ -999,6 +999,14 @@ pub struct SlashCommand {
     pub input_hint: Option<String>,
 }
 
+/// One image embedded in a tool result, held only until the engine stores
+/// a copy under the profile uploads directory. Never journaled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    pub name: String,
+    pub data_base64: String,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1105,6 +1113,13 @@ pub enum AgentEvent {
         /// Inline file diff for edit-shaped tools (ACP `Diff` content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+        /// Uploads paths of images that were embedded in this result. The
+        /// engine fills this before journaling; adapters leave it empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        preview_paths: Vec<String>,
+        /// In-memory image bytes for the engine to store. Never serialized.
+        #[serde(skip)]
+        image_payloads: Vec<ToolResultImage>,
         /// A command's exit status, when the harness reported one (Claude
         /// Code's Bash, Codex's command execution). Absent for other tools,
         /// a command still running in the background, or one that never ran.

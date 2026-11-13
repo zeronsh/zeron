@@ -28,6 +28,8 @@
 #![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
 
 mod about;
+#[cfg(all(windows, feature = "beta"))]
+mod windows_install;
 mod acp_registry;
 mod agents;
 mod appshots;
@@ -227,11 +229,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
-    // The Windows beta's engine is the stable release's whole `zeron.exe`, in
-    // the beta's folder (scripts/package-windows.ps1).
+    // The Zeron app's updater follows the channel on record on every
+    // platform, a stable build's too (crates/update `follows_channels`).
+    #[cfg(feature = "beta")]
+    zeron_update::set_app_follows_channels();
+    // On Windows this app's engine is a whole Zeron `zeron.exe`, in this
+    // version's folder (scripts/package-windows.ps1), which an older updater
+    // may not have brought: bring it in first (src/windows_install.rs).
     #[cfg(all(windows, feature = "beta"))]
-    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
-        zeron_launch::set_full_app_engine(dir.join("beta").join(about::APP_VERSION).join("engine").join("zeron.exe"));
+    {
+        windows_install::complete_if_needed(&argv);
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
+            zeron_launch::set_full_app_engine(
+                zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
+            );
+        }
     }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
@@ -300,19 +312,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe { std::env::set_var("ZGX_LAYOUT_WARNINGS", "1") };
         }
     }
-    // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
-    // of this interface by someone who finished setup before is the exception:
-    // the intro, then their username and card, once.
-    if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        if welcome_due(finished_setup_before(), welcomed()) {
-            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            screen = Screen::Onboarding;
-            // Setup finished on this Mac before: the main window.
-            if onboarded() {
-                screen = Screen::Main;
-            }
+    // Where a launch opens (`opening`). Asking for `intro` still plays it.
+    if matches!(screen, Screen::Intro) && !asked_for_intro {
+        let session = auth::session_exists();
+        match opening(session, session && finished_setup_before(), welcomed(), onboarded()) {
+            Opening::Intro => {}
+            Opening::Welcome => WELCOME.store(true, std::sync::atomic::Ordering::Relaxed),
+            Opening::Setup => screen = Screen::Onboarding,
+            Opening::Main => screen = Screen::Main,
         }
     }
 
@@ -577,6 +584,38 @@ fn welcomed() -> bool {
 /// Whether someone signed in had finished setup, here or in the Zeron app.
 fn finished_setup_before() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
+}
+
+/// Where a launch that asked for no screen opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Opening {
+    /// The intro, then setup from its start.
+    Intro,
+    /// The intro, then their username and card only (`welcome_due`).
+    Welcome,
+    /// Setup at once, where sign-in leads (src/auth.rs).
+    Setup,
+    /// The main window.
+    Main,
+}
+
+/// Where a launch opens: signed in on an earlier run, no intro, setup at once
+/// (the first launch of this interface by someone who finished setup before
+/// is the exception: the intro, then their username and card, once), or the
+/// main window once setup was finished on this computer. Setup finished
+/// without an account opens the main window too: it works without one
+/// (screens/shell), and only the session was asked here before, so whoever
+/// went on without signing in saw the intro and setup on every launch.
+fn opening(session: bool, finished_before: bool, welcomed: bool, onboarded: bool) -> Opening {
+    if session && welcome_due(finished_before, welcomed) {
+        Opening::Welcome
+    } else if onboarded {
+        Opening::Main
+    } else if session {
+        Opening::Setup
+    } else {
+        Opening::Intro
+    }
 }
 
 /// Whether someone signed in gets the welcome: they'd finished setup before and
@@ -1301,13 +1340,24 @@ fn bundled_ui() -> Option<PathBuf> {
             let ui = if cfg!(target_os = "macos") {
                 dir.parent()?.join("Resources").join("ui")
             } else if cfg!(windows) {
-                dir.join("beta").join(about::APP_VERSION).join("ui")
+                windows_version_files(dir)?.join("ui")
             } else {
                 dir.join("ui")
             };
             ui.join("app.luau").is_file().then_some(ui)
         })
         .clone()
+}
+
+/// This version's own folder beside the executable on Windows.
+fn windows_version_files(dir: &std::path::Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    return Some(zeron_update::windows::version_files(dir, about::APP_VERSION));
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// Geist (the iOS app's, copied into `fonts/` so this folder builds on its
@@ -1350,5 +1400,19 @@ mod welcome_tests {
         assert!(super::welcome_due(true, false));
         assert!(!super::welcome_due(true, true));
         assert!(!super::welcome_due(false, false));
+    }
+
+    /// Setup finished without an account opens the main window on the next
+    /// launch, as it does signed in; the intro is for whoever hasn't finished it.
+    #[test]
+    fn setup_finished_without_an_account_opens_the_main_window() {
+        use super::{Opening, opening};
+        // (session, finished before, welcomed, onboarded here)
+        assert_eq!(opening(false, false, false, true), Opening::Main);
+        assert_eq!(opening(false, false, false, false), Opening::Intro);
+        assert_eq!(opening(true, false, false, true), Opening::Main);
+        assert_eq!(opening(true, false, false, false), Opening::Setup);
+        assert_eq!(opening(true, true, false, true), Opening::Welcome);
+        assert_eq!(opening(true, true, true, true), Opening::Main);
     }
 }
