@@ -518,7 +518,13 @@ function M.setup()
 			-- A diff's counts: what it adds and what it takes away.
 			-- (And a line a comment rests on, lit: its chip pointed at, or a
 			-- range being chosen.)
-			diff = { added = "{success}", removed = "{danger}", comment_wash = "alpha({accent}, 0.14)" },
+			diff = {
+				added = "{success}",
+				removed = "{danger}",
+				comment_wash = "alpha({accent}, 0.14)",
+				-- Sticky file headers share the content plane, not menu glass.
+				sticky = { tint = "alpha({background}, 0.12)", solid = "{popover.bg}", blur = 24 },
+			},
 			-- A dialog or sheet: its panel over the dimmed window (the palette's
 			-- denser glass: a menu's tint would go black on the dim), its
 			-- corner, the dim, and its width at each size.
