@@ -44,7 +44,73 @@ pub(crate) fn as_report(text: &str) -> ReportParams {
     }
 }
 
+/// The crew rules each thread was last sent, by thread: a thread is sent
+/// its rules again only when they changed.
+fn rules_sent() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static SENT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    SENT.get_or_init(Default::default)
+}
+
+fn rules_hash(rules: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rules.trim().hash(&mut h);
+    h.finish()
+}
+
+/// Where a send's text sits in its params.
+fn text_slot<'a>(method: &str, params: &'a mut Value) -> Option<&'a mut Value> {
+    match method {
+        methods::QUEUE_MESSAGE => Some(&mut params["text"]),
+        methods::QUEUE_COMMAND => match params["command"]["kind"].as_str() {
+            Some("run") => Some(&mut params["command"]["request"]["prompt"]),
+            Some("steer") => Some(&mut params["command"]["prompt"]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 impl EngineRpc {
+    /// An orchestrator's send to a thread in its own crew starts with its
+    /// crew rules (`[Crew rules from <name>]`) the first time, and again
+    /// whenever they change.
+    pub(super) fn with_crew_rules(&self, method: &str, params: &mut Value) {
+        let Caller::Agent { chat: Some(caller) } = zeron_rpc::caller() else {
+            return;
+        };
+        let Some(target) = params["chatId"].as_str().map(str::to_owned) else {
+            return;
+        };
+        let orchestration = self.orchestration();
+        let Some(orchestrator) = orchestration.orchestrator(&caller) else {
+            return;
+        };
+        if orchestrator.crew_rules.trim().is_empty()
+            || orchestration.crew_of(&target).is_none_or(|m| m.orchestrator_id != caller)
+        {
+            return;
+        }
+        let Some(slot) = text_slot(method, params) else { return };
+        let Some(text) = slot.as_str() else { return };
+        let hash = rules_hash(&orchestrator.crew_rules);
+        {
+            let mut sent = rules_sent().lock().unwrap_or_else(|e| e.into_inner());
+            if sent.get(&target) == Some(&hash) {
+                return;
+            }
+            sent.insert(target.clone(), hash);
+        }
+        // Under the sender's own header (the gate writes it afresh).
+        let body = match zeron_proto::agent_messages::agent_message_sender(text) {
+            Some((sender, body)) if sender.chat_id == caller => body,
+            _ => text,
+        };
+        let rules = zeron_proto::orchestration::role_prompts::crew_rules_block(&orchestrator.name, &orchestrator.crew_rules);
+        *slot = json!(format!("{rules}{body}"));
+    }
+
     /// `Some(reply)` when this call is a crew thread messaging its own
     /// orchestrator: filed as a report instead, replying as the send would.
     pub(super) async fn crew_message_as_report(

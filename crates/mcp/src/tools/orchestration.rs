@@ -516,6 +516,31 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
     }
 }
 
+/// The built-in instructions for `role` (docs/design/orchestrators.md,
+/// "Built-in prompts"), from its rows.
+pub fn role_prompt(role: &Role, chat: Option<&str>, state: &OrchestrationState) -> Option<String> {
+    use zeron_proto::orchestration::role_prompts;
+    match role {
+        Role::Plain => None,
+        Role::Orchestrator { id } => {
+            let o = state.orchestrators.iter().find(|o| &o.id == id)?;
+            Some(role_prompts::orchestrator(&o.name, &o.goal, &o.rules))
+        }
+        Role::BrainDump { .. } => Some(role_prompts::BRAIN_DUMP.to_owned()),
+        Role::Crew { orchestrator_id } => {
+            let o = state.orchestrators.iter().find(|o| &o.id == orchestrator_id)?;
+            let item = state
+                .crew
+                .iter()
+                .find(|m| Some(m.chat_id.as_str()) == chat && &m.orchestrator_id == orchestrator_id)
+                .and_then(|m| m.item_id.as_deref())
+                .and_then(|id| state.items.iter().find(|i| i.id == id))
+                .map(|i| i.title.as_str());
+            Some(role_prompts::crew(&o.name, item, &o.crew_rules))
+        }
+    }
+}
+
 /// Why a new crew thread can't start now, or `None`: its orchestrator is
 /// paused, or `running` of its threads already work and that's its limit.
 pub(super) fn crew_refusal(orchestrator: &zeron_proto::orchestration::Orchestrator, running: usize, starts: bool) -> Option<String> {
@@ -606,15 +631,25 @@ impl Tools {
     /// engine predates them or the server speaks for no chat).
     pub async fn resolve_role(&self) -> Role {
         let chat = self.zeron.origin().chat_id.clone();
-        let role = match chat {
-            None => Role::Plain,
+        let (role, prompt) = match chat {
+            None => (Role::Plain, None),
             Some(_) => match self.orchestration_state().await {
-                Ok(state) => Role::of(chat.as_deref(), &state),
-                Err(_) => Role::Plain,
+                Ok(state) => {
+                    let role = Role::of(chat.as_deref(), &state);
+                    let prompt = role_prompt(&role, chat.as_deref(), &state);
+                    (role, prompt)
+                }
+                Err(_) => (Role::Plain, None),
             },
         };
         *self.role.write().unwrap_or_else(|e| e.into_inner()) = Some(role.clone());
+        *self.role_prompt.write().unwrap_or_else(|e| e.into_inner()) = prompt;
         role
+    }
+
+    /// Zeron's built-in instructions for this chat's role, when it has one.
+    pub fn role_instructions(&self) -> Option<String> {
+        self.role_prompt.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The role as last read.
@@ -838,6 +873,46 @@ mod tests {
             released,
             joined_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn each_role_gets_its_built_in_prompt() {
+        let mut o = orchestrator("o1", OrchestratorKind::Standard);
+        o.name = "Ops".into();
+        o.goal = "Ship it".into();
+        o.crew_rules = "Tests first".into();
+        let mut m = member("c1", "o1", false);
+        m.item_id = Some("i1".into());
+        let item = zeron_proto::orchestration::WorkItem {
+            id: "i1".into(),
+            orchestrator_id: Some("o1".into()),
+            title: "Auth PR".into(),
+            detail: String::new(),
+            state: WorkState::Active,
+            priority: Default::default(),
+            progress: None,
+            threads: vec![],
+            links: vec![],
+            outcome: None,
+            source: None,
+            order: 0.0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            done_at: None,
+        };
+        let state = OrchestrationState {
+            orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],
+            crew: vec![m],
+            items: vec![item],
+            ..Default::default()
+        };
+        let prompt = |chat: &str| role_prompt(&Role::of(Some(chat), &state), Some(chat), &state);
+        assert!(prompt("o1").unwrap().starts_with("You are an orchestrator in Zeron: Ops. Goal: Ship it."));
+        let crew = prompt("c1").unwrap();
+        assert!(crew.starts_with("You are on Ops's crew, working on Auth PR."), "{crew}");
+        assert!(crew.contains("Crew rules: Tests first."));
+        assert!(prompt("b1").unwrap().starts_with("You route the person's brain dumps."));
+        assert_eq!(prompt("someone"), None);
     }
 
     #[test]

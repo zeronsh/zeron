@@ -3223,6 +3223,8 @@ impl RpcService for EngineRpc {
         if let Some(reply) = self.crew_message_as_report(method, &params).await? {
             return Ok(reply);
         }
+        let mut params = params;
+        self.with_crew_rules(method, &mut params);
         let params = self.agent_gate(method, params)?;
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.

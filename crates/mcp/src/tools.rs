@@ -55,6 +55,8 @@ pub struct Tools {
     /// What the calling chat is to orchestration, once read
     /// ([`Self::resolve_role`]): it picks the orchestration tools listed.
     role: std::sync::RwLock<Option<Role>>,
+    /// The role's built-in instructions, read with it.
+    role_prompt: std::sync::RwLock<Option<String>>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -831,6 +833,7 @@ impl Tools {
             pending_turns: Default::default(),
             plugins: Default::default(),
             role: Default::default(),
+            role_prompt: Default::default(),
         }
     }
 

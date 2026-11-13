@@ -339,3 +339,40 @@ async fn a_wake_runs_as_the_orchestrator_is_set_not_as_its_last_run_did() {
     let _ = finish.send(());
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crew_rules_ride_an_orchestrators_send_once_until_they_change() {
+    let Setup { core, finish, prompts, .. } = setup().await;
+    call(
+        &core,
+        Caller::Local,
+        methods::ORCHESTRATE,
+        json!({ "op": "updateOrchestrator", "id": ORCH, "crewRules": "Run the tests before you report done." }),
+    )
+    .await;
+    let send = |text: &'static str| {
+        let core = &core;
+        async move {
+            call(
+                core,
+                Caller::Agent { chat: Some(ORCH.into()) },
+                methods::QUEUE_MESSAGE,
+                json!({ "chatId": CREW, "text": text, "holdForTurnEnd": true }),
+            )
+            .await
+        }
+    };
+    send("first task").await;
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the first send").await;
+    let first = prompts.lock().unwrap()[0].clone();
+    assert!(first.contains("[Crew rules from Ops]\nRun the tests before you report done."), "{first}");
+    assert!(first.contains("first task"));
+    let _ = finish.send(());
+    wait_for(|| !core.sessions.turn_in_flight(CREW), "its turn to end").await;
+    send("second task").await;
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the second send").await;
+    let second = prompts.lock().unwrap()[1].clone();
+    assert!(!second.contains("[Crew rules"), "unchanged rules aren't sent again: {second}");
+    let _ = finish.send(());
+    core.shutdown().await;
+}

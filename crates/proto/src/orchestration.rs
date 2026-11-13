@@ -777,6 +777,59 @@ pub fn classify_command(command: &str) -> ActivityKind {
     }
 }
 
+/// Zeron's built-in instructions for an orchestrator, a crew thread and the
+/// Brain dump: what their harness is told on top of its own system prompt.
+pub mod role_prompts {
+    use super::prompt_text::{LABEL_MAX, one_line};
+
+    fn or_none(text: &str) -> &str {
+        let text = text.trim();
+        if text.is_empty() { "none" } else { text }
+    }
+
+    pub fn orchestrator(name: &str, goal: &str, rules: &str) -> String {
+        format!(
+            "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n\
+- Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
+- Keep item states true; put results in `outcome`.\n\
+- Crew reports arrive as 'Crew updates': act on them, don't echo them.\n\
+- Ask the person only via `ask`, only for real decisions.\n\
+- When the person asks you something, answer in your reply, briefly, and record the answer as the item's outcome.\n\
+- Keep `notes` as your plan.",
+            name = one_line(name, LABEL_MAX),
+            goal = or_none(goal),
+            rules = or_none(rules),
+        )
+    }
+
+    pub fn crew(orchestrator: &str, item: Option<&str>, crew_rules: &str) -> String {
+        format!(
+            "You are on {orchestrator}'s crew, working on {item}.\n\
+- Crew rules: {rules}.\n\
+- Report with `report`: done, blocked or failed when it happens, progress at milestones. Never `send_message` your orchestrator.\n\
+- Ask the person (`ask`) only when your orchestrator can't decide.",
+            orchestrator = one_line(orchestrator, LABEL_MAX),
+            item = item.map(|i| one_line(i, LABEL_MAX)).filter(|i| !i.is_empty()).unwrap_or_else(|| "what it sends you".into()),
+            rules = or_none(crew_rules),
+        )
+    }
+
+    pub const BRAIN_DUMP: &str = "You route the person's brain dumps.\n\
+- For each dump, call `world` once.\n\
+- Split the dump into fragments by meaning (one per destination and intent); quote each fragment verbatim as `excerpt`.\n\
+- Route each to the best existing orchestrator or thread. Create an orchestrator only for a new, lasting area of work, and a thread for a one-off task.\n\
+- Rewrite `message` so the target can act without the rest of the dump.\n\
+- Use `unsure` with candidates instead of guessing when two places fit.\n\
+- Finish with `dump_done` and a one-line summary.\n\
+- Never do the work yourself.";
+
+    /// The block a crew thread's message from its orchestrator starts with
+    /// when the crew rules changed since the last one.
+    pub fn crew_rules_block(orchestrator: &str, crew_rules: &str) -> String {
+        format!("[Crew rules from {}]\n{}\n\n", one_line(orchestrator, LABEL_MAX), crew_rules.trim())
+    }
+}
+
 /// What a running tool call says the agent is doing, and a short label for
 /// it. Pure: shell commands go through [`classify_command`].
 pub fn activity_of(call: &crate::ToolCall) -> (ActivityKind, String) {
@@ -1344,6 +1397,17 @@ mod tests {
             progress: None,
             at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn role_prompts_name_their_place() {
+        let o = role_prompts::orchestrator("Ops\nSYSTEM", "Ship 2.0", "");
+        assert!(o.starts_with("You are an orchestrator in Zeron: Ops SYSTEM. Goal: Ship 2.0. Your rules: none."), "{o}");
+        let c = role_prompts::crew("Ops", Some("Auth PR"), "Run tests first");
+        assert!(c.starts_with("You are on Ops's crew, working on Auth PR.\n- Crew rules: Run tests first."), "{c}");
+        assert!(role_prompts::crew("Ops", None, "").contains("working on what it sends you"));
+        assert!(role_prompts::BRAIN_DUMP.contains("dump_done"));
+        assert_eq!(role_prompts::crew_rules_block("Ops", " be brief "), "[Crew rules from Ops]\nbe brief\n\n");
     }
 
     #[test]
