@@ -26,6 +26,21 @@ pub struct ReportParams {
     pub progress: Option<f32>,
 }
 
+/// A crew thread's message to its orchestrator, as a `message` report: the
+/// first line its summary, the whole text its detail.
+pub(crate) fn message_report(text: &str) -> ReportParams {
+    let text = text.trim();
+    let summary = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Message").to_owned();
+    ReportParams {
+        state: ReportState::Message,
+        summary,
+        detail: text.to_owned(),
+        item_id: None,
+        links: Vec::new(),
+        progress: None,
+    }
+}
+
 /// A summary is one line of at most this many characters.
 pub const MAX_SUMMARY_CHARS: usize = 140;
 

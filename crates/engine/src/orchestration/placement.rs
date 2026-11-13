@@ -347,6 +347,7 @@ impl EngineRpc {
             answered_at: None,
             dump_id: Some(dump.id.clone()),
             route_id: Some(route.id.clone()),
+            quiet: Default::default(),
         };
         self.orchestration().workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
         self.orchestration().comms().say(

@@ -557,6 +557,7 @@ mod tests {
             space_id: None,
             device_id: None,
             attachments: Default::default(),
+            delivered_at: Default::default(),
         }
     }
 
@@ -608,6 +609,7 @@ mod tests {
             answered_at: None,
             dump_id: None,
             route_id: None,
+            quiet: Default::default(),
         };
         doc.upsert_ask(&ask);
         let mut d = dump("d1");

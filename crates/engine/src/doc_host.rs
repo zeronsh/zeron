@@ -293,6 +293,11 @@ struct DocHostInner {
     /// What a `ProgressCheck` command calls with its chat id (set by
     /// orchestration; absent in bare tests).
     progress_checks: OnceLock<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// What a prompt about to run in a chat hosted here is offered first,
+    /// with the chat's id: `true` when orchestration filed it instead (an
+    /// agent's message to a Brain dump or an orchestrator, from any sender
+    /// and any engine version). Absent in bare tests.
+    incoming_messages: OnceLock<IncomingMessages>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
@@ -540,6 +545,9 @@ const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open th
 /// Older clients stored the already-expanded prompt in `text`; recognize the
 /// exact trailer implied by `attachments` so those rows are not expanded a
 /// second time after an upgrade.
+/// See `Inner::incoming_messages`: `(chat id, prompt) -> taken`.
+pub(crate) type IncomingMessages = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
@@ -1285,6 +1293,7 @@ impl DocHost {
                 dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
                 progress_checks: OnceLock::new(),
+                incoming_messages: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 shutdown: CancellationToken::new(),
@@ -1713,6 +1722,17 @@ impl DocHost {
     /// wins).
     pub(crate) fn set_progress_checks(&self, check: Arc<dyn Fn(&str) + Send + Sync>) {
         let _ = self.inner.progress_checks.set(check);
+    }
+
+    /// What a prompt about to run here is offered first (first set wins;
+    /// see `incoming_messages`).
+    pub(crate) fn set_incoming_messages(&self, take: IncomingMessages) {
+        let _ = self.inner.incoming_messages.set(take);
+    }
+
+    /// `prompt`, about to run in `chat_id`, taken by orchestration instead.
+    fn taken_by_orchestration(&self, chat_id: &str, prompt: &str) -> bool {
+        self.inner.incoming_messages.get().is_some_and(|take| take(chat_id, prompt))
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -5189,6 +5209,11 @@ impl DocHost {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
         let chat_id = &handle.chat_id;
+        // An agent's message to a Brain dump or an orchestrator: filed by
+        // orchestration, never a turn (see `execute`).
+        if self.taken_by_orchestration(chat_id, &item.text) {
+            return Ok(());
+        }
         // Keep the queue row's identity when it becomes a real user message.
         // The submitting viewport learns this id from QueueMessage and can
         // therefore wait without disturbing the active turn's runway, then
@@ -6366,6 +6391,16 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        // An agent's message to a Brain dump or an orchestrator is filed by
+        // orchestration (an outcome, a report, an update), never a turn.
+        let prompt = match &entry.payload {
+            SessionCommandPayload::Run { request, .. } => Some(request.prompt.as_str()),
+            SessionCommandPayload::Steer { prompt, .. } => Some(prompt.as_str()),
+            _ => None,
+        };
+        if prompt.is_some_and(|prompt| self.taken_by_orchestration(chat_id, prompt)) {
+            return Ok((SessionCommandStatus::Applied, Some("filed by orchestration".into())));
+        }
         if let Some(message_id) = self.cancelled_by_stop(handle, entry) {
             // Still the user's message: it stays in the transcript, unrun.
             let prompt = match &entry.payload {

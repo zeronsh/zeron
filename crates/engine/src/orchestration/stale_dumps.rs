@@ -91,6 +91,7 @@ pub(crate) fn settle(dump: &Dump, candidates: &[RouteTarget]) -> Option<Dump> {
             space_id: None,
             device_id: None,
             attachments: Default::default(),
+            delivered_at: Default::default(),
         });
     }
     dump.state = super::brain::settled_state(&dump);
@@ -242,6 +243,7 @@ mod tests {
             space_id: None,
             device_id: None,
             attachments: Default::default(),
+            delivered_at: Default::default(),
         }
     }
 
