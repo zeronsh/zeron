@@ -28,7 +28,10 @@
 //!                   candidates = { target }, answer?, item_id? } },
 //!                   summary?, device, created, updated } } (newest first) }
 //!   `orchestration.loads`  { [device id] = { cpu?, mem_used?, mem_total?, load1?,
-//!                            cores?, online, at } } (while a screen wants them)
+//!                            cores?, online, at,
+//!                            history = { { at, cpu } } } } (while a screen
+//!                            wants them; `history` the CPU samples heard
+//!                            this run, oldest first, the last six minutes)
 //!   `orchestration.comms`  { { id, kind, from, to, summary, at } } (newest last,
 //!                            the latest 100; `from`/`to` a chat id or "you")
 //!
@@ -61,6 +64,9 @@ use crate::engine::{self, rpc::{Rpc, Watch}};
 
 /// The most comms kept (the engine's own ring, `WatchComms`).
 const COMMS: usize = 100;
+/// The CPU samples kept for each device's line: six minutes at
+/// `WatchDeviceLoads`' one every five seconds.
+const HISTORY: usize = 72;
 
 /// One open window's states, and how many of its screens want loads.
 struct Window {
@@ -84,6 +90,9 @@ struct Orchestration {
     now: RefCell<Option<Value>>,
     comms: RefCell<Comms>,
     loads: RefCell<Value>,
+    /// Each device's CPU as it was heard, for its line (kept while the app
+    /// runs: a screen shown again has its last minutes at once).
+    history: RefCell<History>,
     /// Whether something the engine sent couldn't be read, said once.
     complained: Cell<bool>,
     watches: RefCell<Vec<Watch>>,
@@ -229,7 +238,8 @@ impl Orchestration {
         };
         // (A row this build can't read costs that row, not the rest.)
         let loads: Vec<DeviceLoad> = rows.iter().filter_map(|row| DeviceLoad::deserialize(row).ok()).collect();
-        let value = loads_value(&loads);
+        self.history.borrow_mut().heard(&loads);
+        let value = loads_value_with(&loads, &self.history.borrow());
         if *self.loads.borrow() == value {
             return;
         }
@@ -294,37 +304,78 @@ struct Comms {
 }
 
 impl Comms {
-    /// `item` heard: a list is the whole ring again, one event is added (or
-    /// put in place of the one with its id). Whether anything changed.
+    /// `item` heard: a list of events (the stream's every frame: the
+    /// backlog first, then what happened since, or the whole ring again
+    /// after falling behind), or one event. Each is added, or put in place
+    /// of the one with its id; the ring stays in time order, the newest
+    /// [`COMMS`]. Whether anything changed.
     fn heard(&mut self, item: &Json) -> Result<bool, serde_json::Error> {
-        if let Some(rows) = item.as_array() {
+        let events: Vec<CommEvent> = match item.as_array() {
             // (A row this build can't read costs that row, not the rest.)
-            let mut events: Vec<CommEvent> = rows.iter().filter_map(|row| CommEvent::deserialize(row).ok()).collect();
-            events.sort_by_key(|e| e.at);
-            let events: VecDeque<CommEvent> = events.into_iter().rev().take(COMMS).rev().collect();
-            if events == self.events {
-                return Ok(false);
+            Some(rows) => rows.iter().filter_map(|row| CommEvent::deserialize(row).ok()).collect(),
+            None => vec![CommEvent::deserialize(item)?],
+        };
+        let mut changed = false;
+        let mut out_of_order = false;
+        for event in events {
+            if let Some(held) = self.events.iter_mut().find(|e| e.id == event.id) {
+                if *held != event {
+                    out_of_order |= held.at != event.at;
+                    *held = event;
+                    changed = true;
+                }
+                continue;
             }
-            self.events = events;
-            return Ok(true);
+            out_of_order |= self.events.back().is_some_and(|last| last.at > event.at);
+            self.events.push_back(event);
+            changed = true;
         }
-        let event = CommEvent::deserialize(item)?;
-        if let Some(held) = self.events.iter_mut().find(|e| e.id == event.id) {
-            if *held == event {
-                return Ok(false);
-            }
-            *held = event;
-            return Ok(true);
+        if out_of_order {
+            self.events.make_contiguous().sort_by_key(|e| e.at);
         }
-        self.events.push_back(event);
         while self.events.len() > COMMS {
             self.events.pop_front();
         }
-        Ok(true)
+        Ok(changed)
     }
 
     fn value(&self) -> Value {
         Value::List(self.events.iter().map(comm_value).collect())
+    }
+}
+
+/// Each device's CPU samples as `WatchDeviceLoads` gave them, oldest first,
+/// the latest [`HISTORY`].
+#[derive(Default)]
+struct History {
+    by_device: std::collections::HashMap<String, VecDeque<(DateTime<Utc>, f32)>>,
+}
+
+impl History {
+    /// A round of loads heard: each device's CPU onto its line, once per
+    /// sample (a round sent again adds nothing).
+    fn heard(&mut self, loads: &[DeviceLoad]) {
+        for l in loads {
+            let Some(cpu) = l.cpu else { continue };
+            let line = self.by_device.entry(l.device_id.clone()).or_default();
+            if line.back().is_some_and(|(at, _)| *at >= l.at) {
+                continue;
+            }
+            line.push_back((l.at, cpu));
+            while line.len() > HISTORY {
+                line.pop_front();
+            }
+        }
+    }
+
+    fn value(&self, device: &str) -> Value {
+        let line = self.by_device.get(device);
+        Value::List(
+            line.into_iter()
+                .flatten()
+                .map(|(at, cpu)| Value::record([("at", secs(at)), ("cpu", fraction(*cpu))]))
+                .collect(),
+        )
     }
 }
 
@@ -511,8 +562,13 @@ fn dump_value(d: &Dump) -> Value {
     ])
 }
 
-/// The devices' loads, by device id.
+/// The devices' loads, by device id (no history).
 fn loads_value(loads: &[DeviceLoad]) -> Value {
+    loads_value_with(loads, &History::default())
+}
+
+/// The devices' loads, by device id, each with its CPU line.
+fn loads_value_with(loads: &[DeviceLoad], history: &History) -> Value {
     Value::record(loads.iter().map(|l| {
         let bytes = |b: Option<u64>| opt(b, |b| Value::from(b as f64));
         (
@@ -525,6 +581,7 @@ fn loads_value(loads: &[DeviceLoad]) -> Value {
                 ("cores", opt(l.cores, |n| Value::from(f64::from(n)))),
                 ("online", Value::Bool(l.online)),
                 ("at", secs(&l.at)),
+                ("history", history.value(&l.device_id)),
             ]),
         )
     }))
@@ -913,6 +970,52 @@ mod tests {
         // Something unreadable: told, and the ring stands.
         assert!(comms.heard(&json!({ "id": "x" })).is_err());
         assert_eq!(comms.events.len(), COMMS);
+    }
+
+    #[test]
+    fn each_comms_frame_adds_to_what_came_before() {
+        // The stream's frames: the backlog, then each burst since (also a
+        // list). A later frame must not stand for the whole feed.
+        let mut comms = Comms::default();
+        let ids = |c: &Comms| c.events.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        assert!(comms.heard(&json!([comm("a", NOW - 30), comm("b", NOW - 20)])).unwrap());
+        assert!(comms.heard(&json!([comm("c", NOW - 10)])).unwrap());
+        assert!(comms.heard(&json!([comm("d", NOW - 5), comm("e", NOW)])).unwrap());
+        assert_eq!(ids(&comms), ["a", "b", "c", "d", "e"]);
+        // Fallen behind: the whole ring again, overlapping what's held.
+        assert!(comms.heard(&json!([comm("c", NOW - 10), comm("d", NOW - 5), comm("e", NOW), comm("f", NOW + 1)])).unwrap());
+        assert_eq!(ids(&comms), ["a", "b", "c", "d", "e", "f"]);
+        // One that came late goes in its place in time.
+        assert!(comms.heard(&json!([comm("z", NOW - 25)])).unwrap());
+        assert_eq!(ids(&comms), ["a", "z", "b", "c", "d", "e", "f"]);
+    }
+
+    #[test]
+    fn each_device_keeps_its_cpu_line() {
+        let round = |at: i64, cpu: f32| -> Vec<DeviceLoad> {
+            serde_json::from_value(json!([
+                { "deviceId": "dev-desk", "cpu": cpu, "online": true, "at": iso(at) },
+                { "deviceId": "dev-cloud", "online": false, "at": iso(at) },
+            ]))
+            .unwrap()
+        };
+        let mut history = History::default();
+        history.heard(&round(NOW - 10, 0.2));
+        history.heard(&round(NOW - 5, 0.5));
+        // The same round again adds nothing.
+        history.heard(&round(NOW - 5, 0.5));
+        let v = loads_value_with(&round(NOW - 5, 0.5), &history);
+        let line = v.field("dev-desk").unwrap().field("history").unwrap().list();
+        assert_eq!(line.len(), 2);
+        assert_eq!(num(line[0].field("at")), Some((NOW - 10) as f64));
+        assert_eq!(num(line[1].field("cpu")), Some(0.5));
+        // No CPU, no line.
+        assert!(v.field("dev-cloud").unwrap().field("history").unwrap().list().is_empty());
+        // At most six minutes of it.
+        for i in 0..200 {
+            history.heard(&round(NOW + i * 5, 0.1));
+        }
+        assert_eq!(history.by_device["dev-desk"].len(), HISTORY);
     }
 
     #[test]
