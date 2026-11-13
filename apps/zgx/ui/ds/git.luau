@@ -558,16 +558,22 @@ local NUM, SIGN = 36, 16
 function M.gutter(narrow: boolean?): number
 	return Inline.SLOT + (if narrow then NUM else NUM * 2) + SIGN
 end
+-- A side-by-side half's gutter: the + slot (blank on the left), one column
+-- of numbers, the sign.
+function M.half_gutter(): number
+	return Inline.SLOT + NUM + SIGN
+end
 
 -- Row heights a list of a diff can know: a hunk's header, a line.
 M.HUNK_H, M.LINE_H = 24, 22
 
 -- One line of the diff. With `on_comment`, the + shows in its slot at the
 -- line's start under the pointer, to say something about it.
--- The text of a line: its colours (`runs`), or plain; scrolled sideways
--- whole, or wrapped (`wrap`) to the room it has.
-local function code(l: Line, runs_of: { Run }?, wrap: boolean?): Node
+-- The text of a line: its colours (`runs`), or plain; as long as it runs,
+-- or wrapped (`wrap`) to the room it has.
+local function code_text(l: Line, runs_of: { Run }?, wrap: boolean?): Node
 	local base: { [any]: any } = {
+		class = "diff-code",
 		literal = true,
 		shrink = if wrap then 1 else 0,
 		grow = if wrap then 1 else nil,
@@ -586,6 +592,33 @@ local function code(l: Line, runs_of: { Run }?, wrap: boolean?): Node
 		base[k] = ui.span { r.text, color = r.color, literal = true }
 	end
 	return ui.rich(base)
+end
+-- A line's text as a diff row holds it. With `hx` (how far the
+-- diff is scrolled sideways, read as it's drawn), it slides in a clip of
+-- the room past the gutter, so the numbers stay put as the code moves and
+-- the line's wash, the row's, still runs the whole width.
+local function code(l: Line, runs_of: { Run }?, wrap: boolean?, hx: (() -> number)?): Node
+	local text = code_text(l, runs_of, wrap)
+	if wrap or not hx then
+		return text
+	end
+	return ui.div {
+		grow = 1,
+		min_w = 0,
+		h_full = true,
+		overflow = "hidden",
+		relative = true,
+		ui.row {
+			absolute = true,
+			top = 0,
+			bottom = 0,
+			items = "center",
+			left = function(): number
+				return -hx()
+			end,
+			text,
+		},
+	}
 end
 M.code = code
 
@@ -657,7 +690,7 @@ local function add_props(base: { [string]: any }, extra: { [string]: any }?, dra
 	end
 	return p
 end
-local DiffLine = ui.component(function(props: { line: Line, narrow: boolean?, on_comment: (() -> ())?, runs: { Run }?, wrap: boolean?, mark: (() -> string?)?, slot: { [string]: any }?, row: { [string]: any }? }): Node
+local DiffLine = ui.component(function(props: { line: Line, narrow: boolean?, on_comment: (() -> ())?, runs: { Run }?, wrap: boolean?, hx: (() -> number)?, mark: (() -> string?)?, slot: { [string]: any }?, row: { [string]: any }? }): Node
 	local over = ui.use_state(false)
 	local dragging = ui.use_state(false)
 	local l = props.line
@@ -690,11 +723,11 @@ local DiffLine = ui.component(function(props: { line: Line, narrow: boolean?, on
 	table.insert(numbers, ui.text { if l.kind == " " then "" else l.kind, w = SIGN, shrink = 0, align = "center", font = "$font.mono", text_size = "$font.size.sm", color = ink })
 	-- (The children as one list, unpacked last: an unpacked list in the
 	-- middle of a table gives only its first item.) The text is never cut:
-	-- the diff scrolls sideways, as the app's does (long-line wrapping is a
-	-- toolbar choice there), so a long line can be read to its end. Its
-	-- label is the line as a diff writes it, sign first.
+	-- the diff scrolls sideways (`hx`, its list's), as the app's does
+	-- (long-line wrapping is a toolbar choice there), so a long line can be
+	-- read to its end. Its label is the line as a diff writes it, sign first.
 	local kids: { Node } = numbers
-	table.insert(kids, code(l, props.runs, props.wrap))
+	table.insert(kids, code(l, props.runs, props.wrap, props.hx))
 	local mark = mark_of(props.mark)
 	if mark then
 		table.insert(kids, mark)
@@ -750,7 +783,7 @@ end
 -- and text, on its own wash; a half with no line (a line only put in, or
 -- only taken out) a quiet blank. Comments go on the right: what's said
 -- is said of the change as it now stands.
-local function half(l: Line?, side: string, runs_of: { Run }?, wrap: boolean?, slot: Node?): Node
+local function half(l: Line?, side: string, runs_of: { Run }?, wrap: boolean?, slot: Node?, hx: (() -> number)?): Node
 	if not l then
 		return ui.row {
 			-- (Halves of one width: none of their own, the room shared.)
@@ -780,11 +813,11 @@ local function half(l: Line?, side: string, runs_of: { Run }?, wrap: boolean?, s
 		slot,
 		ui.text { if n then tostring(n) else "", w = NUM, shrink = 0, align = "right", font = "$font.mono", text_size = "$font.size.xs", color = "$text.tertiary", tabular = true },
 		ui.text { if kind == " " then "" else kind, w = SIGN, shrink = 0, align = "center", font = "$font.mono", text_size = "$font.size.sm", color = ink },
-		code(l, runs_of, wrap),
+		code(l, runs_of, wrap, hx),
 	}
 end
 
-local SplitLine = ui.component(function(props: { pair: Pair, left_runs: { Run }?, right_runs: { Run }?, wrap: boolean?, on_comment: (() -> ())?, mark: (() -> string?)?, slot: { [string]: any }?, row: { [string]: any }? }): Node
+local SplitLine = ui.component(function(props: { pair: Pair, left_runs: { Run }?, right_runs: { Run }?, wrap: boolean?, hx: (() -> number)?, on_comment: (() -> ())?, mark: (() -> string?)?, slot: { [string]: any }?, row: { [string]: any }? }): Node
 	local over = ui.use_state(false)
 	local dragging = ui.use_state(false)
 	local p = props.pair
@@ -821,9 +854,11 @@ local SplitLine = ui.component(function(props: { pair: Pair, left_runs: { Run }?
 				over:set(inside)
 			end
 			else nil,
-		half(p.left, "left", props.left_runs, props.wrap, ui.div { w = Inline.SLOT, shrink = 0 }),
+		-- (Both halves slide by the one `hx`, so a pair's old and new text
+		-- stay side by side as the diff scrolls.)
+		half(p.left, "left", props.left_runs, props.wrap, ui.div { w = Inline.SLOT, shrink = 0 }, props.hx),
 		ui.div { w = 1, shrink = 0, bg = "$zeron.settings.rule", aria_hidden = true },
-		half(r, "right", props.right_runs, props.wrap, slot),
+		half(r, "right", props.right_runs, props.wrap, slot, props.hx),
 		mark_of(props.mark),
 	}
 	for k, v in props.row or {} do

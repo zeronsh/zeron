@@ -131,6 +131,9 @@ export type ListProps = {
 	reveal: any?,
 	-- Where the list's scroll stands, and its own ref.
 	offset: State<number>?,
+	-- How far its lines are scrolled sideways (kept by the caller to outlast
+	-- the list, as `offset` is).
+	hx: State<number>?,
 	ref: any?,
 	-- Told the list's frame (the element the rows scroll in), for what
 	-- brings itself into view inside it.
@@ -258,8 +261,16 @@ local List = ui.component(function(props: ListProps): Node
 	-- Blocks measure themselves; the list takes the height it last saw.
 	local measured: { [string]: number } = {}
 	local remeasure = ui.use_state(0)
-	-- How tall the list is, for its rail.
+	-- How tall the list is, for its rail; how wide, for the sideways one.
 	local seen = ui.use_state(0)
+	local seen_w = ui.use_state(0)
+	-- The lines scroll sideways as one, their gutters standing (Zeron's
+	-- Changes panel: changes.rs's per-file code plane): `hx`, how far, read
+	-- by every line's text as it's drawn, so a swipe moves the text alone.
+	local hx = props.hx or ui.use_state(0)
+	-- A column's width in the code's font, measured off a probe as it draws.
+	local PROBE = 64
+	local digit = ui.use_state(7)
 	-- What the rows show, kept here in Lua as the rows are worked out: each
 	-- open file's lines (and side by side, their pairs), each file by its
 	-- path, each row by its key. (The rows are state: a value in them is
@@ -399,6 +410,62 @@ local List = ui.component(function(props: ListProps): Node
 		end
 		return sum
 	end)
+	-- How far the lines can scroll sideways: the widest line shown (its
+	-- columns, tabs to their stops, at the probe's width, with the text's
+	-- room after it) past the room beside the gutter. Wrapped, nothing runs
+	-- past it.
+	local wide = ui.computed(function(): number
+		rows:get()
+		local cols = 0
+		for _, lines in file_lines do
+			for _, l in lines do
+				if l.kind ~= "hunk" then
+					local n = utf8.len(git.expand(l.text)) or #l.text
+					if n > cols then
+						cols = n
+					end
+				end
+			end
+		end
+		return cols * digit:get() + ((ui.theme.get("space.3") :: number?) or 12) + digit:get()
+	end)
+	local function room(): number
+		local w = seen_w:get()
+		if split:get() then
+			return (w - 1) / 2 - git.half_gutter()
+		end
+		return w - git.gutter(one_column)
+	end
+	local most = ui.computed(function(): number
+		if wrap:get() then
+			return 0
+		end
+		return math.max(0, wide:get() - room())
+	end)
+	local function shift(): number
+		return math.clamp(hx:get(), 0, most:get())
+	end
+	-- A sideways swipe, or Shift with the wheel (macOS turns that sideways
+	-- itself; elsewhere it comes as the wheel's own), moves the lines; the
+	-- rest goes on to the list. (On a line, so the list never takes it first.)
+	local function sideways(e: any): boolean?
+		if wrap:peek() then
+			return nil
+		end
+		local dx, dy = e.dx or 0, e.dy or 0
+		if dx == 0 and e.shift then
+			dx, dy = dy, 0
+		end
+		if math.abs(dx) <= math.abs(dy) then
+			return nil
+		end
+		local limit = most:peek()
+		if limit <= 0 then
+			return nil
+		end
+		hx:set(math.clamp(math.clamp(hx:peek(), 0, limit) + dx, 0, limit))
+		return true
+	end
 	-- A file open in place: its row sticks to the top while its lines
 	-- scroll under it, the next file's row pushing it up (zgx's sticky
 	-- rows; production's sticky file headers).
@@ -495,7 +562,9 @@ local List = ui.component(function(props: ListProps): Node
 			if not line then
 				return ui.div { h = M.HUNK }
 			end
-			return git.hunk_row(line :: git.Line)
+			-- (It stands as the lines scroll sideways; a swipe on it still
+			-- moves them.)
+			return ui.div { w_full = true, on_wheel = sideways, git.hunk_row(line :: git.Line) }
 		elseif r.kind == "line" or r.kind == "pair" then
 			local f = files_by[r.path :: string]
 			local lines: { git.Line } = file_lines[r.path :: string] or {}
@@ -575,6 +644,9 @@ local List = ui.component(function(props: ListProps): Node
 				}
 			end
 			local marked = if props.marks or props.ranges then mark else nil
+			local line_extra: { [string]: any } = if row_extra then table.clone(row_extra) else {}
+			line_extra.on_wheel = sideways
+			local slide = if wrapped then nil else shift
 			local node: Node
 			if r.kind == "pair" then
 				local p = pair :: git.Pair
@@ -583,6 +655,7 @@ local List = ui.component(function(props: ListProps): Node
 					left_runs = if hl and p.li then hl[p.li] else nil,
 					right_runs = if hl and p.ri then hl[p.ri] else nil,
 					wrap = wrapped,
+					hx = slide,
 					on_comment = if props.on_comment and p.right
 						then function()
 							(props.on_comment :: any)(f.path, git.line_key(p.right :: git.Line), p.right)
@@ -590,7 +663,7 @@ local List = ui.component(function(props: ListProps): Node
 						else nil,
 					mark = marked,
 					slot = slot_extra,
-					row = row_extra,
+					row = line_extra,
 				}
 			else
 				local l = own :: git.Line
@@ -599,6 +672,7 @@ local List = ui.component(function(props: ListProps): Node
 					narrow = one_column,
 					runs = if hl then hl[r.index or 0] else nil,
 					wrap = wrapped,
+					hx = slide,
 					on_comment = if props.on_comment
 						then function()
 							(props.on_comment :: any)(f.path, git.line_key(l), l)
@@ -606,7 +680,7 @@ local List = ui.component(function(props: ListProps): Node
 						else nil,
 					mark = marked,
 					slot = slot_extra,
-					row = row_extra,
+					row = line_extra,
 				}
 			end
 			if not wrapped then
@@ -662,8 +736,11 @@ local List = ui.component(function(props: ListProps): Node
 		grow = 1,
 		min_h = 0,
 		relative = true,
+		-- (Under the last line too, where no line takes it.)
+		on_wheel = sideways,
 		on_resize = function(size, el)
 			seen:set(size.h)
+			seen_w:set(size.w)
 			if props.on_frame then
 				props.on_frame(el)
 			end
@@ -699,6 +776,41 @@ local List = ui.component(function(props: ListProps): Node
 			end,
 		},
 		Rail { id = if props.id then `{props.id}-rail` else "changes-rail", offset = offset, extent = total, view = seen },
+		-- The sideways rail, under the code (past the gutter, or past the
+		-- left half's: both halves slide together).
+		Rail {
+			id = if props.id then `{props.id}-hrail` else "changes-hrail",
+			axis = "x",
+			offset = hx,
+			extent = wide,
+			view = room,
+			start = function(): number
+				return if split:get() then git.half_gutter() else git.gutter(one_column)
+			end,
+			track = function(): number
+				local start = if split:get() then git.half_gutter() else git.gutter(one_column)
+				return math.max(0, seen_w:get() - start)
+			end,
+		},
+		-- The probe the columns are measured with: the code's font, unseen.
+		ui.text {
+			string.rep("0", PROBE),
+			literal = true,
+			absolute = true,
+			left = 0,
+			top = 0,
+			opacity = 0,
+			pointer_events = false,
+			aria_hidden = true,
+			font = "$font.mono",
+			text_size = "$font.size.sm",
+			on_resize = function(size)
+				local w = size.w / PROBE
+				if w > 0 and math.abs(w - digit:peek()) > 0.01 then
+					digit:set(w)
+				end
+			end,
+		},
 	}
 end)
 

@@ -13,12 +13,14 @@
 //! A shot is `<fixture>` (ui/<fixture>_fixture.luau, or a name ending
 //! .luau) or `gallery:<page>`, optionally `@<w>x<h>`, `#<target>` (crop to
 //! a node's box) and `!<command>` / `=<state>:<json>` / `^<target>` (a click) / `+<ms>` (a wait)
-//! steps, joined by `|`:
+//! steps, joined by `|`, and `%<target>:<dx> <dy>[ shift]` (the wheel or a
+//! trackpad over a target, Shift held or not):
 //! `gallery:composer|#gallery-demo@1240x820`. `AUDIT_SCALE` (2) is the
 //! pixels a point; `AUDIT_DARK=1` the dark scheme where the screen has one.
 //! What's transparent (the window's glass) is laid on `AUDIT_BACKDROP`
 //! (`#e9e9ee` light, `#1d1d22` dark), the same under both. `AUDIT_WAIT_MS`
 //! lets real time pass before the picture, for what comes over the network.
+//! `AUDIT_SETTLE_FRAMES` (90) is how many frames are drawn after the steps.
 //!
 //! Plugins too: `ZERON_ZGX_DEV_PLUGINS` loads plugin folders into each shot
 //! (lent the design system, as the app lends it), and `ZERON_ZGX_DEV_GITHUB`
@@ -48,6 +50,9 @@ enum Step {
     Key(String),
     // The pointer resting on a target (`*target`): its hover state.
     Hover(String),
+    // The wheel turned over a target (`%target:dx dy[ shift]`): a trackpad's
+    // swipe, or Shift with the wheel.
+    Wheel(String, f32, f32, bool),
     State(String, serde_json::Value),
 }
 
@@ -91,6 +96,13 @@ fn parse(spec: &str, dark: bool) -> Shot {
         } else if let Some(rest) = part.strip_prefix('=') {
             let (state, json) = rest.split_once(':').expect("=<state>:<json>");
             steps.push(Step::State(state.to_string(), serde_json::from_str(json).expect("a state's JSON")));
+        } else if let Some(rest) = part.strip_prefix('%') {
+            // (Spaces apart, not commas: commas part the shots.)
+            let (target, motion) = rest.rsplit_once(':').expect("%<target>:<dx> <dy>[ shift]");
+            let mut motion = motion.split_whitespace();
+            let mut next = || motion.next().unwrap_or_default();
+            let (dx, dy) = (next().parse().expect("dx"), next().parse().expect("dy"));
+            steps.push(Step::Wheel(target.to_string(), dx, dy, next() == "shift"));
         } else if let Some(ms) = part.strip_prefix('+') {
             steps.push(Step::Wait(ms.parse().expect("+<milliseconds>")));
         } else if let Some(label) = part.strip_prefix('~') {
@@ -172,6 +184,14 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
                 app.target(target).map_err(|e| format!("{}: hover {target}: {e}", shot.name))?;
                 app.hover(target);
             }
+            Step::Wheel(target, dx, dy, shift) => {
+                let node = app.target(target).map_err(|e| format!("{}: wheel {target}: {e}", shot.name))?;
+                let b = app.ui.scene.borrow().bounds(node);
+                app.ui.dispatch_with_modifiers(
+                    zgx::input::InputEvent::Scroll { x: b.x + b.width / 2., y: b.y + b.height / 2., delta_x: *dx, delta_y: *dy },
+                    zgx::input::Modifiers { shift: *shift, ..Default::default() },
+                );
+            }
             Step::Command(id) => {
                 if !app.host.run_command(id) {
                     return Err(format!("{}: no command `{id}`", shot.name));
@@ -186,8 +206,9 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         app.settle();
         app.frames(10);
     }
-    // Long enough for entrances and springs to finish.
-    app.frames(90);
+    // Long enough for entrances and springs to finish (`AUDIT_SETTLE_FRAMES`
+    // fewer to catch what fades, as a scroll's rail does).
+    app.frames(std::env::var("AUDIT_SETTLE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(90));
     wait(&mut app);
     if let Some(error) = app.error() {
         eprintln!("audit_shots: {}: script error: {error}", shot.name);

@@ -3914,3 +3914,73 @@ fn settings_pages_lay_out_at_full_width_with_plugins_loaded() {
         assert_eq!(app.error(), None);
     }
 }
+
+#[test]
+fn git_s_diff_scrolls_long_lines_sideways_its_numbers_standing() {
+    // The window's width, src/graph.rs's diff beside the list: a line far
+    // wider than the card, between two short ones.
+    const LONG: &str = "    let lanes = rows.iter().map(Row::lane).filter(Option::is_some).count() + self.pending.len() + self.retired.len(); // THE_END_OF_A_LINE_FAR_WIDER_THAN_THE_CARD_SO_ONLY_A_SCROLL_SHOWS_IT";
+    let mut w = git_world();
+    w["diff"]["text"] = json!(format!(
+        "diff --git a/src/graph.rs b/src/graph.rs\n--- a/src/graph.rs\n+++ b/src/graph.rs\n@@ -1,3 +1,4 @@\n fn lanes() {{}}\n-fn rows() {{}}\n+{LONG}\n+fn lines() {{}}\n"
+    ));
+    let (mut app, _heard, _) = git_tab(w, None);
+    let row = format!("\"+{LONG}\"");
+    let code = format!("{row} >> .diff-code");
+    assert!(app.wait_until(|app| app.find(&code).is_some()), "{}", app.tree());
+    assert_eq!(app.error(), None);
+    let card = app.bounds("#git-diff");
+    let (row0, code0) = (app.bounds(&row), app.bounds(&code));
+    assert!(code0.x + code0.width > card.x + card.width + 100.0, "the line runs past the card: {code0:?} {card:?}");
+    let wheel = |app: &mut TestApp, dx: f32, dy: f32, shift: bool| {
+        let at = app.bounds(&code);
+        app.ui.dispatch_with_modifiers(
+            zgx::input::InputEvent::Scroll { x: card.x + card.width / 2., y: at.y + at.height / 2., delta_x: dx, delta_y: dy },
+            zgx::input::Modifiers { shift, ..Default::default() },
+        );
+        app.frames(5);
+    };
+
+    // (The rails take a view's first moments as it placing itself, not a
+    // scroll: let them pass, 0.7 s of frames.)
+    app.frames(42);
+    // A trackpad's swipe: the code moves, the line (its wash, its numbers)
+    // stays where it is.
+    wheel(&mut app, 120.0, 0.0, false);
+    let (row1, code1) = (app.bounds(&row), app.bounds(&code));
+    assert!((code0.x - code1.x - 120.0).abs() < 0.5, "slid by the swipe: {code0:?} {code1:?}");
+    assert_eq!((row1.x, row1.width), (row0.x, row0.width), "the row stands");
+    // The app's rail shows along the bottom, past the numbers, as it scrolls.
+    let rail = app.bounds("#git-diff-hrail");
+    assert!(app.opacity("#git-diff-hrail") > 0.0, "the rail shows: {}", app.tree());
+    assert!(rail.x >= code0.x - 1.0 && (rail.y + rail.height - (card.y + card.height)).abs() < 1.0, "under the code: {rail:?} {card:?}");
+    // Shift with the wheel (as Linux and Windows send it): sideways too.
+    wheel(&mut app, 0.0, 80.0, true);
+    let code2 = app.bounds(&code);
+    assert!((code1.x - code2.x - 80.0).abs() < 0.5, "Shift+wheel slides it: {code1:?} {code2:?}");
+    // The wheel alone scrolls the list, never the code sideways.
+    wheel(&mut app, 0.0, 30.0, false);
+    assert!((app.bounds(&code).x - code2.x).abs() < 0.5, "a plain wheel leaves it: {:?}", app.bounds(&code));
+    // As far as it goes: the line's end, and no further.
+    wheel(&mut app, 100_000.0, 0.0, false);
+    let end = app.bounds(&code);
+    let right = end.x + end.width;
+    assert!(right <= card.x + card.width + 1.0 && right > card.x + card.width - 60.0, "its end in view: {end:?} {card:?}");
+    // Back to the start.
+    wheel(&mut app, -100_000.0, 0.0, false);
+    assert!((app.bounds(&code).x - code0.x).abs() < 0.5, "back where it began: {:?}", app.bounds(&code));
+
+    // Side by side: the halves slide by the one offset (here the old
+    // half's text, beside the long new one), their numbers standing.
+    app.click("role:checkbox \"Side by side\"");
+    let pair = format!("\"-fn rows() {{}} │ +{LONG}\"");
+    let half = format!("{pair} >> \"fn rows() {{}}\"");
+    assert!(app.wait_until(|app| app.find(&half).is_some()), "{}", app.tree());
+    let (pair0, half0) = (app.bounds(&pair), app.bounds(&half));
+    app.ui.dispatch(zgx::input::InputEvent::Scroll { x: pair0.x + 40.0, y: pair0.y + pair0.height / 2., delta_x: 60.0, delta_y: 0.0 });
+    app.frames(5);
+    let (pair1, half1) = (app.bounds(&pair), app.bounds(&half));
+    assert!((half0.x - half1.x - 60.0).abs() < 0.5, "the half slid: {half0:?} {half1:?}");
+    assert_eq!((pair1.x, pair1.width), (pair0.x, pair0.width), "the pair's row stands");
+    assert_eq!(app.error(), None);
+}
