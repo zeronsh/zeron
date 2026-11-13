@@ -371,6 +371,11 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					on_open_thread = function(chat: string)
 						route.open_session(chat)
 					end,
+					-- (A card's dump, shown in the Control room's capture.)
+					on_source = function(src: any)
+						orchestration.reveal_dump:set(src.dump_id)
+						route.control()
+					end,
 					progress = function(chat: string): Node
 						return Progress.strip(chat, { lean = true })
 					end,

@@ -210,6 +210,8 @@ const PERSON_OPS: &[&str] = &[
     "updateOrchestrator",
     "addToCrew",
     "releaseFromCrew",
+    // (A chat put on the board: its card, made if it has none open.)
+    "addToBoard",
     "upsertItem",
     "answerAsk",
     "dismissAsk",

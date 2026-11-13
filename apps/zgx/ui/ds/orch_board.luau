@@ -17,7 +17,8 @@
 -- cells, else its own progress), and a quiet line of what else it has:
 -- whose it is (its orchestrator's hue dot and name, and the project it's in
 -- where that's named otherwise; a loose item, its project), its threads as
--- dots when it has several, its pull request. (On an orchestrator's own
+-- dots when it has several, its pull request, and, made from a dump's part,
+-- a mark that shows that dump (`on_source`). (On an orchestrator's own
 -- page, whose is implied: none says.) Its priority stands at its title's end when it's high or
 -- urgent. A card in Review or Done carries its outcome, two lines of it,
 -- all of it in a hover card. Each card is a plugin slot
@@ -42,6 +43,7 @@
 --     now = fn() -> number,      -- Unix seconds: what "today" is
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
 --     on_open_thread = fn(chat), on_link = fn(link),
+--     on_source = fn({ dump_id, route_id }),  -- a card's dump, shown
 --     compact = true,            -- denser cards (a page's side pane)
 --     project_of = fn(chat) -> string?,  -- the name of the project a chat works in
 --     context = false,           -- cards say nothing of whose they are (an
@@ -82,6 +84,8 @@ export type Item = {
 	created: number?,
 	updated: number?,
 	done: number?,
+	-- The dump it came from, where a dump's part made it.
+	source: { dump_id: string?, route_id: string? }?,
 }
 export type Orchestrator = { id: string, kind: string?, name: string, hue: number, archived: boolean? }
 export type Todo = { done: number, total: number, current: string? }
@@ -100,6 +104,7 @@ export type Props = {
 	on_priority: ((id: string, priority: string) -> ())?,
 	on_open_thread: ((chat: string) -> ())?,
 	on_link: ((link: Link) -> ())?,
+	on_source: ((source: { dump_id: string?, route_id: string? }) -> ())?,
 	compact: boolean?,
 	project_of: ((chat: string) -> string?)?,
 	context: boolean?,
@@ -660,7 +665,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 			local _, p = context_of(item())
 			return p
 		end
-		return ui.row {
+		return ui.show(function(): boolean
+			return orch() ~= nil or project() ~= nil
+		end, ui.row {
 			class = "orch-card-owner",
 			min_w = 0,
 			shrink = 1,
@@ -711,7 +718,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 					color = "$text.tertiary",
 				},
 			}),
-		}
+		})
 	end
 
 	-- What a card shows lifted and carried: its status and title, at its
@@ -771,6 +778,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			local it = item()
 			local o = it.outcome
 			return if (it.state == "done" or it.state == "review") and o ~= nil and o ~= "" then o else nil
+		end
+		local function from_dump(): boolean
+			local src = item().source
+			return src ~= nil and src.dump_id ~= nil and src.dump_id ~= ""
 		end
 		local function prs(): { Link }
 			local out: { Link } = {}
@@ -884,7 +895,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		-- Its quiet line: whose it is, its threads, its pull request.
 		local function has_meta(): boolean
 			local o, p = context_of(item())
-			return o ~= nil or p ~= nil or #(item().threads or {}) > 1 or #prs() > 0
+			return o ~= nil or p ~= nil or #(item().threads or {}) > 1 or #prs() > 0 or from_dump()
 		end
 		local meta = ui.row {
 			class = "orch-card-meta",
@@ -898,6 +909,32 @@ local OrchBoard = ui.component(function(props: Props): Node
 				shrink = 0,
 				gap = "$space.1",
 				items = "center",
+				-- Made from a dump's part: the dump, shown where it was said.
+				ui.show(from_dump, ui.button {
+					class = "orch-card-source",
+					label = locale.t("orch.board.from_dump"),
+					tooltip = locale.s("orch.board.from_dump"),
+					tooltip_delay = 300,
+					w = 16,
+					h = 16,
+					items = "center",
+					justify = "center",
+					rounded = "$radius.sm",
+					shrink = 0,
+					color = "$text.tertiary",
+					bg = "#00000000",
+					hover = { bg = "$hover", color = "$text.secondary" },
+					active = { bg = "$pressed" },
+					on_click = if props.on_source
+						then function()
+							local src = item().source
+							if src then
+								(props.on_source :: any)(src)
+							end
+						end
+						else nil,
+					Icon { name = "pen-new-square", size = 12 },
+				}),
 				ui.each(ui.computed(function(): { string }
 					-- (One thread: its status leads the title already.)
 					local threads = item().threads or {}

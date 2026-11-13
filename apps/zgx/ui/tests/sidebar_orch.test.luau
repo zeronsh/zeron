@@ -112,6 +112,16 @@ test("sidebar orch: Make orchestrator on a session's menu", function()
 	expect(app:state("orch_route")).to_be("orchestrator:th-titlebar")
 end)
 
+test("sidebar orch: Add to board on a session's menu, while it has no card not done", function()
+	local app = open()
+	-- Its card is done: it can go on the board again.
+	app:right_click(`{SIDE} >> role:button "Linux titlebar toggle"`)
+	app:frames(20)
+	app:click('role:menuitem "Add to board"')
+	app:frames(10)
+	expect(app:state("orch_calls")).to_contain("addToBoard:chatId=th-titlebar")
+end)
+
 test("sidebar orch: the rail, drawn and resized, folded and open", function()
 	local app = open()
 	local rail = tree(app, "#orch-rail")

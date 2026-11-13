@@ -105,6 +105,9 @@ return ui.scroll {
 				on_link = function(l: any)
 					note(`link:{l.label}`)
 				end,
+				on_source = function(src: any)
+					note(`source:{src.dump_id}`)
+				end,
 			}
 		end, { w_full = true }),
 	},
