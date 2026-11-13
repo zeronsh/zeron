@@ -27,33 +27,39 @@ const H: f32 = 800.;
 const DIVIDED: f32 = 12.;
 const MAC_LINE: f32 = 21.;
 
-/// What a window reports: its title bar's free strip and its buttons.
+/// What a window reports: the system it's on (src/main.rs `platform`), its
+/// title bar's free strip and its buttons.
 #[derive(Clone, Copy, Debug)]
 struct Report {
+    platform: &'static str,
     area: Option<Rect>,
     controls: Option<Rect>,
 }
 
 /// Windows: zgx's caption buttons, three of 46 by 32 at the top right.
 fn windows(w: f32) -> Report {
-    Report { area: Some(Rect::new(0., 0., w - 138., 32.)), controls: Some(Rect::new(w - 138., 0., 138., 32.)) }
+    Report { platform: "windows", area: Some(Rect::new(0., 0., w - 138., 32.)), controls: Some(Rect::new(w - 138., 0., 138., 32.)) }
 }
 
 /// GNOME's `appmenu:minimize,maximize,close`: libadwaita's circles at the
 /// right of zgx's 40-point strip.
 fn gnome(w: f32) -> Report {
-    Report { area: Some(Rect::new(0., 0., w - 104., 40.)), controls: Some(Rect::new(w - 104., 0., 104., 40.)) }
+    Report { platform: "linux", area: Some(Rect::new(0., 0., w - 104., 40.)), controls: Some(Rect::new(w - 104., 0., 104., 40.)) }
 }
 
 /// macOS: the traffic lights' frames as zgx's inset title bar reports them,
 /// 12 in and 60 across.
 fn macos(w: f32) -> Report {
-    Report { area: Some(Rect::new(72., 0., w - 72., 40.)), controls: Some(Rect::new(12., 13., 60., 16.)) }
+    Report { platform: "macos", area: Some(Rect::new(72., 0., w - 72., 40.)), controls: Some(Rect::new(12., 13., 60., 16.)) }
 }
 
 fn mount(report: Report) -> TestApp {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
-    let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    let app = TestApp::new(|runtime| {
+        let host = ScriptHost::new(runtime, path);
+        host.shared("platform", report.platform);
+        host
+    });
     let (area, controls) = (app.ui.signal(report.area), app.ui.signal(report.controls));
     app.host.window_chrome(area, controls);
     app.ui.scene.borrow_mut().resize(W, H);
@@ -187,7 +193,7 @@ fn beside_gnomes_buttons_at_the_right_the_line_stays_and_the_toggle_starts_at_th
 /// that line.
 #[test]
 fn beside_the_traffic_lights_nothing_moves() {
-    for (report, when) in [(macos(W), "the lights reported"), (Report { area: None, controls: None }, "nothing reported (full screen)")] {
+    for (report, when) in [(macos(W), "the lights reported"), (Report { platform: "macos", area: None, controls: None }, "nothing reported (full screen)")] {
         let mut app = mount(report);
         assert_eq!(app.bounds(TOGGLE).x, 88., "{when}");
         on_line(&mut app, MAC_LINE, when);
@@ -207,7 +213,11 @@ fn beside_the_traffic_lights_nothing_moves() {
 #[test]
 fn the_bar_follows_the_window_as_it_resizes() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
-    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::new(runtime, path);
+        host.shared("platform", "windows");
+        host
+    });
     let report = windows(W);
     let (area, controls) = (app.ui.signal(report.area), app.ui.signal(report.controls));
     app.host.window_chrome(area.clone(), controls.clone());

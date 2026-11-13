@@ -148,7 +148,9 @@ fn the_controls_slide_to_the_lights_place_in_full_screen_and_back() {
 #[test]
 fn off_macos_the_controls_stay_where_they_are() {
     // Linux and Windows: no transition, no traffic lights; full screen
-    // changes nothing of the bar (another layout is theirs).
+    // changes nothing of the bar (another layout is theirs). With nothing
+    // reported (a tiling compositor's window, full screen) nothing stands at
+    // the left either: the toggle takes the row's 10, not the lights' 88.
     let slot: Rc<RefCell<Option<Signal<bool>>>> = Rc::default();
     let given = slot.clone();
     let mut app = TestApp::new(move |runtime| {
@@ -163,8 +165,8 @@ fn off_macos_the_controls_stay_where_they_are() {
     app.frames(60);
     assert_eq!(app.error(), None);
     let full = slot.borrow_mut().take().unwrap();
-    assert_eq!(toggle_x(&mut app), 88.);
+    assert_eq!(toggle_x(&mut app), 10.);
     full.set(true);
     app.frames(30);
-    assert_eq!(toggle_x(&mut app), 88.);
+    assert_eq!(toggle_x(&mut app), 10.);
 }
