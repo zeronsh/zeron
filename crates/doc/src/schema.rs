@@ -847,6 +847,26 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Replace the entry at `index` whole, in place (appended when `index` is
+    /// past the end). For entries kept in step with another source — an
+    /// OpenCode session's message read again as it grows — never for one a
+    /// [`SegmentWriter`] is streaming into.
+    pub fn replace_message(&self, index: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        if index >= messages.len() {
+            return self.push_message(entry);
+        }
+        messages.delete(index, 1)?;
+        let map = messages.insert_container(index, LoroMap::new())?;
+        write_entry_scalar_fields(&map, entry)?;
+        let parts = map.insert_container("parts", LoroList::new())?;
+        for part in &entry.parts {
+            push_part(&parts, part)?;
+        }
+        self.commit();
+        Ok(())
+    }
+
     /// [`push_message`](Self::push_message), but inserted before the last
     /// `from_end` entries of the messages list (clamped to its start).
     pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
@@ -2684,6 +2704,41 @@ mod tests {
         let all = doc.sent_by();
         assert_eq!(all.len(), SENT_BY_KEPT);
         assert!(!all.contains_key("m1") && all.contains_key(&format!("n{}", SENT_BY_KEPT + 4)));
+    }
+
+    #[test]
+    fn replace_message_rewrites_one_entry_in_place() {
+        let doc = SessionDoc::init("replace").unwrap();
+        let entry = |id: &str, text: &str| SessionMessageEntry {
+            duration_ms: None,
+            id: id.into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        for id in ["a", "b", "c"] {
+            doc.push_message(&entry(id, "first")).unwrap();
+        }
+        doc.replace_message(1, &entry("b", "grown")).unwrap();
+        let entries = doc.read_entries().unwrap();
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert_eq!(
+            entries[1].parts,
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "grown".into()
+            }]
+        );
+        // (Past the end appends.)
+        doc.replace_message(9, &entry("d", "new")).unwrap();
+        assert_eq!(doc.read_entries().unwrap().len(), 4);
     }
 
     #[test]

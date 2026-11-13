@@ -6582,6 +6582,24 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                // An OpenCode session's question (asked in its TUI or desktop
+                // app, or by a run that has ended): the answer goes back to the
+                // session, which is waiting on it, not into a new turn.
+                if request_id.starts_with(crate::opencode_sync::FORM_REQUEST_PREFIX)
+                    && let Some(workspace) = self.workspace()
+                {
+                    return match crate::opencode_sync::answer(
+                        workspace, chat_id, request_id, &questions, answers,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            handle.doc.resolve_input(request_id, answers)?;
+                            Ok((SessionCommandStatus::Applied, None))
+                        }
+                        Err(error) => Ok((SessionCommandStatus::Rejected, Some(error))),
+                    };
+                }
                 // Closed without an answer: there is nothing to deliver, and
                 // a resumed turn would only say so. Record it and stop.
                 if answers.is_empty() {

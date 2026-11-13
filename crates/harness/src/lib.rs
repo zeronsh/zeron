@@ -739,7 +739,10 @@ pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
-pub use opencode::{OPENCODE_ACCESS_MODES, OpencodeHarness};
+pub use opencode::{
+    NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession, OPENCODE_ACCESS_MODES,
+    OpencodeHarness,
+};
 pub use muse::MuseHarness;
 pub use pi::PiHarness;
 

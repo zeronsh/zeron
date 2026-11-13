@@ -1,0 +1,648 @@
+//! OpenCode's sessions as the background service holds them, for the engine
+//! to show as chats and keep current: every session any client made (the
+//! TUI, the desktop app, Zeron), its history as Zeron's own agent events,
+//! and a feed of which sessions changed.
+//!
+//! Read off the service only (2.x): a private server has no sessions but the
+//! run's own. Shapes verified live against 2.3.0 — sessions list newest
+//! first and page by cursor; messages list newest first too; a tool part
+//! carries `name`, `state.{status, input, content, error}`.
+
+use std::time::Duration;
+
+use futures::StreamExt;
+use serde_json::Value;
+use tokio::sync::mpsc;
+use zeron_proto::AgentEvent;
+
+use zeron_proto::{UserInputAnswer, UserInputQuestion};
+
+use super::{
+    OUTPUT_CAP, OpencodeHarness, Server, cap_text, form_answer_body, map_questions, oc_tool_call,
+    unwrap_data, v2_question_form_payload,
+};
+use crate::HarnessError;
+
+/// How many sessions or messages to ask for per page.
+const PAGE: usize = 200;
+
+/// A bound on pages read for one list, against a cursor that never ends.
+const MAX_PAGES: usize = 1000;
+
+/// A session as the service lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeSession {
+    pub id: String,
+    pub title: Option<String>,
+    /// Where it runs: the project it belongs to.
+    pub directory: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub archived: bool,
+    /// A turn is running in it, in whichever client started it.
+    pub busy: bool,
+    /// `provider/model`, as Zeron names a model.
+    pub model: Option<String>,
+    /// The Zeron chat a run of Zeron's made it for (its metadata).
+    pub zeron_chat: Option<String>,
+}
+
+/// One message of a session's history.
+#[derive(Clone, Debug)]
+pub struct NativeMessage {
+    /// OpenCode's own id (`msg_…`): stable, so a re-read finds the same one.
+    pub id: String,
+    pub created_at_ms: i64,
+    pub kind: NativeMessageKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum NativeMessageKind {
+    User {
+        text: String,
+    },
+    /// What the agent did, as the events a run of Zeron's would have sent.
+    Assistant {
+        events: Vec<AgentEvent>,
+    },
+}
+
+/// A question the agent is waiting on (the `question` tool's form), in
+/// whichever client it was asked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeQuestion {
+    /// The form's id (`frm_…`): the request an answer names.
+    pub form_id: String,
+    /// The panel's questions. Each id is `<form id>:<field key>`, the same on
+    /// every read, so a question read again stays the one on screen and its
+    /// answer finds its field.
+    pub questions: Vec<UserInputQuestion>,
+}
+
+/// What changed on the service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeChange {
+    /// Something about this session changed: read it again.
+    Session(String),
+    /// The session is gone.
+    Deleted(String),
+    /// The feed (re)connected; changes while it was down are lost, so every
+    /// session should be read again.
+    Resync,
+}
+
+impl OpencodeHarness {
+    /// The background service, or an error saying there is none (1.x, or a
+    /// private server only).
+    async fn sync_server(&self) -> Result<Server, HarnessError> {
+        self.service_server().await.ok_or_else(|| {
+            HarnessError::Protocol("OpenCode's background service isn't available".into())
+        })
+    }
+
+    /// Every top-level session on the service, archived ones included
+    /// (subagent sessions belong to their parent's transcript).
+    pub async fn native_sessions(&self) -> Result<Vec<NativeSession>, HarnessError> {
+        let server = self.sync_server().await?;
+        let mut sessions = Vec::new();
+        for archived in [false, true] {
+            let mut cursor: Option<String> = None;
+            for _ in 0..MAX_PAGES {
+                let mut path = format!("/api/session?limit={PAGE}&archived={archived}");
+                if let Some(cursor) = &cursor {
+                    path.push_str(&format!("&cursor={}", super::encode_directory(cursor)));
+                }
+                let page = server.get_json(&path, None).await?;
+                let items = page
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let count = items.len();
+                sessions.extend(items.iter().filter_map(native_session));
+                cursor = page
+                    .pointer("/cursor/next")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                // (The service caps a page below `limit` and still offers a
+                // next cursor; only an empty page ends the list.)
+                if count == 0 || cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        sessions.sort_by_key(|session| session.created_at_ms);
+        sessions.dedup_by(|a, b| a.id == b.id);
+        Ok(sessions)
+    }
+
+    /// One session, `None` when it no longer exists or is a subagent's.
+    pub async fn native_session(&self, id: &str) -> Result<Option<NativeSession>, HarnessError> {
+        let server = self.sync_server().await?;
+        match server.get_json(&format!("/api/session/{id}"), None).await {
+            Ok(info) => Ok(native_session(&unwrap_data(info))),
+            Err(HarnessError::Protocol(message)) if message.contains("404") => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A session's history, oldest first.
+    pub async fn native_history(
+        &self,
+        session: &NativeSession,
+    ) -> Result<Vec<NativeMessage>, HarnessError> {
+        let server = self.sync_server().await?;
+        let mut messages = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let mut path = format!("/api/session/{}/message?limit={PAGE}", session.id);
+            if let Some(cursor) = &cursor {
+                path.push_str(&format!("&cursor={}", super::encode_directory(cursor)));
+            }
+            let page = server.get_json(&path, Some(&session.directory)).await?;
+            let items = page
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let count = items.len();
+            messages.extend(items.iter().filter_map(native_message));
+            cursor = page
+                .pointer("/cursor/next")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if count == 0 || cursor.is_none() {
+                break;
+            }
+        }
+        messages.sort_by_key(|message| message.created_at_ms);
+        messages.dedup_by(|a, b| a.id == b.id);
+        Ok(messages)
+    }
+
+    /// The questions `session` is waiting on, oldest first.
+    pub async fn native_questions(
+        &self,
+        session: &NativeSession,
+    ) -> Result<Vec<NativeQuestion>, HarnessError> {
+        let server = self.sync_server().await?;
+        let forms = server
+            .get_json(
+                &format!("/api/session/{}/form", session.id),
+                Some(&session.directory),
+            )
+            .await?;
+        Ok(unwrap_data(forms)
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(native_question)
+            .collect())
+    }
+
+    /// Answer a question `session` is waiting on, from the panel's answers;
+    /// no answers at all closes it unanswered, as the TUI's dismiss does.
+    pub async fn answer_native_question(
+        &self,
+        session_id: &str,
+        directory: &str,
+        form_id: &str,
+        questions: &[UserInputQuestion],
+        answers: &[UserInputAnswer],
+    ) -> Result<(), HarnessError> {
+        let server = self.sync_server().await?;
+        if answers.is_empty() {
+            let path = format!("/api/session/{session_id}/form/{form_id}");
+            let request = server.request(reqwest::Method::DELETE, &path);
+            let response = server
+                .scoped(request, Some(directory))
+                .await
+                .send()
+                .await
+                .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
+            if !response.status().is_success() {
+                return Err(HarnessError::Protocol(format!(
+                    "opencode DELETE {path}: {}",
+                    response.status()
+                )));
+            }
+            return Ok(());
+        }
+        let pairs: Vec<(String, UserInputQuestion)> = questions
+            .iter()
+            .filter_map(|question| {
+                let key = question.id.strip_prefix(form_id)?.strip_prefix(':')?;
+                Some((key.to_owned(), question.clone()))
+            })
+            .collect();
+        if pairs.is_empty() {
+            return Err(HarnessError::Protocol(
+                "these questions aren't that form's".into(),
+            ));
+        }
+        server
+            .post_json(
+                &format!("/api/session/{session_id}/form/{form_id}/reply"),
+                Some(directory),
+                &form_answer_body(&pairs, answers),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Which sessions change, for as long as the receiver is kept. The feed
+    /// redials itself after a drop and says so ([`NativeChange::Resync`]).
+    pub async fn follow_native(&self) -> Result<mpsc::Receiver<NativeChange>, HarnessError> {
+        let server = self.sync_server().await?;
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_millis(500);
+            loop {
+                if tx.is_closed() {
+                    return;
+                }
+                match follow_once(&server, &tx).await {
+                    Ok(()) => backoff = Duration::from_millis(500),
+                    Err(error) => {
+                        tracing::debug!(
+                            target: "zeron_harness::opencode",
+                            %error,
+                            "opencode session feed dropped"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
+            }
+        });
+        Ok(rx)
+    }
+}
+
+/// One connection of the session feed: until it ends or the receiver goes.
+async fn follow_once(server: &Server, tx: &mpsc::Sender<NativeChange>) -> Result<(), String> {
+    let response = server
+        .request(reqwest::Method::GET, "/api/event")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("GET /api/event: {}", response.status()));
+    }
+    if tx.send(NativeChange::Resync).await.is_err() {
+        return Ok(());
+    }
+    let mut body = response.bytes_stream();
+    let mut buffer = String::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = buffer.find('\n') {
+            let line: String = buffer.drain(..=end).collect();
+            let Some(data) = line.trim_end().strip_prefix("data:") else {
+                continue;
+            };
+            let Ok(frame) = serde_json::from_str::<Value>(data.trim_start()) else {
+                continue;
+            };
+            if let Some(change) = change_of(&frame)
+                && tx.send(change).await.is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a frame of the service's event feed means for the session list, if
+/// anything. Streaming deltas are skipped: the steps and tools that close
+/// them say the same, far less often.
+fn change_of(frame: &Value) -> Option<NativeChange> {
+    let kind = frame.get("type").and_then(Value::as_str)?;
+    let data = frame.get("data");
+    let session = data
+        .and_then(|data| data.get("sessionID"))
+        .or_else(|| data.and_then(|data| data.pointer("/form/sessionID")))
+        .or_else(|| frame.pointer("/durable/aggregateID"))
+        .and_then(Value::as_str)
+        .filter(|id| id.starts_with("ses"))?
+        .to_owned();
+    match kind {
+        "session.deleted" => Some(NativeChange::Deleted(session)),
+        "session.created"
+        | "session.renamed"
+        | "session.archived"
+        | "session.unarchived"
+        | "session.moved"
+        | "session.forked"
+        | "session.execution.started"
+        | "session.execution.succeeded"
+        | "session.execution.failed"
+        | "session.execution.interrupted"
+        | "session.idle"
+        | "session.synthetic"
+        | "session.step.ended"
+        | "session.text.ended"
+        | "session.tool.called"
+        | "session.tool.success"
+        | "session.tool.failed"
+        | "session.revert.committed"
+        | "session.compaction.ended"
+        | "form.created"
+        | "form.replied"
+        | "form.cancelled" => Some(NativeChange::Session(session)),
+        _ => None,
+    }
+}
+
+/// A listed session; subagent sessions (with a parent) are left out.
+fn native_session(info: &Value) -> Option<NativeSession> {
+    if info
+        .get("parentID")
+        .and_then(Value::as_str)
+        .is_some_and(|parent| !parent.is_empty())
+    {
+        return None;
+    }
+    let id = info.get("id").and_then(Value::as_str)?.to_owned();
+    let directory = info
+        .pointer("/location/directory")
+        .and_then(Value::as_str)?
+        .to_owned();
+    let time = |key: &str| {
+        info.pointer(&format!("/time/{key}"))
+            .and_then(Value::as_f64)
+    };
+    let busy = match (time("busy"), time("idle")) {
+        (Some(busy), Some(idle)) => busy > idle,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    Some(NativeSession {
+        id,
+        title: info
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned),
+        directory,
+        created_at_ms: time("created").unwrap_or_default() as i64,
+        updated_at_ms: time("updated").unwrap_or_default() as i64,
+        archived: time("archived").is_some(),
+        busy,
+        model: match (
+            info.pointer("/model/providerID").and_then(Value::as_str),
+            info.pointer("/model/id").and_then(Value::as_str),
+        ) {
+            (Some(provider), Some(model)) => Some(format!("{provider}/{model}")),
+            _ => None,
+        },
+        zeron_chat: info
+            .pointer("/metadata/zeron/chatId")
+            .and_then(Value::as_str)
+            .filter(|chat| !chat.is_empty())
+            .map(str::to_owned),
+    })
+}
+
+/// A pending form as the panel's questions, when it is the question tool's.
+fn native_question(form: &Value) -> Option<NativeQuestion> {
+    let form_id = form.get("id").and_then(Value::as_str)?.to_owned();
+    let payload = v2_question_form_payload(form).into_iter().next()?;
+    let questions = map_questions(payload.get("properties")?)
+        .into_iter()
+        .map(|(key, mut question)| {
+            question.id = format!("{form_id}:{key}");
+            question
+        })
+        .collect::<Vec<_>>();
+    (!questions.is_empty()).then_some(NativeQuestion { form_id, questions })
+}
+
+/// A user prompt or an assistant reply; bookkeeping (agent and model
+/// switches, compaction, idle markers) has no transcript entry.
+fn native_message(message: &Value) -> Option<NativeMessage> {
+    let id = message.get("id").and_then(Value::as_str)?.to_owned();
+    let created_at_ms = message
+        .pointer("/time/created")
+        .and_then(Value::as_f64)
+        .unwrap_or_default() as i64;
+    let kind = match message.get("type").and_then(Value::as_str)? {
+        "user" => NativeMessageKind::User {
+            text: message
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        },
+        "assistant" => NativeMessageKind::Assistant {
+            events: message
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(part_events)
+                .collect(),
+        },
+        _ => return None,
+    };
+    Some(NativeMessage {
+        id,
+        created_at_ms,
+        kind,
+    })
+}
+
+/// One part of an assistant message as the events that would have built it.
+fn part_events(part: &Value) -> Vec<AgentEvent> {
+    let text = || {
+        part.get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    match part.get("type").and_then(Value::as_str) {
+        Some("text") => text()
+            .map(|text| vec![AgentEvent::TextDelta { text }])
+            .unwrap_or_default(),
+        Some("reasoning") => text()
+            .map(|text| vec![AgentEvent::ReasoningDelta { text }])
+            .unwrap_or_default(),
+        Some("tool") => tool_events(part),
+        _ => Vec::new(),
+    }
+}
+
+/// A tool part: its call, and its result once it finished.
+fn tool_events(part: &Value) -> Vec<AgentEvent> {
+    let Some(id) = part.get("id").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let name = part.get("name").and_then(Value::as_str).unwrap_or_default();
+    let state = part.get("state").cloned().unwrap_or(Value::Null);
+    let input = state.get("input").cloned().unwrap_or(Value::Null);
+    let mut events = vec![AgentEvent::ToolCall {
+        id: id.to_owned(),
+        call: oc_tool_call(name, &input),
+    }];
+    let status = state
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(status, "completed" | "error") {
+        let output: String = state
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = state.get("error").and_then(|error| {
+            error.as_str().map(str::to_owned).or_else(|| {
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        });
+        let output = error.or((!output.is_empty()).then_some(output));
+        events.push(AgentEvent::ToolResult {
+            id: id.to_owned(),
+            is_error: status == "error",
+            output: output.map(|output| cap_text(&output, OUTPUT_CAP)),
+            diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
+            exit_code: state
+                .pointer("/metadata/exit")
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok()),
+        });
+    }
+    events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use zeron_proto::ToolCall;
+
+    #[test]
+    fn sessions_read_their_place_and_state() {
+        let listed = json!({
+            "id": "ses_a", "title": "Fix the build", "location": {"directory": "/work"},
+            "time": {"created": 10, "updated": 20, "busy": 30, "idle": 25}
+        });
+        let session = native_session(&listed).unwrap();
+        assert_eq!(session.directory, "/work");
+        assert_eq!(session.title.as_deref(), Some("Fix the build"));
+        assert!(session.busy);
+        assert!(!session.archived);
+        let archived = json!({
+            "id": "ses_b", "location": {"directory": "/work"},
+            "time": {"created": 1, "updated": 2, "archived": 3, "busy": 1, "idle": 2}
+        });
+        let archived = native_session(&archived).unwrap();
+        assert!(archived.archived);
+        assert!(!archived.busy);
+        assert_eq!(archived.title, None);
+        // (A subagent's session is its parent's business.)
+        let child = json!({"id": "ses_c", "parentID": "ses_a", "location": {"directory": "/w"}});
+        assert!(native_session(&child).is_none());
+    }
+
+    #[test]
+    fn an_assistant_message_reads_as_the_events_that_built_it() {
+        let message = json!({
+            "id": "msg_1", "type": "assistant", "time": {"created": 5},
+            "content": [
+                {"type": "reasoning", "text": "thinking"},
+                {"type": "tool", "id": "prt_1", "name": "shell",
+                 "state": {"status": "completed", "input": {"command": "ls"},
+                           "content": [{"type": "text", "text": "a\nb"}],
+                           "metadata": {"exit": 0}}},
+                {"type": "tool", "id": "prt_2", "name": "todowrite",
+                 "state": {"status": "running",
+                           "input": {"todos": [{"content": "ship", "status": "in_progress"}]}}},
+                {"type": "text", "text": "done"}
+            ]
+        });
+        let message = native_message(&message).unwrap();
+        let NativeMessageKind::Assistant { events } = message.kind else {
+            panic!("an assistant message");
+        };
+        assert!(matches!(&events[0], AgentEvent::ReasoningDelta { text } if text == "thinking"));
+        assert!(matches!(
+            &events[1],
+            AgentEvent::ToolCall { id, call: ToolCall::Exec { command } } if id == "prt_1" && command == "ls"
+        ));
+        assert!(matches!(
+            &events[2],
+            AgentEvent::ToolResult { output: Some(output), exit_code: Some(0), is_error: false, .. }
+                if output == "a\nb"
+        ));
+        assert!(
+            matches!(&events[3], AgentEvent::ToolCall { call: ToolCall::Todo { items }, .. } if items.len() == 1)
+        );
+        assert!(matches!(&events[4], AgentEvent::TextDelta { text } if text == "done"));
+    }
+
+    #[test]
+    fn bookkeeping_messages_have_no_entry() {
+        for kind in ["agent-switched", "model-switched", "compaction", "idle"] {
+            assert!(native_message(&json!({"id": "m", "type": kind})).is_none());
+        }
+        let user = native_message(&json!({"id": "m", "type": "user", "text": "hi"})).unwrap();
+        assert!(matches!(user.kind, NativeMessageKind::User { text } if text == "hi"));
+    }
+
+    #[test]
+    fn a_question_form_reads_with_ids_that_stay_put_and_answers_by_field() {
+        let form = json!({
+            "id": "frm_1", "sessionID": "ses_a", "title": "Questions",
+            "metadata": {"kind": "question"},
+            "fields": [
+                {"key": "q0", "type": "string", "title": "Scope", "description": "Which part?",
+                 "options": [{"value": "Engine", "label": "Engine"}, {"value": "UI", "label": "UI"}]},
+                {"key": "q1", "type": "multiselect", "title": "Also", "description": "And?",
+                 "options": [{"value": "Docs", "label": "Docs"}]}
+            ]
+        });
+        let first = native_question(&form).unwrap();
+        assert_eq!(first, native_question(&form).unwrap());
+        assert_eq!(first.form_id, "frm_1");
+        let ids: Vec<&str> = first.questions.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["frm_1:q0", "frm_1:q1"]);
+        assert_eq!(first.questions[0].options, ["Engine", "UI"]);
+        assert!(first.questions[1].multi_select);
+        // (Another feature's form isn't the question panel's.)
+        let other = json!({"id": "frm_2", "sessionID": "ses_a", "title": "x", "fields": []});
+        assert!(native_question(&other).is_none());
+    }
+
+    #[test]
+    fn the_feed_names_the_session_that_changed() {
+        let idle = json!({"type": "session.idle", "data": {"sessionID": "ses_a"}});
+        assert_eq!(
+            change_of(&idle),
+            Some(NativeChange::Session("ses_a".into()))
+        );
+        let deleted = json!({"type": "session.deleted", "durable": {"aggregateID": "ses_b"}});
+        assert_eq!(
+            change_of(&deleted),
+            Some(NativeChange::Deleted("ses_b".into()))
+        );
+        let delta = json!({"type": "session.text.delta", "data": {"sessionID": "ses_a"}});
+        assert_eq!(change_of(&delta), None);
+        let form = json!({"type": "form.created", "data": {"form": {"sessionID": "ses_c"}}});
+        assert_eq!(
+            change_of(&form),
+            Some(NativeChange::Session("ses_c".into()))
+        );
+    }
+}

@@ -34,7 +34,7 @@ rusqlite.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v5"] }
 chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true

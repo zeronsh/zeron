@@ -58,6 +58,7 @@ pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
+mod opencode_sync;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
@@ -1173,6 +1174,13 @@ impl Engine {
             }
             core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
         }
+        // OpenCode's sessions, from any of its clients, as chats here.
+        opencode_sync::spawn(
+            core.workspace.clone(),
+            core.doc_host.clone(),
+            core.sessions.clone(),
+            core.registry.clone(),
+        );
         // The chats as last published (the list every view watches), not a
         // fresh parse of every chat row on each scan.
         let preview_chats = core.workspace.watch_chats();

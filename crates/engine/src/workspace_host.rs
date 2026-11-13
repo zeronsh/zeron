@@ -970,7 +970,7 @@ impl WorkspaceHost {
     /// A linked-worktree cwd resolves to the checkout root FIRST: claiming at
     /// the worktree path itself minted a phantom sidebar space named after the
     /// worktree folder ("clever-ember") next to the project's real space.
-    fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
+    pub(crate) fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
         let device_id = &self.inner.config.device_id;
         let spaces = self.read(|doc| doc.read_spaces())?;
         if let Some(space) = spaces

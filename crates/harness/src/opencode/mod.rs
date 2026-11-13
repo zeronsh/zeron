@@ -103,6 +103,9 @@ pub const OPENCODE_ACCESS_MODES: [AccessMode; 2] = [AccessMode::Supervised, Acce
 
 mod client_mcp;
 mod service;
+mod sync;
+
+pub use sync::{NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession};
 
 /// Health-poll cadence while the server boots.
 const HEALTH_POLL: Duration = Duration::from_millis(150);
@@ -2177,6 +2180,14 @@ async fn run_session(session: Session) {
     let dir = directory.as_deref();
 
     let access = access(&request);
+    // The chat this run is for, as the host stamped Zeron's MCP server with
+    // it: recorded on a session this run creates.
+    let chat_id = request
+        .mcp
+        .as_ref()
+        .and_then(|mcp| mcp.env.get("ZERON_CHAT_ID"))
+        .filter(|chat| !chat.is_empty())
+        .cloned();
     // Plan mode as of the live prompt: 1.x names the plan agent on each
     // prompt, 2.x holds it on the session (and keeps it there across runs).
     let mut plan = request.plan;
@@ -2222,11 +2233,11 @@ async fn run_session(session: Session) {
                             target: "zeron_harness::opencode",
                             "session resume failed (starting fresh): {e}"
                         );
-                        create_session(&server, dir, agent).await?
+                        create_session(&server, dir, agent, chat_id.as_deref()).await?
                     }
                 }
             }
-            None => create_session(&server, dir, agent).await?,
+            None => create_session(&server, dir, agent, chat_id.as_deref()).await?,
         };
 
         // Provider catalog: resolves the model's advertised reasoning
@@ -3181,6 +3192,7 @@ async fn create_session(
     server: &Server,
     dir: Option<&str>,
     agent: Option<&str>,
+    chat: Option<&str>,
 ) -> Result<String, HarnessError> {
     if server.protocol().await == Protocol::V2 {
         // 2.x takes the run directory in the BODY (`location.directory`) —
@@ -3193,6 +3205,11 @@ async fn create_session(
         };
         if let Some(agent) = agent {
             body["agent"] = json!(agent);
+        }
+        // The chat it belongs to, so the engine's session sync knows it for
+        // Zeron's own and never imports it as a chat of its own.
+        if let Some(chat) = chat {
+            body["metadata"] = json!({ "zeron": { "chatId": chat } });
         }
         let created = server.post_json("/api/session", dir, &body).await?;
         return created
@@ -4959,7 +4976,8 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
             .map(str::to_owned)
     };
     match name {
-        "bash" => ToolCall::Exec {
+        // (2.x names its shell tool `shell`.)
+        "bash" | "shell" => ToolCall::Exec {
             command: s(&["command"]).unwrap_or_default(),
         },
         "read" => ToolCall::ReadFile {

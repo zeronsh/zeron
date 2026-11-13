@@ -1885,6 +1885,24 @@ impl SessionsEngine {
         lock(&self.inner.runs).contains_key(chat_id)
     }
 
+    /// A turn running in another client of the chat's agent (an OpenCode
+    /// session continued in its TUI): shown as the chat working, through the
+    /// same status every view and device reads, with no run here. Called
+    /// again while it runs, it keeps the status fresh; `false` settles it. A
+    /// run of Zeron's on the chat owns its status instead.
+    pub fn set_external_turn(&self, chat_id: &str, running: bool) {
+        if self.has_run(chat_id) {
+            return;
+        }
+        let status = if running {
+            SessionStatus::Working
+        } else {
+            SessionStatus::Idle
+        };
+        self.inner
+            .set_status_with_completion(chat_id, status, false, None, None);
+    }
+
     /// Boot recovery means to bring this chat's killed turn back, and hasn't got
     /// as far as a run holding the chat. (Not `revivals`: dispatch takes its entry
     /// before the run is in place, and a row sent in that moment overtakes it.)
