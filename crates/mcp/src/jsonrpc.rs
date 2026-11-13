@@ -297,7 +297,10 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only()),
+                    "instructions": match tools.role_instructions() {
+                        Some(role) => format!("{}\n\n{role}", instructions(tools.waits_on_background(), tools.side_chats_only())),
+                        None => instructions(tools.waits_on_background(), tools.side_chats_only()).into_owned(),
+                    },
                 }),
             )
         }

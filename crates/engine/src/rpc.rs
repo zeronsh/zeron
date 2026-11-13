@@ -60,6 +60,9 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod brain_model;
+pub(crate) use agent_gate::run_as_chat_is_set;
+mod crew_messages;
 mod device_stats;
 mod remote_plugins;
 mod voice_chat;
@@ -973,6 +976,11 @@ impl EngineRpc {
 
     pub(crate) fn sessions_ref(&self) -> &SessionsEngine {
         &self.sessions
+    }
+
+    /// This engine's data folder.
+    pub(crate) fn data_dir(&self) -> &std::path::Path {
+        self.repos.data_dir()
     }
 
     /// `createChat` as an RPC caller sends it: the agent gate first (an
@@ -3216,7 +3224,15 @@ impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
+        // A crew thread's message to its own orchestrator is a report
+        // (rpc/crew_messages.rs), read before the gate attributes it.
+        if let Some(reply) = self.crew_message_as_report(method, &params).await? {
+            return Ok(reply);
+        }
+        let mut params = params;
+        self.with_crew_rules(method, &mut params);
         let params = self.agent_gate(method, params)?;
+        self.note_agent_message(method, &params);
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
@@ -3517,6 +3533,12 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
+                // Reports are Zeron's to file (`report` op), never a caller's.
+                if matches!(p.command, zeron_doc::SessionCommandPayload::CrewReport { .. })
+                    && !zeron_rpc::caller().is_local()
+                {
+                    return Err(RpcError::BadParams("Only Zeron files crew reports".into()));
+                }
                 let command_id = self
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
@@ -4185,14 +4207,19 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
-            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(self.orchestration.stream())),
+            // An agent sees its own part (orchestration/scope.rs).
+            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_stream(chat),
+                _ => self.orchestration.stream(),
+            })),
             methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
             methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
                 std::sync::Arc::new(self.clone()),
             ))),
-            methods::WATCH_COMMS => Ok(RpcReply::Stream(
-                crate::orchestration::comms::stream(self.orchestration.comms()),
-            )),
+            methods::WATCH_COMMS => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_comms(chat),
+                _ => crate::orchestration::comms::stream(self.orchestration.comms()),
+            })),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self

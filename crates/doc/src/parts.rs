@@ -366,6 +366,16 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_harness: Option<String>,
     },
+    /// Reports from an orchestrator's crew threads, filed into the
+    /// orchestrator's transcript by its host (never a user turn). Clients
+    /// render the message that carries it as a "Crew updates" card and hide
+    /// its text parts, which are there only for builds that don't know this
+    /// kind. Reports since the orchestrator's last turn extend one message.
+    #[serde(rename_all = "camelCase")]
+    CrewReports {
+        id: String,
+        reports: Vec<zeron_proto::orchestration::Report>,
+    },
 }
 
 impl MessagePart {
@@ -379,7 +389,8 @@ impl MessagePart {
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
             | MessagePart::Fork { id, .. }
-            | MessagePart::Switch { id, .. } => id,
+            | MessagePart::Switch { id, .. }
+            | MessagePart::CrewReports { id, .. } => id,
         }
     }
 
@@ -424,8 +435,27 @@ impl MessagePart {
                 ..
             } => source_chat_id.len() + source_title.len(),
             MessagePart::Switch { from, to, .. } => from.len() + to.len(),
+            MessagePart::CrewReports { reports, .. } => {
+                serde_json::to_vec(reports).map_or(0, |v| v.len())
+            }
         }
     }
+}
+
+/// The text a [`MessagePart::CrewReports`] message carries beside the part,
+/// for builds that don't know the kind: one line per report.
+pub fn crew_reports_fallback_text(reports: &[zeron_proto::orchestration::Report]) -> String {
+    use zeron_proto::orchestration::prompt_text::{SUMMARY_MAX, one_line};
+    let mut out = String::from("Crew updates");
+    for r in reports {
+        let from: String = one_line(&r.from_chat, 8);
+        out.push_str(&format!(
+            "\n- {from} {}: {}",
+            r.state.as_str(),
+            one_line(&r.summary, SUMMARY_MAX)
+        ));
+    }
+    out
 }
 
 /// Fold one agent event into a parts accumulator, in place.

@@ -18,7 +18,7 @@ use zeron_proto::{ChatConfig, ChildKind, SandboxLevel, SessionStatus, agent_mess
 use zeron_rpc::{Caller, RpcError};
 
 use super::comms::YOU;
-use super::{ChatRole, excerpt};
+use super::ChatRole;
 use crate::rpc::EngineRpc;
 
 fn failed(message: impl Into<String>) -> RpcError {
@@ -313,14 +313,8 @@ impl EngineRpc {
                 };
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
-                let title = self
-                    .workspace_host()
-                    .chat(chat)
-                    .ok()
-                    .flatten()
-                    .and_then(|c| c.title)
-                    .unwrap_or_else(|| "A chat".into());
-                self.notify_person(&title, &excerpt(&ask.question, 200), Some(chat));
+                // Its banner shows on every device as the row arrives
+                // (orchestration/watchers.rs), this one too.
                 orch.comms().say(CommKind::Ask, chat, YOU, &ask.question);
                 Ok(json!({ "id": ask.id }))
             }
@@ -340,11 +334,9 @@ impl EngineRpc {
                     doc.upsert_ask(&ask);
                     Ok(ask)
                 })?;
-                let text = format!(
-                    "[Answer from you] {} → {}",
-                    excerpt(&ask.question, 120),
-                    answer
-                );
+                // One line each: an ask's text can't pass for another message.
+                let text =
+                    zeron_proto::orchestration::prompt_text::answer_delivery(&ask.question, &answer);
                 deliver(self, &ask.from_chat, &text, None, When::Now)?;
                 orch.comms()
                     .say(CommKind::Answer, YOU, &ask.from_chat, &answer);

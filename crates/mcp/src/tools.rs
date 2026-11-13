@@ -22,8 +22,10 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
+mod orchestration;
 mod plugins;
 mod themes;
+pub use orchestration::Role;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
 
@@ -50,6 +52,11 @@ pub struct Tools {
     /// Which plugin tools the client was last shown ([`Self::list_all`],
     /// [`Self::watch_plugin_tools`]).
     plugins: plugins::PluginState,
+    /// What the calling chat is to orchestration, once read
+    /// ([`Self::resolve_role`]): it picks the orchestration tools listed.
+    role: std::sync::RwLock<Option<Role>>,
+    /// The role's built-in instructions, read with it.
+    role_prompt: std::sync::RwLock<Option<String>>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -151,6 +158,8 @@ fn catalog() -> Vec<ToolDef> {
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
                     "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
+                    "item": { "type": "string", "description": "Crew threads: the board item it works on (one item per thread)." },
+                    "role": { "type": "string", "description": "Crew threads: a short role, e.g. \"auth PR\"." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -297,6 +306,7 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["task_ids"]
         }),
     });
+    tools.extend(orchestration::catalog());
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools
@@ -665,6 +675,9 @@ struct PendingTurn {
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
     kind: Option<ChatKind>,
+    /// Crew threads: the board item it works on, and its short role.
+    item: Option<String>,
+    role: Option<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -819,6 +832,8 @@ impl Tools {
             zeron,
             pending_turns: Default::default(),
             plugins: Default::default(),
+            role: Default::default(),
+            role_prompt: Default::default(),
         }
     }
 
@@ -838,11 +853,15 @@ impl Tools {
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
         let waits = self.waits_on_background();
+        let role = self.role();
         catalog()
             .into_iter()
             .filter(|tool| match tool.name {
                 SHOW_VISUAL | SHOW_IMAGE => in_chat,
                 WAIT_ON_BACKGROUND => waits,
+                // `ask` is for a chat's agent; the rest by role.
+                orchestration::ASK => in_chat,
+                name if orchestration::NAMES.contains(&name) => role.offers(name),
                 _ => true,
             })
             .collect()
@@ -876,6 +895,9 @@ impl Tools {
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
+            tool if orchestration::NAMES.contains(&tool) => {
+                return self.orchestration_tool(tool, args).await;
+            }
             plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
             plugins::LIST_PLUGINS => return self.list_plugins().await,
             plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
@@ -957,6 +979,7 @@ impl Tools {
             "originDeviceId": origin.device_id,
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
+            "orchestrationRole": self.role().label(),
             "note": if origin.chat_id.is_some() {
                 "Messages you send are attributed to this chat; it cannot message itself."
             } else {
@@ -1145,7 +1168,7 @@ impl Tools {
             .unwrap_or_default()
     }
 
-    async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
+    async fn create_chat(&self, mut args: CreateChatArgs) -> anyhow::Result<Value> {
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
         let explicit_parent = args
@@ -1201,6 +1224,14 @@ impl Tools {
             }
             (_, true) => ChatKind::Subagent,
         };
+        // A crew thread starts as its orchestrator's crew policy says.
+        let crew_of = match (kind, parent_chat_id.as_deref()) {
+            (ChatKind::Crew, Some(orchestrator)) => Some(orchestrator.to_owned()),
+            _ => None,
+        };
+        if let Some(orchestrator) = crew_of.as_deref() {
+            self.apply_crew_policy(orchestrator, &mut args).await?;
+        }
 
         // Delegation depth: a top-level chat (an orchestrator too) creates
         // chats, and so does a crew thread (its own subagents); any other
@@ -1382,6 +1413,20 @@ impl Tools {
             mutate["cloud"] = json!(true);
         }
         let created = self.zeron.mutate(mutate).await?;
+        // Its role and item in the crew, before its first turn reads them.
+        if let Some(orchestrator) = crew_of.as_deref()
+            && (args.role.is_some() || args.item.is_some())
+        {
+            self.zeron
+                .call(
+                    zeron_rpc::methods::ORCHESTRATE,
+                    json!({
+                        "op": "addToCrew", "orchestratorId": orchestrator, "chatId": chat_id,
+                        "role": args.role.clone().unwrap_or_default(), "itemId": args.item,
+                    }),
+                )
+                .await?;
+        }
         // A Cloud chat's machine and checkout come back from the engine.
         let (device_id, cwd) = if args.cloud {
             (
@@ -1523,6 +1568,25 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        // To its own orchestrator, a crew thread reports.
+        if let Role::Crew { orchestrator_id } = self.role()
+            && orchestrator_id == chat.id
+        {
+            let summary = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Message");
+            let filed = self
+                .zeron
+                .call(
+                    zeron_rpc::methods::ORCHESTRATE,
+                    json!({ "op": "report", "state": "message", "summary": summary, "detail": text }),
+                )
+                .await?;
+            return Ok(json!({
+                "chatId": chat.id,
+                "title": chat.title,
+                "sent": { "delivery": "report", "id": filed["id"] },
+                "note": "Your orchestrator is sent this as a report (use the report tool next time). It wakes on it; there's no reply to wait for.",
+            }));
+        }
         if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
             anyhow::bail!(
                 "refusing to send a message to your own chat ({})",

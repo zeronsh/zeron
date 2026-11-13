@@ -1,9 +1,11 @@
 //! `Orchestrate{op: report}`: a crew thread reports to its orchestrator.
 //!
-//! What lands here now: the crew row's last report, the item's progress and
-//! links, and a comms event. Filing the report in the orchestrator's
-//! transcript (`crewReports`) and the coalesced wake are added on top of
-//! this one function (engine-flow).
+//! Here, on the crew thread's engine: the crew row's last report, the item's
+//! progress and links, and a comms event. The orchestrator is always the
+//! crew row's, never what the caller says. The report then goes to the
+//! orchestrator's host as a `crewReport` command in its doc, which files it
+//! in the transcript as "Crew updates" and wakes it when it should
+//! (`doc_host/crew_inbox.rs`).
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -11,6 +13,7 @@ use zeron_proto::orchestration::{CommKind, Report, ReportHead, ReportState, Work
 use zeron_rpc::RpcError;
 
 use crate::rpc::EngineRpc;
+use zeron_doc::SessionCommandPayload;
 
 /// The `report` op's fields (`OrchestrateOp::Report`).
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +61,7 @@ pub async fn file_report(
         summary,
         detail: params.detail,
         links: params.links,
-        progress: params.progress.map(|p| p.clamp(0.0, 1.0)),
+        progress: params.progress.filter(|p| p.is_finite()).map(|p| p.clamp(0.0, 1.0)),
         at: Utc::now(),
     };
     orchestration.set_last_report(
@@ -95,5 +98,13 @@ pub async fn file_report(
         &report.orchestrator_id,
         &report.summary,
     );
-    Ok(json!({ "id": report.id }))
+    let id = report.id.clone();
+    let orchestrator = report.orchestrator_id.clone();
+    if let Err(err) = ctx
+        .doc_host_ref()
+        .queue_command(&orchestrator, SessionCommandPayload::CrewReport { report })
+    {
+        tracing::warn!(orchestrator = %orchestrator, error = %err, "report: couldn't reach the orchestrator's transcript");
+    }
+    Ok(json!({ "id": id }))
 }

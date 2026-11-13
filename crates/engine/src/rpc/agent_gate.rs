@@ -61,6 +61,36 @@ fn refused(message: impl Into<String>) -> RpcError {
     RpcError::Failed(message.into())
 }
 
+/// A run `request` (JSON) as the chat `target` is set, whatever it says:
+/// its harness, sandbox, access, plan mode and folder; nothing approved on
+/// its own and no MCP servers of the sender's (the host adds the standard
+/// ones). A chat with no config yet runs with no more than `ceiling`.
+pub(crate) fn run_as_chat_is_set(request: &mut Value, target: Option<&Chat>, ceiling: (SandboxLevel, AccessMode)) {
+    request["autoApprove"] = json!(false);
+    request["mcp"] = Value::Null;
+    request["extraMcp"] = json!([]);
+    match target.and_then(|c| c.config.as_ref()) {
+        Some(config) => {
+            request["harness"] = json!(config.harness);
+            request["sandbox"] = json!(config.sandbox);
+            request["access"] = json!(config.access);
+            request["plan"] = json!(config.plan);
+        }
+        // A chat set up before configs (or not here yet): no more than the
+        // ceiling.
+        None => {
+            let sandbox = serde_json::from_value(request["sandbox"].clone()).unwrap_or(SandboxLevel::DangerFullAccess);
+            let access = serde_json::from_value(request["access"].clone()).unwrap_or_default();
+            let (sandbox, access, _) = cap_access((sandbox, access), ceiling);
+            request["sandbox"] = json!(sandbox);
+            request["access"] = json!(access);
+        }
+    }
+    if let Some(cwd) = target.and_then(|c| c.cwd.as_deref()) {
+        request["cwd"] = json!(cwd);
+    }
+}
+
 impl EngineRpc {
     fn calling(&self, chat_id: &str, chats: &[Chat]) -> Calling {
         let chat = chats.iter().find(|c| c.id == chat_id);
@@ -201,35 +231,15 @@ impl EngineRpc {
                         let request = &mut command["request"];
                         let prompt = request["prompt"].as_str().unwrap_or_default();
                         request["prompt"] = json!(attributed(&target_id, prompt));
-                        // As the chat is set, whatever the request says.
-                        request["autoApprove"] = json!(false);
-                        request["mcp"] = Value::Null;
-                        request["extraMcp"] = json!([]);
-                        match target.and_then(|c| c.config.as_ref()) {
-                            Some(config) => {
-                                request["harness"] = json!(config.harness);
-                                request["sandbox"] = json!(config.sandbox);
-                                request["access"] = json!(config.access);
-                                request["plan"] = json!(config.plan);
-                            }
-                            // A chat set up before configs (or not here yet):
-                            // no more than the agent's own.
-                            None => {
-                                let ceiling = calling
-                                    .as_ref()
-                                    .and_then(|c| c.ceiling)
-                                    .unwrap_or((SandboxLevel::DangerFullAccess, AccessMode::FullAccess));
-                                let sandbox = serde_json::from_value(request["sandbox"].clone())
-                                    .unwrap_or(SandboxLevel::DangerFullAccess);
-                                let access = serde_json::from_value(request["access"].clone()).unwrap_or_default();
-                                let (sandbox, access, _) = cap_access((sandbox, access), ceiling);
-                                request["sandbox"] = json!(sandbox);
-                                request["access"] = json!(access);
-                            }
-                        }
-                        if let Some(cwd) = target.and_then(|c| c.cwd.as_deref()) {
-                            request["cwd"] = json!(cwd);
-                        }
+                        let ceiling = calling
+                            .as_ref()
+                            .and_then(|c| c.ceiling)
+                            .unwrap_or((SandboxLevel::DangerFullAccess, AccessMode::FullAccess));
+                        run_as_chat_is_set(request, target, ceiling);
+                    }
+                    // Only Zeron files a report (the `report` op).
+                    "crewReport" => {
+                        return Err(refused("Only Zeron files crew reports: use the report tool"));
                     }
                     "steer" => {
                         let prompt = command["prompt"].as_str().unwrap_or_default();

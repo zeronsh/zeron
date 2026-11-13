@@ -26,6 +26,8 @@ pub mod comms;
 pub(crate) mod loads;
 pub(crate) mod ops;
 pub mod report;
+pub(crate) mod scope;
+pub(crate) mod watchers;
 pub(crate) mod wake;
 
 #[cfg(test)]
@@ -235,6 +237,7 @@ impl Orchestration {
             .swap(true, std::sync::atomic::Ordering::AcqRel)
         {
             wake::start(self.clone());
+            watchers::start(self.clone());
         }
     }
 

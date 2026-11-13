@@ -124,6 +124,8 @@ impl EngineRpc {
             return Err(RpcError::BadParams("Nothing to dump".into()));
         }
         let brain = self.ensure_brain_dump()?;
+        // A Brain dump that has never run starts on a fast model.
+        self.brain_dump_fast_model(&brain).await;
         let now = Utc::now();
         let dump = Dump {
             id: uuid::Uuid::new_v4().simple().to_string(),
@@ -249,10 +251,7 @@ impl EngineRpc {
         let brain = self.brain_of(&dump);
         let delivered = matches!(route.state, RouteState::Delivered | RouteState::Answered);
         if delivered && let Some(old) = target_chat(&route.target) {
-            let retraction = format!(
-                "[Brain dump] Ignore the earlier note \"{}\": it was meant elsewhere.",
-                excerpt(&route.excerpt, 80)
-            );
+            let retraction = zeron_proto::orchestration::prompt_text::retraction(&route.excerpt);
             if let Err(error) = deliver(self, old, &retraction, brain.as_deref(), When::Now) {
                 tracing::warn!(chat = %old, %error, "brain dump: retraction not delivered");
             }
