@@ -260,8 +260,9 @@ export type Provenance = {
 }
 
 -- Who started what, and what the Brain dump handed where: a chat's own
--- `started_by` where the host says it, else its dumps' routes (a part that
--- started a thread or an orchestrator; a part delivered to one).
+-- `started_by` where the host says it (the Brain dump, or an orchestrator
+-- that spawned it), else the dumps' routes (a part that started a thread
+-- or an orchestrator; a part delivered to one).
 function M.provenance(world: any): Provenance
 	local now = world.now or {}
 	local out: Provenance = { started = {}, routed = {} }
@@ -271,9 +272,13 @@ function M.provenance(world: any): Provenance
 			brain = o.id
 		end
 	end
+	-- (The host's word first: `started_by = { chat_id, dump_id?, route_id? }`,
+	-- or the chat's id alone.)
 	for id, c in world.chats or {} do
-		if type(c.started_by) == "string" and c.started_by ~= "" then
-			out.started[id] = c.started_by
+		local by = c.started_by
+		local who = if type(by) == "string" then by elseif type(by) == "table" then (by.chat_id or by.chatId) else nil
+		if type(who) == "string" and who ~= "" and who ~= id then
+			out.started[id] = who
 		end
 	end
 	if not brain then

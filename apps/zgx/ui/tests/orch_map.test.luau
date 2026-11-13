@@ -610,3 +610,33 @@ test("graph: a node dropped stays where it was dropped", function()
 	app:frames(5)
 	expect(app:state("control_map_graph_pins")["th-vpn-exporter"]).to_be(nil)
 end)
+
+test("started_by from the host: under who started it, in the Topology and the Graph", function()
+	local w = world()
+	local chats = table.clone(w.chats)
+	-- A thread an orchestrator spawned, not (yet) in its crew; another the
+	-- Brain dump started, its dump unknown here.
+	chats["th-spawned"] = { id = "th-spawned", title = "Spawned by Tally", device = "dev-cloud", status = "working", started_by = { chat_id = "orc-tally" } }
+	chats["th-bd"] = { id = "th-bd", title = "Started from a dump", device = "dev-mac", status = "working", started_by = { chat_id = "orc-brain", dump_id = "dp-x" } }
+	w.chats = chats
+	local l = Layout.layout(w, 1200)
+	local of: { [string]: string } = {}
+	for _, rail in l.rails do
+		for _, b in rail.branches do
+			for _, r in l.rows do
+				if r.mid == b.y and r.x == b.to + Layout.GAP then
+					of[r.id] = rail.orchestrator
+				end
+			end
+		end
+	end
+	expect(of["th-spawned"]).to_be("orc-tally")
+	expect(of["th-bd"]).to_be("orc-brain")
+	local g = Sim.build(w)
+	local has: { [string]: boolean } = {}
+	for _, e in g.edges do
+		has[`{e.kind}:{e.a}>{e.b}`] = true
+	end
+	expect(has["started:orc-tally>th-spawned"]).to_be(true)
+	expect(has["started:orc-brain>th-bd"]).to_be(true)
+end)
