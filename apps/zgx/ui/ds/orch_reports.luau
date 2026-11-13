@@ -17,7 +17,7 @@ local Badge = require("@self/badge")
 local status = require("@self/status")
 local control = require("@self/control")
 local locale = require("@self/locale")
-local hue = require("@self/orch_hue_stub")
+local hue = require("@self/orch_hue")
 
 export type Report = {
 	id: string,
@@ -76,7 +76,7 @@ return ui.component(function(props: Props): Node
 	-- the quiet rule's ink while it isn't known.
 	local function stripe(): string
 		local h = if props.hue then control.value(props.hue) :: number? else nil
-		return if h then hue.color(h) else "$border"
+		return if h then hue.paint(h) else "$border"
 	end
 
 	local function row(_r: Report, _i: number, now: State<Report>): Node

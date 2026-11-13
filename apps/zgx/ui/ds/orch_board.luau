@@ -41,7 +41,7 @@ local control = require("@self/control")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
 local material = require("@self/material")
-local hue = require("@self/orch_hue_stub")
+local hue = require("@self/orch_hue")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -292,7 +292,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 	end
 	local function ink_of(id: string?): string
 		local h = hue_of(id)
-		return if h then hue.color(h) else "$text.tertiary"
+		return if h then hue.paint(h) else "$text.tertiary"
 	end
 
 	local columns: { Column } = if props.inbox then { INBOX, table.unpack(COLUMNS) } else table.clone(COLUMNS)
@@ -786,7 +786,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				on_click = function()
 					set_filter(id)
 				end,
-				if h then ui.div { w = 7, h = 7, rounded = "$radius.full", bg = hue.color(h), shrink = 0 } else nil,
+				if h then ui.div { w = 7, h = 7, rounded = "$radius.full", bg = hue.paint(h), shrink = 0 } else nil,
 				ui.text {
 					name,
 					text_size = "$font.size.xs",
