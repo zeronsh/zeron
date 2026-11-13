@@ -665,7 +665,7 @@ async fn a_progress_question_to_a_working_thread_is_answered_not_delivered() {
     core.sessions.shutdown().await;
 }
 
-struct NoteHarness(std::sync::Mutex<Vec<zeron_proto::RunRequest>>);
+struct NoteHarness(std::sync::Mutex<Vec<zeron_proto::RunRequest>>, &'static str);
 
 type Events = futures::stream::BoxStream<'static, Result<zeron_proto::AgentEvent, zeron_harness::HarnessError>>;
 
@@ -707,7 +707,7 @@ impl zeron_harness::Harness for NoteHarness {
     ) -> Result<Events, zeron_harness::HarnessError> {
         self.0.lock().unwrap().push(request);
         Ok(futures::stream::iter(vec![
-            Ok(zeron_proto::AgentEvent::TextDelta { text: "> Running the migration tests, 3 of 4 steps done\nmore".into() }),
+            Ok(zeron_proto::AgentEvent::TextDelta { text: self.1.into() }),
             Ok(zeron_proto::AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None }),
         ])
         .boxed())
@@ -717,9 +717,9 @@ impl zeron_harness::Harness for NoteHarness {
 #[tokio::test]
 async fn the_note_runs_the_title_path_on_the_chats_cheapest_model() {
     let registry = Arc::new(HarnessRegistry::new());
-    let recorder = Arc::new(NoteHarness(Default::default()));
+    let recorder = Arc::new(NoteHarness(Default::default(), "> Running the migration tests, 3 of 4 steps done\nmore"));
     registry.register(recorder.clone());
-    let note = title_path(registry)(HarnessId::ClaudeCode, "PROMPT".into()).await;
+    let note = title_path(registry)(HarnessId::ClaudeCode, "PROMPT".into()).await.map(|raw| progress_note(&raw));
     assert_eq!(note.as_deref(), Some("Running the migration tests, 3 of 4 steps done"));
     let requests = recorder.0.lock().unwrap();
     let request = &requests[0];
@@ -727,4 +727,90 @@ async fn the_note_runs_the_title_path_on_the_chats_cheapest_model() {
     assert_eq!(request.sandbox, zeron_proto::SandboxLevel::ReadOnly);
     assert!(!request.auto_approve && request.resume.is_none() && request.mcp.is_none());
     assert_eq!(request.prompt, "PROMPT");
+}
+
+const REPLY: &str = "## Auth fix\n\nIt lands **Friday**, once `cargo test -p auth` passes on CI. Then I merge [the PR](https://x/1).\n\n- tests: 41/42\n- docs: pending\n\nI sent this answer to the Brain dump chat.";
+
+/// A question routed to `chat` (hosted elsewhere, so nothing runs): the
+/// dump's and the route's ids.
+async fn question_to(core: &crate::EngineCore, rpc: &EngineRpc, chat_id: &str) -> (String, String) {
+    chat(rpc, chat_id, "dev-remote", None).await;
+    let dump = call(rpc, Caller::Local, methods::ORCHESTRATE, json!({"op":"dump","text":"when does the auth fix land?"})).await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let brain = core
+        .orchestration
+        .state()
+        .orchestrators
+        .iter()
+        .find(|o| o.kind == zeron_proto::orchestration::OrchestratorKind::BrainDump)
+        .unwrap()
+        .id
+        .clone();
+    let route = call(
+        rpc,
+        agent(&brain),
+        methods::ORCHESTRATE,
+        json!({"op":"route","dumpId":dump,"excerpt":"when does the auth fix land?","target":{"kind":"chat","id":chat_id},
+            "intent":"question","message":"When does the auth fix land?"}),
+    )
+    .await
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (dump, route)
+}
+
+fn route_of(core: &crate::EngineCore, dump: &str, route: &str) -> zeron_proto::orchestration::Route {
+    let d = core.workspace.read_orchestration_with(|doc| doc.dump(dump)).unwrap();
+    d.routes.into_iter().find(|r| r.id == route).unwrap()
+}
+
+#[tokio::test]
+async fn a_routed_answer_is_one_line_from_the_cheap_model_and_keeps_the_whole_reply() {
+    let (_temp, core, rpc) = core().await;
+    let recorder = Arc::new(NoteHarness(Default::default(), "\"It lands **Friday**, after `cargo test -p auth` passes on CI.\"\nI sent this to the Brain dump."));
+    core.registry.register(recorder.clone());
+    let (dump, route) = question_to(&core, &rpc, "auth").await;
+    assert!(super::super::watchers::record_answer(&core.orchestration, &rpc, "auth", &dump, &route, "when does the auth fix land?", REPLY.into()).await);
+    let r = route_of(&core, &dump, &route);
+    assert_eq!(r.state, zeron_proto::orchestration::RouteState::Answered);
+    assert_eq!(r.answer.as_deref(), Some("It lands Friday, after `cargo test -p auth` passes on CI."));
+    assert_eq!(r.answer_full.as_deref(), Some(REPLY), "the whole reply is kept");
+    {
+        let requests = recorder.0.lock().unwrap();
+        let request = &requests[0];
+        assert_eq!(request.model.as_deref(), Some("haiku"), "the fastest model of the target's harness");
+        assert_eq!(request.sandbox, zeron_proto::SandboxLevel::ReadOnly);
+        assert!(request.prompt.starts_with(zeron_harness::ANSWER_INSTRUCTIONS));
+        let data: Value = serde_json::from_str(request.prompt.split_once("(JSON):\n").unwrap().1).unwrap();
+        assert_eq!(data["question"], "when does the auth fix land?");
+        assert_eq!(data["reply"], REPLY, "the reply rides a JSON string");
+    }
+    // Once only.
+    assert!(!super::super::watchers::record_answer(&core.orchestration, &rpc, "auth", &dump, &route, "q", "other".into()).await);
+    assert_eq!(route_of(&core, &dump, &route).answer_full.as_deref(), Some(REPLY));
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_a_model_the_answer_is_the_replys_first_real_sentence() {
+    let (_temp, core, rpc) = core().await;
+    let (dump, route) = question_to(&core, &rpc, "auth").await;
+    assert!(super::super::watchers::record_answer(&core.orchestration, &rpc, "auth", &dump, &route, "when?", REPLY.into()).await);
+    let r = route_of(&core, &dump, &route);
+    assert_eq!(r.answer.as_deref(), Some("It lands Friday, once `cargo test -p auth` passes on CI."));
+    assert_eq!(r.answer_full.as_deref(), Some(REPLY));
+    // A model reply that's only about the delivery leaves the plain one.
+    let (dump, route) = question_to(&core, &rpc, "auth2").await;
+    let f: NoteFn = Arc::new(|_, prompt: String| {
+        assert!(prompt.starts_with(zeron_harness::ANSWER_INSTRUCTIONS));
+        async { Some("I forwarded the answer to the Brain dump.".to_owned()) }.boxed()
+    });
+    core.orchestration.progress().set_note_fn(f);
+    super::super::watchers::record_answer(&core.orchestration, &rpc, "auth2", &dump, &route, "when?", REPLY.into()).await;
+    assert_eq!(route_of(&core, &dump, &route).answer.as_deref(), Some("It lands Friday, once `cargo test -p auth` passes on CI."));
+    core.sessions.shutdown().await;
 }

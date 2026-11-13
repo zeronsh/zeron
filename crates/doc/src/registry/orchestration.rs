@@ -547,6 +547,7 @@ mod tests {
             state: RouteState::Delivered,
             candidates: vec![],
             answer: None,
+            answer_full: None,
             item_id: None,
         }
     }

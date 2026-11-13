@@ -84,6 +84,7 @@ pub(crate) fn settle(dump: &Dump, candidates: &[RouteTarget]) -> Option<Dump> {
             state: RouteState::Pending,
             candidates: candidates.to_vec(),
             answer: None,
+            answer_full: None,
             item_id: None,
         });
     }
@@ -215,6 +216,7 @@ mod tests {
             state: RouteState::Delivered,
             candidates: vec![],
             answer: None,
+            answer_full: None,
             item_id: None,
         }
     }
