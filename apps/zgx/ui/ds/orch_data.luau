@@ -304,7 +304,8 @@ end
 function M.open_asks(now: any): { [string]: any }
 	local out: { [string]: any } = {}
 	for _, a in (now and now.asks) or {} do
-		if a.state == "open" and a.from_chat then
+		-- (A quiet one, a "hasn't answered" chase, waits on no card or row.)
+		if a.state == "open" and a.from_chat and not a.quiet then
 			local had = out[a.from_chat]
 			if not had or (a.created or 0) > (had.created or 0) then
 				out[a.from_chat] = a
