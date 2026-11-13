@@ -1,0 +1,18 @@
+[
+  {
+    "id": "parakeet-ultra-q8",
+    "name": "Parakeet Ultra",
+    "repository": "handy-computer/parakeet-ultra-gguf",
+    "revision": "a1539be1b849ea7463b88343e5277b373d0c4ea9",
+    "source": "moondream/parakeet-ultra",
+    "license": "CC-BY-4.0",
+    "languages": ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"],
+    "files": [
+      {
+        "name": "parakeet-ultra-Q8_0.gguf",
+        "size": 740363168,
+        "sha256": "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59"
+      }
+    ]
+  }
+]

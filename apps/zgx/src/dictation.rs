@@ -22,8 +22,6 @@ use crate::plugins::{json_value, off_thread, value_json};
 mod meter;
 use meter::Meter;
 
-const MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
-
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn zeron_microphone_permission() -> i32;
@@ -160,6 +158,7 @@ impl Service {
     fn status(&self) -> Result<Json, String> {
         Ok(json!({
             "installed": zeron_voice::installed(&self.dir()?),
+            "name": zeron_voice::manifest().name,
             "size": zeron_voice::download_size(),
         }))
     }
@@ -354,7 +353,14 @@ fn levels_value(levels: &[f32]) -> Value {
 /// what's happening in the shared `dictation`.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let (wake, mut work) = zgx::task::latest::<()>();
-    let dir = crate::engine::data_dir().map(|d| d.join("models").join(MODEL));
+    let models = crate::engine::data_dir().map(|d| d.join("models"));
+    static RETIRED: std::sync::Once = std::sync::Once::new();
+    if let Some(models) = models.clone() {
+        RETIRED.call_once(|| {
+            std::thread::spawn(move || zeron_voice::retire_old_models(&models));
+        });
+    }
+    let dir = models.map(|m| m.join(zeron_voice::manifest().id));
     let me = Rc::new(Dictation {
         shared: host.shared("dictation", json_value(&json!({"phase":"idle"}))),
         levels: host.shared("dictation_levels", json_value(&json!([]))),
@@ -575,7 +581,7 @@ mod tests {
     #[test]
     fn dictation_without_the_model_asks_for_it_before_touching_the_microphone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Service::new(Some(dir.path().join(MODEL)));
+        let mut s = Service::new(Some(dir.path().join(zeron_voice::manifest().id)));
         assert_eq!(s.status().unwrap()["installed"], false);
         assert_eq!(s.start(&json!({})).unwrap_err(), "no_model");
         assert!(s.session.is_none());
