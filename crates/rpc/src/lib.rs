@@ -194,8 +194,13 @@ pub mod methods {
     /// `Vec<orchestration::DeviceLoad>` for every device of the account,
     /// sampled every ~5 s while subscribed.
     pub const WATCH_DEVICE_LOADS: &str = "WatchDeviceLoads";
-    /// Live `orchestration::CommEvent`s (messages, reports, asks, routes)
-    /// this engine sees; the newest 100 on subscribe.
+    /// Live `orchestration::CommEvent`s this engine sees: agent messages,
+    /// reports, asks, answers, routes and spawns. Every frame is a JSON
+    /// ARRAY of events, oldest first: the first frame is the backlog (the
+    /// newest ≤ 100), each later frame the events since. A subscriber that
+    /// fell behind gets the whole backlog again, so clients merge frames and
+    /// dedupe by `id` (never replace the list with a frame). Agents see only
+    /// their own traffic.
     pub const WATCH_COMMS: &str = "WatchComms";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.

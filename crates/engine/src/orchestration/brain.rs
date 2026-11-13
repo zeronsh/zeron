@@ -145,6 +145,9 @@ impl EngineRpc {
         self.orchestration()
             .workspace()
             .write_orchestration(|doc| doc.upsert_dump(&dump));
+        self.orchestration()
+            .comms()
+            .say(CommKind::Message, super::comms::YOU, &brain, &text);
         let message = zeron_proto::orchestration::prompt_text::dump_message(&dump.id, &text);
         if let Err(error) = deliver(self, &brain, &message, None, When::Next) {
             self.orchestration().workspace().write_orchestration(|doc| {

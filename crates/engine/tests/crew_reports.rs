@@ -484,3 +484,48 @@ async fn a_dump_the_brain_dump_leaves_unrouted_needs_the_person() {
     assert_eq!(routes[0].candidates, vec![RouteTarget::Orchestrator { id: ORCH.into() }]);
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_kind_of_traffic_shows_in_comms() {
+    use zeron_proto::orchestration::{CommKind, OrchestratorKind};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    // Spawn: the crew thread joined in setup.
+    report(&rpc, "done", "shipped").await;
+    let ask = call(
+        &rpc,
+        Caller::Agent { chat: Some(CREW.into()) },
+        methods::ORCHESTRATE,
+        json!({ "op": "ask", "kind": "approval", "question": "Merge it?" }),
+    )
+    .await;
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "answerAsk", "id": ask["id"], "answer": "Yes" })).await;
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(ORCH.into()) },
+        methods::QUEUE_MESSAGE,
+        json!({ "chatId": CREW, "text": "next: docs", "holdForTurnEnd": true }),
+    )
+    .await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "note: docs later" })).await;
+    let brain = core
+        .workspace
+        .read_orchestration_with(|d| d.read_orchestrators())
+        .into_iter()
+        .find(|o| o.kind == OrchestratorKind::BrainDump)
+        .unwrap()
+        .id;
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(brain) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump["id"], "excerpt": "note: docs later", "target": { "kind": "note" }, "intent": "note" }),
+    )
+    .await;
+    let kinds: Vec<CommKind> = core.orchestration.comms().recent().iter().map(|e| e.kind).collect();
+    for kind in [CommKind::Spawn, CommKind::Report, CommKind::Ask, CommKind::Answer, CommKind::Message, CommKind::Route] {
+        assert!(kinds.contains(&kind), "{kind:?} missing from {kinds:?}");
+    }
+    let _ = prompts;
+    let _ = finish.send(());
+    core.shutdown().await;
+}

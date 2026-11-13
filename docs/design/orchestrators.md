@@ -133,6 +133,8 @@ chats, coalesced ≤ 4/s).
   to `DeviceStats`).
 - `WatchComms`: a bounded ring (100) of `CommEvent`s this engine produced or delivered. Messages
   between agents (the existing agent-message path), reports, asks, answers, routes and spawns.
+  Every frame is an array: the backlog first, then arrays of the events since (the backlog again
+  after a lag). Clients merge frames and dedupe by `id`; a frame never replaces the list.
 
 ### Wake schedule
 
