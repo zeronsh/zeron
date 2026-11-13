@@ -565,20 +565,63 @@ M.View = ui.component(function(props: {
 		-- left, centred on the mark; then below, above), and for a name that
 		-- must show (a leader's, a working thread's) hanging under or over
 		-- it and at its corners too.
+		-- Whether a box sits on a rim (a name reads broken there).
+		local function on_rim(x0: number, y0: number, x1: number, y1: number): number
+			for _, p in rim_pts do
+				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
+					return 1
+				end
+			end
+			return 0
+		end
+		-- Whether a box would sit on another name or a mark (never allowed).
+		local function hard(x0: number, y0: number, x1: number, y1: number, own: string): boolean
+			for _, bx in taken do
+				if x0 < bx[3] and x1 > bx[1] and y0 < bx[4] and y1 > bx[2] then
+					return true
+				end
+			end
+			for _, m in graph.nodes do
+				if m.id ~= own and m.kind ~= "device" then
+					local mx, my = at(m)
+					local mr = reach(m) + 3
+					if mx + mr > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
+						return true
+					end
+				end
+			end
+			return false
+		end
+		-- A name's place: tried in one line, then two, on each side (right,
+		-- left, centred on the mark; then below, above; hanging; the
+		-- corners), close in, then a step out with a leader; shortened
+		-- only when nothing else is free. Never on another name or a mark.
 		local function place(n: sim.Node, forms: { { string } }, opts: any, must: boolean, force: boolean)
 			local x, y = at(n)
 			local base = (if n.kind == "thread" then 9 else reach(n)) + 8
-			local best: any, least, least_rank = nil, math.huge, math.huge
-			-- (And the least crowded, whatever lines it sits on.)
-			local fit: any, fit_k = nil, math.huge
-			-- (Only a working thread's name steps out, a leader tying it back.)
-			for _, far in (if must and n.kind == "thread" then { 0, 10, 24, 38 } else { 0 }) do
-				local r = base + far
-				for _, text in forms do
+			-- (The full name's forms, then a shortened one as a last resort.)
+			local full = forms[#forms]
+			local all_forms = table.clone(forms)
+			local long = 0
+			for _, t in full do
+				long = math.max(long, utf8.len(t) or #t)
+			end
+			if long > 16 then
+				local t = if #full == 1 then full[1] else table.concat(full, " ")
+				-- (At the last whole word that fits in 18 characters.)
+				local head = string.sub(t, 1, (utf8.offset(t, 19) or (#t + 1)) - 1)
+				local cut = string.match(head, "^(.*%S)%s+%S*$") or head
+				table.insert(all_forms, { cut .. "…" })
+			end
+			local cands: { any } = {}
+			for fi, text in all_forms do
+				local short = fi > #forms
+				for _, far in { 0, 10 } do
+					local r = base + far
 					local tw, lh = 0, 0
 					for _, t in text do
-						local a, b = c:measure_text(t, opts)
-						tw, lh = math.max(tw, a), math.max(lh, b)
+						local aw, bh = c:measure_text(t, opts)
+						tw, lh = math.max(tw, aw), math.max(lh, bh)
 					end
 					lh = math.floor(lh * 1.08 + 0.5)
 					local th = lh * #text
@@ -587,64 +630,37 @@ M.View = ui.component(function(props: {
 						{ x - r - tw, y - th / 2, "end" },
 						{ x - tw / 2, y + r - 1, "center" },
 						{ x - tw / 2, y - r - th + 1, "center" },
+						{ x - 8, y + r + 1, "start", true },
+						{ x + 8 - tw, y + r + 1, "end", true },
+						{ x - 8, y - r - th - 1, "start", true },
+						{ x + 8 - tw, y - r - th - 1, "end", true },
 					}
-					if must then
-						-- (Then hanging under or over it, either way; then the
-						-- corners, close in.)
-						table.insert(spots, { x - 8, y + r + 1, "start", true })
-						table.insert(spots, { x + 8 - tw, y + r + 1, "end", true })
-						table.insert(spots, { x - 8, y - r - th - 1, "start", true })
-						table.insert(spots, { x + 8 - tw, y - r - th - 1, "end", true })
-						local d = r * 0.72
-						table.insert(spots, { x + d, y + d - th / 2, "start", true })
-						table.insert(spots, { x + d, y - d - th / 2, "start", true })
-						table.insert(spots, { x - d - tw, y + d - th / 2, "end", true })
-						table.insert(spots, { x - d - tw, y - d - th / 2, "end", true })
-					end
+					local d = r * 0.72
+					table.insert(spots, { x + d, y + d - th / 2, "start", true })
+					table.insert(spots, { x + d, y - d - th / 2, "start", true })
+					table.insert(spots, { x - d - tw, y + d - th / 2, "end", true })
+					table.insert(spots, { x - d - tw, y - d - th / 2, "end", true })
 					for _, sp in spots do
-						-- (A working thread's name may cross a rim, if it must.)
-						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id, if must and n.kind == "thread" then 0.35 else nil) + far * 0.03
-						local rank = k + on_own(sp[1] - 2, sp[2] - 2, sp[1] + tw + 2, sp[2] + th + 2, n.id) + outside(n, sp[1], sp[2], sp[1] + tw, sp[2] + th)
-						local here_spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 }
-						if rank < least_rank then
-							best, least, least_rank = here_spot, k, rank
+						local x0, y0, x1, y1 = sp[1], sp[2], sp[1] + tw, sp[2] + th
+						if x0 < 6 or y0 < 4 or x1 > w - 6 or y1 > h - 4 then
+							continue
 						end
-						if k < fit_k then
-							fit, fit_k = here_spot, k
+						if hard(x0 - 4, y0 - 2, x1 + 4, y1 + 2, n.id) then
+							continue
 						end
-					end
-					if least_rank < 0.5 then
-						break
+						local k = crowd(x0 - 4, y0 - 4, x1 + 4, y1 + 4, n.id, if must and n.kind == "thread" then 0.35 else nil)
+						local rank = k + far * 0.03 + (if short then 2 else 0) + on_own(x0 - 2, y0 - 2, x1 + 2, y1 + 2, n.id) + outside(n, x0, y0, x1, y1) + on_rim(x0 - 4, y0 - 4, x1 + 4, y1 + 4)
+						table.insert(cands, { rank = rank, k = k, spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 } })
 					end
 				end
-				if least_rank < 0.5 then
-					break
-				end
 			end
-			-- (Lines may run under a name, broken round it; marks and other
-			-- names may not: a thread whose name fits nowhere keeps its dot.)
-			-- (A name that need not show may cross a rim, never a mark or a name.)
-			if best and least >= (if must then 1 else 0.65) and not force and fit then
-				-- (Ranked best but not allowed: the least crowded instead.)
-				best, least = fit, fit_k
-			end
-			-- (Never dropped: a name with no free place takes the least
-			-- crowded, shortened.)
-			if not best then
+			if #cands == 0 then
 				return
 			end
-			if least >= (if must then 1 else 0.65) and #best.text == 1 and (utf8.len(best.text[1]) or 0) > 16 then
-				local t = best.text[1]
-				local short = string.sub(t, 1, (utf8.offset(t, 16) :: number) - 1) .. "…"
-				local nw = c:measure_text(short, opts)
-				best = table.clone(best)
-				if best.align == "end" then
-					best.x += best.tw - nw
-				elseif best.align == "center" then
-					best.x += (best.tw - nw) / 2
-				end
-				best.text, best.tw = { short }, nw
-			end
+			table.sort(cands, function(p: any, q: any): boolean
+				return p.rank < q.rank
+			end)
+			local best = cands[1].spot
 			-- (Never past the field's edge: slid back in, a leader tying it.)
 			local cx0 = math.clamp(best.x, 6, math.max(6, w - best.tw - 6))
 			local cy0 = math.clamp(best.y, 4, math.max(4, h - best.th - 4))
@@ -1011,6 +1027,7 @@ M.View = ui.component(function(props: {
 			local lit = lit_of(rim.n.id)
 			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1, { cap = "round" })
 		end
+		c:restore()
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
 			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
@@ -1042,11 +1059,58 @@ M.View = ui.component(function(props: {
 				end
 				segs = { sub_quad(q, t0, t1) }
 			end
-			local p = ui.path():move(segs[1][1], segs[1][2])
+			-- (Broken round each name it would cross, by hand: a piece left
+			-- shorter than 10px is dropped, not left as a stub.)
+			local ex, ey = at(a)
+			local fx, fy = at(b)
+			local near_a, near_b = reach(a) + 5, reach(b) + 5
+			local function hidden(px: number, py: number): boolean
+				if (px - ex) ^ 2 + (py - ey) ^ 2 < near_a * near_a or (px - fx) ^ 2 + (py - fy) ^ 2 < near_b * near_b then
+					return false
+				end
+				for _, bx in taken do
+					if not (bx :: any).tab and px > bx[1] and px < bx[3] and py > bx[2] and py < bx[4] then
+						return true
+					end
+				end
+				return false
+			end
+			local pieces: { { number } } = {}
 			local length = 0
-			for _, sg in segs do
-				p:quad(sg[3], sg[4], sg[5], sg[6])
-				length += quad_length(sg)
+			for si, sg in segs do
+				local N = 48
+				local run0: number? = nil
+				local function close(t1: number)
+					if run0 then
+						local piece = sub_quad(sg, run0 :: number, t1)
+						local lp = quad_length(piece)
+						local touches = (si == 1 and (run0 :: number) == 0) or (si == #segs and t1 == 1)
+						if lp >= 10 or touches then
+							table.insert(pieces, piece)
+							length += lp
+						end
+						run0 = nil
+					end
+				end
+				for i = 0, N do
+					local t = i / N
+					local u = 1 - t
+					local px = u * u * sg[1] + 2 * u * t * sg[3] + t * t * sg[5]
+					local py = u * u * sg[2] + 2 * u * t * sg[4] + t * t * sg[6]
+					if hidden(px, py) then
+						close(math.max(0, (i - 1) / N))
+					elseif run0 == nil then
+						run0 = t
+					end
+				end
+				close(1)
+			end
+			if #pieces == 0 then
+				continue
+			end
+			local p = ui.path()
+			for _, pc in pieces do
+				p:move(pc[1], pc[2]):quad(pc[3], pc[4], pc[5], pc[6])
 			end
 			-- (A dashed line begins and ends on a dash, its pattern fitted to
 			-- its length.)
@@ -1083,7 +1147,6 @@ M.View = ui.component(function(props: {
 				c:circle(x, y, 2.75, hue.canvas(p.hue, 1))
 			end
 		end
-		c:restore()
 
 		-- 4. The marks.
 		for _, n in graph.nodes do
