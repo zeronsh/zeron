@@ -101,6 +101,9 @@ M.View = ui.component(function(props: {
 	-- keeps it, the drawing reads it.
 	local shown: { [string]: () -> string } = {}
 
+	-- The zoom the web was last fitted at: what its islands are sized for
+	-- (a person's own zoom, a view's change, never resizes them).
+	local layout_z = 1
 	local function fit()
 		local x0, y0, x1, y1 = sim.bounds(graph)
 		local w, h = width:peek(), math.clamp(math.floor(width:peek() * 0.6), 380, 660)
@@ -108,6 +111,8 @@ M.View = ui.component(function(props: {
 		local most = if #graph.nodes <= 12 then 1.1 else 1
 		local zoom = math.clamp(math.min((w - 64) / math.max(1, x1 - x0), (h - 72) / math.max(1, y1 - y0)), 0.35, most)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * zoom, y = h / 2 - (y0 + y1) / 2 * zoom, zoom = zoom })
+		-- (Rounded, so a fit that barely moves doesn't resize anything.)
+		layout_z = math.floor(zoom * 20 + 0.5) / 20
 	end
 
 	-- The settling, a frame at a time, until still; then once more for
@@ -372,13 +377,13 @@ M.View = ui.component(function(props: {
 			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
 			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 10 + load_w else 0) + 8
 			-- (The island makes room for it, and an empty one for its one
-			-- line saying so: settled again if either grew. Measured as at
-			-- zoom 1, so a zoom — a view's change, not the web's — never
-			-- moves anything.)
+			-- line saying so: settled again if either grew. Measured at the
+			-- zoom it was fitted at, so a person's zoom — a view's change,
+			-- not the web's — never moves anything.)
 			local was = ((n :: any).tab_w or 0) + ((n :: any).idle_w or 0)
-			;(n :: any).idle_w = if next(isl.members) == nil then c:measure_text(locale.s("ds.orch.map.idle"), { size = 11 }) else 0
-			;(n :: any).tab_w = tw
-			if math.abs(was - tw - (n :: any).idle_w) > 4 and not retab then
+			;(n :: any).idle_w = if next(isl.members) == nil then c:measure_text(locale.s("ds.orch.map.idle"), { size = 11 }) / layout_z else 0
+			;(n :: any).tab_w = tw / layout_z
+			if math.abs(was - tw / layout_z - (n :: any).idle_w) > 4 and not retab then
 				retab = true
 				ui.after(0, function()
 					graph.alpha = math.max(graph.alpha, 0.3)
