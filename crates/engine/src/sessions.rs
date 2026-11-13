@@ -6292,7 +6292,9 @@ mod tests {
         let journal =
             serde_json::to_string(&sessions.inner.journal.replay("chat", 0).unwrap()).unwrap();
         assert!(!journal.contains(png_b64));
-        assert!(journal.contains(&preview_paths[0]));
+        // (As the journal's JSON writes it: a Windows path's `\` escaped.)
+        let stored = serde_json::to_string(&preview_paths[0]).unwrap();
+        assert!(journal.contains(stored.trim_matches('"')), "{journal}");
 
         let bad = AgentEvent::ToolResult {
             exit_code: None,
