@@ -137,6 +137,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         grok_usage: format!("{base}/v1/billing?format=credits"),
         github_api: base.to_string(),
         github_login: base.to_string(),
+        copilot_api: Some(base.to_string()),
         openai_auth: base.to_string(),
         openai_port: 0,
         nous_portal: base.to_string(),
@@ -1261,7 +1262,14 @@ async fn hermes_lists_its_own_pool_read_only() {
             "OPENROUTER_API_KEY"
         ]
     );
-    assert!(hermes[0].active && !hermes[1].active && !hermes[2].active);
+    // Each provider's first entry is the one its models run on: one in use
+    // per provider group.
+    assert!(hermes[0].active && !hermes[1].active && hermes[2].active && hermes[3].active);
+    let groups: Vec<_> = hermes.iter().map(|a| a.provider.clone().unwrap()).collect();
+    assert_eq!(
+        groups,
+        ["openai-codex", "openai-codex", "nous", "openrouter"]
+    );
     assert!(hermes.iter().all(|a| !a.switchable && a.saved_at.is_none()));
     assert_eq!(hermes[0].plan_label.as_deref(), Some("ChatGPT Pro"));
     assert!((hermes[0].usage_windows[0].used_fraction - 0.1).abs() < 1e-6);
@@ -2070,4 +2078,263 @@ async fn codex_banked_resets_list_persist_and_redeem_against_the_mock() {
     // Nothing to redeem with: refused before any request.
     assert!(accounts.consume_codex_reset_credit(&account, "", "key-3").await.is_err());
     assert!(accounts.consume_codex_reset_credit("no-such-account", "credit-2", "key-4").await.is_err());
+}
+
+// ── per-provider accounts (Pi, OpenCode, Hermes) ────────────────────────────
+
+fn copilot_entry(github_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "oauth",
+        "refresh": github_token,
+        "access": format!("tid=1;exp=9;proxy-ep=proxy.individual.githubcopilot.com;{github_token}"),
+        "expires": 1,
+    })
+}
+
+#[tokio::test]
+async fn copilot_device_sign_in_for_pi_exchanges_the_session_and_keeps_chatgpt() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let polled = polls.clone();
+    let server = MockServer::start(move |method, path, body| match (method, path) {
+        ("POST", "/login/device/code") => {
+            // pi's own Copilot app: Copilot's token exchange serves only it.
+            assert!(body.contains("client_id=Iv1.b507a08c87ecfe98"), "{body}");
+            (
+                200,
+                r#"{"device_code":"dc","user_code":"WXYZ-0001","verification_uri":"https://github.com/login/device","interval":1,"expires_in":900}"#.into(),
+            )
+        }
+        ("POST", "/login/oauth/access_token") => {
+            if polled.fetch_add(1, Ordering::SeqCst) == 0 {
+                (200, r#"{"error":"authorization_pending"}"#.into())
+            } else {
+                (200, r#"{"access_token":"gho_pi","token_type":"bearer"}"#.into())
+            }
+        }
+        ("GET", "/copilot_internal/v2/token") => (
+            200,
+            r#"{"token":"tid=1;exp=2;proxy-ep=proxy.individual.githubcopilot.com;sig","expires_at":2000000000}"#.into(),
+        ),
+        ("GET", "/models") => (
+            200,
+            serde_json::json!({ "data": [
+                { "id": "gpt-6", "model_picker_enabled": true, "policy": { "state": "enabled" } },
+                { "id": "claude-opus-5", "model_picker_enabled": true, "policy": { "state": "unconfigured" } },
+                { "id": "o-old", "model_picker_enabled": true, "policy": { "state": "disabled" } },
+                { "id": "embed", "model_picker_enabled": false, "capabilities": { "supports": { "tool_calls": false } } },
+            ]})
+            .to_string(),
+        ),
+        ("POST", "/models/claude-opus-5/policy") => {
+            assert!(body.contains(r#""state":"enabled""#), "{body}");
+            (200, "{}".into())
+        }
+        ("GET", "/user") => (200, r#"{"id":7,"login":"pi-octo","name":"Pi Octo"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let file = config.pi_agent_dir.join("auth.json");
+    let chatgpt = openai_entry("a@example.com", "acct-a");
+    write(
+        &file,
+        &serde_json::json!({
+            "openai-codex": chatgpt,
+            "openrouter": { "type": "api_key", "key": "sk-or-keep" },
+        })
+        .to_string(),
+    );
+    let start = accounts
+        .start_login_with(HarnessId::Pi, Some("github-copilot"), None)
+        .await
+        .unwrap();
+    assert_eq!(start.url, "https://github.com/login/device");
+    assert_eq!(start.callback_port, None, "a device code needs no tunnel");
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    assert_eq!(server.hits("POST /models/claude-opus-5/policy"), 1);
+    assert_eq!(server.hits("POST /models/gpt-6/policy"), 0);
+
+    // pi's entry shape: the GitHub token refreshes, the Copilot session is
+    // the access token; the first Copilot login is in use at once.
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let copilot = &live["github-copilot"];
+    assert_eq!(copilot["type"], "oauth");
+    assert_eq!(copilot["refresh"], "gho_pi");
+    assert!(copilot["access"].as_str().unwrap().contains("proxy-ep="));
+    assert_eq!(copilot["expires"], 2_000_000_000i64 * 1000 - 300_000);
+    assert_eq!(
+        copilot["availableModelIds"],
+        serde_json::json!(["gpt-6", "claude-opus-5"])
+    );
+    // The ChatGPT login beside it is untouched, and so is everything else.
+    assert_eq!(live["openai-codex"], chatgpt);
+    assert_eq!(live["openrouter"]["key"], "sk-or-keep");
+
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    let copilot_rows: Vec<_> = pi
+        .iter()
+        .filter(|a| a.provider.as_deref() == Some("github-copilot"))
+        .collect();
+    assert_eq!(copilot_rows.len(), 1);
+    assert_eq!(copilot_rows[0].email.as_deref(), Some("pi-octo"));
+    assert!(copilot_rows[0].active && copilot_rows[0].switchable);
+    assert!(
+        pi.iter()
+            .any(|a| a.provider.as_deref() == Some("openai-codex") && a.active),
+        "the ChatGPT login stays in use"
+    );
+}
+
+#[tokio::test]
+async fn a_copilot_sign_in_without_copilot_says_so_and_writes_nothing() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("POST", "/login/device/code") => (
+            200,
+            r#"{"device_code":"dc","user_code":"NOPE-0000","verification_uri":"https://github.com/login/device","interval":1}"#.into(),
+        ),
+        ("POST", "/login/oauth/access_token") => (200, r#"{"access_token":"gho_none"}"#.into()),
+        ("GET", "/copilot_internal/v2/token") => (404, r#"{"message":"Not Found"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let start = accounts
+        .start_login_with(HarnessId::Pi, Some("github-copilot"), None)
+        .await
+        .unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    let last = polls.last().unwrap();
+    assert_eq!(last.status, AgentLoginStatus::Error);
+    assert!(
+        last.message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no GitHub Copilot"),
+        "{last:?}"
+    );
+    assert!(!config.pi_agent_dir.join("auth.json").exists());
+    assert!(accounts.read_slots(HarnessId::Pi).is_empty());
+}
+
+#[tokio::test]
+async fn switching_one_providers_account_never_touches_another_providers_login() {
+    let server = MockServer::start(|_, path, _| match path {
+        "/user" => (200, r#"{"id":9,"login":"octo"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let file = config.pi_agent_dir.join("auth.json");
+    let copilot = copilot_entry("gho_keep");
+    let store = |chatgpt: serde_json::Value| {
+        serde_json::json!({ "openai-codex": chatgpt, "github-copilot": copilot }).to_string()
+    };
+    write(&file, &store(openai_entry("a@example.com", "acct-a")));
+    accounts.list(false).await.unwrap();
+    write(&file, &store(openai_entry("b@example.com", "acct-b")));
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    assert_eq!(pi.len(), 3);
+    // One in use per provider group: b's ChatGPT, and the Copilot login.
+    let in_use = |rows: &[AgentAccount], provider: &str| -> Vec<String> {
+        rows.iter()
+            .filter(|a| a.provider.as_deref() == Some(provider) && a.active)
+            .map(|a| a.email.clone().unwrap())
+            .collect()
+    };
+    assert_eq!(in_use(&pi, "openai-codex"), ["b@example.com"]);
+    assert_eq!(in_use(&pi, "github-copilot"), ["octo"]);
+
+    let a = pi
+        .iter()
+        .find(|r| r.email.as_deref() == Some("a@example.com"))
+        .unwrap();
+    let after = rows(
+        &accounts.activate(HarnessId::Pi, &a.id).await.unwrap(),
+        HarnessId::Pi,
+    );
+    assert_eq!(in_use(&after, "openai-codex"), ["a@example.com"]);
+    assert_eq!(in_use(&after, "github-copilot"), ["octo"]);
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(live["openai-codex"]["accountId"], "acct-a");
+    assert_eq!(live["github-copilot"], copilot, "byte for byte");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hermes_adds_an_xai_account_through_its_own_device_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let cli = script(
+        tmp.path(),
+        "hermes",
+        r#"#!/bin/sh
+[ "$*" = "auth add xai-oauth --type oauth --no-browser" ] || { echo "bad args: $*" >&2; exit 3; }
+printf 'Open this URL to sign in:\n  https://accounts.x.ai/device?user_code=XAI-1234\nEnter this code: XAI-1234\nWaiting for approval (polling every 5s)...\n'
+sleep 1
+mkdir -p "$HERMES_HOME"
+printf '{"active_provider":"openai-codex","credential_pool":{"xai-oauth":[{"id":"x1","label":"grok@example.com","auth_type":"oauth","priority":0,"access_token":"x"}]}}' > "$HERMES_HOME/auth.json"
+"#,
+    );
+    accounts.override_cli(HarnessId::Hermes, cli);
+    let start = accounts
+        .start_login_with(HarnessId::Hermes, Some("xai-oauth"), None)
+        .await
+        .unwrap();
+    assert_eq!(start.url, "https://accounts.x.ai/device?user_code=XAI-1234");
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    let hermes = rows(&accounts.list(false).await.unwrap(), HarnessId::Hermes);
+    assert_eq!(hermes.len(), 1);
+    assert_eq!(hermes[0].provider.as_deref(), Some("xai-oauth"));
+    assert!(hermes[0].active && !hermes[0].switchable);
+}
+
+#[test]
+fn copilot_sessions_name_their_own_api_and_models() {
+    assert_eq!(
+        oauth::copilot_api_from_token("tid=1;proxy-ep=proxy.business.githubcopilot.com;x")
+            .as_deref(),
+        Some("https://api.business.githubcopilot.com")
+    );
+    assert_eq!(
+        oauth::copilot_api_from_token("tid=1;exp=2").as_deref(),
+        Some("https://api.individual.githubcopilot.com")
+    );
+    // A token naming any other host is never sent there.
+    assert_eq!(
+        oauth::copilot_api_from_token("proxy-ep=proxy.evil.example;x"),
+        None
+    );
+    assert_eq!(
+        oauth::copilot_api_from_token("proxy-ep=proxy.githubcopilot.com.evil.example"),
+        None
+    );
+
+    let catalog = serde_json::json!({ "data": [
+        { "id": "a", "model_picker_enabled": false, "policy": { "state": "enabled" } },
+        { "id": "b", "model_picker_enabled": false, "policy": { "state": "unconfigured" } },
+    ]});
+    // An individual account whose picker flags are all off: pi's fallback.
+    let (available, enable) = oauth::copilot_model_choices(&catalog, true).unwrap();
+    assert_eq!(
+        (available, enable),
+        (vec!["a".to_string()], vec!["b".to_string()])
+    );
+    let (available, enable) = oauth::copilot_model_choices(&catalog, false).unwrap();
+    assert!(available.is_empty() && enable.is_empty());
+    assert!(oauth::copilot_model_choices(&serde_json::json!({}), true).is_none());
 }

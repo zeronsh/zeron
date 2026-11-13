@@ -113,13 +113,26 @@ local function card(row: State<agents.Agent>): Node
 		on_add = function()
 			agents.sign_in(id)
 		end,
+		-- An agent with a login per model provider: its accounts by provider,
+		-- each group adding its own.
+		groups = if first.groups
+			then function()
+				return (row:get().groups or {}) :: any
+			end
+			else nil,
+		login_for = function(): string?
+			return row:get().login_for
+		end,
+		on_add_to = function(provider: string)
+			agents.sign_in_to(id, provider)
+		end,
 		on_code = function(code: string)
 			agents.complete(id, code)
 		end,
 		settle = function(next: string)
 			local login = row:peek().login
 			if next == "waiting" then
-				agents.sign_in(id)
+				agents.retry(row:peek())
 			elseif login == "waiting" or login == "code" then
 				agents.cancel(id)
 			else

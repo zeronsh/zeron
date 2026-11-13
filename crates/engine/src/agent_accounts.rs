@@ -11,13 +11,20 @@
 //! |----------|--------|--------|--------------------------------|-------|
 //! | Grok     | yes    | yes    | `grok login --device-auth`     | yes   |
 //! | Devin    | yes    | yes    | ACP `authenticate` (loopback)  | yes   |
-//! | OpenCode | yes    | yes    | ChatGPT loopback, Copilot code | yes   |
-//! | Pi       | yes    | yes    | ChatGPT loopback               | yes   |
+//! | OpenCode | yes    | yes²   | ChatGPT loopback, Copilot code | yes   |
+//! | Pi       | yes    | yes²   | ChatGPT loopback, Copilot code | yes   |
 //! | Hermes   | yes    | no¹    | `hermes auth add` (device code) | yes  |
 //!
 //! ¹ Hermes keeps every account in its own credential pool and rotates
 //! through it itself; zeron lists the pool and adds to it through Hermes'
 //! own CLI, but never rewrites it.
+//!
+//! ² Per model provider: these agents keep one login per provider in one
+//! store, and a run reads the entry of its model's provider. Each row
+//! carries its provider (`AgentAccount::provider`); rows sharing one form a
+//! group with at most one in use, and switching (or a new sign-in) rewrites
+//! that provider's entry alone — a ChatGPT switch never touches the Claude
+//! or Copilot login beside it.
 //!
 //! The original four providers each store exactly one live login:
 //!
@@ -725,6 +732,9 @@ struct ProbeEndpoints {
     github_api: String,
     /// GitHub's OAuth root (`/login/device/code`, `/login/oauth/access_token`).
     github_login: String,
+    /// A Copilot session's API root (`/models`): `None` in production, where
+    /// it's read from the session token itself.
+    copilot_api: Option<String>,
     /// OpenAI's OAuth root (`/oauth/authorize`, `/oauth/token`).
     openai_auth: String,
     /// The ChatGPT sign-in's loopback port — FIXED at 1455 by the client
@@ -752,6 +762,7 @@ impl Default for ProbeEndpoints {
             grok_usage: usage::GROK_USAGE_URL.into(),
             github_api: "https://api.github.com".into(),
             github_login: "https://github.com".into(),
+            copilot_api: None,
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
@@ -1618,8 +1629,12 @@ impl AgentAccounts {
 
     /// [`Self::start_login_for`] for one model provider of an agent that
     /// keeps a login per provider (`provider`: OpenCode's `openai` /
-    /// `github-copilot`, Pi's `openai-codex`, Hermes' `openai-codex` /
-    /// `nous`); `None` picks the agent's default.
+    /// `github-copilot`, Pi's `openai-codex` / `github-copilot`, Hermes'
+    /// `openai-codex` / `nous` / `xai-oauth` —
+    /// `zeron_proto::providers::login_options`); `None` picks the agent's
+    /// default. The new login joins its provider's group only: it takes
+    /// over that provider's live login when there is none (or it re-signs
+    /// that one in), and never touches another provider's.
     pub async fn start_login_with(
         &self,
         harness: HarnessId,
@@ -1657,6 +1672,7 @@ impl AgentAccounts {
                     self.start_openai_login(HarnessId::Pi, "openai-codex")
                         .await?
                 }
+                "github-copilot" => self.start_copilot_login(HarnessId::Pi).await?,
                 other => return Err(stores::unsupported_login(harness, other)),
             },
             HarnessId::Hermes => {

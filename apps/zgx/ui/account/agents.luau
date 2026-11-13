@@ -8,6 +8,8 @@
 --                          list = { Agent } }
 --   agents.load()        looks again (and the first time)
 --   agents.sign_in(id)   a new account for that agent, through the browser
+--   agents.sign_in_to(id, provider)  the same, for one model provider of
+--                        an agent that keeps a login per provider
 --   agents.cancel(id)    gives up that sign-in
 --   agents.dismiss(id)   forgets one that failed
 --   agents.set_enabled(id, on)
@@ -25,6 +27,12 @@
 -- account: { id, email, plan, session, week, active, session_resets?,
 -- week_resets? }, `session` and `week` its plan's two windows, 0 to 1, and
 -- when each starts over (seconds since the epoch).
+--
+-- An agent that keeps a login per model provider (Pi, OpenCode, Hermes)
+-- also has `groups`: its accounts by provider, `{ id, name, accounts, add?,
+-- hint?, read_only }` (`add`, what its add row says; nil: Zeron can't sign
+-- in to it, and `hint` says how the agent does), and its sign-in's
+-- provider, `login_for`. Its accounts each say their `provider`.
 --
 -- A Codex account also has what it banks: `banked` (how many resets) and
 -- `resets`, soonest to expire first ({ id, title, scope?, expires? },
@@ -52,6 +60,16 @@ export type Account = {
 	banked: number?,
 	resets: { Reset }?,
 	reset: ResetWord?,
+	switchable: boolean?,
+	provider: string?,
+}
+export type Group = {
+	id: string,
+	name: string,
+	accounts: { Account },
+	add: string?,
+	hint: string?,
+	read_only: boolean?,
 }
 export type Agent = {
 	id: string,
@@ -64,6 +82,8 @@ export type Agent = {
 	installing: boolean,
 	login: string,
 	accounts: { Account },
+	groups: { Group }?,
+	login_for: string?,
 }
 export type Now = { state: string, list: { Agent }, target: string? }
 
@@ -83,6 +103,22 @@ end
 
 function M.sign_in(id: string)
 	ui.call("agents.sign_in", id):after(function() end, quietly())
+end
+
+-- A new account for one model provider of an agent that keeps a login per
+-- provider (one of its `groups`).
+function M.sign_in_to(id: string, provider: string)
+	ui.call("agents.sign_in", { id = id, provider = provider }):after(function() end, quietly())
+end
+
+-- Again, the sign-in that failed: to the provider it was for, if it was for
+-- one.
+function M.retry(a: Agent)
+	if a.login_for then
+		M.sign_in_to(a.id, a.login_for)
+	else
+		M.sign_in(a.id)
+	end
 end
 
 function M.cancel(id: string)
@@ -132,6 +168,10 @@ end
 -- by agent (only an agent that signs in and reports usage): `{ id, email,
 -- plan, active, can_switch, error?, windows = { { label, used } } }`.
 M.on_device = ui.shared("agents.on_device", {} :: { [string]: { [string]: { any } } })
+
+-- Each per-provider agent's sign-ins, by provider: `{ [harness] = {
+-- [provider] = { name, add } } }` (`add`: what adding one says).
+M.logins = ui.shared("agents.logins", {} :: { [string]: { [string]: { name: string, add: string } } })
 
 -- Their accounts, on first sight of a device. (A host with no accounts to
 -- say, a fixture's: none come.)

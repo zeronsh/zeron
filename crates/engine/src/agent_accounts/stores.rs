@@ -31,16 +31,19 @@
 //!   0600, guarded by proper-lockfile's `auth.json.lock` DIRECTORY): the
 //!   same per-provider shape (`openai-codex`, `anthropic`, `github-copilot`),
 //!   hot-reloaded by running agents. Swap = rewrite one entry under that
-//!   lock. Add account = ChatGPT only (zeron's own loopback, see
-//!   [`super::oauth`]); Claude and Copilot logins stay with pi's `/login` —
-//!   minting Claude Code OAuth for a third-party agent is not something
-//!   zeron should do, and pi's Copilot login is an internal token exchange.
+//!   lock. Add account = ChatGPT (zeron's own loopback) and GitHub Copilot
+//!   (device code, then pi's own Copilot exchange — see [`super::oauth`]);
+//!   Claude logins stay with pi's `/login` — minting Claude Code OAuth for a
+//!   third-party agent is not something zeron should do. Pi's other OAuth
+//!   logins (xAI, Kimi, Meta, OpenRouter, ChatGPT-direct `openai`) aren't
+//!   listed: zeron can't tell their accounts apart yet.
 //! - **Hermes** — `$HERMES_HOME/auth.json` (default `~/.hermes`): Hermes
 //!   keeps EVERY account itself, in `credential_pool[provider]`, and picks
 //!   (fill-first by `priority`, or round-robin) and refreshes them on its
 //!   own. A running Hermes writes its in-memory pool back over the file, so
-//!   a zeron reorder would be silently undone — zeron lists the pool (the
-//!   active provider's first entry is "in use"), probes usage, and adds
+//!   a zeron reorder would be silently undone — zeron lists the pool (each
+//!   provider's first entry by priority is that provider's "in use": a run
+//!   on one of its models fills from it first), probes usage, and adds
 //!   accounts through `hermes auth add` (device code; Hermes appends to its
 //!   own pool under its own lock). It never rewrites the pool.
 //!
@@ -158,8 +161,11 @@ pub(super) fn upstream_vendor(store_key: &str) -> &'static str {
     }
 }
 
-/// The logins `hermes auth add` can run unattended (device codes).
-pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous"];
+/// The logins `hermes auth add` can run unattended (device codes): its
+/// ChatGPT, Nous Portal and xAI flows print a page and a code, then poll.
+/// (Its Claude flow wants a pasted code; Qwen imports Qwen CLI's login;
+/// OpenRouter mints an API key; MiniMax wasn't verified.)
+pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous", "xai-oauth"];
 
 pub(super) fn unsupported_login(harness: HarnessId, provider: &str) -> EngineError {
     let reason = match (harness, provider) {
@@ -1086,8 +1092,10 @@ impl AgentAccounts {
     // ── Hermes ──────────────────────────────────────────────────────────────
 
     /// Hermes' credential pool as rows (never persisted as slots — the pool
-    /// is Hermes' own), plus the account keys in use: the active provider's
-    /// first entry by priority (fill-first, Hermes' default strategy).
+    /// is Hermes' own), plus the account keys in use: each provider's first
+    /// entry by priority (fill-first, Hermes' default strategy — a model of
+    /// that provider runs on it). The active provider's rows come first, so
+    /// an app reading one "in use" for all of Hermes still finds its own.
     pub(super) fn hermes_slots(&self) -> (Vec<Slot>, HashSet<String>) {
         let mut slots = Vec::new();
         let mut active = HashSet::new();
@@ -1118,7 +1126,7 @@ impl AgentAccounts {
             for (ix, entry) in entries.iter().enumerate() {
                 let id = str_field(entry, "id").unwrap_or_default();
                 let account_key = format!("{provider}:{id}");
-                if ix == 0 && active_provider.as_deref() == Some(provider.as_str()) {
+                if ix == 0 {
                     active.insert(account_key.clone());
                 }
                 slots.push(Slot {
@@ -1441,7 +1449,7 @@ pub(super) fn scan_grok_url(output: &str) -> Option<String> {
 }
 
 pub(super) fn scan_hermes_url(output: &str) -> Option<String> {
-    scan_https_url(output, &["nousresearch.com", "openai.com"])
+    scan_https_url(output, &["nousresearch.com", "openai.com", "x.ai"])
 }
 
 /// Devin's sign-in page — its CLI-auth page (`/auth/cli/…`) or the Windsurf

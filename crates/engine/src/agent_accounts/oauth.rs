@@ -10,12 +10,21 @@
 //!   Each login is a fresh grant: a refresh token is never shared with the
 //!   Codex slots (OpenAI rotates them, so sharing one logs the other out).
 //!   The callback port is reported, so a remote login tunnels it.
-//! - **GitHub Copilot** (OpenCode `github-copilot`): GitHub's device flow
-//!   with OpenCode's OAuth app (scope `read:user`) — the dialog shows the
-//!   code; no loopback, so a remote login needs no tunnel. OpenCode stores
-//!   the GitHub token as both `access` and `refresh` with `expires: 0`.
-//!   Pi's Copilot login exchanges the token for an internal Copilot session
-//!   and is left to pi's own `/login`.
+//! - **GitHub Copilot** (`github-copilot`, OpenCode and Pi): GitHub's
+//!   device flow (scope `read:user`) — the dialog shows the code; no
+//!   loopback, so a remote login needs no tunnel. Each agent signs in with
+//!   its own OAuth app and keeps its own entry shape:
+//!   - OpenCode (its app): the GitHub token as both `access` and `refresh`,
+//!     `expires: 0`.
+//!   - Pi (the Copilot editor app pi's `/login` uses — Copilot's token
+//!     endpoint only serves that one): the GitHub token is `refresh`, and
+//!     `access` the Copilot session it's exchanged for at
+//!     `copilot_internal/v2/token`, with its `expires` — pi re-exchanges it
+//!     itself when it runs out. As pi's login does, the models the account
+//!     may pick but hasn't enabled yet (`policy.state: "unconfigured"`) are
+//!     enabled, and the ones it can use recorded as `availableModelIds`
+//!     (pi lists those). Both best effort: pi fills them on its next
+//!     refresh anyway. github.com only — an Enterprise host stays with pi.
 
 use super::stores::{Upstream, openai_detected, upstream_of};
 use super::*;
@@ -29,6 +38,18 @@ pub(super) const OPENAI_LOOPBACK_PORT: u16 = 1455;
 const OPENAI_SCOPES: &str = "openid profile email offline_access";
 /// OpenCode's GitHub OAuth app (its Copilot device flow).
 const OPENCODE_COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
+/// The Copilot editor app pi's `/login` signs in with (pi-ai
+/// `auth/oauth/github-copilot`): Copilot's token exchange serves its tokens.
+const PI_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+/// The headers pi's Copilot client sends (pi-ai `COPILOT_HEADERS`).
+const PI_COPILOT_HEADERS: [(&str, &str); 4] = [
+    ("User-Agent", "GitHubCopilotChat/0.35.0"),
+    ("Editor-Version", "vscode/1.107.0"),
+    ("Editor-Plugin-Version", "copilot-chat/0.35.0"),
+    ("Copilot-Integration-Id", "vscode-chat"),
+];
+/// Where an individual Copilot account's API is when its token names none.
+const COPILOT_INDIVIDUAL_API: &str = "https://api.individual.githubcopilot.com";
 /// How long a sign-in waits on the browser before giving up.
 const LOGIN_WAIT: Duration = Duration::from_secs(10 * 60);
 
@@ -232,9 +253,9 @@ impl AgentAccounts {
         self.save_new_login(harness, &detected).await
     }
 
-    /// GitHub Copilot for OpenCode: GitHub's device flow. The start asks
-    /// GitHub for the code (the dialog shows it), then a task polls until
-    /// the user approves.
+    /// GitHub Copilot for OpenCode / Pi: GitHub's device flow, with the
+    /// agent's own OAuth app. The start asks GitHub for the code (the dialog
+    /// shows it), then a task polls until the user approves.
     pub(super) async fn start_copilot_login(
         &self,
         harness: HarnessId,
@@ -251,9 +272,9 @@ impl AgentAccounts {
             .http
             .post(format!("{login}/login/device/code"))
             .header("Accept", "application/json")
-            .header("User-Agent", "zeron")
+            .header("User-Agent", copilot_user_agent(harness))
             .form(&[
-                ("client_id", OPENCODE_COPILOT_CLIENT_ID),
+                ("client_id", copilot_client_id(harness)),
                 ("scope", "read:user"),
             ])
             .send()
@@ -325,9 +346,9 @@ impl AgentAccounts {
                 .http
                 .post(format!("{login}/login/oauth/access_token"))
                 .header("Accept", "application/json")
-                .header("User-Agent", "zeron")
+                .header("User-Agent", copilot_user_agent(harness))
                 .form(&[
-                    ("client_id", OPENCODE_COPILOT_CLIENT_ID),
+                    ("client_id", copilot_client_id(harness)),
                     ("device_code", device_code),
                     ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ])
@@ -364,12 +385,15 @@ impl AgentAccounts {
                 }
             }
         };
-        let entry = serde_json::json!({
-            "type": "oauth",
-            "refresh": token,
-            "access": token,
-            "expires": 0,
-        });
+        let entry = match harness {
+            HarnessId::Pi => self.pi_copilot_entry(&token).await?,
+            _ => serde_json::json!({
+                "type": "oauth",
+                "refresh": token,
+                "access": token,
+                "expires": 0,
+            }),
+        };
         let (account_key, profile) = self
             .github_identity("github-copilot", &token, &entry)
             .await
@@ -379,6 +403,207 @@ impl AgentAccounts {
         let detected = Detected::known(account_key, profile, entry).keyed("github-copilot");
         self.save_new_login(harness, &detected).await
     }
+
+    /// Pi's Copilot entry for a fresh GitHub token, as pi's `/login` writes
+    /// it: the token exchanged for a Copilot session (refused: the account
+    /// has no Copilot, said so), then the models it may use.
+    async fn pi_copilot_entry(&self, github_token: &str) -> Result<serde_json::Value, EngineError> {
+        let api = self.inner.endpoints.github_api.trim_end_matches('/');
+        let mut request = self
+            .inner
+            .http
+            .get(format!("{api}/copilot_internal/v2/token"))
+            .header("Accept", "application/json")
+            .bearer_auth(github_token)
+            .timeout(Duration::from_secs(15));
+        for (name, value) in PI_COPILOT_HEADERS {
+            request = request.header(name, value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| EngineError::Other(format!("Couldn't reach GitHub Copilot: {e}")))?;
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403 | 404) {
+            return Err(EngineError::Other(
+                "That GitHub account has no GitHub Copilot — sign in with one that does.".into(),
+            ));
+        }
+        if !status.is_success() {
+            // Never echo the body: it may carry token material.
+            return Err(EngineError::Other(format!(
+                "GitHub Copilot refused the sign-in ({status}) — try again."
+            )));
+        }
+        let session: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| EngineError::Other(format!("GitHub Copilot returned junk: {e}")))?;
+        let (Some(access), Some(expires_at)) = (
+            str_field(&session, "token"),
+            session.get("expires_at").and_then(|v| v.as_i64()),
+        ) else {
+            return Err(EngineError::Other(
+                "GitHub Copilot returned no session — try signing in again.".into(),
+            ));
+        };
+        let mut entry = serde_json::json!({
+            "type": "oauth",
+            "refresh": github_token,
+            "access": access,
+            // pi re-exchanges five minutes early, as its own login sets it.
+            "expires": expires_at * 1000 - 5 * 60 * 1000,
+        });
+        if let Some(models) = self.pi_copilot_models(&access).await
+            && let Some(map) = entry.as_object_mut()
+        {
+            map.insert("availableModelIds".into(), serde_json::json!(models));
+        }
+        Ok(entry)
+    }
+
+    /// The Copilot models a fresh Pi login may use (pi-ai
+    /// `parseGitHubCopilotModelCatalog` + `enableGitHubCopilotModels`):
+    /// those in the account's picker and not disabled by policy, plus the
+    /// ones it may pick but never enabled, enabled now. `None` when the
+    /// catalog can't be read (pi lists every model until it refreshes).
+    async fn pi_copilot_models(&self, copilot_token: &str) -> Option<Vec<String>> {
+        let base = match &self.inner.endpoints.copilot_api {
+            Some(base) => base.trim_end_matches('/').to_string(),
+            None => copilot_api_from_token(copilot_token)?,
+        };
+        let headers = |mut request: reqwest::RequestBuilder| {
+            request = request
+                .header("Accept", "application/json")
+                .bearer_auth(copilot_token)
+                .timeout(Duration::from_secs(10));
+            for (name, value) in PI_COPILOT_HEADERS {
+                request = request.header(name, value);
+            }
+            request
+        };
+        let catalog: serde_json::Value = headers(self.inner.http.get(format!("{base}/models")))
+            .header("X-GitHub-Api-Version", "2026-06-01")
+            .send()
+            .await
+            .ok()
+            .filter(|res| res.status().is_success())?
+            .json()
+            .await
+            .ok()?;
+        let (mut available, to_enable) =
+            copilot_model_choices(&catalog, base == COPILOT_INDIVIDUAL_API)?;
+        for id in to_enable.into_iter().take(32) {
+            let enabled = headers(
+                self.inner
+                    .http
+                    .post(format!("{base}/models/{}/policy", urlencode(&id))),
+            )
+            .header("openai-intent", "chat-policy")
+            .header("x-interaction-type", "chat-policy")
+            .json(&serde_json::json!({ "state": "enabled" }))
+            .send()
+            .await;
+            match enabled {
+                Ok(res) if res.status().is_success() => {
+                    if !available.contains(&id) {
+                        available.push(id);
+                    }
+                }
+                // Rate limited: the rest stay as they are (pi stops too).
+                Ok(res) if res.status().as_u16() == 429 => break,
+                _ => {}
+            }
+        }
+        Some(available)
+    }
+}
+
+fn copilot_client_id(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::Pi => PI_COPILOT_CLIENT_ID,
+        _ => OPENCODE_COPILOT_CLIENT_ID,
+    }
+}
+
+fn copilot_user_agent(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::Pi => PI_COPILOT_HEADERS[0].1,
+        _ => "zeron",
+    }
+}
+
+/// A Copilot session's API root, from its token's `proxy-ep` (`proxy.X` →
+/// `https://api.X`) — only on GitHub Copilot's own hosts, or the individual
+/// default when the token names none.
+pub(super) fn copilot_api_from_token(token: &str) -> Option<String> {
+    let Some(proxy) = token
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("proxy-ep="))
+    else {
+        return Some(COPILOT_INDIVIDUAL_API.to_string());
+    };
+    let host = proxy.trim().trim_start_matches("proxy.");
+    let host = format!("api.{host}").to_ascii_lowercase();
+    let valid = host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    (valid && super::stores::host_in(&host, &["githubcopilot.com"]))
+        .then(|| format!("https://{host}"))
+}
+
+/// From a Copilot `/models` reply: the model ids the account can use now,
+/// and those it may pick but must enable first. `individual` admits pi's
+/// fallback for individual accounts whose picker flags are all off.
+pub(super) fn copilot_model_choices(
+    catalog: &serde_json::Value,
+    individual: bool,
+) -> Option<(Vec<String>, Vec<String>)> {
+    struct Listed {
+        id: String,
+        picker: bool,
+        policy: Option<String>,
+    }
+    let listed: Vec<Listed> = catalog
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            let id = str_field(item, "id")?;
+            let tools = item
+                .pointer("/capabilities/supports/tool_calls")
+                .and_then(|v| v.as_bool());
+            (tools != Some(false)).then(|| Listed {
+                id,
+                picker: item.get("model_picker_enabled").and_then(|v| v.as_bool()) == Some(true),
+                policy: item
+                    .pointer("/policy/state")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    let in_picker: Vec<String> = listed
+        .iter()
+        .filter(|m| m.picker && m.policy.as_deref() != Some("disabled"))
+        .map(|m| m.id.clone())
+        .collect();
+    let fallback = individual && in_picker.is_empty();
+    let available = if fallback {
+        listed
+            .iter()
+            .filter(|m| m.policy.as_deref() == Some("enabled"))
+            .map(|m| m.id.clone())
+            .collect()
+    } else {
+        in_picker
+    };
+    let to_enable = listed
+        .iter()
+        .filter(|m| m.policy.as_deref() == Some("unconfigured") && (m.picker || fallback))
+        .map(|m| m.id.clone())
+        .collect();
+    Some((available, to_enable))
 }
 
 /// A loopback listener on `port` (0 = any): `localhost` resolves to either

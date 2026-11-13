@@ -37,6 +37,7 @@ local Links = require("@self/links")
 local Dialog = require("@self/dialog").Dialog
 local RadioGroup = require("@self/radio")
 local PrivateText = require("@self/private_text")
+local SectionTitle = require("@self/section_title")
 local locale = require("@self/locale")
 
 local M = {}
@@ -69,6 +70,24 @@ export type Account = {
 	-- When each window starts over (seconds since the epoch), if known.
 	session_resets: number?,
 	week_resets: number?,
+	-- (A grouped card's:) whether it's the one in use in its group, and
+	-- whether it can be put in use.
+	active: boolean?,
+	switchable: boolean?,
+}
+
+-- One model provider's accounts of an agent that keeps a login per
+-- provider (Pi, OpenCode, Hermes): who you sign in to (`name`), its
+-- accounts (one in use: its `active`), what its add row says (nil: Zeron
+-- can't sign in to it, and `hint` says how the agent does), and whether its
+-- accounts are the agent's own to choose (`read_only`, Hermes' pool).
+export type AccountGroup = {
+	id: string,
+	name: string,
+	accounts: { Account },
+	add: string?,
+	hint: string?,
+	read_only: boolean?,
 }
 
 -- When a window starts over, in this Mac's time, as the shipping app says
@@ -235,6 +254,16 @@ export type CardProps = {
 	login_methods: (() -> { LoginMethod })?,
 	on_sign_in_with: ((method: string) -> ())?,
 	on_key: ((var: string, value: string) -> ())?,
+	-- An agent that keeps a login per model provider: its accounts by
+	-- provider, as they stand (`accounts` then only finds one by id). Each
+	-- group with accounts is headed by its provider, the one in use marked
+	-- in it alone, and ends in its own add row ("Add ChatGPT account");
+	-- a provider with none yet is a Connect row at the card's foot. A
+	-- sign-in shows in the row of its provider (`login_for`), started by
+	-- `on_add_to`.
+	groups: (() -> { AccountGroup })?,
+	login_for: (() -> string?)?,
+	on_add_to: ((provider: string) -> ())?,
 }
 
 export type LoginMethod = {
@@ -334,7 +363,7 @@ end)
 -- the one in use marked, its two meters and its actions at the end. Every
 -- account row has the same shape; what Codex banks for one is the row
 -- after it. Read from its row's state, so it changes in place.
-local function account(c: CardProps, row: State<Account>): Node
+local function account(c: CardProps, row: State<Account>, group: { read_only: boolean? }?): Node
 	-- (Its limits just started over: the data has its windows at 0 until a
 	-- probe says more.)
 	local function reset(): boolean
@@ -392,7 +421,11 @@ local function account(c: CardProps, row: State<Account>): Node
 		lead = ui.presence(email, function(e: string): Node
 			return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
 		end),
+		-- (In a group, the one in use there: each group has its own.)
 		badge = ui.show(function()
+			if group then
+				return row:get().active == true
+			end
 			return c.active() == email()
 		end, Badge { locale.t("ds.provider_card.in_use"), tone = "accent" }),
 		control = ui.row {
@@ -409,7 +442,8 @@ local function account(c: CardProps, row: State<Account>): Node
 				meter("ds.provider_card.session", session),
 				meter("ds.provider_card.week", week),
 			},
-			Actions { card = c, account = row },
+			-- (The agent's own to choose, Hermes' pool: nothing to do here.)
+			if group and group.read_only then nil else Actions { card = c, account = row },
 		},
 	}
 end
@@ -902,6 +936,140 @@ local function failed(provider: Provider, settle: (next: string) -> (), note: ((
 	}
 end
 
+-- A provider group's heading, over its accounts: who you sign in to.
+local function heading(group: State<AccountGroup>): Node
+	local function name(): string
+		return group:get().name
+	end
+	return ui.row {
+		w_full = true,
+		px = "$space.4",
+		pt = "$space.3",
+		pb = "$space.2",
+		items = "center",
+		SectionTitle { name, heading = 3 },
+	}
+end
+
+-- How the agent adds an account to a group Zeron can't sign in to (Pi's
+-- Claude logins): said quietly under the group, never a row that looks
+-- like it does something.
+local function hint_line(text: () -> string): Node
+	return ui.row {
+		w_full = true,
+		px = "$space.4",
+		py = "$space.3",
+		items = "center",
+		ui.text { text, grow = 1, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true },
+	}
+end
+
+-- A group's foot: its add row ("Add ChatGPT account", or "Connect GitHub
+-- Copilot" while it has none), or, while a sign-in to its provider is
+-- under way, that sign-in in its place; a group Zeron can't add to says
+-- how the agent does. Swapped as the sign-in starts and ends.
+local function group_foot(c: CardProps, group: State<AccountGroup>, kind: () -> string): Node
+	local id = group:peek().id
+	-- (Named for its provider: "Signing in to GitHub Copilot".)
+	local named: Provider = { id = id, name = group:peek().name }
+	local function mine(): string
+		local k = kind()
+		if k ~= "idle" and c.login_for and c.login_for() == id then
+			return k
+		end
+		local g = group:get()
+		return if g.add then "add" elseif g.hint and #g.accounts > 0 then "hint" else "none"
+	end
+	return ui.presence(mine, function(k: string): Node
+		if k == "waiting" then
+			return ui.column { w_full = true, rule(), waiting(named, c.settle, c.login_note, c) }
+		elseif k == "code" then
+			return ui.column { w_full = true, rule(), code_row(named, c.settle, c.on_code) }
+		elseif k == "failed" then
+			return ui.column { w_full = true, rule(), failed(named, c.settle, c.login_note, c) }
+		elseif k == "add" then
+			return ui.column {
+				w_full = true,
+				rule(),
+				Settings.Row {
+					label = function(): string
+						return group:get().add or ""
+					end,
+					lead = M.disc(Icon { name = "plus", size = 16 }),
+					on_click = function()
+						if c.on_add_to then
+							c.on_add_to(id)
+						end
+					end,
+				},
+			}
+		elseif k == "hint" then
+			return ui.column {
+				w_full = true,
+				rule(),
+				hint_line(function(): string
+					return group:get().hint or ""
+				end),
+			}
+		end
+		return ui.column { w_full = true }
+	end, { w_full = true })
+end
+
+-- A grouped card's accounts: each provider with accounts under its heading
+-- (its accounts keyed, each in use or not in its group alone, then its
+-- foot), and after them a Connect row for each provider with none yet.
+-- Keyed by provider, so a group gaining or losing an account changes in
+-- place, and one gaining its first moves from the foot up to a group.
+local function grouped(c: CardProps, kind: () -> string): Node
+	local function groups(): { AccountGroup }
+		return if c.groups then c.groups() or {} else {}
+	end
+	local listed = ui.computed(function(): { AccountGroup }
+		local out = {}
+		for _, g in groups() do
+			if #g.accounts > 0 then
+				table.insert(out, g)
+			end
+		end
+		return out
+	end)
+	local to_connect = ui.computed(function(): { AccountGroup }
+		local out = {}
+		for _, g in groups() do
+			if #g.accounts == 0 and g.add then
+				table.insert(out, g)
+			end
+		end
+		return out
+	end)
+	local function by_id(g: AccountGroup): string
+		return g.id
+	end
+	return ui.column {
+		w_full = true,
+		ui.each(listed, function(_g: AccountGroup, _i: number, row: State<AccountGroup>): Node
+			local read_only = row:peek().read_only
+			return ui.column {
+				w_full = true,
+				-- (What a test finds a group by.)
+				id = `account-group-{c.provider.id}-{row:peek().id}`,
+				rule(),
+				heading(row),
+				ui.each(ui.computed(function(): { Account }
+					return row:get().accounts
+				end), function(_a: Account, _j: number, acc: State<Account>): Node
+					return ui.column { w_full = true, id = `account-row-{acc:peek().id or key(acc:peek())}`, rule(), account(c, acc, { read_only = read_only }) }
+				end, { key = key }),
+				group_foot(c, row, kind),
+			}
+		end, { key = by_id }),
+		ui.each(to_connect, function(_g: AccountGroup, _i: number, row: State<AccountGroup>): Node
+			return ui.column { w_full = true, id = `account-connect-{c.provider.id}-{row:peek().id}`, group_foot(c, row, kind) }
+		end, { key = by_id }),
+	}
+end
+
 -- An installed agent's card.
 function M.Card(c: CardProps): Node
 	local provider = c.provider
@@ -989,6 +1157,13 @@ function M.Card(c: CardProps): Node
 		else function()
 			return (given :: string?) or "idle"
 		end
+	-- An agent with a login per model provider: its accounts by provider,
+	-- each group with its own foot (no card-wide one).
+	if c.groups then
+		return Settings.Group {
+			ui.column { w_full = true, head, grouped(c, kind) },
+		}
+	end
 	return Settings.Group {
 		ui.column { w_full = true, head, list },
 		ui.presence(kind, foot, { w_full = true }),

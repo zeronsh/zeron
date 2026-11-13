@@ -871,6 +871,8 @@
       "default": "Default",
       "reasoning": "REASONING",
       "account": "Account",
+      "account_of": "{name} account",
+      "no_account": "None",
       "model": "Model",
       "search_starred": "Search starred models…",
       "search_agent": "Search {agent} models…",

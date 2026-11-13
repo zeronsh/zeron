@@ -871,6 +871,8 @@
       "default": "默认",
       "reasoning": "推理强度",
       "account": "账号",
+      "account_of": "{name} 账户",
+      "no_account": "无",
       "model": "模型",
       "search_starred": "搜索已加星标的模型…",
       "search_agent": "搜索 {agent} 模型…",

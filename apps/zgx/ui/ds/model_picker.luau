@@ -67,11 +67,20 @@ export type Account = {
 	active: boolean,
 	can_switch: boolean,
 }
+-- The accounts a model runs on, where its agent keeps a login per model
+-- provider (Pi, OpenCode, Hermes): who they're with ("ChatGPT"), and, where
+-- Zeron can sign in to it, what adds one and what that does.
+export type AccountGroup = { name: string, add: string?, on_add: (() -> ())? }
 export type Props = {
 	-- The accounts of a model's agent (nil or none: no row, no ring), followed
-	-- as they change. `on_account` puts one in use; `on_accounts_open` asks
-	-- after them again as the panel opens.
-	accounts: ((harness: string, model: string) -> { Account }?)?,
+	-- as they change; for an agent with a login per model provider, its
+	-- provider's alone (`provider`, the model's). `on_account` puts one in
+	-- use; `on_accounts_open` asks after them again as the panel opens.
+	accounts: ((harness: string, model: string, provider: string?) -> { Account }?)?,
+	-- The model's provider's accounts, named (nil: the agent keeps one
+	-- login): the row is "<name> account", and offers to add one, even with
+	-- none yet.
+	account_group: ((harness: string, provider: string?) -> AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
 	model: State<string?>,
@@ -511,10 +520,32 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
-	-- The chosen model's agent's accounts, and the one in use.
+	-- The chosen model's agent's accounts (its provider's, where the agent
+	-- keeps a login per provider), and the one in use.
+	local function provider_of(m: Model?): string?
+		return if m and m.provider then m.provider.id else nil
+	end
 	local function accounts(): { Account }
 		local m = current()
-		return (if m and props.accounts then props.accounts(m.harness, m.value) else nil) or {}
+		return (if m and props.accounts then props.accounts(m.harness, m.value, provider_of(m)) else nil) or {}
+	end
+	-- Those accounts' provider, named, and how to add one (nil: the agent
+	-- keeps one login).
+	local function group(): AccountGroup?
+		local m = current()
+		return if m and props.account_group then props.account_group(m.harness, provider_of(m)) else nil
+	end
+	-- Whether the row shows: an account to show, or one the provider can add.
+	local function has_account_row(): boolean
+		if #accounts() > 0 then
+			return true
+		end
+		local g = group()
+		return g ~= nil and g.add ~= nil
+	end
+	local function account_label(): string
+		local g = group()
+		return if g then locale.s("ds.model_picker.account_of", { name = g.name }) else locale.s("ds.model_picker.account")
 	end
 	local function account_by_id(id: string?): Account?
 		for _, a in accounts() do
@@ -567,11 +598,32 @@ return ui.component(function(props: Props): Node
 				end
 				return out
 			end,
-			label = locale.t("ds.model_picker.account"),
+			label = account_label,
 			search = false,
 			width = 300,
 			placement = { side = "right", align = "start", offset = 7 },
 			on_open = sync,
+			-- (Another of the model's provider's accounts, where Zeron can
+			-- sign in to it: "Add ChatGPT account".)
+			actions = {
+				{
+					label = function(): string
+						local g = group()
+						return if g and g.add then g.add else ""
+					end,
+					icon = "plus",
+					shown = function(): boolean
+						local g = group()
+						return g ~= nil and g.add ~= nil and g.on_add ~= nil
+					end,
+					on_click = function()
+						local g = group()
+						if g and g.on_add then
+							g.on_add()
+						end
+					end,
+				},
+			},
 			trailing_item = function(item: Dropdown.Item): Node?
 				return ui.show(function(): boolean
 					local a = account_by_id(item.value)
@@ -596,12 +648,16 @@ return ui.component(function(props: Props): Node
 			trigger = function(menu: Dropdown.Menu): Node
 				local row: ContainerProps = {
 					id = "model-picker-account",
-					label = locale.t("ds.model_picker.account"),
+					label = account_label,
 					bg = function()
 						return if menu.open:get() then "$hover" else "#00000000"
 					end,
 					on_click = menu.toggle,
-					ui.text { locale.t("ds.model_picker.account"), text_size = "$font.size.md", color = "$text.primary", grow = 1 },
+					ui.text { account_label, text_size = "$font.size.md", color = "$text.primary", grow = 1, min_w = 0, truncate = true },
+					-- (None in use: none signed in to the model's provider.)
+					ui.show(function(): boolean
+						return in_use() == nil
+					end, ui.text { locale.t("ds.model_picker.no_account"), shrink = 0, text_size = "$font.size.md", color = "$text.tertiary" }),
 					PrivateText {
 						function(): string
 							local a = in_use()
@@ -714,9 +770,7 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local foot: { Node } = {
-		ui.show(function(): boolean
-			return #accounts() > 0
-		end, account_row()),
+		ui.show(has_account_row, account_row()),
 		ui.each(owned, function(it: Owned): Node
 			return option_row(it.option)
 		end, {
@@ -889,7 +943,7 @@ return ui.component(function(props: Props): Node
 		extra_when = function(): boolean
 			local m = current()
 			return m ~= nil
-				and ((m.efforts ~= nil and #m.efforts > 0) or (m.fast == true and fast ~= nil) or #ordered(m) > 0 or #accounts() > 0)
+				and ((m.efforts ~= nil and #m.efforts > 0) or (m.fast == true and fast ~= nil) or #ordered(m) > 0 or has_account_row())
 		end,
 		placement = props.placement,
 		bottom_up = bottom_up,
