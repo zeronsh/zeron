@@ -1329,7 +1329,7 @@ M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, f
 		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}{suffix}` })
 		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_mention") :: any })
 		if props.refs then
-			table.insert(node, DropOverlay { shown = carrying_ref, id = `lane-drop-ref-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_reference") :: any })
+			table.insert(node, DropOverlay { shown = carrying_ref, id = `lane-drop-ref-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_reference") :: any, tone = "accent" })
 		end
 		return ui.column(node :: any)
 	end, { w_full = true })

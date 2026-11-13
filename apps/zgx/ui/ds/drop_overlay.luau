@@ -7,11 +7,15 @@
 --
 -- `DropOverlay { shown = function() return carrying() end, id = "chat-drop" }`
 -- (placed over the area, absolute, filling it).
+--
+-- `tone = "accent"` (an element dragged in to be referenced): no scrim; the
+-- area washed and ringed in the accent and its words on an accent pill, so
+-- the drop zone is plain to see in either theme while something is over it.
 
 local glass = require("@self/glass")
 local locale = require("@self/locale")
 
-export type Props = { shown: () -> boolean, id: string?, label: string? }
+export type Props = { shown: () -> boolean, id: string?, label: string?, tone: ("accent")? }
 
 return function(props: Props): Node
 	-- The pill: glass lying flat on the dimmed area (no drop shadow and no
@@ -27,6 +31,39 @@ return function(props: Props): Node
 	pill.shadow = nil
 	pill.border = 0
 	pill.border_color = nil
+	if props.tone == "accent" then
+		return ui.show(
+			props.shown,
+			ui.div {
+				id = props.id,
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				items = "center",
+				justify = "center",
+				pointer_events = "none",
+				rounded = "$radius.xl",
+				bg = "$zeron.drop.ref.wash",
+				border = 2,
+				border_color = "$zeron.drop.ref.edge",
+				ui.row {
+					id = if props.id then `{props.id}-label` else nil,
+					rounded = "$radius.full",
+					px = "$space.3",
+					py = "$space.1",
+					bg = "$accent",
+					ui.text {
+						props.label or locale.t("ds.drop_overlay.drop"),
+						text_size = "$font.size.md",
+						weight = "$font.weight.medium",
+						color = "$accent.text",
+					},
+				},
+			}
+		)
+	end
 	return ui.show(
 		props.shown,
 		ui.div {
