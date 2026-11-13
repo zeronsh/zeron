@@ -94,6 +94,15 @@ use crate::{Harness, HarnessError, RunControls};
 /// discovery (same boot either way).
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 const STARTUP_TIMEOUT_ENV: &str = "ZERON_OPENCODE_STARTUP_TIMEOUT_SECS";
+/// Set to `1` to keep every run and probe on a private `opencode serve`
+/// instead of OpenCode's background service ([`service`]).
+const PRIVATE_SERVER_ENV: &str = "ZERON_OPENCODE_PRIVATE_SERVER";
+
+/// What the TUI offers: prompt for what OpenCode's rules ask, or accept it.
+pub const OPENCODE_ACCESS_MODES: [AccessMode; 2] = [AccessMode::Supervised, AccessMode::FullAccess];
+
+mod client_mcp;
+mod service;
 
 /// Health-poll cadence while the server boots.
 const HEALTH_POLL: Duration = Duration::from_millis(150);
@@ -373,11 +382,26 @@ pub struct OpencodeHarness {
     /// Coalesce concurrent picker/title probes: several cold opencode boots
     /// at once are slower than one.
     probe_lock: tokio::sync::Mutex<()>,
+    /// The background service last attached to ([`service`]), re-checked
+    /// before each use.
+    service: tokio::sync::Mutex<Option<service::ServiceInfo>>,
+    /// Never attach to the background service: every run and probe boots a
+    /// private server, as before (`ZERON_OPENCODE_PRIVATE_SERVER=1`).
+    private_only: bool,
+    /// Zeron's MCP servers, offered to the service per directory and routed
+    /// to the chat that owns the calling session ([`client_mcp`]).
+    mcp_routes: client_mcp::Routes,
 }
 
 impl Default for OpencodeHarness {
     fn default() -> Self {
         Self {
+            service: tokio::sync::Mutex::new(None),
+            // (Unit tests never reach the machine's real service.)
+            private_only: cfg!(test)
+                || std::env::var(PRIVATE_SERVER_ENV)
+                    .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
+            mcp_routes: client_mcp::Routes::default(),
             executable: None,
             base_url: None,
             interrupt_grace: Duration::from_secs(2),
@@ -396,9 +420,12 @@ impl OpencodeHarness {
         Self::default()
     }
 
-    /// Use a fixed binary instead of PATH/known-location resolution.
+    /// Use a fixed binary instead of PATH/known-location resolution. It gets
+    /// private servers only: a fixed binary is a fixture or a probe, never one
+    /// to hand the machine's background service to.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self.private_only = true;
         self
     }
 
@@ -470,6 +497,17 @@ impl OpencodeHarness {
             }
             return Ok(Server::attached(base.clone()));
         }
+        // The background service, shared with the TUI and desktop app. A run
+        // carrying host secrets (a Cloud device's credential broker) keeps
+        // its private server: they must never reach a server other clients
+        // use. The access mode needs no server of its own there — it is
+        // answered here, as the TUI's auto-accept is — and Zeron's MCP
+        // servers are offered over client MCP ([`client_mcp`]).
+        if run_env.is_empty()
+            && let Some(server) = self.service_server().await
+        {
+            return Ok(server);
+        }
         let exe = self.resolve_executable()?;
         Server::spawn_with_extras(
             &exe,
@@ -481,6 +519,35 @@ impl OpencodeHarness {
             access,
         )
         .await
+    }
+
+    /// The background service, started if it isn't running. `None` where
+    /// there is none to have: switched off, a 1.x install (no service), or
+    /// one that won't start — the caller boots a private server.
+    async fn service_server(&self) -> Option<Server> {
+        if self.private_only {
+            return None;
+        }
+        let exe = self.resolve_executable().ok()?;
+        if opencode_version(&exe).await?.major < 2 {
+            return None;
+        }
+        let client = http_client();
+        let mut cached = self.service.lock().await;
+        if let Some(info) = cached.as_ref()
+            && service::healthy(&client, info).await
+        {
+            return Some(Server::service(info, client));
+        }
+        let info = service::ensure(&exe, &client, self.startup_timeout).await?;
+        tracing::debug!(
+            target: "zeron_harness::opencode",
+            url = %info.url,
+            version = info.version.as_deref().unwrap_or("unknown"),
+            "attached to the opencode background service"
+        );
+        *cached = Some(info.clone());
+        Some(Server::service(&info, client))
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -581,12 +648,13 @@ impl Harness for OpencodeHarness {
             && (next.reasoning.is_some() || live.reasoning.is_none())
             && access(live) == access(next)
     }
-    /// Full access approves every permission request, as every run did
-    /// before modes; the others add `ask` rules to the server's config so
-    /// opencode raises what they ask about (its defaults allow everything),
-    /// and put each of those to the person.
+    /// OpenCode's own two: its rules decide what is asked (config and saved
+    /// permissions, shared with its TUI and desktop app), and each ask is put
+    /// to the person (supervised) or approved (full access, the TUI's auto
+    /// accept). A private server, which no other client shares, still adds
+    /// supervised's `ask` rules to its inline config, as before.
     fn access_modes(&self) -> &[AccessMode] {
-        &AccessMode::ALL
+        &OPENCODE_ACCESS_MODES
     }
     fn supports_plan(&self) -> bool {
         true
@@ -676,6 +744,7 @@ impl Harness for OpencodeHarness {
                 access(&request),
             )
             .await?;
+        let shared = server.shared;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -687,6 +756,7 @@ impl Harness for OpencodeHarness {
             bus_timeouts: self.bus_timeouts,
             known_commands: None, // Resolve the live session directory, never a global probe cache.
             initial_native_command_selected,
+            mcp_routes: shared.then(|| self.mcp_routes.clone()),
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -711,6 +781,9 @@ struct Server {
     version: tokio::sync::OnceCell<ServerVersion>,
     /// Keeps preview discovery off our own server's port while it lives.
     _port: Option<crate::agent_ports::Reservation>,
+    /// OpenCode's background service, which other clients share: nothing
+    /// per-run may be configured into it, and it outlives every run.
+    shared: bool,
 }
 
 /// The attached server's wire generation: the 1.x "v1" global namespace
@@ -815,6 +888,29 @@ impl Server {
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
             _port: None,
+            shared: false,
+        }
+    }
+
+    /// OpenCode's background service ([`service`]): its own address and
+    /// password, no process of ours. Always the 2.x wire.
+    fn service(info: &service::ServiceInfo, client: reqwest::Client) -> Self {
+        let protocol = tokio::sync::OnceCell::new();
+        let _ = protocol.set(Protocol::V2);
+        let version = tokio::sync::OnceCell::new();
+        if let Some(raw) = info.version.as_deref() {
+            let _ = version.set(ServerVersion::parse(raw));
+        }
+        Self {
+            child: None,
+            base: info.url.trim_end_matches('/').to_owned(),
+            auth: Some(info.auth()),
+            client,
+            stderr_tail: crate::StderrTail::default(),
+            protocol,
+            version,
+            _port: None,
+            shared: true,
         }
     }
 
@@ -1075,6 +1171,7 @@ impl Server {
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
             _port: Some(crate::agent_ports::reserve(port)),
+            shared: false,
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -1375,6 +1472,7 @@ impl Server {
             protocol: self.protocol.clone(),
             version: self.version.clone(),
             _port: None,
+            shared: self.shared,
         }
     }
 
@@ -1869,6 +1967,9 @@ struct Session {
     /// True only when the composer supplied a canonical leading command or
     /// provider-backed skill. Raw slash text deliberately stays false.
     initial_native_command_selected: bool,
+    /// Where Zeron's MCP servers are offered on the background service; on
+    /// a private server they ride its inline config instead.
+    mcp_routes: Option<client_mcp::Routes>,
 }
 
 fn new_message_id() -> String {
@@ -2061,6 +2162,7 @@ async fn run_session(session: Session) {
         bus_timeouts,
         known_commands,
         initial_native_command_selected,
+        mcp_routes,
     } = session;
     let RunControls {
         realtime: _,
@@ -2171,6 +2273,29 @@ async fn run_session(session: Session) {
             server.shutdown(kill_grace).await;
             return;
         }
+    };
+
+    // On the background service, Zeron's MCP servers are offered per
+    // directory and each call routed back to this chat by its session; the
+    // lease stops this run's MCP processes when the run ends.
+    let _mcp_lease = match (&mcp_routes, dir) {
+        (Some(routes), Some(directory)) => {
+            let servers: Vec<zeron_proto::McpServer> = request
+                .mcp
+                .iter()
+                .chain(&request.extra_mcp)
+                .cloned()
+                .collect();
+            let service = client_mcp::Service {
+                base: server.base.clone(),
+                auth: server.auth.clone(),
+            };
+            routes
+                .offer(&service, directory, &session_id, &servers)
+                .await;
+            Some(routes.lease(&session_id))
+        }
+        _ => None,
     };
 
     let (mut model, mut variant) = model_selection(&providers, &request);
@@ -4126,11 +4251,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             } else {
                 "reply"
             };
-            // Full access approves each owned request, as every run did
-            // before modes; what a restricted mode does not cover is put to
-            // the person, and only a yes approves. Never "always": that
-            // would write a durable permission rule. Genuine agent questions
-            // use the separate question.asked path.
+            // Full access approves each owned request, as the TUI's auto
+            // accept does; otherwise each is put to the person, and only a
+            // yes approves. 2.x also offers "always": OpenCode saves the rule
+            // itself, and its TUI and desktop app keep to it too. Genuine
+            // agent questions use the separate question.asked path.
             let permission = props
                 .get("permission")
                 .or_else(|| props.get("action"))
@@ -4142,7 +4267,10 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 crate::approval::Action::Other
             };
             let ask = (!crate::approval::allowed_without_asking(access, action)).then(|| {
-                let question = permission_question(props, dir);
+                let mut question = permission_question(props, dir);
+                if protocol == Protocol::V2 {
+                    question = crate::approval::with_always(question);
+                }
                 (question.clone(), (request_input)(vec![question]))
             });
             tokio::spawn(async move {
@@ -4150,7 +4278,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     None => "once",
                     Some((question, answers)) => {
                         let answers = answers.await.unwrap_or_default();
-                        if crate::approval::approved(&question, &answers) {
+                        if crate::approval::approved_always(&question, &answers) {
+                            "always"
+                        } else if crate::approval::approved(&question, &answers) {
                             "once"
                         } else {
                             "reject"
@@ -4167,7 +4297,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         signal: TurnSignal::ReplyFailed(format!(
                             "Could not {} an opencode permission request, so the \
                              agent cannot continue: {error}",
-                            if reply == "once" { "approve" } else { "refuse" }
+                            if reply == "reject" {
+                                "refuse"
+                            } else {
+                                "approve"
+                            }
                         )),
                     });
                 }

@@ -1,10 +1,13 @@
 //! Live probe: one full turn through the native driver against a chosen
 //! opencode binary — prints the event stream and exits 0 only on a
-//! Completed turn with text. Arg 1 = executable (default: PATH resolution),
+//! Completed turn with text. Arg 1 = executable (default or `-`: PATH
+//! resolution, on OpenCode's background service where it has one),
 //! arg 2 = model (`provider/model`), arg 3 = prompt.
 //! Optional env: OPENCODE_PROBE_WORKSPACE uses an existing configured directory,
 //! OPENCODE_PROBE_AGENT selects an agent, OPENCODE_PROBE_INTERRUPT_MS cancels
-//! after the first text delta. Set TMPDIR to control temporary workspace placement.
+//! after the first text delta, OPENCODE_PROBE_MCP (a command line) gives the
+//! run a stdio MCP server named `probe`, as the engine gives it Zeron's. Set
+//! TMPDIR to control temporary workspace placement.
 //!
 //!     cargo run -p zeron-harness --example opencode_turn_probe -- \
 //!         ~/.opencode/bin/opencode opencode/muse-spark-1.3-contributor-free \
@@ -17,7 +20,10 @@ use zeron_proto::{AgentEvent, RunRequest, SandboxLevel};
 
 #[tokio::main]
 async fn main() {
-    let exe = std::env::args().nth(1);
+    // (`-` leaves the binary to resolution, and so the background service.)
+    let exe = std::env::args()
+        .nth(1)
+        .filter(|exe| !exe.is_empty() && exe != "-");
     let model = std::env::args().nth(2).filter(|m| m.contains('/'));
     let prompt = std::env::args()
         .nth(3)
@@ -41,8 +47,17 @@ async fn main() {
     let answer_yes = std::env::var_os("OPENCODE_PROBE_ANSWER_YES").is_some();
     let interrupt = CancellationToken::new();
     let (_steer_tx, steering) = mpsc::channel(8);
+    let mcp = std::env::var("OPENCODE_PROBE_MCP").ok().and_then(|line| {
+        let mut words = line.split_whitespace().map(str::to_owned);
+        Some(zeron_proto::McpServer {
+            name: "probe".into(),
+            command: words.next()?,
+            args: words.collect(),
+            env: Default::default(),
+        })
+    });
     let request = RunRequest {
-        mcp: None,
+        mcp,
         prompt,
         harness: None,
         model,

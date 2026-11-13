@@ -377,6 +377,7 @@ impl TurnWire {
                 input_hint: None,
             }]),
             initial_native_command_selected: native_command_reply.is_some(),
+            mcp_routes: None,
         }));
         Self {
             bus,
@@ -2190,7 +2191,7 @@ async fn plan_mode_sets_the_v2_session_agent() {
 #[test]
 fn access_changes_restart_the_server_and_plan_changes_do_not() {
     let harness = OpencodeHarness::new();
-    assert_eq!(harness.access_modes(), AccessMode::ALL);
+    assert_eq!(harness.access_modes(), OPENCODE_ACCESS_MODES);
     assert!(harness.supports_plan());
     let request = |access: &str, auto_approve: bool, plan: bool| -> RunRequest {
         serde_json::from_value(json!({
@@ -4024,6 +4025,7 @@ async fn wedged_run(base: String, timeouts: BusTimeouts) -> (Option<String>, Don
         bus_timeouts: timeouts,
         known_commands: Some(Vec::new()),
         initial_native_command_selected: false,
+        mcp_routes: None,
     }));
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut chip = None;

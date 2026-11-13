@@ -6,6 +6,9 @@ use zeron_proto::{AccessMode, UserInputAnswer, UserInputQuestion};
 
 pub const ALLOW: &str = "Yes";
 pub const DENY: &str = "No";
+/// Yes, and remember it: offered only where the agent keeps the rule itself
+/// (OpenCode's saved permissions, which its other clients share).
+pub const ALWAYS: &str = "Always";
 
 /// What an agent wants to do, for deciding whether its mode covers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +48,19 @@ pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserI
 pub fn approved(question: &UserInputQuestion, answers: &[UserInputAnswer]) -> bool {
     answers.iter().any(|a| {
         a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case(ALLOW))
+    })
+}
+
+/// `question` with [`ALWAYS`] between yes and no.
+pub fn with_always(mut question: UserInputQuestion) -> UserInputQuestion {
+    question.options = vec![ALLOW.into(), ALWAYS.into(), DENY.into()];
+    question
+}
+
+/// Whether `answers` approve `question` for good ([`ALWAYS`]).
+pub fn approved_always(question: &UserInputQuestion, answers: &[UserInputAnswer]) -> bool {
+    answers.iter().any(|a| {
+        a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case(ALWAYS))
     })
 }
 

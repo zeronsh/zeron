@@ -958,7 +958,7 @@ async fn a_model_switch_rides_the_next_prompt() {
 async fn supervised_plan_run_names_the_plan_agent_and_asks_before_commands() {
     let fake = FakeOpencode::start().await;
     let driver = harness(&fake);
-    assert_eq!(driver.access_modes(), AccessMode::ALL);
+    assert_eq!(driver.access_modes(), zeron_harness::OPENCODE_ACCESS_MODES);
     assert!(driver.supports_plan());
     let (mut controls, _steer, _token) = controls();
     let asked = Arc::new(Mutex::new(Vec::new()));

@@ -1097,7 +1097,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: AccessMode::ALL.to_vec(),
+            access_modes: zeron_harness::OPENCODE_ACCESS_MODES.to_vec(),
             supports_plan: true,
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),

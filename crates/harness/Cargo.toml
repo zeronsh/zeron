@@ -28,6 +28,7 @@ base64 = "0.22"
 reqwest.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["io-util", "codec"] }
+tokio-tungstenite.workspace = true
 uuid.workspace = true
 futures.workspace = true
 async-trait.workspace = true
