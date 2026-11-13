@@ -380,7 +380,11 @@ impl EngineRpc {
                 Aim::Answer { ask_id, .. } => {
                     // LATER(decision-ui): use the decision op with {option?, text?}: pass
                     // the option `answer_text` matched as AnswerAsk's `option`, else the text.
-                    let answer = self.answer_text(ask_id, &route);
+                    let answer = self.answer_text(ask_id, &route).ok_or_else(|| {
+                        RpcError::BadParams(
+                            "A reply to an @ask is the person's words: quote it verbatim from the dump as `excerpt`".into(),
+                        )
+                    })?;
                     self.answer_ask(&Who::Person, ask_id.clone(), answer).await?;
                     route.state = RouteState::Delivered;
                 }
@@ -473,13 +477,22 @@ impl EngineRpc {
 
     /// What a route answers ask `ask_id` with: one of its options when the
     /// reply is just that option, else the reply.
-    fn answer_text(&self, ask_id: &str, route: &Route) -> String {
-        let reply = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
-        let reply = reply.trim();
+    ///
+    /// Always the person's own words: the fragment quoted verbatim from the
+    /// dump (never the Brain dump's rewording, which would answer as the
+    /// person in words they didn't write). `None` when the excerpt isn't
+    /// found in the dump's text.
+    fn answer_text(&self, ask_id: &str, route: &Route) -> Option<String> {
+        route.span?;
+        let reply = route.excerpt.trim();
+        if reply.is_empty() {
+            return None;
+        }
         let bare = reply.trim_end_matches(['.', '!']).trim().to_lowercase();
         let ask = self.orchestration().workspace().read_orchestration_with(|doc| doc.ask(ask_id));
         ask.and_then(|a| a.options.into_iter().find(|o| o.label.trim().to_lowercase() == bare))
             .map_or_else(|| reply.to_owned(), |o| o.label)
+            .into()
     }
 
     /// A comment kept on card `item_id` (no thread or owner to tell yet):

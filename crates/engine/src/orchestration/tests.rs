@@ -2007,10 +2007,19 @@ async fn a_reply_on_an_ask_reference_answers_the_ask() {
     assert!(to_brain.last().unwrap().contains(&format!("@ask id={ask}")), "{to_brain:?}");
 
     // Only a reference the dump has.
+    // (The Brain dump's rewording never answers as the person: the message
+    // says "Wait", the person wrote "merge", and "merge" is the answer.)
     let route = |reference: &str| json!({"op":"route","dumpId":dump,"excerpt":"merge","target":{"kind":"note"},
-        "intent":"info","message":"merge","reference":reference});
+        "intent":"info","message":"Wait","reference":reference});
     let wrong = op(&core, agent(&brain), route("not-a-ref")).await.unwrap_err();
     assert!(wrong.contains("not one of"), "{wrong}");
+    // An excerpt that isn't the person's words, verbatim, answers nothing.
+    let made_up = json!({"op":"route","dumpId":dump,"excerpt":"wait for CI","target":{"kind":"note"},
+        "intent":"info","message":"wait","reference":ask});
+    let refused = op(&core, agent(&brain), made_up).await.unwrap_err();
+    assert!(refused.contains("verbatim"), "{refused}");
+    let still = core.workspace.read_orchestration_with(|d| d.ask(&ask)).unwrap();
+    assert_eq!(still.state, AskState::Open, "a refused reply leaves the ask open");
 
     let id = op(&core, agent(&brain), route(&ask)).await.unwrap();
     let answered = core.workspace.read_orchestration_with(|d| d.ask(&ask)).unwrap();
