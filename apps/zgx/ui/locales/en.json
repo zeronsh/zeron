@@ -1229,7 +1229,8 @@
         "pin": "Pin to Progress",
         "unpin": "Unpin from Progress",
         "menu": "Progress actions",
-        "refreshing": "Writing a fresh note"
+        "refreshing": "Writing a fresh note",
+        "pinned": "Pinned"
       }
     }
   },

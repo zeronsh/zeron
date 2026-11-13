@@ -239,7 +239,8 @@ M.Progress = ui.component(function(props: Props): Node
 	local menu_open = ui.use_state(false)
 	local function entries(): { any }
 		local out: { any } = {}
-		if props.on_check then
+		-- (A full unit has its own button for it.)
+		if props.on_check and variant ~= "full" then
 			table.insert(out, {
 				label = locale.s("ds.orch.progress.whats_up"),
 				icon = "refresh",
@@ -525,15 +526,29 @@ M.Progress = ui.component(function(props: Props): Node
 			grow = 1,
 			min_w = 0,
 			gap = "$zeron.space.hair",
-			ui.text {
-				title,
-				class = "orch-progress-title",
-				literal = true,
+			ui.row {
+				w_full = true,
 				min_w = 0,
-				truncate = true,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.medium",
-				color = "$text.primary",
+				gap = "$space.1",
+				items = "center",
+				ui.text {
+					title,
+					class = "orch-progress-title",
+					literal = true,
+					min_w = 0,
+					truncate = true,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
+				},
+				-- Pinned: a quiet pin after its name.
+				ui.show(pinned, ui.div {
+					class = "orch-progress-pinned",
+					shrink = 0,
+					color = "$text.tertiary",
+					label = locale.t("ds.orch.progress.pinned"),
+					Icon { name = "pin", size = 12 },
+				}),
 			},
 			ui.show(function(): boolean
 				return context() ~= ""
@@ -590,14 +605,29 @@ M.Progress = ui.component(function(props: Props): Node
 			},
 		},
 	}
-	local cells = ui.show(function(): boolean
-		return steps() ~= nil
-	end, ui.row {
-		class = "orch-progress-todo",
+	-- What it's on: its state's glyph, its steps as cells, the command (or
+	-- the step, or its state's name), how long since its last step.
+	local function on_text(): string
+		local d = doing()
+		if d then
+			return d
+		end
+		if kind() == "working" or kind() == "idle" then
+			return M.step(row()) or (if kind() == "working" then locale.s("ds.orch.activity.other") else "")
+		end
+		local info = status.KINDS[kind() :: any]
+		return if info then info.long else ""
+	end
+	local telemetry = ui.row {
+		class = "orch-progress-activity",
 		w_full = true,
+		h = 20,
 		gap = "$space.2",
 		items = "center",
-		Cells {
+		glyph(14),
+		ui.show(function(): boolean
+			return steps() ~= nil
+		end, Cells {
 			class = "orch-progress-cells",
 			done = function(): number
 				local s = steps()
@@ -610,108 +640,78 @@ M.Progress = ui.component(function(props: Props): Node
 			current = function(): boolean
 				return kind() == "working"
 			end,
-			cell = 9,
-			gap = 3,
+			cell = 7,
+			gap = 2,
 			h = 10,
 			max = 24,
-		},
-		ui.text {
-			function(): string
-				return M.step(row()) or ""
-			end,
-			class = "orch-progress-step",
-			literal = true,
+		}),
+		ui.row {
 			grow = 1,
 			min_w = 0,
-			truncate = true,
-			text_size = "$font.size.xs",
-			color = "$text.secondary",
+			gap = "$space.1",
+			items = "center",
+			ui.text {
+				on_text,
+				class = "orch-progress-doing",
+				literal = true,
+				min_w = 0,
+				truncate = true,
+				font = function(): string
+					return if doing() then "$font.mono" else "$font.sans"
+				end,
+				text_size = "$font.size.xs",
+				color = function(): string
+					if doing() or kind() == "working" or kind() == "idle" then
+						return "$text.secondary"
+					end
+					local k = kind()
+					return `$zeron.status.{if k == "waiting" then "working" else k}`
+				end,
+			},
+			ui.show(function(): boolean
+				return tool_text() ~= ""
+			end, small(function(): string
+				return `· {tool_text()}`
+			end, { class = "orch-progress-tool-time" })),
 		},
-	})
-	local activity = ui.row {
-		class = "orch-progress-activity",
-		w_full = true,
-		h = 20,
-		gap = "$space.1",
-		items = "center",
-		glyph(14),
-		ui.text {
-			doing_text,
-			class = "orch-progress-doing",
-			literal = true,
-			min_w = 0,
-			truncate = true,
-			font = function(): string
-				return if doing() then "$font.mono" else "$font.sans"
-			end,
-			text_size = function(): string
-				return if doing() then "$font.size.xs" else "$font.size.sm"
-			end,
-			color = function(): string
-				if doing() then
-					return "$text.secondary"
-				end
-				local k = kind()
-				return if k == "idle" then "$text.secondary" else `$zeron.status.{if k == "waiting" then "working" else k}`
-			end,
-		},
-		ui.show(function(): boolean
-			return tool_text() ~= ""
-		end, small(function(): string
-			return `· {tool_text()}`
-		end, { class = "orch-progress-tool-time" })),
-		ui.div { grow = 1, min_w = "$space.2" },
 		ui.show(function(): boolean
 			return since_text() ~= ""
 		end, small(since_text, { class = "orch-progress-since", color = since_ink })),
 	}
 	local line = (ui.theme.get("font.line.sm") :: number?) or 18
-	local actions = ui.row {
-		class = "orch-progress-actions",
+	-- Its note, and at its end What's up? and the menu (open, pin).
+	local said = ui.row {
+		class = "orch-progress-said",
 		w_full = true,
-		gap = "$space.1",
-		items = "center",
-		if props.on_check
-			then Button {
-				class = "orch-progress-check",
-				tone = "ghost",
-				size = "xs",
-				-- (A fresh note on its way: the note's roller says so.)
-				disabled = function(): boolean
-					return refreshing() or (props.cooling ~= nil and props.cooling())
-				end,
-				label = locale.t("ds.orch.progress.whats_up"),
-				on_click = props.on_check,
-				Icon { name = "refresh", size = 12 },
-				locale.t("ds.orch.progress.whats_up"),
-			}
-			else nil,
-		if props.on_open
-			then Button {
-				class = "orch-progress-open",
-				tone = "ghost",
-				size = "xs",
-				label = locale.t("ds.orch.progress.open"),
-				on_click = props.on_open,
-				locale.t("ds.orch.progress.open"),
-			}
-			else nil,
-		ui.div { grow = 1 },
-		if props.on_pin
-			then IconButton {
-				class = "orch-progress-pin",
-				icon = "pin",
-				label = function(): string
-					return locale.s(if pinned() then "ds.orch.progress.unpin" else "ds.orch.progress.pin")
-				end,
-				size = "sm",
-				tone = "quiet",
-				lit = pinned,
-				on_click = function()
-					(props.on_pin :: any)(not pinned())
-				end,
-			}
-			else nil,
+		gap = "$space.2",
+		items = "start",
+		ui.row {
+			grow = 1,
+			min_w = 0,
+			pt = ui.raw(3, "the note's first line level with the button's label"),
+			note_line { wrap = true, max_h = line * 2, line_height = "$font.line.sm", line = line },
+		},
+		ui.row {
+			class = "orch-progress-actions",
+			shrink = 0,
+			gap = "$space.1",
+			items = "center",
+			if props.on_check
+				then Button {
+					class = "orch-progress-check",
+					tone = "ghost",
+					size = "xs",
+					-- (A fresh note on its way: the note's roller says so.)
+					disabled = function(): boolean
+						return refreshing() or (props.cooling ~= nil and props.cooling())
+					end,
+					label = locale.t("ds.orch.progress.whats_up"),
+					on_click = props.on_check,
+					locale.t("ds.orch.progress.whats_up"),
+				}
+				else nil,
+			menu(),
+		},
 	}
 	return ui.column {
 		id = props.id,
@@ -724,11 +724,9 @@ M.Progress = ui.component(function(props: Props): Node
 			class = "orch-progress-body",
 			w_full = true,
 			pl = ui.raw(INDENT, "under the title, past the tile"),
-			gap = "$zeron.space.snug",
-			cells,
-			activity,
-			note_line { wrap = true, max_h = line * 2, line_height = "$font.line.sm", line = line },
-			actions,
+			gap = "$space.1",
+			telemetry,
+			said,
 		},
 	}
 end)

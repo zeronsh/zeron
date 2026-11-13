@@ -986,6 +986,7 @@ return {
 	["ds.orch.progress.unpin"] = "Unpin from Progress",
 	["ds.orch.progress.menu"] = "Progress actions",
 	["ds.orch.progress.refreshing"] = "Writing a fresh note",
+	["ds.orch.progress.pinned"] = "Pinned",
 	["common.loading"] = "Loading…",
 	["common.something_went_wrong"] = "Something went wrong.",
 	["common.open"] = "Open",
