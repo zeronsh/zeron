@@ -4118,7 +4118,8 @@
       "failed": "That didn't go through",
       "move_failed": "Couldn't move it",
       "newest": "Newest",
-      "earlier": "{n, plural, one {# earlier} other {# earlier}}"
+      "earlier": "{n, plural, one {# earlier} other {# earlier}}",
+      "history": "更早"
     },
     "needs": {
       "failed": "Couldn't send that"

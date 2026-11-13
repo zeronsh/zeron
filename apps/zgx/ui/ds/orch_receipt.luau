@@ -38,6 +38,9 @@ export type Props = {
 	chats: () -> { [string]: any },
 	on_reroute: (dump_id: string, route_id: string, target: { kind: string, id: string? }) -> (),
 	on_open: (target: { kind: string, id: string? }) -> (),
+	-- Its parts there at once, never lit one after another (an earlier
+	-- dump opened in the history).
+	settled: boolean?,
 	-- The excerpts' text size (a token): the Control room's is larger.
 	text_size: string?,
 	line_height: string?,
@@ -150,7 +153,7 @@ return ui.component(function(props: Props): Node
 		if known == nil then
 			-- First seen: there before the page (its routes shown at once),
 			-- or new (lit from nothing as its routes come).
-			known = if first then s.n else 0
+			known = if first or props.settled then s.n else 0
 		end
 		known = math.min(known, s.n)
 		said_lit(id, known)
