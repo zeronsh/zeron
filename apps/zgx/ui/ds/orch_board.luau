@@ -103,6 +103,7 @@ local PRIORITIES = { "urgent", "high", "normal", "low" }
 -- stack. An empty one stands this wide.
 local COLUMN_MIN = 168
 local SLIM = 112
+local COLUMN_MAX = 360
 -- Each column's glyph at its head: how its cards stand.
 local COLUMN_GLYPH: { [string]: Icon.Name } = {
 	inbox = "inbox",
@@ -525,6 +526,17 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 			}),
 			title_text,
+			-- (Side by side, its priority at the title's end; compact, among
+			-- its marks.)
+			if compact then nil else ui.div { grow = 1 },
+			if compact then nil else ui.div {
+				h = line,
+				items = "center",
+				shrink = 0,
+				priority_mark(function(): string
+					return item().priority
+				end),
+			},
 		}
 		-- Its marks: priority, threads, pull request.
 		local marks = ui.row {
@@ -533,9 +545,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 				h = line,
 				gap = "$space.1",
 				items = "center",
-				priority_mark(function(): string
+				if compact then priority_mark(function(): string
 					return item().priority
-				end),
+				end) else nil,
 				ui.each(ui.computed(function(): { string }
 					-- (One thread: its status leads the title already.)
 					local threads = item().threads or {}
@@ -545,7 +557,6 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end, { key = function(chat: string): string
 					return chat
 				end }),
-				if compact then nil else ui.div { grow = 1 },
 				ui.each(ui.computed(prs), function(l: Link): Node
 					local n = tonumber(string.match(l.label, "%d+"))
 					return ui.button {
@@ -627,7 +638,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			gap = if compact then "$space.1" else "$zeron.space.snug",
 			if compact then ui.row { w_full = true, gap = "$space.3", items = "start", title, marks } else title,
 			progress_bar,
-			if compact then nil else marks,
+			-- (Its marks, where it has any: several threads, a pull request.)
+			if compact then nil else ui.show(function(): boolean
+				return #(item().threads or {}) > 1 or #prs() > 0
+			end, marks),
 			-- Its outcome: two lines, or all of it opened.
 			ui.show(
 				has_outcome,
@@ -826,7 +840,14 @@ local OrchBoard = ui.component(function(props: Props): Node
 			w = if stacked then nil else function(): number | string
 				return if #list() > 0 then "auto" else SLIM
 			end,
-			min_h = if stacked then nil else 96,
+			-- (A few cards: a column keeps a card's reading width, not the
+			-- board's.)
+			max_w = if stacked then nil else COLUMN_MAX,
+			-- (Empty, its head alone, unless a card is on its way: then it's
+			-- somewhere to put one.)
+			min_h = if stacked then nil else function(): number
+				return if #list() > 0 or dragging:get() ~= nil then 96 else 0
+			end,
 			p = "$space.1",
 			rounded = "$radius.lg",
 			bg = function(): string
