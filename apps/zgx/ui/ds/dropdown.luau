@@ -12,6 +12,7 @@
 -- icon = "folder", placeholder = "No project", search = "Search projects…" }`
 
 local Icon = require("@self/icon")
+local motion = require("@self/motion")
 local Mark = require("@self/mark")
 local AgentMark = require("@self/agent_mark")
 local RollText = require("@self/roll_text")
@@ -443,28 +444,87 @@ return ui.component(function(props: Props): Node
 	local function hint_shown(now: Item): boolean
 		return now.hint ~= nil and (not now.hint_when_found or not by_name(now, string.lower(query:get())))
 	end
-	-- A name with its hint beside it: the name fades where the row runs
-	-- short, the hint keeps its width; the row's own gap between them.
-	local function named(item: Item): Node
+	-- A name with its hint beside it, read as one line: where it runs past
+	-- the row, its right edge fades (as FadeText's does), and while the row
+	-- is highlighted (`lit`: under the pointer, or the keys') the line glides
+	-- left until its end shows, rests, and glides back, over and over. With
+	-- motion reduced it stays put, faded.
+	local NAMED_FADE = 24
+	local function named(item: Item, lit: () -> boolean): Node
+		local clip, line = ui.ref(), ui.ref()
+		local el: any = nil
+		local run: any = nil
+		-- How far the line runs past its row.
+		local function over(): number
+			return math.max(0, (line.width or 0) - (clip.width or 0))
+		end
+		local function still()
+			if run then
+				run:cancel()
+				run = nil
+			end
+			if el then
+				anime.utils.cleanInlineStyles(el, "x")
+			end
+		end
+		ui.effect(function()
+			local on = lit()
+			local past = over()
+			if not on or past <= 0.5 or motion.reduced() or not el then
+				still()
+				return
+			end
+			if run then
+				return
+			end
+			local travel = past + NAMED_FADE
+			run = anime.animate(el, {
+				x = { 0, -travel },
+				-- (About 40 points a second: read as it passes, not a jump.)
+				duration = math.max(900, travel * 25),
+				delay = 700,
+				loopDelay = 1000,
+				loop = true,
+				alternate = true,
+				ease = "inOut(2)",
+			})
+			ui.on_cleanup(still)
+		end)
 		return ui.row {
+			ref = clip,
 			grow = 1,
 			min_w = 0,
-			gap = "$space.2",
+			overflow = "hidden",
 			items = "center",
-			FadeText {
-				item.label,
-				text_size = "$font.size.md",
-				color = "$text.primary",
-				shrink = 1,
-			},
-			ui.show(function(): boolean
-				return hint_shown(item)
-			end, ui.text {
-				item.hint :: string,
+			fade_x = function()
+				local past = (line.width or 0) > (clip.width or 0) + 0.5
+				-- (Gliding, its start runs off the left too.)
+				local moving = past and lit() and not motion.reduced()
+				return { if moving then NAMED_FADE else 0, if past then NAMED_FADE else 0 }
+			end,
+			ui.row {
+				ref = line,
 				shrink = 0,
-				text_size = "$font.size.md",
-				color = "$text.tertiary",
-			}),
+				gap = "$space.2",
+				items = "center",
+				on_mount = function(node: any)
+					el = node
+				end,
+				ui.text {
+					item.label,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.primary",
+				},
+				ui.show(function(): boolean
+					return hint_shown(item)
+				end, ui.text {
+					item.hint :: string,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.tertiary",
+				}),
+			},
 		}
 	end
 	local shown = ui.computed(function(): { Item }
@@ -1250,7 +1310,9 @@ return ui.component(function(props: Props): Node
 										wrap = true,
 									},
 								}
-								elseif item.hint then named(item)
+								elseif item.hint then named(item, function(): boolean
+									return hi:get() == item.value
+								end)
 								else text(item.label),
 							if item.tag
 								then ui.text {

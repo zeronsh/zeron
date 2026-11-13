@@ -138,27 +138,43 @@ test("a search finds models by their provider, and says it on each row", functio
 	expect(app:error()).to_be(nil)
 end)
 
-test("a long name fades before its provider gives way", function()
+test("a line past its row fades at its right edge, and glides to its end while highlighted", function()
 	local app = mount("picker_sources_fixture.luau")
 	app:resize(600, 700)
 	settle(app)
 	open(app)
-	for _, p in { "Codex", "OpenCode" } do
-		local row = `{LONG} {p}`
+	local row = `{LONG} Codex`
+	local function ends(): (number, number)
 		local r = row_box(app, row)
-		local name = box(app, row, LONG) :: any
-		local hint = box(app, row, p) :: any
-		local short = box(app, `GPT-5.5 {p}`, p) :: any
-		expect(name).never.to_be_nil()
-		expect(hint).never.to_be_nil()
-		-- The hint whole (as wide as on a short row), inside the row's inset.
-		expect(hint.w).to_be(short.w)
-		expect(hint.x + hint.w <= r.x + r.w - 8).to_be(true)
-		-- The name runs past where the hint starts: it is the one cut (its
-		-- clip fades it there).
-		expect(name.x + name.w > hint.x).to_be(true)
-		expect(hint.x - name.x > 100).to_be(true)
+		local hint = box(app, row, "Codex") :: any
+		return hint.x + hint.w, r.x + r.w
 	end
+	-- At rest the line runs past the row: its end (the provider) is out of
+	-- sight under the fade, not squeezed in.
+	local hint_end, row_end = ends()
+	expect(hint_end > row_end).to_be(true)
+	-- Highlighted, it glides left until its end shows.
+	app:hover(`role:option "{row}"`)
+	app:frames(240)
+	hint_end, row_end = ends()
+	expect(hint_end <= row_end).to_be(true)
+	-- Off it, it's back where it started.
+	app:hover('role:option "GPT-5.5 Codex"')
+	app:frames(30)
+	hint_end, row_end = ends()
+	expect(hint_end > row_end).to_be(true)
+	-- With motion reduced it stays put.
+	app:set_state("motion_reduce", true)
+	app:hover(`role:option "{row}"`)
+	app:frames(240)
+	hint_end, row_end = ends()
+	expect(hint_end > row_end).to_be(true)
+	-- A short row that fits never moves.
+	local short = box(app, "GPT-5.5 Codex", "Codex") :: any
+	app:set_state("motion_reduce", false)
+	app:hover('role:option "GPT-5.5 Codex"')
+	app:frames(240)
+	expect((box(app, "GPT-5.5 Codex", "Codex") :: any).x).to_be(short.x)
 	expect(app:error()).to_be(nil)
 end)
 
