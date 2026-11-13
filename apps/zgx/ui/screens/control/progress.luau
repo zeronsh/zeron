@@ -27,6 +27,8 @@ local M = {}
 
 -- How long "What's up?" rests after it's used (seconds).
 M.COOLDOWN = 15
+-- The widget's units before the rest fold away.
+M.FIRST = 4
 
 -- The threads pinned to the widget, in the order they were pinned (this
 -- device's).
@@ -38,6 +40,8 @@ local resting = ui.state("progress_resting", {} :: { [string]: boolean })
 -- A test's clock (Unix seconds): set before the units are built, they
 -- read it in place of their own.
 local clock = ui.state("progress_now", nil :: number?)
+-- The widget showing all its units, not the first few.
+local all = ui.state("progress_all", false)
 
 local chats_now = ui.computed(function(): { [string]: any }
 	return data.chats(sessions.now:get())
@@ -245,9 +249,20 @@ function M.figures(): Node
 end
 
 function M.Widget(): Node
+	local shown = ui.computed(function(): { { id: string } }
+		local list = M.listed:get()
+		if all:get() or #list <= M.FIRST + 1 then
+			return list
+		end
+		return table.move(list, 1, M.FIRST, 1, {})
+	end)
+	local function more(): number
+		return #M.listed:get() - #shown:get()
+	end
 	return ui.column {
 		id = "control-progress",
 		w_full = true,
+		gap = "$space.3",
 		ui.show(function(): boolean
 			return #M.listed:get() == 0
 		end, ui.text {
@@ -256,14 +271,14 @@ function M.Widget(): Node
 			text_size = "$font.size.sm",
 			color = "$text.tertiary",
 		}),
-		ui.each(M.listed, function(e: { id: string }): Node
+		ui.each(shown, function(e: { id: string }): Node
 			return ui.column {
 				class = "control-progress-row",
 				w_full = true,
 				gap = "$space.3",
 				-- (A hairline over each but the first.)
 				ui.show(function(): boolean
-					local top = M.listed:get()[1]
+					local top = shown:get()[1]
 					return top ~= nil and top.id ~= e.id
 				end, ui.div { w_full = true, h = 1, bg = "$border.subtle" }),
 				unit(e.id, "full"),
@@ -274,6 +289,23 @@ function M.Widget(): Node
 			end,
 			w_full = true,
 			gap = "$space.3",
+		}),
+		-- The rest, folded: how many, or fold them again.
+		ui.show(function(): boolean
+			return all:get() or more() > 0
+		end, ds.Button {
+			id = "control-progress-more",
+			class = "control-progress-more",
+			tone = "ghost",
+			size = "xs",
+			on_click = function()
+				all:set(not all:peek())
+			end,
+			ui.text {
+				function(): string
+					return if all:get() and more() == 0 then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = more() })
+				end,
+			},
 		}),
 	}
 end

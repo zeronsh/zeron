@@ -520,28 +520,15 @@ M.Progress = ui.component(function(props: Props): Node
 			grow = 1,
 			min_w = 0,
 			gap = "$zeron.space.hair",
-			ui.button {
+			ui.text {
+				title,
 				class = "orch-progress-title",
-				label = function(): string
-					return locale.s("ds.orch.crew.open", { title = title() })
-				end,
+				literal = true,
 				min_w = 0,
-				p = 0,
-				h = "auto",
-				justify = "start",
-				bg = "#00000000",
-				hover = { bg = "#00000000" },
-				active = { bg = "#00000000" },
-				on_click = props.on_open,
-				ui.text {
-					title,
-					literal = true,
-					min_w = 0,
-					truncate = true,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.primary",
-				},
+				truncate = true,
+				text_size = "$font.size.sm",
+				weight = "$font.weight.medium",
+				color = "$text.primary",
 			},
 			ui.show(function(): boolean
 				return context() ~= ""

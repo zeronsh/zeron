@@ -26,7 +26,7 @@ end)
 
 test("a comms row opens the crew thread it came from", function()
 	local app = open()
-	app:resize(1440, 2400)
+	app:resize(1440, 3200)
 	app:frames(10)
 	app:click('#control-widget-comms >> role:button "Coalesced wake works in tests"')
 	app:frames(30)
