@@ -25,6 +25,14 @@
 --                                (`{ kind = "orchestrator", id }`)
 --   orchestration.move_item(id, state, order?)  a card moved on the board
 --   orchestration.set_priority(id, priority)
+--   orchestration.settings:get()  the profile's settings, synced and read by
+--                                every engine: { crew_auto_archive,
+--                                crew_idle_hours } (defaults until the
+--                                engine says: on, 12)
+--   orchestration.auto_archive   a state for a Switch: crew threads left
+--                                idle archived (writes `updateSettings`)
+--   orchestration.idle_hours     a state for a Select: how long idle first
+--   orchestration.IDLE_HOURS     the windows offered (hours)
 --
 -- Chats come from `sessions.now` (account/sessions); their rows carry
 -- `activity = { kind, label, since }` and `todo = { done, total, current? }`.
@@ -68,6 +76,77 @@ end)
 function M.op(op: { [string]: any }): any
 	return ui.call("orchestration.op", op)
 end
+
+-- The profile's settings (src/orchestration.rs `settings`). What was just
+-- asked for shows at once, until the engine's state says it (or the ask
+-- fails).
+local DEFAULT_SETTINGS = { crew_auto_archive = true, crew_idle_hours = 12 }
+local asked = ui.state("orchestration_settings_asked", {} :: { [string]: any })
+M.settings = ui.computed(function(): { crew_auto_archive: boolean, crew_idle_hours: number }
+	local s = M.now:get().settings or DEFAULT_SETTINGS
+	local a = asked:get()
+	local out = table.clone(s)
+	for k, v in a do
+		out[k] = v
+	end
+	return out :: any
+end)
+-- (What the engine now says puts an ask to rest.)
+ui.effect(function()
+	local s = M.now:get().settings
+	local a = asked:peek()
+	if not s then
+		return
+	end
+	local left, settled = {}, false
+	for k, v in a do
+		if s[k] == v then
+			settled = true
+		else
+			left[k] = v
+		end
+	end
+	if settled then
+		asked:set(left)
+	end
+end)
+
+M.IDLE_HOURS = { 1, 6, 12, 24, 72, 168 }
+
+-- `key` (snake_case) set to `value` through `updateSettings`.
+local function set_setting(key: string, value: any)
+	local a = table.clone(asked:peek())
+	a[key] = value
+	asked:set(a)
+	M.op({ op = "updateSettings", [M.camel(key)] = value }):after(function() end, function()
+		local back = table.clone(asked:peek())
+		back[key] = nil
+		asked:set(back)
+	end)
+end
+
+-- A state for `key` (a Switch's, a Select's): what the settings say, and a
+-- change of the person's sent to the engine. (Each follows the other: what
+-- the engine says is set here; what's set here and isn't what it says is
+-- asked of it.)
+local function setting_state(key: string): any
+	local st = ui.state(`orchestration_setting_{key}`, (DEFAULT_SETTINGS :: any)[key])
+	ui.effect(function()
+		local v = (M.settings:get() :: any)[key]
+		if st:peek() ~= v then
+			st:set(v)
+		end
+	end)
+	ui.effect(function()
+		local v = st:get()
+		if (M.settings:peek() :: any)[key] ~= v then
+			set_setting(key, v)
+		end
+	end)
+	return st
+end
+M.auto_archive = setting_state("crew_auto_archive")
+M.idle_hours = setting_state("crew_idle_hours")
 
 -- Wanting loads, counted by the host (several screens may show them).
 function M.loads_wanted(on: boolean)
