@@ -99,9 +99,9 @@ M.View = ui.component(function(props: {
 		local x0, y0, x1, y1 = sim.bounds(graph)
 		local w, h = width:peek(), math.clamp(math.floor(width:peek() * 0.6), 380, 660)
 		-- (A small web closer, a big one as close as names stay readable.)
-		local most = if #graph.nodes <= 12 then 1.25 else 1.1
-		local zoom = math.clamp(math.min((w - 120) / math.max(1, x1 - x0), (h - 110) / math.max(1, y1 - y0)), 0.35, most)
-		view:set({ x = w / 2 - (x0 + x1) / 2 * zoom, y = h / 2 - (y0 + y1) / 2 * zoom + 10, zoom = zoom })
+		local most = if #graph.nodes <= 12 then 1.1 else 1
+		local zoom = math.clamp(math.min((w - 64) / math.max(1, x1 - x0), (h - 72) / math.max(1, y1 - y0)), 0.35, most)
+		view:set({ x = w / 2 - (x0 + x1) / 2 * zoom, y = h / 2 - (y0 + y1) / 2 * zoom, zoom = zoom })
 	end
 
 	-- The settling, a frame at a time, until still; then once more for
@@ -232,9 +232,12 @@ M.View = ui.component(function(props: {
 		return model.status_of(props.chat(id))
 	end
 
-	-- An island's room past its farthest member (its name and ring), and
-	-- the most it spreads (a member pulled farther keeps a line home).
-	local ISLAND_PAD, ISLAND_MAX = 26, 170
+	-- Whether the theme is dark (its ink light): a few alphas differ.
+	local function is_dark(): boolean
+		local ink = kit.ink("text.primary")
+		local r, g, b = tonumber(string.sub(ink, 2, 3), 16) or 0, tonumber(string.sub(ink, 4, 5), 16) or 0, tonumber(string.sub(ink, 6, 7), 16) or 0
+		return r + g + b > 384
+	end
 
 	local function draw(c: any, w: number, h: number)
 		tick:get()
@@ -242,134 +245,236 @@ M.View = ui.component(function(props: {
 		local over = M.hover:get()
 		local near = if over and graph.index[over] then sim.neighbors(graph, over) else nil
 		local z = v.zoom
+		-- (Marks keep near their size as the view zooms; the web's
+		-- distances follow it.)
+		local zs = math.clamp(z, 0.9, 1.25)
 		local function dim(a: number, lit: boolean): number
 			return if near and not lit then a * 0.18 else a
 		end
+		local dark = is_dark()
 		local world = props.world()
 		local loads = world.loads or {}
 		local here = world.here
+		local function ink(a: number, lit: boolean): string
+			return kit.ink("text.primary", dim(a, lit))
+		end
+		local function at(n: sim.Node): (number, number)
+			return n.x * z + v.x, n.y * z + v.y
+		end
+		local function lit_of(id: string): boolean
+			return near == nil or near[id] == true
+		end
 
 		-- The ground: a dot grid that moves with the view.
 		local step = 32 * z
 		while step < 18 do
 			step *= 2
 		end
-		local grid = kit.ink("text.primary", 0.07)
-		local gx0, gy0 = v.x % step, v.y % step
-		local gy = gy0
+		local grid = kit.ink("text.primary", if dark then 0.06 else 0.1)
+		local gy = v.y % step
 		while gy < h do
-			local gx = gx0
+			local gx = v.x % step
 			while gx < w do
-				c:circle(gx, gy, 0.9, grid)
+				c:circle(gx, gy, 0.8, grid)
 				gx += step
 			end
 			gy += step
 		end
 
-		-- Islands: each machine's room, round everything it runs.
-		local islands: { [string]: { x: number, y: number, r: number, top: boolean? } } = {}
-		local inside: { [string]: boolean } = {}
-		-- (Centred between the machine and what stays near it.)
-		local members: { [string]: { sim.Node } } = {}
-		for _, n in graph.nodes do
+		-- How far a node's mark reaches (a line stops short of it).
+		local function reach(n: sim.Node): number
 			if n.kind == "device" then
-				islands[n.id] = { x = n.x, y = n.y, r = n.r + 30 }
-				members[n.id] = {}
+				return n.r * zs * 1.25
+			elseif n.kind == "brain" then
+				return n.r * zs * 1.15
+			elseif n.kind == "thread" then
+				return math.max(n.r * zs, 8)
 			end
+			return n.r * zs
 		end
-		for _, e in graph.edges do
-			local isl = islands[e.a]
-			local m = graph.nodes[graph.index[e.b]]
-			if e.kind == "host" and isl and m and math.sqrt((m.x - isl.x) ^ 2 + (m.y - isl.y) ^ 2) + m.r <= ISLAND_MAX then
-				table.insert(members[e.a], m)
-				inside[`{e.a}>{e.b}`] = true
-			end
-		end
-		for id, isl in islands do
-			local list = members[id]
-			local sx, sy, k = isl.x * 2, isl.y * 2, 2
-			for _, m in list do
-				sx += m.x
-				sy += m.y
-				k += 1
-			end
-			isl.x, isl.y = sx / k, sy / k
-			local dev = graph.nodes[graph.index[id]]
-			isl.r = math.max(dev.r + 30, math.sqrt((dev.x - isl.x) ^ 2 + (dev.y - isl.y) ^ 2) + dev.r + ISLAND_PAD)
-			for _, m in list do
-				isl.r = math.max(isl.r, math.sqrt((m.x - isl.x) ^ 2 + (m.y - isl.y) ^ 2) + m.r + ISLAND_PAD)
-			end
-		end
-		local function device_of(n: sim.Node): any
-			for _, dev in world.devices or {} do
-				if dev.id == n.device then
-					return dev
-				end
-			end
-			return nil
-		end
+
+		-- 1. Where everything goes, nothing drawn yet: islands (each name
+		-- in a gap in its rim, at the top or the bottom), lines, names.
+		local islands = sim.islands(graph)
+		local taken: { { number } } = {}
+		local rims: { any } = {}
+		local NAME = { size = 12, weight = 500 }
 		for _, n in graph.nodes do
 			if n.kind ~= "device" then
 				continue
 			end
 			local isl = islands[n.id]
-			local lit = near == nil or near[n.id] == true
 			local x, y = isl.x * z + v.x, isl.y * z + v.y
 			local r = isl.r * z
-			c:circle(x, y, r, kit.ink("text.primary", dim(if over == n.id then 0.06 else 0.035, lit)))
-			-- The rim, broken for the name (at the top, or the bottom where a
-			-- leader's name would sit on it); the CPU runs along it.
-			local name_w = c:measure_text(n.title, { size = 12, weight = 600 })
+			local name_w, name_h = c:measure_text(n.title, NAME)
 			local function crowded(ny: number): number
 				local k = 0
 				local x0, x1, y0, y1 = x - name_w / 2 - 6, x + name_w / 2 + 6, ny - 10, ny + 10
 				for _, m in graph.nodes do
 					if m.kind ~= "device" then
-						local mx, my = screen(m, v)
-						local mr = m.r * z + 4
-						-- (A leader's name runs off to its right.)
-						local reach = if m.kind == "thread" then mr else mr + 150
-						if mx + reach > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
+						local mx, my = at(m)
+						local mr = reach(m) + 4
+						local far = if m.kind == "thread" then mr else mr + 150
+						if mx + far > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
 							k += 1
 						end
 					end
 				end
 				return k
 			end
-			isl.top = crowded(y - r) <= crowded(y + r)
-			local gap = math.deg(math.asin(math.clamp((name_w / 2 + 10) / r, 0, 0.95)))
-			local from, sweep = (if isl.top then -90 else 90) + gap, 360 - gap * 2
-			c:stroke(ui.path():arc(x, y, r, from, sweep), kit.ink("text.primary", dim(0.11, lit)), 1)
-			local l = (loads :: any)[n.device or ""]
-			local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
-			if f > 0.005 then
-				local ink = ContextUsage.ink(f)
-				c:stroke(ui.path():arc(x, y, r, from, sweep * f), kit.ink(string.sub(ink, 2), dim(0.9, lit)), 2, { cap = "round" })
+			local top = crowded(y - r) <= crowded(y + r)
+			local ny = if top then y - r else y + r
+			table.insert(taken, { x - name_w / 2 - 6, ny - name_h / 2 - 2, x + name_w / 2 + 6, ny + name_h / 2 + 2 })
+			local gap = math.deg(math.asin(math.clamp((name_w / 2 + 9) / r, 0, 0.95)))
+			table.insert(rims, { n = n, x = x, y = y, r = r, ny = ny, from = (if top then -90 else 90) + gap, sweep = 360 - gap * 2 })
+		end
+
+		local lines: { any } = {}
+		for _, e in graph.edges do
+			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
+			local lit = near ~= nil and (e.a == over or e.b == over)
+			if e.kind == "host" then
+				-- (Shown only lit: the island says what runs where.)
+				local isl = islands[e.a]
+				if not lit and isl and isl.members[e.b] then
+					continue
+				end
+			end
+			local ax, ay = at(a)
+			local bx, by = at(b)
+			local dx, dy = bx - ax, by - ay
+			local d = math.sqrt(dx * dx + dy * dy)
+			local ra, rb = reach(a) + 3, reach(b) + 3
+			if d <= ra + rb + 2 then
+				continue
+			end
+			local ux, uy = dx / d, dy / d
+			ax, ay, bx, by = ax + ux * ra, ay + uy * ra, bx - ux * rb, by - uy * rb
+			local bend = if e.kind == "host" then 0 else 0.12
+			local mx, my = (ax + bx) / 2, (ay + by) / 2
+			table.insert(lines, { e = e, lit = lit, ax = ax, ay = ay, bx = bx, by = by, cx = mx - (by - ay) * bend, cy = my + (bx - ax) * bend })
+		end
+
+		-- Names: leaders first, then threads at work or waiting on you, then
+		-- the rest; each on the first side of its mark that clears every
+		-- mark and name before it (a leader's on the least crowded); a
+		-- thread's that can't is left to its card. Lines and rims break
+		-- round them.
+		local function short(t: string, most: number): string
+			if utf8.len(t) and (utf8.len(t) :: number) > most then
+				return string.sub(t, 1, (utf8.offset(t, most) :: number) - 1) .. "…"
+			end
+			return t
+		end
+		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string): number
+			local k = 0
+			for _, bx in taken do
+				if x0 < bx[3] and x1 > bx[1] and y0 < bx[4] and y1 > bx[2] then
+					k += 1
+				end
+			end
+			for _, m in graph.nodes do
+				if m.id ~= own then
+					local mx, my = at(m)
+					local mr = reach(m) + 3
+					if mx + mr > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
+						k += 1
+					end
+				end
+			end
+			if x0 < 4 or y0 < 4 or x1 > w - 4 or y1 > h - 4 then
+				k += 1
+			end
+			return k
+		end
+		local labels: { any } = {}
+		local function place(n: sim.Node, t: string, opts: any, force: boolean)
+			local x, y = at(n)
+			local r = reach(n) + 6
+			local tw, th = c:measure_text(t, opts)
+			local spots = {
+				{ x + r, y - th / 2 },
+				{ x - r - tw, y - th / 2 },
+				{ x - tw / 2, y + r - 2 },
+				{ x - tw / 2, y - r - th + 2 },
+				{ x + r - 4, y - r - th + 6 },
+				{ x + r - 4, y + r - 6 },
+				{ x - r - tw + 4, y - r - th + 6 },
+				{ x - r - tw + 4, y + r - 6 },
+			}
+			local best: { number }, least = spots[1], math.huge
+			for _, sp in spots do
+				local k = crowd(sp[1] - 3, sp[2] - 1, sp[1] + tw + 3, sp[2] + th + 1, n.id)
+				if k < least then
+					best, least = sp, k
+				end
+				if k == 0 then
+					break
+				end
+			end
+			if least > 0 and not force then
+				return
+			end
+			table.insert(taken, { best[1] - 3, best[2] - 1, best[1] + tw + 3, best[2] + th + 1 })
+			opts.baseline = "middle"
+			table.insert(labels, { t = t, x = best[1], y = best[2] + th / 2, opts = opts })
+		end
+		for _, n in graph.nodes do
+			if n.kind == "orchestrator" or n.kind == "brain" then
+				place(n, short(n.title, 28), { size = 13, weight = 600, color = ink(0.92, lit_of(n.id)) }, true)
+			end
+		end
+		for pass = 1, 2 do
+			for _, n in graph.nodes do
+				if n.kind ~= "thread" then
+					continue
+				end
+				local st = state_of(n.id)
+				local busy = st == "working" or st == "input" or st == "approval" or st == "failed"
+				local lit_here = near ~= nil and near[n.id] == true
+				if (pass == 1) == (busy or lit_here) then
+					place(n, short(n.title, 26), { size = 12, color = ink(if busy then 0.74 else 0.5, lit_of(n.id)) }, lit_here)
+				end
 			end
 		end
 
-		-- Lines: hosting only where a member strays off its island (or lit);
-		-- leading as a gentle curve in the orchestrator's hue.
-		local function curve(ax: number, ay: number, bx: number, by: number): any
-			local mx, my = (ax + bx) / 2, (ay + by) / 2
-			local dx, dy = bx - ax, by - ay
-			return ui.path():move(ax, ay):quad(mx - dy * 0.12, my + dx * 0.12, bx, by)
+		-- 2. Island grounds.
+		for _, rim in rims do
+			local lit = lit_of(rim.n.id)
+			c:circle(rim.x, rim.y, rim.r, ink(if over == rim.n.id then 0.07 else (if dark then 0.045 else 0.04), lit))
 		end
-		for _, e in graph.edges do
-			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
-			local ax, ay = screen(a, v)
-			local bx, by = screen(b, v)
-			local lit = near ~= nil and (e.a == over or e.b == over)
+
+		-- 3. Rims and lines, broken round every name: the field, less a box
+		-- a name (each traced the other way round, so it's left out).
+		local field = ui.path():move(0, 0):line(w, 0):line(w, h):line(0, h):close()
+		for _, bx in taken do
+			field:move(bx[1], bx[2]):line(bx[1], bx[4]):line(bx[3], bx[4]):line(bx[3], bx[2]):close()
+		end
+		c:clip(field)
+		for _, rim in rims do
+			local lit = lit_of(rim.n.id)
+			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.18, lit), 1)
+			local l = (loads :: any)[rim.n.device or ""]
+			local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
+			if f > 0.005 then
+				-- (Neutral; amber only when the machine is near full.)
+				local paint = if f >= 0.85
+					then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(0.6, lit))
+					else ink(if dark then 0.5 else 0.42, lit)
+				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 2, { cap = "round" })
+			end
+		end
+		for _, ln in lines do
+			local e, lit = ln.e, ln.lit
+			local p = ui.path():move(ln.ax, ln.ay):quad(ln.cx, ln.cy, ln.bx, ln.by)
 			if e.kind == "host" then
-				if lit or not inside[`{e.a}>{e.b}`] then
-					c:line(ax, ay, bx, by, kit.ink("text.primary", dim(if lit then 0.3 else 0.12, lit)), 1, { dash = { 2, 3 } })
-				end
+				c:stroke(p, ink(0.32, lit), 1, { dash = { 2, 3 } })
 			elseif e.kind == "control" then
-				c:stroke(curve(ax, ay, bx, by), hue.canvas(e.hue, dim(if lit then 0.95 else 0.6, lit)), if lit then 2 else 1.5, { cap = "round" })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.95 else 0.6, lit)), if lit then 2 else 1.5, { cap = "round" })
 			elseif e.kind == "started" then
-				c:stroke(curve(ax, ay, bx, by), hue.canvas(e.hue, dim(if lit then 0.9 else 0.55, lit)), 1.5, { cap = "round", dash = { 5, 4 } })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.85 else 0.45, lit)), 1.25, { cap = "round", dash = { 5, 3 } })
 			else
-				c:stroke(curve(ax, ay, bx, by), hue.canvas(e.hue, dim(if lit then 0.65 else 0.3, lit)), 1.25, { cap = "round", dash = { 1, 4 } })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.7 else 0.3, lit)), 1.25, { cap = "round", dash = { 0.5, 3.5 } })
 			end
 		end
 		-- Pulses along them.
@@ -379,163 +484,79 @@ M.View = ui.component(function(props: {
 			if a and b then
 				local t = math.clamp((now - p.t0) / PULSE_MS, 0, 1)
 				t = t * t * (3 - 2 * t)
-				local ax, ay = screen(a, v)
-				local bx, by = screen(b, v)
+				local ax, ay = at(a)
+				local bx, by = at(b)
 				local x, y = ax + (bx - ax) * t, ay + (by - ay) * t
 				c:circle(x, y, 6, hue.canvas(p.hue, 0.25))
 				c:circle(x, y, 2.75, hue.canvas(p.hue, 1))
 			end
 		end
+		c:restore()
 
-		-- The nodes.
-		local plate = kit.ink("background", 1)
+		-- 4. The marks.
 		for _, n in graph.nodes do
-			local lit = near == nil or near[n.id] == true
-			local x, y = screen(n, v)
-			local r = n.r * z
+			local lit = lit_of(n.id)
+			local x, y = at(n)
+			local r = n.r * zs
 			if n.kind == "device" then
 				-- The machine itself: a square plate (hardware), its mark.
-				c:rect(x - r, y - r, r * 2, r * 2, kit.ink("background", dim(0.95, lit)), 7 * z)
-				c:rect(x - r, y - r, r * 2, r * 2, kit.ink("text.primary", dim(0.08, lit)), 7 * z)
-				c:stroke(ui.path():rect(x - r + 0.5, y - r + 0.5, r * 2 - 1, r * 2 - 1, 7 * z), kit.ink("text.primary", dim(0.22, lit)), 1)
-				local d = device_of(n)
-				glyph(c, MachineHead.icon(d), x, y, kit.ink("text.primary", dim(0.8, lit)))
+				local rad = 6 * zs
+				c:rect(x - r, y - r, r * 2, r * 2, kit.ink("background", dim(0.96, lit)), rad)
+				c:rect(x - r, y - r, r * 2, r * 2, ink(0.05, lit), rad)
+				c:stroke(ui.path():rect(x - r + 0.5, y - r + 0.5, r * 2 - 1, r * 2 - 1, rad), ink(if dark then 0.22 else 0.24, lit), 1)
+				local d = nil
+				for _, dev in world.devices or {} do
+					if dev.id == n.device then
+						d = dev
+					end
+				end
+				glyph(c, MachineHead.icon(d), x, y, ink(0.75, lit))
 				if n.device == here or (d and d.here) then
-					c:circle(x + r - 1, y - r + 1, 4.5, plate)
+					c:circle(x + r - 1, y - r + 1, 4.5, kit.ink("background", 1))
 					c:circle(x + r - 1, y - r + 1, 3, kit.ink("zeron.tone.info.ink", dim(1, lit)))
 				end
 			elseif n.kind == "orchestrator" then
-				c:circle(x, y, r + 5 * z, plate)
-				c:stroke(ui.path():arc(x, y, r + 4 * z, 0, 360), hue.canvas(n.hue, dim(0.45, lit)), 1.5)
 				c:circle(x, y, r, hue.canvas(n.hue, dim(1, lit)))
 			elseif n.kind == "brain" then
-				-- (An orchestrator's size, quieter: a tinted diamond in a line
-				-- of its hue, where theirs are solid.)
+				-- (An orchestrator's size, quieter: tinted, in a line of its hue.)
 				local k = r * 1.15
-				local function diamond(s: number): any
-					return ui.path():move(x, y - s):line(x + s, y):line(x, y + s):line(x - s, y):close()
-				end
-				c:fill(diamond(k + 2), plate)
-				c:fill(diamond(k), hue.canvas(n.hue, dim(0.28, lit)))
-				c:stroke(diamond(k - 0.75), hue.canvas(n.hue, dim(0.9, lit)), 1.5, { join = "round" })
+				local p = ui.path():move(x, y - k):line(x + k, y):line(x, y + k):line(x - k, y):close()
+				c:fill(p, hue.canvas(n.hue, dim(0.3, lit)))
+				local q = ui.path():move(x, y - k + 0.75):line(x + k - 0.75, y):line(x, y + k - 0.75):line(x - k + 0.75, y):close()
+				c:stroke(q, hue.canvas(n.hue, dim(0.9, lit)), 1.5, { join = "round" })
 			else
 				local st = state_of(n.id)
-				local faded = st == "done" or st == "idle"
-				local rr = if faded then r * 0.8 else r
-				local ink
 				if st == "working" or st == "waiting" then
-					-- (Small inside Zeron's working ring, laid over it.)
-					ink = kit.ink("text.primary", dim(0.9, lit))
-					rr = r * 0.55
-				elseif st == "input" or st == "approval" or st == "failed" then
-					ink = kit.ink(`zeron.status.{st}`, dim(1, lit))
-					c:circle(x, y, rr + 4 * z, kit.ink(`zeron.status.{st}`, dim(0.22, lit)))
-				elseif st == "done" then
-					ink = kit.ink("zeron.status.done", dim(0.75, lit))
+					-- (A dot inside Zeron's working ring, laid over it.)
+					c:circle(x, y, 3 * zs, ink(0.9, lit))
 				else
-					ink = kit.ink("text.primary", dim(0.55, lit))
-				end
-				c:circle(x, y, rr + 2, plate)
-				if n.crew then
-					c:circle(x, y, rr, ink)
-				else
-					c:stroke(ui.path():arc(x, y, rr - 0.75, 0, 360), ink, 1.5)
+					local rr = r
+					local paint
+					if st == "input" or st == "approval" or st == "failed" then
+						paint = kit.ink(`zeron.status.{st}`, dim(1, lit))
+						c:circle(x, y, rr + 3.5 * zs, kit.ink(`zeron.status.{st}`, dim(0.2, lit)))
+					elseif st == "done" then
+						paint = kit.ink("zeron.status.done", dim(0.75, lit))
+						rr = r * 0.85
+					else
+						paint = ink(0.45, lit)
+						rr = r * 0.85
+					end
+					if n.crew then
+						c:circle(x, y, rr, paint)
+					else
+						c:stroke(ui.path():arc(x, y, rr - 0.75, 0, 360), paint, 1.5)
+					end
 				end
 			end
 		end
 
-		-- Names. A machine's on its island's rim; an orchestrator's and the
-		-- Brain dump's on a plate beside it; a thread's when it needs you or
-		-- works (or close up, or lit), quieter.
-		local function short(t: string, most: number): string
-			if utf8.len(t) and (utf8.len(t) :: number) > most then
-				return string.sub(t, 1, (utf8.offset(t, most) :: number) - 1) .. "…"
-			end
-			return t
+		-- 5. The names.
+		for _, rim in rims do
+			c:text(rim.n.title, rim.x, rim.ny, { size = 12, weight = 500, color = ink(0.72, lit_of(rim.n.id)), align = "center", baseline = "middle" })
 		end
-		-- Placed in turn (machines, then leaders, then threads at work, then
-		-- the rest): each beside its node where it clears every node and
-		-- every name placed before it, else left out (its card still names it).
-		local taken: { { number } } = {}
-		-- How much is in the way of a name there (0: nothing).
-		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string): number
-			local k = 0
-			for _, b in taken do
-				if x0 < b[3] and x1 > b[1] and y0 < b[4] and y1 > b[2] then
-					k += 2
-				end
-			end
-			for _, m in graph.nodes do
-				if m.id ~= own then
-					local mx, my = screen(m, v)
-					local mr = m.r * z + 2
-					if mx + mr > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
-						k += 1
-					end
-				end
-			end
-			return k
-		end
-		local function label(n: sim.Node, t: string, opts: any, back: number, force: boolean)
-			local x, y = screen(n, v)
-			local r = n.r * z + (if n.kind == "thread" then 6 else 9 * z)
-			local tw, th = c:measure_text(t, opts)
-			local bw, bh = tw + 10, th + 4
-			-- Right, left, below, above.
-			local spots = {
-				{ x + r, y - bh / 2 },
-				{ x - r - bw, y - bh / 2 },
-				{ x - bw / 2, y + r - 2 },
-				{ x - bw / 2, y - r - bh + 2 },
-			}
-			local at: { number }, least = spots[1], math.huge
-			for _, sp in spots do
-				local k = crowd(sp[1], sp[2], sp[1] + bw, sp[2] + bh, n.id)
-				if k < least then
-					at, least = sp, k
-				end
-				if k == 0 then
-					break
-				end
-			end
-			if least > 0 and not force then
-				return
-			end
-			table.insert(taken, { at[1], at[2], at[1] + bw, at[2] + bh })
-			c:rect(at[1], at[2], bw, bh, kit.ink("background", back), bh / 2)
-			opts.baseline = "middle"
-			c:text(t, at[1] + 5, at[2] + bh / 2, opts)
-		end
-		for _, n in graph.nodes do
-			if n.kind == "device" then
-				local lit = near == nil or near[n.id] == true
-				local isl = islands[n.id]
-				local x, y = isl.x * z + v.x, (isl.y + (if isl.top then -isl.r else isl.r)) * z + v.y
-				local o = { size = 12, weight = 600 }
-				local tw, th = c:measure_text(n.title, o)
-				table.insert(taken, { x - tw / 2 - 6, y - th / 2 - 2, x + tw / 2 + 6, y + th / 2 + 2 })
-				c:text(n.title, x, y, { size = 12, weight = 600, color = kit.ink("text.primary", dim(0.82, lit)), align = "center", baseline = "middle" })
-			end
-		end
-		for _, n in graph.nodes do
-			if n.kind == "orchestrator" or n.kind == "brain" then
-				local lit = near == nil or near[n.id] == true
-				label(n, short(n.title, 28), { size = 12, weight = 600, color = kit.ink("text.primary", dim(0.95, lit)) }, dim(0.78, lit), true)
-			end
-		end
-		for pass = 1, 2 do
-			for _, n in graph.nodes do
-				if n.kind ~= "thread" then
-					continue
-				end
-				local lit = near == nil or near[n.id] == true
-				local st = state_of(n.id)
-				local busy = st == "working" or st == "input" or st == "approval" or st == "failed"
-				local lit_here = near ~= nil and near[n.id] == true
-				if (pass == 1) == (busy or lit_here) then
-					label(n, short(n.title, 26), { size = 11, color = kit.ink("text.primary", dim(if busy then 0.78 else 0.55, lit)) }, dim(0.6, lit), lit_here)
-				end
-			end
+		for _, l in labels do
+			c:text(l.t, l.x, l.y, l.opts)
 		end
 	end
 
@@ -634,7 +655,7 @@ M.View = ui.component(function(props: {
 					end
 					return 1
 				end,
-				status.StatusIcon { kind = "working", size = 22 },
+				status.StatusIcon { kind = "working", size = 16 },
 			}),
 		}
 	end
