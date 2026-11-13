@@ -327,7 +327,8 @@ function M.islands(g: Graph): { [string]: Island }
 		for _, n in list[id] do
 			r = math.max(r, math.sqrt((n.x - isl.x) ^ 2 + (n.y - isl.y) ^ 2) + n.r)
 		end
-		isl.r = math.max(r + M.ISLAND_PAD, list[id][1].r + 34)
+		-- (Never smaller than its heading on top needs.)
+		isl.r = math.max(r + M.ISLAND_PAD, if next(isl.members) then 76 else 100)
 	end
 	return out
 end

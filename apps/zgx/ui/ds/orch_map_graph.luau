@@ -317,7 +317,7 @@ M.View = ui.component(function(props: {
 		-- Each machine's heading: a tab on its island's rim (its mark, its
 		-- name, its load), the rim broken behind it; at the top, else where
 		-- it clears what's round it.
-		local TAB_NAME = { size = 13, weight = 600 }
+		local TAB_NAME = { size = 13.5, weight = 600 }
 		local TAB_LOAD = { size = 11, tabular = true }
 		local TAB_H = 24
 		for _, n in graph.nodes do
@@ -337,8 +337,8 @@ M.View = ui.component(function(props: {
 			local load = if l and l.cpu then `{math.floor(math.clamp(l.cpu, 0, 1) * 100 + 0.5)}%` else ""
 			local name_w = c:measure_text(n.title, TAB_NAME)
 			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
-			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 8 + load_w else 0) + 9
-			table.insert(rims, { n = n, d = d, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
+			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 10 + load_w else 0) + 8
+			table.insert(rims, { n = n, d = d, empty = next(isl.members) == nil, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
 		end
 		-- (Centred on its rim at `angle`.)
 		local function name_box(rim: any, angle: number): (number, number)
@@ -348,7 +348,7 @@ M.View = ui.component(function(props: {
 		-- (Held for the working threads' names till the machine names go.)
 		for _, rim in rims do
 			local x0, y0 = name_box(rim, rim.angle)
-			table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim = rim })
+			table.insert(taken, { x0 - 8, y0 - 6, x0 + rim.w + 8, y0 + rim.h + 6, rim = rim })
 		end
 
 		local lines: { any } = {}
@@ -633,7 +633,8 @@ M.View = ui.component(function(props: {
 		end
 		for _, n in graph.nodes do
 			if n.kind == "orchestrator" or n.kind == "brain" then
-				place(n, forms_of(n.title, 24), { size = 13, weight = 600, color = ink(if dark then 0.92 else 0.9, lit_of(n.id)) }, true, true)
+				-- (Under the machines' names: lighter, so a machine leads.)
+				place(n, forms_of(n.title, 24), { size = 12.5, weight = 500, color = ink(if dark then 0.86 else 0.84, lit_of(n.id)) }, true, true)
 			end
 		end
 		for pass = 1, 2 do
@@ -650,7 +651,9 @@ M.View = ui.component(function(props: {
 				tabs = {}
 				for _, rim in rims do
 					local best_a, least = -90, math.huge
-					for _, a in { -90, -60, -120, -30, -150, 90, 0, 180, 60, 120 } do
+					-- (A heading: always at the top, so every machine reads the
+					-- same way; names round it give way instead.)
+					for _, a in { -90 } do
 						local x0, y0 = name_box(rim, a)
 						local k = crowd(x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim.n.id)
 						if k < 0.5 then
@@ -665,10 +668,10 @@ M.View = ui.component(function(props: {
 					y0 = math.clamp(y0, 4, math.max(4, h - rim.h - 4))
 					rim.nx, rim.ny = x0, y0
 					-- (The rim breaks behind it; the load runs on from its edge.)
-					local gap = math.deg(math.asin(math.clamp((rim.w / 2 + 3) / math.max(1, rim.r), 0, 0.99)))
+					local gap = math.deg(math.asin(math.clamp((rim.w / 2 + 8) / math.max(1, rim.r), 0, 0.99)))
 					rim.from, rim.sweep = best_a + gap, 360 - gap * 2
 					tabs[rim.n.id] = { x0, y0, x0 + rim.w, y0 + rim.h }
-					table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2 })
+					table.insert(taken, { x0 - 8, y0 - 6, x0 + rim.w + 8, y0 + rim.h + 6 })
 				end
 			end
 			for _, n in graph.nodes do
@@ -802,7 +805,7 @@ M.View = ui.component(function(props: {
 				local along = ((wx - ln.ax) * tx + (wy - ln.ay) * ty) / len
 				local aside_d = math.abs((wx - ln.ax) * -ty + (wy - ln.ay) * tx)
 				-- (A long dashed route may swing wider round a name.)
-				local wide = if ln.e.kind == "control" then 0.35 else 0.75
+				local wide = if ln.e.kind == "control" then 0.35 else 0.45
 				if along < 0.15 or along > 0.85 or aside_d > len * wide then
 					continue
 				end
@@ -924,14 +927,13 @@ M.View = ui.component(function(props: {
 		c:clip(field)
 		for _, rim in rims do
 			local lit = lit_of(rim.n.id)
-			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1)
+			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1, { cap = "round" })
 			local l = (loads :: any)[rim.n.device or ""]
 			local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
 			if f > 0.005 then
 				-- (Neutral, by its length; all of it a muted amber past 80%.)
-				local paint = if f > 0.8
-					then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(if dark then 0.42 else 0.42, lit))
-					else ink(if dark then 0.42 else 0.38, lit)
+				-- (Neutral always: the tab's figure says when it's full.)
+				local paint = ink(if dark then 0.4 else 0.36, lit)
 				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 1.5, { cap = "round" })
 			end
 		end
@@ -1060,11 +1062,11 @@ M.View = ui.component(function(props: {
 			local lit = lit_of(rim.n.id)
 			local x0, y0, tw, th = rim.nx, rim.ny, rim.w, rim.h
 			local cy = y0 + th / 2
-			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.94 else 0.86, lit)), 7)
+			-- (No fill: a hairline round it, the rim broken behind it.)
 			if over == rim.n.id then
-				c:rect(x0, y0, tw, th, ink(0.06, lit), 7)
+				c:rect(x0, y0, tw, th, ink(0.06, lit), 6)
 			end
-			c:stroke(ui.path():rect(x0 + 0.5, y0 + 0.5, tw - 1, th - 1, 7), ink(if dark then 0.22 else 0.26, lit), 1)
+			c:stroke(ui.path():rect(x0 + 0.5, y0 + 0.5, tw - 1, th - 1, 6), ink(if dark then 0.16 else 0.2, lit), 1)
 			local gx = x0 + 8 + 7
 			glyph(c, MachineHead.icon(rim.d), gx, cy, ink(if dark then 0.8 else 0.75, lit))
 			if rim.n.device == here or (rim.d and rim.d.here) then
@@ -1072,9 +1074,17 @@ M.View = ui.component(function(props: {
 				c:circle(gx + 7, cy - 6, 2.5, kit.ink("zeron.tone.info.ink", dim(1, lit)))
 			end
 			local nx = x0 + 8 + 14 + 6
-			c:text(rim.n.title, nx, cy, { size = 13, weight = 600, color = ink(if dark then 0.94 else 0.9, lit), baseline = "middle" })
+			c:text(rim.n.title, nx, cy, { size = 13.5, weight = 600, color = ink(if dark then 0.95 else 0.9, lit), baseline = "middle" })
 			if rim.load ~= "" then
-				c:text(rim.load, nx + rim.name_w + 8, cy, { size = 11, tabular = true, color = ink(if dark then 0.5 else 0.55, lit), baseline = "middle" })
+				local l = (loads :: any)[rim.n.device or ""]
+				local f = if l and l.cpu then l.cpu else 0
+				-- (Its figure amber past 80%: the one sign a machine is full.)
+				local paint = if f > 0.8 then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(0.9, lit)) else ink(if dark then 0.5 else 0.5, lit)
+				c:text(rim.load, nx + rim.name_w + 10, cy, { size = 11, tabular = true, color = paint, baseline = "middle" })
+			end
+			-- A machine with nothing at work says so, quietly, inside.
+			if rim.empty then
+				c:text(locale.s("ds.orch.map.idle"), rim.x, rim.y, { size = 11, color = ink(if dark then 0.38 else 0.45, lit), align = "center", baseline = "middle" })
 			end
 		end
 		for _, l in labels do
