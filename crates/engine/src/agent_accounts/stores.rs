@@ -65,6 +65,9 @@
 
 use std::collections::HashSet;
 
+/// Account keys of OpenCode 2.x's credentials: `credential:<id>`.
+const OPENCODE_CREDENTIAL: &str = "credential:";
+
 use super::*;
 
 // ── paths ───────────────────────────────────────────────────────────────────
@@ -1213,6 +1216,79 @@ impl AgentAccounts {
             }
         }
         (slots, active)
+    }
+
+    // ── OpenCode 2.x ────────────────────────────────────────────────────────
+
+    /// OpenCode 2.x's sign-ins as rows, read live off its background service
+    /// (never saved as slots: they are OpenCode's, and every client of it
+    /// sees a switch or a sign-out at once), plus the active one of each
+    /// integration. `None` where OpenCode keeps `auth.json` instead (1.x, or
+    /// no service), and in tests.
+    pub(super) async fn opencode_credential_slots(&self) -> Option<(Vec<Slot>, HashSet<String>)> {
+        if !self.inner.config.opencode_service {
+            return None;
+        }
+        let harness = zeron_harness::OpencodeHarness::new();
+        if !harness.has_native_credentials().await {
+            return None;
+        }
+        let credentials = harness.native_credentials().await.ok()?;
+        let mut active = HashSet::new();
+        let slots = credentials
+            .into_iter()
+            .map(|credential| {
+                let account_key = format!("{OPENCODE_CREDENTIAL}{}", credential.id);
+                if credential.active {
+                    active.insert(account_key.clone());
+                }
+                let integration = credential
+                    .integration_name
+                    .clone()
+                    .unwrap_or_else(|| credential.integration.clone());
+                Slot {
+                    id: slot_id_for(HarnessId::Opencode, &account_key),
+                    harness: HarnessId::Opencode,
+                    account_key,
+                    profile: SlotProfile {
+                        email: credential.label.clone().unwrap_or_else(|| integration.clone()),
+                        display_name: None,
+                        organization: None,
+                        plan: Some(integration),
+                        auth_kind: if credential.kind == "key" {
+                            AgentAuthKind::ApiKey
+                        } else {
+                            AgentAuthKind::Oauth
+                        },
+                    },
+                    // (Its secret stays on the service.)
+                    credentials: serde_json::Value::Null,
+                    claude_config: None,
+                    saved_at: 0,
+                    created_at: None,
+                    store_key: Some(credential.integration),
+                }
+            })
+            .collect();
+        Some((slots, active))
+    }
+
+    /// The OpenCode 2.x credential a row is, by the row's id.
+    pub(super) async fn opencode_credential(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<String>, EngineError> {
+        let Some((slots, _)) = self.opencode_credential_slots().await else {
+            return Ok(None);
+        };
+        Ok(slots
+            .into_iter()
+            .find(|slot| slot.id == account_id)
+            .and_then(|slot| {
+                slot.account_key
+                    .strip_prefix(OPENCODE_CREDENTIAL)
+                    .map(str::to_owned)
+            }))
     }
 
     // ── sign-ins through the CLI ────────────────────────────────────────────

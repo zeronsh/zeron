@@ -103,11 +103,13 @@ pub const OPENCODE_ACCESS_MODES: [AccessMode; 2] = [AccessMode::Supervised, Acce
 
 mod actions;
 mod client_mcp;
+mod credentials;
 mod service;
 mod sync;
 
 use actions::TuiAction;
 
+pub use credentials::NativeCredential;
 pub use sync::{NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession};
 
 /// Health-poll cadence while the server boots.

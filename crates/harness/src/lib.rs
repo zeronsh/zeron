@@ -740,7 +740,8 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::{
-    NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession, OPENCODE_ACCESS_MODES,
+    NativeChange, NativeCredential, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
+    OPENCODE_ACCESS_MODES,
     OpencodeHarness,
 };
 pub use muse::MuseHarness;
