@@ -36,6 +36,16 @@ pub(crate) fn span_of(text: &str, excerpt: &str) -> Option<(u32, u32)> {
     Some((from as u32, (from + excerpt.len()) as u32))
 }
 
+/// The sentence (or line) of `text` that holds `span`: from the last
+/// `.`, `!`, `?` or line break before it to the next one after it.
+pub(crate) fn sentence_around(text: &str, span: (u32, u32)) -> String {
+    let (from, to) = (span.0 as usize, span.1 as usize);
+    let stop = |c: char| matches!(c, '.' | '!' | '?' | '\n' | ';');
+    let start = text[..from].rfind(stop).map_or(0, |i| i + 1);
+    let end = text[to..].find(stop).map_or(text.len(), |i| to + i);
+    text[start..end].trim().to_owned()
+}
+
 fn cut(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
@@ -180,7 +190,16 @@ impl EngineRpc {
     ) -> Result<String, RpcError> {
         let text = cut(text.trim(), MAX_DUMP_BYTES);
         let files = super::placement::dump_files(attachments)?;
-        let refs = zeron_proto::orchestration::clean_refs(refs);
+        let mut refs = zeron_proto::orchestration::clean_refs(refs);
+        // A card's state as the engine has it when the person dumps (never the
+        // window's word for it): a reply only counts as a verdict on a card
+        // that was in Review as they wrote it.
+        for r in refs.iter_mut().filter(|r| r.kind == zeron_proto::orchestration::RefKind::Card) {
+            r.context.remove("state");
+            if let Some(card) = self.orchestration().item(&r.id) {
+                r.context.insert("state".into(), if card.state == WorkState::Review { "review" } else { "other" }.into());
+            }
+        }
         let text = match () {
             _ if !text.is_empty() => text,
             _ if !files.is_empty() => "(files)".to_owned(),
@@ -286,11 +305,28 @@ impl EngineRpc {
         // approves it, anything else asks for changes. Only in the person's
         // own words (the excerpt, verbatim in the dump), never the Brain
         // dump's rewording: these are the person's ops.
-        let verdict: Option<(String, bool)> = match &aim {
-            Aim::Direct { card: Some(id), .. } if span_of(&dump.text, &excerpt_text).is_some() => orch
-                .item(id)
-                .filter(|c| c.state == WorkState::Review)
-                .map(|c| (c.id, reads_as_approval(&excerpt_text))),
+        // Guarded, as these are the person's ops: only while the dump is
+        // being routed, on a card in Review both when the person dumped and
+        // now, once per card per dump, and judged on the whole sentence the
+        // excerpt sits in (a "looks good" cut from "doesn't look good" isn't
+        // one). Otherwise the reply is a comment to the card's thread.
+        let verdict: Option<(String, bool, String)> = match &aim {
+            Aim::Direct { card: Some(id), .. } if dump.state == DumpState::Routing => {
+                let was_review = dump.refs.iter().any(|r| {
+                    r.kind == zeron_proto::orchestration::RefKind::Card
+                        && &r.id == id
+                        && r.context.get("state").map(String::as_str) == Some("review")
+                });
+                let judged = dump.routes.iter().any(|r| r.reference.as_deref() == Some(id.as_str()));
+                let sentence = span_of(&dump.text, &excerpt_text).map(|span| sentence_around(&dump.text, span));
+                match (was_review && !judged, sentence) {
+                    (true, Some(sentence)) => orch
+                        .item(id)
+                        .filter(|c| c.state == WorkState::Review)
+                        .map(|c| (c.id, reads_as_approval(&sentence), sentence)),
+                    _ => None,
+                }
+            }
             _ => None,
         };
         let (target, message) = match &aim {
@@ -384,6 +420,9 @@ impl EngineRpc {
             }
             None => match &aim {
                 Aim::Answer { ask_id, .. } => {
+                    if dump.state != DumpState::Routing {
+                        return Err(RpcError::BadParams("This dump is already routed".into()));
+                    }
                     // LATER(decision-ui): use the decision op with {option?, text?}: pass
                     // the option `answer_text` matched as AnswerAsk's `option`, else the text.
                     let answer = self.answer_text(ask_id, &route).ok_or_else(|| {
@@ -401,11 +440,11 @@ impl EngineRpc {
                 // (Review card: approveItem / requestChanges, as the person's
                 // buttons on it do; requestChanges tells its thread itself.)
                 _ if verdict.is_some() => {
-                    let (card_id, approve) = verdict.clone().expect("checked");
+                    let (card_id, approve, sentence) = verdict.clone().expect("checked");
                     if approve {
                         self.approve_item(&card_id, Utc::now())?;
                     } else {
-                        self.request_changes(&card_id, route.excerpt.trim())?;
+                        self.request_changes(&card_id, &sentence)?;
                     }
                     route.state = RouteState::Delivered;
                 }

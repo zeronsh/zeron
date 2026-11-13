@@ -2102,6 +2102,28 @@ async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
     assert!(to_fixer.last().unwrap().contains("thicker rails please"), "{to_fixer:?}");
     assert!(!to_fixer.last().unwrap().contains("colours"), "never the Brain dump's rewording: {to_fixer:?}");
 
+    // Once per card per dump: a second reply on it is a comment, not a verdict.
+    op(&core, agent(&brain), route("use dashed lines there", "Approved, looks good", &rework)).await.unwrap();
+    assert_eq!(core.orchestration.item(&rework).unwrap().state, WorkState::Active);
+
+    // A "looks good" cut out of "doesn't look good" approves nothing: the
+    // whole sentence is judged, and sent as the change asked for.
+    let again = op(&core, Caller::Local, upsert("Legend", "fixer", "review")).await.unwrap();
+    let dump2 = op(&core, Caller::Local, json!({"op":"dump","text":"it doesn't look good yet",
+        "refs":[{"kind":"card","id":again,"label":"Legend","context":{"state":"review"}}]})).await.unwrap();
+    op(&core, agent(&brain), json!({"op":"route","dumpId":dump2,"excerpt":"look good","target":{"kind":"note"},
+        "intent":"info","message":"looks good","reference":again})).await.unwrap();
+    assert_eq!(core.orchestration.item(&again).unwrap().state, WorkState::Active, "changes asked, not approved");
+    assert!(sent(&core, "fixer").last().unwrap().contains("it doesn't look good yet"));
+    // (A card not in Review when the person dumped: the window's "review" is ignored.)
+    let late = op(&core, Caller::Local, upsert("Late", "fixer", "active")).await.unwrap();
+    let dump3 = op(&core, Caller::Local, json!({"op":"dump","text":"approve",
+        "refs":[{"kind":"card","id":late,"label":"Late","context":{"state":"review"}}]})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":late,"state":"review"}})).await.unwrap();
+    op(&core, agent(&brain), json!({"op":"route","dumpId":dump3,"excerpt":"approve","target":{"kind":"note"},
+        "intent":"info","message":"approve","reference":late})).await.unwrap();
+    assert_eq!(core.orchestration.item(&late).unwrap().state, WorkState::Review, "not a verdict");
+
     // A card with no thread or owner keeps the comment.
     let id = op(
         &core,
