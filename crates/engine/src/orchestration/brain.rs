@@ -198,6 +198,7 @@ impl EngineRpc {
             state: RouteState::Pending,
             candidates,
             answer: None,
+            answer_full: None,
             item_id: None,
         };
         let brain = self.brain_of(&dump);
@@ -319,6 +320,7 @@ impl EngineRpc {
         route.target = target;
         route.state = RouteState::Pending;
         route.answer = None;
+        route.answer_full = None;
         self.deliver_route(&dump, &mut route, brain.as_deref())
             .await?;
         let to = target_chat(&route.target).unwrap_or("").to_owned();
