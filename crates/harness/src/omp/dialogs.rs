@@ -35,8 +35,6 @@ const DENY: &str = "Deny";
 #[derive(Default)]
 pub(super) struct Dialogs {
     pub input: Option<Arc<Input>>,
-    /// Whether approvals are refused without asking (nobody to ask).
-    pub deny_approvals: bool,
     tasks: JoinSet<()>,
     /// Dialog ids omp still waits on, with the task answering each; whoever
     /// removes an id answers it, once.
@@ -110,12 +108,14 @@ impl Dialogs {
                 return;
             }
         }
-        if matches!(kind, Kind::Approval { .. }) && self.deny_approvals {
-            let _ = client.send(json!({"type":"extension_ui_response","id":id,"value":DENY}));
-            return;
-        }
         let Some(input) = self.input.clone() else {
-            let _ = client.send(cancelled(&id, false));
+            // Nobody to ask: an approval is refused, anything else declined.
+            let _ = client.send(match kind {
+                Kind::Approval { .. } => {
+                    json!({"type":"extension_ui_response","id":id,"value":DENY})
+                }
+                _ => cancelled(&id, false),
+            });
             return;
         };
         // omp's `timeout` is in milliseconds; a host enforces it and answers
@@ -480,7 +480,7 @@ mod tests {
         drop(tx);
         assert_eq!(rig.reply().await["value"], "Deny");
         // With nobody to ask, refused without asking.
-        rig.dialogs.deny_approvals = true;
+        rig.dialogs.input = None;
         rig.request(approval());
         assert_eq!(rig.reply().await["value"], "Deny");
         assert!(rig.asked.try_recv().is_err());
