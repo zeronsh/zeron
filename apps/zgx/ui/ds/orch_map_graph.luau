@@ -489,10 +489,10 @@ M.View = ui.component(function(props: {
 				-- (Its own lines in are ranked apart (`on_own`), not counted
 				-- against it here.)
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 and (p :: any)[3] ~= own and (p :: any)[4] ~= own then
-					k += 0.15
+					k += 0.3
 				end
 			end
-			k = math.min(k, 0.6)
+			k = math.min(k, 1.5)
 			-- (A rim cut reads worse than a line's.)
 			for _, p in rim_pts do
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
@@ -616,7 +616,7 @@ M.View = ui.component(function(props: {
 			local cands: { any } = {}
 			for fi, text in all_forms do
 				local short = fi > #forms
-				for _, far in { 0, 10 } do
+				for _, far in (if n.kind == "thread" then { 0, 10, 24 } else { 0, 6 }) do
 					local r = base + far
 					local tw, lh = 0, 0
 					for _, t in text do
@@ -640,8 +640,10 @@ M.View = ui.component(function(props: {
 					table.insert(spots, { x + d, y - d - th / 2, "start", true })
 					table.insert(spots, { x - d - tw, y + d - th / 2, "end", true })
 					table.insert(spots, { x - d - tw, y - d - th / 2, "end", true })
-					for _, sp in spots do
+					for si, sp in spots do
 						local x0, y0, x1, y1 = sp[1], sp[2], sp[1] + tw, sp[2] + th
+						-- (A leader's name to its right, else its left: an anchor.)
+						local side_cost = if n.kind ~= "thread" and si > 2 then 3 else 0
 						if x0 < 6 or y0 < 4 or x1 > w - 6 or y1 > h - 4 then
 							continue
 						end
@@ -649,7 +651,7 @@ M.View = ui.component(function(props: {
 							continue
 						end
 						local k = crowd(x0 - 4, y0 - 4, x1 + 4, y1 + 4, n.id, if must and n.kind == "thread" then 0.35 else nil)
-						local rank = k + far * 0.03 + (if short then 2 else 0) + on_own(x0 - 2, y0 - 2, x1 + 2, y1 + 2, n.id) + outside(n, x0, y0, x1, y1) + on_rim(x0 - 4, y0 - 4, x1 + 4, y1 + 4)
+						local rank = k + side_cost + far * 0.03 + (if short then 3 else 0) + on_own(x0 - 2, y0 - 2, x1 + 2, y1 + 2, n.id) + outside(n, x0, y0, x1, y1) + on_rim(x0 - 4, y0 - 4, x1 + 4, y1 + 4)
 						table.insert(cands, { rank = rank, k = k, spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 } })
 					end
 				end
@@ -677,7 +679,8 @@ M.View = ui.component(function(props: {
 			local gx, gy = qx - x, qy - y
 			local gd = math.sqrt(gx * gx + gy * gy)
 			-- (Always for a name hung aside or stepped out; else past 13px.)
-			if gd - mr > 13 then
+			-- (A clear one or none: under 20px it reads as debris.)
+			if gd - mr >= 20 then
 				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
 			end
 			for i, t in best.text do
