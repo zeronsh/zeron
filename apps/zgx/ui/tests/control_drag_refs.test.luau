@@ -186,10 +186,14 @@ end)
 
 test("drag refs: Capture says Drop to reference while one is over it", function()
 	local app = tall()
+	-- At rest: nothing over the composer.
+	expect(app:has("#lane-drop-ref-control-capture")).to_be(false)
 	app:command("fixture.drag_refs")
 	app:frames(10)
 	expect(app:has("#lane-drop-ref-control-capture")).to_be(true)
-	expect(app:has('#lane-drop-ref-control-capture >> "Drop to reference"')).to_be(true)
+	-- Its words on their own accent pill, over the washed, ringed zone.
+	expect(app:has("#lane-drop-ref-control-capture-label")).to_be(true)
+	expect(app:has('#lane-drop-ref-control-capture-label >> "Drop to reference"')).to_be(true)
 	-- (The chips there under it.)
 	expect(#refs_of(app)).to_be(3)
 end)
