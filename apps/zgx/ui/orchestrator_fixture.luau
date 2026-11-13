@@ -22,6 +22,12 @@ local sample = (function(): any
 	local moved = base.at(os.time())
 	for i, c in moved.chats :: { any } do
 		c.todo = (base.chats[i] :: any).todo
+		-- (A row's `agent` is ds.Mark's name for its harness, as the host
+		-- has it: Codex's is OpenAI's.)
+		if c.agent == "codex" then
+			c.harness = "codex"
+			c.agent = "openai"
+		end
 	end
 	return moved
 end)()
@@ -162,6 +168,23 @@ local function said(op: { [string]: any }): string
 	end
 	return `{op.op}:{table.concat(parts, ",")}`
 end
+-- (The Control room's loads, wanted as its Machines show: none to send.)
+;(orchestration :: any).loads_wanted = function(_on: boolean) end
+-- (A composer's agents and models, for its picker: the Brain dump's too.)
+do
+	local store = require("@app/screens/chat/store") :: any
+	store.catalog_on = function() end
+	store.load_catalog = function() end
+	store.catalog:set({
+		state = "ready",
+		harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
+		complete = true,
+		models = {
+			{ value = "claude-code/claude-opus-5-5", label = "Opus 5.5", harness = "claude-code" },
+			{ value = "claude-code/claude-haiku-5-5", label = "Haiku 5.5", harness = "claude-code" },
+		},
+	})
+end
 ;(orchestration :: any).op = function(op: { [string]: any }): any
 	local line = said(op)
 	calls:set(if calls:peek() == "" then line else `{calls:peek()}\n{line}`)
@@ -202,6 +225,35 @@ ui.command { id = "orch.unknown", title = "Orchestration unknown", run = functio
 end }
 ui.command { id = "orch.known", title = "Orchestration again", run = function()
 	orchestration.now:set(published)
+end }
+-- None of the person's own yet (the Brain dump alone), or CI speed
+-- archived.
+local function with_orchestrators(keep: (o: any) -> any?)
+	local now = table.clone(orchestration.now:peek())
+	local list = {}
+	for _, o in now.orchestrators or {} do
+		local kept = keep(o)
+		if kept then
+			table.insert(list, kept)
+		end
+	end
+	now.orchestrators = list
+	orchestration.now:set(now)
+end
+ui.command { id = "orch.none", title = "No orchestrators", run = function()
+	with_orchestrators(function(o: any): any?
+		return if o.kind == "brain_dump" then o else nil
+	end)
+end }
+ui.command { id = "orch.archive_ci", title = "CI speed archived", run = function()
+	with_orchestrators(function(o: any): any?
+		if o.id == "orc-ci" then
+			local c = table.clone(o)
+			c.archived = true
+			return c
+		end
+		return o
+	end)
 end }
 
 route.orchestrator("orc-orch")

@@ -510,7 +510,8 @@
       "new_orchestrator": "New orchestrator",
       "orchestrator_actions": "Orchestrator actions",
       "paused": "Paused",
-      "crew_of": "Started by {name}"
+      "crew_of": "Started by {name}",
+      "archived_orchestrator": "Archived"
     },
     "git": {
       "pull_request": "Pull request",
@@ -4109,7 +4110,19 @@
       "make_orchestrator": "Make orchestrator",
       "add_to_board": "Add to board",
       "added_to_board": "Added to the board",
-      "add_to_board_failed": "Couldn't add it to the board"
+      "add_to_board_failed": "Couldn't add it to the board",
+      "unarchive": "Unarchive",
+      "view": {
+        "orchestrators": "Orchestrators",
+        "new": "New orchestrator…",
+        "section": "Show section",
+        "archived": "Show archived",
+        "control": "Control room",
+        "open_control": "Open Control room",
+        "widgets": "Widgets…",
+        "map": "Default map view",
+        "brain_model": "Brain dump model…"
+      }
     },
     "palette": {
       "new_orchestrator": "New orchestrator",

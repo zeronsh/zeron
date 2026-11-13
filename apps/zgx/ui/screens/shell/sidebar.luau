@@ -87,6 +87,10 @@ local shared = {
 		-- Orchestrators row, the Control room and the Map list them anyway.)
 		orchestrator_chats = ui.persist("shell_sidebar_show_orchestrator_chats", true),
 	},
+	-- The view menu's Orchestrators group: the section itself (on until put
+	-- away), and archived orchestrators listed in it (off until asked for).
+	orchestrators = ui.persist("shell_sidebar_show_orchestrators", true),
+	archived_orchestrators = ui.persist("shell_sidebar_show_archived_orchestrators", false),
 	-- The groups showing all their sessions ("Show N more"): until the app
 	-- quits (a reload keeps them).
 	expanded = ui.state("shell_sidebar_expanded", {} :: { [string]: boolean }),
@@ -1531,12 +1535,17 @@ local orch_rows = ui.computed(function(): { any }
 	local now = orchestration.now:get()
 	local chats = orch_data.chats(sessions.now:get())
 	local list: { any } = {}
+	local with_archived = shared.archived_orchestrators:get()
 	for _, o in now.orchestrators or {} do
-		if o.kind == "standard" and not o.archived then
+		if o.kind == "standard" and (with_archived or not o.archived) then
 			table.insert(list, o)
 		end
 	end
+	-- (Archived ones after the rest.)
 	table.sort(list, function(a: any, b: any): boolean
+		if (a.archived == true) ~= (b.archived == true) then
+			return b.archived == true
+		end
 		if (a.created or 0) ~= (b.created or 0) then
 			return (a.created or 0) < (b.created or 0)
 		end
@@ -1568,8 +1577,8 @@ local orch_rows = ui.computed(function(): { any }
 				needs += 1
 			end
 		end
-		table.insert(out, { id = o.id, name = o.name, hue = o.hue, working = working, total = total, needs = needs, paused = o.paused == true })
-		table.insert(parts, `{o.id}|{o.name}|{o.hue}|{working}|{total}|{needs}|{o.paused}`)
+		table.insert(out, { id = o.id, name = o.name, hue = o.hue, working = working, total = total, needs = needs, paused = o.paused == true, archived = o.archived == true })
+		table.insert(parts, `{o.id}|{o.name}|{o.hue}|{working}|{total}|{needs}|{o.paused}|{o.archived}`)
 	end
 	local key = table.concat(parts, "\n")
 	if key == orch_rows_key then
@@ -1616,15 +1625,129 @@ local function orchestrator_menu(id: string): { any }?
 			end,
 		},
 		{ separator = true },
-		{
-			label = locale.s("orch.sidebar.archive"),
-			icon = "archive-minimalistic",
-			on_select = function()
-				orch_actions.archive(id)
-			end,
+		if o.archived
+			then {
+				label = locale.s("orch.sidebar.unarchive"),
+				icon = "archive-minimalistic",
+				on_select = function()
+					orch_actions.update(id, { archived = false })
+				end,
+			}
+			else {
+				label = locale.s("orch.sidebar.archive"),
+				icon = "archive-minimalistic",
+				on_select = function()
+					orch_actions.archive(id)
+				end,
+			},
+	}
+end
+
+-- The view menu's groups past Show: Orchestrators (a new one, the section
+-- shown, archived ones in it) and the Control room (to it, its widgets, the
+-- Map's view it opens on, the Brain dump's model).
+local Menu = require("@ds/menu")
+local OrchMap = require("@ds/orch_map")
+local function control_page(): any
+	return boundary.load("@app/screens/control/page")
+end
+M.show_orchestrators = shared.orchestrators
+M.show_archived_orchestrators = shared.archived_orchestrators
+local function view_more(more: any): { Node }
+	local function toggle(st: any): () -> ()
+		return function()
+			st:set(not st:peek())
+		end
+	end
+	local page = control_page()
+	return {
+		Menu.Group {
+			heading = locale.s("orch.sidebar.view.orchestrators"),
+			Menu.Row {
+				icon = "plus",
+				label = locale.s("orch.sidebar.view.new"),
+				on_click = function()
+					more.close()
+					orch_actions.new()
+				end,
+			},
+			Menu.Row {
+				icon = "users-group-rounded",
+				label = locale.s("orch.sidebar.view.section"),
+				checked = function(): boolean
+					return shared.orchestrators:get()
+				end,
+				on_click = toggle(shared.orchestrators),
+			},
+			Menu.Row {
+				icon = "archive-minimalistic",
+				label = locale.s("orch.sidebar.view.archived"),
+				checked = function(): boolean
+					return shared.archived_orchestrators:get()
+				end,
+				on_click = toggle(shared.archived_orchestrators),
+			},
+		},
+		Menu.Group {
+			heading = locale.s("orch.sidebar.view.control"),
+			Menu.Row {
+				icon = "monitor",
+				label = locale.s("orch.sidebar.view.open_control"),
+				on_click = function()
+					more.close()
+					route.control()
+				end,
+			},
+			Menu.Row {
+				icon = "tuning",
+				label = locale.s("orch.sidebar.view.widgets"),
+				disabled = page == nil,
+				on_click = function()
+					if page then
+						more.menu(page.widget_entries())
+					end
+				end,
+			},
+			Menu.Row {
+				icon = "git-branch",
+				label = locale.s("orch.sidebar.view.map"),
+				disabled = page == nil,
+				on_click = function()
+					if not page then
+						return
+					end
+					local out: { any } = { { heading = locale.s("orch.sidebar.view.map") } }
+					for _, v in OrchMap.VARIANTS do
+						table.insert(out, {
+							label = locale.s(`ds.orch.map.variant.{v}`),
+							checked = function(): boolean
+								return OrchMap.valid(page.map_view:get()).variant == v
+							end,
+							on_select = function()
+								OrchMap.set(page.map_view, { variant = v })
+							end,
+						})
+					end
+					more.menu(out)
+				end,
+			},
+			Menu.Row {
+				icon = "bot",
+				label = locale.s("orch.sidebar.view.brain_model"),
+				on_click = function()
+					more.close()
+					route.control()
+					local lane = boundary.load("@app/screens/chat/lane_tab") :: any
+					local ask = lane and lane.open_model_when
+					if ask then
+						(ask :: any)("control-capture")
+					end
+				end,
+			},
 		},
 	}
 end
+M.view_more = view_more
 
 local orchestration_prop = {
 	control = {
@@ -1650,6 +1773,9 @@ local orchestration_prop = {
 		orch_actions.new()
 	end,
 	menu = orchestrator_menu,
+	shown = function(): boolean
+		return shared.orchestrators:get()
+	end,
 }
 
 M.Sidebar = ui.component(function(props: Props): Node
@@ -1709,6 +1835,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 			route.plugin_page(page.plugin, page.id)
 		end,
 		orchestration = orchestration_prop :: any,
+		view_more = if props.island then nil else view_more,
 		on_search = function()
 			view.palette:set(true)
 		end,
