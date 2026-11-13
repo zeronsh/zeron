@@ -212,6 +212,8 @@ const PERSON_OPS: &[&str] = &[
     "releaseFromCrew",
     // (A chat put on the board: its card, made if it has none open.)
     "addToBoard",
+    // (A card taken off the board: kept, marked removed; its chat untouched.)
+    "removeItem",
     "upsertItem",
     "answerAsk",
     "dismissAsk",

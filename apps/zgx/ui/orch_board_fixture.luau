@@ -58,7 +58,7 @@ local function update(id: string, fields: { [string]: any })
 	items:set(list)
 end
 
-return ui.scroll {
+return ui.div { w_full = true, h_full = true, ui.scroll {
 	id = "fixture-root",
 	w_full = true,
 	h_full = true,
@@ -108,7 +108,21 @@ return ui.scroll {
 				on_source = function(src: any)
 					note(`source:{src.dump_id}`)
 				end,
+				-- (As the engine: kept, marked removed; put back, a new card.)
+				on_remove = function(id: string)
+					note(`remove:{id}`)
+					update(id, { removed = true })
+					return nil
+				end,
+				on_restore = function(it: any)
+					note(`restore:{it.id}:{it.title}`)
+					local copy = table.clone(it)
+					copy.id = `{it.id}-back`
+					copy.removed = nil
+					items:push(copy)
+					return nil
+				end,
 			}
 		end, { w_full = true }),
 	},
-}
+}, ds.toast.Host {} }

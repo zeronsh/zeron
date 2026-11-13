@@ -132,6 +132,37 @@ function M.add_to_board(chat_id: string): any
 	return M.op({ op = "addToBoard", chatId = chat_id })
 end
 
+-- A card taken off the board (kept, marked removed; its chat untouched).
+function M.remove_item(id: string): any
+	return M.op({ op = "removeItem", id = id })
+end
+
+-- A card taken off the board, put back as it was: made again from its
+-- fields (the engine brings none back), a new card. A promise of `{ id }`.
+function M.restore_item(item: any): any
+	local src = item.source
+	local links: { any } = {}
+	for _, l in item.links or {} do
+		table.insert(links, { kind = l.kind, label = l.label, target = l.target })
+	end
+	return M.op({
+		op = "upsertItem",
+		item = {
+			orchestratorId = item.orchestrator_id,
+			title = item.title,
+			detail = item.detail or "",
+			state = item.state,
+			priority = item.priority,
+			progress = item.progress,
+			threads = item.threads or {},
+			links = links,
+			outcome = item.outcome,
+			source = if src and src.dump_id then { dumpId = src.dump_id, routeId = src.route_id or "" } else nil,
+			order = item.order,
+		},
+	})
+end
+
 -- Whether a chat has a card on the board not done yet.
 function M.on_board(chat_id: string): boolean
 	for _, it in M.now:peek().items or {} do

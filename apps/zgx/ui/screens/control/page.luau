@@ -515,6 +515,8 @@ local function board(): Node
 		on_source = function(src: any)
 			M.show_dump(src.dump_id)
 		end,
+		on_remove = orchestration.remove_item,
+		on_restore = orchestration.restore_item,
 		progress = function(chat: string): Node
 			return Progress.strip(chat, { lean = true })
 		end,
