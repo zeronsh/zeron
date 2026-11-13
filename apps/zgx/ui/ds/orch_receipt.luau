@@ -35,6 +35,7 @@ local RouteMark = require("@self/orch_route_mark")
 local PartCard = require("@self/orch_part_card")
 local IconButton = require("@self/icon_button").IconButton
 local Markdown = require("@self/markdown")
+local HoverCard = require("@self/hover_card")
 
 export type Props = {
 	dump: () -> any,
@@ -52,6 +53,11 @@ export type Props = {
 
 -- How far apart the excerpts light.
 local STAGGER = 60
+-- How long the pointer rests on another word before the part card hangs
+-- from it (past zgx's grace for crossing into a hover card, 120 ms), and
+-- the card's width (ds/orch_part_card's).
+local SWITCH_MS = 250
+local CARD_W = 480
 
 -- The chips' edges: a fade as wide as this once they run past it, reached
 -- this many times faster than they overflow (as the session tabs' strip).
@@ -188,8 +194,8 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- A part's hover card (ds/orch_part_card), reading its route as it
-	-- stands now.
-	local function card(index: number | () -> number): Node
+	-- stands now; `c`, ds/hover_card Anchored's (framed or not, its close).
+	local function card(index: number | () -> number, c: HoverCard.CardContext): Node
 		local function r(): any
 			local i = if type(index) == "function" then (index :: any)() else index
 			return routes_of(props.dump())[i] or {}
@@ -200,6 +206,8 @@ return ui.component(function(props: Props): Node
 				return data.target(props.now(), props.chats(), r().target, words)
 			end,
 			on_open = props.on_open,
+			bare = c.bare,
+			on_close = c.close,
 		}
 	end
 
@@ -232,6 +240,25 @@ return ui.component(function(props: Props): Node
 	-- own points), the route's index and id; nil off every part.
 	type At = { x: number, y: number, w: number, h: number, index: number, rid: string }
 	local at = ui.use_state(nil :: At?)
+	-- The part the pointer is on now (what lights), apart from `at`, the
+	-- word the card hangs from: that one stays put while the pointer
+	-- crosses other words on its way into the card, and moves only once
+	-- the pointer rests on another word (`SWITCH_MS`, past zgx's grace
+	-- for the crossing). Off the text and off the card, it goes.
+	local under: At? = nil
+	local switching = 0
+	local over_card = false
+	local words_of = ""
+	ui.effect(function()
+		-- (A dump of other words: no word of the last one's.)
+		local sh = shape:get()
+		local k = `{sh.id or ""}:{sh.n}`
+		if k ~= words_of then
+			words_of = k
+			at:set(nil)
+			under = nil
+		end
+	end)
 
 	-- The text, cut at its routes: drawn as one paragraph (each part a span,
 	-- underlined in its hue, tinted under the pointer), so it reads, selects
@@ -368,26 +395,54 @@ return ui.component(function(props: Props): Node
 			end
 			return nil
 		end
+		local function same(a: At?, b: At?): boolean
+			return a ~= nil and b ~= nil and a.x == b.x and a.y == b.y
+		end
 		local function point(x: number, y: number)
 			local found = find(x, y)
-			local was = at:peek()
-			if found and was and found.x == was.x and found.y == was.y then
-				return
-			end
-			at:set(found)
+			local was = under
+			under = found
 			if found then
-				hovered:set(found.rid)
-				reveal(found.rid)
+				if not same(found, was) then
+					hovered:set(found.rid)
+					reveal(found.rid)
+				end
 			elseif was and hovered:peek() == was.rid then
 				hovered:set(nil)
 			end
+			if not found or same(found, at:peek()) then
+				return
+			end
+			if at:peek() == nil then
+				at:set(found)
+				return
+			end
+			switching += 1
+			local mine = switching
+			ui.after(SWITCH_MS, function()
+				if mine == switching and same(under, found) then
+					at:set(under)
+				end
+			end)
+		end
+		-- Off the text: the card's anchor goes, unless the pointer went into
+		-- the card (it goes as the pointer leaves that).
+		local function let_go()
+			switching += 1
+			local mine = switching
+			ui.after(SWITCH_MS, function()
+				if mine == switching and under == nil and not over_card then
+					at:set(nil)
+				end
+			end)
 		end
 		local function leave()
-			local was = at:peek()
-			at:set(nil)
+			local was = under
+			under = nil
 			if was and hovered:peek() == was.rid then
 				hovered:set(nil)
 			end
+			let_go()
 		end
 
 		return ui.overlay {
@@ -408,7 +463,8 @@ return ui.component(function(props: Props): Node
 			end,
 			ui.rich(runs),
 			ui.row(layout),
-			-- Over the word the pointer is on: the part's hover card.
+			-- Over the word the pointer rests on: the part's hover card,
+			-- hanging from that word (ds/hover_card Anchored).
 			ui.show(function(): boolean
 				return at:get() ~= nil
 			end, ui.div {
@@ -430,15 +486,36 @@ return ui.component(function(props: Props): Node
 					local a = at:get()
 					return if a then a.h else 0
 				end,
-				tooltip = card(function(): number
-					local a = at:get()
-					return if a then a.index else 0
-				end),
-				tooltip_placement = { side = "bottom", align = "start", offset = 6 },
-				tooltip_interactive = true,
 				on_pointer_move = function(e: PointerEvent)
 					point(e.x, e.y)
 				end,
+				HoverCard.Anchored {
+					class = "orch-part-hold",
+					w = CARD_W,
+					-- (The word's box: the outer one's, which places it.)
+					anchor = ui.div {
+						w = function(): number
+							local a = at:get()
+							return if a then a.w else 0
+						end,
+						h = function(): number
+							local a = at:get()
+							return if a then a.h else 0
+						end,
+					},
+					card = function(c: HoverCard.CardContext): Node
+						return card(function(): number
+							local a = at:get()
+							return if a then a.index else 0
+						end, c)
+					end,
+					on_card_hover = function(inside: boolean)
+						over_card = inside
+						if not inside then
+							let_go()
+						end
+					end,
+				},
 			}),
 		}
 	end
@@ -561,10 +638,9 @@ return ui.component(function(props: Props): Node
 			local tg = row:get().target
 			return tg ~= nil and tg.kind == "unsure"
 		end
-		local opener: ((x: number, y: number) -> boolean)? = nil
-		-- The chip's element as it is now (one handed over as it came into
-		-- view may be gone, its chip drawn anew).
-		local chip_ref = ui.ref()
+		-- Its part's card, pinned by a click on it (ds/hover_card Anchored);
+		-- its menu is the secondary click's, the Menu key's, Shift+F10's.
+		local pinned = ui.use_state(false)
 		local function intent(): string
 			return row:get().intent or "task"
 		end
@@ -602,21 +678,12 @@ return ui.component(function(props: Props): Node
 					hovered:set(nil)
 				end
 			end,
-			ref = chip_ref,
 			on_click = function()
 				-- (The end of a drag across the strip is no click.)
 				if dragged then
 					return
 				end
-				-- Under the chip, from its start; not while it has no box.
-				local el = chip_ref:peek()
-				if not (opener and el and el.mounted) then
-					return
-				end
-				local x, y, h = el.x, el.y, el.height
-				if x and y and h and h > 0 and (el.width or 0) > 0 then
-					opener(x, y + h + 4)
-				end
+				pinned:set(not pinned:peek())
 			end,
 			ui.switch(function(): string
 				return if unsure() then "unsure" else "placed"
@@ -670,13 +737,26 @@ return ui.component(function(props: Props): Node
 					items = function(): { any }?
 						return menu(row)
 					end,
-					hook = function(open_at: (x: number, y: number) -> boolean)
-						opener = open_at
-					end,
 					label = function(): string
 						return t().label
 					end,
-					body,
+					HoverCard.Anchored {
+						class = "orch-chip-hold",
+						w = CARD_W,
+						pinned = pinned,
+						anchor = body,
+						card = function(c: HoverCard.CardContext): Node
+							return card(function(): number
+								local id = row:get().id
+								for k, rr in routes:get() do
+									if rr.id == id then
+										return k
+									end
+								end
+								return 0
+							end, c)
+						end,
+					},
 				},
 				-- Unsure: its likely places, then elsewhere from the menu.
 				ui.show(unsure, ui.row {
@@ -715,15 +795,12 @@ return ui.component(function(props: Props): Node
 				index = i
 			end
 		end
-		return ui.row {
+		local line = ui.row {
 			class = "orch-answer",
 			w_full = true,
 			h = 24,
 			gap = "$space.2",
 			items = "center",
-			tooltip = card(index),
-			tooltip_placement = { side = "bottom", align = "start", offset = 6 },
-			tooltip_interactive = true,
 			on_hover = function(inside: boolean)
 				if inside then
 					hovered:set(row:peek().id)
@@ -775,6 +852,16 @@ return ui.component(function(props: Props): Node
 					small = true,
 				},
 			},
+		}
+		-- Its part's card, hanging from the line (ds/hover_card Anchored).
+		return HoverCard.Anchored {
+			class = "orch-answer-hold",
+			w = CARD_W,
+			w_full = true,
+			anchor = line,
+			card = function(c: HoverCard.CardContext): Node
+				return card(index, c)
+			end,
 		}
 	end
 
