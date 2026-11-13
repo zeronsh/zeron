@@ -79,8 +79,28 @@ M.View = ui.component(function(props: {
 	chat: (id: string) -> any,
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
+	menu: ((id: string) -> { any }?)?,
+	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 }): Node
 	local width = ui.use_state(720)
+	-- Something in a block with a secondary click's menu: `id`'s.
+	local function with_menu(id: string, child: Node): Node
+		return kit.MenuField {
+			menu = props.menu,
+			register = props.register,
+			key = `machines:{id}`,
+			hit = function(_x: number, _y: number): string?
+				return id
+			end,
+			center = function(want: string): (number?, number?)
+				if want == id then
+					return 12, 14
+				end
+				return nil, nil
+			end,
+			child = child,
+		}
+	end
 	local fleet = ui.computed(function(): model.Fleet
 		return model.fleet(props.world())
 	end)
@@ -311,7 +331,7 @@ M.View = ui.component(function(props: {
 				},
 			}
 		end
-		return thread_row(line)
+		return with_menu(line:peek().id, thread_row(line))
 	end
 
 	local function block(id: string): Node
@@ -338,7 +358,7 @@ M.View = ui.component(function(props: {
 				return if m().online == false then 0.55 else 1
 			end,
 			-- Its head, as every view has it.
-			MachineHead.MachineHead {
+			with_menu(`dev:{id}`, MachineHead.MachineHead {
 				device = function(): any
 					return m().device
 				end,
@@ -347,7 +367,7 @@ M.View = ui.component(function(props: {
 				end,
 				load = load,
 				load_at_end = true,
-			},
+			}),
 			-- Its CPU over the last minutes, as the host keeps it (once
 			-- there's a line to draw).
 			ui.show(function(): boolean

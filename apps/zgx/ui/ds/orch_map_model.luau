@@ -92,8 +92,14 @@ function M.fleet(world: any): Fleet
 		return if p then p.name else nil, id
 	end
 	local order = 0
+	-- (Nothing archived shows: an orchestrator, nor a thread, whose row or
+	-- chat is.)
+	local function archived(id: string?): boolean
+		local c = id and chats[id]
+		return c ~= nil and c.archived == true
+	end
 	for _, o in now.orchestrators or {} do
-		if not o.archived then
+		if not o.archived and not archived(o.id) then
 			orchestrators[o.id] = o
 			local c = chats[o.id]
 			local name, pid = project_of(c, o.project)
@@ -114,7 +120,7 @@ function M.fleet(world: any): Fleet
 	end
 	for _, m in now.crew or {} do
 		local o = orchestrators[m.orchestrator_id]
-		if not m.released and o then
+		if not m.released and o and not archived(m.chat_id) then
 			local c = chats[m.chat_id]
 			local home = threads[o.id]
 			-- (A crew thread's project, else its orchestrator's where they

@@ -50,7 +50,10 @@ export type Graph = {
 	alpha: number,
 }
 
-M.R = { device = 16, orchestrator = 10, brain = 9, thread = 7 }
+M.R = { device = 16, orchestrator = 10, brain = 9, thread = 5 }
+-- An island (a machine's room) reaches PAD past its farthest member;
+-- islands keep GAP apart, rim to rim.
+M.ISLAND_PAD, M.ISLAND_GAP = 28, 72
 M.ALPHA_MIN = 0.004
 local DECAY = 0.028
 local FRICTION = 0.58
@@ -102,7 +105,7 @@ function M.build(world: any): Graph
 	-- What runs where.
 	for _, t in fleet.threads do
 		local big = t.kind == "orchestrator"
-		link(`dev:{t.device or ""}`, t.id, "host", nil, if big then 78 else 64, if big then 0.45 else 0.55)
+		link(`dev:{t.device or ""}`, t.id, "host", nil, if big then 66 else 58, 0.9)
 	end
 	-- What leads what; what the Brain dump started; what it handed parts.
 	local prov = model.provenance(world)
@@ -110,7 +113,7 @@ function M.build(world: any): Graph
 		if t.kind == "crew" and t.orchestrator then
 			-- (Across machines, a looser pull: each stays on its island.)
 			local lead = fleet.threads[t.orchestrator :: string]
-			local away = if lead and lead.device ~= t.device then 0.35 else 1
+			local away = if lead and lead.device ~= t.device then 0.1 else 1
 			if t.started then
 				link(t.orchestrator :: string, t.id, "started", t.hue, 110, 0.22 * away)
 			else
@@ -122,7 +125,7 @@ function M.build(world: any): Graph
 		local t = fleet.threads[id]
 		if t and t.kind == "orchestrator" then
 			local o = fleet.orchestrators[by]
-			link(by, id, "started", o and o.hue, 110, 0.15)
+			link(by, id, "started", o and o.hue, 110, 0.05)
 		end
 	end
 	local seen: { [string]: boolean } = {}
@@ -210,14 +213,7 @@ function M.step(g: Graph): boolean
 				b.vx += fx
 				b.vy += fy
 				-- (Room for a name beside a node that always shows one.)
-				-- (Machines apart by two islands' width; what runs on one
-				-- kept off another's.)
-				local foreign = (a.kind == "device") ~= (b.kind == "device")
-					and (if a.kind == "device" then b.device else a.device) ~= (if a.kind == "device" then a.device else b.device)
-				local room = if a.kind == "device" and b.kind == "device"
-					then 340
-					elseif foreign then 150
-					else a.r + b.r + 14 + (if a.kind ~= "thread" then 22 else 0) + (if b.kind ~= "thread" then 22 else 0)
+				local room = a.r + b.r + 22 + (if a.kind ~= "thread" then 24 else 0) + (if b.kind ~= "thread" then 24 else 0)
 				if d < room then
 					local push = (room - d) / d * 0.5
 					a.vx -= dx * push * 0.5
@@ -241,6 +237,53 @@ function M.step(g: Graph): boolean
 			a.y += a.vy
 		end
 	end
+	-- Each machine drawn to the middle of what it runs (its island's
+	-- anchor), unless dropped.
+	local pre = M.islands(g)
+	for id, i in pre do
+		local d = nodes[g.index[id]]
+		if not d.fixed and next(i.members) then
+			d.x += (i.x - d.x) * 0.3
+			d.y += (i.y - d.y) * 0.3
+		end
+	end
+	-- Islands apart, rim to rim, each moved whole (a dropped node stays).
+	local isl = M.islands(g)
+	local ids = {}
+	for id in isl do
+		table.insert(ids, id)
+	end
+	table.sort(ids)
+	local function shift(id: string, dx: number, dy: number)
+		local d = nodes[g.index[id]]
+		if not d.fixed then
+			d.x += dx
+			d.y += dy
+		end
+		for m in isl[id].members do
+			local o = nodes[g.index[m]]
+			if not o.fixed then
+				o.x += dx
+				o.y += dy
+			end
+		end
+	end
+	for i = 1, #ids do
+		for j = i + 1, #ids do
+			local p, q = isl[ids[i]], isl[ids[j]]
+			local dx, dy = q.x - p.x, q.y - p.y
+			local d = math.sqrt(dx * dx + dy * dy)
+			local room = p.r + q.r + M.ISLAND_GAP
+			if d < room then
+				if d < 1e-3 then
+					dx, dy, d = 1, 0, 1
+				end
+				local push = (room - d) / d * 0.25
+				shift(ids[i], -dx * push, -dy * push)
+				shift(ids[j], dx * push, dy * push)
+			end
+		end
+	end
 	g.alpha = alpha * (1 - DECAY)
 	return g.alpha >= M.ALPHA_MIN
 end
@@ -253,11 +296,55 @@ function M.settle(g: Graph, steps: number)
 	end
 end
 
+-- Each machine's island, by its node's id: round the machine and all it
+-- runs, centred between them (the machine counted twice); `members` the
+-- ids on it.
+export type Island = { x: number, y: number, r: number, members: { [string]: boolean } }
+function M.islands(g: Graph): { [string]: Island }
+	local out: { [string]: Island } = {}
+	local list: { [string]: { Node } } = {}
+	for _, n in g.nodes do
+		if n.kind == "device" then
+			out[n.id] = { x = n.x, y = n.y, r = 0, members = {} }
+			list[n.id] = { n, n }
+		end
+	end
+	for _, n in g.nodes do
+		local home = n.kind ~= "device" and list[`dev:{n.device or ""}`]
+		if home then
+			table.insert(home, n)
+			out[`dev:{n.device or ""}`].members[n.id] = true
+		end
+	end
+	for id, isl in out do
+		local sx, sy = 0, 0
+		for _, n in list[id] do
+			sx += n.x
+			sy += n.y
+		end
+		isl.x, isl.y = sx / #list[id], sy / #list[id]
+		local r = 0
+		for _, n in list[id] do
+			r = math.max(r, math.sqrt((n.x - isl.x) ^ 2 + (n.y - isl.y) ^ 2) + n.r)
+		end
+		isl.r = math.max(r + M.ISLAND_PAD, list[id][1].r + 34)
+	end
+	return out
+end
+
 function M.bounds(g: Graph): (number, number, number, number)
 	local x0: number, y0: number, x1: number, y1: number = math.huge, math.huge, -math.huge, -math.huge
 	for _, n in g.nodes do
 		x0, y0 = math.min(x0, n.x - n.r), math.min(y0, n.y - n.r)
 		x1, y1 = math.max(x1, n.x + n.r), math.max(y1, n.y + n.r)
+	end
+	for _, island in M.islands(g) do
+		local isl: any = island
+		local r: number = isl.r
+		x0 = math.min(x0 :: number, (isl.x :: number) - r)
+		y0 = math.min(y0 :: number, (isl.y :: number) - r)
+		x1 = math.max(x1 :: number, (isl.x :: number) + r)
+		y1 = math.max(y1 :: number, (isl.y :: number) + r)
 	end
 	if x0 > x1 then
 		return -100, -100, 100, 100

@@ -2535,6 +2535,255 @@ mod tests {
     /// it is, on its row (top-level or a crew thread's): the activity only
     /// while it works, the todo whenever its host says; a change to either
     /// alone is published and builds its row again.
+    /// A snapshot of an engine's lists (`SESSIONS_SNAPSHOT`: a JSON file of
+    /// WatchChats, WatchSessions, WatchDevices, WatchSpaces,
+    /// WatchSidebarPreferences and LocalDevice) through the bridge, its
+    /// value written beside it (`.value.json`): what the scripts would see.
+    #[test]
+    #[ignore]
+    fn sessions_snapshot() {
+        let Ok(path) = std::env::var("SESSIONS_SNAPSHOT") else { return };
+        let snap: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = snap["LocalDevice"]["id"].as_str().map(String::from);
+        s.heard(Slot::Devices, snap["WatchDevices"].clone());
+        s.heard(Slot::Spaces, snap["WatchSpaces"].clone());
+        s.heard(Slot::Places, snap["WatchSidebarPreferences"].clone());
+        s.heard(Slot::Live, snap["WatchSessions"].clone());
+        s.heard(Slot::Chats, snap["WatchChats"].clone());
+        let v = s.value();
+        std::fs::write(format!("{path}.value.json"), v.to_json()).unwrap();
+    }
+
+    /// A recorded WatchSessions stream (`SESSIONS_STREAM`: [{ t, m: { item } }])
+    /// over the snapshot's chats, replayed: each chat named in
+    /// `SESSIONS_WATCH` (comma-separated prefixes), its status at each frame.
+    #[test]
+    #[ignore]
+    fn sessions_stream_replay() {
+        let (Ok(snap), Ok(stream)) = (std::env::var("SESSIONS_SNAPSHOT"), std::env::var("SESSIONS_STREAM")) else { return };
+        let watch: Vec<String> = std::env::var("SESSIONS_WATCH").unwrap_or_default().split(',').map(String::from).collect();
+        let snap: Json = serde_json::from_str(&std::fs::read_to_string(&snap).unwrap()).unwrap();
+        let stream: Json = serde_json::from_str(&std::fs::read_to_string(&stream).unwrap()).unwrap();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = snap["LocalDevice"]["deviceId"].as_str().map(String::from);
+        s.heard(Slot::Devices, snap["WatchDevices"].clone());
+        s.heard(Slot::Spaces, snap["WatchSpaces"].clone());
+        s.heard(Slot::Chats, snap["WatchChats"].clone());
+        for f in stream.as_array().unwrap() {
+            let t = f["t"].as_f64().unwrap() as i64;
+            s.heard(Slot::Live, f["m"]["item"].clone());
+            let v = s.value_at(t);
+            for c in v.field("chats").unwrap().list() {
+                let id = c.field("id").map(crate::auth::text).unwrap_or_default();
+                if watch.iter().any(|w| !w.is_empty() && id.starts_with(w.as_str())) {
+                    eprintln!("{t} {} {:?}", &id[..8], c.field("status").map(crate::auth::text));
+                }
+            }
+        }
+    }
+
+    /// Recorded change frames (`SESSIONS_FRAMES`: [{ t, m, list, changes? }]
+    /// of WatchChats and WatchSessions, as `{"changes": true}` streams them)
+    /// replayed as the listener hands them over, over the snapshot's devices
+    /// and projects: the watched chats' statuses at each.
+    #[test]
+    #[ignore]
+    fn sessions_frames_replay() {
+        use crate::engine::lists::{Changes, Frame};
+        let (Ok(snap), Ok(frames)) = (std::env::var("SESSIONS_SNAPSHOT"), std::env::var("SESSIONS_FRAMES")) else { return };
+        let watch: Vec<String> = std::env::var("SESSIONS_WATCH").unwrap_or_default().split(',').map(String::from).collect();
+        let snap: Json = serde_json::from_str(&std::fs::read_to_string(&snap).unwrap()).unwrap();
+        let frames: Json = serde_json::from_str(&std::fs::read_to_string(&frames).unwrap()).unwrap();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = snap["LocalDevice"]["deviceId"].as_str().map(String::from);
+        s.heard_list(Slot::Devices, &Frame::for_tests(&snap["WatchDevices"], None, "id"));
+        s.heard(Slot::Spaces, snap["WatchSpaces"].clone());
+        for f in frames.as_array().unwrap() {
+            let t = f["t"].as_f64().unwrap() as i64;
+            let (slot, key) = if f["m"] == "WatchChats" { (Slot::Chats, "id") } else { (Slot::Live, "chatId") };
+            let changes = f["changes"].as_object().map(|c| Changes {
+                changed: c["changed"].as_array().cloned().unwrap_or_default(),
+                removed: c["removed"].as_array().map(|r| r.iter().filter_map(|k| k.as_str().map(String::from)).collect()).unwrap_or_default(),
+                reordered: c["reordered"].as_bool().unwrap_or(false),
+            });
+            s.heard_list(slot, &Frame::for_tests(&f["list"], changes.as_ref(), key));
+            let v = s.value_at(t);
+            let listed: Vec<String> = v.field("chats").unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect();
+            for w in &watch {
+                if w.is_empty() {
+                    continue;
+                }
+                let found = listed.iter().find(|id| id.starts_with(w.as_str()));
+                let st = found.and_then(|id| chat(&v, id).field("status").map(crate::auth::text));
+                eprintln!("{t} {} {w} listed={} status={st:?}", f["m"].as_str().unwrap_or(""), found.is_some());
+            }
+        }
+    }
+
+    /// The lists as the engine streams them, one change at a time (rows
+    /// changing state, working with background agents, waiting on them,
+    /// going and coming back, chats moving), give the scripts what the same
+    /// lists heard whole give: every chat listed, each in its state.
+    #[test]
+    fn streamed_changes_list_what_whole_lists_do() {
+        use crate::engine::lists::{Changes, Frame};
+        let now = now_seconds();
+        let mut seed: u64 = 0x5eed;
+        let mut rnd = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let n = 40;
+        let chat_row = |i: usize, t: i64| json!({ "id": format!("c{i:02}"), "deviceId": if i % 3 == 0 { "r" } else { "here" }, "title": format!("Chat {i}"),
+            "spaceId": "space", "lastMessageAt": iso(t), "createdAt": iso(now - 9000), "lastSeenAt": iso(now - 5000), "archived": false });
+        let session_row = |i: usize, kind: u64, t: i64| {
+            let mut r = json!({ "chatId": format!("c{i:02}"), "deviceId": if i % 3 == 0 { "r" } else { "here" }, "updatedAt": iso(t),
+                "lastCompletedTurn": format!("t{i}"), "runningSubagents": if kind == 1 || kind == 2 { 3 } else { 0 } });
+            match kind {
+                0 | 1 => { r["status"] = json!("working"); r["startedAt"] = json!(iso(t - 30)); }
+                2 => { r["status"] = json!("idle"); r["startedAt"] = Json::Null;
+                       r["waiting"] = json!({ "since": iso(t), "on": [{ "id": "a", "kind": "agent", "label": "x" }] }); }
+                _ => { r["status"] = json!("idle"); r["startedAt"] = Json::Null;
+                       r["lastTurnOutcome"] = json!({ "status": "completed", "finishedAt": iso(t) }); }
+            }
+            r
+        };
+        let mut chats: Vec<Json> = (0..n).map(|i| chat_row(i, now - 100)).collect();
+        let mut live: Vec<Json> = (0..n).map(|i| session_row(i, (i % 4) as u64, now - 5)).collect();
+        let devices = json!([{ "id": "here", "name": "desk", "lastSeenAt": iso(now) }, { "id": "r", "name": "honeypot", "lastSeenAt": iso(now) }]);
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("here".into());
+        s.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
+        s.heard_list(Slot::Chats, &Frame::for_tests(&Json::Array(chats.clone()), None, "id"));
+        s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), None, "chatId"));
+        let shown = |v: &zgx_script::Value| -> Vec<(String, Option<String>)> {
+            let mut out: Vec<(String, Option<String>)> = v.field("chats").unwrap().list().iter()
+                .map(|c| (c.field("id").map(crate::auth::text).unwrap_or_default(), c.field("status").map(crate::auth::text)))
+                .collect();
+            out.sort();
+            out
+        };
+        for step in 0..600 {
+            let t = now - 5 + (step as i64 % 4);
+            match rnd(6) {
+                // A row's state moves (the engine sends that row alone).
+                0..=2 => {
+                    let i = rnd(live.len() as u64) as usize;
+                    let id: usize = live[i]["chatId"].as_str().unwrap()[1..].parse().unwrap();
+                    let row = session_row(id, rnd(4), t);
+                    live[i] = row.clone();
+                    let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                    s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), Some(&changes), "chatId"));
+                }
+                // A row goes from the middle; later, back at the end.
+                3 => {
+                    if live.len() > 5 {
+                        let i = rnd(live.len() as u64) as usize;
+                        let gone = live.remove(i);
+                        let changes = Changes { changed: vec![], removed: vec![gone["chatId"].as_str().unwrap().to_owned()], reordered: false };
+                        s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), Some(&changes), "chatId"));
+                    }
+                }
+                4 => {
+                    let have: Vec<String> = live.iter().map(|r| r["chatId"].as_str().unwrap().to_owned()).collect();
+                    if let Some(id) = (0..n).find(|i| !have.contains(&format!("c{i:02}"))) {
+                        let row = session_row(id, rnd(4), t);
+                        live.push(row.clone());
+                        let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                        s.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), Some(&changes), "chatId"));
+                    }
+                }
+                // A chat's entry moves (a new message).
+                _ => {
+                    let i = rnd(n as u64) as usize;
+                    let row = chat_row(i, t);
+                    chats[i] = row.clone();
+                    let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+                    s.heard_list(Slot::Chats, &Frame::for_tests(&Json::Array(chats.clone()), Some(&changes), "id"));
+                }
+            }
+            let fresh = Sessions::default();
+            *fresh.here.borrow_mut() = Some("here".into());
+            fresh.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
+            fresh.heard_list(Slot::Chats, &Frame::for_tests(&Json::Array(chats.clone()), None, "id"));
+            fresh.heard_list(Slot::Live, &Frame::for_tests(&Json::Array(live.clone()), None, "chatId"));
+            assert_eq!(shown(&s.value_at(now)), shown(&fresh.value_at(now)), "step {step}");
+        }
+    }
+
+    /// Two chats of the person's on one machine (an older host), alike but
+    /// that one waits on (or works with) three background agents of its
+    /// own: both are listed, each with its state. (The live rows as the
+    /// dev engine sent them, times moved to now.)
+    #[test]
+    fn a_chat_running_subagents_is_listed_as_any() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        s.heard.set(true);
+        *s.here.borrow_mut() = Some("here".into());
+        let entry = |id: &str, title: &str| json!({
+            "id": id, "deviceId": "e2f70bf5", "title": title, "archived": false,
+            "cwd": "/w", "branch": "main", "config": { "harness": "claude-code", "model": "claude-opus-5-5", "sandbox": "workspace-write" },
+            "lastMessagePreview": "…", "lastMessageAt": iso(now - 5), "createdAt": iso(now - 20000),
+            "harnessSessionId": "h", "harnessSessionCwd": "/w", "harnessSessionHarness": "claude-code",
+            "spaceId": "space", "lastSeenAt": iso(now - 2000), "roomGen": 3 });
+        s.set_chats(json!([entry("capy", "Explaining Capy.ai Captains"), entry("graph", "Redesign Map Graph Mode")]));
+        *s.spaces.borrow_mut() = json!([{ "id": "space", "name": "zeron", "deviceId": "e2f70bf5", "path": "/w" }]);
+        let waiting = json!([
+            { "lastCompletedTurn": "t1", "chatId": "capy", "deviceId": "e2f70bf5", "status": "idle", "startedAt": null,
+              "updatedAt": iso(now - 1), "runningSubagents": 3,
+              "waiting": { "since": iso(now - 1), "on": [
+                { "id": "a1", "kind": "agent", "label": "Engine: reports flow + MCP tools" },
+                { "id": "a2", "kind": "agent", "label": "Control room v2 polish" },
+                { "id": "a3", "kind": "agent", "label": "Map v2: three variants" } ] } },
+            { "lastCompletedTurn": "t2", "chatId": "graph", "deviceId": "e2f70bf5", "status": "working",
+              "startedAt": iso(now - 200), "updatedAt": iso(now - 3), "runningSubagents": 0 },
+        ]);
+        s.set_live(waiting);
+        s.publish();
+        let v = s.value();
+        let ids: Vec<String> = v.field("chats").unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect();
+        assert!(ids.contains(&"capy".to_string()), "listed: {ids:?}");
+        assert!(ids.contains(&"graph".to_string()));
+        let status = |id: &str| chat(&v, id).field("status").map(crate::auth::text);
+        assert_eq!(status("capy").as_deref(), Some("waiting"));
+        assert_eq!(status("graph").as_deref(), Some("working"));
+        // Working itself, with its agents: working.
+        let working = json!([
+            { "lastCompletedTurn": "t1", "chatId": "capy", "deviceId": "e2f70bf5", "status": "working", "startedAt": iso(now - 300),
+              "updatedAt": iso(now - 1), "runningSubagents": 3 },
+            { "lastCompletedTurn": "t2", "chatId": "graph", "deviceId": "e2f70bf5", "status": "working",
+              "startedAt": iso(now - 200), "updatedAt": iso(now - 3), "runningSubagents": 0 },
+        ]);
+        s.heard(Slot::Live, working.clone());
+        let v = s.value();
+        let ids: Vec<String> = v.field("chats").unwrap().list().iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect();
+        assert!(ids.contains(&"capy".to_string()), "listed: {ids:?}");
+        assert_eq!(chat(&v, "capy").field("status").map(crate::auth::text).as_deref(), Some("working"));
+        // As the engine streams it: one row's change at a time, back and forth.
+        use crate::engine::lists::{Changes, Frame};
+        let mut list = working;
+        for (i, st) in ["idle", "working", "idle", "working"].iter().enumerate() {
+            let mut row = list[0].clone();
+            row["status"] = json!(st);
+            row["updatedAt"] = json!(iso(now - 1 + i as i64));
+            if *st == "idle" {
+                row["startedAt"] = Json::Null;
+                row["waiting"] = json!({ "since": iso(now - 1), "on": [{ "id": "a1", "kind": "agent", "label": "x" }] });
+            } else {
+                row["startedAt"] = json!(iso(now - 300));
+                row.as_object_mut().unwrap().remove("waiting");
+            }
+            list[0] = row.clone();
+            let changes = Changes { changed: vec![row], removed: vec![], reordered: false };
+            s.heard_list(Slot::Live, &Frame::for_tests(&list, Some(&changes), "chatId"));
+            let v = s.value();
+            let want = if *st == "idle" { "waiting" } else { "working" };
+            assert_eq!(chat(&v, "capy").field("status").map(crate::auth::text).as_deref(), Some(want), "step {i}");
+        }
+    }
+
     /// A thread on another machine whose host writes no activity (an older
     /// release): working, then its turn over, told as a change to its row
     /// alone (`startedAt` null, the outcome completed). Its row says so at

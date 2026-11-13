@@ -1190,6 +1190,7 @@
         "empty": "No machines online",
         "idle": "Nothing running",
         "this_device": "This device",
+        "menu": "Actions",
         "now": "now",
         "view": "View",
         "variant": {
@@ -4170,6 +4171,15 @@
     },
     "map": {
       "working": "{n} working"
+    },
+    "map_menu": {
+      "label": "Actions",
+      "stop": "Stop",
+      "unpin": "Unpin from Progress",
+      "release": "Release from crew",
+      "rename_device": "Rename device",
+      "no_section": "No section",
+      "failed": "Couldn't do that"
     },
     "figures": {
       "urgent": "{n} urgent",

@@ -488,6 +488,24 @@ test("the model puts each thread on its machine, by project", function()
 	expect(f.threads["th-titlebar"]).to_be(nil)
 end)
 
+test("nothing archived is on the Map: an orchestrator, a crew thread, nor a thread of the person's own", function()
+	local f = (sample :: any).fleet
+	local gone = { ["orc-vpn"] = true, ["th-engine-flow"] = true, ["th-zgx-mem"] = true }
+	-- (Archived as the host lists them: under `archived`, unflagged.)
+	local sessions_now = { chats = {}, children = {}, archived = {} }
+	for _, c in f.chats do
+		table.insert(if gone[c.id] then sessions_now.archived else sessions_now.chats, c)
+	end
+	local w = { now = f.now, chats = data.chats(sessions_now), devices = f.devices, projects = f.projects, loads = f.loads, here = "dev-desk" }
+	local fleet = model.fleet(w)
+	for id in gone do
+		expect(fleet.threads[id]).to_be(nil)
+	end
+	expect(fleet.orchestrators["orc-vpn"]).to_be(nil)
+	expect(fleet.threads["th-engine-state"] ~= nil).to_be(true)
+	expect(fleet.orchestrators["orc-orch"] ~= nil).to_be(true)
+end)
+
 test("a remote thread's turn ending shows in every view at once, no activity ever written", function()
 	local thread = "Verify unique device names"
 	local function state_in(app: any, within: string): string
@@ -640,4 +658,52 @@ test("started_by from the host: under who started it, in the Topology and the Gr
 	end
 	expect(has["started:orc-tally>th-spawned"]).to_be(true)
 	expect(has["started:orc-brain>th-bd"]).to_be(true)
+end)
+
+-- A secondary click's menu for `id` in the view showing.
+local function menu_for(app: any, id: string)
+	app:set_state("map_menu_id", id)
+	app:command("map_menu")
+	app:frames(10)
+end
+
+test("a secondary click on a thread, an orchestrator or a machine opens its menu, in every view", function()
+	for _, v in { "topology", "timeline", "machines", "graph" } do
+		local app = open(1440, 2400)
+		view(app, v)
+		app:frames(if v == "graph" then 80 else 10)
+		-- A machine.
+		menu_for(app, "dev:dev-mac")
+		expect(app:has('"Rename device"')).to_be(true)
+		-- An orchestrator: its own Pause, Settings and Archive.
+		menu_for(app, "orc-orch")
+		for _, item in { "Open", "Pause", "Settings…", "Archive" } do
+			expect(app:has(`"{item}"`)).to_be(true)
+		end
+		expect(app:has('"Release from crew"')).to_be(false)
+		-- A crew thread at work.
+		menu_for(app, "th-ui-control")
+		for _, item in { "Open", "Stop", "What's up?", "Pin to Progress", "Rename", "Move to", "Copy", "Sleep", "Release from crew", "Archive" } do
+			expect(app:has(`"{item}"`)).to_be(true)
+		end
+		expect(app:has('"Delete"')).to_be(false)
+		expect(app:has('"Make orchestrator"')).to_be(false)
+	end
+end)
+
+test("the menu's Stop and Archive do what they say", function()
+	local app = open(1440, 2400)
+	local function choose(id: string, label: string)
+		app:set_state("map_menu_id", id)
+		app:set_state("map_menu_pick", label)
+		app:command("map_menu_choose")
+		app:frames(5)
+	end
+	choose("th-ui-control", "Stop")
+	expect(string.find(app:state("calls"), "stop:th-ui-control", 1, true) ~= nil).to_be(true)
+	-- (A thread done: Archive is there to take.)
+	choose("th-tally-docs", "Archive")
+	expect(string.find(app:state("calls"), "archive:th-tally-docs", 1, true) ~= nil).to_be(true)
+	choose("th-ui-control", "Release from crew")
+	expect(string.find(app:state("calls"), "op:releaseFromCrew:th-ui-control", 1, true) ~= nil).to_be(true)
 end)
