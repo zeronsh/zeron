@@ -867,7 +867,7 @@ M.Panel = ui.component(function(props: Props): Node
 				return FileIcon { name = name, size = 14 }
 			end)
 		end
-		-- Its tile: a side chat's its project's, as a chat's on the top bar.
+		-- A side chat's harness mark; other tabs keep their kind's icon.
 		local function make_tile(): Node
 			if tab.kind == "side_chat" and Lanes then
 				return Lanes.tile(tab)

@@ -1,7 +1,7 @@
 -- A side chat does what the chat page does, as far as the two can: what `@`,
 -- `/` and `$` offer, ⌘F and ⌘/, Escape and what sends, its Fast and plan mode,
 -- Retry, a passage quoted, its device gone. And its tab reads as a tab on the
--- top bar: its project's tile, its live name, what it's at, every inset even.
+-- top bar: its live name, what it's at, every inset even; its harness mark.
 -- On the page in ui/lanes_fixture.luau.
 
 local BOX = ".side-chat-tab >> role:textbox"
@@ -32,22 +32,43 @@ end
 
 -- Its tab ------------------------------------------------------------------
 
-test("a side chat's tab shows its project's tile, not the side chat's glyph", function()
+test("a side chat's tab shows its harness mark and follows a different agent picked", function()
 	local app = open()
-	-- (Its project's, "atlas": its first letter, on its hue.)
-	expect(app:tree("#panel-tab-tab1")).to_contain('"A"')
+	expect(app:has("#panel-tab-tab1 >> role:img")).to_be(true)
+	expect(app:tree("#panel-tab-tab1")).never.to_contain('"A"')
 	app:command("side_no_project")
 	app:frames(10)
-	expect(app:tree("#panel-tab-tab1")).never.to_contain('"A"')
+	expect(app:has("#panel-tab-tab1 >> role:img")).to_be(true)
+
+	-- The existing chat runs Codex. A new pick is reflected in the tab
+	-- before sending, including a registry agent whose icon arrives later.
+	local catalog = table.clone(app:state("chat.catalog"))
+	catalog.harnesses = table.clone(catalog.harnesses)
+	catalog.models = table.clone(catalog.models)
+	table.insert(catalog.harnesses, { id = "acp.factory-droid", label = "Factory Droid", mark = "acp.factory-droid" })
+	table.insert(catalog.models, { value = "acp.factory-droid/auto", label = "Auto", harness = "acp.factory-droid" })
+	app:set_state("chat.catalog", catalog)
+	app:set_state("chat_lane_model_side-a", "acp.factory-droid/auto")
+	app:frames(10)
+	expect(app:has("#panel-tab-tab1 >> .registry-mark-glyph")).to_be(true)
+	app:command("side_on_registry")
+	app:frames(10)
+	expect(app:has("#panel-tab-tab1 >> .registry-mark")).to_be(true)
+	expect(app:has("#panel-tab-tab1 >> .registry-mark-glyph")).to_be(false)
+	app:set_state("chat_lane_model_side-a", "codex/gpt-6.1")
+	app:frames(10)
+	expect(app:has("#panel-tab-tab1 >> .registry-mark")).to_be(false)
+	expect(app:has("#panel-tab-tab1 >> role:img")).to_be(true)
 end)
 
-test("a new side chat's tile is its parent's project until it's moved", function()
+test("a new side chat's tile starts with its parent's harness mark", function()
 	local app = mount("lanes_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
 	app:click('#session-lanes >> role:button "New side chat"')
 	app:frames(30)
-	expect(app:tree("#panel-tab-tab1")).to_contain('"A"')
+	expect(app:has("#panel-tab-tab1 >> role:img")).to_be(true)
+	expect(app:tree("#panel-tab-tab1")).never.to_contain('"A"')
 end)
 
 test("a side chat's tab follows its chat's name", function()
