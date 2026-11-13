@@ -155,7 +155,9 @@ fn past_fillers(mut clause: &str) -> &str {
 }
 
 /// Whether a piece of a sentence asks for work.
-fn is_work(clause: &str, question: bool) -> bool {
+/// What a piece asks for, past its fillers and its request ("could you",
+/// "please"), and whether it was a request.
+fn request_of(clause: &str) -> (&str, bool) {
     let mut c = past_fillers(clause);
     let mut asking = false;
     loop {
@@ -168,6 +170,23 @@ fn is_work(clause: &str, question: bool) -> bool {
             None => break,
         }
     }
+    (c, asking)
+}
+
+/// Asking only that the answer be checked ("please verify", "double-check
+/// it", "look into it"), not for something to change.
+const VERIFY: &[&str] = &[
+    "verify", "check", "confirm", "double-check", "double check", "look into it", "look into this",
+    "look at it", "look at this", "find out", "make sure", "see",
+];
+
+fn is_verify(clause: &str) -> bool {
+    let (c, _) = request_of(clause);
+    VERIFY.iter().any(|v| opens(c, v))
+}
+
+fn is_work(clause: &str, question: bool) -> bool {
+    let (c, asking) = request_of(clause);
     if opens(c, "let's") || opens(c, "lets") {
         return true;
     }
@@ -188,7 +207,23 @@ fn asks(clause: &str, question: bool) -> bool {
 /// What `excerpt` (the person's words) asks for.
 pub fn classify(excerpt: &str) -> Asked {
     let parts = sentences(excerpt);
-    if parts.iter().any(|(s, q)| pieces(s, *q).iter().any(|(p, pq)| is_work(p, *pq))) {
+    let work: Vec<String> = parts
+        .iter()
+        .flat_map(|(s, q)| pieces(s, *q))
+        .filter(|(p, pq)| is_work(p, *pq))
+        .map(|(p, _)| p)
+        .collect();
+    if !work.is_empty() {
+        // A question about how things stand ("it shows X though Y, which is
+        // right?") with only a "please verify" after it is still the
+        // person's to have answered. A sentence that is itself the request
+        // ("can you check whether CI is green?") isn't such a question.
+        let asked = parts.iter().any(|(s, q)| {
+            asks(s, *q) && !is_rhetorical(s) && !pieces(s, *q).iter().any(|(p, pq)| is_work(p, *pq))
+        });
+        if asked && work.iter().all(|p| is_verify(p)) {
+            return Asked::Direct;
+        }
         return Asked::Work;
     }
     let questions: Vec<_> = parts.iter().filter(|(s, q)| asks(s, *q)).collect();
@@ -241,6 +276,12 @@ mod tests {
         "btw what model does the Brain dump use",
         "Test results from last night?",
         "Is it true the map is drawn every frame, right? I want to know how often it redraws.",
+        // A question about how things stand, a "verify" after it.
+        "In the map it shows control room brain dump model to be Haiku 5.5 even though in Composer I have a set to Opus 5.5 there can you see which one is correct and if the model selector doesn't work there at all for some reason? please verify",
+        "The Board shows three blocked cards even though nothing is running. Why? Please check.",
+        "Progress says nothing is working while two threads run. Is that right? Can you verify?",
+        "What model does the Brain dump actually use? Double-check it.",
+        "Why is the sidebar empty after a restart? Look into it and tell me.",
     ];
 
     /// Work in a question's shape, rhetorical questions, and plain work.
