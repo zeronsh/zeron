@@ -6,6 +6,7 @@ fn row(id: &str, label: &str) -> Model {
         default: false,
         id: id.into(),
         label: label.into(),
+        provider: None,
         description: None,
         reasoning_levels: vec![ReasoningLevel::High],
         options: vec![],

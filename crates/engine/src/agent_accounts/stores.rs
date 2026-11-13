@@ -25,24 +25,35 @@
 //!   key}`), re-read on every request. zeron manages the OAuth entries of
 //!   `openai` (ChatGPT) and `github-copilot`; a swap rewrites that one entry
 //!   and leaves every other provider byte-for-byte. OpenCode has no lock of
-//!   its own. API-key entries aren't accounts and are left alone.
+//!   its own. API keys are `{type: "api", key}` entries ([`super::api_keys`]),
+//!   listed and switched like any login (OpenCode 2.x keeps its logins in
+//!   its own database instead: zeron says so and adds none there).
 //!   Anthropic OAuth was removed from OpenCode upstream and is not offered.
 //! - **Pi** — `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent`,
 //!   0600, guarded by proper-lockfile's `auth.json.lock` DIRECTORY): the
 //!   same per-provider shape (`openai-codex`, `anthropic`, `github-copilot`),
 //!   hot-reloaded by running agents. Swap = rewrite one entry under that
-//!   lock. Add account = ChatGPT only (zeron's own loopback, see
-//!   [`super::oauth`]); Claude and Copilot logins stay with pi's `/login` —
-//!   minting Claude Code OAuth for a third-party agent is not something
-//!   zeron should do, and pi's Copilot login is an internal token exchange.
+//!   lock (Pi refreshes under the same lock; a switch saves the login it
+//!   replaces with the tokens it has then, and refuses over one it can't
+//!   identify). Add account = ChatGPT and Claude (zeron's own loopback,
+//!   Claude being Pi's own Claude Pro/Max sign-in, a grant of its own) and
+//!   GitHub Copilot (device code, then pi's own Copilot exchange) — see
+//!   [`super::oauth`]; API keys as `{type: "api_key", key}` entries (see
+//!   [`super::api_keys`]). Pi's other OAuth logins (xAI, Kimi, Meta,
+//!   OpenRouter, ChatGPT-direct `openai`) aren't listed: zeron can't tell
+//!   their accounts apart yet.
 //! - **Hermes** — `$HERMES_HOME/auth.json` (default `~/.hermes`): Hermes
 //!   keeps EVERY account itself, in `credential_pool[provider]`, and picks
 //!   (fill-first by `priority`, or round-robin) and refreshes them on its
 //!   own. A running Hermes writes its in-memory pool back over the file, so
-//!   a zeron reorder would be silently undone — zeron lists the pool (the
-//!   active provider's first entry is "in use"), probes usage, and adds
-//!   accounts through `hermes auth add` (device code; Hermes appends to its
-//!   own pool under its own lock). It never rewrites the pool.
+//!   a zeron reorder would be silently undone — zeron lists the pool (each
+//!   provider's first entry by priority is that provider's "in use": a run
+//!   on one of its models fills from it first), probes usage, and adds
+//!   accounts through `hermes auth add` (device code, or an API key on its
+//!   stdin; Hermes appends to its own pool under its own lock). It never
+//!   rewrites the pool. Only entries Hermes itself would use are listed
+//!   (its `_pool_entry_is_explicit`): one it borrowed — the GitHub CLI's
+//!   token, Claude Code's login — Hermes never picks, so neither is shown.
 //!
 //! Opaque tokens (Pi's Claude login, Copilot tokens) carry no identity: a
 //! live entry is matched to its slot by token, else identified ONCE per token
@@ -158,14 +169,16 @@ pub(super) fn upstream_vendor(store_key: &str) -> &'static str {
     }
 }
 
-/// The logins `hermes auth add` can run unattended (device codes).
-pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous"];
+/// The logins `hermes auth add` can run unattended (device codes): its
+/// ChatGPT, Nous Portal and xAI flows print a page and a code, then poll.
+/// (Its Claude flow wants a pasted code; Qwen imports Qwen CLI's login;
+/// OpenRouter mints an API key; MiniMax wasn't verified.)
+pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous", "xai-oauth"];
 
 pub(super) fn unsupported_login(harness: HarnessId, provider: &str) -> EngineError {
     let reason = match (harness, provider) {
-        (HarnessId::Pi, "anthropic") => {
-            "Claude logins for Pi stay with pi's own /login — zeron only mints Claude Code \
-             logins for Claude Code."
+        (HarnessId::Opencode, "anthropic") => {
+            "OpenCode has no Claude sign-in of its own — add an Anthropic API key instead."
                 .to_string()
         }
         _ => format!(
@@ -586,6 +599,19 @@ pub(super) fn merge_json_entry(
     entry: Option<&serde_json::Value>,
     lock: StoreLock,
 ) -> Result<(), EngineError> {
+    merge_json_entry_with(file, key, entry, lock, &mut |_| Ok(()))
+}
+
+/// [`merge_json_entry`], showing `before_write` the entry being replaced
+/// (under the lock, on the read the write is compared against); its error
+/// stops the write, the store untouched.
+pub(super) fn merge_json_entry_with(
+    file: &Path,
+    key: &str,
+    entry: Option<&serde_json::Value>,
+    lock: StoreLock,
+    before_write: &mut dyn FnMut(Option<&serde_json::Value>) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
     // Held for its Drop (the unlock) only.
     #[allow(dead_code)]
     enum Guard {
@@ -618,6 +644,7 @@ pub(super) fn merge_json_entry(
                 })?,
             None => serde_json::json!({}),
         };
+        before_write(store.get(key))?;
         if let Some(map) = store.as_object_mut() {
             match entry {
                 Some(entry) => {
@@ -833,7 +860,7 @@ impl AgentAccounts {
         }
     }
 
-    /// The live entry under `store_key`, if it's an OAuth login.
+    /// The live entry under `store_key`, if it's an OAuth login or an API key.
     pub(super) fn live_keyed_entry(
         &self,
         harness: HarnessId,
@@ -841,8 +868,38 @@ impl AgentAccounts {
     ) -> Option<serde_json::Value> {
         read_json(&self.keyed_file(harness))?
             .get(store_key)
-            .filter(|entry| oauth_entry(entry))
+            .filter(|entry| {
+                oauth_entry(entry) || api_keys::key_entry_secret(harness, entry).is_some()
+            })
             .cloned()
+    }
+
+    /// [`Self::write_keyed_entry`] for a switch: `before_write` sees the
+    /// entry being replaced, under the agent's own lock, right before the
+    /// write — and refuses it if that isn't the login the switch saved.
+    pub(super) fn swap_keyed_entry(
+        &self,
+        harness: HarnessId,
+        store_key: &str,
+        entry: &serde_json::Value,
+        before_write: &mut dyn FnMut(Option<&serde_json::Value>) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        let file = self.keyed_file(harness);
+        merge_json_entry_with(
+            &file,
+            store_key,
+            Some(entry),
+            self.keyed_lock(harness),
+            before_write,
+        )
+    }
+
+    fn keyed_lock(&self, harness: HarnessId) -> StoreLock {
+        let file = self.keyed_file(harness);
+        match harness {
+            HarnessId::Pi => StoreLock::Dir(lock_path(&file)),
+            _ => StoreLock::File(file.with_file_name("auth.json.zeron-lock")),
+        }
     }
 
     /// Replace ONE provider's entry in OpenCode's / Pi's store, keeping every
@@ -857,11 +914,7 @@ impl AgentAccounts {
         entry: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
         let file = self.keyed_file(harness);
-        let lock = match harness {
-            HarnessId::Pi => StoreLock::Dir(lock_path(&file)),
-            _ => StoreLock::File(file.with_file_name("auth.json.zeron-lock")),
-        };
-        merge_json_entry(&file, store_key, entry, lock)
+        merge_json_entry(&file, store_key, entry, self.keyed_lock(harness))
     }
 
     /// The live per-provider logins of OpenCode / Pi: `(identified,
@@ -885,6 +938,15 @@ impl AgentAccounts {
                 None => unidentified.push(unresolved(store_key, upstream)),
             }
         }
+        // API keys, whichever provider: identified locally by a digest of
+        // the key, never by sending it anywhere.
+        if let Some(map) = store.as_object() {
+            for (store_key, entry) in map {
+                if let Some(detected) = api_keys::key_detected(harness, store_key, entry) {
+                    resolved.push(detected);
+                }
+            }
+        }
         (resolved, unidentified)
     }
 
@@ -895,8 +957,11 @@ impl AgentAccounts {
         harness: HarnessId,
         store_key: &str,
     ) -> Option<Option<Detected>> {
-        let upstream = upstream_of(harness, store_key)?;
         let entry = self.live_keyed_entry(harness, store_key)?;
+        if api_keys::key_entry_secret(harness, &entry).is_some() {
+            return Some(api_keys::key_detected(harness, store_key, &entry));
+        }
+        let upstream = upstream_of(harness, store_key)?;
         Some(
             self.identify_entry(harness, store_key, upstream, &entry)
                 .await,
@@ -977,24 +1042,32 @@ impl AgentAccounts {
     }
 
     /// Claude's profile for a live access token (`user:profile` scope).
-    async fn anthropic_identity(
+    pub(super) async fn anthropic_identity(
         &self,
         store_key: &str,
         access_token: &str,
     ) -> Option<(String, SlotProfile)> {
-        let profile: serde_json::Value = self
+        let response = self
             .inner
             .http
             .get(&self.inner.endpoints.claude_profile)
             .bearer_auth(access_token)
             .header("anthropic-beta", "oauth-2025-04-20")
             .send()
-            .await
-            .ok()
-            .filter(|res| res.status().is_success())?
-            .json()
-            .await
-            .ok()?;
+            .await;
+        // (The status only: never the body or the token.)
+        let response = match response {
+            Ok(res) if res.status().is_success() => res,
+            Ok(res) => {
+                tracing::warn!(status = %res.status(), "Claude profile lookup refused");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error.without_url(), "Claude profile lookup failed");
+                return None;
+            }
+        };
+        let profile: serde_json::Value = response.json().await.ok()?;
         let account = profile.get("account")?;
         let org = profile.get("organization").cloned().unwrap_or_default();
         let email = str_field(account, "email_address")?;
@@ -1086,8 +1159,10 @@ impl AgentAccounts {
     // ── Hermes ──────────────────────────────────────────────────────────────
 
     /// Hermes' credential pool as rows (never persisted as slots — the pool
-    /// is Hermes' own), plus the account keys in use: the active provider's
-    /// first entry by priority (fill-first, Hermes' default strategy).
+    /// is Hermes' own), plus the account keys in use: each provider's first
+    /// entry by priority (fill-first, Hermes' default strategy — a model of
+    /// that provider runs on it). The active provider's rows come first, so
+    /// an app reading one "in use" for all of Hermes still finds its own.
     pub(super) fn hermes_slots(&self) -> (Vec<Slot>, HashSet<String>) {
         let mut slots = Vec::new();
         let mut active = HashSet::new();
@@ -1106,9 +1181,12 @@ impl AgentAccounts {
             let Some(entries) = pool.get(provider).and_then(|e| e.as_array()) else {
                 continue;
             };
+            // Only what Hermes itself would use: an entry it borrowed (the
+            // GitHub CLI's token, Claude Code's login) it never picks.
             let mut entries: Vec<&serde_json::Value> = entries
                 .iter()
                 .filter(|e| str_field(e, "id").is_some())
+                .filter(|e| hermes_entry_is_explicit(e, &self.inner.config.hermes_home))
                 .collect();
             entries.sort_by_key(|e| {
                 e.get("priority")
@@ -1118,7 +1196,7 @@ impl AgentAccounts {
             for (ix, entry) in entries.iter().enumerate() {
                 let id = str_field(entry, "id").unwrap_or_default();
                 let account_key = format!("{provider}:{id}");
-                if ix == 0 && active_provider.as_deref() == Some(provider.as_str()) {
+                if ix == 0 {
                     active.insert(account_key.clone());
                 }
                 slots.push(Slot {
@@ -1177,7 +1255,7 @@ impl AgentAccounts {
         Ok(dirs)
     }
 
-    async fn cli_command(
+    pub(super) async fn cli_command(
         &self,
         harness: HarnessId,
         args: &[&str],
@@ -1399,6 +1477,64 @@ pub(super) struct DevinLoginDirs {
     pub(super) url_file: PathBuf,
 }
 
+/// The pool sources Hermes counts as the user's own (hermes_cli/auth.py
+/// `_EXPLICIT_POOL_SOURCES`): what a Hermes sign-in or `hermes auth add`
+/// made. Anything else it found itself (`gh_cli`, `claude_code`,
+/// `qwen-cli`) is "ambient borrowed": Hermes never offers or picks it.
+const HERMES_EXPLICIT_SOURCES: &[&str] = &["device_code", "loopback_pkce", "hermes_pkce", "manual"];
+
+/// Hermes' own `_pool_entry_is_explicit`: an entry it made, or one seeded
+/// from an environment variable that still holds a key — in Hermes' `.env`
+/// (read first, as Hermes reads it) or the environment.
+pub(super) fn hermes_entry_is_explicit(entry: &serde_json::Value, hermes_home: &Path) -> bool {
+    let raw = str_field(entry, "source").unwrap_or_default();
+    let source = raw.trim().to_ascii_lowercase();
+    if source.starts_with("env:") {
+        // (The variable as written: names are case-sensitive.)
+        let var = raw.trim().get(4..).unwrap_or_default().trim();
+        return !var.is_empty() && hermes_env_secret(var, hermes_home);
+    }
+    !source.is_empty()
+        && (HERMES_EXPLICIT_SOURCES.contains(&source.as_str()) || source.starts_with("manual:"))
+}
+
+/// Whether `var` holds a key for Hermes: its `.env` first, then the
+/// environment (Hermes' `get_env_value_prefer_dotenv`).
+fn hermes_env_secret(var: &str, hermes_home: &Path) -> bool {
+    let usable = |value: &str| {
+        let value = value.trim().trim_matches(['"', '\'']).trim();
+        !value.is_empty()
+    };
+    // (Only a regular file of a sane size: no FIFO or runaway file is read
+    // while the accounts are listed.)
+    let env_file = hermes_home.join(".env");
+    let readable = std::fs::metadata(&env_file).is_ok_and(|m| m.is_file() && m.len() <= 1 << 20);
+    if readable && let Ok(text) = std::fs::read_to_string(&env_file) {
+        for line in text.lines() {
+            let line = line.trim();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            if let Some((name, value)) = line.split_once('=')
+                && name.trim() == var
+            {
+                return usable(value);
+            }
+        }
+    }
+    std::env::var(var).is_ok_and(|value| usable(&value))
+}
+
+/// The label `hermes auth add` gives a key nobody named ("api-key-2").
+fn is_hermes_default_key_label(label: &str) -> bool {
+    label
+        .strip_prefix("api-key-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A Hermes pool entry's secret (`access_token`, an API key's too).
+fn access_key(entry: &serde_json::Value) -> Option<String> {
+    str_field(entry, "access_token")
+}
+
 fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotProfile {
     let access = str_field(entry, "access_token")
         .and_then(|t| jwt_claims(&t))
@@ -1416,8 +1552,27 @@ fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotP
         other => title_words(other),
     };
     let api_key = str_field(entry, "auth_type").as_deref() == Some("api_key");
+    // A key reads as Zeron's own do ([`api_keys::key_rows`]): its label
+    // only when someone named it — never Hermes' "api-key-N", never the
+    // variable an env-seeded one came from.
+    let (label, plan) = if api_key {
+        let source = str_field(entry, "source").unwrap_or_default();
+        let from_env = source.trim().to_ascii_lowercase().starts_with("env:");
+        let named = str_field(entry, "label")
+            .filter(|label| !from_env && !is_hermes_default_key_label(label));
+        let key = access_key(entry).filter(|key| api_keys::valid_key(key));
+        let (title, line) = api_keys::key_rows(
+            &zeron_proto::providers::account_group_label(HarnessId::Hermes, provider),
+            key.as_deref(),
+            named.as_deref(),
+            from_env,
+        );
+        (Some(title), Some(line))
+    } else {
+        (str_field(entry, "label"), plan)
+    };
     SlotProfile {
-        email: str_field(entry, "label")
+        email: label
             .or_else(|| {
                 access
                     .get("https://api.openai.com/profile")
@@ -1441,7 +1596,7 @@ pub(super) fn scan_grok_url(output: &str) -> Option<String> {
 }
 
 pub(super) fn scan_hermes_url(output: &str) -> Option<String> {
-    scan_https_url(output, &["nousresearch.com", "openai.com"])
+    scan_https_url(output, &["nousresearch.com", "openai.com", "x.ai"])
 }
 
 /// Devin's sign-in page — its CLI-auth page (`/auth/cli/…`) or the Windsurf

@@ -337,13 +337,43 @@ local function card(row: State<agents.Agent>): Node
 		on_add = function()
 			agents.sign_in(id)
 		end,
+		-- An agent with a login per model provider: its accounts by provider,
+		-- each group adding its own.
+		groups = if first.groups
+			then function()
+				return (row:get().groups or {}) :: any
+			end
+			else nil,
+		login_for = function(): string?
+			return row:get().login_for
+		end,
+		on_add_to = function(provider: string)
+			agents.sign_in_to(id, provider)
+		end,
+		-- API keys: typed on this Mac for this Mac's agents only.
+		on_add_key = function(provider: string, key: string, name: string?): any
+			return agents.add_key(id, provider, key, name)
+		end,
+		on_rename = function(acc, name: string): any
+			return agents.rename(id, acc.id, name)
+		end,
+		keys_here = function(): boolean
+			return agents.now:get().target == nil
+		end,
+		key_request = function(): string?
+			local agent, provider = string.match(agents.key_request:get(), "^([^:]+):(.+)$")
+			return if agent == id then provider else nil
+		end,
+		key_request_seen = function()
+			agents.key_request:set("")
+		end,
 		on_code = function(code: string)
 			agents.complete(id, code)
 		end,
 		settle = function(next: string)
 			local login = row:peek().login
 			if next == "waiting" then
-				agents.sign_in(id)
+				agents.retry(row:peek())
 			elseif login == "waiting" or login == "code" then
 				agents.cancel(id)
 			else
@@ -352,7 +382,17 @@ local function card(row: State<agents.Agent>): Node
 		end,
 		on_switch = function(acc)
 			if acc.id then
-				agents.switch(id, acc.id)
+				-- (Refused or out of reach: said, never swallowed.)
+				agents.switch(id, acc.id):after(function() end, function(err: any)
+					local message = if type(err) == "table" then err.message else nil
+					toast.show {
+						title = ui.t("settings.providers.couldnt_switch"):get(),
+						body = if message == "offline"
+							then ui.t("settings.providers.cant_reach", { device = device_name() }):get()
+							else message,
+						tone = "danger",
+					}
+				end)
 			end
 		end,
 		on_remove = function(acc)

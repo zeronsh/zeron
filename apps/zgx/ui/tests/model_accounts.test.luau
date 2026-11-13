@@ -168,3 +168,34 @@ test("an agent with no accounts has neither", function()
 	app:frames(30)
 	expect(app:has("#model-picker-account")).to_be(false)
 end)
+
+-- A line's box (x, y, w, h) in the tree: the first line holding `find`.
+local function box_of(app: any, find: string): { y: number, h: number }?
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(find, 1, true) then
+			local _, y, _, h = line:match("(%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+			if y then
+				return { y = tonumber(y) :: number, h = tonumber(h) :: number }
+			end
+		end
+	end
+	return nil
+end
+
+test("an agent Zeron can't add an account to ends its list at its last account", function()
+	-- (Claude Code: no "Add … account" action, so no rule and no gap under
+	-- the last row.)
+	local app = with_accounts(here(accounts()))
+	app:click('role:button "Model"')
+	app:frames(30)
+	app:click("#model-picker-account")
+	app:frames(30)
+	local list = box_of(app, ' listbox "Account"') :: any
+	local last = box_of(app, ' option "work@example.test') :: any
+	expect(list).never.to_be_nil()
+	expect(last).never.to_be_nil()
+	-- The list's foot is the last row's, give or take the list's own inset.
+	local under = (list.y + list.h) - (last.y + last.h)
+	expect(under <= 8).to_be(true)
+	expect(app:error()).to_be(nil)
+end)

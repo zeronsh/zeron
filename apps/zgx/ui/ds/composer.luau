@@ -136,7 +136,8 @@ export type Props = {
 	default_model: (() -> string?)?,
 	-- A model's agent's accounts, putting one in use, and asking after them
 	-- again (ds.ModelPicker's).
-	accounts: ((harness: string, model: string) -> { ModelPicker.Account }?)?,
+	accounts: ((harness: string, model: string, provider: string?) -> { ModelPicker.Account }?)?,
+	account_group: ((harness: string, provider: string?) -> ModelPicker.AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
 	-- How much of the model's context is used (0 to 1): a ring beside its
@@ -1469,6 +1470,7 @@ return ui.component(function(props: Props): Node
 			model_label = props.model_label,
 			default_model = props.default_model,
 			accounts = props.accounts,
+			account_group = props.account_group,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,
 			placement = { side = at, align = "end", offset = 6 },

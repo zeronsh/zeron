@@ -12,6 +12,7 @@
 -- icon = "folder", placeholder = "No project", search = "Search projects…" }`
 
 local Icon = require("@self/icon")
+local motion = require("@self/motion")
 local Mark = require("@self/mark")
 local AgentMark = require("@self/agent_mark")
 local RollText = require("@self/roll_text")
@@ -51,6 +52,14 @@ export type Item = {
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
 	emoji: string?,
 	description: string?,
+	-- Quiet words beside its name, in the name's size and on its line (a
+	-- model's provider, telling it from a namesake), searched as its name
+	-- is. The name gives way first: it fades, the hint stays whole. With
+	-- `hint_when_found`, they show only while a search found the row by
+	-- them (its name alone doesn't hold what was typed). A row whose hint
+	-- changes is built again (its key holds them).
+	hint: string?,
+	hint_when_found: boolean?,
 	-- Its label is an email address: drawn as ds.PrivateText draws one, its
 	-- tile no letter of it (`seed`'s avatar).
 	private: boolean?,
@@ -386,12 +395,144 @@ return ui.component(function(props: Props): Node
 		return control.text(props.placeholder) or locale.s("ds.dropdown.placeholder")
 	end
 
+	-- Whether a search finds an item: by its name, else by its hint from the
+	-- start of one of its words ("code" finds OpenCode's, "ai" not OpenAI's),
+	-- or by its name and hint read together ("gpt-5.5 codex").
+	local function word_start(text: string, q: string): boolean
+		local low = string.lower(text)
+		local at = string.find(low, q, 1, true)
+		while at do
+			local before = if at > 1 then string.sub(text, at - 1, at - 1) else " "
+			-- A word starts after a space or a mark, or at a capital inside
+			-- one (Open|Code).
+			if not string.match(before, "%w") or (string.match(before, "%l") and string.match(string.sub(text, at, at), "%u")) then
+				return true
+			end
+			at = string.find(low, q, at + 1, true)
+		end
+		return false
+	end
+	local function by_name(item: Item, q: string): boolean
+		return q == "" or string.find(string.lower(item.label), q, 1, true) ~= nil
+	end
+	local function found(item: Item, q: string): boolean
+		if by_name(item, q) then
+			return true
+		end
+		local hint = item.hint
+		if not hint then
+			return false
+		end
+		if word_start(hint, q) then
+			return true
+		end
+		-- Read together, the search runs from the name on into the hint,
+		-- reaching it at a word's start (its first).
+		local label = string.lower(item.label)
+		local together = label .. " " .. string.lower(hint)
+		local from, to = string.find(together, q, 1, true)
+		while from do
+			if from <= #label and (to :: number) > #label + 1 then
+				return true
+			end
+			from, to = string.find(together, q, from + 1, true)
+		end
+		return false
+	end
+	-- Whether an item's hint shows now (`hint_when_found`: while a search
+	-- found it by its hint, not its name).
+	local function hint_shown(now: Item): boolean
+		return now.hint ~= nil and (not now.hint_when_found or not by_name(now, string.lower(query:get())))
+	end
+	-- A name with its hint beside it, read as one line: where it runs past
+	-- the row, its right edge fades (as FadeText's does), and while the row
+	-- is highlighted (`lit`: under the pointer, or the keys') the line glides
+	-- left until its end shows, rests, and glides back, over and over. With
+	-- motion reduced it stays put, faded.
+	local NAMED_FADE = 24
+	local function named(item: Item, lit: () -> boolean): Node
+		local clip, line = ui.ref(), ui.ref()
+		local el: any = nil
+		local run: any = nil
+		-- How far the line runs past its row.
+		local function over(): number
+			return math.max(0, (line.width or 0) - (clip.width or 0))
+		end
+		local function still()
+			if run then
+				run:cancel()
+				run = nil
+			end
+			if el then
+				anime.utils.cleanInlineStyles(el, "x")
+			end
+		end
+		ui.effect(function()
+			local on = lit()
+			local past = over()
+			if not on or past <= 0.5 or motion.reduced() or not el then
+				still()
+				return
+			end
+			if run then
+				return
+			end
+			local travel = past + NAMED_FADE
+			run = anime.animate(el, {
+				x = { 0, -travel },
+				-- (About 40 points a second: read as it passes, not a jump.)
+				duration = math.max(900, travel * 25),
+				delay = 700,
+				loopDelay = 1000,
+				loop = true,
+				alternate = true,
+				ease = "inOut(2)",
+			})
+			ui.on_cleanup(still)
+		end)
+		return ui.row {
+			ref = clip,
+			grow = 1,
+			min_w = 0,
+			overflow = "hidden",
+			items = "center",
+			fade_x = function()
+				local past = (line.width or 0) > (clip.width or 0) + 0.5
+				-- (Gliding, its start runs off the left too.)
+				local moving = past and lit() and not motion.reduced()
+				return { if moving then NAMED_FADE else 0, if past then NAMED_FADE else 0 }
+			end,
+			ui.row {
+				ref = line,
+				shrink = 0,
+				gap = "$space.2",
+				items = "center",
+				on_mount = function(node: any)
+					el = node
+				end,
+				ui.text {
+					item.label,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.primary",
+				},
+				ui.show(function(): boolean
+					return hint_shown(item)
+				end, ui.text {
+					item.hint :: string,
+					shrink = 0,
+					text_size = "$font.size.md",
+					color = "$text.tertiary",
+				}),
+			},
+		}
+	end
 	local shown = ui.computed(function(): { Item }
 		local q = string.lower(query:get())
 		local out: { Item } = {}
 		local keep = props.filter
 		for _, item in items() do
-			if (keep == nil or keep(item)) and (q == "" or string.find(string.lower(item.label), q, 1, true)) then
+			if (keep == nil or keep(item)) and found(item, q) then
 				table.insert(out, item)
 			end
 		end
@@ -1091,6 +1232,13 @@ return ui.component(function(props: Props): Node
 					ui.each(shown, function(item: Item)
 						local r = row({
 							role = "option",
+							-- A row with a hint is heard as it reads: its name,
+							-- then its hint while that shows.
+							label = if item.hint
+								then function(): string
+									return if hint_shown(item) then `{item.label} {item.hint}` else item.label
+								end
+								else nil,
 							-- What assistive technology hears the selected
 							-- state as (the check it no longer shows).
 							selected = function(): boolean
@@ -1162,6 +1310,9 @@ return ui.component(function(props: Props): Node
 										wrap = true,
 									},
 								}
+								elseif item.hint then named(item, function(): boolean
+									return hi:get() == item.value
+								end)
 								else text(item.label),
 							if item.tag
 								then ui.text {
@@ -1207,8 +1358,12 @@ return ui.component(function(props: Props): Node
 							r,
 						}
 					end, {
+						-- (A row whose hint changes, or comes or goes, is built
+						-- again: its hint is part of what it is.)
 						key = function(item: Item)
-							return item.value
+							return if item.hint
+								then `{item.value}\0{item.hint}\0{if item.hint_when_found then "found" else "always"}`
+								else item.value
 						end,
 						w_full = true,
 					})
@@ -1386,7 +1541,18 @@ return ui.component(function(props: Props): Node
 					table.insert(rows, gated(list))
 				end
 				if props.actions and #props.actions > 0 then
-					table.insert(rows, rule())
+					local all = props.actions
+					-- (The rule and the actions' inset only while an action
+					-- shows: a menu whose every action is hidden ends at its
+					-- last item, with no line or gap under it.)
+					local function any_shown(): boolean
+						for _, action in all do
+							if not action.shown or action.shown() then
+								return true
+							end
+						end
+						return false
+					end
 					local acts: { Node } = {}
 					for n, action in props.actions do
 						local key = `action:{n}`
@@ -1408,7 +1574,18 @@ return ui.component(function(props: Props): Node
 						}, false)
 						table.insert(acts, if action.shown then ui.show(action.shown, made) else made)
 					end
-					table.insert(rows, ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) })
+					table.insert(
+						rows,
+						ui.show(
+							any_shown,
+							ui.column {
+								w_full = true,
+								gap = 0,
+								rule(),
+								ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) },
+							}
+						)
+					)
 				end
 				if bottom_up then
 					place_top()

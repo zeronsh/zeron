@@ -16,6 +16,7 @@ local agents = require("@account/agents")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local route = require("@app/screens/shell/route")
 
 local M = {}
 
@@ -1017,19 +1018,48 @@ local function account_detail(account: any): string
 	return table.concat(parts, " · ")
 end
 
+-- Whether `harness` keeps a login per model provider (Pi, OpenCode,
+-- Hermes): Zeron signs in to its providers one by one, or its accounts say
+-- their provider.
+local function per_provider(harness: string, list: { any }?): boolean
+	if agents.logins:get()[harness] ~= nil then
+		return true
+	end
+	for _, a in list or {} do
+		if a.provider ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
 -- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
--- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
--- it's first seen.
+-- `account_group`, `on_account`, `on_accounts_open`), whichever computer it
+-- is: asked for as it's first seen. An agent that keeps a login per model
+-- provider shows only the model's provider's: switching its ChatGPT
+-- account never touches its Claude one.
 function M.model_accounts(device: () -> string?): any
 	ui.effect(function()
 		agents.watch_device(account_key(device()))
 	end)
+	local function listed(harness: string): { any }?
+		local on = agents.on_device:get()[account_key(device())]
+		return on and on[harness]
+	end
 	return {
-		accounts = function(harness: string, model: string): { any }?
-			local on = agents.on_device:get()[account_key(device())]
-			local list = on and on[harness]
-			if not list then
+		accounts = function(harness: string, model: string, provider: string?): { any }?
+			local all = listed(harness)
+			if not all then
 				return nil
+			end
+			local list = all
+			if provider and per_provider(harness, all) then
+				list = {}
+				for _, a in all do
+					if a.provider == provider then
+						table.insert(list, a)
+					end
+				end
 			end
 			local out = table.create(#list)
 			for i, a in list do
@@ -1044,6 +1074,49 @@ function M.model_accounts(device: () -> string?): any
 				}
 			end
 			return out
+		end,
+		-- The model's provider, named, and adding one of its accounts: Settings
+		-- → Providers, on the composer's device, its sign-in under way there.
+		account_group = function(harness: string, provider: string?): any
+			if not provider or not per_provider(harness, listed(harness)) then
+				return nil
+			end
+			local offer = (agents.logins:get()[harness] or {})[provider]
+			local name = if offer then offer.name else nil
+			for _, a in listed(harness) or {} do
+				if not name and a.provider == provider then
+					name = a.group
+				end
+			end
+			if not name then
+				return nil
+			end
+			local key = account_key(device())
+			-- Another account: a sign-in, on the composer's device; else an
+			-- API key, typed in Settings — on this Mac alone (a key never
+			-- travels to another device).
+			if offer and offer.login then
+				return {
+					name = name,
+					add = locale.s("ds.provider_card.add_named_account", { name = offer.login }),
+					on_add = function()
+						agents.target(if key == "" then nil else key)
+						route.settings("providers")
+						agents.sign_in_to(harness, provider)
+					end,
+				}
+			elseif offer and offer.key and key == "" then
+				return {
+					name = name,
+					add = locale.s("ds.model_picker.add_key", { name = offer.key }),
+					on_add = function()
+						agents.target(nil)
+						route.settings("providers")
+						agents.key_request:set(`{harness}:{provider}`)
+					end,
+				}
+			end
+			return { name = name }
 		end,
 		on_account = function(harness: string, id: string)
 			agents.switch_on(account_key(device()), harness, id):after(function() end, function()
