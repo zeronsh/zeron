@@ -998,31 +998,34 @@ local function layout(kind: string): Node
 	}
 end
 
+-- The widgets' menu: each shown or not, and back to how they came (the
+-- head's menu, and the sidebar's view menu, "Widgets…").
+function M.widget_entries(): { any }
+	local out: { any } = { { heading = locale.s("control.widgets.title") } }
+	for _, id in M.WIDGETS do
+		table.insert(out, {
+			label = locale.s(`control.widget.{id}`),
+			keep_open = true,
+			checked = function(): boolean
+				return not (M.widgets:get().hidden or {})[id]
+			end,
+			on_select = function()
+				M.toggle(id)
+			end,
+		})
+	end
+	table.insert(out, { separator = true })
+	table.insert(out, { label = locale.s("control.widgets.reset"), icon = "refresh", on_select = function()
+		M.widgets:set({ order = table.clone(M.WIDGETS), hidden = {} })
+	end })
+	return out
+end
+
 -- The page's head: its name, what's going on, and the widgets' menu.
 local function head(): Node
 	local hook, seen, open = opens_under()
-	local function entries(): { any }
-		local out: { any } = { { heading = locale.s("control.widgets.title") } }
-		for _, id in M.WIDGETS do
-			table.insert(out, {
-				label = locale.s(`control.widget.{id}`),
-				keep_open = true,
-				checked = function(): boolean
-					return not (M.widgets:get().hidden or {})[id]
-				end,
-				on_select = function()
-					M.toggle(id)
-				end,
-			})
-		end
-		table.insert(out, { separator = true })
-		table.insert(out, { label = locale.s("control.widgets.reset"), icon = "refresh", on_select = function()
-			M.widgets:set({ order = table.clone(M.WIDGETS), hidden = {} })
-		end })
-		return out
-	end
 	return ContextMenu {
-		items = entries,
+		items = M.widget_entries,
 		hook = hook,
 		label = locale.t("control.widgets.title"),
 		w_full = true,

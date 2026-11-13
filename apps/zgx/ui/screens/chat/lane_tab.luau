@@ -193,6 +193,21 @@ function M.open_model(tab: any): boolean
 	return true
 end
 
+-- A `Composer`'s model picker, asked for from elsewhere (the sidebar's
+-- "Brain dump model…", on the way to the Control room): opened by that
+-- composer, at once if it's there, else as it comes.
+local model_wanted = ui.state("chat_lane_model_wanted", nil :: string?)
+-- (How soon after opening its picker a composer let go hands it on, ms.)
+local HAND_ON = 1000
+-- (When it was asked: a request no composer took soon is let go, never
+-- opening a picker later out of nowhere.)
+local wanted_at = -math.huge
+local WANT_FOR = 3000
+function M.open_model_when(slot: string)
+	wanted_at = ui.now()
+	model_wanted:set(slot)
+end
+
 -- A side chat's composer: the chat page's (ds.Composer), its footer the
 -- same row: the access mode, where it works, the model. Its draft is its
 -- own. Its picks start as its chat has them (the engine's `harness/model`,
@@ -1078,8 +1093,39 @@ M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, t
 		local id = props.chat()
 		lanes.watch(slot, id)
 	end)
+	-- (Its picker, for `open_model`; one asked for before it came, opened
+	-- once its chat is known.)
+	pickers[slot] = open_model
+	-- (Taken a frame on, once its composer and its picker are made, and
+	-- only by one still there. A page coming may make it again as it lays
+	-- itself out: one let go just after it opened its picker hands the
+	-- request on to the next.)
+	local alive = true
+	local opened_at = -math.huge
+	ui.effect(function()
+		if model_wanted:get() == slot and props.chat() then
+			ui.after(0, function()
+				ui.after(0, function()
+					if alive and model_wanted:peek() == slot then
+						model_wanted:set(nil)
+						if ui.now() - wanted_at < WANT_FOR then
+							opened_at = ui.now()
+							open_model:add(1)
+						end
+					end
+				end)
+			end)
+		end
+	end)
 	ui.on_cleanup(function()
+		alive = false
+		if ui.now() - opened_at < HAND_ON then
+			model_wanted:set(slot)
+		end
 		lanes.watch(slot, nil)
+		if pickers[slot] == open_model then
+			pickers[slot] = nil
+		end
 	end)
 	-- (A real swap: the chat it's bound to, once known.)
 	return ui.presence(function(): string
