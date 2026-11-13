@@ -105,6 +105,11 @@ export type Props = {
 	keep: string?,
 	-- Always opened out (a new chat's), rather than one line while it fits.
 	expanded: (boolean | () -> boolean)?,
+	-- No footer under the pill (its pickers shown elsewhere, or not at
+	-- all): a composer that's only its draft, + and Send.
+	bare: boolean?,
+	-- Told as the draft's field takes the keys (true) and lets them go.
+	on_field_focus: ((focused: boolean) -> ())?,
 	-- Moved as the composer is shown for something else (a new chat's
 	-- page or a session's, as the route switches): its form and size are
 	-- there at once for a moment after, not eased. Growing in place (more
@@ -1950,11 +1955,17 @@ return ui.component(function(props: Props): Node
 					if spoken and spoken.on_focus then
 						spoken.on_focus()
 					end
+					if props.on_field_focus then
+						props.on_field_focus(true)
+					end
 				end,
 				on_blur = function()
 					m.on_focus(false)
 					if spoken and spoken.on_blur then
 						spoken.on_blur()
+					end
+					if props.on_field_focus then
+						props.on_field_focus(false)
 					end
 				end,
 				on_key_up = if spoken then spoken.on_key_up else nil,
@@ -2016,6 +2027,10 @@ return ui.component(function(props: Props): Node
 						local el = field:peek()
 						if el then
 							el:blur()
+							-- (A blur asked for is told to no one: said here.)
+							if props.on_field_focus then
+								props.on_field_focus(false)
+							end
 							return true
 						end
 						return false
@@ -2512,7 +2527,7 @@ return ui.component(function(props: Props): Node
 			trays,
 			ui.popover(m.popover(surface)),
 		},
-		footer,
+		if props.bare then nil else footer,
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
 		-- it, as under "Scroll to end", which it moves aside for).

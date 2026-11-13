@@ -236,7 +236,16 @@ end
 -- checkout, branch); the model and agent always show.
 export type Take = (text: string, attachments: { any }, picks: { [string]: any }) -> any
 export type Footer = { access: boolean?, place: boolean? }
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?): Node
+-- A second placement of a page's composer (the Control room's floating
+-- one): the same draft, chips and picks as the first, shown another way.
+-- `mirror`: the first one keeps the chat's picks and edits, this one only
+-- shows them. `bare`: no footer and no chips over the draft (one line).
+-- `expanded`: opened out from the start. `on_escape`: Escape's, first.
+-- `on_focus`: told as its field takes the keys and lets them go (either
+-- placement's, so the keys can follow it from one to the other).
+export type Form = { mirror: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?, form: Form?): Node
+	local mirror = form ~= nil and form.mirror == true
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -359,7 +368,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- A tab closed mid-edit lets go of the edit, and made again finds its row
 	-- no longer held: the draft it set aside back. (A row gone is another
 	-- matter: it keeps the words, and saving says so.)
-	if not split then
+	if not split and not mirror then
 		ui.effect(function()
 			local e = editing:get()
 			local s = session:get()
@@ -623,7 +632,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- A page's own composer (`take`): a pick is the chat's at once, as on
 	-- the chat page (screens/chat/composer), never only with the next send.
 	-- (What the chat runs with already, or was seeded from it, isn't a pick.)
-	if take then
+	if take and not mirror then
 		ui.effect(function()
 			local m, e, f, o = model:get(), effort:get(), fast:get(), options:get()
 			local s = session:get()
@@ -812,6 +821,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return prefs.send_with:get()
 		end,
 		on_escape = function(): boolean
+			if form and form.on_escape and form.on_escape() then
+				return true
+			end
 			return store.escape_chat(chat, running:peek())
 		end,
 		disabled = function(): boolean
@@ -1024,6 +1036,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			p[k] = nil
 		end
 	end
+	-- (Another placement's form: one line with nothing over it or under it,
+	-- or opened out from the start.)
+	if form and form.bare then
+		p.cargo, p.bare = nil, true
+	end
+	if form and form.expanded then
+		p.expanded = true
+	end
+	if form and form.on_focus then
+		p.on_field_focus = form.on_focus
+	end
 	return ds.Composer(p :: any)
 end
 
@@ -1072,6 +1095,16 @@ local function focus_of(slot: string): State<number>
 	end
 	return f
 end
+-- A page composer's draft for `chat`, the words (a side chat's too), as
+-- every placement of it shows them.
+function M.draft(chat: string): State<string>
+	return ui.state(`chat_lane_draft_{chat}`, "")
+end
+
+-- Gives `slot`'s page composer the keys (its first placement's).
+function M.focus(slot: string)
+	focus_of(slot):add(1)
+end
 
 -- A chat's composer on a page of its own, outside the panel's tabs: the
 -- side chat's (above), bound to chat `chat` in `slot` (its session watched
@@ -1082,20 +1115,85 @@ end
 --   LaneTab.Composer { chat = function() return id end, slot = "capture",
 --     take = function(text, attachments) return promise end,
 --     placeholder = "Dump anything" }
-M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, drop: boolean?, id: string? }): Node
+--
+-- A second placement of the same composer (`mirror = true`, the same
+-- `slot`): one composer shown in two places, its draft, chips and picks
+-- the first one's. Its focus is its own (`focus`); `bare()` while it's one
+-- line with nothing over or under it, opened out otherwise; `on_escape`
+-- has Escape first; `on_open_model` is asked for while it's bare and its
+-- model picker is wanted (`/model`, the sidebar's): it opens out, then
+-- the picker. While a mirror shows, the model picker asked for from
+-- elsewhere opens in it rather than in the first (likely out of view).
+-- The slot's session is watched while either is there.
+local holders: { [string]: number } = {}
+local mirrors: { [string]: number } = {}
+local live_pickers: { [string]: { State<number> } } = {}
+M.Composer = ui.component(function(props: {
+	chat: () -> string?,
+	slot: string,
+	take: Take?,
+	placeholder: string?,
+	footer: Footer?,
+	drop: boolean?,
+	id: string?,
+	mirror: boolean?,
+	focus: State<number>?,
+	bare: (() -> boolean)?,
+	on_escape: (() -> boolean)?,
+	on_open_model: (() -> ())?,
+	on_focus: ((focused: boolean) -> ())?,
+}): Node
 	local slot = props.slot
+	local mirror = props.mirror == true
 	local view = lanes.view(slot)
 	-- (Its focus, by its slot: a drop zone of its, around it or anywhere on
-	-- its page, gives it the keys as something lands.)
-	local focus = focus_of(slot)
+	-- its page, gives it the keys as something lands. A mirror's, its own.)
+	local focus = props.focus or focus_of(slot)
 	local open_model = ui.use_state(0)
+	holders[slot] = (holders[slot] or 0) + 1
+	if mirror then
+		mirrors[slot] = (mirrors[slot] or 0) + 1
+	end
 	ui.effect(function()
 		local id = props.chat()
 		lanes.watch(slot, id)
 	end)
 	-- (Its picker, for `open_model`; one asked for before it came, opened
-	-- once its chat is known.)
-	pickers[slot] = open_model
+	-- once its chat is known. The first placement's: a mirror's picker is
+	-- only its own.)
+	if not mirror then
+		local list = live_pickers[slot] or {}
+		table.insert(list, open_model)
+		live_pickers[slot] = list
+		pickers[slot] = open_model
+	end
+	-- (Bare, its picker wanted: opened out first, then the picker, once
+	-- the opened-out form is made.)
+	local bare = props.bare
+	if mirror and bare then
+		local seen = open_model:peek()
+		local again = false
+		ui.effect(function()
+			local n = open_model:get()
+			if n == seen then
+				return
+			end
+			seen = n
+			if again then
+				again = false
+				return
+			end
+			if bare() and props.on_open_model then
+				props.on_open_model()
+				ui.after(0, function()
+					ui.after(0, function()
+						again = true
+						open_model:add(1)
+					end)
+				end)
+			end
+		end)
+	end
 	-- (Taken a frame on, once its composer and its picker are made, and
 	-- only by one still there. A page coming may make it again as it lays
 	-- itself out: one let go just after it opened its picker hands the
@@ -1106,7 +1204,9 @@ M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, t
 		if model_wanted:get() == slot and props.chat() then
 			ui.after(0, function()
 				ui.after(0, function()
-					if alive and model_wanted:peek() == slot then
+					-- (A mirror showing takes it: it's the one in view.)
+					local mine = mirror or (mirrors[slot] or 0) == 0
+					if alive and mine and model_wanted:peek() == slot then
 						model_wanted:set(nil)
 						if ui.now() - wanted_at < WANT_FOR then
 							opened_at = ui.now()
@@ -1122,22 +1222,64 @@ M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, t
 		if ui.now() - opened_at < HAND_ON then
 			model_wanted:set(slot)
 		end
-		lanes.watch(slot, nil)
-		if pickers[slot] == open_model then
-			pickers[slot] = nil
+		-- (The slot's session let go with the last placement of it, never
+		-- under another still showing.)
+		local left = (holders[slot] or 1) - 1
+		holders[slot] = if left > 0 then left else nil
+		if mirror then
+			local m = (mirrors[slot] or 1) - 1
+			mirrors[slot] = if m > 0 then m else nil
+		end
+		if left <= 0 then
+			lanes.watch(slot, nil)
+		end
+		if not mirror then
+			local list = live_pickers[slot] or {}
+			local at = table.find(list, open_model)
+			if at then
+				table.remove(list, at)
+			end
+			live_pickers[slot] = if #list > 0 then list else nil
+			if pickers[slot] == open_model then
+				pickers[slot] = list[#list]
+			end
 		end
 	end)
-	-- (A real swap: the chat it's bound to, once known.)
+	local function build(id: string, form: Form?): Node
+		local c = composer(id, view, `lane.{slot}`, focus, open_model, false, nil, true, props.take, props.placeholder, props.footer, form)
+		return if props.drop then M.DropZone { slot = slot, chat = props.chat, focus = props.focus, place = if mirror then "mirror" else nil, c } else c
+	end
+	-- (A real swap: the chat it's bound to, once known; a mirror's form,
+	-- bare or opened out, as it changes.)
 	return ui.presence(function(): string
-		return props.chat() or ""
-	end, function(id: string): Node
-		if id == "" then
+		local id = props.chat() or ""
+		if mirror and bare and id ~= "" then
+			return if bare() then `{id}#bare` else `{id}#open`
+		end
+		return id
+	end, function(key: string): Node
+		if key == "" then
 			return ui.div {}
+		end
+		local id, how = nil, nil
+		if mirror and bare then
+			id, how = string.match(key, "^(.-)#(%a+)$")
+		end
+		local form: Form? = nil
+		if id and how then
+			local f: Form = { mirror = true, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = props.on_focus }
+			form = f
+		else
+			id = key
+			if mirror or props.on_focus then
+				local f: Form = { mirror = mirror, on_escape = props.on_escape, on_focus = props.on_focus }
+				form = f
+			end
 		end
 		-- (Its `id` is the component's node's: zgx gives it there.)
 		return ui.column {
 			w_full = true,
-			if props.drop then M.DropZone { slot = slot, chat = props.chat, composer(id, view, `lane.{slot}`, focus, open_model, false, nil, true, props.take, props.placeholder, props.footer) } else composer(id, view, `lane.{slot}`, focus, open_model, false, nil, true, props.take, props.placeholder, props.footer),
+			build(id :: string, form),
 		}
 	end, { w_full = true })
 end)
@@ -1148,16 +1290,19 @@ end)
 -- send with it, the chat page's own overlays saying so while they're over
 -- it; its composer takes the keys as one lands. A page puts it round as
 -- much as it likes (the Control room: all of Capture); `LaneTab.Composer`'s
--- `drop = true`, round the composer alone.
+-- `drop = true`, round the composer alone. Round a second placement of
+-- the composer (a mirror's): `focus`, that one's, and `place`, a name of
+-- its own for the zone (its overlays its own, the draft the same).
 --
 --   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, node }
-M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, [number]: Node }): Node
+M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, focus: State<number>?, place: string?, [number]: Node }): Node
 	local slot = props.slot
-	local focus = focus_of(slot)
+	local focus = props.focus or focus_of(slot)
+	local suffix = if props.place then `-{props.place}` else ""
 	local body = ui.presence(function(): string
 		return props.chat() or ""
 	end, function(id: string): Node
-		local zone_name = `lane.{slot}`
+		local zone_name = if props.place then `lane.{slot}.{props.place}` else `lane.{slot}`
 		local node: { [any]: any } = { w_full = true, relative = true }
 		for _, child in ipairs(props :: any) do
 			table.insert(node, child)
@@ -1171,8 +1316,8 @@ M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, [
 		for k, v in zone do
 			node[k] = v
 		end
-		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}` })
-		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}{suffix}` })
+		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_mention") :: any })
 		return ui.column(node :: any)
 	end, { w_full = true })
 	return body
