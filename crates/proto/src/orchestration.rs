@@ -651,6 +651,85 @@ pub fn classify_command(command: &str) -> ActivityKind {
     }
 }
 
+/// What a running tool call says the agent is doing, and a short label for
+/// it. Pure: shell commands go through [`classify_command`].
+pub fn activity_of(call: &crate::ToolCall) -> (ActivityKind, String) {
+    use crate::ToolCall;
+    fn clip(s: &str, max: usize) -> String {
+        let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+        if line.chars().count() <= max {
+            line.to_owned()
+        } else {
+            let mut out: String = line.chars().take(max - 1).collect();
+            out.push('…');
+            out
+        }
+    }
+    fn file(path: &str) -> &str {
+        path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path)
+    }
+    const DELEGATING: &[&str] = &[
+        "create_chat",
+        "create_chats",
+        "send_message",
+        "send_messages",
+        "wait_for_turn",
+    ];
+    match call {
+        ToolCall::Exec { command } => (classify_command(command), clip(command, 80)),
+        ToolCall::ReadFile { path } => (ActivityKind::Reading, format!("Read {}", file(path))),
+        ToolCall::Search { pattern, .. } => (ActivityKind::Reading, format!("Search {}", clip(pattern, 60))),
+        ToolCall::Glob { pattern } => (ActivityKind::Reading, format!("Glob {}", clip(pattern, 60))),
+        ToolCall::WriteFile { path, .. } => (ActivityKind::Editing, format!("Write {}", file(path))),
+        ToolCall::EditFile { path, .. } => (ActivityKind::Editing, format!("Edit {}", file(path))),
+        ToolCall::ApplyPatch { path } => (
+            ActivityKind::Editing,
+            match path {
+                Some(path) => format!("Patch {}", file(path)),
+                None => "Patch".into(),
+            },
+        ),
+        ToolCall::WebFetch { url, .. } => (ActivityKind::Browsing, clip(url, 80)),
+        ToolCall::WebSearch { query } => (ActivityKind::Browsing, format!("Search {}", clip(query, 60))),
+        ToolCall::Todo { .. } => (ActivityKind::Thinking, "Planning".into()),
+        _ if call.is_subagent_spawn() => (ActivityKind::Delegating, "Subagent".into()),
+        ToolCall::Mcp { tool, .. } if DELEGATING.contains(&tool.as_str()) => {
+            (ActivityKind::Delegating, tool.replace('_', " "))
+        }
+        ToolCall::Mcp { tool, .. } => (ActivityKind::Running, clip(tool, 60)),
+        ToolCall::Unknown { name, .. } => {
+            let lower = name.to_ascii_lowercase();
+            let bare = lower.rsplit("__").next().unwrap_or(&lower);
+            if DELEGATING.contains(&bare) {
+                (ActivityKind::Delegating, bare.replace('_', " "))
+            } else if lower.contains("web") || lower.contains("browser") || lower.contains("fetch") {
+                (ActivityKind::Browsing, clip(name, 60))
+            } else {
+                (ActivityKind::Running, clip(name, 60))
+            }
+        }
+    }
+}
+
+/// Progress through a todo list (the newest todo/plan tool call's items).
+/// `None` for an empty list.
+pub fn todo_progress(items: &[crate::TodoItem]) -> Option<TodoProgress> {
+    if items.is_empty() {
+        return None;
+    }
+    let done = items.iter().filter(|i| i.status() == crate::TodoStatus::Completed).count();
+    let current = items
+        .iter()
+        .find(|i| i.status() == crate::TodoStatus::InProgress)
+        .map(|i| i.text.trim().to_owned())
+        .filter(|t| !t.is_empty());
+    Some(TodoProgress {
+        done: done as u32,
+        total: items.len() as u32,
+        current,
+    })
+}
+
 // ── Live: machines and communications ───────────────────────────────────────
 
 /// How busy a device is, sampled while someone watches (`WatchDeviceLoads`).
@@ -908,6 +987,69 @@ mod tests {
         assert_eq!(classify_command("cargo build --release"), ActivityKind::Building);
         assert_eq!(classify_command("pnpm install"), ActivityKind::Installing);
         assert_eq!(classify_command("ls -la"), ActivityKind::Running);
+    }
+
+    #[test]
+    fn tool_calls_classify_into_activities() {
+        use crate::ToolCall;
+        let exec = |c: &str| activity_of(&ToolCall::Exec { command: c.into() });
+        assert_eq!(exec("cargo test -p zeron-engine").0, ActivityKind::Testing);
+        assert_eq!(exec("git push").0, ActivityKind::Pushing);
+        assert_eq!(
+            activity_of(&ToolCall::EditFile { path: "/a/b/sessions.rs".into(), old_string: None, new_string: None }),
+            (ActivityKind::Editing, "Edit sessions.rs".into())
+        );
+        assert_eq!(activity_of(&ToolCall::ReadFile { path: "x/y.rs".into() }).0, ActivityKind::Reading);
+        assert_eq!(activity_of(&ToolCall::Glob { pattern: "**/*.rs".into() }).0, ActivityKind::Reading);
+        assert_eq!(activity_of(&ToolCall::Search { pattern: "fn".into(), path: None }).0, ActivityKind::Reading);
+        assert_eq!(activity_of(&ToolCall::WebSearch { query: "loro".into() }).0, ActivityKind::Browsing);
+        assert_eq!(
+            activity_of(&ToolCall::Mcp { server: "zeron".into(), tool: "create_chat".into(), input: None }).0,
+            ActivityKind::Delegating
+        );
+        assert_eq!(
+            activity_of(&ToolCall::Unknown { name: "mcp__zeron__send_message".into(), input: None }).0,
+            ActivityKind::Delegating
+        );
+        assert_eq!(activity_of(&ToolCall::Unknown { name: "Agent: review".into(), input: None }).0, ActivityKind::Delegating);
+        let long = "x".repeat(200);
+        assert_eq!(exec(&long).1.chars().count(), 80);
+    }
+
+    #[test]
+    fn todo_progress_counts_done_and_names_the_current_item() {
+        use crate::{TodoItem, TodoStatus};
+        assert_eq!(todo_progress(&[]), None);
+        let items = vec![
+            TodoItem::new("one", TodoStatus::Completed),
+            TodoItem::new("two", TodoStatus::InProgress),
+            TodoItem::new("three", TodoStatus::Pending),
+        ];
+        assert_eq!(
+            todo_progress(&items),
+            Some(TodoProgress { done: 1, total: 3, current: Some("two".into()) })
+        );
+    }
+
+    #[test]
+    fn reports_read_compact_with_ids() {
+        let report = Report {
+            id: "r".into(),
+            orchestrator_id: "o".into(),
+            from_chat: "c1".into(),
+            item_id: Some("i1".into()),
+            state: ReportState::Done,
+            summary: "merged".into(),
+            detail: "line one\nline two".into(),
+            links: vec![WorkLink { kind: LinkKind::Pr, label: "#7".into(), target: "https://x/7".into() }],
+            progress: Some(1.0),
+            at: Utc::now(),
+        };
+        assert_eq!(
+            report.compact(),
+            "- [done] chat c1 item i1 (100%): merged\n    line one\n    line two\n    #7: https://x/7"
+        );
+        assert!(reports_prompt(&[report]).starts_with("[Crew updates] 1 report from"));
     }
 
     #[test]
