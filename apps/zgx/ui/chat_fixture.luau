@@ -1165,6 +1165,17 @@ ui.command {
 		seed()
 	end,
 }
+-- A Codex session on its agent's default model (none set, so none the
+-- catalog names): its agent only the one its config records.
+ui.command {
+	id = "codex_model_less",
+	title = "A Codex session with no model",
+	run = function()
+		META.s3 = { title = "Codex chat", project = "atlas", agent = "codex", harness = "codex", access = "full", plan = false }
+		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
+		seed()
+	end,
+}
 -- A session of long messages (each folds to five lines).
 do
 	local long_chat = {}
