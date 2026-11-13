@@ -22,6 +22,8 @@ local Asks = require("@ds/orch_asks")
 local OrchMap = require("@ds/orch_map")
 local Machines = require("@ds/orch_machines")
 local Comms = require("@ds/orch_comms")
+local OrchBoard = require("@ds/orch_board")
+local Links = require("@ds/links")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
@@ -375,102 +377,41 @@ local function capture(): Node
 	}
 end
 
--- The board: a stand-in for ds/orch_board (the orchestrator stream's), its
--- columns and their cards' titles.
--- TODO(integration): mount ds/orch_board here once orch/ui-orchestrator is in.
-local BOARD = { "active", "planned", "blocked", "review", "done" }
-local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
+-- The board: every orchestrator's work, its filter over it, loose items in
+-- an Inbox first.
 local function board(): Node
-	local function column(state: string): Node
-		local cards = ui.computed(function(): { any }
-			local out = {}
-			local day = os.time() - 86400
-			for _, it in orchestration.now:get().items or {} do
-				if it.state == state and (state ~= "done" or (it.done or it.updated or 0) >= day) then
-					table.insert(out, it)
-				end
+	return OrchBoard {
+		id = "control-board",
+		items = function(): { any }
+			return orchestration.now:get().items or {}
+		end,
+		orchestrators = function(): { any }
+			return orchestration.now:get().orchestrators or {}
+		end,
+		show_filter = true,
+		inbox = true,
+		todo_of = function(chat: string): any
+			local c = chats_now:get()[chat]
+			return c and c.todo
+		end,
+		thread_of = function(chat: string): any
+			return chats_now:get()[chat]
+		end,
+		on_move = function(id: string, state: string, order: number)
+			orchestration.move_item(id, state, order):after(function() end, said("control.board.failed"))
+		end,
+		on_priority = function(id: string, p: string)
+			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
+		end,
+		on_open_thread = M.open_chat,
+		on_link = function(link: any)
+			if link.kind == "chat" then
+				M.open_chat(link.target)
+			elseif string.match(link.target or "", "^https?://") then
+				Links.open(link.target)
 			end
-			table.sort(out, function(a: any, b: any): boolean
-				local pa, pb = RANK[a.priority] or 2, RANK[b.priority] or 2
-				if pa ~= pb then
-					return pa < pb
-				end
-				return (a.order or 0) < (b.order or 0)
-			end)
-			return out
-		end)
-		return ui.column {
-			class = "control-board-column",
-			grow = 1,
-			basis = 0,
-			min_w = 0,
-			gap = "$space.2",
-			ui.row {
-				gap = "$space.2",
-				items = "center",
-				ui.text { locale.t(`control.board.{state}`), text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.tertiary" },
-				ui.text {
-					function(): string
-						local n = #cards:get()
-						return if n > 0 then tostring(n) else ""
-					end,
-					tabular = true,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				},
-			},
-			ui.each(cards, function(_it: any, _i: number, row: State<any>): Node
-				return ui.row {
-					class = "control-board-card",
-					w_full = true,
-					gap = "$space.2",
-					py = "$zeron.space.hair",
-					items = "start",
-					ui.div {
-						w = 2,
-						h = 16,
-						mt = "$zeron.space.hair",
-						shrink = 0,
-						rounded = "$radius.full",
-						bg = function(): any
-							return hue.paint(hue_of(row:get().orchestrator_id), 0.9)
-						end,
-					},
-					ui.text {
-						function(): string
-							return row:get().title or ""
-						end,
-						grow = 1,
-						min_w = 0,
-						wrap = true,
-						text_size = "$font.size.sm",
-						color = if state == "done" then "$text.secondary" else "$text.primary",
-					},
-					ui.show(function(): boolean
-						local p = row:get().priority
-						return p == "urgent" or p == "high"
-					end, ui.div {
-						color = function(): string
-							return if row:get().priority == "urgent" then "$danger" else "$text.tertiary"
-						end,
-						shrink = 0,
-						Icon { name = "flag", size = 12 },
-					}),
-				}
-			end, { key = function(it: any): string
-				return it.id
-			end, w_full = true, gap = "$space.1" }),
-		}
-	end
-	local cols = {}
-	for _, s in BOARD do
-		table.insert(cols, column(s))
-	end
-	local p: any = { id = "control-board", w_full = true, gap = "$space.5", items = "start" }
-	for _, c in cols do
-		table.insert(p, c)
-	end
-	return ui.row(p)
+		end,
+	}
 end
 
 local function needs(): Node

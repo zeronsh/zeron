@@ -4101,11 +4101,7 @@
       "failed": "Couldn't send that"
     },
     "board": {
-      "active": "Now",
-      "planned": "Next",
-      "blocked": "Blocked",
-      "review": "Review",
-      "done": "Done"
+      "failed": "Couldn't move it"
     },
     "widget": {
       "capture": "Capture",
