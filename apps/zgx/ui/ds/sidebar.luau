@@ -5321,6 +5321,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				return if h > VIEW_MENU_MIN + VIEW_MENU_CLEAR then h - VIEW_MENU_CLEAR else math.huge
 			end
 			return ui.scroll {
+				id = "sidebar-view-menu-scroll",
 				w_full = true,
 				-- (Not laid out yet, the first time: as tall as it needs.)
 				h = function(): any

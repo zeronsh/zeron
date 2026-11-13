@@ -145,6 +145,57 @@ pub struct CrewMember {
     #[serde(default)]
     pub released: bool,
     pub joined_at: DateTime<Utc>,
+    /// When its chat's host first saw the chat archived (by the person, or
+    /// by the auto-archive sweep); cleared once it's seen unarchived again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_seen_at: Option<DateTime<Utc>>,
+    /// When its chat's host saw it unarchived: activity, for the auto-archive
+    /// sweep's idle timer (an unarchive is never fought).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revived_at: Option<DateTime<Utc>>,
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+/// The profile's orchestration settings: one synced row (registry kind
+/// `orchestrationSettings`), read by every engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrationSettings {
+    /// Archive crew threads (chats an orchestrator started) left idle for
+    /// [`Self::crew_idle_hours`]. On by default.
+    #[serde(default = "default_true")]
+    pub crew_auto_archive: bool,
+    /// How long a crew thread is idle before it's archived, in hours.
+    #[serde(default = "default_crew_idle_hours")]
+    pub crew_idle_hours: u32,
+}
+
+/// The default idle window before a crew thread is archived.
+pub const DEFAULT_CREW_IDLE_HOURS: u32 = 12;
+/// The shortest and longest idle windows a setting may hold.
+pub const CREW_IDLE_HOURS_MIN: u32 = 1;
+pub const CREW_IDLE_HOURS_MAX: u32 = 24 * 30;
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_crew_idle_hours() -> u32 {
+    DEFAULT_CREW_IDLE_HOURS
+}
+
+impl Default for OrchestrationSettings {
+    fn default() -> Self {
+        Self { crew_auto_archive: true, crew_idle_hours: DEFAULT_CREW_IDLE_HOURS }
+    }
+}
+
+impl OrchestrationSettings {
+    /// The idle window, kept inside its bounds.
+    pub fn crew_idle(&self) -> chrono::Duration {
+        chrono::Duration::hours(i64::from(self.crew_idle_hours.clamp(CREW_IDLE_HOURS_MIN, CREW_IDLE_HOURS_MAX)))
+    }
 }
 
 // ── Reports (crew → orchestrator) ───────────────────────────────────────────
@@ -1656,6 +1707,9 @@ pub struct OrchestrationState {
     pub asks: Vec<Ask>,
     /// Newest first, at most 50.
     pub dumps: Vec<Dump>,
+    /// The profile's settings (defaults until one is written).
+    #[serde(default)]
+    pub settings: OrchestrationSettings,
 }
 
 /// `Orchestrate` RPC params: one op. Ops marked (agent) are also allowed
@@ -1729,6 +1783,14 @@ pub enum OrchestrateOp {
     /// (agent: orchestrators, own crew)
     #[serde(rename_all = "camelCase")]
     ReleaseFromCrew { chat_id: String },
+    /// The person changes orchestration settings; absent = unchanged.
+    #[serde(rename_all = "camelCase")]
+    UpdateSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crew_auto_archive: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crew_idle_hours: Option<u32>,
+    },
     /// The person takes a card off the board (done or not): it is kept,
     /// marked `removed`, and gone for every reader. Its chat is untouched.
     /// Replies `{ id }`.

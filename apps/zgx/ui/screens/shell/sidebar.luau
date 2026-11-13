@@ -1687,6 +1687,16 @@ local function view_more(more: any): { Node }
 				end,
 				on_click = toggle(shared.archived_orchestrators),
 			},
+			-- Crew threads left idle archived on their own (the profile's
+			-- setting, Settings → Orchestration has how long).
+			Menu.Row {
+				icon = "inbox",
+				label = locale.s("orch.sidebar.view.auto_archive"),
+				checked = function(): boolean
+					return orchestration.auto_archive:get() == true
+				end,
+				on_click = toggle(orchestration.auto_archive),
+			},
 		},
 		Menu.Group {
 			heading = locale.s("orch.sidebar.view.control"),

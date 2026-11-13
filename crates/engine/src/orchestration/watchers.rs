@@ -76,6 +76,8 @@ pub(crate) fn start(orchestration: Orchestration) {
         }
     });
     super::turn_asks::start(orchestration.clone());
+    // Crew threads left idle, archived (the profile's setting).
+    super::crew_archive::start(orchestration.clone());
     // Questions still waiting on a reply that's there: one whose
     // transcript synced in after every retry, or came while this engine
     // wasn't running and its thread hasn't ended a turn since.

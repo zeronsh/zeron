@@ -450,6 +450,14 @@ fn state_value(s: &OrchestrationState) -> Value {
         ("items", list(&s.items, item_value)),
         ("asks", list(&s.asks, ask_value)),
         ("dumps", list(&s.dumps, dump_value)),
+        // The profile's settings: `{ crew_auto_archive, crew_idle_hours }`.
+        (
+            "settings",
+            Value::record([
+                ("crew_auto_archive", Value::Bool(s.settings.crew_auto_archive)),
+                ("crew_idle_hours", Value::from(f64::from(s.settings.crew_idle_hours))),
+            ]),
+        ),
     ])
 }
 

@@ -2483,6 +2483,24 @@
         "description": "Parakeet v3 · {total} MB",
         "remove": "移除"
       }
+    },
+    "orchestration": {
+      "title": "Orchestration",
+      "terms": "orchestrator orchestrators crew threads archive idle",
+      "description": "How orchestrators' chats are kept, on every device.",
+      "crew_section": "Orchestrator chats",
+      "auto_archive": {
+        "label": "Auto-archive orchestrator chats",
+        "description": "Archive a chat an orchestrator started once it has been idle. Never while it's working, waiting on you, or its card is in Now or Blocked.",
+        "terms": "archive crew threads idle automatically"
+      },
+      "idle_hours": {
+        "label": "Archive after",
+        "description": "How long a chat sits with no turn and no message before it's archived.",
+        "terms": "idle inactivity window hours days",
+        "hours": "{n, plural, one {# hour} other {# hours}}",
+        "days": "{n, plural, one {# day} other {# days}}"
+      }
     }
   },
   "common": {
@@ -4126,7 +4144,8 @@
         "open_control": "Open Control room",
         "widgets": "Widgets…",
         "map": "Default map view",
-        "brain_model": "Brain dump model…"
+        "brain_model": "Brain dump model…",
+        "auto_archive": "Auto-archive idle chats"
       }
     },
     "palette": {

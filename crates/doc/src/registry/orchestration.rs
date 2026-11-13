@@ -19,7 +19,8 @@
 use serde::de::DeserializeOwned;
 use serde_json::Map;
 use zeron_proto::orchestration::{
-    Ask, CrewMember, Dump, OrchestrationState, Orchestrator, Progress, Route, WorkItem,
+    Ask, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, Progress, Route,
+    WorkItem,
 };
 
 use super::*;
@@ -29,18 +30,23 @@ pub const KIND_CREW: &str = "crew";
 pub const KIND_WORK_ITEMS: &str = "workItems";
 pub const KIND_ASKS: &str = "asks";
 pub const KIND_DUMPS: &str = "dumps";
+/// The profile's orchestration settings: one row, [`SETTINGS_ROW`].
+pub const KIND_SETTINGS: &str = "orchestrationSettings";
+/// The settings row's id.
+pub const SETTINGS_ROW: &str = "settings";
 /// How far each chat's work has got (`Progress`), keyed by chat id, written
 /// by the chat's host only. Not one of [`ORCHESTRATION_KINDS`]: it changes
 /// far more often than the rest and has its own watch (`WatchProgress`).
 pub const KIND_PROGRESS: &str = "progress";
 
 /// Every orchestration kind (publishers watch their versions together).
-pub const ORCHESTRATION_KINDS: [&str; 5] = [
+pub const ORCHESTRATION_KINDS: [&str; 6] = [
     KIND_ORCHESTRATORS,
     KIND_CREW,
     KIND_WORK_ITEMS,
     KIND_ASKS,
     KIND_DUMPS,
+    KIND_SETTINGS,
 ];
 
 /// `WatchOrchestration` sends at most this many dumps, newest first.
@@ -107,6 +113,22 @@ impl Entity for Ask {
     const KIND: &'static str = KIND_ASKS;
     const REQUIRED: &'static [&'static str] =
         &["id", "fromChat", "kind", "question", "state", "createdAt"];
+    fn row_id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// The settings as their row holds them: the settings and the row's id.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct SettingsRow {
+    id: String,
+    #[serde(flatten)]
+    settings: OrchestrationSettings,
+}
+
+impl Entity for SettingsRow {
+    const KIND: &'static str = KIND_SETTINGS;
+    const REQUIRED: &'static [&'static str] = &["id"];
     fn row_id(&self) -> &str {
         &self.id
     }
@@ -467,6 +489,16 @@ impl RegistryDoc {
         all
     }
 
+    /// Write the profile's orchestration settings.
+    pub fn upsert_orchestration_settings(&mut self, settings: &OrchestrationSettings) {
+        self.write_entity(&SettingsRow { id: SETTINGS_ROW.to_owned(), settings: settings.clone() });
+    }
+
+    /// The profile's orchestration settings (the defaults until written).
+    pub fn orchestration_settings(&self) -> OrchestrationSettings {
+        self.read_entity::<SettingsRow>(SETTINGS_ROW).map(|row| row.settings).unwrap_or_default()
+    }
+
     /// Changes whenever a progress row may have changed.
     pub fn progress_version(&self) -> u64 {
         self.kind_version(KIND_PROGRESS)
@@ -484,6 +516,7 @@ impl RegistryDoc {
             items: self.read_work_items().into_iter().filter(|i| !i.removed).collect(),
             asks: self.read_asks(),
             dumps,
+            settings: self.orchestration_settings(),
         }
     }
 }
@@ -593,6 +626,8 @@ mod tests {
             last_report: None,
             released: false,
             joined_at: ts(1_500),
+            archived_seen_at: Some(ts(1_600)),
+            revived_at: Some(ts(1_700)),
         };
         doc.upsert_crew_member(&member);
         doc.upsert_work_item(&item("i1"));

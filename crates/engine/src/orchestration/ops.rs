@@ -224,6 +224,28 @@ impl EngineRpc {
                 self.add_to_crew(&orchestrator_id, &chat_id, &role, item_id)?;
                 Ok(json!({ "id": chat_id }))
             }
+            OrchestrateOp::UpdateSettings { crew_auto_archive, crew_idle_hours } => {
+                use zeron_proto::orchestration::{CREW_IDLE_HOURS_MAX, CREW_IDLE_HOURS_MIN};
+                if let Some(hours) = crew_idle_hours
+                    && !(CREW_IDLE_HOURS_MIN..=CREW_IDLE_HOURS_MAX).contains(&hours)
+                {
+                    return Err(failed(format!(
+                        "The idle window is {CREW_IDLE_HOURS_MIN} to {CREW_IDLE_HOURS_MAX} hours"
+                    )));
+                }
+                let settings = orch.workspace().write_orchestration(|doc| {
+                    let mut settings = doc.orchestration_settings();
+                    if let Some(on) = crew_auto_archive {
+                        settings.crew_auto_archive = on;
+                    }
+                    if let Some(hours) = crew_idle_hours {
+                        settings.crew_idle_hours = hours;
+                    }
+                    doc.upsert_orchestration_settings(&settings);
+                    settings
+                });
+                Ok(serde_json::to_value(settings).unwrap_or(Value::Null))
+            }
             OrchestrateOp::RemoveItem { id } => {
                 self.remove_item(&id)?;
                 Ok(json!({ "id": id }))
@@ -553,6 +575,9 @@ impl EngineRpc {
                     .as_ref()
                     .filter(|_| same_crew)
                     .map_or(now, |m| m.joined_at),
+                // (Its archive marks are its chat's, whatever crew it's in.)
+                archived_seen_at: previous.as_ref().and_then(|m| m.archived_seen_at),
+                revived_at: previous.as_ref().and_then(|m| m.revived_at),
             };
             doc.upsert_crew_member(&member);
             if let Some(item) = member.item_id.as_deref().and_then(|id| doc.work_item(id).filter(|i| !i.removed))
@@ -711,6 +736,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         OrchestrateOp::PromoteChat { .. } => refuse("Only the person makes a chat an orchestrator"),
         OrchestrateOp::AddToBoard { .. } => refuse("Only the person puts a chat on the board"),
         OrchestrateOp::RemoveItem { .. } => refuse("Only the person takes a card off the board"),
+        OrchestrateOp::UpdateSettings { .. } => refuse("Only the person changes orchestration settings"),
         OrchestrateOp::UpdateOrchestrator {
             id,
             name,

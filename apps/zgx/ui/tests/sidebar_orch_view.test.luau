@@ -42,6 +42,10 @@ end
 local function choose(app: any, label: string)
 	app:click(MORE)
 	settle(app)
+	-- (The menu scrolls once taller than the window: the row brought into
+	-- view first.)
+	app:scroll("#sidebar-view-menu-scroll", 2000)
+	settle(app)
 	app:click(item(app, label))
 	settle(app)
 end

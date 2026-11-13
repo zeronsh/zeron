@@ -1718,3 +1718,72 @@ async fn a_card_set_by_hand_before_the_mark_existed_is_kept_at_start() {
     assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "once");
     core.sessions.shutdown().await;
 }
+
+/// Crew auto-archive against a whole engine: the settings op (the person's
+/// alone), an idle thread archived through the chat row as the person's
+/// Archive does, its card keeping its column with the thread a chat link,
+/// the archive noted, and an unarchive starting its idle time again.
+#[tokio::test]
+async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
+    use super::crew_archive::{Step, apply, plan};
+    let (_temp, core) = core().await;
+    let auth = orchestrator(&core, "Auth").await;
+
+    // The settings: defaults, changed by the person, refused to an agent.
+    let state = core.workspace.orchestration_state();
+    assert_eq!((state.settings.crew_auto_archive, state.settings.crew_idle_hours), (true, 12));
+    let reply = call(&core, Caller::Local, methods::ORCHESTRATE,
+        json!({"op":"updateSettings","crewIdleHours":6})).await.unwrap();
+    assert_eq!(reply["crewIdleHours"], 6);
+    assert!(op(&core, agent(&auth), json!({"op":"updateSettings","crewAutoArchive":false})).await.is_err());
+    assert!(op(&core, Caller::Local, json!({"op":"updateSettings","crewIdleHours":0})).await.is_err(), "out of bounds");
+    let settings = core.workspace.orchestration_state().settings;
+    assert_eq!((settings.crew_auto_archive, settings.crew_idle_hours), (true, 6));
+
+    // A crew thread on a card in Review (done working, waiting on merge).
+    let item = op(&core, agent(&auth), json!({"op":"upsertItem","item":{"title":"Login redirect","state":"review"}}))
+        .await
+        .unwrap();
+    chat(&core, "worker", "Worker", Some((auth.as_str(), "crew"))).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":auth,"chatId":"worker","role":"fix","itemId":item}))
+        .await
+        .unwrap();
+    assert!(core.orchestration.item(&item).unwrap().threads.contains(&"worker".to_owned()));
+
+    let chats = || core.workspace.read_chats().unwrap();
+    let st = || core.workspace.orchestration_state();
+    let now = chrono::Utc::now();
+    let later = now + chrono::Duration::hours(7);
+    assert!(plan(now, REMOTE, &chats(), &st(), |_| None).is_empty(), "not idle yet");
+    let steps = plan(later, REMOTE, &chats(), &st(), |_| None);
+    assert!(matches!(steps.as_slice(), [Step::Archive { chat_id, .. }] if chat_id == "worker"), "{steps:?}");
+    // The orchestrator's own chat isn't among them.
+    assert!(!steps.iter().any(|s| matches!(s, Step::Archive { chat_id, .. } if *chat_id == auth)));
+    assert_eq!(apply(&core.orchestration, &steps, later), 1);
+
+    assert!(core.workspace.chat("worker").unwrap().unwrap().archived, "archived as the person's Archive does");
+    let card = core.orchestration.item(&item).unwrap();
+    assert_eq!(card.state, WorkState::Review, "its column kept");
+    assert!(!card.threads.contains(&"worker".to_owned()));
+    assert!(card.links.iter().any(|l| l.kind == LinkKind::Chat && l.target == "worker" && l.label == "Worker"));
+    assert!(core.orchestration.crew_of("worker").unwrap().archived_seen_at.is_some());
+    // Again: nothing more to do (idempotent).
+    assert!(plan(later, REMOTE, &chats(), &st(), |_| None).is_empty());
+
+    // The person unarchives it: revived, and kept a whole window from then.
+    call(&core, Caller::Local, methods::MUTATE, json!({"op":"setChatArchived","chatId":"worker","archived":false}))
+        .await
+        .unwrap();
+    let revive_at = later + chrono::Duration::hours(1);
+    let steps = plan(revive_at, REMOTE, &chats(), &st(), |_| None);
+    assert_eq!(steps, vec![Step::Revived { chat_id: "worker".into() }]);
+    apply(&core.orchestration, &steps, revive_at);
+    let member = core.orchestration.crew_of("worker").unwrap();
+    assert_eq!((member.archived_seen_at, member.revived_at), (None, Some(revive_at)));
+    assert!(plan(revive_at + chrono::Duration::hours(5), REMOTE, &chats(), &st(), |_| None).is_empty());
+    assert!(!plan(revive_at + chrono::Duration::hours(6), REMOTE, &chats(), &st(), |_| None).is_empty());
+
+    // The setting off: nothing archived, however idle.
+    op(&core, Caller::Local, json!({"op":"updateSettings","crewAutoArchive":false})).await.ok();
+    assert!(plan(revive_at + chrono::Duration::hours(100), REMOTE, &chats(), &st(), |_| None).is_empty());
+}
