@@ -225,7 +225,8 @@ end
 --
 -- `take`: what a send does instead of messaging the chat (the Control
 -- room's Capture: a dump): told the words as they'd be sent and what they
--- carry (Carried.pack's `attachments`), it returns a promise; the draft
+-- carry (Carried.pack's `attachments`, then its references as
+-- `{ kind = "ref", ref }`), it returns a promise; the draft
 -- clears as it goes and comes back, with its chips, if it fails. It's
 -- told the pickers' picks too (`picks()`: model, its agent, effort…), and a
 -- pick made there is the chat's at once (`store.configure`), as on the chat
@@ -931,7 +932,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- Taken by its page (a dump): the words and what they carry, never
 			-- a message of the chat's.
 			if take then
-				take(prompt, pack.attachments, picks()):after(function() end, function(err: any)
+				-- (Its references go too, each `{ kind = "ref", ref }` after
+				-- the files: the page splits them off, ds/orch_ref.)
+				local carry = table.clone(pack.attachments)
+				for _, r in pack.refs do
+					table.insert(carry, { kind = "ref", ref = r })
+				end
+				take(prompt, carry, picks()):after(function() end, function(err: any)
 					ui.batch(function()
 						draft:set(text)
 						quotes:set(said_quotes)
@@ -1292,10 +1299,13 @@ end)
 -- much as it likes (the Control room: all of Capture); `LaneTab.Composer`'s
 -- `drop = true`, round the composer alone. Round a second placement of
 -- the composer (a mirror's): `focus`, that one's, and `place`, a name of
--- its own for the zone (its overlays its own, the draft the same).
+-- its own for the zone (its overlays its own, the draft the same). `refs`:
+-- it takes the Control room's references too (ds/orch_ref, dragged from
+-- its widgets: a chip each, sent with the dump), "Drop to reference" while
+-- one is over it.
 --
---   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, node }
-M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, focus: State<number>?, place: string?, [number]: Node }): Node
+--   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, refs = true, node }
+M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, focus: State<number>?, place: string?, refs: boolean?, [number]: Node }): Node
 	local slot = props.slot
 	local focus = props.focus or focus_of(slot)
 	local suffix = if props.place then `-{props.place}` else ""
@@ -1310,14 +1320,17 @@ M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, f
 		if id == "" then
 			return ui.column(node :: any)
 		end
-		local zone, carrying, carrying_session = Shared.own_drop_zone(zone_name, id, function()
+		local zone, carrying, carrying_session, carrying_ref = Shared.own_drop_zone(zone_name, id, function()
 			focus:add(1)
-		end)
+		end, props.refs)
 		for k, v in zone do
 			node[k] = v
 		end
 		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}{suffix}` })
 		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+		if props.refs then
+			table.insert(node, DropOverlay { shown = carrying_ref, id = `lane-drop-ref-{slot}{suffix}`, label = ui.t("chat.composer.drop_to_reference") :: any })
+		end
 		return ui.column(node :: any)
 	end, { w_full = true })
 	return body

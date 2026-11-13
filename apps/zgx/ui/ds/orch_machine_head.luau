@@ -24,6 +24,7 @@ local Counter = require("@self/orch_counter")
 local Block = require("@self/orch_block")
 local ContextUsage = require("@self/context_usage")
 local Tooltip = require("@self/tooltip")
+local Ref = require("@self/orch_ref")
 
 local M = {}
 
@@ -76,6 +77,10 @@ function M.MachineHead(props: Props): Node
 		return if l and l.cpu then math.clamp(l.cpu, 0, 1) * 100 else nil
 	end
 	local small = Block.baseline("$font.size.sm", "$font.size.xs")
+	-- Dragged: a reference to the machine (ds/orch_ref), for Capture.
+	local drag = Ref.source(function(): any
+		return Ref.device(props.device())
+	end)
 	return ui.row {
 		class = if props.class then `orch-machine-head {props.class}` else "orch-machine-head",
 		label = function(): string
@@ -86,6 +91,10 @@ function M.MachineHead(props: Props): Node
 		gap = "$space.2",
 		items = "center",
 		overflow = "hidden",
+		on_drag = drag.on_drag,
+		drag_preview = drag.drag_preview,
+		drag_preview_anchor = drag.drag_preview_anchor,
+		drag_preview_offset = drag.drag_preview_offset,
 		ui.div {
 			class = "orch-machine-head-icon",
 			relative = true,
