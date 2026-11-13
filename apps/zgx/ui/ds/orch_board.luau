@@ -1,15 +1,22 @@
 --!strict
 -- The board: where every piece of an orchestrator's work stands, in
--- columns Now, Next, Blocked, Review and Done (today), with Inbox before
--- them where loose items are captured (`inbox = true`). Shared by the
+-- columns Queued, Now, Blocked, Review and Done (today). Shared by the
 -- orchestrator's page (filtered to it, `compact`) and the Control room
 -- (all of them, its filter on top).
 --
+-- Queued is what isn't started, in two groups: Up next (cards `planned`:
+-- real work waiting for its turn, or for a slot while its crew is full) and,
+-- under it, Later (cards `inbox`: someday, remind me, ideas, never started
+-- on their own), folded until opened (`later_open`, its count on its
+-- head). Its head counts Up next. A card dragged from one group to the
+-- other changes its state; dragged into Now, it starts.
+--
 -- The columns share the board's width evenly, each a lane of its own, its
 -- name, glyph and count on one line across them all; an empty one keeps
--- its width, quiet, but Inbox and Blocked, which stand only while they
--- hold a card (Blocked too while one is carried, to be put there): the
--- others take their room. Each shows ten cards at most, "Show N more" under
+-- its width, quiet, but Blocked, which stands only while it holds a card
+-- (and while one is carried, to be put there): the others take its room.
+-- Each shows ten cards at most (Queued: Up next first, then Later where
+-- it's open), "Show N more" under
 -- the rest; shown, every column shows all of its (one choice for them all,
 -- `expanded`), and "Show less" puts them all back. Done's head clears it:
 -- every card in it taken off the board at once, as Delete takes one, one
@@ -37,13 +44,14 @@
 -- lifts and follows the pointer, the cards where it would land making room;
 -- let go over the board it lands there, elsewhere (or Escape) it goes back.
 -- A click opens its thread. A secondary click opens its menu: Start now
--- (an Inbox or Next card with no thread yet), its thread, Move to a column,
--- its priority, the dump it came from, and Delete, which takes it off the
--- board at once (never its chat), an Undo beside it for a while.
+-- (a Queued card with no thread yet), its thread, Move to (Up next, Later,
+-- Now, Blocked, Review, Done), its priority, the dump it came from, and
+-- Delete, which takes it off the board at once (never its chat), an Undo
+-- beside it for a while.
 --
--- Inbox holds what was captured and not started, Next what's queued. Such
--- a card says where it will be worked (its project, else its machine) and,
--- held back by the engine while its crew is full, that it's queued. Carried
+-- A Queued card says where it will be worked (its project, else its
+-- machine) and, held back by the engine while its crew is full, that it
+-- waits for a slot. Carried
 -- into Now (or Start now), one without a thread starts: "Starting…" on it
 -- until its thread is there; if that fails, it goes back, with a word.
 --
@@ -55,7 +63,7 @@
 --     ask_of = fn(chat) -> Ask?, -- the open ask a thread raised, if any
 --     filter = state_or_fn,      -- an orchestrator's id: its items alone
 --     show_filter = true,        -- its chips over the board (the Control room)
---     inbox = true,              -- an Inbox column first
+--     inbox = true,              -- (no longer used: Later is in Queued)
 --     now = fn() -> number,      -- Unix seconds: what "today" is
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
 --     on_open_thread = fn(chat), on_link = fn(link),
@@ -63,7 +71,7 @@
 --     on_remove = fn(id) -> promise?,  -- a card taken off the board (its
 --                                      -- chat untouched); Undo puts it
 --     on_restore = fn(item) -> promise?,  -- back as it was
---     on_start = fn(id, order?) -> promise?,  -- an Inbox or Next card
+--     on_start = fn(id, order?) -> promise?,  -- a Queued card
 --                                -- without a thread started: its thread
 --                                -- made, the card in Now (at `order`)
 --     space_name = fn(space_id) -> string?,   -- a project's name
@@ -79,6 +87,8 @@
 --     expanded = state,          -- whether every column shows all its cards
 --                                -- (a boolean state, kept where the page
 --                                -- keeps its view; else the board's own)
+--     later_open = state,        -- whether Queued's Later group is open (a
+--                                -- boolean state, kept as `expanded`)
 --   }
 
 local Icon = require("@self/icon")
@@ -154,20 +164,33 @@ export type Props = {
 	project_of: ((chat: string) -> string?)?,
 	context: boolean?,
 	expanded: any?,
+	later_open: any?,
 	id: string?,
 }
 
--- The columns, in order: each its key, the state its cards are in, and its
--- name's key.
-type Column = { key: string, state: string, name: string }
-local INBOX: Column = { key = "inbox", state = "inbox", name = "orch.board.column.inbox" }
+-- The columns, in order: each its key, the state its cards are in (Queued:
+-- Up next's, Later's too), and its name's key.
+type Column = { key: string, state: string, name: string, later: string? }
 local COLUMNS: { Column } = {
+	{ key = "queued", state = "planned", later = "inbox", name = "orch.board.column.queued" },
 	{ key = "now", state = "active", name = "orch.board.column.now" },
-	{ key = "next", state = "planned", name = "orch.board.column.next" },
 	{ key = "blocked", state = "blocked", name = "orch.board.column.blocked" },
 	{ key = "review", state = "review", name = "orch.board.column.review" },
 	{ key = "done", state = "done", name = "orch.board.column.done" },
 }
+-- Where Move to puts a card: Queued's two groups, then the rest.
+type Place = { key: string, state: string, name: string }
+local PLACES: { Place } = {
+	{ key = "queued", state = "planned", name = "orch.board.column.up_next" },
+	{ key = "queued", state = "inbox", name = "orch.board.column.later" },
+	{ key = "now", state = "active", name = "orch.board.column.now" },
+	{ key = "blocked", state = "blocked", name = "orch.board.column.blocked" },
+	{ key = "review", state = "review", name = "orch.board.column.review" },
+	{ key = "done", state = "done", name = "orch.board.column.done" },
+}
+-- Queued's two groups' states.
+local UP_NEXT, LATER = "planned", "inbox"
+
 local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
 
@@ -178,13 +201,12 @@ local COLUMN_MIN = 160
 -- The most cards a column shows until its cards are all shown.
 local CAP = 10
 -- The columns that stand only while they hold a card.
-local ONLY_HELD: { [string]: boolean } = { inbox = true, blocked = true }
+local ONLY_HELD: { [string]: boolean } = { blocked = true }
 local PER_ROW = 3
 -- Each column's glyph at its head: how its cards stand.
 local COLUMN_GLYPH: { [string]: Icon.Name } = {
-	inbox = "inbox",
+	queued = "clock-circle",
 	now = "status-working",
-	next = "clock-circle",
 	blocked = "status-failed",
 	review = "status-input",
 	done = "status-done",
@@ -207,7 +229,16 @@ end
 -- Whether `item` stands in `col` today (a done one, done since local
 -- midnight: `data.shown_today`, as the Control room's count has it).
 local function in_column(item: Item, col: Column, now: number): boolean
-	return item.state == col.state and data.shown_today(item, now)
+	return (item.state == col.state or item.state == col.later) and data.shown_today(item, now)
+end
+
+-- A Queued list (Up next's, then Later's) split: Up next's cards, Later's.
+local function groups(list: { Item }): ({ Item }, { Item })
+	local up, later = {}, {}
+	for _, it in list do
+		table.insert(if it.state == LATER then later else up, it)
+	end
+	return up, later
 end
 
 local function sorted(list: { Item }): { Item }
@@ -401,7 +432,25 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 	end
 
-	local columns: { Column } = if props.inbox then { INBOX, table.unpack(COLUMNS) } else table.clone(COLUMNS)
+	-- Whether Queued's Later group is open.
+	local own_later = ui.use_state(false)
+	local function later_open(): boolean
+		local e = props.later_open
+		if e ~= nil then
+			return (e :: any):get() == true
+		end
+		return own_later:get()
+	end
+	local function set_later_open(on: boolean)
+		local e = props.later_open
+		if e ~= nil then
+			(e :: any):set(on)
+		else
+			own_later:set(on)
+		end
+	end
+
+	local columns: { Column } = table.clone(COLUMNS)
 
 	-- A card just dropped, where it went, until the items say so (the
 	-- engine answers a beat later): it stays where it was let go.
@@ -456,10 +505,37 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end
 		for k, l in out do
-			out[k] = sorted(l)
+			if k == "queued" then
+				local up, later = groups(l)
+				out[k] = table.move(sorted(later), 1, #later, #up + 1, sorted(up))
+			else
+				out[k] = sorted(l)
+			end
 		end
 		return out
 	end)
+	-- The cards a column shows, in order: ten at most until all are shown
+	-- (Queued: Up next's, then Later's where it's open).
+	local function visible(key: string, list: { Item }): { Item }
+		local l = list
+		if key == "queued" and not later_open() then
+			l = (groups(l))
+		end
+		if expanded() or #l <= CAP then
+			return l
+		end
+		return table.move(l, 1, CAP, 1, {})
+	end
+	-- How many a column has past the ten it shows (Queued: of those it
+	-- would show, a folded Later's not among them).
+	local function past_cap(key: string, list: { Item }): number
+		local n = #list
+		if key == "queued" and not later_open() then
+			local up = groups(list)
+			n = #up
+		end
+		return math.max(0, n - CAP)
+	end
 	local function empty(): boolean
 		for _, l in shown:get() do
 			if #l > 0 then
@@ -509,16 +585,18 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- "carrying", or "landed" (let go on the board: the cards there take their
 	-- new places at once, not sliding back).
 	type Carry = { id: string, col: string, h: number, w: number, rank: number }
-	type Target = { col: string, index: number, y: number }
+	type Target = { col: string, index: number, y: number, state: string? }
 	local carry = ui.use_state(nil :: Carry?)
 	local target = ui.use_state(nil :: Target?)
 	local phase = ui.use_state("idle")
 	local lane_refs: { [string]: any } = {}
 	local body_refs: { [string]: any } = {}
 	local slot_refs: { [string]: any } = {}
+	-- Queued's Later head: above it Up next, below it Later.
+	local later_ref = ui.ref()
 	local function set_target(t: Target?)
 		local was = target:peek()
-		if was and t and was.col == t.col and was.index == t.index and math.abs(was.y - t.y) < 0.5 then
+		if was and t and was.col == t.col and was.index == t.index and was.state == t.state and math.abs(was.y - t.y) < 0.5 then
 			return
 		end
 		if was == nil and t == nil then
@@ -583,9 +661,22 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local key = best.key
 		local body = rect_of(body_refs[key])
 		-- (Among the cards it shows: past ten, the rest are under "Show more".)
-		local list = others(key, c)
-		if not expanded() and #list > CAP then
-			list = table.move(list, 1, CAP, 1, {})
+		local list = visible(key, others(key, c))
+		-- (In Queued: Up next above Later's head, Later below it.)
+		local state: string? = nil
+		local offset = 0
+		local floor: number? = nil
+		if key == "queued" then
+			local up, later = groups(list)
+			local head = rect_of(later_ref)
+			if head and head.height > 0 and y >= head.y then
+				state, list, offset = LATER, later, #up
+				if body then
+					floor = head.y + head.height - body.y + gap
+				end
+			else
+				state, list = UP_NEXT, up
+			end
 		end
 		local index = #list + 1
 		local tops: { number } = {}
@@ -616,21 +707,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 			local last = rect_of(slot_refs[list[#list].id])
 			at = tops[#list] + (if last then last.height else 0) + gap
 		else
-			at = 0
+			at = floor or 0
 		end
-		return { col = key, index = index, y = at }
+		return { col = key, index = offset + index, y = at, state = state }
 	end
 
 	-- Its place where it was picked up (so nothing moves as it lifts).
 	local function home(c: Carry): Target
 		local index = 1
+		local state: string? = nil
 		for _, it in shown:peek()[c.col] or {} do
 			if it.id == c.id then
+				state = if c.col == "queued" then it.state else nil
 				break
 			end
 			index += 1
 		end
-		return { col = c.col, index = index, y = top_in(c.col, c.id, c) or 0 }
+		return { col = c.col, index = index, y = top_in(c.col, c.id, c) or 0, state = state }
 	end
 
 	local function finish(how: string)
@@ -700,17 +793,19 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end
 		local back = home(c)
-		if not col or not props.on_move or (t.col == c.col and t.index == back.index) then
+		if not col or not props.on_move or (t.col == c.col and t.index == back.index and t.state == back.state) then
 			return finish("idle")
 		end
+		local state = t.state or col.state
 		local list = others(t.col, c)
-		-- (Its neighbours of its own priority: the board sorts by priority
-		-- first, so another's order says nothing of where it stands.)
+		-- (Its neighbours of its own priority, and its own group in Queued:
+		-- the board sorts by priority first, so another's order says nothing
+		-- of where it stands.)
 		local prev, nxt = list[t.index - 1], list[t.index]
-		if prev and (RANK[prev.priority] or 2) ~= c.rank then
+		if prev and ((RANK[prev.priority] or 2) ~= c.rank or prev.state ~= state) then
 			prev = nil
 		end
-		if nxt and (RANK[nxt.priority] or 2) ~= c.rank then
+		if nxt and ((RANK[nxt.priority] or 2) ~= c.rank or nxt.state ~= state) then
 			nxt = nil
 		end
 		local order: number
@@ -723,8 +818,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 		else
 			order = 0
 		end
-		local id, state = c.id, col.state
-		-- (Captured or queued, carried into Now: it starts.)
+		local id = c.id
+		-- (Queued, carried into Now: it starts.)
 		if state == "active" then
 			for _, it in shown:peek()[c.col] or {} do
 				if it.id == id and startable(it) then
@@ -854,20 +949,20 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 	end
 
-	-- Moved to the end of `col`.
-	local function move_to(it: Item, col: Column)
-		if col.state == "active" and startable(it) then
+	-- Moved to the end of `place` (a column, or one of Queued's groups).
+	local function move_to(it: Item, place: Place)
+		if place.state == "active" and startable(it) then
 			return start(it)
 		end
 		local last = 0
-		for _, x in shown:peek()[col.key] or {} do
-			if x.id ~= it.id then
+		for _, x in shown:peek()[place.key] or {} do
+			if x.id ~= it.id and x.state == place.state then
 				last = math.max(last, x.order or 0)
 			end
 		end
 		local order = last + 1
-		pending:set({ id = it.id, state = col.state, order = order })
-		;(props.on_move :: any)(it.id, col.state, order)
+		pending:set({ id = it.id, state = place.state, order = order })
+		;(props.on_move :: any)(it.id, place.state, order)
 	end
 
 	-- A card's menu: its thread, Move to, its priority, its dump; Delete.
@@ -900,15 +995,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		if props.on_move then
 			local sub: { any } = {}
-			for _, c in columns do
+			for _, place in PLACES do
 				table.insert(sub, {
-					label = locale.s(c.name),
+					label = locale.s(place.name),
 					checked = function(): boolean
-						return item().state == c.state
+						return item().state == place.state
 					end,
 					on_select = function()
-						if item().state ~= c.state then
-							move_to(item(), c)
+						if item().state ~= place.state then
+							move_to(item(), place)
 						end
 					end,
 				})
@@ -1500,11 +1595,129 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 	end
 
+	-- Queued's Later: its head ("Later · 4", folded or open, where a card
+	-- carried below it lands in Later), and its cards while it's open. It
+	-- moves with the cards above it while one is carried, as they do.
+	local function later_group(col: Column, count: () -> number, cards: () -> { Item }): Node
+		local function shift(): number
+			local c = carry:get()
+			if not c then
+				return 0
+			end
+			local d = c.h + gap
+			local off = 0
+			local t = target:get()
+			local carried: Item? = nil
+			for _, it in shown:get()[col.key] or {} do
+				if it.id == c.id then
+					carried = it
+				end
+			end
+			if carried and carried.state == UP_NEXT then
+				off -= d
+			end
+			if t and t.col == col.key and t.state == UP_NEXT then
+				off += d
+			end
+			return off
+		end
+		local off = ui.use_state(0)
+		local run: any = nil
+		ui.effect(function()
+			local to = shift()
+			if run then
+				run:cancel()
+				run = nil
+			end
+			if phase:peek() == "landed" or motion.reduced_now() or math.abs(off:peek() - to) < 0.5 then
+				off:set(to)
+				return
+			end
+			run = anime.animate(off, { value = to, ease = motion.tab_ease() })
+		end)
+		ui.on_cleanup(function()
+			if run then
+				run:cancel()
+			end
+		end)
+		return ui.column {
+			w_full = true,
+			gap = "$space.1",
+			-- (While a card is carried, Later is somewhere to put it.)
+			hidden = function(): boolean
+				return count() == 0 and carry:get() == nil
+			end,
+			ui.button {
+				ref = later_ref,
+				class = "orch-later-head",
+				label = function(): string
+					return locale.s("orch.board.later_count", { n = count() })
+				end,
+				expanded = later_open,
+				w_full = true,
+				h = 28,
+				px = "$space.2",
+				gap = "$zeron.space.tight",
+				items = "center",
+				rounded = CARD_RADIUS,
+				color = "$text.tertiary",
+				bg = "#00000000",
+				hover = { bg = "$hover", color = "$text.secondary" },
+				active = { bg = "$pressed" },
+				y = function(): number
+					return off:get()
+				end,
+				on_click = function()
+					set_later_open(not later_open())
+				end,
+				ui.div {
+					shrink = 0,
+					Icon {
+						name = function(): any
+							return if later_open() then "alt-arrow-down" else "alt-arrow-right"
+						end,
+						size = 12,
+					},
+				},
+				ui.text {
+					function(): string
+						return locale.s("orch.board.later_count", { n = count() })
+					end,
+					class = "orch-later-label",
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+			},
+			ui.each(ui.computed(cards), function(it: Item, i: any, row: any): Node
+				return card(it, i, row, col)
+			end, { key = function(it: Item): string
+				return it.id
+			end, w_full = true }),
+		}
+	end
+
 	local function column(col: Column, mode: string): Node
 		local stacked = mode == "stacked"
+		local queued = col.later ~= nil
 		local function list(): { Item }
 			return shown:get()[col.key] or {}
 		end
+		-- (Queued's head counts Up next; its Later head, Later.)
+		local function counted(): number
+			if not queued then
+				return #list()
+			end
+			local up = groups(list())
+			return #up
+		end
+		local function later_count(): number
+			local _, later = groups(list())
+			return #later
+		end
+		-- What it shows: ten at most until all are (Queued: by group).
+		local shows = ui.computed(function(): { Item }
+			return visible(col.key, list())
+		end)
 		local lane, body = ui.ref(), ui.ref()
 		lane_refs[col.key] = lane
 		body_refs[col.key] = body
@@ -1560,7 +1773,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				ui.div {
 					shrink = 0,
 					color = function(): string
-						return if #list() > 0 then COLUMN_INK[col.key] or "$text.tertiary" else "$text.tertiary"
+						return if counted() > 0 then COLUMN_INK[col.key] or "$text.tertiary" else "$text.tertiary"
 					end,
 					Icon { name = COLUMN_GLYPH[col.key] or "checklist", size = 12 },
 				},
@@ -1571,14 +1784,16 @@ local OrchBoard = ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					weight = "$font.weight.medium",
 					color = function(): string
-						return if #list() > 0 then "$text.primary" else "$text.tertiary"
+						return if counted() > 0 then "$text.primary" else "$text.tertiary"
 					end,
 				},
 				ui.text {
 					function(): string
-						local n = #list()
+						local n = counted()
 						return if n > 0 then tostring(n) else ""
 					end,
+					tooltip = if queued then locale.s("orch.board.column.up_next") else nil,
+					tooltip_delay = if queued then 300 else nil,
 					class = "orch-column-count",
 					tabular = true,
 					text_size = "$font.size.xs",
@@ -1647,26 +1862,30 @@ local OrchBoard = ui.component(function(props: Props): Node
 					pointer_events = "none",
 				}),
 				ui.each(ui.computed(function(): { Item }
-					local l = list()
-					if expanded() or #l <= CAP then
+					local l = shows:get()
+					if not queued then
 						return l
 					end
-					return table.move(l, 1, CAP, 1, {})
+					return (groups(l))
 				end), function(it: Item, i: any, row: any): Node
 					return card(it, i, row, col)
 				end, { key = function(it: Item): string
 					return it.id
 				end, w_full = true }),
+				if queued then later_group(col, later_count, function(): { Item }
+					local _, later = groups(shows:get())
+					return later
+				end) else nil,
 			},
 			-- Past ten: the rest, for every column at once (and back).
 			ui.show(function(): boolean
-				return #list() > CAP and carry:get() == nil
+				return past_cap(col.key, list()) > 0 and carry:get() == nil
 			end, ui.button {
 				class = "orch-column-more",
 				label = function(): string
 					return if expanded()
 						then locale.s("orch.board.show_less")
-						else locale.s("orch.board.show_more", { n = #list() - CAP })
+						else locale.s("orch.board.show_more", { n = past_cap(col.key, list()) })
 				end,
 				w_full = true,
 				h = 28,
@@ -1685,7 +1904,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 					function(): string
 						return if expanded()
 							then locale.s("orch.board.show_less")
-							else locale.s("orch.board.show_more", { n = #list() - CAP })
+							else locale.s("orch.board.show_more", { n = past_cap(col.key, list()) })
 					end,
 					text_size = "$font.size.xs",
 					weight = "$font.weight.medium",

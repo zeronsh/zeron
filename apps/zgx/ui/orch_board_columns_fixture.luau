@@ -1,7 +1,10 @@
--- The board's columns (ds/orch_board), for tests/orch_board_columns.test.luau
--- and pictures: an Inbox first, Inbox and Blocked standing only while they
--- hold a card, each column ten cards at most until all are shown (the state
--- `columns_expanded`, one for them all), and Done cleared at once. The
+-- The board's columns (ds/orch_board), for tests/orch_board_columns.test.luau,
+-- orch_board_queued.test.luau and pictures: Queued first (Up next, and
+-- Later folded until opened: the state `columns_later`), Blocked standing
+-- only while it holds a card, each column ten cards at most until all are
+-- shown (the state `columns_expanded`, one for them all), and Done cleared
+-- at once. `!fixture.later` puts four in Later, `!fixture.queued` fills Up
+-- next and Later past ten. The
 -- items are the state `columns_items` (`!fixture.many` fills Now and Done
 -- past ten, `!fixture.blocked` puts one in Blocked); what it's asked is
 -- noted in `calls`, a delete and a restore applied as the engine would. The
@@ -71,6 +74,7 @@ local BASE = {
 }
 local items = ui.state("columns_items", table.clone(BASE) :: { any })
 local expanded = ui.state("columns_expanded", false)
+local later_open = ui.state("columns_later", false)
 
 local DONE_TITLES = {
 	"Linux titlebar without controls", "Delete cards from the Board", "Map labels keep clear",
@@ -98,7 +102,23 @@ end }
 ui.command { id = "fixture.blocked", title = "Put one in Blocked", run = function()
 	items:push(card("it-blk1", "blocked", "DNS failover between regions", 1))
 end }
-ui.command { id = "fixture.inbox", title = "Put one in the Inbox", run = function()
+ui.command { id = "fixture.later", title = "Put four in Later", run = function()
+	for i, t in { "Look at the hover delay", "Try a darker map", "Remind me: renew the cert", "Someday: a CLI" } do
+		items:push(card(`it-later{i}`, "inbox", t, i))
+	end
+end }
+ui.command { id = "fixture.queued", title = "Fill Up next and Later", run = function()
+	local list: { any } = {}
+	for i = 1, 8 do
+		table.insert(list, card(`it-up{i}`, "planned", `Up next thing {i}`, i))
+	end
+	for i = 1, 5 do
+		table.insert(list, card(`it-l{i}`, "inbox", `Later idea {i}`, i))
+	end
+	table.insert(list, card("it-now1", "active", "Scroll position resets", 1, { threads = { "th-a" } }))
+	items:set(list)
+end }
+ui.command { id = "fixture.inbox", title = "Put one in Later", run = function()
 	items:push(card("it-in1", "inbox", "Look at the hover delay", 1))
 end }
 
@@ -129,7 +149,7 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 			items = items,
 			orchestrators = orchestrators,
 			show_filter = true,
-			inbox = true,
+			later_open = later_open,
 			expanded = expanded,
 			now = function(): number
 				return T
@@ -139,6 +159,12 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 			end,
 			project_of = function(_chat: string): string?
 				return "zeron"
+			end,
+			-- (As the engine: its thread made, the card in Now.)
+			on_start = function(id: string, order: number?)
+				note(`start:{id}:{order or ""}`)
+				update(id, { state = "active", order = order or 99, threads = { `th-{id}` } })
+				return nil
 			end,
 			on_move = function(id: string, state: string, order: number)
 				note(`move:{id}:{state}:{order}`)

@@ -199,7 +199,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ITEM_UPSERT,
-            description: "Create a board item (no id; title required) or change one (id plus the fields to change). States: inbox, planned (next), active (now), blocked, review, done, dropped. Keep states true, and put the answer or result in outcome when there is one: that is what the person reads.",
+            description: "Create a board item (no id; title required) or change one (id plus the fields to change). States: inbox (Later: someday, remind me, ideas; never started on its own), planned (Up next: queued real work, or held while a crew is full), active (Now), blocked, review, done, dropped. Keep states true, and put the answer or result in outcome when there is one: that is what the person reads.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -257,7 +257,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "The dump's files this fragment is about (their paths or names, as the dump lists them). Omit to send all of them with a task or info, and none otherwise." },
                     "project": s("For newThread/newOrchestrator/a new item: the project it is about (id, name or path, from world)."),
                     "device": s("For newThread/newOrchestrator/a new item: the device (id or name); with a project, that project's own."),
-                    "card": { "type": "string", "enum": ["inbox", "next"], "description": "For a new item: inbox (captured for later; the default) or next (queued after something else)." },
+                    "card": { "type": "string", "enum": ["inbox", "next"], "description": "For a new item: inbox (Later: someday, remind me, ideas; never started on its own; the default) or next (Up next: queued real work, after something else)." },
                     "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." }
                 },
                 "required": ["dump", "excerpt", "target", "intent"]
@@ -391,7 +391,7 @@ struct RouteArgs {
     #[serde(default)]
     progress: bool,
     attachments: Option<Vec<String>>,
-    /// For a new card: `inbox` (for later) or `next` (after something else).
+    /// For a new card: `inbox` (Later) or `next` (Up next: after something else).
     #[serde(default)]
     card: Option<String>,
     /// Resolved before the op (see `orchestration_tool`).

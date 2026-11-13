@@ -16,8 +16,8 @@ local function titles(app: any, col: string): { string }
 	local out: { string } = {}
 	for line in app:tree(`#cols-{col}`):gmatch("[^\n]+") do
 		local t = line:match('^  @%d+ button "([^"]+)"')
-		-- (Not its buttons: Show more or less, Clear all done.)
-		if t and not t:match("^Show ") and t ~= "Clear all done" then
+		-- (Not its buttons: Show more or less, Clear all done, Later's head.)
+		if t and not t:match("^Show ") and t ~= "Clear all done" and not t:match("^Later · ") then
 			table.insert(out, t)
 		end
 	end
@@ -30,29 +30,39 @@ local function stands(app: any, col: string): boolean
 	return first ~= "" and not first:match(" hidden%s*$")
 end
 
+-- Where a column stands, left to right: its x.
+local function x_of(app: any, col: string): number
+	local first = app:tree(`#cols-{col}`):match("[^\n]+") or ""
+	return tonumber(first:match(" (%-?[%d%.]+),%-?[%d%.]+ [%d%.]+x")) or 0
+end
+
 -- A node's width as the tree says it.
 local function width(app: any, target: string): number
 	local first = app:tree(target):match("[^\n]+") or ""
 	return tonumber(first:match("([%d%.]+)x[%d%.]+%s*$")) or 0
 end
 
-test("orch board columns: empty Inbox and Blocked stand aside, and come back with a card", function()
+test("orch board columns: Queued, Now, Review, Done; Blocked between Now and Review only while it holds a card", function()
 	local app = board()
-	expect(stands(app, "inbox")).to_be(false)
 	expect(stands(app, "blocked")).to_be(false)
-	for _, k in { "now", "next", "review", "done" } do
+	local order = { "queued", "now", "review", "done" }
+	for i, k in order do
 		expect(stands(app, k)).to_be(true)
+		if i > 1 then
+			expect(x_of(app, k) > x_of(app, order[i - 1])).to_be(true)
+		end
 	end
+	expect(app:has("#cols-inbox")).to_be(false)
+	expect(app:has("#cols-next")).to_be(false)
 	-- The four share the width: each a quarter of it, near enough.
 	local four = width(app, "#cols-now")
 	app:command("fixture.blocked")
 	app:frames(20)
 	expect(app:has('#cols-blocked >> role:button "DNS failover between regions"')).to_be(true)
+	expect(x_of(app, "blocked") > x_of(app, "now")).to_be(true)
+	expect(x_of(app, "blocked") < x_of(app, "review")).to_be(true)
 	local five = width(app, "#cols-now")
 	expect(five < four - 20).to_be(true)
-	app:command("fixture.inbox")
-	app:frames(20)
-	expect(app:has('#cols-inbox >> role:button "Look at the hover delay"')).to_be(true)
 	-- Moved out of Blocked by its menu: Blocked stands aside again, the
 	-- others wider.
 	app:right_click('#cols-blocked >> role:button "DNS failover between regions"')
@@ -69,7 +79,7 @@ end)
 
 test("orch board columns: a card moved into an empty Blocked brings it back", function()
 	local app = board()
-	app:right_click('#cols-next >> role:button "Phase 2 migration"')
+	app:right_click('#cols-queued >> role:button "Phase 2 migration"')
 	app:frames(10)
 	app:click('role:menuitem "Move to"')
 	app:frames(10)
@@ -77,9 +87,9 @@ test("orch board columns: a card moved into an empty Blocked brings it back", fu
 	app:frames(20)
 	expect(app:has('#cols-blocked >> role:button "Phase 2 migration"')).to_be(true)
 	-- Dragged out again: gone with it.
-	app:drag('#cols-blocked >> role:button "Phase 2 migration"', "#cols-next")
+	app:drag('#cols-blocked >> role:button "Phase 2 migration"', "#cols-queued")
 	app:frames(20)
-	expect(app:has('#cols-next >> role:button "Phase 2 migration"')).to_be(true)
+	expect(app:has('#cols-queued >> role:button "Phase 2 migration"')).to_be(true)
 	expect(stands(app, "blocked")).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
@@ -92,7 +102,7 @@ test("orch board columns: ten a column, one Show more for them all, one Show les
 	expect(#titles(app, "done")).to_be(10)
 	expect(app:has('#cols-now >> role:button "Show 1 more"')).to_be(true)
 	expect(app:has('#cols-done >> role:button "Show 2 more"')).to_be(true)
-	expect(app:has("#cols-next >> .orch-column-more")).to_be(false)
+	expect(app:has("#cols-queued >> .orch-column-more")).to_be(false)
 	-- (The column's count says them all.)
 	expect(app:has('#cols-done >> .orch-column-count >> "12"')).to_be(true)
 	-- Shown in Now: Done shows all of its too.
@@ -152,7 +162,7 @@ end)
 
 test("orch board columns: dragged between columns and the menu, as before", function()
 	local app = board()
-	app:drag('#cols-next >> role:button "Write the mesh runbook"', "#cols-review")
+	app:drag('#cols-queued >> role:button "Write the mesh runbook"', "#cols-review")
 	app:frames(20)
 	expect(app:state("calls")).to_contain("move:it-next2:review:")
 	expect(app:has('#cols-review >> role:button "Write the mesh runbook"')).to_be(true)

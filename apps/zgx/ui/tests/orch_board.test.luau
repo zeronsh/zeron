@@ -22,9 +22,10 @@ local function titles(app: any, col: string): { string }
 	for line in app:tree(`#orch-col-{col}`):gmatch("[^\n]+") do
 		-- (A card is a button right under its column; its own buttons, its
 		-- threads' dots and its chips, sit deeper. Not the column's own:
-		-- Done's Clear all done, Show more or less.)
+		-- Done's Clear all done, Show more or less, Queued's Later head; Later's
+		-- cards sit under that head, deeper.)
 		local t = line:match('^  @%d+ button "([^"]+)"')
-		if t and t ~= "Clear all done" and not t:match("^Show %d+ more$") and t ~= "Show less" then
+		if t and t ~= "Clear all done" and not t:match("^Show %d+ more$") and t ~= "Show less" and not t:match("^Later · ") then
 			table.insert(out, t)
 		end
 	end
@@ -42,12 +43,12 @@ local function box(app: any, target: string): (number, number, number, number)
 	return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
 end
 
-local COLS = { "now", "next", "blocked", "review", "done" }
+local COLS = { "now", "queued", "blocked", "review", "done" }
 
 test("orch board: the sample's columns, priority first", function()
 	local app = board()
 	expect(count(app, "now")).to_be(4)
-	expect(count(app, "next")).to_be(2)
+	expect(count(app, "queued")).to_be(2)
 	expect(count(app, "blocked")).to_be(2)
 	expect(count(app, "review")).to_be(1)
 	expect(count(app, "done")).to_be(1)
@@ -92,7 +93,7 @@ test("orch board: filtered to one orchestrator", function()
 	app:set_state("filter", "orc-orch")
 	app:frames(10)
 	expect(count(app, "now")).to_be(3)
-	expect(count(app, "next")).to_be(1)
+	expect(count(app, "queued")).to_be(1)
 	expect(count(app, "blocked")).to_be(1)
 	expect(count(app, "review")).to_be(0)
 	-- Its chips set it too.
@@ -118,7 +119,7 @@ test("orch board: nothing on it is one quiet line, not empty columns", function(
 	})
 	app:frames(10)
 	expect(app:has(".orch-board-empty")).to_be(false)
-	expect(count(app, "next")).to_be(1)
+	expect(count(app, "queued")).to_be(1)
 	for _, c in COLS do
 		expect(app:has(`#orch-col-{c}`)).to_be(true)
 	end
@@ -131,14 +132,14 @@ end)
 
 test("orch board: a card dragged to another column moves there", function()
 	local app = board()
-	app:drag('#orch-col-next >> role:button "Live end-to-end test on a dev engine"', '#orch-col-blocked >> role:button "Orchestrator screen"')
+	app:drag('#orch-col-queued >> role:button "Live end-to-end test on a dev engine"', '#orch-col-blocked >> role:button "Orchestrator screen"')
 	app:frames(20)
 	local calls = app:state("calls") :: string
 	expect(calls).to_contain("move:it-live:blocked:")
 	local order = tonumber(calls:match("move:it%-live:blocked:([%-%d%.]+)"))
 	expect(order ~= nil).to_be(true)
 	expect(count(app, "blocked")).to_be(3)
-	expect(count(app, "next")).to_be(1)
+	expect(count(app, "queued")).to_be(1)
 	-- Nothing left lifted or moved aside.
 	expect(app:has(".orch-column-drop")).to_be(false)
 	expect(app:error()).to_be_nil()
@@ -149,7 +150,7 @@ test("orch board: a card dragged into an empty column lands there", function()
 	app:set_state("filter", "orc-orch")
 	app:frames(10)
 	expect(count(app, "review")).to_be(0)
-	app:drag('#orch-col-next >> role:button "Live end-to-end test on a dev engine"', "#orch-col-review")
+	app:drag('#orch-col-queued >> role:button "Live end-to-end test on a dev engine"', "#orch-col-review")
 	app:frames(20)
 	expect(app:state("calls")).to_contain("move:it-live:review:0")
 	expect(count(app, "review")).to_be(1)
@@ -183,14 +184,14 @@ end)
 
 test("orch board: its menu sets a priority", function()
 	local app = board()
-	app:right_click('#orch-col-next >> role:button "Phase 2 migration"')
+	app:right_click('#orch-col-queued >> role:button "Phase 2 migration"')
 	app:frames(10)
 	app:click('role:menuitem "Priority"')
 	app:frames(10)
 	app:click('role:menuitem "Urgent"')
 	app:frames(20)
 	expect(app:state("calls")).to_contain("priority:it-phase2:urgent")
-	expect(titles(app, "next")[1]).to_be("Phase 2 migration")
+	expect(titles(app, "queued")[1]).to_be("Phase 2 migration")
 end)
 
 test("orch board: an outcome is two quiet lines", function()
@@ -273,9 +274,9 @@ test("orch board: every card says whose it is, its orchestrator's hue named", fu
 		{ id = "it-c", title = "Loose alone", state = "planned", priority = "normal" },
 	})
 	app:frames(10)
-	expect(app:has('#orch-col-next >> role:button "One thing" >> role:img "Exnomic VPN"')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "Loose with a thread" >> .orch-card-owner')).to_be(false)
-	expect(app:has('#orch-col-next >> role:button "Loose alone" >> .orch-card-owner')).to_be(false)
+	expect(app:has('#orch-col-queued >> role:button "One thing" >> role:img "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-queued >> role:button "Loose with a thread" >> .orch-card-owner')).to_be(false)
+	expect(app:has('#orch-col-queued >> role:button "Loose alone" >> .orch-card-owner')).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -320,12 +321,12 @@ test("orch board: a card made from a dump's part shows that dump from its menu",
 	app:frames(10)
 	-- No mark of it on the card: its menu says it.
 	expect(app:has(".orch-card-source")).to_be(false)
-	app:right_click('#orch-col-next >> role:button "Made by hand"')
+	app:right_click('#orch-col-queued >> role:button "Made by hand"')
 	app:frames(10)
 	expect(app:has('role:menuitem "Show dump"')).to_be(false)
 	app:key("Escape")
 	app:frames(10)
-	app:right_click('#orch-col-next >> role:button "From what was said"')
+	app:right_click('#orch-col-queued >> role:button "From what was said"')
 	app:frames(10)
 	app:click('role:menuitem "Show dump"')
 	app:frames(10)
@@ -338,8 +339,11 @@ test("orch board: in the Control room, a card's dump is brought into view", func
 	-- (Tall enough for the Board under both columns, Q&A's in the right.)
 	app:resize(1440, 3000)
 	app:frames(30)
-	-- The loose item the newest dump made, in the Inbox: its menu's Show dump.
-	app:right_click("#control-board-inbox >> .orch-card")
+	-- The loose item the newest dump made, in Queued's Later (opened): its
+	-- menu's Show dump.
+	app:click("#control-board-queued >> .orch-later-head")
+	app:frames(10)
+	app:right_click('#control-board-queued >> role:button "Rerun omarchy-update (needs sudo)"')
 	app:frames(10)
 	app:click('role:menuitem "Show dump"')
 	app:frames(10)
@@ -373,7 +377,7 @@ test("orch board: a card's menu, its thread, Move to, priority, its dump, Delete
 		{ id = "it-d", orchestrator_id = "orc-orch", title = "From what was said", state = "planned", priority = "normal", order = 1, threads = { "th-ui-control" }, source = { dump_id = "dp-2", route_id = "rt-5" } },
 	})
 	app:frames(10)
-	app:right_click('#orch-col-next >> role:button "From what was said"')
+	app:right_click('#orch-col-queued >> role:button "From what was said"')
 	app:frames(10)
 	for _, name in { "Open thread", "Move to", "Priority", "Show dump", "Delete" } do
 		expect(app:has(`role:menuitem "{name}"`)).to_be(true)
@@ -383,7 +387,7 @@ test("orch board: a card's menu, its thread, Move to, priority, its dump, Delete
 	app:frames(20)
 	expect(app:state("calls")).to_contain("source:dp-2")
 	-- Move to.
-	app:right_click('#orch-col-next >> role:button "From what was said"')
+	app:right_click('#orch-col-queued >> role:button "From what was said"')
 	app:frames(10)
 	app:click('role:menuitem "Move to"')
 	app:frames(10)
@@ -395,19 +399,19 @@ end)
 
 test("orch board: Delete takes a card off the board at once, Undo puts it back", function()
 	local app = board()
-	app:right_click('#orch-col-next >> role:button "Phase 2 migration"')
+	app:right_click('#orch-col-queued >> role:button "Phase 2 migration"')
 	app:frames(10)
 	app:click('role:menuitem "Delete"')
 	app:frames(20)
 	expect(app:state("calls")).to_contain("remove:it-phase2")
-	expect(app:has('#orch-col-next >> role:button "Phase 2 migration"')).to_be(false)
+	expect(app:has('#orch-col-queued >> role:button "Phase 2 migration"')).to_be(false)
 	-- Never its chat: no other call.
 	expect(app:state("calls")).never.to_contain("open:")
 	expect(app:has('"Deleted from the board"')).to_be(true)
 	app:click('role:button "Undo"')
 	app:frames(20)
 	expect(app:state("calls")).to_contain("restore:it-phase2:Phase 2 migration")
-	expect(app:has('#orch-col-next >> role:button "Phase 2 migration"')).to_be(true)
+	expect(app:has('#orch-col-queued >> role:button "Phase 2 migration"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -434,7 +438,7 @@ test("orch board cards: priority is a word on the quiet line, urgent and high al
 	expect(app:has('#cards-now >> role:button "Fix slash menu in Codex chats" >> .orch-card-priority >> "Urgent"')).to_be(true)
 	expect(app:has('#cards-now >> role:button "Scroll position resets on live re-renders" >> .orch-card-priority >> "High"')).to_be(true)
 	expect(app:has('#cards-now >> role:button "Delete cards from the Board" >> .orch-card-priority')).to_be(false)
-	expect(app:has('#cards-next >> role:button "Phase 2 migration" >> .orch-card-priority')).to_be(false)
+	expect(app:has('#cards-queued >> role:button "Phase 2 migration" >> .orch-card-priority')).to_be(false)
 end)
 
 test("orch board cards: progress only once a step is done, one clock", function()
@@ -453,7 +457,7 @@ test("orch board cards: progress only once a step is done, one clock", function(
 	expect(app:has('#cards-now >> role:button "Delete cards from the Board" >> .orch-card-owner-name >> "Zeron fixes"')).to_be(true)
 	expect(app:has('#cards-now >> role:button "Fix slash menu in Codex chats" >> .orch-card-owner-name')).to_be(false)
 	-- Its own share, once there's some.
-	expect(app:has('#cards-next >> role:button "Write the mesh runbook" >> .orch-card-progress >> "40%"')).to_be(true)
+	expect(app:has('#cards-queued >> role:button "Write the mesh runbook" >> .orch-card-progress >> "40%"')).to_be(true)
 	-- Waiting on the person: how long since it moved.
 	expect(app:has('#cards-blocked >> role:button "Approve engine migration" >> .orch-card-word >> "Needs you"')).to_be(true)
 	expect(app:has('#cards-blocked >> role:button "Approve engine migration" >> .orch-card-clock >> "10m"')).to_be(true)
@@ -503,7 +507,7 @@ end)
 
 test("orch board: a Next card carried into Now starts, Starting… until its thread is there", function()
 	local app = board()
-	app:drag('#orch-col-next >> role:button "Phase 2 migration"', '#orch-col-now >> role:button "Merge phase-1 fixes"')
+	app:drag('#orch-col-queued >> role:button "Phase 2 migration"', '#orch-col-now >> role:button "Merge phase-1 fixes"')
 	app:frames(2)
 	-- Started, not merely moved: in Now at once, saying so.
 	expect(app:state("calls")).to_contain("start:it-phase2:")
@@ -520,7 +524,7 @@ end)
 
 test("orch board: Start now on a Next card's menu; refused, it goes back with a word", function()
 	local app = board()
-	app:right_click('#orch-col-next >> role:button "Phase 2 migration"')
+	app:right_click('#orch-col-queued >> role:button "Phase 2 migration"')
 	app:frames(10)
 	expect(app:has('role:menuitem "Start now"')).to_be(true)
 	app:set_state("start_fails", true)
@@ -529,7 +533,7 @@ test("orch board: Start now on a Next card's menu; refused, it goes back with a 
 	expect(app:state("calls")).to_contain("start:it-phase2:")
 	app:wait(100)
 	app:frames(20)
-	expect(app:has('#orch-col-next >> role:button "Phase 2 migration"')).to_be(true)
+	expect(app:has('#orch-col-queued >> role:button "Phase 2 migration"')).to_be(true)
 	expect(app:has('"Couldn\'t start it"')).to_be(true)
 	-- A card at work has no Start now.
 	app:right_click('#orch-col-now >> role:button "Control room"')
@@ -537,7 +541,7 @@ test("orch board: Start now on a Next card's menu; refused, it goes back with a 
 	expect(app:has('role:menuitem "Start now"')).to_be(false)
 end)
 
-test("orch board: a waiting card says where it will be worked, and when it's queued", function()
+test("orch board: a queued card says where it will be worked, and when it waits for a slot", function()
 	local app = board()
 	app:set_state("orch_board_items", {
 		{ id = "it-p", orchestrator_id = "orc-orch", title = "In a project", state = "planned", priority = "normal", order = 1, space_id = "p-tally", device_id = "dev-cloud" },
@@ -545,20 +549,25 @@ test("orch board: a waiting card says where it will be worked, and when it's que
 		{ id = "it-a", orchestrator_id = "orc-orch", title = "At work", state = "active", priority = "normal", order = 1, space_id = "p-tally", threads = { "th-ui-control" } },
 	})
 	app:frames(10)
-	expect(app:has('#orch-col-next >> role:button "In a project" >> .orch-card-place-name >> "tally"')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "On a machine" >> .orch-card-place-name >> "Cloud"')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "On a machine" >> "Queued"')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "In a project" >> "Queued"')).to_be(false)
+	expect(app:has('#orch-col-queued >> role:button "In a project" >> .orch-card-place-name >> "tally"')).to_be(true)
+	expect(app:has('#orch-col-queued >> role:button "On a machine" >> .orch-card-place-name >> "Cloud"')).to_be(true)
+	expect(app:has('#orch-col-queued >> role:button "On a machine" >> "Waiting for a slot"')).to_be(true)
+	expect(app:has('#orch-col-queued >> role:button "In a project" >> "Waiting for a slot"')).to_be(false)
 	-- Started, its place is its thread's: no chip.
 	expect(app:has('#orch-col-now >> role:button "At work" >> .orch-card-place')).to_be(false)
 end)
 
-test("orch board: in the Control room, an Inbox card carried into Now starts", function()
+test("orch board: in the Control room, a Later card carried into Now starts", function()
 	local app = mount("control_page_fixture.luau")
 	-- (Tall enough for the Board under both columns, Q&A's in the right.)
 	app:resize(1440, 3000)
 	app:frames(30)
-	app:drag('#control-board-inbox >> role:button "Rerun omarchy-update (needs sudo)"', "#control-board-now")
+	-- (Later is folded at first; opened, the Control room keeps it so.)
+	expect(app:state("control_board_later")).to_be(false)
+	app:click("#control-board-queued >> .orch-later-head")
+	app:frames(10)
+	expect(app:state("control_board_later")).to_be(true)
+	app:drag('#control-board-queued >> role:button "Rerun omarchy-update (needs sudo)"', "#control-board-now")
 	app:frames(5)
 	-- (Dropped at a place: moved to Now there, which starts it.)
 	expect(app:state("calls")).to_contain("start:it-omarchy:")

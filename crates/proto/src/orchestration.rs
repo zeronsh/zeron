@@ -516,7 +516,7 @@ pub struct WorkItem {
     pub space_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
-    /// Why a Next card waits, one line ("Auth's crew is full: 2 of 2
+    /// Why an Up next card waits, one line ("Auth's crew is full: 2 of 2
     /// working"). Cleared when it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
@@ -534,9 +534,11 @@ pub struct WorkItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkState {
-    /// Captured, not planned yet.
+    /// Later: someday, remind me, an idea; never started on its own (the
+    /// board's Queued column, its Later group).
     Inbox,
-    /// Planned, not started ("Next").
+    /// Up next: queued real work, waiting for its turn or for a slot while
+    /// its crew is full (the board's Queued column, its Up next group).
     Planned,
     /// Being worked on ("Now").
     Active,
@@ -1199,7 +1201,7 @@ pub mod role_prompts {
         format!(
             "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n\
 - Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
-- Keep item states true; put results in `outcome`.\n\
+- Keep item states true; put results in `outcome`. Not started: `planned` is Up next (real work queued for its turn, or held while your crew is full); `inbox` is Later (someday, remind me, ideas; never started on its own).\n\
 - After starting or messaging crew, end your turn: don't wait on crew threads (`wait_for_turn`, `wait`). Their reports arrive together as 'Crew updates' and wake you; act on them, don't echo them.\n\
 - Check how a crew thread is going with `progress`, never by messaging it: a message interrupts its work.\n\
 - Ask the person only via `ask`, only for real decisions.\n\
@@ -1229,7 +1231,7 @@ pub mod role_prompts {
 - Split the dump into fragments by meaning (one per destination and intent); quote each fragment verbatim as `excerpt`.\n\
 - Route each to the existing orchestrator or thread that owns it. Only an owner of that very work counts; an old thread that merely shares a word doesn't.\n\
 - Bias to action: a task with no owner is a `newThread` in the project it is about (`world` lists projects: the one the text names, else the most recently active), with `project` set; it starts at once with your `message` as its first prompt. A new, lasting, multi-part area of work is a `newOrchestrator` in that project.\n\
-- But don't start what the person says should wait. Something for later (\"later\", \"someday\", \"remind me\", \"next week\", \"when I get a chance\", \"at some point\", a reminder) is an Inbox card: target `item` with no id, `project` set. Something to do after something else (\"after X\", \"once Y is done\", \"then\", low priority) is a Next card: target `item` with no id, `card: next`, `project` set. Either way give it a `title`; the person starts it from the board.\n\
+- But don't start what the person says should wait. Something for later (\"later\", \"someday\", \"remind me\", \"next week\", \"when I get a chance\", \"at some point\", a reminder) is a Later card (someday, remind me, ideas; never started on its own): target `item` with no id, `project` set. Something to do after something else (\"after X\", \"once Y is done\", \"then\", low priority) is an Up next card (queued real work): target `item` with no id, `card: next`, `project` set. Either way give it a `title`; the person starts it from the board.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
 - Give every task a `title`: 3 to 6 words naming the work, as a board card would (\"Delete cards from the Board\", \"Fix slash menu in Codex chats\"); never the message's opening words.\n\
 - Intent `question` is only for a question the person wants answered (\"are X ever used?\", \"when does 2.0 ship?\"): its answer waits for them in the Control room. A question that is part of work they hand over (\"fix X, and can you also check Y?\", \"why does X happen? find the root cause and fix it\", \"could you add Z?\") is a `task`; a rhetorical one (\"so much better, right?\") is `info`.\n\
@@ -1877,18 +1879,18 @@ pub enum OrchestrateOp {
         /// dump). `None`: all of them for a task or info, none otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attachments: Option<Vec<String>>,
-        /// For an `item` target: the column its new card goes in, `inbox`
-        /// (captured, for later; the default) or `planned` (Next: queued,
-        /// after something else). A `newThread` whose wording says it
+        /// For an `item` target: where its new card goes, `inbox` (Later:
+        /// someday, remind me, never started on its own; the default) or
+        /// `planned` (Up next: queued real work, after something else). A `newThread` whose wording says it
         /// should wait becomes such a card too (see [`queue_of`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_state: Option<WorkState>,
     },
-    /// Start a card: an Inbox or Next card with no thread gets one, in its
+    /// Start a card: a Later or Up next card with no thread gets one, in its
     /// project (else its orchestrator's crew policy, else the best project),
     /// its title and detail as the first prompt; the card goes to Now.
     /// Replies `{ id, threadId }`; already started: the thread it has. An
-    /// orchestrator's crew that is full keeps it in Next for an agent
+    /// orchestrator's crew that is full keeps it in Up next for an agent
     /// (`{ id, queued: true, waiting }`); the person starts it anyway.
     /// (agent: an orchestrator, its own cards)
     #[serde(rename_all = "camelCase")]
@@ -1953,9 +1955,9 @@ pub struct WorkItemPatch {
 }
 
 /// The column a task's wording says it waits in, or `None` (start it now):
-/// [`WorkState::Inbox`] for something captured for later ("later",
+/// [`WorkState::Inbox`] (Later) for something for later ("later",
 /// "someday", "remind me", "next week", "when I get a chance", "at some
-/// point"), [`WorkState::Planned`] (Next) for something queued after
+/// point"), [`WorkState::Planned`] (Up next) for something queued after
 /// something else ("after X", "once Y is done", "then …", "low priority").
 pub fn queue_of(text: &str) -> Option<WorkState> {
     let t = format!(" {} ", text.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "));

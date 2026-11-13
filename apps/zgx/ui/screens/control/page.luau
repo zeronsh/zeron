@@ -523,7 +523,6 @@ local function board(): Node
 			return orchestration.now:get().orchestrators or {}
 		end,
 		show_filter = true,
-		inbox = true,
 		todo_of = function(chat: string): any
 			local c = chats_now:get()[chat]
 			return c and c.todo
@@ -561,6 +560,7 @@ local function board(): Node
 		on_remove = orchestration.remove_item,
 		on_restore = orchestration.restore_item,
 		expanded = M.board_expanded,
+		later_open = M.board_later,
 		on_start = orchestration.start_item,
 		space_name = function(id: string): string?
 			for _, p in sessions.projects:get() or {} do
@@ -613,6 +613,8 @@ M.map_view = ui.persist("control_map", OrchMap.DEFAULT)
 -- Whether the board's columns show all their cards (past ten): kept, as
 -- the map's view is.
 M.board_expanded = ui.persist("control_board_expanded", false)
+-- Whether the board's Queued column shows its Later group: kept as well.
+M.board_later = ui.persist("control_board_later", false)
 local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
 
 local function map(): Node

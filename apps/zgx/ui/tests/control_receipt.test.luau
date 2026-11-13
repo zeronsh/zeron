@@ -22,7 +22,7 @@ test("the newest dump's parts each have a chip saying where they went", function
 	expect(app:has('#control-capture >> .orch-receipt-text >> "registry "')).to_be(true)
 	expect(app:count("#control-capture >> .orch-part") >= 5).to_be(true)
 	expect(app:has('#control-capture >> role:button "Orchestrator screen, Context, Done"')).to_be(true)
-	expect(app:has('#control-capture >> role:button "Inbox, Task, Delivered"')).to_be(true)
+	expect(app:has('#control-capture >> role:button "Later, Task, Delivered"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "CI speed, Priority, Delivered"')).to_be(true)
 	expect(app:count("#control-capture >> .orch-chip")).to_be(5)
@@ -376,7 +376,7 @@ test("every part says what came of it: a task's outcome too, its state as Zeron 
 	-- Each chip's mark: done, answered (still going), sent.
 	expect(app:has('#control-capture >> role:button "Orchestrator screen, Context, Done"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
-	expect(app:has('#control-capture >> role:button "Inbox, Task, Delivered"')).to_be(true)
+	expect(app:has('#control-capture >> role:button "Later, Task, Delivered"')).to_be(true)
 	expect(app:count("#control-capture >> .orch-chip >> .orch-route-mark") >= 4).to_be(true)
 end)
 
