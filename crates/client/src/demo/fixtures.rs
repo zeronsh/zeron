@@ -501,6 +501,8 @@ pub(crate) fn seed(
                         label: command.into(),
                     }],
                 }),
+                activity: None,
+                todo: None,
             })?;
         }
         if let Some((until_in, slept_ago)) = demo.sleep {

@@ -7643,6 +7643,8 @@ mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
+            activity: None,
+            todo: None,
         }
     }
 

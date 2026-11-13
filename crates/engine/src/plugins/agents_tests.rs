@@ -82,6 +82,8 @@ pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneSta
         running_subagents: 0,
         background_tasks: Vec::new(),
         waiting: None,
+        activity: None,
+        todo: None,
     }
 }
 

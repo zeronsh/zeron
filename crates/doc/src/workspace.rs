@@ -848,6 +848,20 @@ pub(crate) struct RawSession {
     /// peer's) costs the wait, not the row.
     #[serde(default, deserialize_with = "lenient_waiting")]
     waiting: Option<zeron_proto::SessionWaiting>,
+    /// LENIENT like `waiting`.
+    #[serde(default, deserialize_with = "lenient_value")]
+    activity: Option<zeron_proto::orchestration::ChatActivity>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    todo: Option<zeron_proto::orchestration::TodoProgress>,
+}
+
+fn lenient_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 fn lenient_waiting<'de, D>(deserializer: D) -> Result<Option<zeron_proto::SessionWaiting>, D::Error>
@@ -872,6 +886,8 @@ impl From<RawSession> for Session {
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
             waiting: raw.waiting,
+            activity: raw.activity,
+            todo: raw.todo,
         }
     }
 }
@@ -991,6 +1007,8 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            activity: None,
+            todo: None,
         }
     }
 

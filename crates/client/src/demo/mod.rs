@@ -486,6 +486,8 @@ impl DemoHost {
                 },
                 updated_at: now,
                 waiting: None,
+                activity: None,
+                todo: None,
             })
         });
     }

@@ -15656,6 +15656,8 @@ mod tests {
                             status: zeron_proto::SessionStatus::Working,
                             started_at: Some(chrono::Utc::now()),
                             updated_at: chrono::Utc::now(),
+                            activity: None,
+                            todo: None,
                         })
                     });
                     this.on_own_send("chat".into(), "prompt".into(), cx);

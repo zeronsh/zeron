@@ -2482,6 +2482,8 @@ mod tests {
             started_at: None,
             updated_at: Utc::now(),
             waiting: None,
+            activity: None,
+            todo: None,
         };
         for i in 0..300 {
             let id = format!("chat-{i:03}");
@@ -2815,6 +2817,8 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            activity: None,
+            todo: None,
         }
     }
 

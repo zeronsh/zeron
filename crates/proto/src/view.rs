@@ -458,6 +458,8 @@ mod gate_tests {
             running_subagents: running,
             background_tasks: Vec::new(),
             waiting: None,
+            activity: None,
+            todo: None,
         }
     }
 

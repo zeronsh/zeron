@@ -183,6 +183,20 @@ pub mod methods {
     /// `DeviceStats`. Another of the account's devices answers through its
     /// relay within a few seconds, or the call says it's offline or too old.
     pub const DEVICE_STATS: &str = "DeviceStats";
+    /// Orchestrators, crews, the board, asks and dumps
+    /// (`orchestration::OrchestrationState`), whole on subscribe and on every
+    /// change (coalesced). See docs/design/orchestrators.md.
+    pub const WATCH_ORCHESTRATION: &str = "WatchOrchestration";
+    /// One `orchestration::OrchestrateOp` (tagged `{op, …}`) → op-specific
+    /// reply (`{id}` for creates). Agent callers get the ops the design doc
+    /// marks (agent), scoped to their own chat.
+    pub const ORCHESTRATE: &str = "Orchestrate";
+    /// `Vec<orchestration::DeviceLoad>` for every device of the account,
+    /// sampled every ~5 s while subscribed.
+    pub const WATCH_DEVICE_LOADS: &str = "WatchDeviceLoads";
+    /// Live `orchestration::CommEvent`s (messages, reports, asks, routes)
+    /// this engine sees; the newest 100 on subscribe.
+    pub const WATCH_COMMS: &str = "WatchComms";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";

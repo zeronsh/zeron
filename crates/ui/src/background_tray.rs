@@ -872,6 +872,8 @@ mod tests {
                 running_subagents: 0,
                 background_tasks: tasks,
                 waiting: None,
+                activity: None,
+                todo: None,
             }];
             state.selected_chat = Some(chat_id.into());
         });

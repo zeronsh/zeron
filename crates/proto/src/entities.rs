@@ -377,6 +377,10 @@ pub enum ChildKind {
     Side,
     /// Delegated work: shown under the parent's subagents.
     Subagent,
+    /// A thread in an orchestrator's crew (the parent is an orchestrator's
+    /// chat; see `orchestration`). A full thread: it may delegate to
+    /// subagents of its own.
+    Crew,
 }
 
 impl ChildKind {
@@ -384,6 +388,7 @@ impl ChildKind {
         match self {
             ChildKind::Side => "side",
             ChildKind::Subagent => "subagent",
+            ChildKind::Crew => "crew",
         }
     }
 
@@ -392,6 +397,7 @@ impl ChildKind {
         match value {
             "side" => Some(ChildKind::Side),
             "subagent" => Some(ChildKind::Subagent),
+            "crew" => Some(ChildKind::Crew),
             _ => None,
         }
     }
@@ -612,6 +618,15 @@ pub struct Session {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<SessionWaiting>,
+    /// What the agent is doing right now (testing, merging…), classified
+    /// from its running tool. Host-written while `Working`; `None` otherwise
+    /// and on older peers. See `orchestration::ChatActivity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::orchestration::ChatActivity>,
+    /// Progress through the agent's newest todo/plan list. Host-written;
+    /// missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<crate::orchestration::TodoProgress>,
 }
 
 /// What a chat's agent waits on after its turn ended.

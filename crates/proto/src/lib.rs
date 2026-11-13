@@ -15,6 +15,7 @@ pub mod annotation;
 pub mod file_mentions;
 pub mod invocation;
 pub mod motion;
+pub mod orchestration;
 pub mod plan_usage;
 pub mod preview;
 pub mod program_status;
