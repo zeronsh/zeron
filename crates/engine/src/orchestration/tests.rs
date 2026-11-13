@@ -1353,7 +1353,7 @@ async fn a_reply_in_the_thread_closes_the_codex_ask() {
     turn_ended(&core, CODEX_THREAD).await;
     // The person answers in the thread itself (as they did).
     push(&core, CODEX_THREAD, "804423c1", zeron_doc::MessageRole::User, "yes, please open a PR");
-    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD);
+    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD).await;
     let asks = asks_from(&core, CODEX_THREAD);
     assert_eq!(asks.len(), 1);
     assert_eq!(
@@ -1383,7 +1383,7 @@ async fn a_question_asked_again_updates_its_ask() {
     assert!(asks[0].updated_at.is_some() && asks[0].question.starts_with("Still need your call"));
     // A reply that didn't settle it, then the same question: reopened.
     push(&core, CODEX_THREAD, "u4", zeron_doc::MessageRole::User, "what's the difference?");
-    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD);
+    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD).await;
     assert_eq!(asks_from(&core, CODEX_THREAD)[0].state, AskState::Answered);
     push(&core, CODEX_THREAD, "a4", zeron_doc::MessageRole::Assistant, "A PR goes to review first; a merge lands it now.\n\nShould I commit and open a PR against `zeron/zgx`, or merge it into `zeron/orchestrators`?");
     turn_ended(&core, CODEX_THREAD).await;
@@ -1651,7 +1651,7 @@ async fn cards_an_ask_once_blocked_are_restated_from_their_routes_once() {
             .patch_item(WorkItemPatch { id: Some(item.clone()), state: Some(WorkState::Blocked), ..Default::default() })
             .unwrap();
     }
-    let (mut restated, kept) = rpc.settle_card_states();
+    let (mut restated, kept) = rpc.settle_card_states().await;
     restated.sort();
     assert!(kept.is_empty());
     let mut want = vec![routes[0].1.clone(), routes[1].1.clone()];
@@ -1662,7 +1662,7 @@ async fn cards_an_ask_once_blocked_are_restated_from_their_routes_once() {
         [WorkState::Done, WorkState::Active, WorkState::Blocked],
         "the failed one stays Blocked"
     );
-    assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "idempotent");
+    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]), "idempotent");
     core.sessions.shutdown().await;
 }
 
@@ -1685,7 +1685,7 @@ async fn a_card_the_person_moves_stays_until_its_work_changes() {
     // Re-synced, and the start's pass: it stays Done.
     rpc.sync_route_card(&dump, &legend.0);
     rpc.sync_cards_of(map);
-    assert_eq!(rpc.settle_card_states(), (vec![], vec![]));
+    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]));
     assert_eq!(card(&core, &legend.1), WorkState::Done);
 
     // Another card, at work (an outcome so far), moved to Done; then its
@@ -1714,10 +1714,10 @@ async fn a_card_set_by_hand_before_the_mark_existed_is_kept_at_start() {
     core.orchestration
         .patch_item(WorkItemPatch { id: Some(routes[0].1.clone()), state: Some(WorkState::Active), ..Default::default() })
         .unwrap();
-    assert_eq!(rpc.settle_card_states(), (vec![], vec![routes[0].1.clone()]));
+    assert_eq!(rpc.settle_card_states().await, (vec![], vec![routes[0].1.clone()]));
     rpc.sync_cards_of(map);
     assert_eq!(card(&core, &routes[0].1), WorkState::Active, "a later sync keeps it");
-    assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "once");
+    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]), "once");
     core.sessions.shutdown().await;
 }
 
@@ -1883,7 +1883,7 @@ async fn the_start_restates_cards_the_old_rule_left_in_review() {
         .unwrap();
     op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":r[4].1,"state":"review"}})).await.unwrap();
 
-    let (restated, _) = rpc.settle_card_states();
+    let (restated, _) = rpc.settle_card_states().await;
     assert_eq!(
         [card(&core, &r[0].1), card(&core, &r[1].1), card(&core, &r[2].1), card(&core, &r[3].1), card(&core, &r[4].1)],
         [WorkState::Active, WorkState::Review, WorkState::Done, WorkState::Active, WorkState::Review],
@@ -1896,7 +1896,7 @@ async fn the_start_restates_cards_the_old_rule_left_in_review() {
     assert_eq!(asks[0].item_id.as_deref(), Some(r[3].1.as_str()));
     assert!(asks[0].question.contains("Waiting on your pick"));
     assert!(restated.contains(&r[0].1) && restated.contains(&r[2].1));
-    assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "once");
+    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]), "once");
     core.sessions.shutdown().await;
 }
 
@@ -1918,7 +1918,7 @@ async fn approve_closes_a_review_and_request_changes_sends_it_back_to_work() {
     assert_eq!(approved.state, WorkState::Done);
     assert!(approved.approved_at.is_some());
     core.rpc_service().sync_cards_of(map);
-    assert_eq!(rpc_settle(&core), (vec![], vec![]));
+    assert_eq!(rpc_settle(&core).await, (vec![], vec![]));
     assert_eq!(card(&core, &r[0].1), WorkState::Done);
     // Request changes: an empty one is refused; the text goes to the
     // thread, and the card is back in Now.
@@ -1936,8 +1936,8 @@ async fn approve_closes_a_review_and_request_changes_sends_it_back_to_work() {
     core.sessions.shutdown().await;
 }
 
-fn rpc_settle(core: &crate::EngineCore) -> (Vec<String>, Vec<String>) {
-    core.rpc_service().settle_card_states()
+async fn rpc_settle(core: &crate::EngineCore) -> (Vec<String>, Vec<String>) {
+    core.rpc_service().settle_card_states().await
 }
 
 #[tokio::test]
@@ -2177,6 +2177,122 @@ async fn a_device_reference_is_context_and_the_place_a_new_card_goes() {
     core.sessions.shutdown().await;
 }
 
+/// The cheap model, for "does this message answer that question?" only:
+/// `says` (None: it can't be reached). How often it was asked.
+fn answers_model(core: &crate::EngineCore, says: Option<&str>) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (n, says) = (calls.clone(), says.map(str::to_owned));
+    core.orchestration.progress().set_note_fn(std::sync::Arc::new(move |_, prompt: String| {
+        let said = if prompt.starts_with(zeron_proto::turn_question::ANSWERS_INSTRUCTIONS) {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            says.clone()
+        } else {
+            None
+        };
+        Box::pin(async move { said })
+    }));
+    calls
+}
+
+fn relayed(body: &str) -> String {
+    zeron_proto::agent_messages::agent_message("Brain dump (brain-du)", "brain-dump-1", body)
+}
+
+/// A card the old rule left in Review on `chat`, whose thread's turn (after
+/// the card's delivery) ended asking `asked`. Its card id.
+async fn stale_decision_card(core: &crate::EngineCore, chat: &str, title: &str, asked: &str) -> String {
+    let (dump, _, r) = routed_thread(core, chat, &[title]).await;
+    push(core, chat, &format!("{chat}-u1"), zeron_doc::MessageRole::User, title);
+    push(core, chat, &format!("{chat}-a1"), zeron_doc::MessageRole::Assistant, asked);
+    outcome(core, chat, &dump, &r[0].0, asked, RouteState::Done).await;
+    // (No ask from its outcome: the start's backfill is what's tested.)
+    for a in asks_from(core, chat) {
+        op(core, Caller::Local, json!({"op":"dismissAsk","id":a.id})).await.unwrap();
+    }
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut d = doc.dump(&dump).unwrap();
+        d.routes[0].state = RouteState::Done;
+        d.routes[0].review = None;
+        doc.upsert_dump(&d);
+    });
+    core.orchestration
+        .patch_item(WorkItemPatch { id: Some(r[0].1.clone()), state: Some(WorkState::Review), ..Default::default() })
+        .unwrap();
+    r[0].1.clone()
+}
+
+fn open_asks(core: &crate::EngineCore, chat: &str) -> Vec<Ask> {
+    asks_from(core, chat).into_iter().filter(|a| a.state == AskState::Open).collect()
+}
+
+const PICK: &str = "Both variants are built.\n\nShould I merge it into `zeron/orchestrators`, or open a PR against `zeron/zgx`?";
+
+#[tokio::test]
+async fn a_direct_reply_in_the_thread_answers_without_the_model() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, Some("no"));
+    let card_id = stale_decision_card(&core, "t-direct", "Ship the fix", PICK).await;
+    push(&core, "t-direct", "u2", zeron_doc::MessageRole::User, "hold off for now, I'll look tomorrow");
+    core.rpc_service().settle_card_states().await;
+    assert!(open_asks(&core, "t-direct").is_empty(), "the person replied in the thread");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(card(&core, &card_id), WorkState::Active);
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_message_naming_an_option_answers_without_the_model() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, Some("no"));
+    stale_decision_card(&core, "t-option", "Ship the fix", PICK).await;
+    push(&core, "t-option", "u2", zeron_doc::MessageRole::User, &relayed("The person says: open a PR against zeron/zgx, please."));
+    core.rpc_service().settle_card_states().await;
+    assert!(open_asks(&core, "t-option").is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "named an option: no model");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_message_about_other_work_leaves_the_question_open() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, Some("no"));
+    let card_id = stale_decision_card(&core, "t-other", "Ship the fix", PICK).await;
+    push(&core, "t-other", "u2", zeron_doc::MessageRole::User, &relayed("New graph-map layout direction: size each machine's island by what it holds."));
+    core.rpc_service().settle_card_states().await;
+    let open = open_asks(&core, "t-other");
+    assert_eq!(open.len(), 1, "{open:#?}");
+    assert_eq!(open[0].item_id.as_deref(), Some(card_id.as_str()));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Judged once: the start's pass again asks the model nothing new.
+    core.rpc_service().settle_card_states().await;
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= 1);
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_the_model_a_relayed_message_leaves_the_question_open() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, None);
+    stale_decision_card(&core, "t-nomodel", "Ship the fix", PICK).await;
+    push(&core, "t-nomodel", "u2", zeron_doc::MessageRole::User, &relayed("They'd like this wrapped up soon."));
+    core.rpc_service().settle_card_states().await;
+    assert_eq!(open_asks(&core, "t-nomodel").len(), 1, "unreachable: raised");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // A turn-end ask's close by a reply follows the same rule.
+    let fixes = codex_thread(&core).await;
+    let _ = fixes;
+    turn_ended(&core, CODEX_THREAD).await;
+    push(&core, CODEX_THREAD, "r1", zeron_doc::MessageRole::User, &relayed("Unrelated: the Map needs a legend pass."));
+    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD).await;
+    assert_eq!(open_asks(&core, CODEX_THREAD).len(), 1, "not answered: kept");
+    push(&core, CODEX_THREAD, "r2", zeron_doc::MessageRole::User, &relayed("Decision: merge into zeron/orchestrators."));
+    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD).await;
+    let codex = asks_from(&core, CODEX_THREAD);
+    assert_eq!((codex.len(), codex[0].state, codex[0].answered_via), (1, AskState::Answered, Some(AnswerVia::Thread)));
+    assert_eq!(codex[0].answer.as_deref(), Some("Decision: merge into zeron/orchestrators."));
+    core.sessions.shutdown().await;
+}
+
 /// The live "Topology lines: pick a variant" card: its thread asked, and the
 /// person picked later (a relayed message at 19:40). The start's backfill
 /// raises no ask for it, and closes the one that was open; a card whose
@@ -2213,9 +2329,12 @@ async fn the_start_raises_no_ask_the_person_already_answered() {
     }
     let open_first = asks_from(&core, "9ad131f1-map").into_iter().filter(|a| a.state == AskState::Open).count();
     assert_eq!(open_first, 1);
-    // The person's pick reaches the first thread, relayed by the Brain dump.
-    push(&core, "9ad131f1-map", "u2", zeron_doc::MessageRole::User, "[Message from Zeron chat Brain dump (brain-du).]\n\nThe person picked for the Topology variants. They want TWO options, switchable by the user.");
-    rpc.settle_card_states();
+    // The person's pick reaches the first thread, relayed by the Brain dump:
+    // it names no option, so the cheap model judges it (and says it does).
+    let calls = answers_model(&core, Some("yes"));
+    push(&core, "9ad131f1-map", "u2", zeron_doc::MessageRole::User, &relayed("The person picked for the Topology variants. They want TWO options, switchable by the user."));
+    rpc.settle_card_states().await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     // Answered: no open ask, the old one closed by the thread's reply.
     let first = asks_from(&core, "9ad131f1-map");
     assert!(first.iter().all(|a| a.state != AskState::Open), "{first:#?}");
@@ -2226,5 +2345,25 @@ async fn the_start_raises_no_ask_the_person_already_answered() {
     assert_eq!(second[0].item_id.as_deref(), Some(cards[1].1.as_str()));
     // Both wait in Now, not Review.
     assert_eq!([card(&core, &cards[0].1), card(&core, &cards[1].1)], [WorkState::Active, WorkState::Active]);
+    core.sessions.shutdown().await;
+}
+
+/// The floating composer's @ask (and Needs you's quick reply) answers through
+/// answerAsk in the person's words: its delivery to the thread is tied to
+/// the ask, never judged by the model, even when none can be reached.
+#[tokio::test]
+async fn an_answered_asks_delivery_answers_without_the_model() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, None);
+    stale_decision_card(&core, "t-at-ask", "Ship the fix", PICK).await;
+    let delivered = zeron_proto::orchestration::prompt_text::answer_delivery(
+        "Should I merge it into zeron/orchestrators, or open a PR against zeron/zgx?",
+        "neither yet, rerun the flaky test first",
+    );
+    assert!(zeron_proto::agent_messages::agent_message_sender(&delivered).is_none(), "not a relayed message");
+    push(&core, "t-at-ask", "u2", zeron_doc::MessageRole::User, &delivered);
+    core.rpc_service().settle_card_states().await;
+    assert!(open_asks(&core, "t-at-ask").is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     core.sessions.shutdown().await;
 }

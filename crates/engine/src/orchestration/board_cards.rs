@@ -245,7 +245,7 @@ impl EngineRpc {
     /// than its route says, never marked, was moved by hand before the mark
     /// existed: marked now, so it stays. Cards already marked are left
     /// alone; run again, it does nothing. `(re-stated, kept)`.
-    pub(crate) fn settle_card_states(&self) -> (Vec<String>, Vec<String>) {
+    pub(crate) async fn settle_card_states(&self) -> (Vec<String>, Vec<String>) {
         let state = self.orchestration().state();
         let (mut restated, mut kept) = (Vec::new(), Vec::new());
         for dump in &state.dumps {
@@ -259,7 +259,7 @@ impl EngineRpc {
                 // finished): what waits on the person, if anything, from its
                 // thread now and what it said.
                 if card.state == WorkState::Review && route.review.is_none() && route.state != RouteState::Failed {
-                    if self.restate_review(dump, route, card) {
+                    if self.restate_review(dump, route, card).await {
                         restated.push(item.to_owned());
                     }
                     continue;
@@ -290,7 +290,7 @@ impl EngineRpc {
     ///   screenshots): Review, that first in its outcome;
     /// - else Done (a route still going whose thread isn't known: Now).
     /// Its route takes the same. `true` when the card changed.
-    fn restate_review(
+    async fn restate_review(
         &self,
         dump: &Dump,
         route: &Route,
@@ -368,7 +368,7 @@ impl EngineRpc {
             && card.approved_at.is_none()
             && card.moved_at.is_none()
         {
-            match super::turn_asks::answered_after_asking(&entries, Some(sent)) {
+            match super::turn_asks::answered_after_asking(self.orchestration(), self, chat, &entries, Some(sent)).await {
                 Some(reply) => {
                     let open: Vec<String> = self
                         .orchestration()

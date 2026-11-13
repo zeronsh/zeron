@@ -271,36 +271,131 @@ pub(crate) fn plan(
     })
 }
 
+/// Whether `text`, a message that reached `chat` after it asked
+/// `question` (with `options`), answers it:
+/// - a message no agent relayed (the person in the thread, the Needs-you
+///   answer, an answered ask's delivery) does;
+/// - one relayed by the Brain dump or an orchestrator does when it names
+///   one of the options, else when the cheap one-shot model says it answers
+///   or decides this very question. Unsure, no, or no model: it doesn't, and
+///   the ask is raised or kept (a pending decision is never lost).
+///
+/// A verdict is kept per chat, question and message, so a message is judged
+/// once.
+pub(crate) async fn reply_answers(
+    orch: &Orchestration,
+    rpc: &EngineRpc,
+    chat: &str,
+    question: &str,
+    options: &[String],
+    message_id: &str,
+    text: &str,
+) -> bool {
+    let Some((_, body)) = zeron_proto::agent_messages::agent_message_sender(text) else { return true };
+    if turn_question::names_option(options, &body) {
+        return true;
+    }
+    let key = (format!("{chat}\u{1f}{question}"), message_id.to_owned());
+    if let Some(known) = verdicts().lock().ok().and_then(|v| v.get(&key).copied()) {
+        return known;
+    }
+    let harness = rpc
+        .workspace_host()
+        .chat(chat)
+        .ok()
+        .flatten()
+        .and_then(|c| c.config.map(|c| c.harness))
+        .unwrap_or_else(|| rpc.doc_host_ref().default_harness());
+    let said = orch.progress().one_shot(rpc)(harness, turn_question::answers_prompt(question, options, &body)).await;
+    let Some(verdict) = said.as_deref().and_then(turn_question::parse_answers) else {
+        // (No model, or unsure: asked again next time.)
+        return false;
+    };
+    if let Ok(mut v) = verdicts().lock() {
+        if v.len() > 4096 {
+            v.clear();
+        }
+        v.insert(key, verdict);
+    }
+    verdict
+}
+
+/// The model's verdicts so far: (chat and question, message id) → answers it.
+fn verdicts() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), bool>> {
+    static VERDICTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String), bool>>> =
+        std::sync::OnceLock::new();
+    VERDICTS.get_or_init(Default::default)
+}
+
+/// The first of `later` (messages that reached the thread after it asked)
+/// that answers `question`: its words.
+async fn first_answer(
+    orch: &Orchestration,
+    rpc: &EngineRpc,
+    chat: &str,
+    question: &str,
+    options: &[String],
+    later: &[&SessionMessageEntry],
+) -> Option<String> {
+    for e in later {
+        let text = texts(e);
+        if reply_answers(orch, rpc, chat, question, options, &e.id, &text).await {
+            let words = zeron_proto::agent_messages::agent_message_sender(&text).map_or(text.clone(), |(_, body)| body.to_owned());
+            return Some(zeron_proto::orchestration::prompt_text::one_line(&words, ANSWER_MAX));
+        }
+    }
+    None
+}
+
 /// What answered a decision `chat`'s transcript asks after the message
 /// carrying `sent` (a route's delivery; the whole transcript without it):
-/// the message that reached the thread after the last message there that
-/// waits on the person ([`turn_question::detect`]), its words. `None`: no
-/// such message (or no message asking) yet. The same rule as a turn-end
-/// ask's close by a reply ([`replied`]).
-pub(crate) fn answered_after_asking(entries: &[SessionMessageEntry], sent: Option<&str>) -> Option<String> {
+/// of the messages that reached the thread after the last one there that
+/// waits on the person ([`turn_question::detect`]), the first that answers
+/// it ([`reply_answers`]), its words. `None`: none does (or nothing asks).
+/// The rule a turn-end ask's close by a reply follows ([`replied`]).
+pub(crate) async fn answered_after_asking(
+    orch: &Orchestration,
+    rpc: &EngineRpc,
+    chat: &str,
+    entries: &[SessionMessageEntry],
+    sent: Option<&str>,
+) -> Option<String> {
     let from = sent
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|s| entries.iter().rposition(|e| e.role == MessageRole::User && texts(e).contains(s)))
         .map_or(0, |i| i + 1);
-    let asked = entries[from..]
-        .iter()
-        .rposition(|e| e.role == MessageRole::Assistant && matches!(turn_question::detect(&texts(e)), Verdict::Ask(_)))
-        .map(|i| from + i)?;
-    let reply = entries[asked + 1..].iter().find(|e| e.role == MessageRole::User)?;
-    Some(zeron_proto::orchestration::prompt_text::one_line(&texts(reply), ANSWER_MAX))
+    let (asked, found) = entries[from..].iter().enumerate().rev().find_map(|(i, e)| {
+        if e.role != MessageRole::Assistant {
+            return None;
+        }
+        match turn_question::detect(&texts(e)) {
+            Verdict::Ask(found) => Some((from + i, found)),
+            _ => None,
+        }
+    })?;
+    let later: Vec<&SessionMessageEntry> = entries[asked + 1..].iter().filter(|e| e.role == MessageRole::User).collect();
+    first_answer(orch, rpc, chat, &found.question, &found.options, &later).await
 }
 
-/// `chat`'s open turn-end asks that a message after their turn answers:
-/// each with that message's words.
-pub(crate) fn replied(asks: &[Ask], chat: &str, entries: &[SessionMessageEntry]) -> Vec<(String, String)> {
-    open_turn_asks(asks, chat)
-        .filter_map(|a| {
-            let at = entries.iter().position(|e| Some(e.id.as_str()) == a.turn_id.as_deref())?;
-            let reply = entries[at + 1..].iter().find(|e| e.role == MessageRole::User)?;
-            Some((a.id.clone(), zeron_proto::orchestration::prompt_text::one_line(&texts(reply), ANSWER_MAX)))
-        })
-        .collect()
+/// `chat`'s open turn-end asks that a message after their turn answers
+/// ([`reply_answers`]): each with that message's words.
+pub(crate) async fn replied(
+    orch: &Orchestration,
+    rpc: &EngineRpc,
+    asks: &[Ask],
+    chat: &str,
+    entries: &[SessionMessageEntry],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for a in open_turn_asks(asks, chat) {
+        let Some(at) = entries.iter().position(|e| Some(e.id.as_str()) == a.turn_id.as_deref()) else { continue };
+        let later: Vec<&SessionMessageEntry> = entries[at + 1..].iter().filter(|e| e.role == MessageRole::User).collect();
+        if let Some(reply) = first_answer(orch, rpc, chat, &a.question, &labels(a), &later).await {
+            out.push((a.id.clone(), reply));
+        }
+    }
+    out
 }
 
 /// `chat`'s open turn-end asks a later turn acted on, no message to it
@@ -352,11 +447,12 @@ pub(crate) fn close(orch: &Orchestration, id: &str, via: AnswerVia, answer: &str
 
 /// Close what `chat`'s transcript settles: a reply after an ask's turn, or
 /// a later turn that did one of its options.
-pub(crate) fn settle(orch: &Orchestration, rpc: &EngineRpc, chat: &str, entries: &[SessionMessageEntry]) -> usize {
+pub(crate) async fn settle(orch: &Orchestration, rpc: &EngineRpc, chat: &str, entries: &[SessionMessageEntry]) -> usize {
     let asks = orch.state().asks;
-    let now = Utc::now();
     let mut closed = 0;
-    for (id, reply) in replied(&asks, chat, entries) {
+    let answered = replied(orch, rpc, &asks, chat, entries).await;
+    let now = Utc::now();
+    for (id, reply) in answered {
         if close(orch, &id, AnswerVia::Thread, &reply, now).is_some() {
             orch.comms().say(CommKind::Answer, YOU, chat, &reply);
             closed += 1;
@@ -472,7 +568,7 @@ pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat:
     let Some(launch) = launch_of(&state, chat, started_by.as_deref(), parent.as_deref()) else { return };
     let Ok(handle) = rpc.doc_host_ref().open(chat) else { return };
     let Ok(entries) = handle.doc().read_entries() else { return };
-    settle(orch, rpc, chat, &entries);
+    settle(orch, rpc, chat, &entries).await;
     let Some((turn, text)) = final_message(&entries) else { return };
     // It asked through `ask` this turn: that is its ask.
     let since = turn_started(&entries);
@@ -499,13 +595,13 @@ pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat:
 
 /// A message reached `chat` (its turn started): the turn-end asks it
 /// answers close.
-pub(crate) fn on_reply(orch: &Orchestration, rpc: &EngineRpc, chat: &str) {
+pub(crate) async fn on_reply(orch: &Orchestration, rpc: &EngineRpc, chat: &str) {
     if !orch.state().asks.iter().any(|a| a.from_chat == chat && a.origin == AskOrigin::TurnEnd && a.state == AskState::Open) {
         return;
     }
     let Ok(handle) = rpc.doc_host_ref().open(chat) else { return };
     let Ok(entries) = handle.doc().read_entries() else { return };
-    settle(orch, rpc, chat, &entries);
+    settle(orch, rpc, chat, &entries).await;
 }
 
 /// Raise the stale asks of chats hosted here: urgent, a banner again.
