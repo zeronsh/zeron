@@ -87,6 +87,7 @@ local function foot(): number
 	local at = if floor_ok and floor then floor:get() else nil
 	return if type(at) == "number" then at else 16
 end
+M.foot = foot
 -- What each action runs, by its name: this load's, as `action` declared
 -- them (functions can't live in state). `declared` says one was added, for a
 -- stack built before the module that owns it loaded.
@@ -99,6 +100,12 @@ local FN = "fn:"
 -- The keys of toasts you put away with the ×, for whoever would show them
 -- again to take (and clear): `{ [key]: true }`.
 M.put_away = ui.state("ds_toasts_put_away", {} :: { [string]: boolean })
+
+-- How tall the stack stands now, in points (0 with none showing), and how
+-- far it stands in from the window's right edge with its width: what
+-- floats over a page's foot (the Control room's composer) keeps clear of.
+M.height = ui.state("ds_toasts_height", 0)
+M.RIGHT = 16
 
 -- Those of a load before this one, whose function is gone, go now.
 do
@@ -360,12 +367,18 @@ local function Stack(up: () -> boolean): Node
 		absolute = true,
 		-- (Insets take points: space.4 off the corner, and up from the
 		-- foot as the host says.)
-		right = 16,
+		right = M.RIGHT,
 		bottom = foot,
 		gap = "$space.2",
 		items = "end",
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
+		end,
+		on_resize = function(size: { w: number, h: number })
+			local h = if #visible:peek() > 0 then size.h else 0
+			if math.abs(M.height:peek() - h) >= 0.5 then
+				M.height:set(h)
+			end
 		end,
 	})
 end

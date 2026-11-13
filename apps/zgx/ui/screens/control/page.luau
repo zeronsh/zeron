@@ -40,6 +40,10 @@ local LaneTab = require("@app/screens/chat/lane_tab")
 local KeptScroll = require("@ds/kept_scroll")
 local Scratch = require("@ds/orch_scratchpad")
 local scratchpad = require("@account/scratchpad")
+local Shared = require("@app/screens/chat/shared")
+local motion = require("@ds/motion")
+local material = require("@ds/material")
+local glass = require("@ds/glass")
 
 local M = {}
 
@@ -210,9 +214,19 @@ local function brain_dump(): string?
 end
 
 -- A send from Capture: the words, the files they carry, and the Brain
--- dump's model as the composer has it picked, a dump.
+-- dump's model as the composer has it picked, a dump; what it references
+-- (the composer's `{ kind = "ref", ref }`, dragged from the room's widgets)
+-- goes as the dump's `refs`, never as files.
 function M.take(text: string, attachments: { any }, picks: { [string]: any }?): any
-	return orchestration.dump(text, attachments, brain_dump(), picks)
+	local files, refs = {}, {}
+	for _, a in attachments or {} do
+		if a.kind == "ref" and type(a.ref) == "table" then
+			table.insert(refs, a.ref)
+		else
+			table.insert(files, a)
+		end
+	end
+	return orchestration.dump(text, files, brain_dump(), picks, refs)
 end
 
 -- A dump's receipt (ds/orch_receipt): the newest one's, or an earlier
@@ -377,7 +391,83 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 	}
 end
 
+-- Capture's composer, in one of two places: in Capture, or, with Capture
+-- scrolled up out of view, floating at the page's foot (bare: one line, a
+-- count of what it carries; opened out on a click: its chips and model).
+-- One composer: the same draft, chips and model in both (LaneTab's
+-- `mirror`), the keys going with it as it changes places.
+local SLOT = "control-capture"
+local FOOTER: LaneTab.Footer = { access = false, place = false }
+-- Capture's composer is out of the page's view, above it: it floats.
+M.floating = ui.state("control_capture_floating", false)
+-- The floating one opened out.
+M.float_open = ui.state("control_capture_float_open", false)
+-- (Whether either placement holds the keys, followed as focus moves.)
+local inline_focused = false
+local float_focused = false
+-- Asked for the keys: bumped, the floating one takes them.
+local float_wanted = ui.state("control_capture_float_wanted", 0)
+-- The scroll's own element, to tell above from below.
+local scroll_ref = ui.ref()
+-- The floating one's own element, to let go of the keys before it goes.
+local float_ref = ui.ref()
+-- (Capture's keys, to hand to the floating one as it comes.)
+local float_takes_keys = false
+local function inline_seen(visible: boolean, el: Element)
+	local above = false
+	if not visible then
+		local view = scroll_ref:peek()
+		local top = if view then view.y else nil
+		above = el.y ~= nil and top ~= nil and (el.y :: number) < (top :: number)
+	end
+	if M.floating:peek() == above then
+		return
+	end
+	if above then
+		float_takes_keys = inline_focused
+		M.floating:set(true)
+		return
+	end
+	-- Going: the keys back into Capture's, let go here first (a focused
+	-- node taken away hands the focus on, the view scrolling after it).
+	local had = float_focused
+	if had then
+		local f = float_ref:peek()
+		if f then
+			f:blur()
+		end
+		float_focused = false
+	end
+	ui.batch(function()
+		M.floating:set(false)
+		if M.float_open:peek() then
+			M.float_open:set(false)
+		end
+	end)
+	if had then
+		ui.after(0, function()
+			LaneTab.focus(SLOT)
+		end)
+	end
+end
+
+-- The composer takes the keys where it shows: floating, else in Capture.
+function M.focus_composer(): boolean
+	if M.floating:peek() then
+		float_wanted:add(1)
+	else
+		LaneTab.focus(SLOT)
+	end
+	return true
+end
+
 local function capture(): Node
+	-- (Gone, hidden or laid out again: nothing of it floats till it says.)
+	ui.on_cleanup(function()
+		if M.floating:peek() then
+			M.floating:set(false)
+		end
+	end)
 	local newest = ui.computed(function(): any
 		return orchestration.dumps:get()[1]
 	end)
@@ -392,22 +482,35 @@ local function capture(): Node
 	end)
 	-- (All of it a drop zone for the composer's draft: a sidebar chat
 	-- dropped is an @-mention, files are carried with the dump.)
-	return LaneTab.DropZone { slot = "control-capture", chat = brain_dump, ui.column {
+	-- (And a card, thread, machine, ask… dragged from the room's widgets: a
+	-- reference, ds/orch_ref.)
+	return LaneTab.DropZone { slot = "control-capture", chat = brain_dump, refs = true, ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
 		-- The chat composer (a side chat's: ds.Composer, wired), bound to the
 		-- Brain dump's chat: files pasted or dropped, dictation, mentions,
 		-- its model; Enter sends, as everywhere, each send a dump.
-		LaneTab.Composer {
-			id = "control-capture-composer",
-			slot = "control-capture",
-			chat = brain_dump,
-			take = M.take,
-			placeholder = locale.s("control.capture.placeholder"),
-			-- (The Brain dump's model and agent; no access mode, no place:
-			-- it routes, it works nowhere.)
-			footer = { access = false, place = false },
+		-- (Watched: scrolled up out of the page's view, it floats at the
+		-- page's foot instead, `floating`. Its focus is followed, so the keys
+		-- go with it from one place to the other.)
+		ui.column {
+			id = "control-capture-inline",
+			w_full = true,
+			on_visible = inline_seen,
+			LaneTab.Composer {
+				id = "control-capture-composer",
+				slot = SLOT,
+				chat = brain_dump,
+				take = M.take,
+				placeholder = locale.s("control.capture.placeholder"),
+				-- (The Brain dump's model and agent; no access mode, no place:
+				-- it routes, it works nowhere.)
+				footer = FOOTER,
+				on_focus = function(on: boolean)
+					inline_focused = on
+				end,
+			},
 		},
 		ui.show(function(): boolean
 			return newest:get() ~= nil
@@ -1135,6 +1238,251 @@ local function head(): Node
 	}
 end
 
+-- The floating composer's widths: bare (one line), opened out.
+local FLOAT_W, FLOAT_OPEN_W = 520, 680
+-- Clear of the page's sides, and of its foot.
+local FLOAT_SIDE, FLOAT_FOOT = 24, 20
+-- Clear of a toast stack beside it.
+local FLOAT_TOAST_GAP = 12
+-- The companion's size: the pill's own one line (ds.Composer's ONE_LINE
+-- plus its hairlines).
+local FLOAT_KNOB = 51
+
+-- Capture's composer floating at the page's foot (Capture scrolled up out
+-- of view): bare, one line and beside it a knob (what it carries, counted;
+-- a click opens it out), or opened out, its chips over the draft and its
+-- model under it. Escape, or the knob, folds it back. Its own drop zone,
+-- as Capture is one. `take_keys`: it takes them as it comes (they were in
+-- Capture's).
+local FloatingCapture = ui.component(function(props: { width: () -> number, take_keys: boolean }): Node
+	local open = M.float_open
+	local focus = ui.use_state(0)
+	-- (The keys asked for once its form is laid out: one made again, bare
+	-- or opened out, takes them as it comes.)
+	local alive = true
+	local function take_keys()
+		ui.after(0, function()
+			ui.after(0, function()
+				if alive then
+					focus:add(1)
+				end
+			end)
+		end)
+	end
+	if props.take_keys then
+		take_keys()
+	end
+	local wanted = float_wanted:peek()
+	ui.effect(function()
+		local n = float_wanted:get()
+		if n ~= wanted then
+			wanted = n
+			take_keys()
+		end
+	end)
+	ui.on_cleanup(function()
+		alive = false
+		float_focused = false
+	end)
+	local function set_open(on: boolean)
+		if open:peek() ~= on then
+			open:set(on)
+		end
+		take_keys()
+	end
+	local count = ui.computed(function(): number
+		local chat = brain_dump()
+		return if chat then #Shared.cargo_of(chat) else 0
+	end)
+	local w = ui.computed(function(): number
+		local room = math.max(0, props.width() - FLOAT_SIDE * 2)
+		return math.min(if open:get() then FLOAT_OPEN_W else FLOAT_W, room)
+	end)
+	-- (Where it stands in the window, as last laid out: a toast stack in
+	-- the corner beside it lifts it over the stack.)
+	local box = ui.use_state(nil :: { x: number, w: number }?)
+	local lift = ui.computed(function(): number
+		local h = ds.toast.height:get()
+		local b = box:get()
+		if h <= 0 or not b then
+			return 0
+		end
+		local size = (ui :: any).window and (ui :: any).window.size
+		local win = if size then size:get() else nil
+		local win_w = if type(win) == "table" and type(win.width) == "number" then win.width else 0
+		local toast_w = (ui.theme.get("zeron.toast.width") :: number?) or 340
+		local left = win_w - ds.toast.RIGHT - toast_w - FLOAT_TOAST_GAP
+		if win_w <= 1 or b.x + b.w <= left then
+			return 0
+		end
+		return math.max(0, ds.toast.foot() + h + FLOAT_TOAST_GAP - FLOAT_FOOT)
+	end)
+	local knob = ui.button {
+		id = "control-float-knob",
+		label = locale.t("control.capture.expand"),
+		w = ui.raw(FLOAT_KNOB, "the pill's one line, as round"),
+		h = ui.raw(FLOAT_KNOB, "the pill's one line"),
+		shrink = 0,
+		gap = "$space.1",
+		items = "center",
+		justify = "center",
+		rounded = "$radius.full",
+		border = 1,
+		border_color = "$zeron.composer.edge",
+		bg = function(): string
+			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+		end,
+		backdrop_blur = function(): number
+			return if material.see_through() then 16 else 0
+		end,
+		shadow = function(): string
+			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
+		end,
+		hover = { border_color = "$border.strong" },
+		color = "$text.secondary",
+		focus_on_press = false,
+		on_click = function()
+			set_open(true)
+		end,
+		ui.presence(function(): string
+			return if count:get() > 0 then "count" else "open"
+		end, function(kind: string): Node
+			if kind == "count" then
+				return ui.row {
+					gap = ui.raw(2, "the clip and its number, one mark"),
+					items = "center",
+					Icon { name = "paperclip", size = 14 },
+					ui.text {
+						function(): string
+							return tostring(count:get())
+						end,
+						class = "control-float-count",
+						tabular = true,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+				}
+			end
+			return Icon { name = "expand-arrows", size = 16 }
+		end, {
+			enter = motion.transition({ opacity = { 0, 1 }, scale = { 0.8, 1 }, duration = 160, ease = "out(3)" }),
+			exit = motion.transition({ opacity = 0, duration = 100 }),
+		}),
+	}
+	return ui.row {
+		w_full = true,
+		-- (Off the page's foot, and over a toast stack beside it.)
+		pb = motion.tween(ui.computed(function(): number
+			return FLOAT_FOOT + lift:get()
+		end), { duration = 220, ease = "out(3)" }),
+		justify = "center",
+		pointer_events = "none",
+		ui.column {
+			id = "control-float",
+			ref = float_ref,
+			w = motion.tween(w, { duration = 220, ease = "out(3)" }),
+			pointer_events = "auto",
+			on_resize = function(_size: { w: number, h: number }, el: Element)
+				local x, bw = el.x, el.width
+				if x and bw then
+					local b = box:peek()
+					if not b or math.abs(b.x - x) >= 1 or math.abs(b.w - bw) >= 1 then
+						box:set({ x = x, w = bw })
+					end
+				end
+			end,
+			LaneTab.DropZone {
+				slot = SLOT,
+				chat = brain_dump,
+				focus = focus,
+				place = "float",
+				-- (References dragged from the room too, as Capture's own.)
+				refs = true,
+				ui.row {
+					w_full = true,
+					gap = "$space.2",
+					items = "end",
+					ui.column {
+						id = "control-float-panel",
+						grow = 1,
+						min_w = 0,
+						relative = true,
+						-- Opened out, on a panel of the menus' glass (the page under
+						-- it never reads through), the model's footer inside it.
+						p = function(): any
+							return if open:get() then "$space.3" else 0
+						end,
+						ui.show(function(): boolean
+							return open:get()
+						end, ui.div(glass.style({
+							class = "control-float-surface",
+							absolute = true,
+							left = 0,
+							right = 0,
+							top = 0,
+							bottom = 0,
+							pointer_events = "none",
+							rounded = "$radius.xl",
+						}, "menu") :: any)),
+						-- Its head: folding it back, at the right.
+						ui.show(function(): boolean
+							return open:get()
+						end, ui.row {
+							w_full = true,
+							justify = "end",
+							pb = "$space.2",
+							IconButton {
+								id = "control-float-collapse",
+								icon = "collapse-arrows",
+								label = locale.t("control.capture.collapse"),
+								size = "md",
+								tone = "quiet",
+								on_click = function()
+									set_open(false)
+								end,
+							},
+						}),
+						LaneTab.Composer {
+							id = "control-float-composer",
+							slot = SLOT,
+							chat = brain_dump,
+							take = M.take,
+							placeholder = locale.s("control.capture.placeholder"),
+							footer = FOOTER,
+							mirror = true,
+							focus = focus,
+							bare = function(): boolean
+								return not open:get()
+							end,
+							on_escape = function(): boolean
+								if open:peek() then
+									set_open(false)
+									return true
+								end
+								return false
+							end,
+							on_open_model = function()
+								set_open(true)
+							end,
+							on_focus = function(on: boolean)
+								float_focused = on
+							end,
+						},
+					},
+					-- (Beside it, bare: opened out, its panel's head folds it.)
+					ui.show(function(): boolean
+						return not open:get()
+					end, ui.div {
+						shrink = 0,
+						knob,
+					}),
+				},
+			},
+		},
+	}
+end)
+
 M.Page = ui.component(function(): Node
 	fresh()
 	local width = ui.use_state(0)
@@ -1154,12 +1502,22 @@ M.Page = ui.component(function(): Node
 		orchestration.loads_wanted(false)
 	end)
 	local kept = KeptScroll.use(M.place)
+	ui.on_cleanup(function()
+		if M.floating:peek() then
+			M.floating:set(false)
+		end
+		if M.float_open:peek() then
+			M.float_open:set(false)
+		end
+	end)
 	return ui.column {
 		id = "control-room",
 		w_full = true,
 		h_full = true,
 		min_h = 0,
+		relative = true,
 		ui.scroll {
+			ref = scroll_ref,
 			id = "control-scroll",
 			w_full = true,
 			grow = 1,
@@ -1206,6 +1564,27 @@ M.Page = ui.component(function(): Node
 				end, { w_full = true, items = "center" }),
 			},
 		},
+		-- Capture's composer, floating while Capture is out of view.
+		ui.presence(function(): string?
+			return if M.floating:get() then "float" else nil
+		end, function(): Node
+			local keys = float_takes_keys
+			float_takes_keys = false
+			return FloatingCapture {
+				width = function(): number
+					return width:get()
+				end,
+				take_keys = keys,
+			}
+		end, {
+			absolute = true,
+			left = 0,
+			right = 0,
+			bottom = 0,
+			pointer_events = "none",
+			enter = motion.transition({ opacity = { 0, 1 }, y = { 12, 0 }, duration = 220, ease = "out(3)" }),
+			exit = motion.transition({ opacity = { 1, 0 }, y = { 0, 8 }, duration = 140, ease = "in(2)" }),
+		}),
 	}
 end)
 

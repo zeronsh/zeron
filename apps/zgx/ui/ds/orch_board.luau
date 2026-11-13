@@ -118,6 +118,7 @@ local data = require("@self/orch_data")
 local toast = require("@self/toast")
 local Button = require("@self/button")
 local TextField = require("@self/text_field")
+local Ref = require("@self/orch_ref")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -589,6 +590,27 @@ local OrchBoard = ui.component(function(props: Props): Node
 			project = nil
 		end
 		return o, project
+	end
+	-- A card as a reference (ds/orch_ref): its state, first thread, its
+	-- orchestrator, the project it's in.
+	local function ref_of(it: Item): Ref.Ref
+		local threads = it.threads or {}
+		local project: string? = nil
+		for _, chat in threads do
+			project = project_of(chat)
+			if project then
+				break
+			end
+		end
+		if not project and it.orchestrator_id then
+			project = project_of(it.orchestrator_id)
+		end
+		return Ref.make("card", it.id, it.title, {
+			state = it.state,
+			thread = threads[1],
+			orchestrator = it.orchestrator_id,
+			project = project,
+		})
 	end
 
 	-- A drag. `carry`: the card carried (its column, size and rank); `target`:
@@ -1657,25 +1679,33 @@ local OrchBoard = ui.component(function(props: Props): Node
 					(props.on_open_thread :: any)(threads[1])
 				end
 			end,
-			on_drag = if props.on_move
-				then function(): any
-					local r = rect_of(slot)
-					local c: Carry = {
-						id = id,
-						col = col.key,
-						h = if r then r.height else 64,
-						w = if r then r.width else COLUMN_MIN,
-						rank = RANK[item().priority] or 2,
-					}
-					phase:set("carrying")
-					carry:set(c)
-					target:set(home(c))
-					return { tag = DRAG_TAG, id = id }
+			-- Dragged: to another column (the board's), and a reference to it
+			-- (Capture's composer takes `ref`): one payload, its drop the
+			-- target's to choose.
+			on_drag = function(): any
+				local ref = ref_of(item())
+				if not props.on_move then
+					return { ref = ref }
 				end
-				else nil,
+				local r = rect_of(slot)
+				local c: Carry = {
+					id = id,
+					col = col.key,
+					h = if r then r.height else 64,
+					w = if r then r.width else COLUMN_MIN,
+					rank = RANK[item().priority] or 2,
+				}
+				phase:set("carrying")
+				carry:set(c)
+				target:set(home(c))
+				return { tag = DRAG_TAG, id = id, ref = ref }
+			end,
 			drag_preview = function(): Node
 				local c = carry:peek()
-				return lifted(item(), if c then c.w else COLUMN_MIN, if c then c.h else 0)
+				if not (c and c.id == id) then
+					return Ref.Pill(ref_of(item()))
+				end
+				return lifted(item(), c.w, c.h)
 			end,
 			on_drag_end = function()
 				-- (Let go off the board, or Escape: it goes back.)

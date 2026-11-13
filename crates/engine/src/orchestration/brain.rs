@@ -8,14 +8,14 @@
 
 use chrono::Utc;
 use zeron_proto::orchestration::{
-    BRAIN_DUMP_CHAT_PREFIX, BRAIN_DUMP_TITLE, CommKind, CrewPolicy, Dump, DumpState, Orchestrator,
-    OrchestratorKind, Route, RouteIntent, RouteRef, RouteState, RouteTarget, WorkItemPatch,
-    WorkState, new_brain_dump_chat_id, seed_hue,
+    AskState, BRAIN_DUMP_CHAT_PREFIX, BRAIN_DUMP_TITLE, CommKind, CrewPolicy, Dump, DumpRef, DumpState,
+    Orchestrator, OrchestratorKind, RefKind, Route, RouteIntent, RouteRef, RouteState, RouteTarget,
+    WorkItemPatch, WorkState, new_brain_dump_chat_id, seed_hue,
 };
 use zeron_rpc::RpcError;
 
 use super::excerpt;
-use super::ops::{NewOrchestrator, When, deliver};
+use super::ops::{NewOrchestrator, When, Who, deliver};
 use crate::rpc::EngineRpc;
 
 /// A dump is cut to this many bytes (a row is an index entry).
@@ -34,6 +34,16 @@ pub(crate) fn span_of(text: &str, excerpt: &str) -> Option<(u32, u32)> {
     }
     let from = text.find(excerpt)?;
     Some((from as u32, (from + excerpt.len()) as u32))
+}
+
+/// The sentence (or line) of `text` that holds `span`: from the last
+/// `.`, `!`, `?` or line break before it to the next one after it.
+pub(crate) fn sentence_around(text: &str, span: (u32, u32)) -> String {
+    let (from, to) = (span.0 as usize, span.1 as usize);
+    let stop = |c: char| matches!(c, '.' | '!' | '?' | '\n' | ';');
+    let start = text[..from].rfind(stop).map_or(0, |i| i + 1);
+    let end = text[to..].find(stop).map_or(text.len(), |i| to + i);
+    text[start..end].trim().to_owned()
 }
 
 fn cut(text: &str, max: usize) -> String {
@@ -78,6 +88,36 @@ pub(crate) fn waits(target: &RouteTarget, intent: RouteIntent, asked: Option<Wor
 /// Intents the owner of a crew thread decides on (it keeps its board).
 pub(crate) fn owner_decides(intent: RouteIntent) -> bool {
     matches!(intent, RouteIntent::Task | RouteIntent::Priority | RouteIntent::Cancel)
+}
+
+/// Where a fragment about one of the dump's references goes (see
+/// [`EngineRpc::aim_of`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Aim {
+    /// As the Brain dump routed it (the reference is context; a device is
+    /// where a new thread starts).
+    Routed,
+    /// Answers this open ask (its asker gets the answer).
+    Answer { ask_id: String, asker: String },
+    /// Straight to this place, not through a crew thread's owner. `card`:
+    /// the card it is a comment on.
+    Direct { target: RouteTarget, card: Option<String> },
+    /// Kept on a card with no thread or owner yet (its detail).
+    OnCard { item_id: String },
+}
+
+/// Whether a reply reads as approving a card in Review ("approve",
+/// "looks good", "lgtm", "ship it").
+pub(crate) fn reads_as_approval(text: &str) -> bool {
+    let text = text.to_lowercase();
+    let negated = ["not ", "n't", "don't", "dont", "no "].iter().any(|n| text.contains(n));
+    !negated
+        && [
+            "approve", "approved", "lgtm", "looks good", "look good", "ship it", "sgtm", "good to go",
+            "merge it", "go ahead",
+        ]
+        .iter()
+        .any(|p| text.contains(p))
 }
 
 /// A dump whose every fragment has a place is routed; one with an `unsure`
@@ -146,10 +186,26 @@ impl EngineRpc {
         attachments: Vec<String>,
         transfers: Vec<zeron_proto::orchestration::UploadTransfer>,
         config: Option<zeron_proto::orchestration::DumpConfig>,
+        refs: Vec<DumpRef>,
     ) -> Result<String, RpcError> {
         let text = cut(text.trim(), MAX_DUMP_BYTES);
         let files = super::placement::dump_files(attachments)?;
-        let text = if text.is_empty() && !files.is_empty() { "(files)".to_owned() } else { text };
+        let mut refs = zeron_proto::orchestration::clean_refs(refs);
+        // A card's state as the engine has it when the person dumps (never the
+        // window's word for it): a reply only counts as a verdict on a card
+        // that was in Review as they wrote it.
+        for r in refs.iter_mut().filter(|r| r.kind == zeron_proto::orchestration::RefKind::Card) {
+            r.context.remove("state");
+            if let Some(card) = self.orchestration().item(&r.id) {
+                r.context.insert("state".into(), if card.state == WorkState::Review { "review" } else { "other" }.into());
+            }
+        }
+        let text = match () {
+            _ if !text.is_empty() => text,
+            _ if !files.is_empty() => "(files)".to_owned(),
+            _ if !refs.is_empty() => "(references)".to_owned(),
+            _ => text,
+        };
         if text.is_empty() {
             return Err(RpcError::BadParams("Nothing to dump".into()));
         }
@@ -171,6 +227,7 @@ impl EngineRpc {
             created_at: now,
             updated_at: now,
             attachments: files.clone(),
+            refs,
         };
         self.orchestration()
             .workspace()
@@ -178,7 +235,7 @@ impl EngineRpc {
         self.orchestration()
             .comms()
             .say(CommKind::Message, super::comms::YOU, &brain, &text);
-        let message = zeron_proto::orchestration::prompt_text::dump_message(&dump.id, &text);
+        let message = zeron_proto::orchestration::prompt_text::dump_message_with_refs(&dump.id, &text, &dump.refs);
         // The Brain dump sees the files, as a chat send carries them.
         let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
         let transfers = transfers
@@ -217,6 +274,7 @@ impl EngineRpc {
         device_id: Option<String>,
         attachments: Option<Vec<String>>,
         item_state: Option<WorkState>,
+        reference: Option<String>,
     ) -> Result<String, RpcError> {
         let orch = self.orchestration().clone();
         let dump = orch
@@ -226,12 +284,72 @@ impl EngineRpc {
         if target == RouteTarget::Other {
             return Err(RpcError::BadParams("Unknown route target".into()));
         }
+        // The element the fragment is about: one the person attached.
+        let reference = reference.map(|r| r.trim().to_owned()).filter(|r| !r.is_empty());
+        let referenced = match &reference {
+            None => None,
+            Some(id) => Some(dump.refs.iter().find(|r| r.id == *id).cloned().ok_or_else(|| {
+                RpcError::BadParams(format!("{id} is not one of dump {dump_id}'s references"))
+            })?),
+        };
+        let aim = referenced.as_ref().map_or(Aim::Routed, |r| self.aim_of(r));
         // A "question" that asks for work is a task; a rhetorical one, info
         // (the person's words, checked: zeron_proto::direct_question).
         let intent = zeron_proto::direct_question::settle_intent(intent, &excerpt_text);
-        // Work for a crew thread goes through its orchestrator, so its board
-        // sees it; info and questions may go to the thread itself.
-        let (target, message) = self.through_owner(target, intent, message);
+        // A reply to an ask is what the person tells the asker.
+        let intent = match aim {
+            Aim::Answer { .. } if intent != RouteIntent::Question => RouteIntent::Info,
+            _ => intent,
+        };
+        // A reply on a Review card is the person's verdict on it: approval
+        // approves it, anything else asks for changes. Only in the person's
+        // own words (the excerpt, verbatim in the dump), never the Brain
+        // dump's rewording: these are the person's ops.
+        // Guarded, as these are the person's ops: only while the dump is
+        // being routed, on a card in Review both when the person dumped and
+        // now, once per card per dump, and judged on the whole sentence the
+        // excerpt sits in (a "looks good" cut from "doesn't look good" isn't
+        // one). Otherwise the reply is a comment to the card's thread.
+        let verdict: Option<(String, bool, String)> = match &aim {
+            Aim::Direct { card: Some(id), .. } if dump.state == DumpState::Routing => {
+                let was_review = dump.refs.iter().any(|r| {
+                    r.kind == zeron_proto::orchestration::RefKind::Card
+                        && &r.id == id
+                        && r.context.get("state").map(String::as_str) == Some("review")
+                });
+                let judged = dump.routes.iter().any(|r| r.reference.as_deref() == Some(id.as_str()));
+                let sentence = span_of(&dump.text, &excerpt_text).map(|span| sentence_around(&dump.text, span));
+                match (was_review && !judged, sentence) {
+                    (true, Some(sentence)) => orch
+                        .item(id)
+                        .filter(|c| c.state == WorkState::Review)
+                        .map(|c| (c.id, reads_as_approval(&sentence), sentence)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (target, message) = match &aim {
+            Aim::Answer { asker, .. } => (RouteTarget::Chat { id: asker.clone() }, message),
+            Aim::OnCard { item_id } => (RouteTarget::Item { id: item_id.clone() }, message),
+            // To the very place the person pointed at.
+            Aim::Direct { target, card } => {
+                let message = match card.as_deref().and_then(|id| orch.item(id)) {
+                    Some(card) => {
+                        format!(
+                            "[On your card \"{}\"] {}",
+                            zeron_proto::orchestration::prompt_text::one_line(&card.title, zeron_proto::orchestration::prompt_text::LABEL_MAX),
+                            if message.trim().is_empty() { excerpt_text.trim() } else { message.trim() }
+                        )
+                    }
+                    None => message,
+                };
+                (target.clone(), message)
+            }
+            // Work for a crew thread goes through its orchestrator, so its
+            // board sees it; info and questions may go to the thread itself.
+            Aim::Routed => self.through_owner(target, intent, message),
+        };
         // Unsure only between existing places: with fewer than two it does
         // the work instead, in a new thread in the best project.
         let candidates = self.existing_candidates(candidates);
@@ -245,6 +363,16 @@ impl EngineRpc {
         // for later, Next for after something else.
         let card = waits(&target, intent, item_state, &format!("{excerpt_text} {message}"));
         let target = if card.is_some() { RouteTarget::Item { id: String::new() } } else { target };
+        // A device the person attached (one Zeron knows) is where a new one
+        // starts, when the Brain dump named no place.
+        let device_id = match referenced.as_ref() {
+            Some(r) if r.kind == RefKind::Device && space_id.is_none() && device_id.is_none() => {
+                let known = r.id == self.doc_host_ref().device_id()
+                    || self.workspace_host().read_devices().unwrap_or_default().iter().any(|d| d.id == r.id);
+                known.then(|| r.id.clone())
+            }
+            _ => device_id,
+        };
         // Where a new thread or orchestrator starts (and where a new card's
         // will): as named, else placed.
         let (space_id, device_id) = match &target {
@@ -274,8 +402,10 @@ impl EngineRpc {
             device_id,
             attachments: super::placement::route_files(&dump, intent, attachments)?,
             delivered_at: Default::default(),
+            reference,
         };
         let brain = self.brain_of(&dump);
+        let progress = progress && !matches!(aim, Aim::Answer { .. });
         let answered = match (&route.target, intent == RouteIntent::Question && progress) {
             (RouteTarget::Chat { id } | RouteTarget::Orchestrator { id }, true) => self.progress_answer(id).await,
             _ => None,
@@ -288,7 +418,38 @@ impl EngineRpc {
                 route.answered_at = Some(Utc::now());
                 orch.comms().say(CommKind::Answer, &to, super::comms::YOU, &answer);
             }
-            None => self.deliver_route(&dump, &mut route, brain.as_deref(), card).await?,
+            None => match &aim {
+                Aim::Answer { ask_id, .. } => {
+                    if dump.state != DumpState::Routing {
+                        return Err(RpcError::BadParams("This dump is already routed".into()));
+                    }
+                    // LATER(decision-ui): use the decision op with {option?, text?}: pass
+                    // the option `answer_text` matched as AnswerAsk's `option`, else the text.
+                    let answer = self.answer_text(ask_id, &route).ok_or_else(|| {
+                        RpcError::BadParams(
+                            "A reply to an @ask is the person's words: quote it verbatim from the dump as `excerpt`".into(),
+                        )
+                    })?;
+                    self.answer_ask(&Who::Person, ask_id.clone(), answer).await?;
+                    route.state = RouteState::Delivered;
+                }
+                Aim::OnCard { item_id } => {
+                    self.note_on_card(item_id, &route)?;
+                    route.state = RouteState::Delivered;
+                }
+                // (Review card: approveItem / requestChanges, as the person's
+                // buttons on it do; requestChanges tells its thread itself.)
+                _ if verdict.is_some() => {
+                    let (card_id, approve, sentence) = verdict.clone().expect("checked");
+                    if approve {
+                        self.approve_item(&card_id, Utc::now())?;
+                    } else {
+                        self.request_changes(&card_id, &sentence)?;
+                    }
+                    route.state = RouteState::Delivered;
+                }
+                _ => self.deliver_route(&dump, &mut route, brain.as_deref(), card).await?,
+            },
         }
         // Not sure between places: the person picks, from Needs you.
         if route.target == RouteTarget::Unsure {
@@ -298,7 +459,11 @@ impl EngineRpc {
         if route.state == RouteState::Delivered {
             route.delivered_at = Some(Utc::now());
         }
-        self.card_for_route(&dump, &mut route);
+        // (A reply on an ask or a card is about a card that is already there.)
+        let on_a_card = matches!(aim, Aim::Answer { .. } | Aim::OnCard { .. } | Aim::Direct { card: Some(_), .. });
+        if !on_a_card {
+            self.card_for_route(&dump, &mut route);
+        }
         orch.workspace().write_orchestration(|doc| {
             let Some(mut current) = doc.dump(dump_id) else {
                 return;
@@ -317,6 +482,89 @@ impl EngineRpc {
             &route.excerpt,
         );
         Ok(route.id)
+    }
+
+    /// Where a fragment about `r` goes, from the rows (an id the person
+    /// attached, never trusted beyond what the rows say): an open ask is
+    /// answered; a card's comment goes to its first thread, else its
+    /// orchestrator, else stays on the card; a chat gets it directly; a Q&A
+    /// entry's follow-up goes to the chat that answered it. The rest is
+    /// context for routing.
+    pub(crate) fn aim_of(&self, r: &DumpRef) -> Aim {
+        let orch = self.orchestration();
+        let chat_exists = |id: &str| self.workspace_host().chat(id).ok().flatten().is_some();
+        let direct = |id: &str| Aim::Direct { target: RouteTarget::Chat { id: id.to_owned() }, card: None };
+        match r.kind {
+            RefKind::Ask => match orch.workspace().read_orchestration_with(|doc| doc.ask(&r.id)) {
+                Some(ask) if ask.state == AskState::Open => Aim::Answer { ask_id: ask.id, asker: ask.from_chat },
+                // Answered already: a follow-up for the asker.
+                Some(ask) => direct(&ask.from_chat),
+                None => r.context("chat").filter(|c| chat_exists(c)).map_or(Aim::Routed, direct),
+            },
+            RefKind::Card => match orch.item(&r.id) {
+                Some(card) => {
+                    let target = match (card.threads.first(), card.orchestrator_id.as_deref()) {
+                        (Some(thread), _) => RouteTarget::Chat { id: thread.clone() },
+                        (None, Some(owner)) if orch.orchestrator(owner).is_some() => {
+                            RouteTarget::Orchestrator { id: owner.to_owned() }
+                        }
+                        _ => return Aim::OnCard { item_id: card.id },
+                    };
+                    Aim::Direct { target, card: Some(card.id) }
+                }
+                None => Aim::Routed,
+            },
+            RefKind::Chat if chat_exists(&r.id) => direct(&r.id),
+            RefKind::Qa => {
+                let answered_by = r.context("dump").and_then(|dump| {
+                    orch.workspace()
+                        .read_orchestration_with(|doc| doc.dump(dump))
+                        .and_then(|d| d.routes.into_iter().find(|x| x.id == r.id))
+                        .and_then(|x| target_chat(&x.target).map(str::to_owned))
+                });
+                answered_by
+                    .or_else(|| r.context("chat").map(str::to_owned))
+                    .filter(|c| chat_exists(c))
+                    .map_or(Aim::Routed, |c| direct(&c))
+            }
+            _ => Aim::Routed,
+        }
+    }
+
+    /// What a route answers ask `ask_id` with: one of its options when the
+    /// reply is just that option, else the reply.
+    ///
+    /// Always the person's own words: the fragment quoted verbatim from the
+    /// dump (never the Brain dump's rewording, which would answer as the
+    /// person in words they didn't write). `None` when the excerpt isn't
+    /// found in the dump's text.
+    fn answer_text(&self, ask_id: &str, route: &Route) -> Option<String> {
+        route.span?;
+        let reply = route.excerpt.trim();
+        if reply.is_empty() {
+            return None;
+        }
+        let bare = reply.trim_end_matches(['.', '!']).trim().to_lowercase();
+        let ask = self.orchestration().workspace().read_orchestration_with(|doc| doc.ask(ask_id));
+        ask.and_then(|a| a.options.into_iter().find(|o| o.label.trim().to_lowercase() == bare))
+            .map_or_else(|| reply.to_owned(), |o| o.label)
+            .into()
+    }
+
+    /// A comment kept on card `item_id` (no thread or owner to tell yet):
+    /// added to its detail.
+    fn note_on_card(&self, item_id: &str, route: &Route) -> Result<(), RpcError> {
+        let orch = self.orchestration();
+        let card = orch.item(item_id).ok_or_else(|| failed(format!("No card {item_id}")))?;
+        let comment = if route.message.trim().is_empty() { route.excerpt.trim() } else { route.message.trim() };
+        let detail = if card.detail.trim().is_empty() {
+            comment.to_owned()
+        } else {
+            format!("{}\n\n{comment}", card.detail.trim_end())
+        };
+        orch.patch_item(WorkItemPatch { id: Some(card.id), detail: Some(detail), ..Default::default() })
+            .map(|_| ())
+            .map_err(RpcError::Failed)
     }
 
     /// The answer to "how's it going?" for `chat`, from its progress, when

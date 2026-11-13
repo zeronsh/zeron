@@ -27,6 +27,7 @@ local hue = require("@self/orch_hue")
 local Badge = require("@self/badge")
 local hold = require("@self/orch_hold")
 local data = require("@self/orch_data")
+local Ref = require("@self/orch_ref")
 
 export type Props = {
 	needs: () -> { any },
@@ -166,6 +167,29 @@ return ui.component(function(props: Props): Node
 		local function turn_end(): boolean
 			return data.turn_end(ask())
 		end
+		-- Dragged by its head or its question: a reference to the ask (a chat
+		-- awaiting input, to the chat), for Capture (ds/orch_ref).
+		local drag = Ref.source(function(): any
+			local n = item:peek()
+			local a = n.ask
+			if a and type(a.id) == "string" then
+				local options: { string } = {}
+				for _, o in a.options or {} do
+					if type(o.label) == "string" then
+						table.insert(options, o.label)
+					end
+				end
+				return Ref.make("ask", a.id, a.question, {
+					chat = a.from_chat or n.from,
+					orchestrator = a.orchestrator_id,
+					options = if #options > 0 then table.concat(options, " / ") else nil,
+				})
+			end
+			if type(n.from) == "string" then
+				return Ref.make("chat", n.from, props.name_of(n.from), { state = "input" })
+			end
+			return nil
+		end)
 		local gone = ui.computed(is_leaving)
 		local state = hold.value(function(): status.Kind
 			return KIND_STATUS[kind()] or "input"
@@ -185,6 +209,11 @@ return ui.component(function(props: Props): Node
 			end), { duration = LEAVE_MS, ease = "inCubic" }),
 			-- Who asks, what kind of ask, how long ago.
 			ui.row {
+				class = "orch-need-head",
+				on_drag = drag.on_drag,
+				drag_preview = drag.drag_preview,
+				drag_preview_anchor = drag.drag_preview_anchor,
+				drag_preview_offset = drag.drag_preview_offset,
 				w_full = true,
 				gap = "$space.2",
 				items = "center",
@@ -271,7 +300,15 @@ return ui.component(function(props: Props): Node
 						runs.text_size = "$font.size.md"
 						runs.line_height = "$font.line.md"
 						runs.color = "$text.primary"
-						return ui.rich(runs)
+						return ui.div {
+							class = "orch-need-question",
+							w_full = true,
+							on_drag = drag.on_drag,
+							drag_preview = drag.drag_preview,
+							drag_preview_anchor = drag.drag_preview_anchor,
+							drag_preview_offset = drag.drag_preview_offset,
+							ui.rich(runs),
+						}
 					end
 					-- (Awaiting input: its question is in the chat; the head says whose.)
 					return ui.div {}

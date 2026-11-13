@@ -42,6 +42,7 @@ local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
 local Card = require("@self/orch_card")
 local toast = require("@self/toast")
+local Ref = require("@self/orch_ref")
 
 local M = {}
 
@@ -476,8 +477,17 @@ local function entry(props: Props, row: State<Entry>): Node
 		}),
 	}
 
+	-- Dragged: a reference to the question (ds/orch_ref), for Capture.
+	local drag = Ref.source(function(): any
+		local en = row:peek()
+		return Ref.make("qa", en.route_id, en.question, { dump = en.dump_id, chat = en.chat, answer = en.answer })
+	end)
 	local box = ui.button {
 		class = "orch-qa-entry",
+		on_drag = drag.on_drag,
+		drag_preview = drag.drag_preview,
+		drag_preview_anchor = drag.drag_preview_anchor,
+		drag_preview_offset = drag.drag_preview_offset,
 		label = function(): string
 			return e().question
 		end,

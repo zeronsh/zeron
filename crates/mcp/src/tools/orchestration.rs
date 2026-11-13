@@ -253,7 +253,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ROUTE,
-            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a board card: with an id, that card; with no id, a new card for what should wait, Inbox by default or Next with `card: next`, in `project`; the person starts it from the board); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes)",
+            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a board card: with an id, that card; with no id, a new card for what should wait, Inbox by default or Next with `card: next`, in `project`; the person starts it from the board); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes). When the fragment is about one of the dump's references, set reference to its id: Zeron delivers it to that element whatever the target (a reply to an @ask answers it; a comment on an @card goes to the card's thread; @chat to that chat; a follow-up on a @qa to the chat that answered it), so target note is fine there; an @device is where a new thread starts; an @orchestrator or @comm is context.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -268,7 +268,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "project": s("For newThread/newOrchestrator/a new item: the project it is about (id, name or path, from world)."),
                     "device": s("For newThread/newOrchestrator/a new item: the device (id or name); with a project, that project's own."),
                     "card": { "type": "string", "enum": ["inbox", "next"], "description": "For a new item: inbox (Later: someday, remind me, ideas; never started on its own; the default) or next (Up next: queued real work, after something else)." },
-                    "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." }
+                    "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." },
+                    "reference": s("The id of the dump's reference (an element the person attached: @card, @chat, @ask…) this fragment is about. Only ids the dump lists.")
                 },
                 "required": ["dump", "excerpt", "target", "intent"]
             }),
@@ -438,6 +439,9 @@ struct RouteArgs {
     candidates: Vec<RouteTarget>,
     #[serde(default)]
     progress: bool,
+    /// The dump's reference (its id) the fragment is about.
+    #[serde(default)]
+    reference: Option<String>,
     attachments: Option<Vec<String>>,
     /// For a new card: `inbox` (Later) or `next` (Up next: after something else).
     #[serde(default)]
@@ -632,6 +636,7 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 "op": "route", "dumpId": nonempty("dump", &a.dump)?, "excerpt": nonempty("excerpt", &a.excerpt)?,
                 "target": a.target, "intent": intent, "message": a.message, "title": title, "candidates": a.candidates,
                 "progress": a.progress, "attachments": a.attachments, "itemState": item_state,
+                "reference": a.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()),
             }))
         }
         SCRATCHPAD_READ => Ok(json!({ "op": "read" })),
@@ -1511,6 +1516,12 @@ mod tests {
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "unsure" }, "intent": "task" }), &brain).is_err());
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "chat", "id": "c" }, "intent": "task" }), &brain).is_err());
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "note" }, "intent": "gossip" }), &brain).is_err());
+        let answered = op_for(ROUTE, json!({ "dump": "d", "excerpt": "approve", "target": { "kind": "note" }, "intent": "info", "reference": " a1 " }), &brain).unwrap();
+        assert_eq!(answered["reference"], "a1", "the reference rides the op");
+        let op: zeron_proto::orchestration::OrchestrateOp = serde_json::from_value(answered).unwrap();
+        assert!(matches!(op, zeron_proto::orchestration::OrchestrateOp::Route { reference: Some(_), .. }));
+        let plain = op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "note" }, "intent": "note" }), &brain).unwrap();
+        assert!(plain["reference"].is_null());
         assert!(op_for(DUMP_DONE, json!({ "dump": "d", "summary": "" }), &brain).is_err());
     }
 

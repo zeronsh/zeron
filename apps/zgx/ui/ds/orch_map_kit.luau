@@ -14,12 +14,17 @@
 --                            `hit(x, y)` finds there (an id) and `menu(id)`
 --                            offers; `register(key, open)` hands the Map a
 --                            way to open it for an id (`center(id)`: where)
+--   kit.ref_drag(world, id, title?)
+--                            a row's drag source props: a reference to the
+--                            thread or orchestrator `id()` is (ds/orch_ref),
+--                            for Capture's composer to take
 
 local status = require("@self/status")
 local ContextMenu = require("@self/context_menu")
 local locale = require("@self/locale")
 local hold = require("@self/orch_hold")
 local model = require("@self/orch_map_model")
+local Ref = require("@self/orch_ref")
 
 local M = {}
 
@@ -139,6 +144,25 @@ function M.MenuField(p: MenuProps): Node
 			p.child,
 		},
 	}
+end
+
+-- What `id` is on the Map, as a reference: an orchestrator (the Brain dump
+-- too), else a thread.
+function M.ref_of(world: () -> any, id: string, title: string?): any
+	local w = world() or {}
+	local now = w.now or {}
+	for _, o in now.orchestrators or {} do
+		if o.id == id then
+			return Ref.orchestrator(o, id)
+		end
+	end
+	return Ref.thread(now, (w.chats or {})[id], id, title)
+end
+
+function M.ref_drag(world: () -> any, id: () -> string, title: (() -> string?)?): { [string]: any }
+	return Ref.source(function(): any
+		return M.ref_of(world, id(), if title then title() else nil)
+	end)
 end
 
 return M

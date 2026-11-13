@@ -32,6 +32,7 @@ local sim = require("@self/orch_map_sim")
 local Cells = require("@self/orch_cells")
 local ContextUsage = require("@self/context_usage")
 local MachineHead = require("@self/orch_machine_head")
+local Ref = require("@self/orch_ref")
 
 local M = {}
 
@@ -1390,8 +1391,113 @@ M.View = ui.component(function(props: {
 	end
 
 	-- The pointer: a press on a node may become a drag (the node follows,
-	-- placed where let go) or a click (it opens); on the space, a pan.
+	-- placed where let go) or a click (it opens); on the space, a pan. The
+	-- node under the pointer has a grip beside it whose drag is a reference
+	-- to it instead (ds/orch_ref, for Capture's composer), the node staying
+	-- put. (The field holds its press from press to release, so no drag of
+	-- zgx's starts in it: the grip sits beside it, over it.)
 	local press: any = nil
+	local function ref_of(id: string): any
+		local n = graph.nodes[graph.index[id] or 0]
+		if not n then
+			return nil
+		end
+		if n.kind == "device" then
+			local dev = string.sub(id, 5)
+			for _, d in props.world().devices or {} do
+				if d.id == dev then
+					return Ref.device(d)
+				end
+			end
+			return nil
+		end
+		return kit.ref_of(props.world, id, n.title)
+	end
+	-- The node the grip is for (the last under the pointer), and whether the
+	-- pointer is on the grip (beside the field, so the field's own pointer
+	-- never holds its press).
+	local grip_for = ui.use_state(nil :: string?)
+	local grip_hot = ui.use_state(false)
+	local in_field = false
+	ui.effect(function()
+		local id = M.hover:get()
+		if id and id ~= grip_for:peek() then
+			grip_for:set(id)
+		end
+	end)
+	-- The node under the pointer's grip, at its right edge (a machine's, its
+	-- tab's): dragged, a reference to it.
+	local function grip_at(): (number, number)
+		tick:get()
+		settled:get()
+		version:get()
+		local id = grip_for:get()
+		local n = if id then graph.nodes[graph.index[id] or 0] else nil
+		if not n then
+			return -1000, -1000
+		end
+		local t = tabs[id :: string]
+		if t then
+			return t[3] + 4, (t[2] + t[4]) / 2
+		end
+		local v = view:get()
+		local x, y = screen(n, v)
+		return x + math.max(n.r * v.zoom, 5) + 4, y
+	end
+	local function on_grip(px: number, py: number): boolean
+		local x, y = grip_at()
+		return px >= x - 2 and px <= x + 22 and py >= y - 12 and py <= y + 12
+	end
+	local function grip(): Node
+		local at = grip_at
+		return ui.div {
+			id = "orch-graph-grip",
+			class = "orch-graph-grip",
+			label = locale.t("ds.orch.map.reference"),
+			absolute = true,
+			left = function(): number
+				local x = at()
+				return x
+			end,
+			top = function(): number
+				local _, y = at()
+				return y - 10
+			end,
+			w = 20,
+			h = 20,
+			rounded = "$radius.sm",
+			items = "center",
+			justify = "center",
+			color = "$text.secondary",
+			bg = "$surface.raised",
+			border = 1,
+			border_color = "$border",
+			hover = { bg = "$hover" },
+			on_hover = function(inside: boolean)
+				grip_hot:set(inside)
+				-- (Left for the space: nothing under the pointer.)
+				if not inside then
+					ui.after(0, function()
+						if not grip_hot:peek() and not in_field and not press then
+							M.hover:set(nil)
+						end
+					end)
+				end
+			end,
+			on_drag = function(): any
+				local id = grip_for:peek()
+				local r = if id then ref_of(id) else nil
+				return if r then { ref = r } else nil
+			end,
+			drag_preview = function(payload: any): Node
+				local r = Ref.of(payload)
+				return if r then Ref.Pill(r) else ui.div {}
+			end,
+			drag_preview_anchor = { 0, 0.5 },
+			drag_preview_offset = { 12, 0 },
+			Icon { name = "drag-handle", size = 12 },
+		}
+	end
 	local function to_world(px: number, py: number): (number, number)
 		local v = view:peek()
 		return (px - v.x) / v.zoom, (py - v.y) / v.zoom
@@ -1656,6 +1762,7 @@ M.View = ui.component(function(props: {
 	return ui.column {
 		class = "orch-map-graph",
 		w_full = true,
+		relative = true,
 		on_resize = function(size: { w: number, h: number })
 			if math.abs(size.w - width:peek()) >= 1 then
 				width:set(size.w)
@@ -1726,6 +1833,10 @@ M.View = ui.component(function(props: {
 					end
 					return
 				end
+				-- (Over the hovered node's grip: still that node's.)
+				if M.hover:peek() and on_grip(e.local_x, e.local_y) then
+					return
+				end
 				local n = hit(e.local_x, e.local_y)
 				local id = n and n.id
 				if id ~= M.hover:peek() then
@@ -1751,8 +1862,15 @@ M.View = ui.component(function(props: {
 				end
 			end,
 			on_hover = function(inside: boolean)
+				in_field = inside
 				if not inside and not press then
-					M.hover:set(nil)
+					-- (Onto the grip beside it: still the node's, as the grip
+					-- says the moment after.)
+					ui.after(0, function()
+						if not grip_hot:peek() and not press then
+							M.hover:set(nil)
+						end
+					end)
 				end
 			end,
 			-- (A plain scroll is the page's: it scrolls past the Map. Only
@@ -1836,6 +1954,10 @@ M.View = ui.component(function(props: {
 			},
 		},
 		},
+		-- (The grip, over the field, beside it in the tree.)
+		ui.show(function(): boolean
+			return M.hover:get() ~= nil or grip_hot:get()
+		end, grip()),
 	}
 end)
 
