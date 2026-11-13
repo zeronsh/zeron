@@ -34,6 +34,7 @@
 
 mod antigravity_paths;
 mod devin_models;
+mod hermes_names;
 mod normalize;
 mod permission;
 mod subagent;
@@ -2832,6 +2833,9 @@ impl AcpHarness {
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                 .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
+            if self.spec.id == HarnessId::Hermes {
+                hermes_names::name_models(&mut models);
+            }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
