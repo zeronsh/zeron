@@ -152,7 +152,13 @@ change, never deleted (`crates/engine/src/orchestration/progress.rs`).
     one finished its todo list or reported done.
   - A **step** is a todo item started or completed, a tool call finished, or a report filed. A step
     alone is written at most every 15 s.
-  - **Stalled**: working, with no step for longer than max(5 min, 3 × the median step interval).
+  - **Stalled**: working and seemingly stuck. With no tool call running: no step for longer than
+    max(5 min, 3 × the median step interval). While one runs (a 10-minute `cargo test` is healthy),
+    only once that one call has run longer than 45 min (`PROGRESS_TOOL_STALL_SECS`).
+  - **Running tool**: `tool` (its redacted label) and `toolSince`, once a call has run 15 s, so the
+    UI shows "cargo test · 9m". `step` is the todo item in progress, else that tool; the live label of
+    every moment stays on the session row (`Session.activity`).
+  - **`refreshing`**: a fresh note is being written (by the host, or asked of it from another device).
   - **ETA**: only while working with ≥ 3 todo items done and timed of a known total: the median
     item time × the items left (less what the current item already took, never below the items after
     it). Seconds left as of `updatedAt`.
@@ -278,7 +284,8 @@ orchestration.loads:get() = { [device_id] = { cpu?, mem_used?, mem_total?, load1
 orchestration.comms:get() = { { id, kind, from, to, summary, at } }   -- newest last, ≤ 100
 -- WatchProgress (suggested shape for the UI stream):
 orchestration.progress:get() = { [chat_id] = { state, device_id, started?, last_step?, step?,
-                                  steps? = { done, total }, note?, note_at?, stalled, eta_secs?, updated } }
+                                  steps? = { done, total }, note?, note_at?, stalled, tool?, tool_since?,
+                                  refreshing, eta_secs?, updated } }
 ```
 
 Enum strings are snake_case (`brain_dump`, `needs_you`, `new_orchestrator`…). Chats come from

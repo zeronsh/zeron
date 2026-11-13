@@ -1040,8 +1040,9 @@ pub struct Progress {
     /// [`PROGRESS_STEP_WRITE_SECS`] when nothing else changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_step_at: Option<DateTime<Utc>>,
-    /// The todo item in progress, else what the agent is doing now (a
-    /// redacted, short label, like `ChatActivity::label`).
+    /// The todo item in progress, else the tool call running (see `tool`).
+    /// The live activity of every moment rides the session row
+    /// (`Session::activity`); this row doesn't churn with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
     /// From the newest todo list.
@@ -1052,10 +1053,24 @@ pub struct Progress {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_at: Option<DateTime<Utc>>,
-    /// Working, but no step for longer than max(5 min, 3 × its median step
-    /// interval).
+    /// Working and seemingly stuck. With no tool call running: no step for
+    /// longer than max(5 min, 3 × its median step interval). While one runs
+    /// (a long test run is healthy), only once that one call has run longer
+    /// than [`PROGRESS_TOOL_STALL_SECS`].
     #[serde(default)]
     pub stalled: bool,
+    /// The tool call running now, once it has run for
+    /// [`PROGRESS_STEP_WRITE_SECS`] (shorter ones never show): its label
+    /// (redacted and short, like `ChatActivity::label`) and when it started.
+    /// Clients show "cargo test · 9m" from these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_since: Option<DateTime<Utc>>,
+    /// A fresh note is being written now (by the host, or asked of it by
+    /// `progressCheck` from another device).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refreshing: bool,
     /// Seconds left as of `updatedAt`: the median time of a finished todo
     /// item × the items left. Only with ≥ 3 items done of a known total,
     /// while working; never a guess otherwise.
@@ -1119,6 +1134,8 @@ pub const PROGRESS_NOTE_MAX: usize = 140;
 pub const PROGRESS_STRETCH_GAP_SECS: i64 = 10 * 60;
 /// How often a step alone (nothing else changed) is written.
 pub const PROGRESS_STEP_WRITE_SECS: i64 = 15;
+/// One tool call running longer than this counts as stalled (45 min).
+pub const PROGRESS_TOOL_STALL_SECS: i64 = 45 * 60;
 
 /// A model's note as a progress row keeps it: its first line, secrets
 /// redacted, quote and heading dressing gone, one line of at most
@@ -1153,6 +1170,9 @@ impl Progress {
             Some(at) => format!("{} {}", self.state.as_str(), short_duration((now - at).num_seconds())),
             None => self.state.as_str().to_owned(),
         }];
+        if let Some(at) = self.tool_since.filter(|_| self.state == ProgressState::Working) {
+            parts.push(format!("a tool running {}", short_duration((now - at).num_seconds())));
+        }
         if let Some(at) = self.last_step_at {
             parts.push(format!("last step {} ago", short_duration((now - at).num_seconds())));
         }
@@ -1176,10 +1196,14 @@ impl Progress {
     pub fn answer(&self, now: DateTime<Utc>) -> String {
         let note = self.note.as_deref().map(progress_note).filter(|n| !n.is_empty());
         let step = self.step.as_deref().map(|s| prompt_text::one_line(s, LIVE_LABEL_MAX)).filter(|s| !s.is_empty());
+        let clocks = match self.tool.as_deref().map(|t| prompt_text::one_line(t, LIVE_LABEL_MAX)).filter(|t| !t.is_empty()) {
+            Some(tool) if self.tool_since.is_some() => self.clocks(now).replacen("a tool running", &tool, 1),
+            _ => self.clocks(now),
+        };
         match (note, step) {
-            (Some(note), _) => format!("{note} ({})", self.clocks(now)),
-            (None, Some(step)) => format!("{step} ({})", self.clocks(now)),
-            (None, None) => prompt_text::one_line(&self.clocks(now), BLOCK_LINE_MAX),
+            (Some(note), _) => format!("{note} ({clocks})"),
+            (None, Some(step)) => format!("{step} ({clocks})"),
+            (None, None) => prompt_text::one_line(&clocks, BLOCK_LINE_MAX),
         }
     }
 
@@ -1190,6 +1214,9 @@ impl Progress {
         let mut text = String::new();
         if let Some(step) = self.step.as_deref().map(|s| prompt_text::one_line(s, LIVE_LABEL_MAX)).filter(|s| !s.is_empty()) {
             text.push_str(&format!("Step: {step}\n"));
+        }
+        if let Some(tool) = self.tool.as_deref().map(|s| prompt_text::one_line(s, LIVE_LABEL_MAX)).filter(|s| !s.is_empty()) {
+            text.push_str(&format!("Running: {tool}\n"));
         }
         if let Some(note) = self.note.as_deref().map(progress_note).filter(|n| !n.is_empty()) {
             text.push_str(&format!("Note: {note}"));
@@ -1704,9 +1731,31 @@ mod tests {
             note: note.map(Into::into),
             note_at: Some(now),
             stalled: false,
+            tool: None,
+            tool_since: None,
+            refreshing: false,
             eta_secs: Some(600),
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn a_running_tool_reads_with_its_clock() {
+        let base = progress(Some("Running the suite"));
+        let now = base.updated_at;
+        let p = Progress { tool: Some("cargo test -p zeron-engine".into()), tool_since: Some(now - chrono::Duration::minutes(9)), ..base };
+        assert!(p.clocks(now).contains("a tool running 9m"), "{}", p.clocks(now));
+        assert!(p.answer(now).contains("(working 1h 15m, cargo test -p zeron-engine 9m,"), "{}", p.answer(now));
+        // The label is the agent's text: an agent reads it fenced.
+        let text = p.for_agent(now);
+        let (head, block) = text.split_once('\n').unwrap();
+        assert!(!head.contains("cargo test"), "{head}");
+        assert!(block.contains("Running: cargo test -p zeron-engine"));
+        // The wire: absent when not running or refreshing.
+        let json = serde_json::to_value(progress(None)).unwrap();
+        assert!(json.get("tool").is_none() && json.get("toolSince").is_none() && json.get("refreshing").is_none());
+        let json = serde_json::to_value(Progress { refreshing: true, ..p }).unwrap();
+        assert_eq!((json["refreshing"].as_bool(), json["tool"].as_str()), (Some(true), Some("cargo test -p zeron-engine")));
     }
 
     #[test]

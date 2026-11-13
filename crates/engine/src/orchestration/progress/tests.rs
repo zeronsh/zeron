@@ -53,7 +53,11 @@ fn finished(status: DoneStatus) -> Session {
 }
 
 fn doing(kind: ActivityKind, label: &str) -> Session {
-    Session { activity: Some(ChatActivity { kind, label: label.into(), since: t0() }), ..working() }
+    doing_since(kind, label, t0())
+}
+
+fn doing_since(kind: ActivityKind, label: &str, since: DateTime<Utc>) -> Session {
+    Session { activity: Some(ChatActivity { kind, label: label.into(), since }), ..working() }
 }
 
 fn todo(done: u32, total: u32, current: Option<&str>) -> Option<TodoProgress> {
@@ -115,10 +119,11 @@ fn steps_are_todo_items_finished_tools_and_reports() {
     assert_eq!(p.last_step_at, Some(secs(80)));
     assert_eq!(p.step.as_deref(), Some("Write the parser"));
     assert_eq!(p.steps, Some(ProgressSteps { done: 0, total: 3 }));
-    // Without a current item, the step is the activity.
+    // Without a current item, the step is the tool call running a while.
     let mut other = Tracker::new("c", "here");
     other.observe(&doing(ActivityKind::Editing, "Edit lib.rs"), secs(0));
-    assert_eq!(other.snapshot(secs(0)).step.as_deref(), Some("Edit lib.rs"));
+    assert_eq!(other.snapshot(secs(5)).step, None);
+    assert_eq!(other.snapshot(secs(20)).step.as_deref(), Some("Edit lib.rs"));
     // A report is a step; a done report finishes the work.
     t.report(ReportState::Done, secs(90));
     t.observe(&with_todo(finished(DoneStatus::Completed), todo(0, 3, Some("Write the parser"))), secs(95));
@@ -150,6 +155,35 @@ fn stalled_is_five_minutes_or_three_median_intervals_without_a_step() {
     t.observe(&working(), mins(300));
     assert!(!t.stalled(mins(304)));
     assert!(t.snapshot(mins(330)).stalled);
+}
+
+#[test]
+fn a_long_tool_call_is_not_a_stall() {
+    let mut t = Tracker::new("c", "here");
+    t.observe(&working(), mins(0));
+    t.observe(&doing_since(ActivityKind::Testing, "cargo test -p zeron-engine", mins(1)), mins(1));
+    // Ten minutes into the test run, no step since it started: healthy.
+    assert!(!t.stalled(mins(11)));
+    let p = t.snapshot(mins(11));
+    assert!(!p.stalled);
+    assert_eq!((p.tool.as_deref(), p.tool_since), (Some("cargo test -p zeron-engine"), Some(mins(1))));
+    // A short call doesn't show at all.
+    assert_eq!(t.snapshot(mins(1) + TimeDelta::seconds(5)).tool, None);
+    // One call past the ceiling is a stall.
+    assert!(!t.stalled(mins(1) + TOOL_STALL));
+    assert!(t.stalled(mins(2) + TOOL_STALL));
+    // It ends: a step, the clock restarts, nothing running shows.
+    t.observe(&doing_since(ActivityKind::Thinking, "Thinking", mins(50)), mins(50));
+    let p = t.snapshot(mins(54));
+    assert!(!p.stalled && p.tool.is_none() && p.tool_since.is_none());
+    assert_eq!(p.last_step_at, Some(mins(50)));
+    // The row is rewritten when a long call shows and when it goes.
+    let before = t.snapshot(mins(54));
+    t.observe(&doing_since(ActivityKind::Building, "cargo build", mins(55)), mins(55));
+    assert!(!needs_write(Some(&before), &t.snapshot(mins(55))), "not for a call just started");
+    let shown = t.snapshot(mins(56));
+    assert!(needs_write(Some(&before), &shown));
+    assert!(!needs_write(Some(&shown), &t.snapshot(mins(57))));
 }
 
 #[test]
@@ -340,6 +374,9 @@ fn watch_progress_keeps_live_recent_and_crew_chats() {
         note: None,
         note_at: None,
         stalled: false,
+        tool: None,
+        tool_since: None,
+        refreshing: false,
         eta_secs: None,
         updated_at: now - TimeDelta::hours(hours),
     };
@@ -433,6 +470,15 @@ async fn the_host_writes_its_chats_rows_and_notes_as_one_clean_line() {
     let (_temp, core, rpc) = core().await;
     let orch = &core.orchestration;
     let (f, runs) = notes("\"Fixing the parser;\u{7} tests\nnext line\"");
+    // While the note is made, the row says so.
+    let workspace = core.workspace.clone();
+    let seen_refreshing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = seen_refreshing.clone();
+    let f: NoteFn = Arc::new(move |harness, prompt| {
+        let row = workspace.read_orchestration_with(|doc| doc.progress("c1"));
+        seen.store(row.is_some_and(|r| r.refreshing), Ordering::SeqCst);
+        f(harness, prompt)
+    });
     orch.progress().set_note_fn(f);
     chat(&rpc, "c1", &core.device_id, None).await;
     let now = Utc::now();
@@ -452,6 +498,8 @@ async fn the_host_writes_its_chats_rows_and_notes_as_one_clean_line() {
     let row = core.workspace.read_orchestration_with(|doc| doc.progress("c1")).unwrap();
     assert_eq!(row.state, ProgressState::Done);
     assert_eq!(row.note.as_deref(), Some("Fixing the parser; tests"), "one line, no control characters");
+    assert!(seen_refreshing.load(Ordering::SeqCst), "refreshing while the note was made");
+    assert!(!row.refreshing, "and not after");
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     // Another automatic one right away is held back.
     orch.progress().note(orch, "c1", Why::Report).await;
@@ -480,6 +528,8 @@ async fn progress_check_makes_a_fresh_note_at_most_every_fifteen_seconds() {
     assert_eq!(reply["steps"], json!({"done":2,"total":5}));
     assert_eq!(reply["step"], "Parser");
     assert_eq!(reply["refreshing"], false);
+    let row = core.workspace.read_orchestration_with(|doc| doc.progress("c1")).unwrap();
+    assert!(!row.refreshing);
     // Right away again: the latest note, no new run.
     let again = call(&rpc, Caller::Local, methods::ORCHESTRATE, check).await.unwrap();
     assert_eq!(again["note"], reply["note"]);
@@ -508,6 +558,9 @@ async fn another_devices_chat_is_asked_through_its_doc() {
         note: Some("Running the tests".into()),
         note_at: Some(Utc::now() - TimeDelta::minutes(3)),
         stalled: false,
+        tool: None,
+        tool_since: None,
+        refreshing: false,
         eta_secs: None,
         updated_at: Utc::now(),
     };

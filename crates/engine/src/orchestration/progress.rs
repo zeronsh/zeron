@@ -28,7 +28,7 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::orchestration::{
-    ActivityKind, ChatActivity, PROGRESS_STEP_WRITE_SECS, PROGRESS_STRETCH_GAP_SECS, Progress, ProgressState,
+    ActivityKind, ChatActivity, PROGRESS_STEP_WRITE_SECS, PROGRESS_STRETCH_GAP_SECS, PROGRESS_TOOL_STALL_SECS, Progress, ProgressState,
     ProgressSteps, ReportState, TodoProgress, activity_of, live_label, progress_note,
 };
 use zeron_proto::{DoneStatus, HarnessId, Session, SessionStatus, ToolCall};
@@ -40,6 +40,8 @@ use crate::rpc::EngineRpc;
 
 /// The least a working chat goes without a step before it counts as stalled.
 pub(crate) const STALL_FLOOR: TimeDelta = TimeDelta::minutes(5);
+/// One tool call running longer than this counts as stalled.
+pub(crate) const TOOL_STALL: TimeDelta = TimeDelta::seconds(PROGRESS_TOOL_STALL_SECS);
 /// Automatic notes, at most this often per chat.
 pub(crate) const NOTE_AUTO_EVERY: TimeDelta = TimeDelta::seconds(60);
 /// On-demand notes, at most this often per chat (the latest note otherwise).
@@ -302,11 +304,26 @@ impl Tracker {
         }
     }
 
-    /// Working with no step for longer than max(5 min, 3 × the median step
-    /// interval).
+    /// The tool call running now: its label and when it started.
+    pub(crate) fn running_tool(&self, now: DateTime<Utc>) -> Option<(&str, DateTime<Utc>)> {
+        if self.state() != ProgressState::Working {
+            return None;
+        }
+        self.activity
+            .as_ref()
+            .filter(|a| a.kind != ActivityKind::Thinking)
+            .map(|a| (a.label.as_str(), a.since.min(now)))
+    }
+
+    /// Working and seemingly stuck. No tool call running: no step for
+    /// longer than max(5 min, 3 × the median step interval). One running
+    /// (a long test run is healthy): only past [`TOOL_STALL`].
     pub(crate) fn stalled(&self, now: DateTime<Utc>) -> bool {
         if self.state() != ProgressState::Working {
             return false;
+        }
+        if let Some((_, since)) = self.running_tool(now) {
+            return now - since > TOOL_STALL;
         }
         let Some(from) = self.last_step_at.max(self.resumed_at).or(self.started_at) else {
             return false;
@@ -339,11 +356,16 @@ impl Tracker {
 
     pub(crate) fn snapshot(&self, now: DateTime<Utc>) -> Progress {
         let state = self.state();
+        // A call shows once it has run a while: short ones would only churn
+        // the row (the session row carries the live activity).
+        let tool = self
+            .running_tool(now)
+            .filter(|(_, since)| now - *since >= TimeDelta::seconds(PROGRESS_STEP_WRITE_SECS));
         let step = self
             .todo
             .as_ref()
             .and_then(|t| t.current.clone())
-            .or_else(|| self.activity.as_ref().filter(|_| state == ProgressState::Working).map(|a| a.label.clone()))
+            .or_else(|| tool.map(|(label, _)| label.to_owned()))
             .map(|s| live_label(&s))
             .filter(|s| !s.is_empty());
         Progress {
@@ -357,6 +379,9 @@ impl Tracker {
             note: self.note.clone(),
             note_at: self.note_at,
             stalled: self.stalled(now),
+            tool: tool.map(|(label, _)| live_label(label)).filter(|l| !l.is_empty()),
+            tool_since: tool.map(|(_, since)| since),
+            refreshing: false,
             eta_secs: self.eta_secs(now),
             updated_at: now,
         }
@@ -383,6 +408,9 @@ pub(crate) fn needs_write(written: Option<&Progress>, next: &Progress) -> bool {
         || old.note != next.note
         || old.note_at != next.note_at
         || old.stalled != next.stalled
+        || old.tool != next.tool
+        || old.tool_since != next.tool_since
+        || old.refreshing != next.refreshing
         || eta_moved;
     let step_moved = match (old.last_step_at, next.last_step_at) {
         (Some(a), Some(b)) => (b - a).num_seconds().abs() >= PROGRESS_STEP_WRITE_SECS,
@@ -676,7 +704,8 @@ impl ProgressBook {
         let (next, write) = {
             let mut chats = lock(&self.chats);
             let entry = chats.get_mut(chat_id)?;
-            let next = entry.tracker.snapshot(now);
+            let mut next = entry.tracker.snapshot(now);
+            next.refreshing = entry.clock.in_flight;
             let write = needs_write(entry.written.as_ref(), &next);
             if write {
                 entry.written = Some(next.clone());
@@ -807,6 +836,8 @@ impl ProgressBook {
     pub(crate) async fn note(&self, orch: &Orchestration, chat_id: &str, why: Why) -> Option<Progress> {
         let now = Utc::now();
         if self.claim(chat_id, why, now) == Claim::Go {
+            // The row says a note is on its way while it is.
+            self.flush(orch, chat_id, now);
             let made = self.make_note(orch, chat_id, why).await;
             let note = made.as_ref().and_then(|(note, fp)| note.clone().map(|n| (n, fp.clone())));
             self.release(chat_id, note.as_ref().map(|(_, fp)| fp.clone()));
@@ -956,9 +987,11 @@ pub(crate) fn may_check(rpc: &EngineRpc, who: &Who, chat_id: &str) -> bool {
 }
 
 fn reply(progress: &Progress, refreshing: bool) -> Value {
+    let progress = Progress { refreshing: progress.refreshing || refreshing, ..progress.clone() };
     let mut value = serde_json::to_value(progress).unwrap_or(Value::Null);
+    // Always said, so a caller needn't know the field's default.
     if let Value::Object(map) = &mut value {
-        map.insert("refreshing".into(), json!(refreshing));
+        map.entry("refreshing").or_insert(json!(false));
     }
     value
 }
