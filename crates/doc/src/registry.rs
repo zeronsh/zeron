@@ -45,6 +45,11 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+mod orchestration;
+pub use orchestration::{
+    KIND_ASKS, KIND_CREW, KIND_DUMPS, KIND_ORCHESTRATORS, KIND_WORK_ITEMS, MAX_DUMPS_IN_STATE,
+    MAX_TEXT_FIELD_BYTES, ORCHESTRATION_KINDS,
+};
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;
@@ -1774,6 +1779,28 @@ impl RegistryDoc {
             KIND_CHATS,
             chat_id,
             fields([("roomGen", json!(room_gen))]),
+            same_value,
+        );
+        Ok(true)
+    }
+
+    /// A chat's parent and what it is to it (`None`: no parent, top-level).
+    /// `false` when no such row.
+    pub fn set_chat_parent(
+        &mut self,
+        chat_id: &str,
+        parent: Option<(&str, zeron_proto::ChildKind)>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.update_changed(
+            KIND_CHATS,
+            chat_id,
+            fields([
+                ("parentChatId", opt_str(parent.map(|(p, _)| p))),
+                ("childKind", opt_str(parent.map(|(_, k)| k.as_str()))),
+            ]),
             same_value,
         );
         Ok(true)

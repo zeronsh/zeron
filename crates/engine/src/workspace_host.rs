@@ -204,6 +204,8 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
+    /// Orchestration rows (`crate::orchestration`), republished on change.
+    orchestration_tx: watch::Sender<zeron_proto::orchestration::OrchestrationState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// [`WorkspaceHost::registry_synced`], published when it changes so
     /// waiters (the chat sync dispatcher's reconciliation) need not poll it.
@@ -271,6 +273,7 @@ struct PublishedVersions {
     sessions: u64,
     devices: u64,
     spaces: u64,
+    orchestration: u64,
 }
 
 /// The registry replica a store holds: its whole snapshot plus the row
@@ -429,6 +432,7 @@ impl WorkspaceHost {
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
         });
+        let (orchestration_tx, _) = watch::channel(doc.read_orchestration());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let edge_less = config.edge.is_none();
 
@@ -442,6 +446,7 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 sidebar_preferences_tx,
+                orchestration_tx,
                 room: Mutex::new(None),
                 registry_synced_tx: watch::Sender::new(edge_less),
                 changed_tx,
@@ -846,6 +851,43 @@ impl WorkspaceHost {
             self.inner.persist(true)?;
         }
         Ok(())
+    }
+
+    // ── orchestration rows (crate::orchestration) ───────────────────────────
+
+    /// Orchestration as the registry holds it now.
+    pub fn orchestration_state(&self) -> zeron_proto::orchestration::OrchestrationState {
+        self.read(|doc| doc.read_orchestration())
+    }
+
+    /// Orchestration, republished on every change (not coalesced: see
+    /// `Orchestration::subscribe`).
+    pub fn watch_orchestration_rows(
+        &self,
+    ) -> watch::Receiver<zeron_proto::orchestration::OrchestrationState> {
+        self.inner.orchestration_tx.subscribe()
+    }
+
+    /// Read orchestration rows under the registry lock.
+    pub fn read_orchestration_with<R>(&self, f: impl FnOnce(&RegistryDoc) -> R) -> R {
+        self.read(f)
+    }
+
+    /// Change orchestration rows under the registry lock (a read and the
+    /// write it decides are one step), then publish and push.
+    pub fn write_orchestration<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> R {
+        self.mutate(f)
+    }
+
+    /// Put a chat in an orchestrator's crew (`parent` = the orchestrator's
+    /// chat, kind crew) or take it out (`None`: top-level again). `false`
+    /// when no such chat.
+    pub fn set_chat_parent(
+        &self,
+        chat_id: &str,
+        parent: Option<(&str, zeron_proto::ChildKind)>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_parent(chat_id, parent))?)
     }
 
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
@@ -1635,6 +1677,7 @@ impl WorkspaceHostInner {
             devices: doc.kind_version(zeron_doc::KIND_DEVICES),
             spaces: doc.kind_version(zeron_doc::KIND_SPACES)
                 .wrapping_add(doc.kind_version(zeron_doc::KIND_REPOSITORY_LOOKS)),
+            orchestration: doc.orchestration_version(),
         };
         let last = *published;
         let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
@@ -1642,6 +1685,7 @@ impl WorkspaceHostInner {
         let sessions = changed(|v| v.sessions).then(|| doc.read_sessions());
         let devices = (clock_tick || changed(|v| v.devices)).then(|| doc.read_devices());
         let spaces = changed(|v| v.spaces).then(|| doc.read_spaces());
+        let orchestration = changed(|v| v.orchestration).then(|| doc.read_orchestration());
         // Pins reconcile against the chats as they read now: just read, or
         // (unchanged) as last published.
         let reconciled = match &chats {
@@ -1715,6 +1759,9 @@ impl WorkspaceHostInner {
                 tracing::warn!(error = %err, "registry read failed");
             }
             None => {}
+        }
+        if let Some(orchestration) = orchestration {
+            publish_if_changed(&self.orchestration_tx, orchestration);
         }
         // A failed read retries every list on the next publish.
         *published = (!failed).then_some(now);

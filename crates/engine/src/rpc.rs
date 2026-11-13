@@ -883,6 +883,9 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// Orchestrators, crews, the board, asks and dumps (one per engine:
+    /// `with_orchestration`; a bare assembly gets its own).
+    orchestration: crate::orchestration::Orchestration,
     engine_info: EngineInfo,
 }
 
@@ -919,6 +922,7 @@ impl EngineRpc {
             build: Some(crate::build_id().to_owned()),
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
+        let orchestration = crate::orchestration::Orchestration::new(workspace.clone());
         Self {
             voice: sessions.voice_manager(),
             sessions,
@@ -944,8 +948,45 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            orchestration,
             engine_info,
         }
+    }
+
+    /// Share the engine's orchestration (its comms feed, its wake timer).
+    pub fn with_orchestration(mut self, orchestration: crate::orchestration::Orchestration) -> Self {
+        self.orchestration = orchestration;
+        self
+    }
+
+    pub(crate) fn orchestration(&self) -> &crate::orchestration::Orchestration {
+        &self.orchestration
+    }
+
+    pub(crate) fn workspace_host(&self) -> &WorkspaceHost {
+        &self.workspace
+    }
+
+    pub(crate) fn doc_host_ref(&self) -> &DocHost {
+        &self.doc_host
+    }
+
+    pub(crate) fn sessions_ref(&self) -> &SessionsEngine {
+        &self.sessions
+    }
+
+    /// `createChat` as an RPC caller sends it: the agent gate first (an
+    /// agent's new chat is capped at its own access), then the mutation.
+    pub(crate) fn create_chat_gated(&self, params: serde_json::Value) -> Result<(), RpcError> {
+        let params = self.agent_gate(methods::MUTATE, params)?;
+        let params: MutateParams = parse_params(params)?;
+        self.mutate(params)
+    }
+
+    /// A banner for the person, as the engine's own are (their Settings
+    /// decide), opening `session` when clicked.
+    pub(crate) fn notify_person(&self, title: &str, body: &str, session: Option<&str>) -> &'static str {
+        crate::desktop_notify::post_asked(self.repos.data_dir(), &self.viewport_focus, title, body, session)
     }
 
     /// Attach the plugins service (the Plugin* methods).
@@ -1980,10 +2021,26 @@ impl EngineRpc {
                 child_kind,
                 cloud: _,
             } => {
-                // A voice orchestrator is hidden, so the chats it creates are
-                // the user's top-level sessions rather than its side chats.
-                let parent_chat_id = parent_chat_id
-                    .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
+                // A voice orchestrator and the Brain dump are hidden, so the
+                // chats they create are the user's top-level sessions rather
+                // than their side chats.
+                let parent_chat_id = parent_chat_id.filter(|parent| {
+                    !zeron_proto::voice::is_orchestrator_chat(parent)
+                        && !zeron_proto::orchestration::is_brain_dump_chat(parent)
+                });
+                // A crew thread's parent is its orchestrator.
+                let child_kind = child_kind.filter(|kind| {
+                    *kind != zeron_proto::ChildKind::Crew
+                        || parent_chat_id.as_deref().is_some_and(|parent| {
+                            matches!(
+                                self.orchestration.role_of(parent),
+                                crate::orchestration::ChatRole::Orchestrator { .. }
+                            )
+                        })
+                });
+                let crew_of = parent_chat_id
+                    .clone()
+                    .filter(|_| child_kind == Some(zeron_proto::ChildKind::Crew));
                 self.workspace
                     .create_chat_hosted(
                         &chat_id,
@@ -2000,6 +2057,9 @@ impl EngineRpc {
                     self.workspace
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
+                }
+                if let Some(orchestrator) = crew_of {
+                    self.add_to_crew(&orchestrator, &chat_id, "", None)?;
                 }
                 Ok(())
             }
@@ -4107,6 +4167,16 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
+            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(watch_stream(
+                self.orchestration.subscribe(),
+            ))),
+            methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
+            methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
+                std::sync::Arc::new(self.clone()),
+            ))),
+            methods::WATCH_COMMS => Ok(RpcReply::Stream(
+                crate::orchestration::comms::stream(self.orchestration.comms()),
+            )),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self

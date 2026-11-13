@@ -1091,6 +1091,21 @@ pub struct WorkItemPatch {
     pub order: Option<f64>,
 }
 
+/// Id prefix of a Brain dump's chat. Like the voice orchestrator's, that
+/// chat never takes a session row, and the chats it creates are top-level.
+pub const BRAIN_DUMP_CHAT_PREFIX: &str = "brain-dump-";
+/// Title of every Brain dump chat.
+pub const BRAIN_DUMP_TITLE: &str = "Brain dump";
+
+pub fn is_brain_dump_chat(chat_id: &str) -> bool {
+    chat_id.starts_with(BRAIN_DUMP_CHAT_PREFIX)
+}
+
+/// A new Brain dump chat's id (and its orchestrator row's).
+pub fn new_brain_dump_chat_id() -> String {
+    format!("{BRAIN_DUMP_CHAT_PREFIX}{}", uuid::Uuid::new_v4().simple())
+}
+
 /// Hue for a new orchestrator, spread by the golden angle from its id so
 /// neighbours differ.
 pub fn seed_hue(id: &str) -> u16 {

@@ -61,6 +61,10 @@ pub struct CpuStats {
     pub model: Option<String>,
     pub physical_cores: Option<usize>,
     pub logical_cores: Option<usize>,
+    /// How busy, 0–1 across all cores, since the previous report (the first
+    /// one measures a moment). Missing from older engines' reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -192,6 +196,7 @@ pub fn collect(places: &Places) -> DeviceStats {
         physical_cores: system.physical_core_count().filter(|n| *n > 0),
         logical_cores: logical
             .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get())),
+        usage: if supported { cpu_usage() } else { None },
     };
     // macOS: sysinfo subtracts the compressor's pages from free + inactive
     // + purgeable, which floors at 0 on a busy Mac (more compressed than
@@ -259,6 +264,31 @@ pub fn collect(places: &Places) -> DeviceStats {
         battery: battery(),
         zeron: zeron(places.build.clone()),
     }
+}
+
+/// CPU use since the previous call, 0–1. The first call measures over
+/// sysinfo's minimum interval (it blocks that long: collections run off the
+/// async runtime).
+fn cpu_usage() -> Option<f32> {
+    use sysinfo::{CpuRefreshKind, RefreshKind, System};
+    static SYSTEM: Mutex<Option<System>> = Mutex::new(None);
+    let mut slot = SYSTEM.lock().unwrap_or_else(|e| e.into_inner());
+    let system = match slot.as_mut() {
+        Some(system) => {
+            system.refresh_cpu_usage();
+            system
+        }
+        None => {
+            let mut system = System::new_with_specifics(
+                RefreshKind::new().with_cpu(CpuRefreshKind::new().with_cpu_usage()),
+            );
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+            system.refresh_cpu_usage();
+            slot.insert(system)
+        }
+    };
+    let usage = system.global_cpu_usage();
+    usage.is_finite().then(|| (usage / 100.0).clamp(0.0, 1.0))
 }
 
 /// One mounted volume as the OS lists it (before privacy filtering).

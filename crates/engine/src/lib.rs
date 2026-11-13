@@ -59,6 +59,7 @@ mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
+pub mod orchestration;
 mod hosted_models;
 mod model_catalogs;
 mod plugin_agents;
@@ -199,6 +200,9 @@ pub struct EngineCore {
     pub local_import: Option<local_import::LocalImporter>,
     /// Plugins under `{data}/plugins/` (the plugins contract).
     pub plugins: plugins::Plugins,
+    /// Orchestrators, crews, the board, asks and dumps (shared by every
+    /// RPC service of this engine).
+    pub orchestration: orchestration::Orchestration,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -477,6 +481,7 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
+        let orchestration = orchestration::Orchestration::new(workspace.clone());
         Ok(Self {
             sessions,
             doc_host,
@@ -497,6 +502,7 @@ impl EngineCore {
             device_id,
             local_import,
             plugins,
+            orchestration,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -676,7 +682,9 @@ impl EngineCore {
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
         }
-        Arc::new(rpc)
+        let rpc = Arc::new(rpc.with_orchestration(self.orchestration.clone()));
+        self.orchestration.attach_rpc(&rpc);
+        rpc
     }
 
     /// Revoke every account-scoped transport before any slower graceful

@@ -14,6 +14,10 @@
 //!   a chat it made, what it would itself have to ask the person for.
 //! - What it writes into a chat carries Zeron's header naming the sending
 //!   chat, built here; a header in the text can't claim another chat.
+//! - Delegation depth: a top-level chat, an orchestrator and the Brain dump
+//!   create chats (an orchestrator's children are its crew by default); a
+//!   crew thread creates subagents of its own; any other delegated chat
+//!   creates none.
 //!
 //! The calling chat is the one its MCP server names (`x-zeron-chat`): the
 //! engine sets that server's environment, so a sandboxed agent can't change
@@ -31,8 +35,11 @@ pub(super) struct Calling {
     pub id: String,
     pub label: String,
     /// Its sandbox and access: what a chat it makes may have at most. `None`
-    /// for Zeron's voice orchestrator (the person speaking).
+    /// for Zeron's voice orchestrator and the Brain dump (the person
+    /// speaking, through them).
     pub ceiling: Option<(SandboxLevel, AccessMode)>,
+    /// It has a parent, and isn't a crew thread: it creates no chats.
+    pub delegated: bool,
 }
 
 /// The `Title (short-id)` label a header names a chat by.
@@ -44,6 +51,12 @@ fn label(chat: Option<&Chat>, id: &str) -> String {
     }
 }
 
+/// A chat that creates no chats: one with a parent that isn't a crew
+/// thread (a crew thread may have subagents of its own).
+fn can_not_delegate(chat: &Chat) -> bool {
+    chat.parent_chat_id.is_some() && chat.child_kind != Some(zeron_proto::ChildKind::Crew)
+}
+
 fn refused(message: impl Into<String>) -> RpcError {
     RpcError::Failed(message.into())
 }
@@ -51,7 +64,9 @@ fn refused(message: impl Into<String>) -> RpcError {
 impl EngineRpc {
     fn calling(&self, chat_id: &str, chats: &[Chat]) -> Calling {
         let chat = chats.iter().find(|c| c.id == chat_id);
-        let ceiling = if zeron_proto::voice::is_orchestrator_chat(chat_id) {
+        let ceiling = if zeron_proto::voice::is_orchestrator_chat(chat_id)
+            || zeron_proto::orchestration::is_brain_dump_chat(chat_id)
+        {
             None
         } else {
             // Unknown here, or with no config: the least, never the most.
@@ -65,6 +80,7 @@ impl EngineRpc {
             id: chat_id.to_owned(),
             label: label(chat, chat_id),
             ceiling,
+            delegated: chat.is_some_and(can_not_delegate),
         }
     }
 
@@ -97,6 +113,33 @@ impl EngineRpc {
         match method {
             methods::MUTATE => match params["op"].as_str().unwrap_or_default() {
                 "createChat" => {
+                    if let Some(calling) = calling.as_ref() {
+                        if calling.delegated {
+                            return Err(refused(
+                                "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you.",
+                            ));
+                        }
+                        let parent = params["parentChatId"].as_str().unwrap_or_default().to_owned();
+                        if let Some(parent_chat) = chats.iter().find(|c| c.id == parent)
+                            && can_not_delegate(parent_chat)
+                        {
+                            return Err(refused(format!(
+                                "{} is itself a delegated chat: only top-level chats and crew threads have children.",
+                                label(Some(parent_chat), &parent)
+                            )));
+                        }
+                        // An orchestrator's own children are its crew unless
+                        // it says otherwise.
+                        if parent == calling.id
+                            && params.get("childKind").is_none_or(serde_json::Value::is_null)
+                            && matches!(
+                                self.orchestration().role_of(&calling.id),
+                                crate::orchestration::ChatRole::Orchestrator { .. }
+                            )
+                        {
+                            params["childKind"] = json!(zeron_proto::ChildKind::Crew.as_str());
+                        }
+                    }
                     let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
                         return Err(refused("An agent's new chat names its config (harness, sandbox, access)"));
                     };
