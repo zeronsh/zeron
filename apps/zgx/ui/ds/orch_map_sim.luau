@@ -50,7 +50,7 @@ export type Graph = {
 	alpha: number,
 }
 
-M.R = { device = 16, orchestrator = 10, brain = 12, thread = 7 }
+M.R = { device = 16, orchestrator = 10, brain = 9, thread = 7 }
 M.ALPHA_MIN = 0.004
 local DECAY = 0.028
 local FRICTION = 0.58

@@ -12,10 +12,10 @@
 -- as agents talk. It settles as a web (ds/orch_map_sim) and is still once
 -- settled: no work while nothing changes.
 --
--- Drag a node to place it (it stays, until Reset); drag the space or
--- scroll to pan, pinch or ⌘/Ctrl-scroll to zoom. The pointer on a node
--- lights it and what it touches, dims the rest and shows its card; a
--- click opens it.
+-- Drag a node to place it (it stays, until Reset); drag the space to
+-- pan; pinch or ⌘/Ctrl-scroll to zoom (a plain scroll is the page's).
+-- The pointer on a node lights it and what it touches, dims the rest
+-- and shows its card; a click opens it.
 --
 --   Graph { world, chat, comms, on_open_chat, on_open_orchestrator }
 
@@ -409,13 +409,15 @@ M.View = ui.component(function(props: {
 				c:stroke(ui.path():arc(x, y, r + 4 * z, 0, 360), hue.canvas(n.hue, dim(0.45, lit)), 1.5)
 				c:circle(x, y, r, hue.canvas(n.hue, dim(1, lit)))
 			elseif n.kind == "brain" then
-				local k = r * 1.2
+				-- (An orchestrator's size, quieter: a tinted diamond in a line
+				-- of its hue, where theirs are solid.)
+				local k = r * 1.15
 				local function diamond(s: number): any
 					return ui.path():move(x, y - s):line(x + s, y):line(x, y + s):line(x - s, y):close()
 				end
-				c:fill(diamond(k + 6 * z), plate)
-				c:stroke(diamond(k + 5 * z), hue.canvas(n.hue, dim(0.45, lit)), 1.5, { join = "round" })
-				c:fill(diamond(k), hue.canvas(n.hue, dim(1, lit)))
+				c:fill(diamond(k + 2), plate)
+				c:fill(diamond(k), hue.canvas(n.hue, dim(0.28, lit)))
+				c:stroke(diamond(k - 0.75), hue.canvas(n.hue, dim(0.9, lit)), 1.5, { join = "round" })
 			else
 				local st = state_of(n.id)
 				local faded = st == "done" or st == "idle"
@@ -861,15 +863,15 @@ M.View = ui.component(function(props: {
 					M.hover:set(nil)
 				end
 			end,
+			-- (A plain scroll is the page's: it scrolls past the Map. Only
+			-- ⌘/Ctrl-scroll zooms the web.)
 			on_wheel = function(e: any): boolean
-				moved_view = true
 				if e.ctrl or e.cmd then
+					moved_view = true
 					zoom_at(e.local_x, e.local_y, math.exp(-e.dy * 0.01))
-				else
-					local v = view:peek()
-					view:set({ x = v.x - e.dx, y = v.y - e.dy, zoom = v.zoom })
+					return true
 				end
-				return true
+				return false
 			end,
 			on_pinch = function(e: any): boolean
 				moved_view = true
