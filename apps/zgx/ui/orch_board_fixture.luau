@@ -20,6 +20,7 @@ local function note(what: string)
 	said:set(if said:peek() == "" then what else `{said:peek()},{what}`)
 end
 local items = ui.state("orch_board_items", sample.now.items :: { any })
+local orchestrators = ui.state("orch_board_orchestrators", sample.now.orchestrators :: { any })
 local filter = ui.state("filter", nil :: string?)
 local compact = ui.state("compact", false)
 
@@ -31,7 +32,8 @@ for _, t in { "dark", "light" } do
 	end }
 end
 
-local chats: { [string]: any } = {}
+local PROJECTS: { [string]: string } = { ["orc-orch"] = "zeron", ["orc-vpn"] = "exnomic", ["orc-ci"] = "zeron", ["th-loose"] = "dotfiles" }
+local chats: { [string]: any } = { ["th-loose"] = { id = "th-loose", title = "Loose thread", status = "done" } }
 -- (A thread's todo from the sample as written: `at` shifts every `done`
 -- key as a time, its todo's count among them.)
 local todos: { [string]: any } = {}
@@ -69,7 +71,7 @@ return ui.scroll {
 		end, function(k: string): Node
 			return OrchBoard {
 				items = items,
-				orchestrators = sample.now.orchestrators,
+				orchestrators = orchestrators,
 				filter = filter,
 				show_filter = true,
 				now = function(): number
@@ -81,6 +83,13 @@ return ui.scroll {
 				end,
 				thread_of = function(chat: string): any
 					return chats[chat]
+				end,
+				-- (Each orchestrator's project, its crew's too; a loose
+				-- thread's own.)
+				project_of = function(chat: string): string?
+					local c = chats[chat]
+					local root = if c and c.parent then c.parent else chat
+					return PROJECTS[root]
 				end,
 				on_move = function(id: string, state: string, order: number)
 					note(`move:{id}:{state}:{order}`)

@@ -1,10 +1,12 @@
--- The Control room as a first real run leaves it (ui/control_fixture.luau,
+-- The Control room as a first real run leaves it (ui/control_page_fixture.luau,
 -- its board's work replaced): one orchestrator, Tally, and the two things
 -- it finished today, the rest of the board empty. For the board's audit
--- pictures (`control_board_live@1440x1400|#control-widget-board`).
+-- pictures (`control_board_live@1440x2600|#control-widget-board`) and
+-- tests/orch_board.test.luau.
 
-local built = require("./control_fixture")
+local built = require("./control_page_fixture")
 local orchestration = require("@account/orchestration")
+local sessions = require("@account/sessions")
 
 local now = os.time()
 local n = table.clone(orchestration.now:peek())
@@ -38,5 +40,13 @@ n.items = {
 	},
 }
 orchestration.now:set(n)
+-- (Tally's chat, in its project: named as Tally is, so its cards say Tally
+-- alone.)
+local s = table.clone(sessions.now:peek())
+s.projects = table.clone(s.projects or {})
+table.insert(s.projects, { id = "p-tally", name = "tally", device = "dev-cloud", path = "/work/tally", git = true })
+s.chats = table.clone(s.chats or {})
+table.insert(s.chats, { id = "orc-tally", title = "Tally", device = "dev-cloud", project = "p-tally", updated = now - 300, created = now - 9000, agent = "claude", model = "claude-opus-5-5" })
+sessions.now:set(s)
 
 return built

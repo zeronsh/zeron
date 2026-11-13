@@ -2,10 +2,10 @@
 -- its columns and what's in each, priority first, each column as wide as
 -- the next; a card dragged to another column or within one says where (its
 -- state and an order between its new neighbours); its menu sets a
--- priority; an outcome is two quiet lines; whose a card is shows only
--- while the board shows several orchestrators' cards; an empty board is
--- one line; and it holds side by side when wide, scrolls sideways when
--- narrower, stacks when narrow. (Raw pointer drags, fast and slow, Escape
+-- priority; an outcome is two quiet lines; every card says whose it is
+-- (but on its orchestrator's own page); an empty board is one line; and it
+-- holds side by side when wide, in rows of three when narrower, stacked
+-- when narrow. (Raw pointer drags, fast and slow, Escape
 -- and click: src/orchestration_board_tests.rs.)
 
 local function board(w: number?, h: number?): any
@@ -248,4 +248,65 @@ test("orch board: a card carried between rows lands in the row below", function(
 	app:frames(20)
 	expect(app:state("calls")).to_contain("move:it-phase1:done:")
 	expect(count(app, "done")).to_be(2)
+end)
+
+test("orch board: every card says whose it is, its project where that's named otherwise", function()
+	local app = board()
+	-- Its orchestrator's dot and name, and the project it's in.
+	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-owner >> "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-project >> "exnomic"')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-owner >> "Orchestrators"')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-project >> "zeron"')).to_be(true)
+	-- Filtered to one orchestrator (the Control room's chip), still said.
+	app:set_state("filter", "orc-orch")
+	app:frames(10)
+	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-owner >> "Orchestrators"')).to_be(true)
+	-- One orchestrator's work alone on the board, still said.
+	app:set_state("filter", nil)
+	app:set_state("orch_board_items", {
+		{ id = "it-a", orchestrator_id = "orc-vpn", title = "One thing", state = "planned", priority = "normal" },
+		-- Loose: its project, if its thread has one; no orchestrator.
+		{ id = "it-b", title = "Loose with a thread", state = "planned", priority = "normal", threads = { "th-loose" } },
+		{ id = "it-c", title = "Loose alone", state = "planned", priority = "normal" },
+	})
+	app:frames(10)
+	expect(app:has('#orch-col-next >> role:button "One thing" >> .orch-card-orchestrator >> "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-next >> role:button "Loose with a thread" >> .orch-card-project >> "dotfiles"')).to_be(true)
+	expect(app:has('#orch-col-next >> role:button "Loose with a thread" >> .orch-card-orchestrator')).to_be(false)
+	expect(app:has('#orch-col-next >> role:button "Loose alone" >> .orch-card-owner')).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board: a project named as its orchestrator is left out", function()
+	local app = mount("control_board_live_fixture.luau")
+	app:resize(1440, 2600)
+	app:frames(30)
+	expect(app:has('#control-board-done >> .orch-card-orchestrator >> "Tally"')).to_be(true)
+	expect(app:has("#control-board-done >> .orch-card-project")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board: on an orchestrator's own page, no card says whose", function()
+	local app = mount("orchestrator_fixture.luau")
+	app:resize(1440, 900)
+	app:frames(30)
+	expect(app:has('#orch-page-board >> "Control room"')).to_be(true)
+	expect(app:has("#orch-page-board >> .orch-card-owner")).to_be(false)
+	expect(app:has("#orch-page-board >> .orch-card-orchestrator")).to_be(false)
+end)
+
+test("orch board: two orchestrators of one name, their chips say their projects", function()
+	local app = board()
+	expect(app:has(".orch-filter-project")).to_be(false)
+	local list = table.clone(app:state("orch_board_orchestrators") :: { any })
+	for i, o in list do
+		if o.id == "orc-ci" then
+			local twin = table.clone(o)
+			twin.name = "Orchestrators"
+			list[i] = twin
+		end
+	end
+	app:set_state("orch_board_orchestrators", list)
+	app:frames(10)
+	expect(app:has('.orch-board-filter >> .orch-filter-project >> "zeron"')).to_be(true)
 end)

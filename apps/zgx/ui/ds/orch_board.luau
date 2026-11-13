@@ -14,10 +14,11 @@
 --
 -- A card: how its lead thread stands (Zeron's status glyph, held 300 ms at
 -- least), its title, how far along it is (its threads' todo as segmented
--- cells, else its own progress), and a quiet line of what else it has: its
--- orchestrator (a hue dot and its name, only while the board shows more
--- than one orchestrator's), its threads as dots when it has several, its
--- pull request. Its priority stands at its title's end when it's high or
+-- cells, else its own progress), and a quiet line of what else it has:
+-- whose it is (its orchestrator's hue dot and name, and the project it's in
+-- where that's named otherwise; a loose item, its project), its threads as
+-- dots when it has several, its pull request. (On an orchestrator's own
+-- page, whose is implied: none says.) Its priority stands at its title's end when it's high or
 -- urgent. A card in Review or Done carries its outcome, two lines of it,
 -- all of it in a hover card. Each card is a plugin slot
 -- (`orchestration.item`, `provide = { item = id }`).
@@ -42,6 +43,11 @@
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
 --     on_open_thread = fn(chat), on_link = fn(link),
 --     compact = true,            -- denser cards (a page's side pane)
+--     project_of = fn(chat) -> string?,  -- the name of the project a chat works in
+--     context = false,           -- cards say nothing of whose they are (an
+--                                -- orchestrator's own page, where it's
+--                                -- implied: the default when `filter` is
+--                                -- given without `show_filter`)
 --   }
 
 local Icon = require("@self/icon")
@@ -92,6 +98,8 @@ export type Props = {
 	on_open_thread: ((chat: string) -> ())?,
 	on_link: ((link: Link) -> ())?,
 	compact: boolean?,
+	project_of: ((chat: string) -> string?)?,
+	context: boolean?,
 	id: string?,
 }
 
@@ -379,23 +387,40 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		return true
 	end
-	-- Whether the cards shown are more than one orchestrator's: then each
-	-- says whose it is.
-	local many_owners = ui.computed(function(): boolean
-		local seen: string? = nil
-		for _, l in shown:get() do
-			for _, it in l do
-				local o = it.orchestrator_id
-				if o then
-					if seen and seen ~= o then
-						return true
-					end
-					seen = o
-				end
+	-- Whether cards say whose they are: everywhere but an orchestrator's
+	-- own page (filtered to it, no filter of its own to show).
+	local says_whose = if props.context ~= nil then props.context else not (props.filter ~= nil and not props.show_filter)
+	local function project_of(chat: string?): string?
+		local of = props.project_of
+		if not chat or not of then
+			return nil
+		end
+		local name = of(chat)
+		return if name and name ~= "" then name else nil
+	end
+	-- Whose an item is: its orchestrator, and the project it's in (its
+	-- threads', else its orchestrator's), the project left out where it's
+	-- the orchestrator's own name.
+	local function context_of(it: Item): (Orchestrator?, string?)
+		if not says_whose then
+			return nil, nil
+		end
+		local o = owner_of(it.orchestrator_id)
+		local project: string? = nil
+		for _, chat in it.threads or {} do
+			project = project_of(chat)
+			if project then
+				break
 			end
 		end
-		return false
-	end)
+		if not project and o then
+			project = project_of(o.id)
+		end
+		if o and project and string.lower(project) == string.lower(o.name) then
+			project = nil
+		end
+		return o, project
+	end
 
 	-- A drag. `carry`: the card carried (its column, size and rank); `target`:
 	-- where it would land (its column, its place among the others there from
@@ -621,34 +646,69 @@ local OrchBoard = ui.component(function(props: Props): Node
 
 	local line = (ui.theme.get("font.line.sm") :: number?) or 16
 
-	-- Whose it is: its orchestrator's hue and name, quietly.
+	-- Whose it is, quietly: its orchestrator's hue and name, and its
+	-- project (a folder, as the Map names one).
 	local function owner(item: () -> Item): Node
-		return ui.show(function(): boolean
-			return many_owners:get() and owner_of(item().orchestrator_id) ~= nil
-		end, ui.row {
+		local function orch(): Orchestrator?
+			local o = context_of(item())
+			return o
+		end
+		local function project(): string?
+			local _, p = context_of(item())
+			return p
+		end
+		return ui.row {
 			class = "orch-card-owner",
 			min_w = 0,
 			shrink = 1,
-			gap = "$zeron.space.tight",
+			gap = "$space.2",
 			items = "center",
-			hue.Dot {
-				hue = function(): number?
-					local o = owner_of(item().orchestrator_id)
-					return o and o.hue
-				end,
-				size = 6,
-			},
-			ui.text {
-				function(): string
-					local o = owner_of(item().orchestrator_id)
-					return if o then o.name else ""
-				end,
-				truncate = true,
+			ui.show(function(): boolean
+				return orch() ~= nil
+			end, ui.row {
 				min_w = 0,
-				text_size = "$font.size.xs",
-				color = "$text.tertiary",
-			},
-		})
+				shrink = 1,
+				gap = "$zeron.space.tight",
+				items = "center",
+				hue.Dot {
+					hue = function(): number?
+						local o = orch()
+						return o and o.hue
+					end,
+					size = 6,
+				},
+				ui.text {
+					function(): string
+						local o = orch()
+						return if o then o.name else ""
+					end,
+					class = "orch-card-orchestrator",
+					truncate = true,
+					min_w = 0,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			}),
+			ui.show(function(): boolean
+				return project() ~= nil
+			end, ui.row {
+				min_w = 0,
+				shrink = 1,
+				gap = "$zeron.space.tight",
+				items = "center",
+				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "folder", size = 11 } },
+				ui.text {
+					function(): string
+						return project() or ""
+					end,
+					class = "orch-card-project",
+					truncate = true,
+					min_w = 0,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			}),
+		}
 	end
 
 	-- What a card shows lifted and carried: its status and title, at its
@@ -820,7 +880,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 		-- Its quiet line: whose it is, its threads, its pull request.
 		local function has_meta(): boolean
-			return (many_owners:get() and owner_of(item().orchestrator_id) ~= nil) or #(item().threads or {}) > 1 or #prs() > 0
+			local o, p = context_of(item())
+			return o ~= nil or p ~= nil or #(item().threads or {}) > 1 or #prs() > 0
 		end
 		local meta = ui.row {
 			class = "orch-card-meta",
@@ -1180,7 +1241,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 
 	-- The filter's chips: every orchestrator, and all of them.
 	local function chips(): Node
-		local function chip(id: string?, name: () -> string, h: number?): Node
+		local function chip(id: string?, name: () -> string, h: number?, suffix: (() -> string?)?): Node
 			local hovered = ui.use_state(false)
 			return ui.button {
 				label = name,
@@ -1214,7 +1275,30 @@ local OrchBoard = ui.component(function(props: Props): Node
 						return if filter() == id then "$text.primary" else "$text.secondary"
 					end,
 				},
+				-- (Its project, quietly, where another has the same name.)
+				if suffix
+					then ui.show(function(): boolean
+						return suffix() ~= nil
+					end, ui.text {
+						function(): string
+							return suffix() or ""
+						end,
+						class = "orch-filter-project",
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					})
+					else nil,
 			}
+		end
+		-- Whether another orchestrator shown has this one's name.
+		local function shared(o: Orchestrator): boolean
+			local name = string.lower(o.name)
+			for _, x in orchestrators() do
+				if x.id ~= o.id and (x.kind == nil or x.kind == "standard") and not x.archived and string.lower(x.name) == name then
+					return true
+				end
+			end
+			return false
 		end
 		return ui.row {
 			class = "orch-board-filter",
@@ -1233,9 +1317,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end
 				return out
 			end), function(o: Orchestrator, _i: any, row: any): Node
+				local function now_o(): Orchestrator
+					return if row then row:get() else o
+				end
 				return chip(o.id, function(): string
-					return if row then row:get().name else o.name
-				end, o.hue)
+					return now_o().name
+				end, o.hue, function(): string?
+					local x = now_o()
+					return if shared(x) then project_of(x.id) else nil
+				end)
 			end, { key = function(o: Orchestrator): string
 				return o.id
 			end }),

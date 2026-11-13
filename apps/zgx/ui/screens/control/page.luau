@@ -472,6 +472,20 @@ local function board(): Node
 		thread_of = function(chat: string): any
 			return chats_now:get()[chat]
 		end,
+		-- (Whose a card is: the project its thread or orchestrator works in.)
+		project_of = function(chat: string): string?
+			local c = chats_now:get()[chat]
+			local id = c and c.project
+			if not id then
+				return nil
+			end
+			for _, p in sessions.projects:get() or {} do
+				if p.id == id then
+					return p.name
+				end
+			end
+			return nil
+		end,
 		on_move = function(id: string, state: string, order: number)
 			orchestration.move_item(id, state, order):after(function() end, said("control.board.failed"))
 		end,
