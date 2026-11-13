@@ -2267,12 +2267,17 @@ impl Inner {
                     }
                 }
             }
+            // A tool part's preview paths are only ever the engine's own
+            // copies in uploads: clients read them as pictures as they are
+            // (zgx reads a local chat's straight from disk), so a path an
+            // adapter put there (`/dev/zero`, a file elsewhere) never reaches
+            // the doc.
             AgentEvent::ToolResult {
                 id,
                 is_error,
                 output,
                 diff,
-                preview_paths,
+                preview_paths: _,
                 image_payloads,
                 exit_code,
             } if !image_payloads.is_empty() => {
@@ -2284,12 +2289,28 @@ impl Inner {
                     is_error,
                     output,
                     diff,
-                    preview_paths: if stored.is_empty() {
-                        preview_paths
-                    } else {
-                        stored
-                    },
+                    preview_paths: stored,
                     image_payloads: Vec::new(),
+                    exit_code,
+                }]
+            }
+            AgentEvent::ToolResult {
+                id,
+                is_error,
+                output,
+                diff,
+                preview_paths,
+                image_payloads,
+                exit_code,
+            } if !preview_paths.is_empty() => {
+                tracing::warn!(chat = %chat_id, tool = %id, "tool preview paths without stored images dropped");
+                vec![AgentEvent::ToolResult {
+                    id,
+                    is_error,
+                    output,
+                    diff,
+                    preview_paths: Vec::new(),
+                    image_payloads,
                     exit_code,
                 }]
             }
@@ -5849,7 +5870,8 @@ mod tests {
         assert!(super::tool_image_id("chat-a", b"\x89PNG two").starts_with(prefix));
         assert!(!super::tool_image_id("chat-b", png).starts_with(prefix));
         assert!(
-            id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-' || b.is_ascii_lowercase()),
+            id.bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'-' || b.is_ascii_lowercase()),
             "{id}"
         );
     }
@@ -5974,6 +5996,45 @@ mod tests {
                 ..
             }] if preview_paths.is_empty() && image_payloads.is_empty()
         ));
+
+        // Paths an adapter put on a result are not the engine's copies: they
+        // never reach the doc, with stored pictures or without.
+        for payloads in [
+            Vec::new(),
+            vec![zeron_proto::ToolResultImage {
+                name: "1.png".into(),
+                data_base64: png_b64.into(),
+            }],
+        ] {
+            let stored_any = !payloads.is_empty();
+            let named = AgentEvent::ToolResult {
+                exit_code: None,
+                id: "tool-3".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: vec!["/dev/zero".into(), "/etc/hosts".into()],
+                image_payloads: payloads,
+            };
+            let out = sessions
+                .inner
+                .prepare_generated_image("chat", named, &mut std::collections::HashSet::new())
+                .await;
+            let [AgentEvent::ToolResult { preview_paths, .. }] = &out[..] else {
+                panic!("expected one tool result, got {out:?}");
+            };
+            assert!(
+                preview_paths
+                    .iter()
+                    .all(|path| std::path::Path::new(path).starts_with(&uploads_dir)),
+                "{preview_paths:?}"
+            );
+            assert_eq!(
+                preview_paths.len(),
+                usize::from(stored_any),
+                "{preview_paths:?}"
+            );
+        }
 
         let bare = SessionsEngine::new(
             "host".into(),
