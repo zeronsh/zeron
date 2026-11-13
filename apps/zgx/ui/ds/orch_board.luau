@@ -29,10 +29,16 @@
 -- pressed and moved a few points, from anywhere on it and however fast, it
 -- lifts and follows the pointer, the cards where it would land making room;
 -- let go over the board it lands there, elsewhere (or Escape) it goes back.
--- A click opens its thread. A secondary click opens its menu: its thread,
--- Move to a column, its priority, the dump it came from, and Delete, which
--- takes it off the board at once (never its chat), an Undo beside it for a
--- while.
+-- A click opens its thread. A secondary click opens its menu: Start now
+-- (an Inbox or Next card with no thread yet), its thread, Move to a column,
+-- its priority, the dump it came from, and Delete, which takes it off the
+-- board at once (never its chat), an Undo beside it for a while.
+--
+-- Inbox holds what was captured and not started, Next what's queued. Such
+-- a card says where it will be worked (its project, else its machine) and,
+-- held back by the engine while its crew is full, that it's queued. Carried
+-- into Now (or Start now), one without a thread starts: "Starting…" on it
+-- until its thread is there; if that fails, it goes back, with a word.
 --
 --   OrchBoard {
 --     items = function() return state.items end,
@@ -49,6 +55,11 @@
 --     on_remove = fn(id) -> promise?,  -- a card taken off the board (its
 --                                      -- chat untouched); Undo puts it
 --     on_restore = fn(item) -> promise?,  -- back as it was
+--     on_start = fn(id, order?) -> promise?,  -- an Inbox or Next card
+--                                -- without a thread started: its thread
+--                                -- made, the card in Now (at `order`)
+--     space_name = fn(space_id) -> string?,   -- a project's name
+--     device_name = fn(device_id) -> string?, -- a machine's name
 --     compact = true,            -- denser cards (a page's side pane)
 --     project_of = fn(chat) -> string?,  -- the name of the project a chat works in
 --     context = false,           -- cards say nothing of whose they are (an
@@ -97,6 +108,12 @@ export type Item = {
 	source: { dump_id: string?, route_id: string? }?,
 	-- Taken off the board by the person (kept, never shown).
 	removed: boolean?,
+	-- Where it will be worked, before it's started: its project (a space's
+	-- id) and machine; and why the engine is holding it back in Next
+	-- (`waiting`: its crew was full).
+	space_id: string?,
+	device_id: string?,
+	waiting: string?,
 }
 export type Orchestrator = { id: string, kind: string?, name: string, hue: number, archived: boolean? }
 export type Todo = { done: number, total: number, current: string? }
@@ -118,6 +135,9 @@ export type Props = {
 	on_source: ((source: { dump_id: string?, route_id: string? }) -> ())?,
 	on_remove: ((id: string) -> any)?,
 	on_restore: ((item: Item) -> any)?,
+	on_start: ((id: string, order: number?) -> any)?,
+	space_name: ((space_id: string) -> string?)?,
+	device_name: ((device_id: string) -> string?)?,
 	compact: boolean?,
 	project_of: ((chat: string) -> string?)?,
 	context: boolean?,
@@ -247,6 +267,10 @@ local WORD: { [string]: { key: string, ink: string } } = {
 	limited = { key = "ds.status.failed", ink = "$zeron.status.failed" },
 }
 local STALLED = { key = "ds.orch.progress.stalled", ink = "$zeron.tone.warning.ink" }
+local STARTING = { key = "orch.board.starting", ink = "$text.secondary" }
+local QUEUED = { key = "orch.board.queued", ink = "$text.tertiary" }
+-- Captured or queued, not started: Inbox's and Next's.
+local WAITING: { [string]: boolean } = { inbox = true, planned = true }
 -- Its priority's word, where it says something.
 local PRIORITY_INK: { [string]: string } = { urgent = "$zeron.tone.danger.ink", high = "$zeron.tone.warning.ink" }
 
@@ -301,6 +325,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local pending = ui.use_state(nil :: Pending?)
 	-- Cards deleted here, gone at once (the engine's word follows).
 	local gone = ui.use_state({} :: { [string]: boolean })
+	-- Cards being started here, until their thread is there (or that fails).
+	local starting = ui.use_state({} :: { [string]: boolean })
+	local function set_starting(id: string, on: boolean)
+		local now = table.clone(starting:peek())
+		now[id] = if on then true else nil
+		starting:set(now)
+	end
 
 	-- The items shown, by column, each sorted (filtered first).
 	local shown = ui.computed(function(): { [string]: { Item } }
@@ -515,6 +546,58 @@ local OrchBoard = ui.component(function(props: Props): Node
 		target:set(nil)
 	end
 
+	-- Whether `it` can be started here: captured or queued, no thread yet.
+	local function startable(it: Item): boolean
+		return props.on_start ~= nil and WAITING[it.state] == true and #(it.threads or {}) == 0
+	end
+	-- Started: in Now at once (at `order`, else its end), "Starting…" on it
+	-- until its thread is there; back where it was, with a word, if not.
+	local function start(it: Item, order: number?)
+		local on_start = props.on_start
+		if not on_start then
+			return
+		end
+		local id = it.id
+		local at = order
+		if not at then
+			local last = 0
+			for _, x in shown:peek().now or {} do
+				last = math.max(last, x.order or 0)
+			end
+			at = last + 1
+		end
+		pending:set({ id = id, state = "active", order = at :: number })
+		set_starting(id, true)
+		local function back()
+			set_starting(id, false)
+			local p = pending:peek()
+			if p and p.id == id then
+				pending:set(nil)
+			end
+		end
+		local sent = on_start(id, order)
+		if sent and (sent :: any).after then
+			(sent :: any):after(function()
+				-- (Then the items speak for themselves.)
+				ui.after(4000, function()
+					local p = pending:peek()
+					if p and p.id == id then
+						pending:set(nil)
+					end
+				end)
+			end, function()
+				back()
+				toast.show { title = locale.s("orch.board.start_failed"), body = it.title, tone = "danger" }
+			end)
+		end
+		-- (Never "Starting…" for good: the engine's word stands by then.)
+		ui.after(30000, function()
+			if starting:peek()[id] then
+				back()
+			end
+		end)
+	end
+
 	-- Let go at `t`: its state, and the order between its new neighbours.
 	local function land(c: Carry, t: Target)
 		local col: Column? = nil
@@ -548,6 +631,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 			order = 0
 		end
 		local id, state = c.id, col.state
+		-- (Captured or queued, carried into Now: it starts.)
+		if state == "active" then
+			for _, it in shown:peek()[c.col] or {} do
+				if it.id == id and startable(it) then
+					finish("landed")
+					return start(it, order)
+				end
+			end
+		end
 		pending:set({ id = id, state = state, order = order })
 		finish("landed")
 		;(props.on_move :: any)(id, state, order)
@@ -612,6 +704,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 
 	-- Moved to the end of `col`.
 	local function move_to(it: Item, col: Column)
+		if col.state == "active" and startable(it) then
+			return start(it)
+		end
 		local last = 0
 		for _, x in shown:peek()[col.key] or {} do
 			if x.id ~= it.id then
@@ -627,6 +722,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local function menu(item: () -> Item): { any }?
 		local it = item()
 		local entries: { any } = {}
+		if startable(it) and not starting:peek()[it.id] then
+			table.insert(entries, {
+				label = locale.s("orch.board.start_now"),
+				icon = "action-play",
+				on_select = function()
+					start(item())
+				end,
+			})
+		end
 		local threads = it.threads or {}
 		if props.on_open_thread and #threads > 0 then
 			for _, chat in threads do
@@ -844,6 +948,21 @@ local OrchBoard = ui.component(function(props: Props): Node
 			local o = context_of(item())
 			return o
 		end
+		local function where(): { kind: string, name: string }?
+			local it = item()
+			if not WAITING[it.state] or #(it.threads or {}) > 0 then
+				return nil
+			end
+			local project = if it.space_id and props.space_name then props.space_name(it.space_id) else nil
+			if project and project ~= "" then
+				return { kind = "project", name = project }
+			end
+			local device = if it.device_id and props.device_name then props.device_name(it.device_id) else nil
+			if device and device ~= "" then
+				return { kind = "device", name = device }
+			end
+			return nil
+		end
 		local function urgency(): string?
 			local p = item().priority
 			return if PRIORITY_INK[p] then p else nil
@@ -857,8 +976,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		local function word(): { key: string, ink: string }?
 			local it = item()
-			if it.state == "done" then
+			if starting:get()[id] and #(it.threads or {}) == 0 then
+				return STARTING
+			elseif it.state == "done" then
 				return nil
+			elseif WAITING[it.state] and (it.waiting or "") ~= "" then
+				return QUEUED
 			elseif stalled() then
 				return STALLED
 			end
@@ -953,6 +1076,35 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return if o then o.name else ""
 				end,
 				class = "orch-card-owner-name",
+			}),
+			-- Where it will be worked, while it waits: its project, else its
+			-- machine.
+			ui.show(function(): boolean
+				return where() ~= nil
+			end, ui.row {
+				class = "orch-card-place",
+				min_w = 0,
+				shrink = 1,
+				gap = "$zeron.space.tight",
+				items = "center",
+				ui.div {
+					color = "$text.tertiary",
+					shrink = 0,
+					Icon {
+						name = function(): any
+							local w = where()
+							return if w and w.kind == "device" then "monitor" else "folder"
+						end,
+						size = 11,
+					},
+				},
+				Card.Word {
+					text = function(): string
+						local w = where()
+						return if w then w.name else ""
+					end,
+					class = "orch-card-place-name",
+				},
 			}),
 			ui.show(function(): boolean
 				return urgency() ~= nil
@@ -1057,7 +1209,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			},
 		}
 		local function has_status(): boolean
-			return owner() ~= nil or has_word() or has_steps() or has_clock() or #prs() > 0
+			return owner() ~= nil or where() ~= nil or has_word() or has_steps() or has_clock() or #prs() > 0
 		end
 
 		-- Its outcome: two lines of it, quietly; all of it where the pointer

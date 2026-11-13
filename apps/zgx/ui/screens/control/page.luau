@@ -528,6 +528,23 @@ local function board(): Node
 		end,
 		on_remove = orchestration.remove_item,
 		on_restore = orchestration.restore_item,
+		on_start = orchestration.start_item,
+		space_name = function(id: string): string?
+			for _, p in sessions.projects:get() or {} do
+				if p.id == id then
+					return p.name
+				end
+			end
+			return nil
+		end,
+		device_name = function(id: string): string?
+			for _, d in sessions.devices:get() or {} do
+				if d.id == id then
+					return d.name
+				end
+			end
+			return nil
+		end,
 		-- (Its clocks, from its lead thread's progress row.)
 		progress_of = Progress.row,
 		on_link = function(link: any)

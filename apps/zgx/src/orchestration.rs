@@ -19,7 +19,8 @@
 //!                  last_report? = { id, state, summary, at }, released, joined } },
 //!       items = { { id, orchestrator_id?, title, detail, state, priority, progress?,
 //!                   threads, links = { { kind, label, target } }, outcome?,
-//!                   source? = { dump_id, route_id }, order, created, updated, done? } },
+//!                   source? = { dump_id, route_id }, order, created, updated, done?,
+//!                   space_id?, device_id?, waiting? } },
 //!       asks = { { id, from_chat, orchestrator_id?, item_id?, kind, question,
 //!                  options = { { label, detail? } }, urgent, state, answer?,
 //!                  created, answered? } },
@@ -215,6 +216,8 @@ const PERSON_OPS: &[&str] = &[
     "addToBoard",
     // (A card taken off the board: kept, marked removed; its chat untouched.)
     "removeItem",
+    // (An Inbox or Next card started: its thread made.)
+    "startItem",
     "upsertItem",
     "answerAsk",
     "dismissAsk",
@@ -531,6 +534,10 @@ fn item_value(i: &WorkItem) -> Value {
         ("created", secs(&i.created_at)),
         ("updated", secs(&i.updated_at)),
         ("done", opt(i.done_at.as_ref(), secs)),
+        // (Where it starts, before it's started; why a Next card waits.)
+        ("space_id", opt_str(i.space_id.as_deref())),
+        ("device_id", opt_str(i.device_id.as_deref())),
+        ("waiting", opt_str(i.waiting.as_deref())),
     ])
 }
 
@@ -742,6 +749,28 @@ mod tests {
             assert_eq!(person_op(&json!({ "op": op })), Err("not yours".to_string()), "{op}");
         }
         assert_eq!(person_op(&json!({ "text": "no op" })), Err("invalid".to_string()));
+        // (The person starts an Inbox or Next card from the board.)
+        assert!(person_op(&json!({ "op": "startItem", "id": "it-1" })).is_ok());
+    }
+
+    #[test]
+    fn a_waiting_card_says_where_it_starts_and_why_it_waits() {
+        let item: WorkItem = serde_json::from_value(json!({
+            "id": "x", "title": "t", "state": "planned", "priority": "normal", "createdAt": iso(NOW), "updatedAt": iso(NOW),
+            "spaceId": "sp-1", "deviceId": "dev-1", "waiting": "Auth's crew is full: 2 of 2 working",
+        }))
+        .unwrap();
+        let v = item_value(&item);
+        assert_eq!(text(v.field("space_id")).as_deref(), Some("sp-1"));
+        assert_eq!(text(v.field("device_id")).as_deref(), Some("dev-1"));
+        assert_eq!(text(v.field("waiting")).as_deref(), Some("Auth's crew is full: 2 of 2 working"));
+        // (None of it: nil, as the sample's.)
+        let bare: WorkItem = serde_json::from_value(json!({
+            "id": "y", "title": "t", "state": "inbox", "priority": "normal", "createdAt": iso(NOW), "updatedAt": iso(NOW),
+        }))
+        .unwrap();
+        let v = item_value(&bare);
+        assert!(nil(v.field("space_id")) && nil(v.field("device_id")) && nil(v.field("waiting")));
     }
 
     #[test]
