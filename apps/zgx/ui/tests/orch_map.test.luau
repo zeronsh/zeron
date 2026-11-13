@@ -777,3 +777,33 @@ test("topology: rails across machines keep a column each; where an elbow passes 
 		end
 	end
 end)
+
+test("a crew row is never blank: the chat's name, else its card's, else its role", function()
+	local t = os.time()
+	local sessions_now = {
+		chats = { { id = "orc-z", title = "Zeron fixes", device = "hp1", updated = t, created = t - 900 } },
+		children = { ["orc-z"] = {
+			{ id = "th-a", parent = "orc-z", title = "", device = "hp1", child_kind = "crew", updated = t, created = t - 600 },
+			{ id = "th-b", parent = "orc-z", title = "", device = "hp1", child_kind = "crew", updated = t, created = t - 600 },
+		} },
+	}
+	local w = {
+		now = {
+			orchestrators = { { id = "orc-z", kind = "standard", name = "Zeron fixes", hue = 20, archived = false, paused = false } },
+			crew = {
+				{ chat_id = "th-a", orchestrator_id = "orc-z", item_id = "it-a", role = "", released = false },
+				{ chat_id = "th-b", orchestrator_id = "orc-z", role = "scroll fix", released = false },
+			},
+			items = { { id = "it-a", title = "Board card declutter", order = 1 } },
+			dumps = {},
+		},
+		chats = data.chats(sessions_now),
+		devices = { { id = "hp1", name = "honeypot-1", platform = "linux", here = true, online = true } },
+		projects = {},
+		loads = {},
+		here = "hp1",
+	}
+	local f = model.fleet(w)
+	expect(f.threads["th-a"].title).to_be("Board card declutter")
+	expect(f.threads["th-b"].title).to_be("scroll fix")
+end)
