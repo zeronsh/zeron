@@ -189,3 +189,20 @@ fn orchestration_board_click_is_not_a_drag() {
     assert_eq!(said.matches("open:th-ui-control").count(), 2, "{said:?}");
     assert!(!said.contains("move:"), "{said:?}");
 }
+
+/// Let go in the gutter between two columns, low down where the shorter
+/// ones end: it lands in the nearer column (the board takes the drop, not
+/// only the cards and columns under the pointer).
+#[test]
+fn orchestration_board_drop_in_the_gutter_lands_in_the_nearer_column() {
+    let mut app = mount(1400., 900.);
+    let from = card(&mut app, "next", LIVE);
+    let blocked = rect(&mut app, "#orch-col-blocked");
+    let review = rect(&mut app, "#orch-col-review");
+    let start = (from.x + 30., from.y + from.height / 2.);
+    // (A point past Blocked's right edge, nearer it than Review.)
+    let gutter = blocked.x + blocked.width + (review.x - blocked.x - blocked.width) * 0.3;
+    let end = (gutter, blocked.y + blocked.height - 4.);
+    gesture(&mut app, start, &[end], true);
+    assert!(calls(&app).contains("move:it-live:blocked:"), "{}", calls(&app));
+}
