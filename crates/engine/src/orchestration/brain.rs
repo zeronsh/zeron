@@ -140,7 +140,7 @@ impl EngineRpc {
         self.orchestration()
             .workspace()
             .write_orchestration(|doc| doc.upsert_dump(&dump));
-        let message = format!("[Dump {}]\n{}", dump.id, text);
+        let message = zeron_proto::orchestration::prompt_text::dump_message(&dump.id, &text);
         if let Err(error) = deliver(self, &brain, &message, None, When::Next) {
             self.orchestration().workspace().write_orchestration(|doc| {
                 if let Some(mut d) = doc.dump(&dump.id) {

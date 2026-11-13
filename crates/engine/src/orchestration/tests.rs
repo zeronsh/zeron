@@ -190,7 +190,7 @@ async fn a_dump_is_routed_and_each_fragment_delivered_where_it_goes() {
     let brain_chat = core.workspace.chat(&brain).unwrap().unwrap();
     assert_eq!(brain_chat.device_id, core.device_id);
     assert!(!brain_chat.is_top_level());
-    assert_eq!(sent(&core, &brain), vec![format!("[Dump {dump}]\n{text}")]);
+    assert_eq!(sent(&core, &brain), vec![zeron_proto::orchestration::prompt_text::dump_message(&dump, &text)]);
     assert_eq!(state.dumps[0].state, DumpState::Routing);
     // A second dump reuses it.
     op(&core, Caller::Local, json!({"op":"dump","text":"another"}))

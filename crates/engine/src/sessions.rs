@@ -2735,6 +2735,12 @@ impl Inner {
                 "1".to_owned(),
             );
         }
+        // A restriction, never a grant: an id prefix is enough to take tools
+        // away (agents can't mint Brain dump ids, and the person's own chats
+        // never carry one).
+        if zeron_proto::orchestration::is_brain_dump_chat(chat_id) {
+            env.insert(zeron_proto::McpServer::ROUTER_ONLY_ENV.to_owned(), "1".to_owned());
+        }
         if let Some(path) = lock(&self.ipc_token_file)
             .as_ref()
             .and_then(|path| path.to_str())

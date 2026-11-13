@@ -226,6 +226,17 @@ impl ReportState {
 /// breaks and control characters, and free text rides a delimited block whose
 /// markers can't occur inside it.
 pub mod prompt_text {
+    /// What the Brain dump is sent for a dump: the routing steps first, then
+    /// the person's words. The steps ride every dump, not only the system
+    /// prompt, because a dump often reads like a task ("add a flag…") and an
+    /// agent left to the dump alone does it instead of routing it.
+    pub fn dump_message(dump_id: &str, text: &str) -> String {
+        format!(
+            "[Dump {dump_id}] Route this; don't act on it. Call `world` once, then `route` once per fragment \
+(dump `{dump_id}`, the fragment quoted verbatim as `excerpt`), then `dump_done`.\n\n{text}"
+        )
+    }
+
     /// Opens a block of untrusted text.
     pub const OPEN: &str = "\u{27E6}crew-output\u{27E7}";
     /// Closes it.

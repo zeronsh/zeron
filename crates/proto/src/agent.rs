@@ -676,6 +676,16 @@ impl McpServer {
             .is_some_and(|value| value == "1")
     }
 
+    /// Set to `1` on Zeron's own server for the Brain dump's runs: it only
+    /// routes, so the driver launches it without tools that act (shell, file
+    /// edits, the web, its own subagents) and with its routing rules in the
+    /// system prompt, where they outweigh a dump that reads like a task.
+    pub const ROUTER_ONLY_ENV: &'static str = "ZERON_ROUTER_ONLY";
+
+    pub fn router_only(&self) -> bool {
+        self.env.get(Self::ROUTER_ONLY_ENV).is_some_and(|value| value == "1")
+    }
+
     /// The chat Zeron's own server speaks for, set when the engine launched
     /// it for a chat's run (its in-chat tools are offered only then).
     pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";

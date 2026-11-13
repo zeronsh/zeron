@@ -90,6 +90,10 @@ use wire::{
 /// `wait_on_background`: [`McpServer::waits_on_background`]): the text Sonnet and Opus were live-probed acting
 /// on. The CLI starts a turn of its own when a background task ends, so a
 /// turn that ends on one isn't the agent's last.
+/// What the Brain dump runs without: every tool that acts or delegates
+/// outside Zeron's own routing tools.
+const ROUTER_DISALLOWED: &str = "Agent,Task,Workflow,Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,CronCreate,CronDelete";
+
 const WAIT_ON_BACKGROUND_NOTE: &str = "\
 When you start background work you will come back to once it finishes (a test run, a build, a \
 long check) and you end your turn before it finishes, call the Zeron tool wait_on_background \
@@ -544,8 +548,16 @@ impl ClaudeHarness {
             // neither reaches the model before it decides to end a turn:
             // live-probed on 2.1.319, Sonnet never called it with those
             // alone, and Sonnet and Opus both did with this note.
+            let router = request.mcp.as_ref().is_some_and(McpServer::router_only);
+            let mut appended: Vec<&str> = Vec::new();
             if request.mcp.as_ref().is_some_and(McpServer::waits_on_background) {
-                cmd.args(["--append-system-prompt", WAIT_ON_BACKGROUND_NOTE]);
+                appended.push(WAIT_ON_BACKGROUND_NOTE);
+            }
+            if router {
+                appended.push(zeron_proto::orchestration::role_prompts::BRAIN_DUMP);
+            }
+            if !appended.is_empty() {
+                cmd.args(["--append-system-prompt", &appended.join("\n\n")]);
             }
             // Delegation goes through that server's side chats only. A bare
             // tool name "removes the matching tools from Claude's context"
@@ -555,7 +567,11 @@ impl ClaudeHarness {
             // init frame lists it as `Task`, and `Workflow` runs agents of
             // its own; with the rule, the init frame lists neither `Task`
             // nor `Workflow` (live-verified 2.1.310).
-            if request
+            // The Brain dump routes and never acts: without these it took a
+            // dump that read like a task and did it (live, 2026-11-12).
+            if router {
+                cmd.arg(format!("--disallowedTools={ROUTER_DISALLOWED}"));
+            } else if request
                 .mcp
                 .as_ref()
                 .is_some_and(|mcp| mcp.side_chats_only())
@@ -2382,6 +2398,12 @@ mod tests {
         assert_eq!(appended(Some(server(&[waits]))), None);
         assert_eq!(appended(Some(server(&[]))), None);
         assert_eq!(appended(None), None);
+        // The Brain dump: its routing rules in the system prompt, beside the
+        // waiting note when it has one.
+        let router = (McpServer::ROUTER_ONLY_ENV, "1");
+        let both = appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), router, waits]))).unwrap();
+        assert!(both.contains(WAIT_ON_BACKGROUND_NOTE));
+        assert!(both.contains(zeron_proto::orchestration::role_prompts::BRAIN_DUMP));
     }
 }
 
