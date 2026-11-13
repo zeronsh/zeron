@@ -170,7 +170,7 @@ function M.layout(world: any, width: number): Layout
 				local top = y + h
 				local ty = top + ROW_H / 2
 				if home then
-					table.insert(out.nodes, { id = o.id, lane = lane.id, x = GUTTER + PAD, y = ty - NODE_H / 2, hue = o.hue, paused = o.paused == true })
+					table.insert(out.nodes, { id = o.id, lane = lane.id, x = GUTTER + PAD, y = ty - NODE_H / 2, hue = o.hue :: number?, paused = o.paused == true })
 					out.anchors[o.id] = { GUTTER + PAD + 9, ty }
 				end
 				local n = #members
@@ -180,7 +180,7 @@ function M.layout(world: any, width: number): Layout
 					local m = members[i]
 					local ry = top + (i - 0.5) * ROW_H
 					table.insert(rows, ry)
-					table.insert(out.pills, { id = m.chat_id, lane = lane.id, x = pills_x, y = ry - PILL_H / 2, w = pill_w, orchestrator = o.id, hue = o.hue })
+					table.insert(out.pills, { id = m.chat_id, lane = lane.id, x = pills_x, y = ry - PILL_H / 2, w = pill_w, orchestrator = o.id, hue = o.hue :: number? })
 					out.anchors[m.chat_id] = { pills_x + 10, ry }
 				end
 				if shown < n then
