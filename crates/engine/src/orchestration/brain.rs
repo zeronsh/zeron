@@ -282,6 +282,17 @@ impl EngineRpc {
             Aim::Answer { .. } if intent != RouteIntent::Question => RouteIntent::Info,
             _ => intent,
         };
+        // A reply on a Review card is the person's verdict on it: approval
+        // approves it, anything else asks for changes. Only in the person's
+        // own words (the excerpt, verbatim in the dump), never the Brain
+        // dump's rewording: these are the person's ops.
+        let verdict: Option<(String, bool)> = match &aim {
+            Aim::Direct { card: Some(id), .. } if span_of(&dump.text, &excerpt_text).is_some() => orch
+                .item(id)
+                .filter(|c| c.state == WorkState::Review)
+                .map(|c| (c.id, reads_as_approval(&excerpt_text))),
+            _ => None,
+        };
         let (target, message) = match &aim {
             Aim::Answer { asker, .. } => (RouteTarget::Chat { id: asker.clone() }, message),
             Aim::OnCard { item_id } => (RouteTarget::Item { id: item_id.clone() }, message),
@@ -289,11 +300,6 @@ impl EngineRpc {
             Aim::Direct { target, card } => {
                 let message = match card.as_deref().and_then(|id| orch.item(id)) {
                     Some(card) => {
-                        if card.state == WorkState::Review && reads_as_approval(&format!("{excerpt_text} {message}")) {
-                            // LATER(review-means-you): call the Review Approve op for `card.id`
-                            // here instead of only telling its thread.
-                            tracing::debug!(card = %card.id, "brain dump: a Review card approved in a dump");
-                        }
                         format!(
                             "[On your card \"{}\"] {}",
                             zeron_proto::orchestration::prompt_text::one_line(&card.title, zeron_proto::orchestration::prompt_text::LABEL_MAX),
@@ -390,6 +396,17 @@ impl EngineRpc {
                 }
                 Aim::OnCard { item_id } => {
                     self.note_on_card(item_id, &route)?;
+                    route.state = RouteState::Delivered;
+                }
+                // (Review card: approveItem / requestChanges, as the person's
+                // buttons on it do; requestChanges tells its thread itself.)
+                _ if verdict.is_some() => {
+                    let (card_id, approve) = verdict.clone().expect("checked");
+                    if approve {
+                        self.approve_item(&card_id, Utc::now())?;
+                    } else {
+                        self.request_changes(&card_id, route.excerpt.trim())?;
+                    }
                     route.state = RouteState::Delivered;
                 }
                 _ => self.deliver_route(&dump, &mut route, brain.as_deref(), card).await?,

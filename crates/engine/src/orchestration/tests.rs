@@ -1958,6 +1958,9 @@ async fn a_thread_on_an_older_host_is_asked_for_by_the_engine_that_launched_it()
     turn_ended(&core, "9ad131f1-map").await;
     turn_ended(&core, "9ad131f1-map").await;
     assert_eq!(asks_from(&core, "9ad131f1-map").len(), 1);
+    core.sessions.shutdown().await;
+}
+
 /// The Brain dump's id (after a dump made it).
 fn brain_of(core: &crate::EngineCore) -> String {
     core.orchestration
@@ -2043,44 +2046,61 @@ async fn a_reply_on_an_ask_reference_answers_the_ask() {
 async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
     let (_temp, core) = core().await;
     chat(&core, "worker", "Worker", None).await;
-    let card = op(
-        &core,
-        Caller::Local,
-        json!({"op":"upsertItem","item":{"title":"Topology lines","threads":["worker"],"state":"review"}}),
-    )
-    .await
-    .unwrap();
+    chat(&core, "fixer", "Fixer", None).await;
+    let upsert = |title: &str, thread: &str, state: &str| {
+        json!({"op":"upsertItem","item":{"title":title,"threads":[thread],"state":state}})
+    };
+    let card = op(&core, Caller::Local, upsert("Topology lines", "worker", "active")).await.unwrap();
+    let review = op(&core, Caller::Local, upsert("Curved edges", "worker", "review")).await.unwrap();
+    let rework = op(&core, Caller::Local, upsert("Dashed rails", "fixer", "review")).await.unwrap();
     let loose = op(&core, Caller::Local, json!({"op":"upsertItem","item":{"title":"Someday","detail":"Old idea"}}))
         .await
         .unwrap();
     let dump = op(
         &core,
         Caller::Local,
-        json!({"op":"dump","text":"looks good, ship it. and use dashed lines there",
-            "refs":[{"kind":"card","id":card,"label":"Topology lines"},{"kind":"card","id":loose,"label":"Someday"}]}),
+        json!({"op":"dump","text":"keep the labels left. looks good, ship it. use dashed lines there. thicker rails please",
+            "refs":[{"kind":"card","id":card,"label":"Topology lines"},{"kind":"card","id":loose,"label":"Someday"},
+                    {"kind":"card","id":review,"label":"Curved edges"},{"kind":"card","id":rework,"label":"Dashed rails"}]}),
     )
     .await
     .unwrap();
     let brain = brain_of(&core);
+    let route = |excerpt: &str, message: &str, reference: &str| {
+        json!({"op":"route","dumpId":dump,"excerpt":excerpt,"target":{"kind":"note"},"intent":"info","message":message,"reference":reference})
+    };
+
+    // A card at work: the comment goes to its thread, the card untouched.
     let before = sent(&core, "worker").len();
-    let id = op(
-        &core,
-        agent(&brain),
-        json!({"op":"route","dumpId":dump,"excerpt":"looks good, ship it","target":{"kind":"note"},
-            "intent":"info","message":"Looks good, ship it.","reference":card}),
-    )
-    .await
-    .unwrap();
+    let id = op(&core, agent(&brain), route("keep the labels left", "Keep the labels on the left.", &card)).await.unwrap();
     let to_worker = sent(&core, "worker");
     assert_eq!(to_worker.len(), before + 1);
     assert!(
-        to_worker.last().unwrap().contains("[On your card \"Topology lines\"] Looks good, ship it."),
+        to_worker.last().unwrap().contains("[On your card \"Topology lines\"] Keep the labels on the left."),
         "{to_worker:?}"
     );
     let r = route_row(&core, &dump, &id);
     assert_eq!((r.target.clone(), r.state), (RouteTarget::Chat { id: "worker".into() }, RouteState::Delivered));
     assert_eq!(r.item_id, None, "the card stays its own route's");
-    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Review);
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
+
+    // A Review card the person approves: approveItem, as its button does.
+    op(&core, agent(&brain), route("looks good, ship it", "Looks good, ship it.", &review)).await.unwrap();
+    let approved = core.orchestration.item(&review).unwrap();
+    assert_eq!(approved.state, WorkState::Done);
+    assert!(approved.approved_at.is_some());
+
+    // Anything else on a Review card asks for changes, in the person's
+    // words: the card back in Now, its thread told.
+    let before = sent(&core, "fixer").len();
+    op(&core, agent(&brain), route("thicker rails please", "Make the rails thicker and also redo the colours", &rework))
+        .await
+        .unwrap();
+    assert_eq!(core.orchestration.item(&rework).unwrap().state, WorkState::Active);
+    let to_fixer = sent(&core, "fixer");
+    assert_eq!(to_fixer.len(), before + 1);
+    assert!(to_fixer.last().unwrap().contains("thicker rails please"), "{to_fixer:?}");
+    assert!(!to_fixer.last().unwrap().contains("colours"), "never the Brain dump's rewording: {to_fixer:?}");
 
     // A card with no thread or owner keeps the comment.
     let id = op(
