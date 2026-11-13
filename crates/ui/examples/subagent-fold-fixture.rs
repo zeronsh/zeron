@@ -39,7 +39,6 @@ fn agent(id: &str, description: &str) -> MessagePart {
         subagent_ref: Some(format!("chat--sub--{id}")),
         subagent_status: Some(SubagentStatus::Running),
         subagent_tail: None,
-        preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
     }

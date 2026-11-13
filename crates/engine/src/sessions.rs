@@ -2110,14 +2110,25 @@ impl SessionsEngine {
     }
 }
 
+/// The uploads id of a picture a tool result carried: `tool-<chat>-<bytes>`,
+/// each a SHA-256 in hex, the chat's cut to 16 digits. The same bytes in a
+/// chat name one file; a chat's pictures all start `tool-<chat>-`.
+fn tool_image_id(chat_id: &str, bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let chat = format!("{:x}", Sha256::digest(chat_id.as_bytes()));
+    format!("tool-{}-{:x}", &chat[..16], Sha256::digest(bytes))
+}
+
 impl Inner {
     /// Store image bytes a tool result already carried. The model-supplied
     /// path is never opened. A bad payload leaves no preview and does not
-    /// fail the turn. The same key overwrites the same uploads file.
+    /// fail the turn. Each file is named by its chat (a subagent's results
+    /// are its chat's too) and its bytes: the same picture again in a chat is one file,
+    /// not a copy per read, and a chat's files can be found by its prefix
+    /// when it goes (`tool_image_id`).
     async fn store_tool_result_images(
         &self,
         chat_id: &str,
-        parents: &[String],
         tool_id: &str,
         payloads: Vec<zeron_proto::ToolResultImage>,
     ) -> Vec<String> {
@@ -2131,13 +2142,11 @@ impl Inner {
         };
         let uploads = uploads.clone();
         let chat_id = chat_id.to_owned();
-        let parents = parents.to_vec();
         let tool_id = tool_id.to_owned();
         let chat_for_log = chat_id.clone();
         let tool_for_log = tool_id.clone();
         tokio::task::spawn_blocking(move || {
             use base64::Engine as _;
-            use sha2::{Digest, Sha256};
             let mut paths = Vec::new();
             for (index, payload) in payloads.into_iter().enumerate().take(4) {
                 let bytes = match base64::engine::general_purpose::STANDARD
@@ -2155,17 +2164,7 @@ impl Inner {
                         continue;
                     }
                 };
-                let mut key = String::new();
-                key.push_str(&chat_id);
-                for parent in &parents {
-                    key.push('\0');
-                    key.push_str(parent);
-                }
-                key.push('\0');
-                key.push_str(&tool_id);
-                key.push('\0');
-                key.push_str(&index.to_string());
-                let id = format!("{:x}", Sha256::digest(key.as_bytes()));
+                let id = tool_image_id(&chat_id, &bytes);
                 match uploads.store_shown_image(&id, &payload.name, &bytes) {
                     Ok(image) => paths.push(image.path),
                     Err(err) => {
@@ -2278,7 +2277,7 @@ impl Inner {
                 exit_code,
             } if !image_payloads.is_empty() => {
                 let stored = self
-                    .store_tool_result_images(chat_id, &parents, &id, image_payloads)
+                    .store_tool_result_images(chat_id, &id, image_payloads)
                     .await;
                 vec![AgentEvent::ToolResult {
                     id,
@@ -5834,6 +5833,25 @@ mod tests {
             serde_json::to_string(&sessions.inner.journal.replay("chat", 0).unwrap()).unwrap();
         assert!(!journal.contains(source));
         assert!(!journal.contains("secret"));
+    }
+
+    /// A picture read again in a chat (another call, another subagent) is
+    /// the same file, not a copy per read; another chat's is its own; and a
+    /// chat's files share its prefix, for whatever clears a chat's away.
+    #[test]
+    fn a_chats_tool_pictures_are_one_file_each_under_its_prefix() {
+        let png = b"\x89PNG one";
+        let id = super::tool_image_id("chat-a", png);
+        assert_eq!(id, super::tool_image_id("chat-a", png));
+        assert_ne!(id, super::tool_image_id("chat-a", b"\x89PNG two"));
+        assert_ne!(id, super::tool_image_id("chat-b", png));
+        let prefix = &id[..id.rfind('-').unwrap() + 1];
+        assert!(super::tool_image_id("chat-a", b"\x89PNG two").starts_with(prefix));
+        assert!(!super::tool_image_id("chat-b", png).starts_with(prefix));
+        assert!(
+            id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-' || b.is_ascii_lowercase()),
+            "{id}"
+        );
     }
 
     #[tokio::test]

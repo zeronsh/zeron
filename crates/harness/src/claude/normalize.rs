@@ -438,14 +438,42 @@ fn is_synthetic_user_text(text: &str) -> bool {
     if text.starts_with("<system-reminder>") || text.starts_with("[Request interrupted") {
         return true;
     }
-    let Some(rest) = text.strip_prefix("[Image: ") else {
+    is_image_note(text)
+}
+
+/// The CLI's image note exactly: one line, `[Image: source: <path>]` (the
+/// path may be followed by `, original WxH, displayed at WxH. …`), or
+/// `[Image: original WxH, displayed at WxH. …]`. A steer that only starts
+/// and ends like one (`[Image: original mockup attached]\nmatch it [urgent]`)
+/// is not it.
+fn is_image_note(text: &str) -> bool {
+    if text.contains('\n') {
+        return false;
+    }
+    let Some(rest) = text
+        .strip_prefix("[Image: ")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
         return false;
     };
-    let Some(rest) = rest.strip_suffix(']') else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    rest.starts_with("source: ") || rest.starts_with("original ")
+    if let Some(path) = rest.strip_prefix("source: ") {
+        return !path.trim().is_empty() && !path.contains(['[', ']']);
+    }
+    rest.strip_prefix("original ").is_some_and(sizes_note)
+}
+
+/// `WxH, displayed at WxH` and whatever the CLI says after it.
+fn sizes_note(text: &str) -> bool {
+    fn dimensions(text: &str) -> Option<&str> {
+        let (width, rest) = text.split_once('x')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (!width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) && digits > 0)
+            .then(|| &rest[digits..])
+    }
+    dimensions(text)
+        .and_then(|rest| rest.strip_prefix(", displayed at "))
+        .and_then(dimensions)
+        .is_some_and(|rest| !rest.contains(['[', ']']))
 }
 
 /// Images kept from one tool result. Matches the chip preview cap.
@@ -2001,6 +2029,31 @@ mod tests {
             )),
             "a real steer must still reach the subagent"
         );
+    }
+
+    /// Only the CLI's own image notes are bookkeeping: a steer that merely
+    /// starts with `[Image: ` and ends with `]` still reaches the agent.
+    #[test]
+    fn only_the_clis_image_notes_are_synthetic() {
+        for note in [
+            "[Image: source: /tmp/shots/1.png]",
+            "[Image: source: /tmp/shots/1.png, original 10x10, displayed at 10x10.]",
+            "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]",
+            "  [Image: original 10x10, displayed at 10x10]  ",
+        ] {
+            assert!(super::is_synthetic_user_text(note), "{note}");
+        }
+        for steer in [
+            "[Image: original mockup attached]\nmatch it exactly [urgent]",
+            "[Image: original mockup attached]",
+            "[Image: original 10x10 please]",
+            "[Image: source: ]",
+            "[Image: source: a] and also [b]",
+            "[Image: sourced elsewhere]",
+            "[Image: original 10x10, displayed at big]",
+        ] {
+            assert!(!super::is_synthetic_user_text(steer), "{steer}");
+        }
     }
 
     /// A tool that returns an image puts the pixels on the result. The

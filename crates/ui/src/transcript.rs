@@ -1542,7 +1542,6 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
-                preview_paths,
                 ..
             } => {
                 // A message to another chat reads as one line naming the
@@ -1595,7 +1594,7 @@ pub fn rows_for_entry(
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
                     kind: ToolItemKind::Call,
-                    images: crate::tool_images::chip_images(call, output.as_deref(), preview_paths),
+                    images: crate::tool_images::image_paths(call, output.as_deref()),
                 };
                 if compact {
                     // Compact mode keeps ONE group for the whole turn —
@@ -2347,12 +2346,10 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
     DETAIL_SEPARATOR + body
 }
 
-/// Tool image thumbnails sit in a strip as tall as the tallest one can be
-/// ([`crate::tool_images::THUMB_FRAME`]); each is its own shape inside it.
-const TOOL_IMAGE_HEIGHT: f32 = crate::tool_images::THUMB_FRAME.1;
+/// Tool image preview frame height; widths follow each image's aspect.
+const TOOL_IMAGE_HEIGHT: f32 = 220.0;
+const TOOL_IMAGE_MAX_WIDTH: f32 = 560.0;
 const TOOL_IMAGE_PAD: f32 = 8.0;
-/// Reply pictures' corner (`reply_images::frame`), for the thumbnails too.
-const TOOL_IMAGE_RADIUS: f32 = 12.0;
 /// Analytic height an open chip's image strip adds (separator + frames).
 const TOOL_IMAGE_STRIP_HEIGHT: f32 = DETAIL_SEPARATOR + TOOL_IMAGE_HEIGHT + 2.0 * TOOL_IMAGE_PAD;
 
@@ -3534,9 +3531,6 @@ pub struct Transcript {
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
-    /// A tool thumbnail clicked while its full picture still loads: it
-    /// opens in the lightbox once it's here (`(devices, path, name)`).
-    pending_tool_image: Option<(Vec<String>, String, SharedString)>,
     /// Mermaid fences drawn as diagrams in settled Markdown blocks. Each
     /// row's media handler requests its fences while laying out, so only
     /// painted diagrams are rendered (see [`MermaidCache`]).
@@ -3869,7 +3863,6 @@ impl Transcript {
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
-            pending_tool_image: None,
             diagrams: Rc::default(),
             diagram_media: None,
             diagram_worker: None,
@@ -6382,55 +6375,29 @@ impl Transcript {
     ) -> AnyElement {
         use crate::tool_images::Thumb;
         let devices: Rc<[String]> = self.image_host(cx).0.into_iter().collect();
-        let accent = theme.accent;
         let frames = images.into_iter().enumerate().map(|(ix, (path, thumb))| {
             let name = SharedString::from(file_badge_name(&path).to_owned());
-            let (width, height) = crate::tool_images::thumb_size(match &thumb {
-                Thumb::Ready { image, aspect } => {
-                    let size = image.size(0);
-                    Some(if size.width.0 > 0 && size.height.0 > 0 {
-                        (size.width.0 as f32, size.height.0 as f32)
-                    } else {
-                        (*aspect * TOOL_IMAGE_HEIGHT, TOOL_IMAGE_HEIGHT)
-                    })
+            let width = match &thumb {
+                Thumb::Ready { aspect, .. } => {
+                    (TOOL_IMAGE_HEIGHT * aspect).clamp(48.0, TOOL_IMAGE_MAX_WIDTH)
                 }
-                _ => None,
-            });
+                _ => TOOL_IMAGE_HEIGHT * 4.0 / 3.0,
+            };
             let menu_devices = devices.clone();
-            let open_devices = devices.to_vec();
-            let open_path = path.clone();
-            let open_name = name.clone();
-            let ready = matches!(thumb, Thumb::Ready { .. });
             let frame = div()
                 .id(SharedString::from(format!("{chip}-img{ix}")))
                 .w(px(width))
-                .h(px(height))
+                .h(px(TOOL_IMAGE_HEIGHT))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(TOOL_IMAGE_RADIUS))
+                .rounded(px(8.0))
                 .overflow_hidden()
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.035))
                 .aria_label(name.clone())
-                .when(ready, |frame| {
-                    frame
-                        .role(gpui::Role::Button)
-                        .tab_index(0)
-                        .cursor_pointer()
-                        .focus_visible(move |style| style.border_2().border_color(accent))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_tool_image(
-                                open_devices.clone(),
-                                open_path.clone(),
-                                open_name.clone(),
-                                window,
-                                cx,
-                            );
-                        }))
-                })
                 .on_mouse_down(
                     gpui::MouseButton::Right,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -6450,8 +6417,8 @@ impl Transcript {
                 Thumb::Ready { image, .. } => frame.child(
                     img(image)
                         .w(px(width - 2.0))
-                        .h(px(height - 2.0))
-                        .rounded(px(TOOL_IMAGE_RADIUS - 1.0))
+                        .h(px(TOOL_IMAGE_HEIGHT - 2.0))
+                        .rounded(px(7.0))
                         .object_fit(ObjectFit::Contain),
                 ),
                 Thumb::Loading => frame
@@ -6487,7 +6454,6 @@ impl Transcript {
                     .when(!collapses, |strip| strip.px(px(TOOL_IMAGE_PAD)))
                     .flex()
                     .flex_row()
-                    .items_start()
                     .gap(px(TOOL_IMAGE_PAD))
                     .overflow_x_scroll()
                     .children(frames),
@@ -7368,31 +7334,6 @@ impl Transcript {
             && !Arc::ptr_eq(&preview.image, &source.image)
         {
             cx.defer(move |cx| gpui::ImageSource::Image(preview.image).evict(None, cx));
-        }
-    }
-
-    /// Open a tool thumbnail's picture in the lightbox: its full file, read
-    /// from the chat's host as a sent picture is. Still loading, it opens
-    /// once it's here (`pending_tool_image`); unreadable, nothing opens.
-    fn open_tool_image(
-        &mut self,
-        devices: Vec<String>,
-        path: String,
-        name: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::attachments::AttachmentSnapshot;
-        match self.attachment_state(&devices, &path, None, cx) {
-            AttachmentSnapshot::Loaded(loaded) => {
-                self.pending_tool_image = None;
-                let preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
-                self.open_image_preview(preview, window, cx);
-            }
-            AttachmentSnapshot::Loading => {
-                self.pending_tool_image = Some((devices, path, name));
-            }
-            _ => self.pending_tool_image = None,
         }
     }
 
@@ -11567,12 +11508,6 @@ impl Render for Transcript {
             .flatten()
             .map(|loading| self.render_loader(loading, cx));
         let root = root.children(loader);
-        // A tool thumbnail clicked while its picture loaded: open it now.
-        if self.attachment_preview.is_none()
-            && let Some((devices, path, name)) = self.pending_tool_image.take()
-        {
-            self.open_tool_image(devices, path, name, window, cx);
-        }
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
