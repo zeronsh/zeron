@@ -508,7 +508,8 @@
       "orchestrators": "Orchestrators",
       "new_orchestrator": "New orchestrator",
       "orchestrator_actions": "Orchestrator actions",
-      "paused": "Paused"
+      "paused": "Paused",
+      "crew_of": "Started by {name}"
     },
     "git": {
       "pull_request": "拉取请求",

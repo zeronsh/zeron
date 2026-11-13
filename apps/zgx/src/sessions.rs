@@ -561,7 +561,7 @@ impl Layout {
             }
             let place = place_of(c);
             if let Place::Child(parent) = &place {
-                child_row(rows, c, id, parent, live(id), at);
+                child_row(rows, c, id, parent, known, live(id), at);
                 let i = *layout.parent_at.entry(parent.clone()).or_insert_with(|| {
                     layout.parents.push(parent.clone());
                     layout.kids.push(Kids { ids: Vec::new(), value: Value::Nil, working: 0 });
@@ -618,9 +618,20 @@ impl Layout {
 }
 
 /// A side chat's row, built again if what it shows moved.
-fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, session: Option<&Session>, at: chrono::DateTime<chrono::Utc>) {
+fn child_row(
+    rows: &mut HashMap<String, Row>,
+    c: &Json,
+    id: &str,
+    parent: &str,
+    known: &HashSet<&str>,
+    session: Option<&Session>,
+    at: chrono::DateTime<chrono::Utc>,
+) {
     let status = status_of(rows.get(id).map_or_else(|| seen_marks(c), |row| row.marks), session, at);
     let harness = c["config"]["harness"].as_str();
+    // Its project, as a top-level chat's (one not known: none). A crew
+    // thread is listed in the sidebar under it, as any chat is.
+    let project = c["spaceId"].as_str().filter(|s| known.contains(s));
     let with = RowWith {
         status,
         waiting: None,
@@ -628,7 +639,7 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         running_subagents: 0,
         side_chats: 0,
         working_side_chats: 0,
-        known_project: false,
+        known_project: project.is_some(),
         agent_icon: harness.and_then(crate::agents::registry_icon),
         activity: activity_of(status, session),
         todo: session.and_then(|s| s.todo.clone()),
@@ -649,7 +660,12 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         ("id", Value::from(id)),
         ("parent", Value::from(parent)),
         ("title", Value::from(title)),
+        // Its own title alone (none: not named yet), for a name that falls
+        // back otherwise (a crew thread's: its role, its item's title).
+        ("name", opt(c["title"].as_str().filter(|t| !t.trim().is_empty()))),
         ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
+        ("project", opt(project)),
+        ("branch", opt(c["branch"].as_str())),
         ("status", status.map_or(Value::Nil, Value::from)),
         ("updated", Value::from(updated as f64)),
         ("created", Value::from(created as f64)),
@@ -1453,7 +1469,7 @@ impl Sessions {
         for id in &dirty {
             let Some(Place::Child(parent)) = layout.place.get(id) else { continue };
             let Some(c) = entry(id, &mut index) else { continue };
-            child_row(&mut rows, c, id, parent, live(id), at);
+            child_row(&mut rows, c, id, parent, known, live(id), at);
             if !parents.contains(parent) {
                 parents.push(parent.clone());
             }
@@ -2505,6 +2521,47 @@ mod tests {
 
     fn chat<'a>(v: &'a zgx_script::Value, id: &str) -> &'a zgx_script::Value {
         v.field("chats").unwrap().list().iter().find(|c| c.field("id").map(crate::auth::text).as_deref() == Some(id)).unwrap()
+    }
+
+    /// A crew thread (a chat an orchestrator started, under it) carries its
+    /// project and branch, so the sidebar lists it under that project as any
+    /// chat: the orchestrator's own chat is listed in no project, and a
+    /// thread found only under it was in none. Its cwd (a worktree, another
+    /// checkout) doesn't move it: the project is its `spaceId`. Archived, it
+    /// is in no list, as an archived side chat is.
+    #[test]
+    fn a_crew_thread_carries_its_project_for_the_sidebar() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        s.heard(Slot::Spaces, json!([{ "id": "zeron", "name": "zeron", "path": "/home/u/Documents/zeron", "deviceId": "d" }]));
+        s.set_chats(json!([
+            { "id": "orc", "title": "Zeron fixes", "deviceId": "d", "spaceId": "zeron", "createdAt": iso(now - 7200) },
+            { "id": "qa", "title": "Control Room Q&A section", "parentChatId": "orc", "childKind": "crew", "deviceId": "d",
+              "spaceId": "zeron", "cwd": "/home/u/Documents/dev/zeron", "branch": "main", "createdAt": iso(now - 600) },
+            { "id": "new", "title": "", "lastMessagePreview": "[Message from Zeron chat Zeron fixes]", "parentChatId": "orc", "childKind": "crew",
+              "deviceId": "d", "spaceId": "zeron", "createdAt": iso(now - 60) },
+            { "id": "lost", "title": "Project gone", "parentChatId": "orc", "childKind": "crew", "deviceId": "d",
+              "spaceId": "deleted", "createdAt": iso(now - 500) },
+            { "id": "old", "title": "Done and archived", "parentChatId": "orc", "childKind": "crew", "deviceId": "d",
+              "spaceId": "zeron", "archived": true, "createdAt": iso(now - 900) },
+        ]));
+        s.heard.set(true);
+        let v = s.value();
+        let text = |v: Option<&zgx_script::Value>| v.and_then(|v| match v { zgx_script::Value::Nil => None, v => Some(crate::auth::text(v)) });
+        let kids = v.field("children").unwrap().field("orc").unwrap().list();
+        let kid = |id: &str| kids.iter().find(|c| text(c.field("id")).as_deref() == Some(id));
+        let qa = kid("qa").expect("the crew thread, under its orchestrator");
+        assert_eq!(text(qa.field("child_kind")).as_deref(), Some("crew"));
+        assert_eq!(text(qa.field("project")).as_deref(), Some("zeron"));
+        assert_eq!(text(qa.field("branch")).as_deref(), Some("main"));
+        assert_eq!(text(qa.field("name")).as_deref(), Some("Control Room Q&A section"));
+        assert_eq!(text(kid("lost").unwrap().field("project")), None, "a project not known: none");
+        // Not titled yet: no name of its own (the sidebar names it by its role).
+        assert_eq!(text(kid("new").unwrap().field("name")), None);
+        assert!(kid("old").is_none(), "archived: not under it");
+        let listed = |list: &str| v.field(list).unwrap().list().iter().filter_map(|c| text(c.field("id"))).collect::<Vec<_>>();
+        assert!(!listed("chats").contains(&"old".to_owned()) && !listed("archived").contains(&"old".to_owned()));
+        assert!(!listed("chats").contains(&"qa".to_owned()), "listed once: under its orchestrator");
     }
 
     #[test]

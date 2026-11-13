@@ -394,6 +394,7 @@ return {
 	["ds.sidebar.new_orchestrator"] = "New orchestrator",
 	["ds.sidebar.orchestrator_actions"] = "Orchestrator actions",
 	["ds.sidebar.paused"] = "Paused",
+	["ds.sidebar.crew_of"] = "Started by {name}",
 	["ds.git.pull_request"] = "Pull request",
 	["ds.git.file"] = "File",
 	["ds.git.comment_on_line"] = "Comment on line {n}",
