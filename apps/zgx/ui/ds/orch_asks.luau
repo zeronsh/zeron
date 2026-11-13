@@ -100,13 +100,9 @@ return ui.component(function(props: Props): Node
 	end)
 
 	local function leave(n: any)
-		local g = table.clone(leaving:peek())
-		g[n.id] = n
-		leaving:set(g)
+		leaving:set_key({ n.id }, n)
 		ui.after(motion.ms(LEAVE_MS) + 40, function()
-			local g2 = table.clone(leaving:peek())
-			g2[n.id] = nil
-			leaving:set(g2)
+			leaving:set_key({ n.id }, nil)
 		end)
 	end
 
@@ -227,7 +223,7 @@ return ui.component(function(props: Props): Node
 				end, function(key: string): Node
 					local n = item:peek()
 					if n.ask then
-						local runs = runs_of(n.ask.question or "")
+						local runs: any = runs_of(n.ask.question or "")
 						runs.wrap = true
 						runs.w_full = true
 						runs.text_size = "$font.size.md"

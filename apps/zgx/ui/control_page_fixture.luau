@@ -5,6 +5,7 @@
 ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
+require("@app/screens/shell/route").launched:set(true)
 require("@app/control_world")()
 local page = require("@app/screens/control/page")
 return ui.column {

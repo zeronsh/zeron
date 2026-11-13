@@ -288,6 +288,7 @@ local function capture(): Node
 					return history_open:get()
 				end,
 				h = 26,
+				px = 0,
 				gap = "$space.1",
 				items = "center",
 				bg = "#00000000",
@@ -389,7 +390,7 @@ local function board(): Node
 					table.insert(out, it)
 				end
 			end
-			table.sort(out, function(a, b)
+			table.sort(out, function(a: any, b: any): boolean
 				local pa, pb = RANK[a.priority] or 2, RANK[b.priority] or 2
 				if pa ~= pb then
 					return pa < pb

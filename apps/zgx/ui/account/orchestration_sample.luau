@@ -269,7 +269,10 @@ local function shifted(v, by)
 	end
 	local out = {}
 	for k, x in v do
-		if TIME_KEYS[k] and type(x) == "number" then
+		-- (A todo's `done` is a count, not a time.)
+		if k == "todo" then
+			out[k] = x
+		elseif TIME_KEYS[k] and type(x) == "number" then
 			out[k] = x + by
 		else
 			out[k] = shifted(x, by)

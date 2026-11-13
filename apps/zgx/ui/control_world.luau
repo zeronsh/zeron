@@ -149,15 +149,14 @@ return function()
 	end }
 	-- A report coming in (the Map's pulse, a Comms row).
 	ui.command { id = "fixture.report", title = "Fixture: a crew report", run = function()
-		local list = table.clone(orchestration.comms:peek())
-		table.insert(list, { id = `cm-x{#list}`, kind = "report", from = "th-engine-state", to = "orc-orch", summary = "WatchOrchestration streams", at = os.time() })
-		orchestration.comms:set(list)
+		local n = #orchestration.comms:peek()
+		orchestration.comms:push({ id = `cm-x{n}`, kind = "report", from = "th-engine-state", to = "orc-orch", summary = "WatchOrchestration streams", at = os.time() })
 	end }
 	-- A thread's activity moving (the pill alone follows it).
 	ui.command { id = "fixture.activity", title = "Fixture: a thread starts merging", run = function()
 		local n = sessions.now:peek()
-		local copy = table.clone(n)
-		local kids = table.clone(copy.children)
+		local copy: any = table.clone(n)
+		local kids: any = table.clone(copy.children or {})
 		local list = {}
 		for _, c in kids["orc-orch"] do
 			if c.id == "th-engine-flow" then
