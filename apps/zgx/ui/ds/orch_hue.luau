@@ -126,7 +126,7 @@ end
 
 local function read(v: any): number?
 	if type(v) == "function" then
-		return v()
+		return (v :: any)()
 	end
 	return v
 end

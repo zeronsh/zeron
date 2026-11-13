@@ -52,6 +52,12 @@ local INTENT_ICON: { [string]: Icon.Name } = {
 -- receipt shown again picks up where it was, and one first seen with its
 -- routes already there shows them at once.
 local shown_lit: { [string]: number } = {}
+-- (The same, for tests to read: `orch_receipt_lit`.)
+local lit_seen = ui.state("orch_receipt_lit", {} :: { [string]: number })
+local function said_lit(id: string, n: number)
+	shown_lit[id] = n
+	lit_seen:set_key({ id }, n)
+end
 -- (Whether a receipt has been drawn yet this window: the first one's dumps
 -- were there before it.)
 local opened = false
@@ -93,20 +99,20 @@ return ui.component(function(props: Props): Node
 			known = if first then s.n else 0
 		end
 		known = math.min(known, s.n)
-		shown_lit[id] = known
+		said_lit(id, known)
 		lit:set(known)
 		if known >= s.n then
 			return
 		end
 		if motion.reduced_now() then
-			shown_lit[id] = s.n
+			said_lit(id, s.n)
 			lit:set(s.n)
 			return
 		end
 		for k = known + 1, s.n do
 			ui.after((k - known) * STAGGER, function()
 				if (shown_lit[id] or 0) < k then
-					shown_lit[id] = k
+					said_lit(id, k)
 				end
 				if (shape:peek().id == id) and lit:peek() < k then
 					lit:set(k)
@@ -136,7 +142,7 @@ return ui.component(function(props: Props): Node
 			return ui.div {}
 		end
 		local routes = routes_of(d)
-		local runs: { any } = {}
+		local runs: any = {}
 		for _, seg in data.segments(d.text or "", routes) do
 			local i = seg.route
 			if not i then

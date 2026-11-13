@@ -389,7 +389,7 @@ local function board(): Node
 					table.insert(out, it)
 				end
 			end
-			table.sort(out, function(a, b)
+			table.sort(out, function(a: any, b: any): boolean
 				local pa, pb = RANK[a.priority] or 2, RANK[b.priority] or 2
 				if pa ~= pb then
 					return pa < pb

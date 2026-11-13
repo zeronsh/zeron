@@ -73,7 +73,7 @@ return ui.component(function(props: Props): Node
 				table.insert(out, d)
 			end
 		end
-		table.sort(out, function(a, b)
+		table.sort(out, function(a: any, b: any): boolean
 			if (a.id == here) ~= (b.id == here) then
 				return a.id == here
 			end
@@ -96,7 +96,7 @@ return ui.component(function(props: Props): Node
 					table.insert(out, c)
 				end
 			end
-			table.sort(out, function(a, b)
+			table.sort(out, function(a: any, b: any): boolean
 				local sa = (a.activity and a.activity.since) or 0
 				local sb = (b.activity and b.activity.since) or 0
 				if sa ~= sb then

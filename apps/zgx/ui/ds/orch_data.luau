@@ -165,7 +165,7 @@ function M.segments(text: string, routes: { any }): { Segment }
 			table.insert(spans, { from = from, to = to, route = i })
 		end
 	end
-	table.sort(spans, function(a, b)
+	table.sort(spans, function(a: any, b: any): boolean
 		return a.from < b.from
 	end)
 	local out: { Segment } = {}
