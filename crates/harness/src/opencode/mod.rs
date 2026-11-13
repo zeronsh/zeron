@@ -4551,6 +4551,8 @@ fn part_snapshot_events(
                     is_error: status == "error",
                     output,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
             }
