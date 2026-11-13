@@ -122,8 +122,10 @@ impl EngineRpc {
     /// question. The update's id.
     pub(crate) fn brain_update(&self, sender: &str, body: &str) -> String {
         let orchestration = self.orchestration();
+        // (Read first: the update and its ask land together.)
+        let found = ends_on_question(body);
         orchestration.comms().say(CommKind::Message, sender, super::comms::YOU, &one_line(body, 140));
-        if let Some(found) = ends_on_question(body) {
+        if let Some(found) = found {
             self.ask_for(sender, &found, None);
         }
         uuid::Uuid::new_v4().simple().to_string()
