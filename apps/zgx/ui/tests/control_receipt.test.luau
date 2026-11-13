@@ -384,3 +384,39 @@ test("what the person dumped with it: a picture as a thumbnail, a file as a chip
 	expect(app:count("#control-capture >> .orch-dump-picture")).to_be(1)
 	expect(app:has('#control-capture >> .orch-dump-file >> "notes.txt"')).to_be(true)
 end)
+
+test("capture takes a chat dragged from the sidebar as an @-mention", function()
+	local app = mount("control_fixture.luau")
+	app:resize(1440, 900)
+	app:frames(30)
+	app:drag('#sidebar >> role:button "Linux titlebar toggle"', `{COMPOSER} >> role:textbox`)
+	app:frames(10)
+	-- A chip of it on the draft, as a chat's composer has one.
+	expect(app:has(`{COMPOSER} >> role:button "Remove Linux titlebar toggle"`)).to_be(true)
+	-- Sent, it goes with the dump.
+	app:type(`{COMPOSER} >> role:textbox`, "same fix here")
+	app:key("Enter")
+	app:frames(5)
+	expect(tostring(app:state("calls") or "")).to_contain("dump:same fix here")
+end)
+
+test("capture's model picker shows the Brain dump's own model", function()
+	local app = open()
+	-- Its chat's config (Haiku), never a new chat's default (Opus, first).
+	expect(app:has(`{COMPOSER} >> role:button "Model" >> "Haiku 5.5"`)).to_be(true)
+end)
+
+test("capture: a model picked is the Brain dump's at once, and goes with the dump", function()
+	local app = open()
+	-- (Picked in its model picker: the lane's pick, by its chat.)
+	app:set_state("chat_lane_model_orc-brain", "claude-code/claude-opus-5-5")
+	app:frames(10)
+	-- Nothing else changed, nothing else sent.
+	expect(calls(app)).never.to_contain("configure:orc-brain:,")
+	expect(calls(app)).to_contain("configure:orc-brain:claude-code/claude-opus-5-5")
+	app:type(`{COMPOSER} >> role:textbox`, "plan the week")
+	app:key("Enter")
+	app:frames(5)
+	expect(calls(app)).to_contain("dump:plan the week")
+	expect(calls(app)).to_contain("dump-model:claude-code/claude-opus-5-5")
+end)

@@ -9,11 +9,13 @@
 //! Unix seconds, a field that isn't there is nil):
 //!   { [chat id] = { state, device_id, started?, last_step?, step?,
 //!                   steps? = { done, total }, note?, note_at?, stalled,
-//!                   tool?, tool_since?, refreshing, eta_secs?, updated } }
+//!                   tool?, tool_since?, refreshing, eta_secs?, updated,
+//!                   proxy } }
 //! `state`: "working", "waiting" (on background work), "awaiting_input",
 //! "idle", "failed", "done" or "other". The clocks tick in the scripts:
 //! elapsed = now − `started`, since the last step = now − `last_step`, time
-//! left = `eta_secs` − (now − `updated`).
+//! left = `eta_secs` − (now − `updated`). `proxy`: a row the engine keeps
+//! for a chat whose host writes none of its own (drawn as any other).
 //!
 //! and call:
 //!   orchestration.progress_check(chat)   (async) the chat's row with its
@@ -90,8 +92,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 return Err("invalid".to_string());
             }
             let reply = engine::get().call("Orchestrate", json!({ "op": "progressCheck", "chatId": chat })).await?;
-            let Ok(row) = Progress::deserialize(&reply) else { return Ok(Value::Nil) };
-            let value = progress_value(&row);
+            let Some(row) = Heard::read(&reply) else { return Ok(Value::Nil) };
+            let value = row.value();
             TRACKER.with(|t| t.checked(row));
             Ok(value)
         }
@@ -105,7 +107,7 @@ impl Tracker {
             return self.complain(&"not a list");
         };
         // (A row this build can't read costs that row, not the rest.)
-        let rows: Vec<Progress> = list.iter().filter_map(|row| Progress::deserialize(row).ok()).collect();
+        let rows: Vec<Heard> = list.iter().filter_map(Heard::read).collect();
         if rows.len() < list.len() {
             self.complain(&format!("{} unreadable rows", list.len() - rows.len()));
         }
@@ -115,7 +117,7 @@ impl Tracker {
     }
 
     /// A check's reply: its row, unless the stream already has a newer one.
-    fn checked(&self, row: Progress) {
+    fn checked(&self, row: Heard) {
         if self.rows.borrow_mut().upsert(row) {
             self.publish();
         }
@@ -137,17 +139,42 @@ impl Tracker {
     }
 }
 
+/// A row as the engine sent it: the wire's, and whether it's a proxy's
+/// (`proxy`, a field newer engines add).
+#[derive(Clone, Debug, PartialEq)]
+struct Heard {
+    row: Progress,
+    proxy: bool,
+}
+
+impl Heard {
+    fn read(json: &Json) -> Option<Heard> {
+        let row = Progress::deserialize(json).ok()?;
+        Some(Heard { row, proxy: json["proxy"].as_bool().unwrap_or(false) })
+    }
+
+    fn value(&self) -> Value {
+        progress_value(&self.row, self.proxy)
+    }
+}
+
+impl From<Progress> for Heard {
+    fn from(row: Progress) -> Heard {
+        Heard { row, proxy: false }
+    }
+}
+
 /// Every chat's row, by chat id.
 #[derive(Default)]
 struct Rows {
-    by_chat: BTreeMap<String, Progress>,
+    by_chat: BTreeMap<String, Heard>,
 }
 
 impl Rows {
     /// The stream's whole list in place of what was held. Whether anything
     /// changed.
-    fn replace(&mut self, rows: Vec<Progress>) -> bool {
-        let by_chat: BTreeMap<String, Progress> = rows.into_iter().map(|r| (r.chat_id.clone(), r)).collect();
+    fn replace(&mut self, rows: Vec<Heard>) -> bool {
+        let by_chat: BTreeMap<String, Heard> = rows.into_iter().map(|r| (r.row.chat_id.clone(), r)).collect();
         if by_chat == self.by_chat {
             return false;
         }
@@ -156,18 +183,18 @@ impl Rows {
     }
 
     /// One row in, unless the one held is newer. Whether anything changed.
-    fn upsert(&mut self, row: Progress) -> bool {
-        if let Some(held) = self.by_chat.get(&row.chat_id) {
-            if *held == row || held.updated_at > row.updated_at {
+    fn upsert(&mut self, row: Heard) -> bool {
+        if let Some(held) = self.by_chat.get(&row.row.chat_id) {
+            if *held == row || held.row.updated_at > row.row.updated_at {
                 return false;
             }
         }
-        self.by_chat.insert(row.chat_id.clone(), row);
+        self.by_chat.insert(row.row.chat_id.clone(), row);
         true
     }
 
     fn value(&self) -> Value {
-        Value::record(self.by_chat.iter().map(|(id, r)| (id.as_str(), progress_value(r))))
+        Value::record(self.by_chat.iter().map(|(id, r)| (id.as_str(), r.value())))
     }
 }
 
@@ -185,7 +212,7 @@ fn state_word(s: ProgressState) -> &'static str {
 }
 
 /// One chat's row, as scripts see it.
-fn progress_value(p: &Progress) -> Value {
+fn progress_value(p: &Progress, proxy: bool) -> Value {
     let secs = |t: Option<&DateTime<Utc>>| t.map_or(Value::Nil, |t| Value::from(t.timestamp() as f64));
     let text = |s: Option<&str>| s.map_or(Value::Nil, Value::from);
     let steps = p.steps.map_or(Value::Nil, |s| {
@@ -207,6 +234,7 @@ fn progress_value(p: &Progress) -> Value {
         ("refreshing", Value::Bool(p.refreshing)),
         ("eta_secs", p.eta_secs.map_or(Value::Nil, |s| Value::from(f64::from(s)))),
         ("updated", secs(Some(&p.updated_at))),
+        ("proxy", Value::Bool(proxy)),
     ])
 }
 
@@ -244,7 +272,7 @@ mod tests {
     #[test]
     fn a_row_reads_in_snake_case_and_seconds() {
         let row = Progress::deserialize(&working()).unwrap();
-        let v = progress_value(&row);
+        let v = progress_value(&row, false);
         assert_eq!(text(v.field("chat_id")).as_deref(), Some("th-engine-state"));
         assert_eq!(text(v.field("state")).as_deref(), Some("working"));
         assert_eq!(text(v.field("device_id")).as_deref(), Some("dev-desk"));
@@ -269,7 +297,7 @@ mod tests {
             "chatId": "c", "deviceId": "d", "state": "awaitingInput", "stalled": true, "refreshing": true, "updatedAt": iso(NOW),
         }))
         .unwrap();
-        let v = progress_value(&row);
+        let v = progress_value(&row, false);
         assert_eq!(text(v.field("state")).as_deref(), Some("awaiting_input"));
         assert_eq!(v.field("stalled"), Some(&Value::Bool(true)));
         assert_eq!(v.field("refreshing"), Some(&Value::Bool(true)));
@@ -288,7 +316,7 @@ mod tests {
                 "chatId": "c", "deviceId": "d", "state": wire, "updatedAt": iso(NOW),
             }))
             .unwrap();
-            assert_eq!(text(progress_value(&row).field("state")).as_deref(), Some(word), "{wire}");
+            assert_eq!(text(progress_value(&row, false).field("state")).as_deref(), Some(word), "{wire}");
         }
     }
 
@@ -303,28 +331,42 @@ mod tests {
         assert!(v.field("broken").is_none());
         // The same again: nothing new.
         assert!(!t.rows.borrow_mut().replace(vec![
-            Progress::deserialize(&working()).unwrap(),
-            serde_json::from_value(json!({ "chatId": "th-b", "deviceId": "dev-mac", "state": "done", "updatedAt": iso(NOW - 600) }))
-                .unwrap(),
+            Progress::deserialize(&working()).unwrap().into(),
+            serde_json::from_value::<Progress>(json!({ "chatId": "th-b", "deviceId": "dev-mac", "state": "done", "updatedAt": iso(NOW - 600) }))
+                .unwrap()
+                .into(),
         ]));
         // A check's reply, newer: in its place, refreshing.
         let mut fresh = Progress::deserialize(&working()).unwrap();
         fresh.refreshing = true;
         fresh.updated_at = DateTime::<Utc>::from_timestamp(NOW, 0).unwrap();
-        t.checked(fresh.clone());
+        t.checked(fresh.clone().into());
         let v = t.rows.borrow().value();
         assert_eq!(v.field("th-engine-state").unwrap().field("refreshing"), Some(&Value::Bool(true)));
         // An older one doesn't replace it.
         let mut stale = fresh.clone();
         stale.refreshing = false;
         stale.updated_at = DateTime::<Utc>::from_timestamp(NOW - 100, 0).unwrap();
-        assert!(!t.rows.borrow_mut().upsert(stale));
+        assert!(!t.rows.borrow_mut().upsert(stale.into()));
         // A frame without a chat: it goes (the stream is whole).
         t.heard(&json!([working()]));
         assert!(t.rows.borrow().value().field("th-b").is_none());
         // Not a list: told once, kept.
         t.heard(&json!({ "nope": 1 }));
         assert!(t.rows.borrow().value().field("th-engine-state").is_some());
+    }
+
+    #[test]
+    fn a_proxy_row_reads_as_any_other_flagged() {
+        let mut proxy = working();
+        proxy["proxy"] = json!(true);
+        let t = Tracker::default();
+        t.heard(&json!([proxy, { "chatId": "th-b", "deviceId": "dev-mac", "state": "working", "updatedAt": iso(NOW) }]));
+        let v = t.rows.borrow().value();
+        let row = v.field("th-engine-state").unwrap();
+        assert_eq!(row.field("proxy"), Some(&Value::Bool(true)));
+        assert_eq!(text(row.field("state")).as_deref(), Some("working"));
+        assert_eq!(v.field("th-b").unwrap().field("proxy"), Some(&Value::Bool(false)));
     }
 
     #[test]

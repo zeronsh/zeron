@@ -57,6 +57,9 @@ export type Props = {
 	context: (() -> string?)?,
 	now: (() -> number)?,
 	lean: boolean?,
+	-- Said quietly where its note would be, while it has none ("No
+	-- details yet").
+	placeholder: (() -> string?)?,
 	on_check: (() -> ())?,
 	checking: (() -> boolean)?,
 	cooling: (() -> boolean)?,
@@ -247,6 +250,14 @@ M.Progress = ui.component(function(props: Props): Node
 		local r = row()
 		return (r and r.note) or ""
 	end
+	-- Its note, or what's said in its place.
+	local function said_text(): string
+		local n = note()
+		if n ~= "" then
+			return n
+		end
+		return (if props.placeholder then props.placeholder() else nil) or ""
+	end
 	local function refreshing(): boolean
 		local r = row()
 		return (r ~= nil and r.refreshing == true) or (props.checking ~= nil and props.checking())
@@ -383,7 +394,7 @@ M.Progress = ui.component(function(props: Props): Node
 				status.Spinner { size = 10 },
 			}),
 			ui.text {
-				note,
+				said_text,
 				class = "orch-progress-note-text",
 				literal = true,
 				grow = 1,
@@ -395,12 +406,12 @@ M.Progress = ui.component(function(props: Props): Node
 				text_size = props2.text_size or "$font.size.sm",
 				line_height = props2.line_height,
 				color = function(): string
-					return if refreshing() then "$text.tertiary" else "$text.secondary"
+					return if refreshing() or note() == "" then "$text.tertiary" else "$text.secondary"
 				end,
 			},
 		}
 		return ui.show(function(): boolean
-			return note() ~= ""
+			return said_text() ~= "" or refreshing()
 		end, ui.row(p :: any))
 	end
 
@@ -626,8 +637,8 @@ M.Progress = ui.component(function(props: Props): Node
 				color = "$text.tertiary",
 			}),
 		},
-		-- Its live figures: the time it has taken; under it, its steps and
-		-- the time left, or that it's stalled.
+		-- Its live figures: the time it has taken; under it, the time left
+		-- (or that it's stalled) and since its last step.
 		ui.column {
 			shrink = 0,
 			items = "end",
@@ -656,13 +667,13 @@ M.Progress = ui.component(function(props: Props): Node
 					size = "sm",
 				}),
 				ui.show(function(): boolean
-					return not stalled() and steps() ~= nil
-				end, small(steps_text, { class = "orch-progress-steps", color = "$text.secondary" })),
-				ui.show(function(): boolean
 					return not stalled() and left_text() ~= ""
 				end, small(function(): string
-					return `· {left_text()}`
+					return if since_text() ~= "" then `{left_text()} ·` else left_text()
 				end, { class = "orch-progress-left" })),
+				ui.show(function(): boolean
+					return since_text() ~= ""
+				end, small(since_text, { class = "orch-progress-since", color = since_ink })),
 			},
 		},
 	}
@@ -682,7 +693,7 @@ M.Progress = ui.component(function(props: Props): Node
 	local telemetry = ui.row {
 		class = "orch-progress-activity",
 		w_full = true,
-		h = 20,
+		h = 24,
 		gap = "$space.2",
 		items = "center",
 		glyph(14),
@@ -704,8 +715,11 @@ M.Progress = ui.component(function(props: Props): Node
 			cell = 7,
 			gap = 2,
 			h = 10,
-			max = 24,
+			max = 12,
 		}),
+		ui.show(function(): boolean
+			return steps() ~= nil
+		end, small(steps_text, { class = "orch-progress-steps", color = "$text.secondary" })),
 		ui.row {
 			grow = 1,
 			min_w = 0,
@@ -735,23 +749,7 @@ M.Progress = ui.component(function(props: Props): Node
 				return `· {tool_text()}`
 			end, { class = "orch-progress-tool-time" })),
 		},
-		ui.show(function(): boolean
-			return since_text() ~= ""
-		end, small(since_text, { class = "orch-progress-since", color = since_ink })),
-	}
-	local line = (ui.theme.get("font.line.sm") :: number?) or 18
-	-- Its note, and at its end What's up? and the menu (open, pin).
-	local said = ui.row {
-		class = "orch-progress-said",
-		w_full = true,
-		gap = "$space.2",
-		items = "start",
-		ui.row {
-			grow = 1,
-			min_w = 0,
-			pt = ui.raw(3, "the note's first line level with the button's label"),
-			note_line { wrap = true, max_h = line * 2, line_height = "$font.line.sm", line = line },
-		},
+		-- What's up? and the menu (open, pin), at its end.
 		ui.row {
 			class = "orch-progress-actions",
 			shrink = 0,
@@ -774,6 +772,9 @@ M.Progress = ui.component(function(props: Props): Node
 			menu(),
 		},
 	}
+	local line = (ui.theme.get("font.line.sm") :: number?) or 18
+	-- Its note, across.
+	local said = note_line { wrap = true, max_h = line * 2, line_height = "$font.line.sm", line = line }
 	return ui.column {
 		id = props.id,
 		class = "orch-progress orch-progress-full",

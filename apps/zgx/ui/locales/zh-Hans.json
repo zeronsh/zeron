@@ -4190,7 +4190,8 @@
     },
     "progress": {
       "empty": "Nothing working",
-      "failed": "Couldn't check on it"
+      "failed": "Couldn't check on it",
+      "no_details": "No details yet"
     }
   }
 }

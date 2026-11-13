@@ -61,6 +61,23 @@ return function()
 	-- its session as the host would give it, noted by slot in `watched`.
 	local lanes = require("@app/screens/chat/lanes") :: any
 	local watched = ui.state("watched", {} :: { [string]: string })
+	-- The models a composer offers (the host's catalog), and a pick made the
+	-- chat's (`chat.configure`), noted `configure:<id>:<model>`.
+	local store = require("@app/screens/chat/store") :: any
+	store.catalog_on = function() end
+	store.load_catalog = function() end
+	store.catalog:set({
+		state = "ready",
+		complete = true,
+		harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
+		models = {
+			{ value = "claude-code/claude-opus-5-5", label = "Opus 5.5", harness = "claude-code" },
+			{ value = "claude-code/claude-haiku-5-5", label = "Haiku 5.5", harness = "claude-code" },
+		},
+	})
+	store.configure = function(id: string, patch: any)
+		note(`configure:{id}:{patch.model or ""}`)
+	end
 	lanes.watch = function(slot: string, id: string?)
 		if not id then
 			return
@@ -69,7 +86,7 @@ return function()
 		local view = lanes.view(slot)
 		for _, c in sample.chats do
 			if c.id == id then
-				view.session:set({ id = id, state = "ready", device = c.device, harness = c.agent, model = c.model, running = false })
+				view.session:set({ id = id, state = "ready", device = c.device, harness = "claude-code", model = `claude-code/{c.model}`, running = false })
 			end
 		end
 	end
@@ -116,6 +133,9 @@ return function()
 		local kind = op.op
 		if kind == "dump" then
 			note(`dump:{op.text}`)
+			if op.picks then
+				note(`dump-model:{op.picks.model}`)
+			end
 			for _, f in op.attachments or {} do
 				note(`dump-file:{f.kind}:{f.name or f.path}`)
 			end
@@ -215,8 +235,40 @@ return function()
 		sessions.now:set(copy)
 	end }
 	-- Nothing working anywhere (the Progress widget's quiet line).
-	ui.command { id = "fixture.progress_none", title = "Fixture: nothing working", run = function()
+	-- A host that writes no progress (an older engine): no rows at all.
+	ui.command { id = "fixture.progress_none", title = "Fixture: no progress rows", run = function()
 		orchestration.progress:set({})
+	end }
+	-- A proxy's row (the engine's, for a host that writes none).
+	ui.command { id = "fixture.progress_proxy", title = "Fixture: a proxy row", run = function()
+		local rows = table.clone(orchestration.progress:peek())
+		rows["th-engine-state"] = {
+			chat_id = "th-engine-state", device_id = "dev-desk", state = "working", started = os.time() - 900,
+			last_step = os.time() - 60, note = "Proxy: running the engine tests.", note_at = os.time() - 30,
+			stalled = false, refreshing = false, updated = os.time() - 30, proxy = true,
+		}
+		orchestration.progress:set(rows)
+	end }
+	-- Every chat at rest.
+	ui.command { id = "fixture.all_idle", title = "Fixture: nothing working", run = function()
+		local n: any = table.clone(sessions.now:peek())
+		local function rest(list: { any }): { any }
+			local out = {}
+			for _, c in list do
+				c = table.clone(c)
+				c.status = nil
+				c.activity = nil
+				table.insert(out, c)
+			end
+			return out
+		end
+		n.chats = rest(n.chats or {})
+		local kids = {}
+		for parent, list in n.children or {} do
+			kids[parent] = rest(list)
+		end
+		n.children = kids
+		sessions.now:set(n)
 	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)

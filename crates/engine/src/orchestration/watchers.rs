@@ -266,6 +266,7 @@ fn ended(before: Option<&Session>, now: &Session) -> bool {
 /// one-shot model's one-line answer to `question` from it (the title path
 /// on `chat`'s harness's fastest model; quoted data), when it makes one.
 /// `false` when the route had no answer waiting.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn record_answer(
     orchestration: &Orchestration,
     rpc: &crate::rpc::EngineRpc,
@@ -324,6 +325,8 @@ pub(crate) async fn record_outcome(
     if !recorded {
         return false;
     }
+    // Its card on the board follows.
+    rpc.sync_route_card(dump_id, route_id);
     let kind = if task.is_some() { CommKind::Report } else { CommKind::Answer };
     orchestration.comms().say(kind, chat, super::comms::YOU, &quick);
     if task.is_none() || state == RouteState::Failed {

@@ -578,6 +578,21 @@ pub struct Dump {
     pub attachments: Vec<DumpAttachment>,
 }
 
+/// What the person picked for the Brain dump with a dump (every field
+/// optional: absent keeps the chat's own).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<crate::HarnessId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<crate::ReasoningLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_options: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 /// A file dumped with the text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1277,6 +1292,12 @@ pub struct Progress {
     /// `progressCheck` from another device).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub refreshing: bool,
+    /// Worked out by the engine you watch from, not the chat's host: the
+    /// host predates progress (no `orchestration-progress-v1`). Made from
+    /// the synced session row and transcript, so its steps and times are
+    /// what those show (coarser), and never written to the registry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proxy: bool,
     /// Seconds left as of `updatedAt`: the median time of a finished todo
     /// item × the items left. Only with ≥ 3 items done of a known total,
     /// while working; never a guess otherwise.
@@ -1586,6 +1607,10 @@ pub enum OrchestrateOp {
     /// (agent: orchestrators, own crew)
     #[serde(rename_all = "camelCase")]
     ReleaseFromCrew { chat_id: String },
+    /// The person puts a chat on the board: its card (the one it has, when
+    /// it has one not done). Replies `{ id }`.
+    #[serde(rename_all = "camelCase")]
+    AddToBoard { chat_id: String },
     /// Create (no `id`) or patch an item. Replies `{ id }`. (agent)
     #[serde(rename_all = "camelCase")]
     UpsertItem { item: WorkItemPatch },
@@ -1628,6 +1653,11 @@ pub enum OrchestrateOp {
         attachments: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         transfers: Vec<UploadTransfer>,
+        /// The person's pick for the Brain dump (agent, model, reasoning,
+        /// model options), as a chat send's run carries it: set on the
+        /// Brain dump's chat before this dump runs, and kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<DumpConfig>,
     },
     /// (agent: Brain dump) record one route of a dump and deliver it.
     #[serde(rename_all = "camelCase")]
@@ -1957,6 +1987,7 @@ mod tests {
             tool: None,
             tool_since: None,
             refreshing: false,
+            proxy: false,
             eta_secs: Some(600),
             updated_at: now,
         }
@@ -2063,7 +2094,7 @@ mod tests {
 
     #[test]
     fn ops_round_trip() {
-        let op = OrchestrateOp::Dump { text: "fix the auth thing".into(), attachments: Default::default(), transfers: Default::default(), };
+        let op = OrchestrateOp::Dump { text: "fix the auth thing".into(), attachments: Default::default(), transfers: Default::default(), config: None, };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(json, r#"{"op":"dump","text":"fix the auth thing"}"#);
         assert_eq!(serde_json::from_str::<OrchestrateOp>(&json).unwrap(), op);

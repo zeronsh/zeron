@@ -50,6 +50,11 @@ pub mod capabilities {
     /// such a host until its bytes are stored; older hosts get them over the
     /// peer link, as they always did.
     pub const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
+    /// The host writes its chats' `orchestration::Progress` rows and makes
+    /// a fresh note for a `ProgressCheck` command. For a chat on a host
+    /// without it, a viewing engine works its progress out itself (by
+    /// proxy, never written to the registry).
+    pub const ORCHESTRATION_PROGRESS_V1: &str = "orchestration-progress-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -66,6 +71,7 @@ pub mod capabilities {
         ZGX_INTERFACE_V1,
         UPDATE_ABILITY_V1,
         ATTACHMENT_STORE_V1,
+        ORCHESTRATION_PROGRESS_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -161,6 +167,7 @@ mod tests {
                     "zgx-interface-v1",
                     "update-ability-v1",
                     "attachment-store-v1",
+                    "orchestration-progress-v1",
                     "voice-client-media-v1"
                 ],
             })
