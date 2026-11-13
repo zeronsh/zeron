@@ -606,12 +606,26 @@ M.View = ui.component(function(props: {
 			for _, t in full do
 				long = math.max(long, utf8.len(t) or #t)
 			end
-			if long > 16 then
+			if long > 12 then
+				-- (Shortened at the last whole word, or hyphen, that fits: 18
+				-- characters, then 12; never a one-word stub while more fits.)
 				local t = if #full == 1 then full[1] else table.concat(full, " ")
-				-- (At the last whole word that fits in 18 characters.)
-				local head = string.sub(t, 1, (utf8.offset(t, 19) or (#t + 1)) - 1)
-				local cut = string.match(head, "^(.*%S)%s+%S*$") or head
-				table.insert(all_forms, { cut .. "…" })
+				for _, most in { 18, 12 } do
+					if (utf8.len(t) or #t) > most then
+						local head = string.sub(t, 1, (utf8.offset(t, most + 1) or (#t + 1)) - 1)
+						local cut = string.match(head, "^(.*%S)[%s%-]+[^%s%-]*$") or head
+						local short = cut .. "…"
+						local dup = false
+						for _, f in all_forms do
+							if f[1] == short then
+								dup = true
+							end
+						end
+						if not dup then
+							table.insert(all_forms, { short })
+						end
+					end
+				end
 			end
 			local cands: { any } = {}
 			for fi, text in all_forms do
@@ -651,7 +665,7 @@ M.View = ui.component(function(props: {
 							continue
 						end
 						local k = crowd(x0 - 4, y0 - 4, x1 + 4, y1 + 4, n.id, if must and n.kind == "thread" then 0.35 else nil)
-						local rank = k + side_cost + far * 0.03 + (if short then 3 else 0) + on_own(x0 - 2, y0 - 2, x1 + 2, y1 + 2, n.id) + outside(n, x0, y0, x1, y1) + on_rim(x0 - 4, y0 - 4, x1 + 4, y1 + 4)
+						local rank = k + side_cost + far * 0.03 + (if short then 3 * (fi - #forms) else 0) + on_own(x0 - 2, y0 - 2, x1 + 2, y1 + 2, n.id) + outside(n, x0, y0, x1, y1) + on_rim(x0 - 4, y0 - 4, x1 + 4, y1 + 4)
 						table.insert(cands, { rank = rank, k = k, spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 } })
 					end
 				end
