@@ -1435,6 +1435,23 @@ async fn an_orchestrator_answers_only_its_own_crews_ask() {
         sent(&core, CODEX_THREAD)
     );
     assert!(answer(&fixes).await.is_err(), "once");
+    // An ask the thread raised itself is the person's, and so is a turn-end
+    // one once the thread left the crew.
+    let own = op(&core, agent(CODEX_THREAD), json!({"op":"ask","kind":"decision","question":"Deploy?"})).await.unwrap();
+    assert!(op(&core, agent(&fixes), json!({"op":"answerAsk","id":own,"answer":"yes"})).await.is_err(), "its ask tool's");
+    op(&core, Caller::Local, json!({"op":"dismissAsk","id":own})).await.unwrap();
+    push(&core, CODEX_THREAD, "u9", zeron_doc::MessageRole::User, "next");
+    push(&core, CODEX_THREAD, "a9", zeron_doc::MessageRole::Assistant, "Done. Want me to delete the old worktree?");
+    turn_ended(&core, CODEX_THREAD).await;
+    let late = asks_from(&core, CODEX_THREAD).into_iter().find(|a| a.turn_id.as_deref() == Some("a9")).unwrap().id;
+    op(&core, Caller::Local, json!({"op":"releaseFromCrew","chatId":CODEX_THREAD})).await.ok();
+    core.orchestration.workspace().write_orchestration(|doc| {
+        if let Some(mut m) = doc.crew_member(CODEX_THREAD) {
+            m.released = true;
+            doc.upsert_crew_member(&m);
+        }
+    });
+    assert!(op(&core, agent(&fixes), json!({"op":"answerAsk","id":late,"answer":"yes"})).await.is_err(), "released");
     core.sessions.shutdown().await;
 }
 
