@@ -148,10 +148,13 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     }
 
     host.async_action("orchestration.op", move |op| {
-        let params = crate::plugins::value_json(&op);
+        let mut params = crate::plugins::value_json(&op);
         async move {
             crate::plugins::preview::refuse("orchestration.op")?;
             person_op(&params)?;
+            if params["op"] == "dump" {
+                carry_dump(&op, &mut params).await?;
+            }
             let reply = engine::get().call("Orchestrate", params).await?;
             Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
         }
@@ -163,6 +166,29 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         }
         a.want_loads(window, on.truthy())
     });
+}
+
+/// A dump's files (`attachments`, as the composer packs a message's) sent
+/// on as a chat message's are (chat.rs `carry`): uploaded toward the Brain
+/// dump's chat (`chat`, its id), and the op given what the engine reads, as
+/// `QueueMessage` has them: `attachments` (each file's path where the run
+/// reads it) and `transfers` (what it delivers first). None: the op as it
+/// was, its words alone.
+async fn carry_dump(op: &Value, params: &mut Json) -> Result<(), &'static str> {
+    params.as_object_mut().map(|o| o.remove("chat"));
+    if op.field("attachments").map(Value::list).unwrap_or_default().is_empty() {
+        params.as_object_mut().map(|o| o.remove("attachments"));
+        return Ok(());
+    }
+    let target = op.field("chat").map(crate::auth::text).and_then(|id| crate::chat::target_of(&id));
+    let carried = crate::chat::carry(op, target.as_deref()).await?;
+    params["attachments"] = json!(carried.paths);
+    if !carried.transfers.is_empty() {
+        params["transfers"] = json!(carried.transfers);
+    } else {
+        params.as_object_mut().map(|o| o.remove("transfers"));
+    }
+    Ok(())
 }
 
 /// The ops the person sends from the window. The rest (`report`, `ask`,

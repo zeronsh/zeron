@@ -2429,57 +2429,14 @@ impl View {
             return Ok(());
         }
         // What it carries, uploaded to the chat's host.
-        let mut paths = Vec::new();
-        let mut images = 0;
-        // (Each file here, by what it was sent as: an Appshot's context names
-        // its picture by the path the agent has.)
-        let mut sent_as: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        // (Asked once, when there's a file to send: `store_takes_files`.)
-        let mut through_store = None;
-        let mut transfers: Vec<Json> = Vec::new();
-        for a in req.field("attachments").map(Value::list).unwrap_or_default() {
-            let path = a.field("path").map(text).unwrap_or_default();
-            let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
-            if path.is_empty() {
-                continue;
+        let Carried { paths, images, sent_as, transfers } = match carry(&req, target.as_deref()).await {
+            Ok(carried) => carried,
+            Err(why) => {
+                // Failed before it could go: the prompt says so.
+                self.mark_failed(&id, &message_id, None);
+                return Err(why);
             }
-            if a.field("kind").map(text).as_deref() == Some("image") {
-                images += 1;
-            }
-            // A file of the session's own project (the files pane's): on its
-            // computer already, so it goes by its path there.
-            if a.field("on_host").is_some_and(Value::truthy) {
-                paths.push(path);
-                continue;
-            }
-            let store = match through_store {
-                Some(store) => store,
-                None => {
-                    let store = goes_through_store(target.as_deref()).await;
-                    through_store = Some(store);
-                    store
-                }
-            };
-            let uploaded = if store {
-                stage(&path, &name).await.map(|(reference, transfer)| {
-                    transfers.push(transfer);
-                    reference
-                })
-            } else {
-                upload(&path, &name, target.as_deref()).await
-            };
-            match uploaded {
-                Ok(at) => {
-                    sent_as.insert(path.clone(), at.clone());
-                    paths.push(at)
-                }
-                Err(why) => {
-                    // Failed before it could go: the prompt says so.
-                    self.mark_failed(&id, &message_id, None);
-                    return Err(why);
-                }
-            }
-        }
+        };
         // Appshots: the apps they show, as untrusted observed content after
         // the words (src/appshots, the shipping app's `with_appshots`).
         let shots: Vec<crate::appshots::Context> = req
@@ -3330,6 +3287,74 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         c["modelOptions"][key] = json!(if fast.truthy() { on } else { off });
     }
     c
+}
+
+/// What a message carries, sent on: each file's path where the run reads
+/// it, how many are pictures, each by the local path it was sent from, and
+/// what the engine must deliver first (files staged through its store).
+pub(crate) struct Carried {
+    pub(crate) paths: Vec<String>,
+    pub(crate) images: usize,
+    pub(crate) sent_as: std::collections::HashMap<String, String>,
+    pub(crate) transfers: Vec<Json>,
+}
+
+/// A request's `attachments` (`{ kind, path, name, on_host }`, as the
+/// composer packs them) uploaded toward `target` (the chat's device; none:
+/// this one): a file of the chat's own project goes by its path there, the
+/// rest uploaded to it, or staged through the engine's store where Cloud
+/// takes files so. The chat page's send and the Brain dump's (a dump's op)
+/// alike.
+pub(crate) async fn carry(req: &Value, target: Option<&str>) -> Result<Carried, &'static str> {
+    let mut paths = Vec::new();
+    let mut images = 0;
+    // (Each file here, by what it was sent as: an Appshot's context names
+    // its picture by the path the agent has.)
+    let mut sent_as: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // (Asked once, when there's a file to send: `store_takes_files`.)
+    let mut through_store = None;
+    let mut transfers: Vec<Json> = Vec::new();
+    for a in req.field("attachments").map(Value::list).unwrap_or_default() {
+        let path = a.field("path").map(text).unwrap_or_default();
+        let name = a.field("name").map(text).unwrap_or_else(|| path.clone());
+        if path.is_empty() {
+            continue;
+        }
+        if a.field("kind").map(text).as_deref() == Some("image") {
+            images += 1;
+        }
+        // A file of the session's own project (the files pane's): on its
+        // computer already, so it goes by its path there.
+        if a.field("on_host").is_some_and(Value::truthy) {
+            paths.push(path);
+            continue;
+        }
+        let store = match through_store {
+            Some(store) => store,
+            None => {
+                let store = goes_through_store(target).await;
+                through_store = Some(store);
+                store
+            }
+        };
+        let at = if store {
+            let (reference, transfer) = stage(&path, &name).await?;
+            transfers.push(transfer);
+            reference
+        } else {
+            upload(&path, &name, target).await?
+        };
+        sent_as.insert(path.clone(), at.clone());
+        paths.push(at);
+    }
+    Ok(Carried { paths, images, sent_as, transfers })
+}
+
+/// Where chat `id` runs, as a send uploads toward it (none: this device).
+pub(crate) fn target_of(id: &str) -> Option<String> {
+    let chats = CHATS.with(Rc::clone);
+    let chat = chats.chat(id)?;
+    chats.target(&chat)
 }
 
 /// The prompt with its attachments named after it, as the shipping app

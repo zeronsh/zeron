@@ -56,6 +56,23 @@ return function()
 
 	local now = table.clone(sample.now)
 	orchestration.now:set(now)
+
+	-- A chat watched in a page's own composer (Capture's, the Brain dump's):
+	-- its session as the host would give it, noted by slot in `watched`.
+	local lanes = require("@app/screens/chat/lanes") :: any
+	local watched = ui.state("watched", {} :: { [string]: string })
+	lanes.watch = function(slot: string, id: string?)
+		if not id then
+			return
+		end
+		watched:set_key({ slot }, id)
+		local view = lanes.view(slot)
+		for _, c in sample.chats do
+			if c.id == id then
+				view.session:set({ id = id, state = "ready", device = c.device, harness = c.agent, model = c.model, running = false })
+			end
+		end
+	end
 	orchestration.loads:set(sample.loads)
 	orchestration.comms:set(sample.comms)
 	orchestration.progress:set(sample.progress)
@@ -99,6 +116,9 @@ return function()
 		local kind = op.op
 		if kind == "dump" then
 			note(`dump:{op.text}`)
+			for _, f in op.attachments or {} do
+				note(`dump-file:{f.kind}:{f.name or f.path}`)
+			end
 			local id = `dp-new-{#calls:peek()}`
 			republish(function(n)
 				local dumps = table.clone(n.dumps)

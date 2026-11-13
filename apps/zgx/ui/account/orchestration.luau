@@ -74,8 +74,16 @@ function M.loads_wanted(on: boolean)
 	ui.invoke("orchestration.loads_wanted", on)
 end
 
-function M.dump(text: string): any
-	return M.op({ op = "dump", text = text })
+-- A dump: its words, and the files they carry (as the chat composer packs
+-- a message's: `{ kind, path, name, on_host }`), sent on toward the Brain
+-- dump's chat (`chat`, its id) as a message's are (src/orchestration.rs).
+function M.dump(text: string, attachments: { any }?, chat: string?): any
+	local op: { [string]: any } = { op = "dump", text = text }
+	if attachments and #attachments > 0 then
+		op.attachments = attachments
+		op.chat = chat
+	end
+	return M.op(op)
 end
 
 function M.answer(ask_id: string, text: string): any

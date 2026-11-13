@@ -119,11 +119,18 @@ test("each chip's menu opens under it, from a box of its own, with places to mov
 	local n = app:count("#control-capture >> .orch-chip")
 	expect(n).to_be(5)
 	for i = 1, n do
+		-- (Each from a fresh page, as the unsure chip's below: a menu opened
+		-- right after another's closed can still show its items hidden in
+		-- the tree, the shell's and this page's alike.)
+		app = open()
+		app:resize(2023, 1102)
+		app:frames(30)
 		local chip = `#control-capture >> .orch-chip [{i}]`
 		local name = string.match(app:tree(chip), 'button "([^"]*)"') or ""
 		local _, cy, _, ch = box_of(app, `button "{name}"`)
 		app:click(chip)
-		app:frames(5)
+		-- (Its items fade in: settled, with the page's composer about.)
+		app:frames(30)
 		expect(app:error()).to_be_nil()
 		local items = menu_items(app)
 		expect(#items > 0).to_be(true)
@@ -314,4 +321,44 @@ test("a part's hover card is as tall as what it holds, its reply scrolling only 
 	-- The message sent: one clamped run, cut with an ellipsis, not under the reply.
 	local _, my, _, mh = box(app, "#card-answered >> .orch-part-message")
 	expect(my + mh <= sy).to_be(true)
+end)
+
+-- Capture's composer: the chat composer (screens/chat/lane_tab's), bound to
+-- the Brain dump's chat.
+local COMPOSER = "#control-capture-composer"
+
+test("capture is the chat composer: the Brain dump's, its model there", function()
+	local app = open()
+	expect(app:has(`{COMPOSER} >> role:textbox`)).to_be(true)
+	expect((app:state("watched") or {})["control-capture"]).to_be("orc-brain")
+	-- Its model picker, as a chat's (the Brain dump's own model).
+	expect(app:has(`{COMPOSER} >> role:button "Model"`) or app:has(`{COMPOSER} >> ~"Haiku"`)).to_be(true)
+	expect(app:has(`{COMPOSER} >> role:button "Attach"`)).to_be(true)
+end)
+
+test("capture: Shift+Enter breaks the line, Enter sends it as a dump", function()
+	local app = open()
+	app:type(`{COMPOSER} >> role:textbox`, "first line")
+	app:key("shift+Enter")
+	app:type(`{COMPOSER} >> role:textbox`, "second")
+	app:frames(3)
+	expect(calls(app)).never.to_contain("dump:")
+	app:key("Enter")
+	app:frames(5)
+	expect(calls(app)).to_contain("dump:first line\nsecond")
+	expect(app:text(`{COMPOSER} >> role:textbox`)).to_be("")
+end)
+
+test("capture: a file attached goes with the dump, as a chat message's do", function()
+	local app = open()
+	app:copy_file("assets/favicons/zeron.png", "shot.png")
+	app:pick({ "shot.png" })
+	app:click(`{COMPOSER} >> role:button "Attach"`)
+	app:frames(10)
+	app:type(`{COMPOSER} >> role:textbox`, "look at this")
+	app:key("Enter")
+	app:frames(5)
+	expect(calls(app)).to_contain("dump:look at this")
+	-- (Named as the composer names a picture, its path kept.)
+	expect(calls(app)).to_contain("dump-file:image:")
 end)

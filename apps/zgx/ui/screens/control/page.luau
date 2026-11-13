@@ -31,6 +31,7 @@ local Progress = require("@app/screens/control/progress")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
+local LaneTab = require("@app/screens/chat/lane_tab")
 
 local M = {}
 
@@ -94,8 +95,6 @@ function M.move(id: string, by: number, wide: boolean)
 	M.widgets:set({ order = list, hidden = table.clone(hidden) })
 end
 
--- The draft, kept as the page comes and goes.
-local draft = ui.state("control_draft", "")
 local history_open = ui.state("control_history_open", false)
 -- The earlier dumps opened in the history, by id.
 local history_opened = ui.state("control_history_opened", {} :: { [string]: boolean })
@@ -150,22 +149,22 @@ local function said(what: string): (any) -> ()
 	end
 end
 
-function M.send()
-	local text = string.match(draft:peek(), "^%s*(.-)%s*$") or ""
-	if text == "" then
-		return
-	end
-	draft:set("")
-	orchestration.dump(text):after(function() end, function(e: any)
-		-- (Not taken: the words back, to send again.)
-		if draft:peek() == "" then
-			draft:set(text)
+-- The Brain dump's chat: Capture's composer is its own (its model and
+-- agent the Brain dump's), every send a dump.
+local function brain_dump(): string?
+	for _, o in orchestration.now:get().orchestrators or {} do
+		if o.kind == "brain_dump" then
+			return o.id
 		end
-		said("control.capture.failed")(e)
-	end)
+	end
+	return nil
 end
 
--- Capture: the field, and the receipt of the dump shown.
+-- A send from Capture: the words and the files they carry, a dump.
+function M.take(text: string, attachments: { any }): any
+	return orchestration.dump(text, attachments, brain_dump())
+end
+
 -- A dump's receipt (ds/orch_receipt): the newest one's, or an earlier
 -- one's opened in the history (`settled`: its parts there at once).
 local function receipt(dump: () -> any, settled: boolean?): Node
@@ -330,51 +329,19 @@ local function capture(): Node
 		end
 		return out
 	end)
-	local function empty(): boolean
-		return string.match(draft:get(), "%S") == nil
-	end
 	return ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
-		ui.column {
-			w_full = true,
-			relative = true,
-			ds.TextArea {
-				value = draft,
-				name = locale.t("control.capture.name"),
-				placeholder = locale.t("control.capture.placeholder"),
-				rows = 3,
-				max_rows = 12,
-				size = "lg",
-				w_full = true,
-				on_key = function(e: any): boolean?
-					if e.key == "Enter" and not e.shift and not e.alt then
-						M.send()
-						return true
-					end
-					return nil
-				end,
-			},
-			ui.row {
-				absolute = true,
-				right = 8,
-				bottom = 8,
-				gap = "$space.1",
-				items = "center",
-				ds.Button {
-					id = "control-capture-send",
-					tone = "primary",
-					size = "sm",
-					shape = "pill",
-					icon = true,
-					label = locale.t("control.capture.send"),
-					tooltip = locale.s("control.capture.send"),
-					disabled = empty,
-					on_click = M.send,
-					Icon { name = "arrow-up", size = 16 },
-				},
-			},
+		-- The chat composer (a side chat's: ds.Composer, wired), bound to the
+		-- Brain dump's chat: files pasted or dropped, dictation, mentions,
+		-- its model; Enter sends, as everywhere, each send a dump.
+		LaneTab.Composer {
+			id = "control-capture-composer",
+			slot = "control-capture",
+			chat = brain_dump,
+			take = M.take,
+			placeholder = locale.s("control.capture.placeholder"),
 		},
 		ui.show(function(): boolean
 			return newest:get() ~= nil

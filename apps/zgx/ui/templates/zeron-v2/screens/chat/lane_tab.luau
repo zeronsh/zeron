@@ -75,7 +75,13 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>): Node
+-- `take`: what a send does instead of messaging the chat (the Control
+-- room's Capture: a dump): told the words as they'd be sent and what they
+-- carry (Carried.pack's `attachments`), it returns a promise; the draft
+-- clears as it goes and comes back, with its chips, if it fails.
+-- `placeholder`: the words in it while it's empty.
+export type Take = (text: string, attachments: { any }) -> any
+local function composer(chat: string, view: any, name: string, focus: State<number>, take: Take?, placeholder: string?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -481,7 +487,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		focus = focus,
 		value = draft,
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
-		placeholder = locale.s("chat.lane_tab.placeholder"),
+		placeholder = placeholder or locale.s("chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
 		plan = plan,
@@ -596,6 +602,20 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
+			-- Taken by its page (a dump): the words and what they carry, never
+			-- a message of the chat's.
+			if take then
+				take(prompt, pack.attachments):after(function() end, function(err: any)
+					ui.batch(function()
+						draft:set(text)
+						quotes:set(said_quotes)
+					end)
+					Shared.restore_cargo_of(chat, chips)
+					local why = if type(err) == "table" and err.message then tostring(err.message) else nil
+					notice:set({ tone = "danger", text = why or locale.s("chat.lane_tab.didnt_send"), dismissable = true })
+				end)
+				return
+			end
 			-- (While a turn runs it's queued instead: it shows in the queue, and
 			-- what's picked waits for the turn it will run in.)
 			local queued = not is_unsent and running:peek()
@@ -702,6 +722,34 @@ local function forking(chat: string): Node
 		return ds.EmptyState { icon = "git-branch", size = "sm", fill = true, title = ui.t("chat.lane_tab.forking") :: any }
 	end, { grow = 1, w_full = true })
 end
+
+-- A chat's composer on a page of its own, outside the panel's tabs (the
+-- default layout's `LaneTab.Composer`, as v2 draws a side chat's): bound to
+-- chat `chat` in `slot`, its session watched while it shows, its sends
+-- taken by `take` where given (the Control room's Capture: each a dump).
+M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, id: string? }): Node
+	local slot = props.slot
+	local view = lanes.view(slot)
+	local focus = ui.use_state(0)
+	ui.effect(function()
+		lanes.watch(slot, props.chat())
+	end)
+	ui.on_cleanup(function()
+		lanes.watch(slot, nil)
+	end)
+	return ui.presence(function(): string
+		return props.chat() or ""
+	end, function(id: string): Node
+		if id == "" then
+			return ui.div {}
+		end
+		return ui.column {
+			id = props.id,
+			w_full = true,
+			composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder),
+		}
+	end, { w_full = true })
+end)
 
 M.Tab = ui.component(function(props: { tab: any }): Node
 	local tab = props.tab
