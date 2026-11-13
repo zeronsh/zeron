@@ -693,7 +693,7 @@ M.Progress = ui.component(function(props: Props): Node
 	local telemetry = ui.row {
 		class = "orch-progress-activity",
 		w_full = true,
-		h = 20,
+		h = 24,
 		gap = "$space.2",
 		items = "center",
 		glyph(14),
@@ -749,20 +749,7 @@ M.Progress = ui.component(function(props: Props): Node
 		ui.show(function(): boolean
 			return since_text() ~= ""
 		end, small(since_text, { class = "orch-progress-since", color = since_ink })),
-	}
-	local line = (ui.theme.get("font.line.sm") :: number?) or 18
-	-- Its note, and at its end What's up? and the menu (open, pin).
-	local said = ui.row {
-		class = "orch-progress-said",
-		w_full = true,
-		gap = "$space.2",
-		items = "start",
-		ui.row {
-			grow = 1,
-			min_w = 0,
-			pt = ui.raw(3, "the note's first line level with the button's label"),
-			note_line { wrap = true, max_h = line * 2, line_height = "$font.line.sm", line = line },
-		},
+		-- What's up? and the menu (open, pin), at its end.
 		ui.row {
 			class = "orch-progress-actions",
 			shrink = 0,
@@ -785,6 +772,9 @@ M.Progress = ui.component(function(props: Props): Node
 			menu(),
 		},
 	}
+	local line = (ui.theme.get("font.line.sm") :: number?) or 18
+	-- Its note, across.
+	local said = note_line { wrap = true, max_h = line * 2, line_height = "$font.line.sm", line = line }
 	return ui.column {
 		id = props.id,
 		class = "orch-progress orch-progress-full",
