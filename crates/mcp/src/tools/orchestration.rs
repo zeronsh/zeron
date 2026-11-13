@@ -222,7 +222,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: WORLD,
-            description: "A compact snapshot to route a dump with: every orchestrator (id, name, goal, its crew and open items), recent top-level chats (id, title, status, project, device) and the devices.",
+            description: "A compact snapshot to route a dump with: every orchestrator (id, name, goal, its crew threads with their items, and its open items), recent top-level chats (id, title, status, project, device) and the devices. A task, priority or cancel for a crew thread goes to its orchestrator.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -798,7 +798,12 @@ impl Tools {
                     .map(|m| {
                         let chat = chats.iter().find(|c| c.id == m.chat_id);
                         let session = chat.and_then(|c| session_for(&sessions, c));
-                        json!({ "chat": m.chat_id, "title": chat.and_then(|c| c.title.clone()), "role": m.role, "status": status_of(session.as_ref()).0 })
+                        let item = m.item_id.as_deref().and_then(|id| state.items.iter().find(|i| i.id == id));
+                        json!({
+                            "chat": m.chat_id, "title": chat.and_then(|c| c.title.clone()), "role": m.role,
+                            "status": status_of(session.as_ref()).0,
+                            "item": item.map(|i| json!({ "id": i.id, "title": i.title, "state": i.state })),
+                        })
                     })
                     .collect();
                 let items: Vec<Value> = state
@@ -839,7 +844,13 @@ impl Tools {
             .filter(|i| i.orchestrator_id.is_none() && !matches!(i.state, WorkState::Done | WorkState::Dropped))
             .map(|i| json!({ "id": i.id, "title": i.title, "state": i.state }))
             .collect();
-        Ok(json!({ "orchestrators": orchestrators, "chats": recent, "looseItems": loose, "devices": devices }))
+        Ok(json!({
+            "orchestrators": orchestrators,
+            "chats": recent,
+            "looseItems": loose,
+            "devices": devices,
+            "note": "Crew threads are listed under their orchestrator. A task, priority or cancel for one goes to that orchestrator (name the thread in message); info and questions may go to the thread.",
+        }))
     }
 }
 

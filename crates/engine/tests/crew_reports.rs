@@ -421,3 +421,46 @@ async fn a_question_route_takes_the_targets_reply_as_its_answer() {
     assert_eq!(route().answer.as_deref(), Some("On it."));
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_for_a_crew_thread_goes_through_its_orchestrator() {
+    use zeron_proto::orchestration::{OrchestratorKind, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "add a -l alias. what does --lines print?" })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = core
+        .workspace
+        .read_orchestration_with(|d| d.read_orchestrators())
+        .into_iter()
+        .find(|o| o.kind == OrchestratorKind::BrainDump)
+        .unwrap()
+        .id;
+    let route = |excerpt: &str, intent: &str, message: &str| {
+        let rpc = &rpc;
+        let brain = brain.clone();
+        let dump_id = dump_id.clone();
+        let (excerpt, intent, message) = (excerpt.to_owned(), intent.to_owned(), message.to_owned());
+        async move {
+            call(
+                rpc,
+                Caller::Agent { chat: Some(brain) },
+                methods::ORCHESTRATE,
+                json!({ "op": "route", "dumpId": dump_id, "excerpt": excerpt, "target": { "kind": "chat", "id": CREW },
+                    "intent": intent, "message": message }),
+            )
+            .await
+        }
+    };
+    route("add a -l alias.", "task", "Add -l as an alias of --lines.").await;
+    route("what does --lines print?", "question", "What does --lines print?").await;
+    let routes = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes;
+    assert_eq!(routes[0].target, RouteTarget::Orchestrator { id: ORCH.into() }, "the task went to the owner");
+    assert!(routes[0].message.starts_with(&format!("[For your crew thread {CREW} ({CREW})]")), "{}", routes[0].message);
+    assert_eq!(routes[1].target, RouteTarget::Chat { id: CREW.into() }, "a question may go to the thread");
+    wait_for(|| prompts.lock().unwrap().len() == 3, "both delivered").await;
+    let sent = prompts.lock().unwrap().clone();
+    assert!(sent.iter().any(|p| p.contains("[For your crew thread") && p.contains("Add -l as an alias")), "{sent:?}");
+    let _ = finish.send(());
+    core.shutdown().await;
+}

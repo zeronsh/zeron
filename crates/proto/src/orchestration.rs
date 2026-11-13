@@ -838,9 +838,21 @@ pub mod role_prompts {
 - Split the dump into fragments by meaning (one per destination and intent); quote each fragment verbatim as `excerpt`.\n\
 - Route each to the best existing orchestrator or thread. Create an orchestrator only for a new, lasting area of work, and a thread for a one-off task.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
+- A task, priority or cancel for a crew thread goes to its orchestrator (`world` lists each crew thread under it, with its item): route it to the orchestrator, naming the thread in `message`. Zeron delivers it there whichever you pick. Info and questions may go to the thread itself.\n\
 - Use `unsure` with candidates instead of guessing when two places fit.\n\
 - Finish with `dump_done` and a one-line summary.\n\
 - Never do the work yourself.";
+
+    /// What an orchestrator is sent for a crew thread of its own: the
+    /// Brain dump's task, priority or cancel, which goes through the owner.
+    pub fn for_crew_thread(thread_title: &str, thread_id: &str, message: &str) -> String {
+        format!(
+            "[For your crew thread {} ({})] {}",
+            one_line(thread_title, LABEL_MAX),
+            one_line(thread_id, LABEL_MAX),
+            message.trim()
+        )
+    }
 
     /// The block a crew thread's message from its orchestrator starts with
     /// when the crew rules changed since the last one.

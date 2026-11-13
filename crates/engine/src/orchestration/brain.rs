@@ -58,6 +58,11 @@ fn target_chat(target: &RouteTarget) -> Option<&str> {
     }
 }
 
+/// Intents the owner of a crew thread decides on (it keeps its board).
+pub(crate) fn owner_decides(intent: RouteIntent) -> bool {
+    matches!(intent, RouteIntent::Task | RouteIntent::Priority | RouteIntent::Cancel)
+}
+
 /// A dump whose every fragment has a place is routed; one with an `unsure`
 /// fragment still waiting needs the person.
 fn settled_state(dump: &Dump) -> DumpState {
@@ -172,6 +177,9 @@ impl EngineRpc {
         if target == RouteTarget::Other {
             return Err(RpcError::BadParams("Unknown route target".into()));
         }
+        // Work for a crew thread goes through its orchestrator, so its board
+        // sees it; info and questions may go to the thread itself.
+        let (target, message) = self.through_owner(target, intent, message);
         let mut route = Route {
             id: uuid::Uuid::new_v4().simple().to_string(),
             span: span_of(&dump.text, &excerpt_text),
@@ -206,6 +214,31 @@ impl EngineRpc {
             &route.excerpt,
         );
         Ok(route.id)
+    }
+
+    /// `target` and `message` as a route delivers them: a task, priority or
+    /// cancel aimed at a crew thread (or the thread a new-thread route names)
+    /// goes to that thread's orchestrator instead, naming the thread.
+    fn through_owner(&self, target: RouteTarget, intent: RouteIntent, message: String) -> (RouteTarget, String) {
+        if !owner_decides(intent) {
+            return (target, message);
+        }
+        let thread = match &target {
+            RouteTarget::Chat { id } | RouteTarget::NewThread { id } if !id.is_empty() => id.clone(),
+            _ => return (target, message),
+        };
+        let Some(member) = self.orchestration().crew_of(&thread) else {
+            return (target, message);
+        };
+        let title = self
+            .workspace_host()
+            .chat(&thread)
+            .ok()
+            .flatten()
+            .and_then(|c| c.title)
+            .unwrap_or_else(|| thread.chars().take(8).collect());
+        let message = zeron_proto::orchestration::role_prompts::for_crew_thread(&title, &thread, &message);
+        (RouteTarget::Orchestrator { id: member.orchestrator_id }, message)
     }
 
     /// The Brain dump: done routing `dump_id`.
