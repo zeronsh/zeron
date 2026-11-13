@@ -977,6 +977,11 @@ impl EngineRpc {
         &self.sessions
     }
 
+    /// This engine's data folder.
+    pub(crate) fn data_dir(&self) -> &std::path::Path {
+        self.repos.data_dir()
+    }
+
     /// `createChat` as an RPC caller sends it: the agent gate first (an
     /// agent's new chat is capped at its own access), then the mutation.
     pub(crate) fn create_chat_gated(&self, params: serde_json::Value) -> Result<(), RpcError> {

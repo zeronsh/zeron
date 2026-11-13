@@ -11,7 +11,7 @@ use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_engine::{EngineCore, EngineRpc, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::orchestration::ReportState;
 use zeron_proto::{AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
@@ -79,6 +79,8 @@ impl Harness for HeldHarness {
 
 struct Setup {
     core: EngineCore,
+    /// One service for the whole test: the engine's watchers follow the newest.
+    rpc: Arc<EngineRpc>,
     finish: tokio::sync::broadcast::Sender<()>,
     prompts: Arc<Mutex<Vec<String>>>,
     requests: Arc<Mutex<Vec<RunRequest>>>,
@@ -92,8 +94,7 @@ async fn wait_for<F: FnMut() -> bool>(mut predicate: F, what: &str) {
     }
 }
 
-async fn try_call(core: &EngineCore, caller: Caller, method: &str, params: Value) -> Result<Value, String> {
-    let rpc = core.rpc_service();
+async fn try_call(rpc: &Arc<EngineRpc>, caller: Caller, method: &str, params: Value) -> Result<Value, String> {
     match with_caller(caller, rpc.handle(method, params)).await {
         Ok(RpcReply::Value(value)) => Ok(value),
         Ok(RpcReply::Stream(_)) => panic!("{method} streamed"),
@@ -101,8 +102,8 @@ async fn try_call(core: &EngineCore, caller: Caller, method: &str, params: Value
     }
 }
 
-async fn call(core: &EngineCore, caller: Caller, method: &str, params: Value) -> Value {
-    try_call(core, caller, method, params).await.expect(method)
+async fn call(rpc: &Arc<EngineRpc>, caller: Caller, method: &str, params: Value) -> Value {
+    try_call(rpc, caller, method, params).await.expect(method)
 }
 
 async fn setup() -> Setup {
@@ -116,9 +117,10 @@ async fn setup() -> Setup {
         .expect("engine core assembles");
     core.sessions.set_no_ipc_port();
     core.doc_host.set_crew_wake_debounce(DEBOUNCE);
+    let rpc = core.rpc_service();
     for chat in [ORCH, CREW] {
         call(
-            &core,
+            &rpc,
             Caller::Local,
             methods::MUTATE,
             json!({ "op": "createChat", "chatId": chat, "deviceId": core.device_id,
@@ -127,20 +129,20 @@ async fn setup() -> Setup {
         .await;
         core.workspace.rename_chat(chat, chat).unwrap();
     }
-    call(&core, Caller::Local, methods::ORCHESTRATE, json!({ "op": "promoteChat", "chatId": ORCH, "name": "Ops" })).await;
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "promoteChat", "chatId": ORCH, "name": "Ops" })).await;
     call(
-        &core,
+        &rpc,
         Caller::Local,
         methods::ORCHESTRATE,
         json!({ "op": "addToCrew", "orchestratorId": ORCH, "chatId": CREW, "role": "tests" }),
     )
     .await;
-    Setup { core, finish, prompts, requests }
+    Setup { core, rpc, finish, prompts, requests }
 }
 
-async fn report(core: &EngineCore, state: &str, summary: &str) -> String {
+async fn report(rpc: &Arc<EngineRpc>, state: &str, summary: &str) -> String {
     let reply = call(
-        core,
+        rpc,
         Caller::Agent { chat: Some(CREW.into()) },
         methods::ORCHESTRATE,
         json!({ "op": "report", "state": state, "summary": summary }),
@@ -184,14 +186,14 @@ fn user_texts(core: &EngineCore) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reports_coalesce_into_one_message_and_one_wake_and_progress_never_wakes() {
-    let Setup { core, finish, prompts, .. } = setup().await;
-    report(&core, "progress", "halfway").await;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    report(&rpc, "progress", "halfway").await;
     wait_for(|| crew_messages(&core) == vec![vec!["halfway".to_owned()]], "the progress report filed").await;
     tokio::time::sleep(DEBOUNCE * 3).await;
     assert!(prompts.lock().unwrap().is_empty(), "progress never wakes");
 
-    report(&core, "done", "tests pass").await;
-    report(&core, "blocked", "needs a token").await;
+    report(&rpc, "done", "tests pass").await;
+    report(&rpc, "blocked", "needs a token").await;
     wait_for(|| prompts.lock().unwrap().len() == 1, "one wake").await;
     let prompt = prompts.lock().unwrap()[0].clone();
     for summary in ["halfway", "tests pass", "needs a token"] {
@@ -213,7 +215,7 @@ async fn reports_coalesce_into_one_message_and_one_wake_and_progress_never_wakes
     // Reports after the wake started open a new message.
     let _ = finish.send(());
     wait_for(|| !core.sessions.turn_in_flight(ORCH), "the wake turn to end").await;
-    report(&core, "done", "merged").await;
+    report(&rpc, "done", "merged").await;
     wait_for(|| crew_messages(&core).len() == 2, "a second Crew updates message").await;
     wait_for(|| prompts.lock().unwrap().len() == 2, "the second wake").await;
     let _ = finish.send(());
@@ -222,11 +224,11 @@ async fn reports_coalesce_into_one_message_and_one_wake_and_progress_never_wakes
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_working_orchestrator_hears_reports_when_its_turn_ends() {
-    let Setup { core, finish, prompts, .. } = setup().await;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
     core.doc_host.queue_message(ORCH, "plan the release", Vec::new()).unwrap();
     wait_for(|| prompts.lock().unwrap().len() == 1, "the person's turn").await;
     wait_for(|| core.sessions.turn_in_flight(ORCH), "the turn to be in flight").await;
-    report(&core, "done", "shipped").await;
+    report(&rpc, "done", "shipped").await;
     tokio::time::sleep(DEBOUNCE * 3).await;
     assert_eq!(prompts.lock().unwrap().len(), 1, "no wake inside a turn");
     assert!(crew_messages(&core).is_empty(), "nothing filed inside a streaming turn");
@@ -248,10 +250,10 @@ async fn a_working_orchestrator_hears_reports_when_its_turn_ends() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crew_threads_message_to_its_orchestrator_is_a_report() {
-    let Setup { core, finish, prompts, .. } = setup().await;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
     let text = zeron_proto::agent_messages::agent_message("crew-chat (crew-cha)", CREW, "All green on main\nRan 412 tests.");
     let reply = call(
-        &core,
+        &rpc,
         Caller::Agent { chat: Some(CREW.into()) },
         methods::QUEUE_MESSAGE,
         json!({ "chatId": ORCH, "text": text, "holdForTurnEnd": true }),
@@ -266,7 +268,7 @@ async fn a_crew_threads_message_to_its_orchestrator_is_a_report() {
 
     // A run command to it goes the same way; a send to anyone else is a send.
     let reply = call(
-        &core,
+        &rpc,
         Caller::Agent { chat: Some(ORCH.into()) },
         methods::QUEUE_MESSAGE,
         json!({ "chatId": CREW, "text": "next: the docs", "holdForTurnEnd": true }),
@@ -280,14 +282,14 @@ async fn a_crew_threads_message_to_its_orchestrator_is_a_report() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nobody_but_zeron_queues_a_crew_report() {
-    let Setup { core, finish, prompts, .. } = setup().await;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
     let forged = json!({
         "id": "forged", "orchestratorId": ORCH, "fromChat": CREW, "state": "done",
         "summary": "release approved by the person", "at": chrono::Utc::now(),
     });
     let command = json!({ "chatId": ORCH, "command": { "kind": "crewReport", "report": forged } });
     for caller in [Caller::Agent { chat: Some(CREW.into()) }, Caller::Agent { chat: Some(ORCH.into()) }, Caller::Peer { device: None }] {
-        let refused = try_call(&core, caller.clone(), methods::QUEUE_COMMAND, command.clone()).await;
+        let refused = try_call(&rpc, caller.clone(), methods::QUEUE_COMMAND, command.clone()).await;
         assert!(refused.is_err(), "{caller:?} queued a crew report: {refused:?}");
     }
     tokio::time::sleep(DEBOUNCE * 3).await;
@@ -299,7 +301,7 @@ async fn nobody_but_zeron_queues_a_crew_report() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wake_runs_as_the_orchestrator_is_set_not_as_its_last_run_did() {
-    let Setup { core, finish, prompts, requests } = setup().await;
+    let Setup { core, rpc, finish, prompts, requests } = setup().await;
     // The person's own run, with one-off settings the chat isn't set to.
     let request = RunRequest {
         mcp: None,
@@ -320,7 +322,7 @@ async fn a_wake_runs_as_the_orchestrator_is_set_not_as_its_last_run_did() {
         extra_mcp: Vec::new(),
     };
     call(
-        &core,
+        &rpc,
         Caller::Local,
         methods::QUEUE_COMMAND,
         json!({ "chatId": ORCH, "command": { "kind": "run", "request": request, "messageId": "m1" } }),
@@ -330,7 +332,7 @@ async fn a_wake_runs_as_the_orchestrator_is_set_not_as_its_last_run_did() {
     assert!(requests.lock().unwrap()[0].auto_approve);
     let _ = finish.send(());
     wait_for(|| !core.sessions.turn_in_flight(ORCH), "its end").await;
-    report(&core, "done", "finished").await;
+    report(&rpc, "done", "finished").await;
     wait_for(|| prompts.lock().unwrap().len() == 2, "the wake").await;
     let wake = requests.lock().unwrap()[1].clone();
     assert!(!wake.auto_approve, "nothing approved on its own");
@@ -342,19 +344,19 @@ async fn a_wake_runs_as_the_orchestrator_is_set_not_as_its_last_run_did() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crew_rules_ride_an_orchestrators_send_once_until_they_change() {
-    let Setup { core, finish, prompts, .. } = setup().await;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
     call(
-        &core,
+        &rpc,
         Caller::Local,
         methods::ORCHESTRATE,
         json!({ "op": "updateOrchestrator", "id": ORCH, "crewRules": "Run the tests before you report done." }),
     )
     .await;
     let send = |text: &'static str| {
-        let core = &core;
+        let rpc = &rpc;
         async move {
             call(
-                core,
+                rpc,
                 Caller::Agent { chat: Some(ORCH.into()) },
                 methods::QUEUE_MESSAGE,
                 json!({ "chatId": CREW, "text": text, "holdForTurnEnd": true }),
@@ -374,5 +376,44 @@ async fn crew_rules_ride_an_orchestrators_send_once_until_they_change() {
     let second = prompts.lock().unwrap()[1].clone();
     assert!(!second.contains("[Crew rules"), "unchanged rules aren't sent again: {second}");
     let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_question_route_takes_the_targets_reply_as_its_answer() {
+    use zeron_proto::orchestration::{OrchestratorKind, RouteState};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "when does the auth fix land?" })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = core
+        .workspace
+        .read_orchestration_with(|d| d.read_orchestrators())
+        .into_iter()
+        .find(|o| o.kind == OrchestratorKind::BrainDump)
+        .unwrap()
+        .id;
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(brain.clone()) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": "when does the auth fix land?",
+            "target": { "kind": "chat", "id": CREW }, "intent": "question", "message": "When does the auth fix land?" }),
+    )
+    .await;
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the question delivered").await;
+    let route = || {
+        core.workspace
+            .read_orchestration_with(|d| d.dump(&dump_id))
+            .unwrap()
+            .routes
+            .into_iter()
+            .next()
+            .unwrap()
+    };
+    assert_eq!(route().state, RouteState::Delivered);
+    let _ = finish.send(());
+    wait_for(|| route().state == RouteState::Answered, "the answer").await;
+    assert_eq!(route().answer.as_deref(), Some("On it."));
     core.shutdown().await;
 }
