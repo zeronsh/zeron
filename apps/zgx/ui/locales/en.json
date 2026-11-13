@@ -2483,7 +2483,9 @@
         "settings": "Settings",
         "update_watch": "The update watch",
         "search": "Search",
-        "new_project": "New project"
+        "new_project": "New project",
+        "control": "The Control room",
+        "orchestrator": "The orchestrator's page"
       }
     },
     "title_bar": {
