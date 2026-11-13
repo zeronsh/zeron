@@ -213,10 +213,24 @@ M.View = ui.component(function(props: {
 	local function screen(n: sim.Node, v: any): (number, number)
 		return n.x * v.zoom + v.x, n.y * v.zoom + v.y
 	end
+	-- Each machine's header tab as last drawn, by its node's id: x0, y0, x1, y1.
+	local tabs: { [string]: { number } } = {}
 	local function hit(px: number, py: number): sim.Node?
 		local v = view:peek()
+		-- (A machine is its tab.)
+		for id, t in tabs do
+			if px >= t[1] and px <= t[3] and py >= t[2] and py <= t[4] then
+				local i = graph.index[id]
+				if i then
+					return graph.nodes[i]
+				end
+			end
+		end
 		local best, best_d = nil, math.huge
 		for _, n in graph.nodes do
+			if n.kind == "device" then
+				continue
+			end
 			local sx, sy = screen(n, v)
 			local d = math.sqrt((sx - px) ^ 2 + (sy - py) ^ 2)
 			local room = math.max(n.r * v.zoom + 4, 9)
@@ -300,16 +314,12 @@ M.View = ui.component(function(props: {
 		local islands = sim.islands(graph)
 		local taken: { { number } } = {}
 		local rims: { any } = {}
-		local NAME = { size = 12, weight = 500 }
-		-- (Each name outside its rim, on the side facing away from the
-		-- rest, so the channels between islands stay clear.)
-		local cx, cy, count = 0, 0, 0
-		for _, isl in islands do
-			cx += isl.x
-			cy += isl.y
-			count += 1
-		end
-		cx, cy = cx / math.max(1, count), cy / math.max(1, count)
+		-- Each machine's heading: a tab on its island's rim (its mark, its
+		-- name, its load), the rim broken behind it; at the top, else where
+		-- it clears what's round it.
+		local TAB_NAME = { size = 13, weight = 600 }
+		local TAB_LOAD = { size = 11, tabular = true }
+		local TAB_H = 24
 		for _, n in graph.nodes do
 			if n.kind ~= "device" then
 				continue
@@ -317,21 +327,23 @@ M.View = ui.component(function(props: {
 			local isl = islands[n.id]
 			local x, y = isl.x * z + v.x, isl.y * z + v.y
 			local r = isl.r * z
-			local name_w, name_h = c:measure_text(n.title, NAME)
-			local dx, dy = isl.x - cx, isl.y - cy
-			local angle = if count <= 1 or dx * dx + dy * dy < 1 then -90 else math.deg(math.atan2(dy, dx))
-			-- (Snapped to eight directions, so names line up.)
-			angle = math.floor(angle / 45 + 0.5) * 45
-			-- (Its place is settled after the working threads' names: it
-			-- gives way to them, round its rim.)
-			table.insert(rims, { n = n, x = x, y = y, r = r, angle = angle, w = name_w, h = name_h, nx = 0, ny = 0, from = -90, sweep = 360 })
+			local d = nil
+			for _, dev in world.devices or {} do
+				if dev.id == n.device then
+					d = dev
+				end
+			end
+			local l = (loads :: any)[n.device or ""]
+			local load = if l and l.cpu then `{math.floor(math.clamp(l.cpu, 0, 1) * 100 + 0.5)}%` else ""
+			local name_w = c:measure_text(n.title, TAB_NAME)
+			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
+			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 8 + load_w else 0) + 9
+			table.insert(rims, { n = n, d = d, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
 		end
+		-- (Centred on its rim at `angle`.)
 		local function name_box(rim: any, angle: number): (number, number)
-			local ux, uy = math.cos(math.rad(angle)), math.sin(math.rad(angle))
-			local px, py = rim.x + ux * (rim.r + 8), rim.y + uy * (rim.r + 8)
-			local x0 = if ux > 0.3 then px elseif ux < -0.3 then px - rim.w else px - rim.w / 2
-			local y0 = if uy > 0.3 then py elseif uy < -0.3 then py - rim.h else py - rim.h / 2
-			return x0, y0
+			local px, py = rim.x + math.cos(math.rad(angle)) * rim.r, rim.y + math.sin(math.rad(angle)) * rim.r
+			return px - rim.w / 2, py - rim.h / 2
 		end
 		-- (Held for the working threads' names till the machine names go.)
 		for _, rim in rims do
@@ -477,7 +489,7 @@ M.View = ui.component(function(props: {
 				end
 			end
 			for _, m in graph.nodes do
-				if m.id ~= own then
+				if m.id ~= own and m.kind ~= "device" then
 					local mx, my = at(m)
 					local mr = reach(m) + 3
 					if mx + mr > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
@@ -635,22 +647,27 @@ M.View = ui.component(function(props: {
 					end
 				end
 				taken = kept
+				tabs = {}
 				for _, rim in rims do
-					local best_a, least = rim.angle, math.huge
-					for _, off in { 0, 45, -45, 90, -90, 135, -135, 180 } do
-						local x0, y0 = name_box(rim, rim.angle + off)
+					local best_a, least = -90, math.huge
+					for _, a in { -90, -60, -120, -30, -150, 90, 0, 180, 60, 120 } do
+						local x0, y0 = name_box(rim, a)
 						local k = crowd(x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim.n.id)
 						if k < 0.5 then
-							best_a, least = rim.angle + off, k
+							best_a, least = a, k
 							break
 						elseif k < least then
-							best_a, least = rim.angle + off, k
+							best_a, least = a, k
 						end
 					end
 					local x0, y0 = name_box(rim, best_a)
 					x0 = math.clamp(x0, 6, math.max(6, w - rim.w - 6))
 					y0 = math.clamp(y0, 4, math.max(4, h - rim.h - 4))
-					rim.nx, rim.ny = x0, y0 + rim.h / 2
+					rim.nx, rim.ny = x0, y0
+					-- (The rim breaks behind it; the load runs on from its edge.)
+					local gap = math.deg(math.asin(math.clamp((rim.w / 2 + 3) / math.max(1, rim.r), 0, 0.99)))
+					rim.from, rim.sweep = best_a + gap, 360 - gap * 2
+					tabs[rim.n.id] = { x0, y0, x0 + rim.w, y0 + rim.h }
 					table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2 })
 				end
 			end
@@ -821,6 +838,10 @@ M.View = ui.component(function(props: {
 			local dx, dy = math.abs(px - x), math.abs(py - y)
 			local r = n.r * zs
 			if n.kind == "device" then
+				local t = tabs[n.id]
+				if t then
+					return px >= t[1] - GAP and px <= t[3] + GAP and py >= t[2] - GAP and py <= t[4] + GAP
+				end
 				return dx <= r + GAP and dy <= r + GAP
 			elseif n.kind == "brain" then
 				return dx + dy <= r * 1.15 + GAP * 1.4
@@ -917,9 +938,14 @@ M.View = ui.component(function(props: {
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
 			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
-			-- (From centre to centre, cut where it leaves each mark.)
+			-- (From centre to centre, cut where it leaves each mark; a
+			-- machine's centre its tab's.)
 			local ax, ay = at(a)
 			local bx, by = at(b)
+			local ta = tabs[a.id]
+			if ta then
+				ax, ay = (ta[1] + ta[3]) / 2, (ta[2] + ta[4]) / 2
+			end
 			local segs
 			if ln.via then
 				local v1 = ln.via
@@ -989,24 +1015,7 @@ M.View = ui.component(function(props: {
 			local x, y = at(n)
 			local r = n.r * zs
 			if n.kind == "device" then
-				-- The machine itself: a square plate (hardware), its mark.
-				local rad = 6 * zs
-				if dark then
-					c:rect(x - r, y - r, r * 2, r * 2, kit.ink("background", dim(0.96, lit)), rad)
-					c:rect(x - r, y - r, r * 2, r * 2, ink(0.05, lit), rad)
-				end
-				c:stroke(ui.path():rect(x - r + 0.6, y - r + 0.6, r * 2 - 1.2, r * 2 - 1.2, rad), ink(if dark then 0.22 else 0.35, lit), if dark then 1 else 1.25)
-				local d = nil
-				for _, dev in world.devices or {} do
-					if dev.id == n.device then
-						d = dev
-					end
-				end
-				glyph(c, MachineHead.icon(d), x, y, ink(if dark then 0.75 else 0.7, lit))
-				if n.device == here or (d and d.here) then
-					c:circle(x + r - 1, y - r + 1, 4.5, kit.ink("background", 1))
-					c:circle(x + r - 1, y - r + 1, 3, kit.ink("zeron.tone.info.ink", dim(1, lit)))
-				end
+				-- (The machine is its tab, drawn with the names.)
 			elseif n.kind == "orchestrator" then
 				c:circle(x, y, r, hue.canvas(n.hue, dim(1, lit)))
 			elseif n.kind == "brain" then
@@ -1048,7 +1057,25 @@ M.View = ui.component(function(props: {
 			c:line(l[1], l[2], l[3], l[4], ink(if dark then 0.48 else 0.4, l[5]), 1, { cap = "round" })
 		end
 		for _, rim in rims do
-			c:text(rim.n.title, rim.nx, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), baseline = "middle" })
+			local lit = lit_of(rim.n.id)
+			local x0, y0, tw, th = rim.nx, rim.ny, rim.w, rim.h
+			local cy = y0 + th / 2
+			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.94 else 0.86, lit)), 7)
+			if over == rim.n.id then
+				c:rect(x0, y0, tw, th, ink(0.06, lit), 7)
+			end
+			c:stroke(ui.path():rect(x0 + 0.5, y0 + 0.5, tw - 1, th - 1, 7), ink(if dark then 0.22 else 0.26, lit), 1)
+			local gx = x0 + 8 + 7
+			glyph(c, MachineHead.icon(rim.d), gx, cy, ink(if dark then 0.8 else 0.75, lit))
+			if rim.n.device == here or (rim.d and rim.d.here) then
+				c:circle(gx + 7, cy - 6, 3.5, kit.ink("background", 1))
+				c:circle(gx + 7, cy - 6, 2.5, kit.ink("zeron.tone.info.ink", dim(1, lit)))
+			end
+			local nx = x0 + 8 + 14 + 6
+			c:text(rim.n.title, nx, cy, { size = 13, weight = 600, color = ink(if dark then 0.94 else 0.9, lit), baseline = "middle" })
+			if rim.load ~= "" then
+				c:text(rim.load, nx + rim.name_w + 8, cy, { size = 11, tabular = true, color = ink(if dark then 0.5 else 0.55, lit), baseline = "middle" })
+			end
 		end
 		for _, l in labels do
 			c:text(l.t, l.x, l.y, l.opts)
@@ -1210,6 +1237,11 @@ M.View = ui.component(function(props: {
 				end
 				local v = view:get()
 				tick:get()
+				local t = tabs[x.id]
+				if t then
+					-- (A machine's: under its tab.)
+					return math.clamp(t[1], 8, width:get() - 256)
+				end
 				local sx = x.x * v.zoom + v.x
 				-- (Under the node, its name left clear.)
 				return math.clamp(sx - 124, 8, width:get() - 256)
@@ -1221,6 +1253,10 @@ M.View = ui.component(function(props: {
 				end
 				local v = view:get()
 				tick:get()
+				local t = tabs[x.id]
+				if t then
+					return if t[4] + 8 > height() - 130 then math.max(8, t[2] - 140) else t[4] + 8
+				end
 				local sy = x.y * v.zoom + v.y
 				local below = sy + x.r * v.zoom + 14
 				-- (Near the bottom: above it instead.)
@@ -1329,6 +1365,11 @@ M.View = ui.component(function(props: {
 				if not n then
 					return nil, nil
 				end
+				-- (A machine's: its tab.)
+				local t = tabs[id]
+				if t then
+					return (t[1] + t[3]) / 2, (t[2] + t[4]) / 2
+				end
 				return screen(n, view:peek())
 			end,
 			child = ui.div {
@@ -1341,7 +1382,13 @@ M.View = ui.component(function(props: {
 			rounded = "$radius.lg",
 			on_press = function(e: any)
 				local n = hit(e.local_x, e.local_y)
-				press = { id = n and n.id, x = e.local_x, y = e.local_y, moved = false, view = view:peek() }
+				-- (Held where it was taken: a machine by its tab moves its island.)
+				local ox, oy = 0, 0
+				if n then
+					local sx, sy = screen(n, view:peek())
+					ox, oy = sx - e.local_x, sy - e.local_y
+				end
+				press = { id = n and n.id, x = e.local_x, y = e.local_y, ox = ox, oy = oy, moved = false, view = view:peek() }
 			end,
 			on_pointer_move = function(e: any)
 				if press then
@@ -1353,7 +1400,7 @@ M.View = ui.component(function(props: {
 					if press.id then
 						local n = graph.nodes[graph.index[press.id] or 0]
 						if n then
-							n.x, n.y = to_world(e.local_x, e.local_y)
+							n.x, n.y = to_world(e.local_x + press.ox, e.local_y + press.oy)
 							n.fixed = true
 							graph.alpha = math.max(graph.alpha, 0.12)
 							if settled:peek() then

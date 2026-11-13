@@ -50,7 +50,7 @@ export type Graph = {
 	alpha: number,
 }
 
-M.R = { device = 16, orchestrator = 10, brain = 9, thread = 5 }
+M.R = { device = 8, orchestrator = 10, brain = 9, thread = 5 }
 -- An island (a machine's room) reaches PAD past its farthest member;
 -- islands keep GAP apart, rim to rim.
 M.ISLAND_PAD, M.ISLAND_GAP = 36, 72
