@@ -12344,7 +12344,7 @@ mod tests {
                 state
                     .receive_transcript_update(
                         zeron_doc::TranscriptUpdate {
-                            frame: zeron_doc::TranscriptFrame::reset(&[]),
+                            frame: zeron_doc::TranscriptFrame::reset::<SessionMessageEntry>(&[]),
                             context_usage: None,
                             replay_baseline: Some(Default::default()),
                         },
@@ -13353,6 +13353,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -14551,6 +14552,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -14676,6 +14678,7 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,

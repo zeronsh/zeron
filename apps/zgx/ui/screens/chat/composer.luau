@@ -730,15 +730,9 @@ local function Composer(): Node
 	end)
 
 	-- The agent the chat runs (its model's): whose completion settings the
-	-- composer follows.
+	-- composer follows (the chat's own when the catalog doesn't name it).
 	local function agent(): string?
-		local chosen = model:get()
-		for _, m in store.catalog:get().models do
-			if m.value == chosen then
-				return m.harness
-			end
-		end
-		return nil
+		return Completions.agent_of(model:get(), if session_id:get() then open() else nil)
 	end
 	-- What each trigger lists, as the agent's settings have it: with
 	-- "Separate / commands" off, `/` lists the skills after the commands

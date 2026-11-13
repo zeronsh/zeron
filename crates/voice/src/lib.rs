@@ -184,12 +184,39 @@ pub fn input_devices() -> Vec<InputDevice> {
         .filter_map(|device| {
             Some(InputDevice {
                 id: device.id().ok()?.to_string(),
-                name: device.description().ok()?.name().to_owned(),
+                name: display_name(&device.description().ok()?),
             })
         })
         .collect();
     devices.dedup_by(|a, b| a.id == b.id);
+    disambiguate(&mut devices);
     devices
+}
+
+/// What to show for a device. WASAPI's `name()` is the endpoint description
+/// ("Microphone", "Line"), the same for every device of that kind; the
+/// friendly name that includes the hardware ("Microphone (Realtek Audio)") is
+/// kept by cpal as the first extended line when it differs.
+fn display_name(description: &cpal::DeviceDescription) -> String {
+    friendly(description.name(), description.extended())
+}
+
+fn friendly(name: &str, extended: &[String]) -> String {
+    extended
+        .first()
+        .filter(|line| cfg!(windows) && line.contains(name) && !line.trim().is_empty())
+        .map_or_else(|| name.to_owned(), |line| line.trim().to_owned())
+}
+
+/// Two devices with the same name stay tell-apart-able: "Mic", "Mic (2)".
+fn disambiguate(devices: &mut [InputDevice]) {
+    let names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
+    for (i, device) in devices.iter_mut().enumerate() {
+        let seen = names[..i].iter().filter(|n| **n == device.name).count();
+        if seen > 0 {
+            device.name = format!("{} ({})", device.name, seen + 1);
+        }
+    }
 }
 
 /// The id of the device the system currently records from by default.
@@ -531,6 +558,35 @@ pub fn unload() {
 mod tests {
     use super::*;
     use cpal::Sample;
+
+    #[test]
+    fn friendly_name_replaces_the_generic_endpoint_description() {
+        let extended = vec!["Microphone (Realtek High Definition Audio)".to_owned()];
+        let got = friendly("Microphone", &extended);
+        assert_eq!(
+            got,
+            if cfg!(windows) {
+                "Microphone (Realtek High Definition Audio)"
+            } else {
+                "Microphone"
+            }
+        );
+        // Never swapped for an unrelated extended line.
+        assert_eq!(friendly("Line", &["Driver 1.2".to_owned()]), "Line");
+        assert_eq!(friendly("USB Mic", &[]), "USB Mic");
+    }
+
+    #[test]
+    fn duplicate_names_are_numbered() {
+        let dev = |id: &str, name: &str| InputDevice {
+            id: id.into(),
+            name: name.into(),
+        };
+        let mut devices = vec![dev("a", "Mic"), dev("b", "Line"), dev("c", "Mic")];
+        disambiguate(&mut devices);
+        let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Mic", "Line", "Mic (2)"]);
+    }
     #[test]
     fn native_sample_formats_preserve_levels_and_downmix_channels() {
         fn check<T: cpal::Sample + cpal::FromSample<f32>>()

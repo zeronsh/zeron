@@ -231,6 +231,8 @@ async fn park_after_spawn() -> Parked {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     })
     .unwrap();

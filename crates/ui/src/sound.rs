@@ -5,9 +5,11 @@
 //!   the start and end of a voice call;
 //! - macOS Appshots use a preloaded native player; other cues write to a
 //!   temp file and use the system player on a
-//!   background thread: `afplay` (macOS), PowerShell `Media.SoundPlayer`
-//!   (Windows), first of `paplay`/`pw-play`/`aplay`/`ffplay`/`mpv` (Linux —
-//!   WAV, so even bare ALSA `aplay` decodes it);
+//!   background thread: the System Sound server (macOS, see
+//!   `macos_system_sound` for why not `afplay`), PowerShell
+//!   `Media.SoundPlayer` (Windows), first of
+//!   `paplay`/`pw-play`/`aplay`/`ffplay`/`mpv` (Linux — WAV, so even bare
+//!   ALSA `aplay` decodes it);
 //! - `ZERON_DISABLE_SOUND` env kill-switch + the `soundEnabled` ui-setting;
 //! - failures are logged and swallowed — a missing player must never bother
 //!   the session flow.
@@ -235,7 +237,97 @@ fn create_temp_file() -> std::io::Result<(std::fs::File, TempSoundFile)> {
 
 #[cfg(target_os = "macos")]
 fn run_player(path: &Path) -> Result<(), String> {
-    run_checked("afplay", &[], path)
+    macos_system_sound::play(path)
+}
+
+/// Chimes play in the System Sound server, not in a process of ours.
+///
+/// Whoever plays audio holds a CoreAudio assertion for as long as it sounds.
+/// While a game holds the foreground macOS keeps every other app's process
+/// coalition in the background, and the assertion of an `afplay` child lifts
+/// the whole coalition out and drops it back when the sound ends.
+/// AVAudioPlayer and NSSound take the same assertion, in the app. On macOS
+/// 27.2 such a change can deadlock in the kernel against a process of the
+/// same coalition that is in `exec`, and agents exec all the time: the window
+/// server hangs behind it and the machine needs a reboot. The sound server
+/// holds the assertion itself, so a chime leaves this app's processes alone.
+#[cfg(target_os = "macos")]
+mod macos_system_sound {
+    use core_foundation::base::TCFType;
+    use core_foundation::url::{CFURL, CFURLRef};
+    use std::ffi::c_void;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    type SystemSoundId = u32;
+
+    const PROPERTY_IS_UI_SOUND: u32 = u32::from_be_bytes(*b"isui");
+
+    #[link(name = "AudioToolbox", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioServicesCreateSystemSoundID(url: CFURLRef, id: *mut SystemSoundId) -> i32;
+        fn AudioServicesDisposeSystemSoundID(id: SystemSoundId) -> i32;
+        fn AudioServicesSetProperty(
+            property: u32,
+            specifier_size: u32,
+            specifier: *const c_void,
+            data_size: u32,
+            data: *const c_void,
+        ) -> i32;
+        fn AudioServicesPlaySystemSoundWithCompletion(
+            id: SystemSoundId,
+            completion: &block2::Block<dyn Fn()>,
+        );
+    }
+
+    pub(super) struct SystemSound(SystemSoundId);
+
+    impl Drop for SystemSound {
+        fn drop(&mut self) {
+            unsafe {
+                AudioServicesDisposeSystemSoundID(self.0);
+            }
+        }
+    }
+
+    pub(super) fn register(path: &Path) -> Result<SystemSound, String> {
+        let url = CFURL::from_path(path, false)
+            .ok_or_else(|| format!("no file URL for {}", path.display()))?;
+        let mut id: SystemSoundId = 0;
+        let status = unsafe { AudioServicesCreateSystemSoundID(url.as_concrete_TypeRef(), &mut id) };
+        if status != 0 {
+            return Err(format!("system sound server refused the chime ({status})"));
+        }
+        let sound = SystemSound(id);
+        // System sounds default to interface feedback, silent when the user
+        // turns interface sound effects off. A chime has its own setting.
+        let ui_sound: u32 = 0;
+        unsafe {
+            AudioServicesSetProperty(
+                PROPERTY_IS_UI_SOUND,
+                size_of::<SystemSoundId>() as u32,
+                (&raw const sound.0).cast(),
+                size_of::<u32>() as u32,
+                (&raw const ui_sound).cast(),
+            );
+        }
+        Ok(sound)
+    }
+
+    pub(super) fn play(path: &Path) -> Result<(), String> {
+        let sound = register(path)?;
+        let (finished, wait) = mpsc::channel();
+        let completion = block2::RcBlock::new(move || {
+            let _ = finished.send(());
+        });
+        unsafe { AudioServicesPlaySystemSoundWithCompletion(sound.0, &completion) };
+        // The caller deletes the file when this returns, so wait the chime
+        // out. Bounded like the other players: a wedged sound server must not
+        // accumulate threads.
+        wait.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "system sound timed out".to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -285,6 +377,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     Err(format!("no audio player available: {}", errors.join("; ")))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     // Bounded wait: a wedged audio daemon must not accumulate zombie threads.
     let mut child = std::process::Command::new(program)
@@ -392,6 +485,26 @@ mod tests {
             assert!(data.len() > 1000);
             assert_eq!(&data[..4], b"RIFF");
             assert_eq!(&data[8..12], b"WAVE");
+        }
+    }
+
+    // Registering is everything short of sounding: the server opens and
+    // accepts the file a chime is written to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn embedded_chimes_register_with_the_system_sound_server_without_playback() {
+        for data in [
+            SOUND_DONE,
+            SOUND_REQUEST,
+            SOUND_ATTENTION,
+            SOUND_VOICE_START,
+            SOUND_VOICE_END,
+            SOUND_APPSHOT,
+        ] {
+            let (mut file, tmp) = create_temp_file().expect("reserve temp file");
+            file.write_all(data).expect("write chime");
+            drop(file);
+            macos_system_sound::register(&tmp.path).expect("chime should register");
         }
     }
 

@@ -611,13 +611,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			key = `chat_lane_{chat}`,
 			text = draft,
 			agent = function(): string?
-				local chosen = model:get()
-				for _, m in store.catalog:get().models do
-					if m.value == chosen then
-						return m.harness
-					end
-				end
-				return nil
+				return Completions.agent_of(model:get(), if unsent() then nil else session:get())
 			end,
 			target = function(): any
 				if unsent() then

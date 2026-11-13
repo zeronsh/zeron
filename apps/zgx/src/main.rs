@@ -312,19 +312,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe { std::env::set_var("ZGX_LAYOUT_WARNINGS", "1") };
         }
     }
-    // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
-    // of this interface by someone who finished setup before is the exception:
-    // the intro, then their username and card, once.
-    if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        if welcome_due(finished_setup_before(), welcomed()) {
-            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            screen = Screen::Onboarding;
-            // Setup finished on this Mac before: the main window.
-            if onboarded() {
-                screen = Screen::Main;
-            }
+    // Where a launch opens (`opening`). Asking for `intro` still plays it.
+    if matches!(screen, Screen::Intro) && !asked_for_intro {
+        let session = auth::session_exists();
+        match opening(session, session && finished_setup_before(), welcomed(), onboarded()) {
+            Opening::Intro => {}
+            Opening::Welcome => WELCOME.store(true, std::sync::atomic::Ordering::Relaxed),
+            Opening::Setup => screen = Screen::Onboarding,
+            Opening::Main => screen = Screen::Main,
         }
     }
 
@@ -589,6 +584,38 @@ fn welcomed() -> bool {
 /// Whether someone signed in had finished setup, here or in the Zeron app.
 fn finished_setup_before() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
+}
+
+/// Where a launch that asked for no screen opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Opening {
+    /// The intro, then setup from its start.
+    Intro,
+    /// The intro, then their username and card only (`welcome_due`).
+    Welcome,
+    /// Setup at once, where sign-in leads (src/auth.rs).
+    Setup,
+    /// The main window.
+    Main,
+}
+
+/// Where a launch opens: signed in on an earlier run, no intro, setup at once
+/// (the first launch of this interface by someone who finished setup before
+/// is the exception: the intro, then their username and card, once), or the
+/// main window once setup was finished on this computer. Setup finished
+/// without an account opens the main window too: it works without one
+/// (screens/shell), and only the session was asked here before, so whoever
+/// went on without signing in saw the intro and setup on every launch.
+fn opening(session: bool, finished_before: bool, welcomed: bool, onboarded: bool) -> Opening {
+    if session && welcome_due(finished_before, welcomed) {
+        Opening::Welcome
+    } else if onboarded {
+        Opening::Main
+    } else if session {
+        Opening::Setup
+    } else {
+        Opening::Intro
+    }
 }
 
 /// Whether someone signed in gets the welcome: they'd finished setup before and
@@ -1373,5 +1400,19 @@ mod welcome_tests {
         assert!(super::welcome_due(true, false));
         assert!(!super::welcome_due(true, true));
         assert!(!super::welcome_due(false, false));
+    }
+
+    /// Setup finished without an account opens the main window on the next
+    /// launch, as it does signed in; the intro is for whoever hasn't finished it.
+    #[test]
+    fn setup_finished_without_an_account_opens_the_main_window() {
+        use super::{Opening, opening};
+        // (session, finished before, welcomed, onboarded here)
+        assert_eq!(opening(false, false, false, true), Opening::Main);
+        assert_eq!(opening(false, false, false, false), Opening::Intro);
+        assert_eq!(opening(true, false, false, true), Opening::Main);
+        assert_eq!(opening(true, false, false, false), Opening::Setup);
+        assert_eq!(opening(true, true, false, true), Opening::Welcome);
+        assert_eq!(opening(true, true, true, true), Opening::Main);
     }
 }
