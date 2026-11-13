@@ -58,6 +58,33 @@ impl OpencodeHarness {
         Ok(list)
     }
 
+    /// Store a new sign-in for `integration` (its `value` as the service
+    /// takes it: `{type: "oauth", methodID, access, refresh, expires}` or
+    /// `{type: "key", key}`), made the integration's active one.
+    pub async fn add_native_credential(
+        &self,
+        integration: &str,
+        label: &str,
+        value: Value,
+    ) -> Result<(), HarnessError> {
+        let server = self.service_server().await.ok_or_else(|| {
+            HarnessError::Protocol("OpenCode's background service isn't available".into())
+        })?;
+        server
+            .post_json(
+                "/api/credential",
+                None,
+                &serde_json::json!({
+                    "integrationID": integration,
+                    "label": label,
+                    "value": value,
+                    "activate": true,
+                }),
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// Make `id` the credential its integration signs in with.
     pub async fn activate_native_credential(&self, id: &str) -> Result<(), HarnessError> {
         let server = self.service_server().await.ok_or_else(|| {
