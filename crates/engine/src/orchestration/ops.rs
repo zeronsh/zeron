@@ -362,8 +362,8 @@ impl EngineRpc {
                 })?;
                 Ok(json!({ "id": id }))
             }
-            OrchestrateOp::Dump { text } => {
-                let id = self.dump(&text).await?;
+            OrchestrateOp::Dump { text, attachments, transfers } => {
+                let id = self.dump(&text, attachments, transfers).await?;
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::Route {
@@ -376,9 +376,10 @@ impl EngineRpc {
                 progress,
                 space_id,
                 device_id,
+                attachments,
             } => {
                 let id = self
-                    .route(&dump_id, excerpt, target, intent, message, candidates, progress, space_id, device_id)
+                    .route(&dump_id, excerpt, target, intent, message, candidates, progress, space_id, device_id, attachments)
                     .await?;
                 Ok(json!({ "id": id }))
             }
@@ -852,6 +853,21 @@ pub(crate) fn deliver(
     from: Option<&str>,
     when: When,
 ) -> Result<Delivered, RpcError> {
+    deliver_with(rpc, chat_id, text, from, when, &[], Vec::new())
+}
+
+/// [`deliver`] with files: `attachments` as a chat send carries them (paths
+/// on the chat's host, or `pending://` refs whose bytes `transfers` push
+/// there), named after the words and given to the run.
+pub(crate) fn deliver_with(
+    rpc: &EngineRpc,
+    chat_id: &str,
+    text: &str,
+    from: Option<&str>,
+    when: When,
+    attachments: &[String],
+    transfers: Vec<crate::uploads::AttachmentTransfer>,
+) -> Result<Delivered, RpcError> {
     let workspace = rpc.workspace_host();
     let chat = workspace
         .chat(chat_id)
@@ -876,29 +892,43 @@ pub(crate) fn deliver(
     };
     let status = chat_status(rpc, chat_id);
     let doc_host = rpc.doc_host_ref();
+    // (A queued row keeps its files apart; a run and a steer name them.)
+    let with_files = crate::doc_host::queued_message_prompt(&prompt, attachments);
     let queued = |doc_host: &crate::DocHost| {
         doc_host
-            .queue_message_with_behavior(chat_id, &prompt, Vec::new(), true)
+            .queue_message_with_transfers(chat_id, &prompt, attachments.to_vec(), true, transfers.clone())
             .map(|_| Delivered::Queued)
             .map_err(engine_failed)
     };
     match (status, when) {
         (SessionStatus::Working, When::Now) => doc_host
-            .queue_command(
+            .queue_command_with_transfers(
                 chat_id,
                 zeron_doc::SessionCommandPayload::Steer {
-                    prompt: prompt.clone(),
+                    prompt: with_files.clone(),
                     message_id: Some(uuid::Uuid::new_v4().to_string()),
                 },
+                transfers.clone(),
             )
             .map(|_| Delivered::Steer)
             .map_err(engine_failed),
         (SessionStatus::Working | SessionStatus::AwaitingInput, _) => queued(doc_host),
         (SessionStatus::Idle | SessionStatus::Errored, _) => {
             let config = chat.config.clone();
+            // A project's chat with no folder of its own runs in the project's.
+            let cwd = chat
+                .cwd
+                .clone()
+                .or_else(|| {
+                    chat.space_id
+                        .as_deref()
+                        .and_then(|id| workspace.space(id).ok().flatten())
+                        .map(|space| space.path)
+                })
+                .unwrap_or_else(|| "~".into());
             let request = zeron_proto::RunRequest {
                 mcp: None,
-                prompt: prompt.clone(),
+                prompt: with_files.clone(),
                 harness: Some(
                     config
                         .as_ref()
@@ -910,7 +940,7 @@ pub(crate) fn deliver(
                     .as_ref()
                     .map(|c| c.model_options.clone())
                     .unwrap_or_default(),
-                cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
+                cwd,
                 sandbox: config
                     .as_ref()
                     .map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
@@ -918,18 +948,19 @@ pub(crate) fn deliver(
                 access: config.as_ref().map(|c| c.access).unwrap_or_default(),
                 plan: config.as_ref().is_some_and(|c| c.plan),
                 resume: None,
-                attachments: Vec::new(),
+                attachments: attachments.to_vec(),
                 worktree: None,
                 env: Default::default(),
                 extra_mcp: Vec::new(),
             };
             doc_host
-                .queue_command(
+                .queue_command_with_transfers(
                     chat_id,
                     zeron_doc::SessionCommandPayload::Run {
                         request,
                         message_id: uuid::Uuid::new_v4().to_string(),
                     },
+                    transfers,
                 )
                 .map(|_| Delivered::Run)
                 .map_err(engine_failed)

@@ -1806,6 +1806,25 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Who started a chat for the person ([`zeron_proto::Chat::started_by`]).
+    /// `false` when no such row.
+    pub fn set_chat_started_by(
+        &mut self,
+        chat_id: &str,
+        started_by: &zeron_proto::StartedBy,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.update_changed(
+            KIND_CHATS,
+            chat_id,
+            fields([("startedBy", serde_json::to_value(started_by)?)]),
+            same_value,
+        );
+        Ok(true)
+    }
+
     pub fn set_chat_branch(&mut self, chat_id: &str, branch: &str) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);

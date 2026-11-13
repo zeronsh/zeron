@@ -123,8 +123,15 @@ impl EngineRpc {
 
     /// The person dumps `text`: recorded, and sent to the Brain dump as a
     /// run (after its current turn, if it's routing another). Its id.
-    pub(crate) async fn dump(&self, text: &str) -> Result<String, RpcError> {
+    pub(crate) async fn dump(
+        &self,
+        text: &str,
+        attachments: Vec<String>,
+        transfers: Vec<zeron_proto::orchestration::UploadTransfer>,
+    ) -> Result<String, RpcError> {
         let text = cut(text.trim(), MAX_DUMP_BYTES);
+        let files = super::placement::dump_files(attachments)?;
+        let text = if text.is_empty() && !files.is_empty() { "(files)".to_owned() } else { text };
         if text.is_empty() {
             return Err(RpcError::BadParams("Nothing to dump".into()));
         }
@@ -141,6 +148,7 @@ impl EngineRpc {
             device_id: self.doc_host_ref().device_id().to_owned(),
             created_at: now,
             updated_at: now,
+            attachments: files.clone(),
         };
         self.orchestration()
             .workspace()
@@ -149,7 +157,13 @@ impl EngineRpc {
             .comms()
             .say(CommKind::Message, super::comms::YOU, &brain, &text);
         let message = zeron_proto::orchestration::prompt_text::dump_message(&dump.id, &text);
-        if let Err(error) = deliver(self, &brain, &message, None, When::Next) {
+        // The Brain dump sees the files, as a chat send carries them.
+        let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+        let transfers = transfers
+            .into_iter()
+            .map(|t| crate::uploads::AttachmentTransfer { upload_id: t.upload_id, file_name: t.file_name })
+            .collect();
+        if let Err(error) = super::ops::deliver_with(self, &brain, &message, None, When::Next, &paths, transfers) {
             self.orchestration().workspace().write_orchestration(|doc| {
                 if let Some(mut d) = doc.dump(&dump.id) {
                     d.state = DumpState::Failed;
@@ -178,6 +192,7 @@ impl EngineRpc {
         progress: bool,
         space_id: Option<String>,
         device_id: Option<String>,
+        attachments: Option<Vec<String>>,
     ) -> Result<String, RpcError> {
         let orch = self.orchestration().clone();
         let dump = orch
@@ -220,6 +235,7 @@ impl EngineRpc {
             item_id: None,
             space_id,
             device_id,
+            attachments: super::placement::route_files(&dump, intent, attachments)?,
         };
         let brain = self.brain_of(&dump);
         let answered = match (&route.target, intent == RouteIntent::Question && progress) {
@@ -422,11 +438,11 @@ impl EngineRpc {
                 if orch.orchestrator(&id).is_none() {
                     return Err(failed(format!("No orchestrator {id}")));
                 }
-                deliver(self, &id, &message, brain, When::Now)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
                 route.state = RouteState::Delivered;
             }
             RouteTarget::Chat { id } => {
-                deliver(self, &id, &message, brain, When::Now)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
                 route.state = RouteState::Delivered;
             }
             RouteTarget::NewOrchestrator { id } => {
@@ -450,7 +466,10 @@ impl EngineRpc {
                     })
                     .await?
                 };
-                deliver(self, &id, &message, brain, When::Now)?;
+                if let Some(brain) = brain {
+                    self.mark_started_by(&id, brain, Some(&dump.id), Some(&route.id));
+                }
+                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
                 route.target = RouteTarget::NewOrchestrator { id };
                 route.state = RouteState::Delivered;
             }
@@ -475,6 +494,9 @@ impl EngineRpc {
                         None,
                         None,
                     )?;
+                    if let Some(brain) = brain {
+                        self.mark_started_by(&id, brain, Some(&dump.id), Some(&route.id));
+                    }
                     if !title.is_empty() {
                         self.workspace_host()
                             .rename_chat(&id, &title)
@@ -482,7 +504,7 @@ impl EngineRpc {
                     }
                     id
                 };
-                deliver(self, &id, &message, brain, When::Now)?;
+                self.deliver_forwarding(&id, &message, brain, &route.attachments)?;
                 route.target = RouteTarget::NewThread { id };
                 route.state = RouteState::Delivered;
             }

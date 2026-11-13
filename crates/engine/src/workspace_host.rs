@@ -1269,6 +1269,7 @@ impl WorkspaceHost {
                 child_kind: child_kind.filter(|_| parent.is_some()),
                 parent_chat_id: parent,
                 sleep: None,
+                started_by: None,
             })
         })?;
         Ok(())

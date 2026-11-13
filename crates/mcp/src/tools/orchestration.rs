@@ -239,6 +239,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "intent": { "type": "string", "enum": ["task", "info", "question", "priority", "cancel", "note"] },
                     "message": s("What the target is sent."),
                     "candidates": { "type": "array", "items": target_schema("A likely place."), "description": "For unsure: the likely places, best first." },
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "The dump's files this fragment is about (their paths or names, as the dump lists them). Omit to send all of them with a task or info, and none otherwise." },
                     "project": s("For newThread/newOrchestrator: the project it is about (id, name or path, from world)."),
                     "device": s("For newThread/newOrchestrator: the device (id or name); with a project, that project's own."),
                     "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." }
@@ -365,6 +366,7 @@ struct RouteArgs {
     candidates: Vec<RouteTarget>,
     #[serde(default)]
     progress: bool,
+    attachments: Option<Vec<String>>,
     /// Resolved before the op (see `orchestration_tool`).
     #[serde(default)]
     #[allow(dead_code)]
@@ -534,7 +536,7 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             Ok(json!({
                 "op": "route", "dumpId": nonempty("dump", &a.dump)?, "excerpt": nonempty("excerpt", &a.excerpt)?,
                 "target": a.target, "intent": intent, "message": a.message, "candidates": a.candidates,
-                "progress": a.progress,
+                "progress": a.progress, "attachments": a.attachments,
             }))
         }
         DUMP_DONE => {

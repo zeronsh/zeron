@@ -1104,6 +1104,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sleep: None,
+            started_by: None,
         }
     }
 

@@ -270,6 +270,7 @@ mod tests {
                 device_id: "dev".into(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                attachments: Default::default(),
             }],
         }
     }

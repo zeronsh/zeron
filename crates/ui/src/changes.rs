@@ -6156,6 +6156,7 @@ rename to new_name.rs
             last_seen_at: None,
             room_gen: None,
             sleep: None,
+            started_by: None,
         }
     }
 

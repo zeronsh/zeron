@@ -137,7 +137,7 @@ async fn ask_banners(orchestration: Orchestration) {
 
 // ── Route answers ───────────────────────────────────────────────────────────
 
-fn target_chat(target: &RouteTarget) -> Option<&str> {
+pub(crate) fn target_chat(target: &RouteTarget) -> Option<&str> {
     match target {
         RouteTarget::Orchestrator { id }
         | RouteTarget::Chat { id }
@@ -182,19 +182,72 @@ pub(crate) fn reply_to(entries: &[SessionMessageEntry], message: &str) -> Option
     Some(answer.trim().chars().take(FULL_MAX).collect())
 }
 
-/// `(dump id, route id, message, question)` of every question route
-/// waiting on an answer from `chat`.
-fn waiting_on<'a>(dumps: &'a [Dump], chat: &str) -> Vec<(&'a str, &'a str, String, &'a str)> {
+/// One route waiting on what comes of it from a chat.
+pub(crate) struct Waiting<'a> {
+    pub dump_id: &'a str,
+    pub route_id: &'a str,
+    /// What it was sent (found again in the target's transcript).
+    pub message: String,
+    pub excerpt: &'a str,
+    pub intent: RouteIntent,
+}
+
+/// Every route waiting on `chat`: a question until it is answered; any
+/// other delivered route (a task, info, priority, cancel) until it is done,
+/// its outcome updated each turn.
+pub(crate) fn waiting_on<'a>(dumps: &'a [Dump], chat: &str) -> Vec<Waiting<'a>> {
     dumps
         .iter()
         .flat_map(|d| d.routes.iter().map(move |r| (d, r)))
-        .filter(|(_, r)| r.intent == RouteIntent::Question && r.state == RouteState::Delivered)
+        .filter(|(_, r)| match r.intent {
+            RouteIntent::Question => r.state == RouteState::Delivered,
+            _ => matches!(r.state, RouteState::Delivered | RouteState::Answered),
+        })
         .filter(|(_, r)| target_chat(&r.target) == Some(chat))
-        .map(|(d, r)| {
-            let message = if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() };
-            (d.id.as_str(), r.id.as_str(), message, r.excerpt.as_str())
+        .map(|(d, r)| Waiting {
+            dump_id: &d.id,
+            route_id: &r.id,
+            message: if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() },
+            excerpt: &r.excerpt,
+            intent: r.intent,
         })
         .collect()
+}
+
+/// The latest reply after the message carrying `message` (across the
+/// turns since), once the newest turn is done. `None` while it isn't.
+pub(crate) fn latest_reply(entries: &[SessionMessageEntry], message: &str) -> Option<String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let at = entries
+        .iter()
+        .rposition(|e| e.role == MessageRole::User && texts(e).contains(message))?;
+    let after: Vec<_> = entries[at + 1..].iter().filter(|e| e.role == MessageRole::Assistant).collect();
+    if after.is_empty() || after.iter().any(|e| e.status == Some(MessageStatus::Streaming)) {
+        return None;
+    }
+    let reply = after.iter().rev().map(|e| texts(e)).find(|t| !t.trim().is_empty())?;
+    Some(reply.trim().chars().take(FULL_MAX).collect())
+}
+
+/// Where a task route stands once its target's turn ended, from the
+/// target's session: failed when the turn errored; done when it went idle
+/// with nothing running or left on its todo list; else still going.
+pub(crate) fn task_state(session: &Session) -> RouteState {
+    if session
+        .last_turn_outcome
+        .is_some_and(|o| o.status == zeron_proto::DoneStatus::Errored)
+        || session.status == SessionStatus::Errored
+    {
+        return RouteState::Failed;
+    }
+    let busy = session.waiting.is_some()
+        || session.running_subagents > 0
+        || !session.background_tasks.is_empty()
+        || session.todo.as_ref().is_some_and(|t| t.done < t.total);
+    if busy { RouteState::Answered } else { RouteState::Done }
 }
 
 /// A local chat's turn ended since `before` (it settled with a new
@@ -222,17 +275,48 @@ pub(crate) async fn record_answer(
     question: &str,
     full: String,
 ) -> bool {
-    use zeron_proto::orchestration::{ANSWER_MAX, model_answer, plain_answer, prompt_text::one_line};
-    let quick = Some(plain_answer(&full)).filter(|a| !a.is_empty()).unwrap_or_else(|| one_line(&full, ANSWER_MAX));
+    record_outcome(orchestration, rpc, chat, dump_id, route_id, question, full, None).await
+}
+
+/// [`record_answer`] for any route: `task` is where a task route stands now
+/// ([`task_state`]; `None` for a question, which is answered once). A task's
+/// outcome is updated each turn until it is done or failed. Shows in comms
+/// from the target to the person, and as a banner for a question or a
+/// failure.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_outcome(
+    orchestration: &Orchestration,
+    rpc: &crate::rpc::EngineRpc,
+    chat: &str,
+    dump_id: &str,
+    route_id: &str,
+    question: &str,
+    full: String,
+    task: Option<RouteState>,
+) -> bool {
+    use zeron_proto::orchestration::{ANSWER_MAX, CommKind, model_answer, plain_answer, prompt_text::one_line};
+    let plain = Some(plain_answer(&full)).filter(|a| !a.is_empty());
+    let quick = plain.clone().unwrap_or_else(|| one_line(&full, ANSWER_MAX));
+    let state = task.unwrap_or(RouteState::Answered);
+    // A later turn that only says it sent its result (to the Brain dump)
+    // keeps the outcome it sent; only the state moves.
+    let keeps_outcome = task.is_some() && plain.is_none();
     let recorded = orchestration.workspace().write_orchestration(|doc| {
         let Some(mut dump) = doc.dump(dump_id) else { return false };
         let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) else { return false };
-        if route.state != RouteState::Delivered {
+        let open = match task {
+            None => route.state == RouteState::Delivered,
+            Some(_) => matches!(route.state, RouteState::Delivered | RouteState::Answered),
+        };
+        // The same reply and state again (a heartbeat): nothing new.
+        if !open || (route.state == state && route.answer_full.as_deref() == Some(full.as_str())) {
             return false;
         }
-        route.state = RouteState::Answered;
-        route.answer = Some(quick.clone());
-        route.answer_full = Some(full.clone());
+        route.state = state;
+        if !(keeps_outcome && route.answer.is_some()) {
+            route.answer = Some(quick.clone());
+            route.answer_full = Some(full.clone());
+        }
         dump.updated_at = Utc::now();
         doc.upsert_dump(&dump);
         true
@@ -240,12 +324,26 @@ pub(crate) async fn record_answer(
     if !recorded {
         return false;
     }
-    orchestration.comms().say(zeron_proto::orchestration::CommKind::Answer, chat, super::comms::YOU, &quick);
+    let kind = if task.is_some() { CommKind::Report } else { CommKind::Answer };
+    orchestration.comms().say(kind, chat, super::comms::YOU, &quick);
+    if task.is_none() || state == RouteState::Failed {
+        let title = rpc
+            .workspace_host()
+            .chat(chat)
+            .ok()
+            .flatten()
+            .and_then(|c| c.title)
+            .unwrap_or_else(|| "A thread".into());
+        rpc.notify_person(&title, &quick, Some(chat));
+    }
     let reply: String = zeron_proto::redact::redact_command_output(&full).chars().take(CONDENSE_INPUT_MAX).collect();
-    let data = serde_json::json!({ "question": one_line(question, 600), "reply": reply });
+    let (instructions, label, key) = match task {
+        None => (zeron_harness::ANSWER_INSTRUCTIONS, "Question and reply", "question"),
+        Some(_) => (zeron_harness::OUTCOME_INSTRUCTIONS, "Request and reply", "request"),
+    };
+    let data = serde_json::json!({ key: one_line(question, 600), "reply": reply });
     let prompt = format!(
-        "{}\n\nQuestion and reply (JSON):\n{}",
-        zeron_harness::ANSWER_INSTRUCTIONS,
+        "{instructions}\n\n{label} (JSON):\n{}",
         serde_json::to_string_pretty(&data).unwrap_or_default()
     );
     let harness = rpc
@@ -263,8 +361,9 @@ pub(crate) async fn record_answer(
         orchestration.workspace().write_orchestration(|doc| {
             let Some(mut dump) = doc.dump(dump_id) else { return };
             let Some(route) = dump.routes.iter_mut().find(|r| r.id == route_id) else { return };
-            // Only over the answer it condenses (not one a reroute replaced).
-            if route.state != RouteState::Answered || route.answer_full.as_deref() != Some(full.as_str()) {
+            // Only over the answer it condenses (not one a reroute or a later
+            // turn replaced).
+            if route.answer_full.as_deref() != Some(full.as_str()) {
                 return;
             }
             route.answer = Some(condensed);
@@ -286,10 +385,10 @@ async fn route_answers(orchestration: Orchestration) {
         sessions_rx.borrow_and_update().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
     while sessions_rx.changed().await.is_ok() {
         let now: Vec<Session> = sessions_rx.borrow_and_update().clone();
-        let finished: Vec<String> = now
+        let finished: Vec<(String, Session)> = now
             .iter()
             .filter(|s| ended(seen.get(&s.chat_id), s))
-            .map(|s| s.chat_id.clone())
+            .map(|s| (s.chat_id.clone(), s.clone()))
             .collect();
         seen = now.into_iter().map(|s| (s.chat_id.clone(), s)).collect();
         if finished.is_empty() {
@@ -298,7 +397,7 @@ async fn route_answers(orchestration: Orchestration) {
         // (No services right now: nothing to read the transcripts with.)
         let Some(rpc) = orchestration.rpc() else { continue };
         let dumps = orchestration.state().dumps;
-        for chat in finished {
+        for (chat, session) in finished {
             // A Brain dump's turn that left a dump routing.
             super::stale_dumps::after_turn(&orchestration, &rpc, &chat);
             let waiting = waiting_on(&dumps, &chat);
@@ -307,13 +406,16 @@ async fn route_answers(orchestration: Orchestration) {
             }
             let Ok(handle) = rpc.doc_host_ref().open(&chat) else { continue };
             let Ok(entries) = handle.doc().read_entries() else { continue };
-            for (dump_id, route_id, message, question) in waiting {
-                let Some(full) = reply_to(&entries, &message) else { continue };
+            for w in waiting {
+                let question = w.intent == RouteIntent::Question;
+                let full = if question { reply_to(&entries, &w.message) } else { latest_reply(&entries, &w.message) };
+                let Some(full) = full else { continue };
+                let task = (!question).then(|| task_state(&session));
+                let asked = if question { w.excerpt.to_owned() } else { w.message.clone() };
                 let (orchestration, rpc) = (orchestration.clone(), rpc.clone());
-                let (chat, dump_id, route_id, question) =
-                    (chat.clone(), dump_id.to_owned(), route_id.to_owned(), question.to_owned());
+                let (chat, dump_id, route_id) = (chat.clone(), w.dump_id.to_owned(), w.route_id.to_owned());
                 tokio::spawn(async move {
-                    record_answer(&orchestration, &rpc, &chat, &dump_id, &route_id, &question, full).await;
+                    record_outcome(&orchestration, &rpc, &chat, &dump_id, &route_id, &asked, full, task).await;
                 });
             }
         }
@@ -358,6 +460,49 @@ mod tests {
         assert_eq!(reply_to(&entries, "When does 2.0 ship?").as_deref(), Some("Friday."), "only that turn");
         assert_eq!(reply_to(&entries, "never sent"), None);
         assert_eq!(reply_to(&entries[..3], "When does 2.0 ship?"), None, "no reply yet");
+    }
+
+    #[test]
+    fn a_task_is_done_when_its_target_has_nothing_left() {
+        use zeron_proto::orchestration::TodoProgress;
+        let base = Session {
+            last_completed_turn: Some("t".into()),
+            chat_id: "c".into(),
+            device_id: "d".into(),
+            status: SessionStatus::Idle,
+            started_at: None,
+            updated_at: Utc::now(),
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: vec![],
+            waiting: None,
+            activity: None,
+            todo: None,
+        };
+        assert_eq!(task_state(&base), RouteState::Done);
+        let half = Session { todo: Some(TodoProgress { done: 1, total: 2, current: None }), ..base.clone() };
+        assert_eq!(task_state(&half), RouteState::Answered);
+        let all = Session { todo: Some(TodoProgress { done: 2, total: 2, current: None }), ..base.clone() };
+        assert_eq!(task_state(&all), RouteState::Done);
+        let helping = Session { running_subagents: 1, ..base.clone() };
+        assert_eq!(task_state(&helping), RouteState::Answered);
+        let failed = Session { status: SessionStatus::Errored, ..base };
+        assert_eq!(task_state(&failed), RouteState::Failed);
+    }
+
+    #[test]
+    fn the_latest_reply_spans_the_turns_since_delivery() {
+        use MessageRole::*;
+        use MessageStatus::*;
+        let entries = vec![
+            entry("u1", User, "Check device names.", Complete),
+            entry("a1", Assistant, "Half done.", Complete),
+            entry("u2", User, "go on", Complete),
+            entry("a2", Assistant, "All done.", Complete),
+        ];
+        assert_eq!(latest_reply(&entries, "Check device names.").as_deref(), Some("All done."));
+        assert_eq!(reply_to(&entries, "Check device names.").as_deref(), Some("Half done."));
     }
 
     #[test]

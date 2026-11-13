@@ -74,7 +74,119 @@ pub(crate) fn best_project<'a>(text: &str, projects: &'a [Project]) -> Option<&'
     named_ones.first().copied().or_else(|| projects.first())
 }
 
+/// The most files a dump carries.
+pub(crate) const DUMP_FILES_MAX: usize = 20;
+
+/// A dump's files, checked as a send's are: a `pending://` ref, or an
+/// absolute path on this device (where the Brain dump runs).
+pub(crate) fn dump_files(paths: Vec<String>) -> Result<Vec<zeron_proto::orchestration::DumpAttachment>, RpcError> {
+    if paths.len() > DUMP_FILES_MAX {
+        return Err(RpcError::BadParams(format!("At most {DUMP_FILES_MAX} files in a dump")));
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let path = path.trim().to_owned();
+            let name = if crate::uploads::is_pending_ref(&path) {
+                crate::uploads::parse_pending_ref(&path)
+                    .map(|(_, name)| name.to_owned())
+                    .filter(|n| !n.is_empty())
+                    .ok_or_else(|| RpcError::BadParams(format!("Not an upload: {path}")))?
+            } else if std::path::Path::new(&path).is_absolute() {
+                std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .ok_or_else(|| RpcError::BadParams(format!("Not a file: {path}")))?
+            } else {
+                return Err(RpcError::BadParams(format!("A dumped file is an upload or an absolute path: {path}")));
+            };
+            Ok(zeron_proto::orchestration::DumpAttachment { path, name })
+        })
+        .collect()
+}
+
+/// The dump's files a route forwards: the ones it names (by path or name;
+/// each must be the dump's), else all of them for a task or info.
+pub(crate) fn route_files(
+    dump: &Dump,
+    intent: zeron_proto::orchestration::RouteIntent,
+    named: Option<Vec<String>>,
+) -> Result<Vec<String>, RpcError> {
+    use zeron_proto::orchestration::RouteIntent;
+    match named {
+        None if matches!(intent, RouteIntent::Task | RouteIntent::Info) => {
+            Ok(dump.attachments.iter().map(|a| a.path.clone()).collect())
+        }
+        None => Ok(Vec::new()),
+        Some(named) => named
+            .iter()
+            .map(|n| {
+                dump.attachments
+                    .iter()
+                    .find(|a| a.path == *n || a.name == *n)
+                    .map(|a| a.path.clone())
+                    .ok_or_else(|| RpcError::BadParams(format!("The dump has no file {n}")))
+            })
+            .collect(),
+    }
+}
+
 impl EngineRpc {
+    /// Deliver a route's message with the dump's files it forwards, carried
+    /// to wherever `chat` runs: as they are on this device, or staged as
+    /// uploads whose bytes are pushed to its host.
+    pub(crate) fn deliver_forwarding(
+        &self,
+        chat: &str,
+        message: &str,
+        brain: Option<&str>,
+        files: &[String],
+    ) -> Result<(), RpcError> {
+        let host = self.workspace_host().chat(chat).ok().flatten().map(|c| c.device_id);
+        let (paths, transfers) = self.forwardable(files, host.as_deref());
+        super::ops::deliver_with(self, chat, message, brain, super::ops::When::Now, &paths, transfers).map(|_| ())
+    }
+
+    /// `files` as a chat on device `host` can get them.
+    pub(crate) fn forwardable(
+        &self,
+        files: &[String],
+        host: Option<&str>,
+    ) -> (Vec<String>, Vec<crate::uploads::AttachmentTransfer>) {
+        let uploads = self.uploads_ref();
+        let here = host.is_none_or(|h| h == self.doc_host_ref().device_id());
+        let mut paths = Vec::new();
+        let mut transfers = Vec::new();
+        for file in files {
+            if here {
+                paths.push(uploads.resolve_pending(file).unwrap_or_else(|| file.clone()));
+                continue;
+            }
+            if let Some((upload_id, file_name)) = crate::uploads::parse_pending_ref(file) {
+                transfers.push(crate::uploads::AttachmentTransfer {
+                    upload_id: upload_id.to_owned(),
+                    file_name: file_name.to_owned(),
+                });
+                paths.push(file.clone());
+                continue;
+            }
+            // A file here, for another device: staged as an upload of its own.
+            let source = std::path::Path::new(file);
+            let Some(name) = source.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            let upload_id = uuid::Uuid::new_v4().simple().to_string();
+            let target = uploads.pending_target(&upload_id, &name);
+            let staged = target.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::copy(source, &target));
+            match staged {
+                Ok(_) => {
+                    paths.push(crate::uploads::pending_ref(&upload_id, &name));
+                    transfers.push(crate::uploads::AttachmentTransfer { upload_id, file_name: name });
+                }
+                Err(error) => tracing::warn!(file = %file, %error, "brain dump: a file couldn't be forwarded"),
+            }
+        }
+        (paths, transfers)
+    }
+
     pub(crate) fn placement_projects(&self) -> Vec<Project> {
         let spaces = self.workspace_host().read_spaces().unwrap_or_default();
         let chats = self.workspace_host().read_chats().unwrap_or_default();
@@ -125,6 +237,23 @@ impl EngineRpc {
             Some(p) => (Some(p.space.id.clone()), Some(p.space.device_id.clone())),
             None => (None, None),
         })
+    }
+
+    /// Record that `by` started `chat` for the person (provenance, not
+    /// parenthood: [`zeron_proto::Chat::started_by`]).
+    pub(crate) fn mark_started_by(&self, chat: &str, by: &str, dump_id: Option<&str>, route_id: Option<&str>) {
+        let started = zeron_proto::StartedBy {
+            chat_id: by.to_owned(),
+            dump_id: dump_id.map(str::to_owned),
+            route_id: route_id.map(str::to_owned),
+        };
+        let marked = self
+            .orchestration()
+            .workspace()
+            .write_orchestration(|doc| doc.set_chat_started_by(chat, &started));
+        if !matches!(marked, Ok(true)) {
+            tracing::warn!(chat = %chat, "started-by not recorded");
+        }
     }
 
     /// The existing places among `candidates` (orchestrators, live chats,
@@ -295,6 +424,31 @@ mod tests {
         assert_eq!(best_project("fix my-app login", &p).unwrap().space.id, "s4");
         let q = vec![project("s6", "web", "/x/web", "d1", true, 9), project("s5", "app", "/x/app", "d1", true, 1)];
         assert_eq!(best_project("the happy path", &q).unwrap().space.id, "s6");
+    }
+
+    /// A file here, for a thread on another device: staged as an upload of
+    /// its own, its bytes pushed there; for one here, the path as it is.
+    #[tokio::test]
+    async fn files_go_to_another_device_as_uploads() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(crate::registry::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let file = temp.path().join("shot.png");
+        std::fs::write(&file, b"png").unwrap();
+        let file = file.to_string_lossy().into_owned();
+        let (paths, transfers) = rpc.forwardable(std::slice::from_ref(&file), Some(core.device_id.as_str()));
+        assert_eq!((paths, transfers.len()), (vec![file.clone()], 0));
+        let (paths, transfers) = rpc.forwardable(std::slice::from_ref(&file), Some("honeypot"));
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(paths[0], crate::uploads::pending_ref(&transfers[0].upload_id, "shot.png"));
+        let staged = rpc.uploads_ref().resolve_pending(&paths[0]).expect("staged here");
+        assert_eq!(std::fs::read(staged).unwrap(), b"png");
     }
 
     #[test]

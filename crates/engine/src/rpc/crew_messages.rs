@@ -72,6 +72,28 @@ fn text_slot<'a>(method: &str, params: &'a mut Value) -> Option<&'a mut Value> {
     }
 }
 
+/// The open route of the newest dump that `chat` is the target of: what a
+/// message from it to the Brain dump answers. `(dump, route, intent, what it
+/// was sent)`.
+fn open_route_of(
+    dumps: &[zeron_proto::orchestration::Dump],
+    chat: &str,
+) -> Option<(String, String, zeron_proto::orchestration::RouteIntent, String)> {
+    use zeron_proto::orchestration::RouteState;
+    let mut dumps: Vec<_> = dumps.iter().collect();
+    dumps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    dumps.into_iter().find_map(|d| {
+        d.routes
+            .iter()
+            .filter(|r| matches!(r.state, RouteState::Delivered | RouteState::Answered))
+            .find(|r| crate::orchestration::watchers::target_chat(&r.target) == Some(chat))
+            .map(|r| {
+                let sent = if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() };
+                (d.id.clone(), r.id.clone(), r.intent, sent)
+            })
+    })
+}
+
 impl EngineRpc {
     /// An agent's message to another chat, for the comms feed.
     pub(super) fn note_agent_message(&self, method: &str, params: &Value) {
@@ -147,6 +169,41 @@ impl EngineRpc {
         let Some(text) = sent_text(method, params) else {
             return Ok(None);
         };
+        // A routed chat writing back to the Brain dump: that's what came of
+        // its route. Filed on the route, never a turn of the Brain dump's.
+        if matches!(self.orchestration().role_of(target), crate::orchestration::ChatRole::BrainDump { .. })
+            && let Some((dump, route, intent, sent)) = open_route_of(&self.orchestration().state().dumps, &caller)
+            && !text.trim().is_empty()
+        {
+            use zeron_proto::orchestration::{RouteIntent, RouteState};
+            let task = (intent != RouteIntent::Question).then_some(RouteState::Answered);
+            let asked = sent;
+            let orchestration = self.orchestration().clone();
+            let full: String = text.trim().to_owned();
+            // Filed now; its one-line condensing goes on without the sender.
+            match orchestration.rpc() {
+                Some(rpc) => {
+                    let (route, caller) = (route.clone(), caller.clone());
+                    tokio::spawn(async move {
+                        crate::orchestration::watchers::record_outcome(
+                            &orchestration, &rpc, &caller, &dump, &route, &asked, full, task,
+                        )
+                        .await;
+                    });
+                }
+                None => {
+                    crate::orchestration::watchers::record_outcome(
+                        &orchestration, self, &caller, &dump, &route, &asked, full, task,
+                    )
+                    .await;
+                }
+            }
+            let reply = match method {
+                methods::QUEUE_MESSAGE => json!({ "id": route, "outcome": route }),
+                _ => json!({ "commandId": route, "outcome": route }),
+            };
+            return Ok(Some(RpcReply::value(&reply)?));
+        }
         // The orchestrator is the crew row's: a send anywhere else is a send.
         let Some(member) = self.orchestration().crew_of(&caller) else {
             return Ok(None);
