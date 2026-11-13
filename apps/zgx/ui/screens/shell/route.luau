@@ -41,6 +41,11 @@
 --                           ids); the chats stay as they were under it
 --   route.chat:get()        the chat route (as `current`), held while
 --                           settings shows: `project` and `session` follow it
+--   route.control()         to the Control room (`control`)
+--   route.orchestrator(id)  to an orchestrator's page (`orchestrator`, its id)
+--   route.own_page(name)    whether a route is a page of its own, with no chat
+--                           under it (a plugin's page, the Control room, an
+--                           orchestrator's)
 --   route.choose_project(id?) the project a new chat starts in
 --
 -- What it shows changes in place: each state above keeps its table while
@@ -56,7 +61,7 @@ local look = require("@app/screens/shell/project_look")
 
 local M = {}
 
-export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string? }
+export type Current = { name: string, project: string?, session: string?, page: string?, plugin: string?, orchestrator: string? }
 export type Project = { id: string, device: string?, path: string?, name: string? }
 export type Session = { id: string, device: string?, cwd: string?, title: string?, project: string? }
 export type Choice = { value: string, label: string, hue: string?, src: string?, emoji: string?, project: string? }
@@ -66,6 +71,8 @@ local ROUTES = {
 	session = "/session/:id",
 	settings = "/settings/:page",
 	plugin = "/plugin/:plugin/:page",
+	control = "/control",
+	orchestrator = "/orchestrator/:id",
 }
 -- The router, made by the shell as it's built (`M.make`, from the app's
 -- script, which runs again on every reload) rather than as this module
@@ -90,6 +97,13 @@ local function parse(path: string): Route
 	local plugin, ppage = string.match(path, "^/plugin/([^/]+)/([^/]+)$")
 	if plugin then
 		return { name = "plugin", params = { plugin = plugin, page = ppage }, path = path }
+	end
+	if path == "/control" then
+		return { name = "control", params = {}, path = path }
+	end
+	local orchestrator = string.match(path, "^/orchestrator/([^/]+)$")
+	if orchestrator then
+		return { name = "orchestrator", params = { id = orchestrator }, path = path }
 	end
 	return { name = "home", params = {}, path = "/" }
 end
@@ -307,6 +321,10 @@ local where = steady(function(): Current
 		return { name = "settings", page = r.params.page }
 	elseif r.name == "plugin" then
 		return { name = "plugin", plugin = r.params.plugin, page = r.params.page }
+	elseif r.name == "control" then
+		return { name = "control" }
+	elseif r.name == "orchestrator" then
+		return { name = "orchestrator", orchestrator = r.params.id }
 	end
 	local p = chosen:get()
 	-- A chosen project since deleted: none chosen.
@@ -689,6 +707,28 @@ function M.plugin_page(plugin: string, page: string)
 		return
 	end
 	go("plugin", { plugin = plugin, page = page })
+end
+
+-- Pages of their own, as a plugin's is: no chat under them, no composer.
+local OWN_PAGES: { [string]: boolean } = { plugin = true, control = true, orchestrator = true }
+function M.own_page(name: string?): boolean
+	return name ~= nil and OWN_PAGES[name] == true
+end
+
+-- To the Control room.
+function M.control()
+	if at().name ~= "control" then
+		go("control")
+	end
+end
+
+-- To an orchestrator's page.
+function M.orchestrator(id: string)
+	local r = at()
+	if r.name == "orchestrator" and r.params.id == id then
+		return
+	end
+	go("orchestrator", { id = id })
 end
 
 -- Out of settings, back where the chats were: a step back (so forward

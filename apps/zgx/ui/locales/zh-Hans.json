@@ -2483,7 +2483,9 @@
         "settings": "设置",
         "update_watch": "更新监视器",
         "search": "搜索",
-        "new_project": "新建项目"
+        "new_project": "新建项目",
+        "control": "The Control room",
+        "orchestrator": "The orchestrator's page"
       }
     },
     "title_bar": {
