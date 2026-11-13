@@ -10,6 +10,7 @@ pub mod chat_mentions;
 pub mod change_request_assessment;
 pub mod cloud;
 pub mod device_paths;
+pub mod direct_question;
 pub mod entities;
 pub mod annotation;
 pub mod file_mentions;
