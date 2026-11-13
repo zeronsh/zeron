@@ -20,6 +20,12 @@
 --                                     its ask, `input` set, when it has
 --                                     one), urgent first, then the longest
 --                                     waiting
+--   data.waiting_for_you(now, sessions_now)
+--                                     the one count of what waits on the
+--                                     person: { count, urgent, needs }
+--   data.open_asks(now)               the open asks by the chat that asked
+--                                     (its latest one)
+--   data.turn_end(ask)                whether a turn's end raised it
 --   data.ACTIVITY                     each activity's glyph and word key
 --   data.day_start(t)                 local midnight of `t` (Unix seconds)
 --   data.shown_today(item, now)       whether an item stands on the board
@@ -232,7 +238,8 @@ function M.needs(now: any, sessions_now: any): { Need }
 			table.insert(out, {
 				id = `ask:{a.id}`,
 				kind = "ask",
-				urgent = a.urgent == true,
+				-- (Gone stale unanswered: urgent too.)
+				urgent = a.urgent == true or a.escalated ~= nil,
 				at = a.created or 0,
 				ask = a,
 				input = waiting[a.from_chat] == true,
@@ -264,6 +271,47 @@ function M.needs(now: any, sessions_now: any): { Need }
 		end
 		return a.id < b.id
 	end)
+	return out
+end
+
+-- What waits on the person, counted once for every place that says how
+-- many (the Control room's head, its figures): today the open asks and
+-- chats awaiting input (`needs`, as data.needs lists them). The Control
+-- room's Q&A (questions the person asked, answered and not read yet) joins
+-- here as one more source: add its count to `count` (and `urgent` where it
+-- says so) below, nowhere else.
+export type Waiting = { count: number, urgent: number, needs: { Need } }
+
+function M.waiting_for_you(now: any, sessions_now: any): Waiting
+	local needs = M.needs(now, sessions_now)
+	local urgent = 0
+	for _, n in needs do
+		if n.urgent then
+			urgent += 1
+		end
+	end
+	-- (Q&A answered-unread: its count goes here.)
+	return { count = #needs, urgent = urgent, needs = needs }
+end
+
+-- An ask raised from a turn's end (the thread's plain question), not by
+-- its `ask` tool. (The bridge's words are snake_case, as `word` makes them.)
+function M.turn_end(a: any): boolean
+	return a ~= nil and (a.origin == "turn_end" or a.origin == "turnEnd")
+end
+
+-- The open asks by the chat that asked, its latest where it asked more
+-- than one: what a card or a progress row says waits on the person.
+function M.open_asks(now: any): { [string]: any }
+	local out: { [string]: any } = {}
+	for _, a in (now and now.asks) or {} do
+		if a.state == "open" and a.from_chat then
+			local had = out[a.from_chat]
+			if not had or (a.created or 0) > (had.created or 0) then
+				out[a.from_chat] = a
+			end
+		end
+	end
 	return out
 end
 

@@ -125,12 +125,29 @@ local stood_in = ui.computed(function(): { [string]: any }
 end)
 
 -- Every row: the engine's (its proxies too), and one for each chat at work
--- it has none for.
+-- it has none for; a thread that ended its turn asking the person (an
+-- open ask raised from its turn's end) and is at rest since (idle or done;
+-- not an orchestrator's own chat) waits on them, from when it asked.
 M.rows = ui.computed(function(): { [string]: any }
 	local out = table.clone(orchestration.progress:get())
 	for id, r in stood_in:get() do
 		if out[id] == nil then
 			out[id] = r
+		end
+	end
+	local now = orchestration.now:get()
+	local leads = data.orchestrators(now)
+	for id, a in data.open_asks(now) do
+		local r = out[id]
+		local state = r and r.state
+		local c = chats_now:get()[id]
+		if data.turn_end(a) and not leads[id] and (r or c) and (state == nil or state == "done") then
+			local w = if r then table.clone(r) else { chat_id = id, device_id = c and c.device, stalled = false, refreshing = false }
+			w.state = "awaiting_input"
+			w.asking = true
+			w.started = a.created or w.started
+			w.updated = a.updated or a.created or w.updated
+			out[id] = w
 		end
 	end
 	return out

@@ -1,11 +1,12 @@
 -- Needs you: everything waiting on the person, one list across every
 -- orchestrator: the asks they and their crews raised (a question, a
 -- decision, an approval, a blocker), and chats whose agent stopped to ask
--- (awaiting input), one row a chat. Urgent first, then the one waiting
--- longest. An ask is
--- answered where it stands: its options as buttons, or a line to write
--- in; a chat awaiting input opens. An answered one slides out, the rows
--- under it closing up.
+-- (awaiting input), one row a chat. Urgent (or gone stale unanswered)
+-- first, then the one waiting longest. An ask is answered where it
+-- stands: its options as buttons, or a line to write in; a thread's
+-- question from its turn's end has both, and opens its thread. A chat
+-- awaiting input opens. An answered one slides out, the rows under it
+-- closing up.
 --
 --   Asks {
 --     needs = function() return data.needs(now, sessions_now) end,
@@ -25,6 +26,7 @@ local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
 local Badge = require("@self/badge")
 local hold = require("@self/orch_hold")
+local data = require("@self/orch_data")
 
 export type Props = {
 	needs: () -> { any },
@@ -38,15 +40,36 @@ export type Props = {
 -- How long an answered row takes to leave.
 local LEAVE_MS = 220
 
--- `**bold**` in a question, as its runs; the rest plain.
+-- `**bold**` and `` `code` `` in a question, as its runs; the rest plain.
 local function runs_of(text: string): { any }
 	local out: { any } = {}
-	local bold = false
-	for piece in string.gmatch(text .. "**", "(.-)%*%*") do
-		if piece ~= "" then
-			table.insert(out, ui.span { piece, literal = true, weight = if bold then 600 else nil })
+	local bold, code = false, false
+	local at = 1
+	while at <= #text do
+		local s, e = string.find(text, if code then "`" else "%*%*", at)
+		local tick = if code then nil else string.find(text, "`", at, true)
+		if tick and (not s or tick < s) then
+			s, e = tick, tick
 		end
-		bold = not bold
+		local piece = string.sub(text, at, (s or #text + 1) - 1)
+		if piece ~= "" then
+			table.insert(out, ui.span {
+				piece,
+				literal = true,
+				weight = if bold then 600 else nil,
+				font = if code then "$font.mono" else nil,
+			})
+		end
+		local stop: number? = e
+		if not s or not stop then
+			break
+		end
+		if string.sub(text, s, stop) == "`" then
+			code = not code
+		else
+			bold = not bold
+		end
+		at = stop + 1
 	end
 	return out
 end
@@ -112,6 +135,7 @@ return ui.component(function(props: Props): Node
 
 	local function row(_n: any, _i: number, item: State<any>): Node
 		local draft = ui.use_state("")
+		local reply = ui.use_state("")
 		local function is_leaving(): boolean
 			return leaving:get()[item:get().id] ~= nil
 		end
@@ -137,6 +161,10 @@ return ui.component(function(props: Props): Node
 		local function kind(): string
 			local n = item:get()
 			return if n.kind == "input" then "input" else ((n.ask and n.ask.kind) or "question")
+		end
+		-- A thread's question from its turn's end: answered here or in it.
+		local function turn_end(): boolean
+			return data.turn_end(ask())
 		end
 		local gone = ui.computed(is_leaving)
 		local state = hold.value(function(): status.Kind
@@ -193,10 +221,11 @@ return ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 				},
-				-- (A chat awaiting input: into it. Its ask, if it has one, shows
-				-- here too, answered in place.)
+				-- (A chat awaiting input, or a thread that asked at its turn's
+				-- end: into it. Its ask, if it has one, shows here too,
+				-- answered in place.)
 				ui.show(function(): boolean
-					return ask() == nil or item:get().input == true
+					return ask() == nil or item:get().input == true or turn_end()
 				end, Button {
 					tone = "secondary",
 					size = "xs",
@@ -255,20 +284,35 @@ return ui.component(function(props: Props): Node
 					end
 					return if n.ask and #(n.ask.options or {}) > 0 then "options" else "line"
 				end, {
-					options = ui.each(ui.computed(function(): { any }
-						local a = ask()
-						return (a and a.options) or {}
-					end), function(o: any, oi: number): Node
-						return Button {
-							tone = if oi == 1 then "secondary" else "ghost",
+					options = ui.column {
+						w_full = true,
+						gap = "$space.2",
+						ui.each(ui.computed(function(): { any }
+							local a = ask()
+							return (a and a.options) or {}
+						end), function(o: any, oi: number): Node
+							return Button {
+								tone = if oi == 1 then "secondary" else "ghost",
+								size = "sm",
+								tooltip = if o.detail and o.detail ~= "" then o.detail else nil,
+								on_click = function()
+									answer(o.label)
+								end,
+								o.label,
+							}
+						end, { direction = "row", flex_wrap = true, gap = "$space.2", items = "center" }),
+						-- (From a turn's end: a word of the person's own, too.)
+						ui.show(turn_end, TextField {
+							value = reply,
 							size = "sm",
-							tooltip = if o.detail and o.detail ~= "" then o.detail else nil,
-							on_click = function()
-								answer(o.label)
+							w_full = true,
+							name = locale.t("ds.orch.ask.reply"),
+							placeholder = locale.t("ds.orch.ask.reply"),
+							on_commit = function(text: string)
+								answer(text)
 							end,
-							o.label,
-						}
-					end, { direction = "row", flex_wrap = true, gap = "$space.2", items = "center" }),
+						}),
+					},
 					line = TextField {
 						value = draft,
 						size = "sm",

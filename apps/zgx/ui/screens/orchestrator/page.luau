@@ -374,6 +374,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					thread_of = function(chat: string): any
 						return chats:get()[chat]
 					end,
+					ask_of = function(chat: string): any
+						return data.open_asks(orchestration.now:get())[chat]
+					end,
 					on_move = function(id: string, state: string, order: number)
 						orchestration.move_item(id, state, order)
 					end,

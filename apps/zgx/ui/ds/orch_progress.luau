@@ -29,7 +29,8 @@
 -- `updated` once the stretch is over), since the last step = now −
 -- last_step, time left = eta_secs − (now − updated), shown only while
 -- working with an ETA and some left. A status or activity shows 300 ms at
--- least (ds/orch_hold).
+-- least (ds/orch_hold). A row with `asking` set (its thread asked the
+-- person and waits on the answer) reads "Waiting on you".
 
 local Icon = require("@self/icon")
 local Mark = require("@self/mark")
@@ -198,6 +199,11 @@ M.Progress = ui.component(function(props: Props): Node
 	local function steps(): { done: number, total: number }?
 		return steps_of(row())
 	end
+	-- It asked the person and waits on the answer (an open ask of its).
+	local function waiting_on_you(): boolean
+		local r = row()
+		return r ~= nil and r.asking == true
+	end
 	local function note(): string
 		local r = row()
 		return (r and r.note) or ""
@@ -245,6 +251,8 @@ M.Progress = ui.component(function(props: Props): Node
 		local d = doing()
 		if d then
 			return d
+		elseif waiting_on_you() then
+			return locale.s("ds.orch.progress.waiting_on_you")
 		end
 		local k = kind()
 		if k == "working" then
@@ -639,6 +647,8 @@ M.Progress = ui.component(function(props: Props): Node
 		local d = doing()
 		if d then
 			return d
+		elseif waiting_on_you() then
+			return locale.s("ds.orch.progress.waiting_on_you")
 		end
 		if kind() == "working" or kind() == "idle" then
 			return M.step(row()) or (if kind() == "working" then locale.s("ds.orch.activity.other") else "")

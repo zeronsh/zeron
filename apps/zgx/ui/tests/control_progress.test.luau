@@ -160,3 +160,25 @@ test("control progress: drawn wide and narrow, resized", function()
 		expect(app:error()).to_be(nil)
 	end
 end)
+
+test("control progress: a thread that asked at its turn's end waits on you, until answered", function()
+	local app = open()
+	app:command("fixture.turn_end_ask")
+	app:frames(20)
+	-- Idle since it asked: listed, waiting on you since then.
+	local UNIT = "#progress-full-th-codex-slash"
+	expect(table.find(listed(app), "th-codex-slash") ~= nil).to_be(true)
+	expect(app:has(`{UNIT} >> .orch-progress-doing >> "Waiting on you"`)).to_be(true)
+	expect(app:text(`{UNIT}-elapsed`)).to_be("2m")
+	-- (Not working: the figures don't count it.)
+	expect(app:has(`{W} >> ~"5 working"`)).to_be(true)
+	-- An orchestrator's own ask, or a thread awaiting input, reads as before.
+	expect(app:has("#progress-full-orc-vpn")).to_be(false)
+	app:set_state("progress_all", true)
+	app:frames(5)
+	expect(app:has(`#progress-full-th-ui-orch >> "Waiting on you"`)).to_be(false)
+	-- Answered: at rest again, off the list.
+	app:click('#control-widget-needs >> role:button "Commit and open a PR against zeron/zgx"')
+	expect(app:wait(UNIT, { gone = true, timeout_ms = 3000 })).to_be(true)
+	expect(app:state("calls")).to_contain("answer:ak-turn:Commit and open a PR against zeron/zgx")
+end)

@@ -272,3 +272,20 @@ test("orch progress: a row gone, its unit says nothing; drawn and resized", func
 	expect(app:has(`{ENGINE} >> .orch-counter`)).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
+
+test("orch progress: a thread that asked the person reads Waiting on you, not done", function()
+	local Unit = unit()
+	expect(Unit.kind({ state = "done" })).to_be("done")
+	expect(Unit.kind({ state = "done", asking = true })).to_be("input")
+	expect(Unit.kind({ asking = true })).to_be("input")
+	local app = open()
+	local rows = table.clone(app:state("rows") :: any)
+	local r = table.clone(rows["th-vpn-moscow"])
+	r.state = "awaiting_input"
+	r.asking = true
+	rows["th-vpn-moscow"] = r
+	app:set_state("rows", rows)
+	app:frames(30)
+	expect(app:has(`#fx-strip-th-vpn-moscow >> .orch-progress-doing >> "Waiting on you"`)).to_be(true)
+	expect(app:error()).to_be_nil()
+end)

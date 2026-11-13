@@ -1180,7 +1180,8 @@
         "dismiss": "Dismiss",
         "answer": "Answer",
         "open": "Open",
-        "none": "Nothing needs you"
+        "none": "Nothing needs you",
+        "reply": "Reply"
       },
       "more": "{n} more",
       "less": "Fewer",
@@ -1240,7 +1241,8 @@
         "menu": "Progress actions",
         "refreshing": "Writing a fresh note",
         "pinned": "Pinned",
-        "under_minute": "<1m"
+        "under_minute": "<1m",
+        "waiting_on_you": "Waiting on you"
       },
       "qa": {
         "empty": "No questions yet",
@@ -4080,7 +4082,8 @@
       "starting": "Starting…",
       "queued": "Queued",
       "start_failed": "Couldn't start it",
-      "needs_you": "Needs you"
+      "needs_you": "Needs you",
+      "waiting_on_you": "Waiting on you"
     },
     "reports": {
       "title": "Crew updates",
