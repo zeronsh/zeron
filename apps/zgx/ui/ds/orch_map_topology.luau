@@ -23,6 +23,7 @@ local kit = require("@self/orch_map_kit")
 local Cells = require("@self/orch_cells")
 local MachineHead = require("@self/orch_machine_head")
 local model = require("@self/orch_map_model")
+local Name = require("@ds/orch_name")
 local Layout = require("@self/orch_map_layout")
 
 export type Props = {
@@ -137,6 +138,13 @@ return ui.component(function(props: Props): Node
 	local rows = ui.computed(function(): { Layout.Row }
 		return layout:get().rows
 	end)
+	-- Each thread's name (ds/orch_name): the crew and items it's looked up in.
+	local named = ui.computed(function(): Name.Index
+		return Name.index(props.world().now)
+	end)
+	local function name_of(id: string): string
+		return Name.from(named:get(), props.world().chats, id)
+	end
 	local function by_id(x: any): string
 		return x.id
 	end
@@ -356,7 +364,7 @@ return ui.component(function(props: Props): Node
 			class = if row:peek().kind == "crew" then "orch-pill" else "orch-thread",
 			label = function(): string
 				local a = activity()
-				local title = c().title or ""
+				local title = name_of(row:get().id)
 				return if a then `{title}, {locale.s(`ds.orch.activity.{a.kind}`)}` else title
 			end,
 			absolute = true,
@@ -409,7 +417,7 @@ return ui.component(function(props: Props): Node
 			},
 			ui.text {
 				function(): string
-					return c().title or ""
+					return name_of(row:get().id)
 				end,
 				shrink = 0,
 				max_w = function(): number

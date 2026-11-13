@@ -8,6 +8,8 @@
 --
 -- `world` is the Map's: { now, chats, devices, projects?, loads, here }.
 
+local Name = require("@ds/orch_name")
+
 local M = {}
 
 export type Thread = {
@@ -86,6 +88,8 @@ function M.fleet(world: any): Fleet
 
 	local threads: { [string]: any } = {}
 	local orchestrators: { [string]: any } = {}
+	-- (Each thread's name: ds/orch_name's rule, as every view has it.)
+	local named = Name.index(now)
 	local function project_of(c: any, fallback: string?): (string?, string?)
 		local id = (c and c.project) or fallback
 		local p = id and projects[id]
@@ -106,7 +110,7 @@ function M.fleet(world: any): Fleet
 			order += 1
 			threads[o.id] = {
 				id = o.id,
-				title = o.name or (c and c.title) or "",
+				title = Name.from(named, chats, o.id),
 				device = (c and c.device) or here,
 				project = name,
 				project_id = pid,
@@ -130,7 +134,9 @@ function M.fleet(world: any): Fleet
 			local it = items[m.item_id or ""]
 			threads[m.chat_id] = {
 				id = m.chat_id,
-				title = (c and c.title) or "",
+				-- (Named from its crew row and item while its chat isn't
+				-- heard, or has no title of its own yet.)
+				title = Name.thread(c, m, it, m.chat_id),
 				device = device,
 				project = name,
 				project_id = pid,
@@ -151,7 +157,7 @@ function M.fleet(world: any): Fleet
 			local name, pid = project_of(c, nil)
 			threads[id] = ({
 				id = id,
-				title = c.title or "",
+				title = Name.thread(c, nil, nil, id),
 				device = c.device or here,
 				project = name,
 				project_id = pid,
@@ -170,7 +176,7 @@ function M.fleet(world: any): Fleet
 			local name, pid = project_of(c, nil)
 			threads[id] = ({
 				id = id,
-				title = c.title or "",
+				title = Name.thread(c, nil, nil, id),
 				device = c.device or here,
 				project = name,
 				project_id = pid,

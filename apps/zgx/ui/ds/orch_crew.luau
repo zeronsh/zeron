@@ -32,6 +32,7 @@ local Working = require("@self/working")
 local status = require("@self/status")
 local control = require("@self/control")
 local locale = require("@self/locale")
+local Name = require("@ds/orch_name")
 local data = require("@self/orch_data")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
@@ -160,9 +161,9 @@ return ui.component(function(props: Props): Node
 		local function member(): { [string]: any }
 			return row:get().member
 		end
+		-- (ds/orch_name's: its own title, else its role, else its id.)
 		local function title(): string
-			local t = chat().title
-			return if t and t ~= "" then t else locale.s("ds.orch.crew.thread")
+			return Name.crew(row:get().chat, Name.fallback(member(), nil), id)
 		end
 		-- How it stands, held 300 ms at least.
 		local kind = hold.value(function(): string

@@ -1207,6 +1207,26 @@ impl WorkspaceHost {
         parent_chat_id: Option<String>,
         child_kind: Option<zeron_proto::ChildKind>,
     ) -> Result<(), EngineError> {
+        self.create_chat_titled(chat_id, space_id, device_id, host, config, cwd, parent_chat_id, child_kind, None)
+    }
+
+    /// [`create_chat_hosted`](Self::create_chat_hosted) with the chat's
+    /// title on its row from the first write: a chat named by whoever
+    /// created it (a crew thread, an agent's `create_chat`) is never seen
+    /// untitled, by the Map, the sidebar or a peer. A blank title is none.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_chat_titled(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        host: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        parent_chat_id: Option<String>,
+        child_kind: Option<zeron_proto::ChildKind>,
+        title: Option<&str>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -1246,7 +1266,7 @@ impl WorkspaceHost {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
-                title: None,
+                title: title.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned),
                 archived: false,
                 cwd: Some(cwd),
                 branch: None,

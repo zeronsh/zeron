@@ -1119,6 +1119,7 @@
         "label": "Crew",
         "empty": "No crew yet",
         "thread": "Thread",
+        "unnamed": "Crew thread {id}",
         "open": "Open {title}",
         "idle": "Idle",
         "todo": "{done}/{total}",

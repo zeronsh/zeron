@@ -1057,6 +1057,74 @@ async fn the_watch_publishes_each_change_coalesced() {
     core.sessions.shutdown().await;
 }
 
+/// A crew thread named by the orchestrator that starts it carries its
+/// title from its first write: before any turn, rename or message, the
+/// chat list the Map reads (WatchChats) names it, under its orchestrator,
+/// and the crew lists it.
+#[tokio::test]
+async fn a_just_created_crew_thread_is_named_in_the_chat_list() {
+    let (_temp, core) = core().await;
+    let fixes = orchestrator(&core, "Zeron fixes").await;
+    let rpc = core.rpc_service();
+    with_caller(
+        agent(&fixes),
+        rpc.handle(
+            methods::MUTATE,
+            json!({"op":"createChat","chatId":"asks","deviceId":REMOTE,"parentChatId":fixes,
+                "childKind":"crew","title":"  End-of-turn question asks ",
+                "config":{"harness":"codex","sandbox":"workspace-write"}}),
+        ),
+    )
+    .await
+    .unwrap();
+    // The row as written, and as the chat list's watch has it now.
+    let row = core.workspace.chat("asks").unwrap().unwrap();
+    assert_eq!(row.title.as_deref(), Some("End-of-turn question asks"));
+    assert_eq!(row.last_message_at, None, "no turn, no message");
+    // (The list publishes as the registry is read again: the first time
+    // it holds the thread, it names it.)
+    let mut rx = core.workspace.watch_chats();
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(c) = rx.borrow_and_update().iter().find(|c| c.id == "asks") {
+                return c.clone();
+            }
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("listed");
+    assert_eq!(listed.title.as_deref(), Some("End-of-turn question asks"));
+    let frame = call(&core, Caller::Local, methods::WATCH_CHATS, json!({}))
+        .await
+        .unwrap();
+    let wire = frame
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "asks")
+        .cloned()
+        .expect("in WatchChats");
+    assert_eq!(wire["title"], "End-of-turn question asks");
+    assert_eq!(wire["parentChatId"], json!(fixes));
+    assert_eq!(wire["childKind"], "crew");
+    assert_eq!(core.orchestration.crew_of("asks").unwrap().orchestrator_id, fixes);
+
+    // A blank title is none (the app names it otherwise).
+    with_caller(
+        agent(&fixes),
+        rpc.handle(
+            methods::MUTATE,
+            json!({"op":"createChat","chatId":"blank","deviceId":REMOTE,"parentChatId":fixes,
+                "childKind":"crew","title":"   ","config":{"harness":"codex","sandbox":"workspace-write"}}),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(core.workspace.chat("blank").unwrap().unwrap().title, None);
+    core.sessions.shutdown().await;
+}
+
 /// An agent's crew is only threads it started; the person adds any plain one.
 #[tokio::test]
 async fn an_agents_crew_is_only_threads_it_started() {
