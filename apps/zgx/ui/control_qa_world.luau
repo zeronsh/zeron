@@ -106,6 +106,28 @@ The simpler alternative is to hide Inbox and Next until they have cards. Which d
 	table.insert(chats, { id = "th-capy", title = "Explaining Capy.ai Captains", device = "dev-desk", status = "idle",
 		updated = ago(8 * 3600 - 240), created = ago(9 * 3600), agent = "claude", model = "claude-opus-5-5" })
 	s.chats = chats
+	-- At work: the engine state thread on a turn begun just now (after the
+	-- question to it came); the VPN orchestrator on one begun before its
+	-- question came, so not at it yet.
+	local function at(list: { any }): { any }
+		local out = {}
+		for _, c in list do
+			c = table.clone(c)
+			if c.id == "th-engine-state" then
+				c.status, c.turn_started = "working", ago(10)
+			elseif c.id == "orc-vpn" then
+				c.status, c.turn_started = "working", ago(4 * 3600)
+			end
+			table.insert(out, c)
+		end
+		return out
+	end
+	s.chats = at(s.chats)
+	local kids = {}
+	for parent, list in s.children or {} do
+		kids[parent] = at(list)
+	end
+	s.children = kids
 	sessions.now:set(s)
 
 	-- Read on this device: one; put away: one.

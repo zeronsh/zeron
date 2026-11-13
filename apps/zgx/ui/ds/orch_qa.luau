@@ -124,12 +124,22 @@ function M.entries(dumps: { any }, marks: Marks?, chats: { [string]: any }?): { 
 					asked = d.created or 0,
 					answered = if answered then (r.answered or d.updated) else nil,
 					status = (if not answered then "waiting" elseif read[key] then "read" else "unread") :: Status,
-					answering = not answered and c ~= nil and c.status == "working",
+					answering = not answered and M.at_it(c, r.delivered or d.created),
 				})
 			end
 		end
 	end
 	return out
+end
+
+-- Whether chat `c` is at a question delivered at `delivered`: working,
+-- on a turn begun since (a turn that was already going when it came, the
+-- thread busy with something else, hasn't reached it yet).
+function M.at_it(c: any, delivered: number?): boolean
+	if not c or c.status ~= "working" or type(c.turn_started) ~= "number" then
+		return false
+	end
+	return delivered == nil or c.turn_started >= delivered - 1
 end
 
 -- How many wait to be read, and how many wait on an answer.

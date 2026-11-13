@@ -207,3 +207,21 @@ test("Progress: after the Control room is left and come back to, a thread that s
 	expect(app:error()).to_be_nil()
 	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(true)
 end)
+
+test("Q&A: Answering only while the thread is on a turn begun since the question came; a busy thread not at it yet is Waiting", function()
+	local app = open()
+	-- The engine state thread: working, its turn begun after the question.
+	expect(app:has(`{QA} >> role:button "is the engine state thread still on the registry part?"`)).to_be(true)
+	local tree = tostring(app:tree(QA))
+	local engine = string.find(tree, "registry part?", 1, true) or 0
+	local msi = string.find(tree, "Windows MSI", 1, true) or 0
+	local first = string.find(tree, "Answering", engine, true) or 0
+	expect(first > engine and first < msi).to_be(true)
+	-- The VPN orchestrator: working, but on a turn begun before the MSI
+	-- question came.
+	local after = string.sub(tree, msi)
+	local waiting = string.find(after, "Waiting", 1, true)
+	local answering = string.find(after, "Answering", 1, true)
+	expect(waiting ~= nil).to_be(true)
+	expect(answering == nil or answering > (waiting :: number)).to_be(true)
+end)

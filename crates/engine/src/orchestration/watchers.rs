@@ -185,8 +185,19 @@ fn texts(entry: &SessionMessageEntry) -> String {
 
 /// The reply to the message carrying `message` in `entries`: the last
 /// assistant text after it, before the next message to the chat, once that
-/// turn is done. `None` while it isn't.
+/// turn is done. `None` while it isn't. ([`answer_to`], its text.)
 pub(crate) fn reply_to(entries: &[SessionMessageEntry], message: &str) -> Option<String> {
+    answer_to(entries, message).map(|(text, _)| text)
+}
+
+/// The reply to the message carrying `message` in `entries`, and when it
+/// was written (ms since the epoch): the last assistant text of the turn
+/// after it (before the next message to the chat), once that turn is done.
+/// Each of several questions sent to one thread so has the reply that
+/// follows its own delivery. One sent right before another message (two in
+/// a row, the thread answering both at once) has the first reply after it.
+/// `None` while there's none, or while it's still being written.
+pub(crate) fn answer_to(entries: &[SessionMessageEntry], message: &str) -> Option<(String, i64)> {
     let message = message.trim();
     if message.is_empty() {
         return None;
@@ -194,16 +205,27 @@ pub(crate) fn reply_to(entries: &[SessionMessageEntry], message: &str) -> Option
     let at = entries
         .iter()
         .rposition(|e| e.role == MessageRole::User && texts(e).contains(message))?;
-    let turn: Vec<_> = entries[at + 1..]
+    let after = &entries[at + 1..];
+    let mut turn: Vec<&SessionMessageEntry> = after
         .iter()
         .take_while(|e| e.role != MessageRole::User)
         .filter(|e| e.role == MessageRole::Assistant)
         .collect();
+    if !turn.iter().any(|e| !texts(e).trim().is_empty()) {
+        // (Another message came before any reply: the first turn that
+        // replies after it.)
+        turn = after
+            .iter()
+            .skip_while(|e| e.role != MessageRole::Assistant || texts(e).trim().is_empty())
+            .take_while(|e| e.role != MessageRole::User)
+            .filter(|e| e.role == MessageRole::Assistant)
+            .collect();
+    }
     if turn.is_empty() || turn.iter().any(|e| e.status == Some(MessageStatus::Streaming)) {
         return None;
     }
-    let answer = turn.iter().rev().map(|e| texts(e)).find(|t| !t.trim().is_empty())?;
-    Some(answer.trim().chars().take(FULL_MAX).collect())
+    let reply = turn.iter().rev().find(|e| !texts(e).trim().is_empty())?;
+    Some((texts(reply).trim().chars().take(FULL_MAX).collect(), reply.created_at))
 }
 
 /// One route waiting on what comes of it from a chat.
@@ -324,6 +346,30 @@ pub(crate) async fn record_outcome(
     full: String,
     task: Option<RouteState>,
 ) -> bool {
+    record_outcome_at(orchestration, rpc, chat, dump_id, route_id, question, full, task, None).await
+}
+
+/// How long ago a reply may have been written and still be news: one
+/// older (taken in after a restart, or synced in late) is recorded quietly,
+/// with no banner and nothing in Comms.
+const STILL_NEWS: TimeDelta = TimeDelta::minutes(10);
+
+/// [`record_outcome`] for a reply written at `at` (its transcript's time;
+/// `None`: now). The route's `answeredAt` is that time, so an answer taken
+/// in late says when it came; an old one is recorded quietly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_outcome_at(
+    orchestration: &Orchestration,
+    rpc: &crate::rpc::EngineRpc,
+    chat: &str,
+    dump_id: &str,
+    route_id: &str,
+    question: &str,
+    full: String,
+    task: Option<RouteState>,
+    at: Option<chrono::DateTime<Utc>>,
+) -> bool {
+    let news = at.is_none_or(|at| Utc::now() - at <= STILL_NEWS);
     use zeron_proto::orchestration::{ANSWER_MAX, CommKind, model_answer, plain_answer, prompt_text::one_line};
     let plain = Some(plain_answer(&full)).filter(|a| !a.is_empty());
     let quick = plain.clone().unwrap_or_else(|| one_line(&full, ANSWER_MAX));
@@ -344,7 +390,7 @@ pub(crate) async fn record_outcome(
         }
         route.state = state;
         if route.answered_at.is_none() {
-            route.answered_at = Some(Utc::now());
+            route.answered_at = Some(at.unwrap_or_else(Utc::now));
         }
         if !(keeps_outcome && route.answer.is_some()) {
             route.answer = Some(quick.clone());
@@ -358,7 +404,9 @@ pub(crate) async fn record_outcome(
         return false;
     }
     let kind = if task.is_some() { CommKind::Report } else { CommKind::Answer };
-    orchestration.comms().say(kind, chat, super::comms::YOU, &quick);
+    if news {
+        orchestration.comms().say(kind, chat, super::comms::YOU, &quick);
+    }
     // Its card on the board follows.
     rpc.sync_route_card(dump_id, route_id);
     // A chase of this route ("hasn't answered") is moot now.
@@ -370,7 +418,7 @@ pub(crate) async fn record_outcome(
     if let Some(found) = super::incoming::ends_on_question(&full) {
         rpc.ask_for(chat, &found, Some((dump_id, route_id)));
     }
-    if task.is_none() || state == RouteState::Failed {
+    if news && (task.is_none() || state == RouteState::Failed) {
         let title = rpc
             .workspace_host()
             .chat(chat)
@@ -584,14 +632,19 @@ async fn take_outcomes(
     for w in waiting {
         let (dump_id, route_id, message, excerpt, intent) = &w;
         let question = *intent == RouteIntent::Question;
-        let full = if question { reply_to(&entries, message) } else { latest_reply(&entries, message) };
-        let Some(full) = full else {
+        // (A question's reply, and when it was written.)
+        let found = if question {
+            answer_to(&entries, message).map(|(text, ms)| (text, (ms > 0).then(|| chrono::DateTime::from_timestamp_millis(ms)).flatten()))
+        } else {
+            latest_reply(&entries, message).map(|text| (text, None))
+        };
+        let Some((full, at)) = found else {
             left.push(w);
             continue;
         };
         let task = (!question).then(|| task_state(session));
         let asked = if question { excerpt.clone() } else { message.clone() };
-        record_outcome(orchestration, rpc, chat, dump_id, route_id, &asked, full, task).await;
+        record_outcome_at(orchestration, rpc, chat, dump_id, route_id, &asked, full, task, at).await;
     }
     left
 }
@@ -663,6 +716,29 @@ mod tests {
         assert_eq!(task_state(&helping), RouteState::Answered);
         let failed = Session { status: SessionStatus::Errored, ..base };
         assert_eq!(task_state(&failed), RouteState::Failed);
+    }
+
+    #[test]
+    fn each_question_has_the_reply_after_its_own_delivery() {
+        use MessageRole::*;
+        use MessageStatus::*;
+        let at = |e: SessionMessageEntry, ms: i64| SessionMessageEntry { created_at: ms, ..e };
+        let entries = vec![
+            at(entry("u1", User, "[Message from Zeron chat Brain dump (b).]\n\nAre Inbox and Next used?", Complete), 100),
+            at(entry("a1", Assistant, "Essentially never.", Complete), 200),
+            at(entry("u2", User, "[Message from Zeron chat Brain dump (b).]\n\nWhy is Progress empty?", Complete), 300),
+            at(entry("a2", Assistant, "Looking.", Complete), 400),
+            at(entry("a3", Assistant, "Its rows froze.", Complete), 500),
+            // Two in a row, answered at once.
+            at(entry("u3", User, "Which model does the Brain dump use?", Complete), 600),
+            at(entry("u4", User, "And where are the orchestrators?", Complete), 700),
+            at(entry("a4", Assistant, "Haiku; the sidebar.", Complete), 800),
+        ];
+        assert_eq!(answer_to(&entries, "Are Inbox and Next used?"), Some(("Essentially never.".into(), 200)));
+        assert_eq!(answer_to(&entries, "Why is Progress empty?"), Some(("Its rows froze.".into(), 500)));
+        assert_eq!(answer_to(&entries, "Which model does the Brain dump use?"), Some(("Haiku; the sidebar.".into(), 800)));
+        assert_eq!(answer_to(&entries, "And where are the orchestrators?"), Some(("Haiku; the sidebar.".into(), 800)));
+        assert_eq!(answer_to(&entries[..6], "Which model does the Brain dump use?"), None, "no reply yet");
     }
 
     #[test]
