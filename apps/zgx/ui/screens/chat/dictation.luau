@@ -96,6 +96,13 @@ end
 local TAP = 300
 local starting, held, since = false, false, 0
 local from_shortcut = ui.state("dictation_shortcut_held", false)
+-- The shortcut's key (⌘D's D) until it comes up. Let go of ⌘ first and the
+-- key, still down, repeats as a bare "d": typed into the draft, it would
+-- throw the words away. Its repeats are swallowed; a fresh press types.
+local chord_key: string? = nil
+local function chord_part(e: any): boolean
+	return chord_key ~= nil and type(e.key) == "string" and string.lower(e.key) == chord_key
+end
 local function finish()
 	held = false
 	from_shortcut:set(false)
@@ -110,7 +117,9 @@ local function start(combo: string?, target: string?)
 	if not prefs.dictation:peek() then route.settings("voice") return end
 	if starting or M.active:peek() then return end
 	starting, held, since = true, true, ui.now()
-	from_shortcut:set(combo ~= nil and string.find(combo, "+", 1, true) ~= nil)
+	local chord = combo ~= nil and string.find(combo, "+", 1, true) ~= nil
+	from_shortcut:set(chord)
+	chord_key = if chord then string.lower(string.match(combo :: string, "([^+]+)$") or "") else nil
 	local device = prefs.dictation_input:peek()
 	ui.call("dictation.call", { op = "start", device = if device == "system" then nil else device, hold = combo, target = target }):after(function(r: any)
 		starting = false
@@ -124,10 +133,12 @@ local function start(combo: string?, target: string?)
 	end)
 end
 -- A Command chord may produce no key-up on macOS. Modifier state still
--- changes, including when the window loses focus.
+-- changes, including when the window loses focus. (Read now: the host
+-- follows the keys only once something has, and ⌘ is down by the start.)
+local held_keys = ui.modifiers
 ui.effect(function()
 	if not from_shortcut:get() then return end
-	local m = ui.modifiers
+	local m = held_keys
 	local cmd = if string.find(ui.shortcut_text("cmd"), "⌘", 1, true) then m.meta:get() else m.control:get()
 	local ctrl, alt, shift = m.control:get(), m.alt:get(), m.shift:get()
 	local combo = keys.combo("shell.dictate")
@@ -185,7 +196,14 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 			send_pressed = true
 			ui.after(0, function() send_pressed = false end)
 		end,
+		on_key = function(e: any): boolean
+			if not chord_part(e) then return false end
+			if e["repeat"] then return true end
+			chord_key = nil
+			return false
+		end,
 		on_key_up = function(e: any): boolean
+			if chord_part(e) then chord_key = nil end
 			local hold = M.state:peek().hold
 			if not (pending and hold) or type(e.key) ~= "string" then return false end
 			if string.lower(e.key) ~= string.lower(string.match(hold, "([^+]+)$") or hold) then return false end

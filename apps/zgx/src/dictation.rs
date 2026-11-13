@@ -587,6 +587,80 @@ mod tests {
         assert!(s.session.is_none());
     }
     #[test]
+    fn dictation_shortcut_key_held_past_its_modifier_never_types_over_the_words() {
+        use zgx::input::{InputEvent, Modifiers};
+        // Ops the scripts ask of the host: start answers as the host does.
+        let ops = Rc::new(RefCell::new(Vec::<String>::new()));
+        let asked = ops.clone();
+        let mut app = zgx_script::testing::TestApp::new(move |r| {
+            let host = zgx_script::ScriptHost::new(
+                r,
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dictation_fixture.luau"),
+            );
+            let shared = host.shared("dictation", json_value(&json!({"phase":"idle"})));
+            host.async_action("dictation.call", move |args: Value| {
+                let args = value_json(&args);
+                let op = args["op"].as_str().unwrap_or("").to_owned();
+                asked.borrow_mut().push(op.clone());
+                let state = match op.as_str() {
+                    "start" => json!({"phase":"listening", "serial":0, "hold":args["hold"], "target":"main"}),
+                    "stop" => json!({"phase":"finalizing", "serial":0, "target":"main"}),
+                    _ => json!({"phase":"cancelled", "serial":0}),
+                };
+                shared.set(json_value(&state));
+                async move { Ok::<_, String>(json_value(&state)) }
+            });
+            host.action("dictation.guard", |_: Value| {});
+            host
+        });
+        app.ui.scene.borrow_mut().resize(960., 700.);
+        app.frames(30);
+        app.click("role:textbox \"Message\"");
+        let (d, chord) = zgx_script::driver::parse_keys("cmd+d").unwrap();
+        // A key as the window delivers it: the shortcut runs its command;
+        // else a press nothing prevents, with neither Command nor Control
+        // held, also types its text.
+        let press = |app: &mut zgx_script::testing::TestApp, modifiers: Modifiers, repeat: bool| {
+            zgx::input::set_held_modifiers(&app.ui.runtime, modifiers);
+            if modifiers == chord {
+                assert!(app.host.run_command("shell.dictate"));
+            } else {
+                let result =
+                    app.ui.dispatch(InputEvent::KeyDown { key: d.clone(), modifiers, repeat });
+                if !result.default_prevented && !modifiers.control && !modifiers.meta {
+                    app.ui.dispatch(InputEvent::Text("d".into()));
+                }
+            }
+            app.settle();
+            app.frames(2);
+        };
+        // ⌘ down, D down (and its repeats while ⌘ is held): dictating.
+        press(&mut app, chord, false);
+        press(&mut app, chord, true);
+        // (Held past a tap.)
+        std::thread::sleep(Duration::from_millis(350));
+        // ⌘ up first: the hold ends, the words are on their way.
+        zgx::input::set_held_modifiers(&app.ui.runtime, Modifiers::default());
+        app.settle();
+        app.frames(2);
+        // D still down: bare repeats, then D up.
+        for _ in 0..3 {
+            press(&mut app, Modifiers::default(), true);
+        }
+        app.ui.dispatch(InputEvent::KeyUp { key: d.clone(), modifiers: Modifiers::default() });
+        app.settle();
+        app.host.run_command("final");
+        app.settle();
+        app.frames(5);
+        assert_eq!(app.error(), None);
+        assert_eq!(*ops.borrow(), ["start", "stop", "cancel"]);
+        let editor = app.ui.focused_editor().unwrap();
+        assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎");
+        // A fresh press of D after it came up types, as ever.
+        press(&mut app, Modifiers::default(), false);
+        assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎d");
+    }
+    #[test]
     fn dictation_lease_rejects_ime_and_edits_changed_back() {
         let mut app = zgx_script::testing::TestApp::new(|r| {
             zgx_script::ScriptHost::new(
@@ -612,3 +686,4 @@ mod tests {
         assert!(!lease.valid(), "revision protects against edit-and-revert");
     }
 }
+
