@@ -55,8 +55,8 @@ M.R = { device = 8, orchestrator = 10, brain = 9, thread = 5 }
 -- islands keep GAP apart, rim to rim.
 M.ISLAND_PAD, M.ISLAND_GAP = 36, 84
 M.ALPHA_MIN = 0.004
-local DECAY = 0.028
-local FRICTION = 0.58
+local DECAY = 0.055
+local FRICTION = 0.5
 
 -- A steady number for a string (a stable angle for a new node).
 local function hash(s: string): number

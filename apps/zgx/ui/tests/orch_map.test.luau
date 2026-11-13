@@ -826,3 +826,66 @@ test("timeline: the legend's events are always Report, Ask, Failed, Done", funct
 	end
 	expect(string.find(tree, '"Merged"', 1, true)).to_be(nil)
 end)
+
+test("graph: a pulse travels its line as drawn, from mark edge to mark edge, every frame on it", function()
+	local app = open(1440, 1400)
+	view(app, "graph")
+	app:frames(120)
+	app:command("fixture.report")
+	local seen, bowed, last_a = 0, 0, -1
+	local first, final = nil, nil
+	for _ = 1, 70 do
+		app:frames(1)
+		local p = (app:state("control_map_graph_pulse") or {})[1]
+		if p then
+			seen += 1
+			first = first or p
+			final = p
+			-- (On its line, to within the drawing's sampling.)
+			expect(p.off < 2).to_be(true)
+			bowed = math.max(bowed, p.chord)
+			-- (Onward, never back.)
+			expect(p.from_a >= last_a - 0.5).to_be(true)
+			last_a = p.from_a
+		end
+	end
+	expect(seen > 30).to_be(true)
+	-- (The line bows; so does its pulse, off the straight chord.)
+	expect(bowed > 4).to_be(true)
+	-- (It starts where the line leaves the one mark and ends where it meets
+	-- the other, not at their centres.)
+	expect(first.from_a >= first.reach_a and first.from_a <= first.reach_a + 8).to_be(true)
+	expect(final.from_b >= final.reach_b and final.from_b <= final.reach_b + 10).to_be(true)
+end)
+
+test("graph: a zoom is the view's alone, nothing settles again", function()
+	local app = open(1440, 1400)
+	view(app, "graph")
+	app:frames(120)
+	local before = app:state("control_map_graph_settle")
+	expect(before.done).to_be(true)
+	for _ = 1, 5 do
+		app:command("map_graph_zoom_in")
+		app:frames(2)
+	end
+	app:frames(5)
+	local after = app:state("control_map_graph_settle")
+	expect(after.runs).to_be(before.runs)
+	expect(after.done).to_be(true)
+end)
+
+test("a machine renamed shows its new name at once, in every view", function()
+	-- (Each view on screen when the rename lands: no rebuild, no restart.)
+	for _, v in { "graph", "topology", "timeline", "machines" } do
+		local app = open(1440, 1400)
+		app:command("map_live")
+		view(app, v)
+		app:frames(if v == "graph" then 60 else 10)
+		expect(string.find(app:tree("#control-widget-map"), "DESKTOP-3NFV6JC", 1, true) ~= nil).to_be(true)
+		app:command("fixture.rename_win")
+		app:frames(5)
+		local tree = app:tree("#control-widget-map")
+		expect(string.find(tree, "x16-win", 1, true) ~= nil).to_be(true)
+		expect(string.find(tree, "DESKTOP-3NFV6JC", 1, true)).to_be(nil)
+	end
+end)

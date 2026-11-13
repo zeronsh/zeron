@@ -40,6 +40,10 @@ local PULSE_MS = 900
 M.pins = ui.persist("control_map_graph_pins", {} :: { [string]: { number } })
 -- The node the pointer is on (its id), for what lights up.
 M.hover = ui.state("control_map_graph_hover", nil :: string?)
+M.trace = ui.state("control_map_graph_settle", {} :: any)
+M.zoom_by = function(_k: number) end
+-- Where each pulse was drawn last, and how far that sat off its line.
+M.pulse_trace = ui.state("control_map_graph_pulse", {} :: any)
 
 local function sig_of(g: sim.Graph): string
 	local parts = {}
@@ -109,15 +113,22 @@ M.View = ui.component(function(props: {
 	-- The settling, a frame at a time, until still; then once more for
 	-- what's laid over it (markers, rings). A new web starts a new run.
 	local run = 0
+	-- (How the settling went, for tests and tuning: frames from a pump's
+	-- start till still, and how many times it was started.)
+	local settle_frames = 0
 	local function pump()
 		run += 1
 		local mine = run
 		settled:set(false)
+		settle_frames = 0
+		M.trace:set({ frames = 0, runs = (M.trace:peek().runs or 0) + 1, done = false })
 		local function frame()
 			if mine ~= run then
 				return
 			end
+			settle_frames += 1
 			local moving = sim.step(graph)
+			moving = sim.step(graph) or moving
 			moving = sim.step(graph) or moving
 			local now = ui.now()
 			local live = {}
@@ -135,6 +146,7 @@ M.View = ui.component(function(props: {
 				ui.after(16, frame)
 			else
 				settled:set(true)
+				M.trace:set({ frames = settle_frames, runs = M.trace:peek().runs or 1, done = true })
 			end
 		end
 		ui.after(0, frame)
@@ -146,6 +158,21 @@ M.View = ui.component(function(props: {
 		local g = sim.build(props.world())
 		local sig = sig_of(g)
 		if sig == last_sig then
+			-- (The same web: only names may have moved, a machine renamed or
+			-- a thread retitled. Taken in place, nothing moved.)
+			local renamed = false
+			for _, n in g.nodes do
+				local i = graph.index[n.id]
+				local old = i and graph.nodes[i]
+				if old and old.title ~= n.title then
+					old.title = n.title
+					renamed = true
+				end
+			end
+			if renamed then
+				version:set(version:peek() + 1)
+				tick:set(tick:peek() + 1)
+			end
 			return
 		end
 		last_sig = sig
@@ -345,11 +372,13 @@ M.View = ui.component(function(props: {
 			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
 			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 10 + load_w else 0) + 8
 			-- (The island makes room for it, and an empty one for its one
-			-- line saying so: settled again if either grew.)
+			-- line saying so: settled again if either grew. Measured as at
+			-- zoom 1, so a zoom — a view's change, not the web's — never
+			-- moves anything.)
 			local was = ((n :: any).tab_w or 0) + ((n :: any).idle_w or 0)
-			;(n :: any).idle_w = if next(isl.members) == nil then c:measure_text(locale.s("ds.orch.map.idle"), { size = 11 }) / z else 0
-			;(n :: any).tab_w = tw / z
-			if math.abs(was - tw / z - (n :: any).idle_w) > 4 and not retab then
+			;(n :: any).idle_w = if next(isl.members) == nil then c:measure_text(locale.s("ds.orch.map.idle"), { size = 11 }) else 0
+			;(n :: any).tab_w = tw
+			if math.abs(was - tw - (n :: any).idle_w) > 4 and not retab then
 				retab = true
 				ui.after(0, function()
 					graph.alpha = math.max(graph.alpha, 0.3)
@@ -1079,6 +1108,7 @@ M.View = ui.component(function(props: {
 			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1, { cap = "round" })
 		end
 		c:restore()
+		local paths: { [string]: { { number } } } = {}
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
 			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
@@ -1110,6 +1140,9 @@ M.View = ui.component(function(props: {
 				end
 				segs = { sub_quad(q, t0, t1) }
 			end
+			-- (Its whole path, mark edge to mark edge, kept for the pulses
+			-- that travel it.)
+			paths[`{e.a}>{e.b}`] = segs
 			-- (Broken round each name it would cross, by hand: a piece left
 			-- shorter than 10px is dropped, not left as a stub.)
 			local ex, ey = at(a)
@@ -1184,19 +1217,86 @@ M.View = ui.component(function(props: {
 				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.7 else 0.4, lit)), 1.25, { cap = "round", dash = fitted(0.5, 3) })
 			end
 		end
-		-- Pulses along them.
+		-- Pulses along them: each down its line as drawn (its bow, its way
+		-- round a name), from where it leaves one mark to where it meets the
+		-- other; between two with no line, straight, edge to edge.
 		local now = ui.now()
+		local trace = {}
 		for _, p in pulses do
 			local a, b = graph.nodes[graph.index[p.from] or 0], graph.nodes[graph.index[p.to] or 0]
 			if a and b then
 				local t = math.clamp((now - p.t0) / PULSE_MS, 0, 1)
 				t = t * t * (3 - 2 * t)
-				local ax, ay = at(a)
-				local bx, by = at(b)
-				local x, y = ax + (bx - ax) * t, ay + (by - ay) * t
+				local segs = paths[`{p.from}>{p.to}`]
+				local back = false
+				if not segs then
+					segs = paths[`{p.to}>{p.from}`]
+					back = segs ~= nil
+				end
+				if not segs then
+					local ax, ay = at(a)
+					local bx, by = at(b)
+					local q = { ax, ay, (ax + bx) / 2, (ay + by) / 2, bx, by }
+					local t0, t1 = leave(q, a, false), leave(q, b, true)
+					segs = if t1 > t0 then { sub_quad(q, t0, t1) } else { q }
+				end
+				-- (By length along it, so it moves at an even pace through
+				-- the bend and the detour.)
+				local lens, total = {}, 0
+				for i, sg in segs do
+					lens[i] = quad_length(sg)
+					total += lens[i]
+				end
+				local want = (if back then 1 - t else t) * total
+				local x, y = segs[1][1], segs[1][2]
+				for i, sg in segs do
+					if want <= lens[i] or i == #segs then
+						-- (Within this piece: its parameter for that length.)
+						local lo, hi = 0, 1
+						for _ = 1, 18 do
+							local mid = (lo + hi) / 2
+							if quad_length(sub_quad(sg, 0, mid)) < want then
+								lo = mid
+							else
+								hi = mid
+							end
+						end
+						local u = (lo + hi) / 2
+						local w = 1 - u
+						x = w * w * sg[1] + 2 * w * u * sg[3] + u * u * sg[5]
+						y = w * w * sg[2] + 2 * w * u * sg[4] + u * u * sg[6]
+						break
+					end
+					want -= lens[i]
+				end
+				-- (How far that sits off its path: for tests.)
+				local off = math.huge
+				for _, sg in segs do
+					for k = 0, 64 do
+						local u = k / 64
+						local w = 1 - u
+						local px = w * w * sg[1] + 2 * w * u * sg[3] + u * u * sg[5]
+						local py = w * w * sg[2] + 2 * w * u * sg[4] + u * u * sg[6]
+						off = math.min(off, math.sqrt((px - x) ^ 2 + (py - y) ^ 2))
+					end
+				end
+				-- (And how far off the straight line between the two centres:
+				-- a bowed path takes it off that.)
+				local cax, cay = at(a)
+				local cbx, cby = at(b)
+				local ddx, ddy = cbx - cax, cby - cay
+				local dl = math.max(1e-3, math.sqrt(ddx * ddx + ddy * ddy))
+				local chord = math.abs((x - cax) * ddy - (y - cay) * ddx) / dl
+				local from_a = math.sqrt((x - cax) ^ 2 + (y - cay) ^ 2)
+				table.insert(trace, { x = x, y = y, t = t, off = off, chord = chord, from_a = from_a, reach_a = reach(a), reach_b = reach(b), from_b = math.sqrt((x - cbx) ^ 2 + (y - cby) ^ 2) })
 				c:circle(x, y, 6, hue.canvas(p.hue, 0.25))
 				c:circle(x, y, 2.75, hue.canvas(p.hue, 1))
 			end
+		end
+		if #trace > 0 or #(M.pulse_trace:peek() or {}) > 0 then
+			ui.after(0, function()
+				M.pulse_trace:set(trace)
+			end)
 		end
 
 		-- 4. The marks.
@@ -1303,6 +1403,12 @@ M.View = ui.component(function(props: {
 		local zoom = math.clamp(v.zoom * k, 0.3, 3)
 		local wx, wy = (px - v.x) / v.zoom, (py - v.y) / v.zoom
 		view:set({ x = px - wx * zoom, y = py - wy * zoom, zoom = zoom })
+	end
+	-- (A zoom as a ⌘/Ctrl-scroll gives it, about the field's middle: for
+	-- tests and fixtures.)
+	M.zoom_by = function(k: number)
+		moved_view = true
+		zoom_at(width:peek() / 2, height() / 2, k)
 	end
 
 	-- A node's marker: where it is, for assistive technology and tests,

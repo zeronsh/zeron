@@ -269,6 +269,25 @@ ui.command { id = "map_cross", title = "Map: two rails down", run = function()
 	}
 	orchestration.now:set(o)
 end }
+-- A machine renamed (the live shape's Windows box), as the registry's
+-- update after "Rename device" brings it.
+ui.command { id = "fixture.rename_win", title = "Fixture: rename the Windows machine", run = function()
+	local n: any = table.clone(sessions.now:peek())
+	local list = {}
+	for _, d in n.devices or {} do
+		local d2 = table.clone(d)
+		if d2.id == "dev-win" then
+			d2.name = "x16-win"
+		end
+		table.insert(list, d2)
+	end
+	n.devices = list
+	sessions.now:set(n)
+end }
+-- A zoom in, as a ⌘/Ctrl-scroll gives (the Graph's).
+ui.command { id = "map_graph_zoom_in", title = "Map: zoom the graph in", run = function()
+	require("@ds/orch_map_graph").zoom_by(1.25)
+end }
 -- A secondary click's menu for the id in `map_menu_id`, as on the Map.
 local menu_id = ui.state("map_menu_id", "")
 ui.command { id = "map_menu", title = "Map: open a menu", run = function()
