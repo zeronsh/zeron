@@ -257,9 +257,9 @@ return ui.component(function(props: Props): Node
 		local function counts(): (number, number)
 			local working, total = 0, 0
 			for _, m in (props.world().now or {}).crew or {} do
-				if m.orchestrator_id == row:get().id and not m.released then
+				local c = props.chat(m.chat_id)
+				if m.orchestrator_id == row:get().id and not m.released and not (c and c.archived) then
 					total += 1
-					local c = props.chat(m.chat_id)
 					if c and c.status == "working" then
 						working += 1
 					end

@@ -487,6 +487,24 @@ test("the model puts each thread on its machine, by project", function()
 	expect(f.threads["th-titlebar"]).to_be(nil)
 end)
 
+test("nothing archived is on the Map: an orchestrator, a crew thread, nor a thread of the person's own", function()
+	local f = (sample :: any).fleet
+	local gone = { ["orc-vpn"] = true, ["th-engine-flow"] = true, ["th-zgx-mem"] = true }
+	-- (Archived as the host lists them: under `archived`, unflagged.)
+	local sessions_now = { chats = {}, children = {}, archived = {} }
+	for _, c in f.chats do
+		table.insert(if gone[c.id] then sessions_now.archived else sessions_now.chats, c)
+	end
+	local w = { now = f.now, chats = data.chats(sessions_now), devices = f.devices, projects = f.projects, loads = f.loads, here = "dev-desk" }
+	local fleet = model.fleet(w)
+	for id in gone do
+		expect(fleet.threads[id]).to_be(nil)
+	end
+	expect(fleet.orchestrators["orc-vpn"]).to_be(nil)
+	expect(fleet.threads["th-engine-state"] ~= nil).to_be(true)
+	expect(fleet.orchestrators["orc-orch"] ~= nil).to_be(true)
+end)
+
 test("a remote thread's turn ending shows in every view at once, no activity ever written", function()
 	local thread = "Verify unique device names"
 	local function state_in(app: any, within: string): string

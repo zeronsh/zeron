@@ -31,8 +31,15 @@ function M.chats(sessions_now: any): { [string]: Chat }
 	if not sessions_now then
 		return out
 	end
+	-- (What's archived says so, whether or not its row does.)
 	for _, c in sessions_now.archived or {} do
-		out[c.id] = c
+		if c.archived then
+			out[c.id] = c
+		else
+			local a = table.clone(c)
+			a.archived = true
+			out[c.id] = a
+		end
 	end
 	for _, kids in sessions_now.children or {} do
 		for _, c in kids do
