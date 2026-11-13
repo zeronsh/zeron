@@ -488,6 +488,28 @@ M.View = ui.component(function(props: {
 			end
 			return k
 		end
+		-- Whether a box sits on a line into `own` (its name over its own
+		-- line in): a place to prefer against, never one that drops it.
+		local own_pts: { [string]: { { number } } } = {}
+		for _, ln in lines do
+			for _, id in { ln.e.a, ln.e.b } do
+				local list = own_pts[id] or {}
+				own_pts[id] = list
+				for i = 0, 12 do
+					local t = i / 12
+					local u = 1 - t
+					table.insert(list, { u * u * ln.ax + 2 * u * t * ln.cx + t * t * ln.bx, u * u * ln.ay + 2 * u * t * ln.cy + t * t * ln.by })
+				end
+			end
+		end
+		local function on_own(x0: number, y0: number, x1: number, y1: number, own: string): number
+			for _, p in own_pts[own] or {} do
+				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
+					return 0.5
+				end
+			end
+			return 0
+		end
 		local labels: { any } = {}
 		local leaders: { any } = {}
 		-- A name's place: tried in one line, then two, on each side (right,
@@ -497,7 +519,9 @@ M.View = ui.component(function(props: {
 		local function place(n: sim.Node, forms: { { string } }, opts: any, must: boolean, force: boolean)
 			local x, y = at(n)
 			local base = (if n.kind == "thread" then 9 else reach(n)) + 8
-			local best: any, least = nil, math.huge
+			local best: any, least, least_rank = nil, math.huge, math.huge
+			-- (And the least crowded, whatever lines it sits on.)
+			local fit: any, fit_k = nil, math.huge
 			-- (Only a working thread's name steps out, a leader tying it back.)
 			for _, far in (if must and n.kind == "thread" then { 0, 10, 24, 38 } else { 0 }) do
 				local r = base + far
@@ -531,21 +555,30 @@ M.View = ui.component(function(props: {
 					for _, sp in spots do
 						-- (A working thread's name may cross a rim, if it must.)
 						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id, if must and n.kind == "thread" then 0.35 else nil) + far * 0.03
-						if k < least then
-							best, least = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 }, k
+						local rank = k + on_own(sp[1] - 2, sp[2] - 2, sp[1] + tw + 2, sp[2] + th + 2, n.id)
+						local here_spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 }
+						if rank < least_rank then
+							best, least, least_rank = here_spot, k, rank
+						end
+						if k < fit_k then
+							fit, fit_k = here_spot, k
 						end
 					end
-					if least < 0.5 then
+					if least_rank < 0.5 then
 						break
 					end
 				end
-				if least < 0.5 then
+				if least_rank < 0.5 then
 					break
 				end
 			end
 			-- (Lines may run under a name, broken round it; marks and other
 			-- names may not: a thread whose name fits nowhere keeps its dot.)
 			-- (A name that need not show cuts nothing.)
+			if best and least >= (if must then 1 else 0.05) and not force and fit then
+				-- (Ranked best but not allowed: the least crowded instead.)
+				best, least = fit, fit_k
+			end
 			if not best or (least >= (if must then 1 else 0.05) and not force) then
 				return
 			end
@@ -730,6 +763,12 @@ M.View = ui.component(function(props: {
 			local best_cost, best = now_cost, nil
 			for _, corner in { { hit[1] - 10, hit[2] - 10 }, { hit[3] + 10, hit[2] - 10 }, { hit[1] - 10, hit[4] + 10 }, { hit[3] + 10, hit[4] + 10 } } do
 				local wx, wy = corner[1], corner[2]
+				-- (Only a point well along the way: no hook back.)
+				local along = ((wx - ln.ax) * tx + (wy - ln.ay) * ty) / len
+				local aside_d = math.abs((wx - ln.ax) * -ty + (wy - ln.ay) * tx)
+				if along < 0.2 or along > 0.8 or aside_d > len * 0.35 then
+					continue
+				end
 				local l1 = math.sqrt((wx - ln.ax) ^ 2 + (wy - ln.ay) ^ 2)
 				local l2 = math.sqrt((ln.bx - wx) ^ 2 + (ln.by - wy) ^ 2)
 				-- (Smooth through the point: its tangent along the line.)
