@@ -19,6 +19,9 @@ export type Thread = {
 	orchestrator: string?, -- whose (an orchestrator's own: its id)
 	hue: number?,
 	kind: string, -- "orchestrator" | "crew" | "thread"
+	-- Crew of the Brain dump: a thread it started (none of an orchestrator's
+	-- crew), hanging under it as crew do.
+	started: boolean?,
 	order: number,
 	paused: boolean,
 }
@@ -70,7 +73,7 @@ function M.fleet(world: any): Fleet
 		items[it.id] = it
 	end
 
-	local threads: { [string]: Thread } = {}
+	local threads: { [string]: any } = {}
 	local orchestrators: { [string]: any } = {}
 	local function project_of(c: any, fallback: string?): (string?, string?)
 		local id = (c and c.project) or fallback
@@ -120,6 +123,28 @@ function M.fleet(world: any): Fleet
 				order = (it and it.order) or 0,
 				paused = o.paused == true,
 			}
+		end
+	end
+	-- What the Brain dump started: under it, wherever they run.
+	local prov = M.provenance(world)
+	for id, by in prov.started do
+		local c = chats[id]
+		local o = orchestrators[by]
+		if c and o and not threads[id] and not c.archived then
+			local name, pid = project_of(c, nil)
+			threads[id] = ({
+				id = id,
+				title = c.title or "",
+				device = c.device or here,
+				project = name,
+				project_id = pid,
+				orchestrator = by,
+				hue = o.hue,
+				kind = "crew",
+				order = 0,
+				paused = o.paused == true,
+				started = true,
+			} :: any)
 		end
 	end
 	for id, c in chats do
@@ -213,6 +238,51 @@ function M.fleet(world: any): Fleet
 		end
 	end
 	return { machines = machines, threads = threads, orchestrators = orchestrators }
+end
+
+export type Provenance = {
+	-- Each thread the Brain dump (or an orchestrator) started: by whom.
+	started: { [string]: string },
+	-- What a dump's parts were handed to: { from, to } chat ids.
+	routed: { { from: string, to: string } },
+}
+
+-- Who started what, and what the Brain dump handed where: a chat's own
+-- `started_by` where the host says it, else its dumps' routes (a part that
+-- started a thread or an orchestrator; a part delivered to one).
+function M.provenance(world: any): Provenance
+	local now = world.now or {}
+	local out: Provenance = { started = {}, routed = {} }
+	local brain: string? = nil
+	for _, o in now.orchestrators or {} do
+		if o.kind == "brain_dump" and not o.archived then
+			brain = o.id
+		end
+	end
+	for id, c in world.chats or {} do
+		if type(c.started_by) == "string" and c.started_by ~= "" then
+			out.started[id] = c.started_by
+		end
+	end
+	if not brain then
+		return out
+	end
+	local seen: { [string]: boolean } = {}
+	for _, d in now.dumps or {} do
+		for _, r in d.routes or {} do
+			local t = r.target or {}
+			local id = t.id
+			if type(id) == "string" and id ~= "" and id ~= brain then
+				if (t.kind == "new_thread" or t.kind == "new_orchestrator") and not out.started[id] then
+					out.started[id] = brain :: string
+				elseif (t.kind == "chat" or t.kind == "orchestrator") and not seen[id] then
+					seen[id] = true
+					table.insert(out.routed, { from = brain :: string, to = id })
+				end
+			end
+		end
+	end
+	return out
 end
 
 -- A thread's state word, as its chat has it ("idle" for none).

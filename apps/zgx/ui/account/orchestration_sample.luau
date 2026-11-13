@@ -423,6 +423,15 @@ do
 			updated = ago(10), created = ago(1600), agent = "claude", model = "claude-opus-5-5",
 			activity = { kind = "thinking", label = "", since = ago(120) } },
 		{ id = "th-titlebar", title = "Linux titlebar toggle", device = "dev-desk", project = "p-zeron-desk", status = "done", updated = ago(26000), created = ago(30000), agent = "claude", model = "claude-opus-5-5" },
+		-- What the Brain dump started from the person's dumps: threads of
+		-- their own, on whichever machine the project lives.
+		{ id = "th-dev-names", title = "Verify unique device names", device = "dev-mac", project = "p-zeron-mac", status = "working",
+			updated = ago(6), created = ago(700), agent = "claude", model = "claude-sonnet-5-5",
+			activity = { kind = "testing", label = "cargo test -p zeron-engine devices::names", since = ago(80) }, todo = { done = 2, total = 4, current = "-1, -2 suffixes" } },
+		{ id = "th-omarchy", title = "Rerun omarchy-update", device = "dev-desk", status = "done",
+			updated = ago(1900), created = ago(2400), agent = "claude", model = "claude-haiku-5-5", todo = { done = 1, total = 1 } },
+		{ id = "th-wg-audit", title = "Audit wg peers", device = "dev-cloud", project = "p-exnomic-cloud", status = "input",
+			updated = ago(150), created = ago(1100), agent = "claude", model = "claude-sonnet-5-5", todo = { done = 3, total = 5, current = "Which peers to drop?" } },
 	}
 	local function member(chat: string, o: string, item: string, extra: any?): any
 		local m: any = { chat_id = chat, orchestrator_id = o, item_id = item, role = "", released = false, joined = ago(5000) }
@@ -467,6 +476,23 @@ do
 			question = "Orchestrator page: side by side, or tabs?", options = { { label = "Side by side" }, { label = "Tabs" } },
 			urgent = false, state = "open", created = ago(200) },
 	}
+	-- The person's dumps, and where the Brain dump put each part.
+	local function route(id: string, kind: string, target: string, excerpt: string): any
+		return { id = id, excerpt = excerpt, target = { kind = kind, id = target }, intent = "task", message = excerpt, state = "delivered", candidates = {} }
+	end
+	local f_dumps = {
+		{ id = "dp-f2", text = "make sure no two devices end up with the same name, and the orchestrator page goes side by side. also the reins notes before the msi",
+			state = "routed", device = "dev-desk", created = ago(710), updated = ago(630), routes = {
+				route("rf-1", "new_thread", "th-dev-names", "make sure no two devices end up with the same name"),
+				route("rf-2", "chat", "th-ui-orch", "the orchestrator page goes side by side"),
+				route("rf-3", "orchestrator", "orc-reins", "the reins notes before the msi"),
+			} },
+		{ id = "dp-f1", text = "rerun omarchy update, and someone audit the wg peers on the exnomic box",
+			state = "routed", device = "dev-desk", created = ago(2420), updated = ago(1100), routes = {
+				route("rf-4", "new_thread", "th-omarchy", "rerun omarchy update"),
+				route("rf-5", "new_thread", "th-wg-audit", "audit the wg peers on the exnomic box"),
+			} },
+	}
 	local f_loads = {
 		["dev-desk"] = { cpu = 0.71, mem_used = 41.2e9, mem_total = 62.0e9, load1 = 11.4, cores = 16, online = true, at = NOW },
 		["dev-mac"] = { cpu = 0.46, mem_used = 22.1e9, mem_total = 36.0e9, load1 = 5.2, cores = 12, online = true, at = NOW },
@@ -487,6 +513,11 @@ do
 		{ id = "cf-9", kind = "ask", from = "th-ui-orch", to = "you", summary = "Side by side or tabs?", at = ago(200) },
 		{ id = "cf-10", kind = "report", from = "th-tally-ci", to = "orc-tally", summary = "pytest: 3 failed", at = ago(340) },
 		{ id = "cf-11", kind = "message", from = "orc-orch", to = "th-engine-flow", summary = "Merge engine-state first", at = ago(25) },
+		{ id = "cf-12", kind = "spawn", from = "orc-brain", to = "th-dev-names", summary = "Verify unique device names", at = ago(700) },
+		{ id = "cf-13", kind = "spawn", from = "orc-brain", to = "th-wg-audit", summary = "Audit wg peers", at = ago(1100) },
+		{ id = "cf-14", kind = "route", from = "orc-brain", to = "th-ui-orch", summary = "Side by side, not tabs", at = ago(640) },
+		{ id = "cf-15", kind = "route", from = "orc-brain", to = "orc-reins", summary = "Ship notes before the MSI", at = ago(630) },
+		{ id = "cf-16", kind = "ask", from = "th-wg-audit", to = "you", summary = "Which peers to drop?", at = ago(150) },
 	}
 	-- Each thread's last hour: from `at` on, its state and what it did.
 	local function lane(list: { any }): { any }
@@ -530,6 +561,9 @@ do
 		["th-tally-ci"] = lane { { 2000, "working", "thinking" }, { 1800, "working", "editing" }, { 900, "working", "testing" }, { 340, "failed" } },
 		["th-tally-lines"] = lane { { 1000, "working", "reading" }, { 700, "working", "editing" }, { 450, "working", "testing" }, { 380, "working", "editing" }, { 70, "working", "thinking" } },
 		["th-tally-docs"] = lane { { 3400, "working", "editing" }, { 2700, "working", "pushing" }, { 2600, "done" } },
+		["th-dev-names"] = lane { { 700, "working", "reading" }, { 520, "working", "editing" }, { 80, "working", "testing" } },
+		["th-omarchy"] = lane { { 2400, "working", "running" }, { 1900, "done" } },
+		["th-wg-audit"] = lane { { 1100, "working", "reading" }, { 600, "working", "running" }, { 150, "input" } },
 		["th-zgx-mem"] = lane { { 1500, "working", "reading" }, { 1100, "working", "running" }, { 600, "working", "reading" }, { 120, "working", "thinking" } },
 	}
 	-- Each device's CPU, a sample every five seconds for the last four minutes.
@@ -555,7 +589,7 @@ do
 	end
 	(sample :: any).fleet = {
 		NOW = NOW,
-		now = { state = "ready", orchestrators = f_orchestrators, crew = f_crew, items = f_items, asks = f_asks, dumps = {} },
+		now = { state = "ready", orchestrators = f_orchestrators, crew = f_crew, items = f_items, asks = f_asks, dumps = f_dumps },
 		loads = f_loads,
 		comms = f_comms,
 		devices = f_devices,

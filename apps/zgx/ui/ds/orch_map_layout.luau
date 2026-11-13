@@ -69,6 +69,9 @@ export type Rail = {
 	bottom: number,
 	branches: { Branch },
 	runs: { { number } },
+	-- The Brain dump's: what it started, not crew it leads (drawn lighter,
+	-- dashed).
+	dashed: boolean,
 }
 export type Layout = {
 	h: number,
@@ -371,6 +374,7 @@ function M.layout(world: any, width: number): Layout
 			bottom = sp.bottom,
 			branches = branches,
 			runs = paths,
+			dashed = o.kind == "brain_dump",
 		})
 	end
 
