@@ -26,6 +26,7 @@ pub mod comms;
 pub(crate) mod loads;
 pub(crate) mod ops;
 pub mod report;
+pub(crate) mod scope;
 pub(crate) mod wake;
 
 #[cfg(test)]

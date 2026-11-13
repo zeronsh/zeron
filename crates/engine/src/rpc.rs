@@ -4200,14 +4200,19 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
-            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(self.orchestration.stream())),
+            // An agent sees its own part (orchestration/scope.rs).
+            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_stream(chat),
+                _ => self.orchestration.stream(),
+            })),
             methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
             methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
                 std::sync::Arc::new(self.clone()),
             ))),
-            methods::WATCH_COMMS => Ok(RpcReply::Stream(
-                crate::orchestration::comms::stream(self.orchestration.comms()),
-            )),
+            methods::WATCH_COMMS => Ok(RpcReply::Stream(match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_comms(chat),
+                _ => crate::orchestration::comms::stream(self.orchestration.comms()),
+            })),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self
