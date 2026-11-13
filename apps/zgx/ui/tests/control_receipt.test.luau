@@ -112,7 +112,7 @@ local function box_of(app: any, pattern: string): (number, number, number, numbe
 	return 0, 0, 0, 0
 end
 
-test("each chip's menu opens under it, from a box of its own, with places to move it", function()
+test("each chip's menu opens from a secondary click on it, with places to move it", function()
 	local app = open()
 	-- An odd width: the column centred, a chip starts between points.
 	app:resize(2023, 1102)
@@ -129,17 +129,18 @@ test("each chip's menu opens under it, from a box of its own, with places to mov
 		local chip = `#control-capture >> .orch-chip [{i}]`
 		local name = string.match(app:tree(chip), 'button "([^"]*)"') or ""
 		local _, cy, _, ch = box_of(app, `button "{name}"`)
-		app:click(chip)
+		-- (A primary click pins the part's card: ds/hover_card Anchored.)
+		app:right_click(chip)
 		-- (Its items fade in: settled, with the page's composer about.)
 		app:frames(30)
 		expect(app:error()).to_be_nil()
 		local items = menu_items(app)
 		expect(#items > 0).to_be(true)
 		expect(table.concat(items, ",")).to_contain("New thread")
-		-- Its panel a size, 4 under the chip.
+		-- Its panel a size, at the pointer on the chip.
 		local _, my, mw, mh = box_of(app, ' menu "')
 		expect(mw > 0 and mh > 0).to_be(true)
-		expect(my).to_be(cy + ch + 4)
+		expect(my >= cy and my <= cy + ch).to_be(true)
 		app:key("Escape")
 		app:frames(5)
 	end
@@ -151,7 +152,7 @@ test("each chip's menu opens under it, from a box of its own, with places to mov
 	app:frames(10)
 	app:click(".control-history-row")
 	app:frames(20)
-	app:click('#control-capture >> role:button "Unsure, Task, Unsure"')
+	app:right_click('#control-capture >> role:button "Unsure, Task, Unsure"')
 	app:frames(5)
 	expect(table.concat(menu_items(app), ",")).to_contain("Note")
 	expect(app:error()).to_be_nil()

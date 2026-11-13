@@ -8,6 +8,8 @@
 --     route = function() return route end,       -- a dump's route, as it stands
 --     target = function() return target end,     -- ds/orch_data.target of it
 --     on_open = function(target) end,            -- { kind, id }
+--     bare = false,                              -- ds/hover_card Anchored's `c.bare`
+--     on_close = function() end,                 -- its `c.close`: Open closes the card
 --   }
 
 local Icon = require("@self/icon")
@@ -22,6 +24,8 @@ export type Props = {
 	route: () -> any,
 	target: () -> data.Target,
 	on_open: (target: { kind: string, id: string? }) -> (),
+	bare: boolean?,
+	on_close: (() -> ())?,
 }
 
 -- Each kind of place's glyph.
@@ -68,6 +72,7 @@ return ui.component(function(props: Props): Node
 	local reply_h = ui.use_state(0)
 	return HoverCard.Card {
 		class = "orch-part-card",
+		bare = props.bare,
 		w = WIDTH,
 		p = "$space.3",
 		gap = "$space.2",
@@ -226,6 +231,9 @@ return ui.component(function(props: Props): Node
 				hover = { bg = "$hover" },
 				on_click = function()
 					local tg = t()
+					if props.on_close then
+						props.on_close()
+					end
 					props.on_open({ kind = tg.kind, id = tg.id })
 				end,
 				ui.text { locale.t("ds.orch.receipt.open_short"), text_size = "$font.size.xs", color = "$text.secondary" },
