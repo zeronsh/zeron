@@ -8,7 +8,10 @@
 <meta property="og:title" content="Zeron" />
 <meta property="og:description" content="Control your coding agents from any of your devices." />
 <meta property="og:image" content="/assets/app-screenshot.jpg" />
-<link rel="icon" href="/assets/zeron-favicon-v3.png" type="image/png" sizes="128x128" />
+<link rel="icon" href="/assets/zeron-favicon-light.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: light)" />
+<link rel="icon" href="/assets/zeron-favicon-dark.png" type="image/png" sizes="128x128" media="(prefers-color-scheme: dark)" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
+<link rel="apple-touch-icon" href="/assets/zeron-app-icon.png" />
 <script defer src="/telemetry.js"></script>
 <style>
   @font-face {
@@ -744,17 +747,6 @@
     white-space: nowrap;
   }
   .dl-list .btn { margin-left: auto; padding: 8px 14px; font-size: 13px; }
-  .dl-list .btn.ghost[aria-disabled="true"] {
-    opacity: .4;
-    cursor: default;
-    pointer-events: none;
-  }
-  .dl-soon {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.02em;
-    color: var(--faint);
-  }
   .download-foot {
     margin-top: 24px;
     display: flex;
@@ -847,7 +839,7 @@
   <nav>
     <div class="wrap nav-inner">
       <a class="logo" href="/" aria-label="Zeron home">
-        <img class="logo-mark" src="/assets/zeron-app-icon.png" width="128" height="128" alt="" />
+        <img class="logo-mark" src="/assets/icons/zeron-mark-solid-ivory.svg" width="128" height="128" alt="" />
         <span>Zeron</span>
       </a>
       <div class="links">
@@ -936,7 +928,7 @@
                 <line x1="17.09" y1="31" x2="40.47" y2="44.5" class="spoke-accent" style="animation-delay: 1.25s"></line>
               </g>
             </svg>
-            <div class="spoke-hub"><img src="/assets/zeron-app-icon.png" width="128" height="128" alt="" /></div>
+            <div class="spoke-hub"><img src="/assets/icons/zeron-mark-solid-ivory.svg" width="128" height="128" alt="" /></div>
             <div class="spoke-node" style="left: 50%; top: 12%">
               <span class="agent-icon" style="--icon: url('/assets/icons/claude-mark.svg')"></span><span>Claude Code</span>
             </div>
@@ -1021,7 +1013,7 @@
               <svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M11.3 18.5h1.4"/></svg>
               <span>iPad</span>
             </div>
-            <div class="spoke-hub" style="top: 52%"><img src="/assets/zeron-app-icon.png" width="128" height="128" alt="" /></div>
+            <div class="spoke-hub" style="top: 52%"><img src="/assets/icons/zeron-mark-solid-ivory.svg" width="128" height="128" alt="" /></div>
             <div class="spoke-node" style="left: 50%; top: 86%">
               <span class="agent-icon" style="--icon: url('/assets/icons/claude-mark.svg')"></span><span>Claude Code</span>
             </div>
@@ -1152,7 +1144,7 @@
     <div class="wrap" id="downloads">
       <div class="dl-lede">
         <h2 id="downloads-title">Download Zeron.</h2>
-        <p class="sub">Available for macOS, Windows, Linux and Android. iOS is on the way.</p>
+        <p class="sub">Available for macOS, Windows, Linux, Android and iOS.</p>
       </div>
       <div class="dl-rows">
         <div class="dl-row">
@@ -1174,8 +1166,8 @@
             <p>Android, iPhone and iPad.</p>
           </div>
           <ul class="dl-list">
+            <li><span class="dl-name">iOS</span><span class="dl-meta">iPhone · iPad</span><a class="btn ghost" id="ios-download" href="https://apps.apple.com/us/app/zeron-coding-agents/id6803187897">App Store ↗</a></li>
             <li><span class="dl-name">Android</span><span class="dl-meta">arm64 · apk</span><a class="btn ghost" id="android-download" href="https://zeron.sh/releases/zeron-android-arm64.apk">Download</a></li>
-            <li><span class="dl-name">iOS</span><span class="dl-soon">coming soon</span><span class="btn ghost" role="link" aria-disabled="true">App Store ↗</span></li>
           </ul>
         </div>
       </div>

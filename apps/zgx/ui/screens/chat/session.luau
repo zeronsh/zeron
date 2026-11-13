@@ -177,6 +177,7 @@ local function Session(id: Id?): Node
 		drop_when = zone.drop_when,
 		on_drag_over = zone.on_drag_over,
 		on_drag_leave = zone.on_drag_leave,
+		on_hover = zone.on_hover,
 		on_drop = zone.on_drop,
 		w_full = true,
 		h_full = true,
@@ -241,9 +242,13 @@ local function Session(id: Id?): Node
 					end, function(id: string): Node
 						return T.Transcript {
 							-- Settings' "Conversation width", followed as it moves.
+							-- (A little wider than the composer each side, so it's
+							-- seen fading as it passes behind.)
 							measure = function(): number
-								return prefs.conversation_width:get()
+								return prefs.conversation_width:get() + 24
 							end,
+							side = 20,
+							fade_lead = 12,
 							messages = store.messages,
 							offset = offset,
 							-- Made again (a reload, a template saved), it comes
@@ -254,6 +259,14 @@ local function Session(id: Id?): Node
 							-- Under the docked composer: the conversation runs
 							-- behind it, its end held clear of it.
 							foot = room.foot,
+							beside = function(): number?
+								return shared.pill_width:get()
+							end,
+							on_jump_width = function(w: number?)
+								if shared.jump_width:peek() ~= w then
+									shared.jump_width:set(w)
+								end
+							end,
 							draft = store.draft,
 							-- Settings' compact transcript: each reply's work
 							-- folded into one group.
@@ -261,6 +274,13 @@ local function Session(id: Id?): Node
 								return prefs.compact_transcript:get()
 							end,
 							on_mention = shared.mention,
+							chat_of = shared.chat_of,
+							open_sender = function(chat: string, title: string)
+								local s = which()
+								if s then
+									lanes.open(s, { kind = "side_chat", id = chat, title = title })
+								end
+							end,
 							on_retry = function(message: string)
 								local s = which()
 								if s then

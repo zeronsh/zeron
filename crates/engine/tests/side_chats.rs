@@ -437,6 +437,7 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
         preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
+        output_lines: None,
     };
     core.doc_host
         .open("main")

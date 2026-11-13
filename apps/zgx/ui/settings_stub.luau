@@ -1,6 +1,6 @@
 -- Settings' host calls, answered here as the host would (no engine or edge
 -- in a test host): your profile and card, your organization, its members
--- and invitations, this Mac's engine settings and banners. The shell's
+-- and invitations, this computer's engine settings and banners. The shell's
 -- fixture requires it, so Settings' pages build headless; the tests drive
 -- it (tests/settings_in_place.test.luau).
 --
@@ -28,7 +28,7 @@ local delete_word = ui.state("settings_stub_delete_word", "ok")
 -- What a delete after signing in again answers: "ok", "wait" (until
 -- `settings_stub.signed_in_again`, or cancelled), or a refusal.
 local step_up_word = ui.state("settings_stub_step_up_word", "ok")
--- The account's signing keys: "some" (this Mac's, one new on another
+-- The account's signing keys: "some" (this computer's, one new on another
 -- device, one revoked; listed out of order) or "none".
 local keys_mode = ui.state("settings_stub_keys", "some")
 local signing_keys = {
@@ -342,6 +342,15 @@ local answers: { [string]: (arg: any) -> any } = {
 		end
 		return settled({ version = "0.2.140" })
 	end,
+	-- This computer's fonts (src/fonts.rs), a few of each kind.
+	["fonts.list"] = function()
+		return settled({
+			{ family = "Fira Code", mono = true },
+			{ family = "Inter", mono = false },
+			{ family = "JetBrains Mono", mono = true },
+			{ family = "Noto Serif", mono = false },
+		})
+	end,
 	-- A background image kept: the picked file itself (the app's own PNG,
 	-- so a headless host can draw it), 512 square.
 	["wallpaper.keep"] = function(arg: any)
@@ -414,7 +423,7 @@ apis.invite = function(_org: string, emails: { string }): any
 	end
 	return settled({ sent = sent, failed = failed })
 end
--- This Mac's agents and another device's (account/agents): one each, so
+-- This computer's agents and another device's (account/agents): one each, so
 -- a switch of device shows whose.
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
@@ -536,8 +545,8 @@ ui.command {
 		require("@app/screens/shell/route").settings("account")
 	end,
 }
--- What the main window's theme overrides now (ds.look): its accent and a
--- syntax colour, for a test to read.
+-- What the main window's theme overrides now (ds.look): its accent, a
+-- syntax colour and its fonts, for a test to read.
 local window_theme = ui.state("settings_stub_window_theme", {} :: { [string]: any })
 ui.command {
 	id = "settings_stub.read_theme",
@@ -549,6 +558,10 @@ ui.command {
 			keyword = t["zeron.syntax.keyword"],
 			body = t["font.size.md"],
 			window = t["zeron.window"],
+			sans = t["font.sans"],
+			mono = t["font.mono"],
+			secondary = t["text.secondary"],
+			tertiary = t["text.tertiary"],
 		})
 	end,
 }

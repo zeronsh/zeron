@@ -911,6 +911,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
                     preview_paths: Vec::new(),
                     exit_code: None,
                     output_truncated: false,
+                    output_lines: None,
                 }],
                 created_at: created_at + 1,
                 device_id: String::new(),

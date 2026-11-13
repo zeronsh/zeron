@@ -32,6 +32,7 @@ pub mod snapshot;
 pub mod status;
 pub mod template_packages;
 pub mod templates;
+pub mod themes;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -140,7 +141,9 @@ pub fn handles(method: &str) -> bool {
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::PLUGIN_STATUS
+            | methods::WATCH_THEMES
     ) || lifecycle::handles(method)
+        || themes::handles(method)
 }
 
 /// How long `PluginStatus` waits for the window's account.
@@ -203,6 +206,8 @@ struct Inner {
     written: Mutex<HashMap<String, Vec<u8>>>,
     tools: Arc<ToolBroker>,
     channel: Arc<Slot>,
+    /// The window, told when the theme methods change the theme files.
+    themes: Arc<Slot>,
     kick: Mutex<Option<mpsc::UnboundedSender<Kick>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     watch: Mutex<Option<crate::fs_watch::FsWatch>>,
@@ -482,6 +487,7 @@ impl Plugins {
                 reviews: Mutex::new(reviews::Reviews::default()),
                 tools: Arc::new(ToolBroker::default()),
                 channel: Arc::new(Slot::default()),
+                themes: Arc::new(Slot::default()),
                 kick: Mutex::new(None),
                 tasks: Mutex::new(Vec::new()),
                 watch: Mutex::new(None),
@@ -922,6 +928,7 @@ impl Plugins {
                     self.key_notice(
                         &format!("key-added:{}", row.key),
                         "key_added",
+                        Some(&device),
                         "A new signing key",
                         &format!(
                             "A new signing key was added to your account on {device}. If that wasn't you, revoke it in Settings → Account. (Fingerprint {}.)",
@@ -1007,6 +1014,7 @@ impl Plugins {
         self.key_notice(
             &format!("key-revoked:{key}"),
             "own_key_revoked",
+            None,
             "Signing key revoked",
             &format!(
                 "{here} signing key was revoked from another device. Plugins it signed no longer count as yours; your own plugins' programs, services and other code-running powers wait for you to allow them again. Sign in again to register a new key."
@@ -1033,15 +1041,16 @@ impl Plugins {
         });
     }
 
-    /// Said by the host (the app's strip, from the plugin list) and as a
-    /// desktop banner: once per `id`.
-    fn key_notice(&self, id: &str, kind: &str, title: &str, words: &str) {
+    /// Said by the host (the app's toasts, from the plugin list, in its
+    /// own words from `kind` and `device`, the other device's name) and as
+    /// a desktop banner: once per `id`.
+    fn key_notice(&self, id: &str, kind: &str, device: Option<&str>, title: &str, words: &str) {
         {
             let mut notices = lock(&self.inner.key_notices);
             if notices.iter().any(|n| n["id"] == id) {
                 return;
             }
-            notices.push(serde_json::json!({ "id": id, "kind": kind, "words": words }));
+            notices.push(serde_json::json!({ "id": id, "kind": kind, "device": device, "words": words }));
             let excess = notices.len().saturating_sub(20);
             notices.drain(..excess);
         }
@@ -1666,7 +1675,7 @@ impl Plugins {
             methods::REMOVE_PLUGIN => {
                 let p: IdParams = parse_params(params)?;
                 if self.entry(&p.id).is_some_and(|e| e.item.builtin) {
-                    return Err(failed("Zeron's own plugins can be turned off, not removed"));
+                    return Err(failed("Built-in plugins can be turned off, but not removed"));
                 }
                 // (One plain name, joined so it stays in the plugins folder on
                 // every system: never `C:`, a device name or a trailing dot.)
@@ -1918,6 +1927,21 @@ impl Plugins {
             }
             methods::WATCH_PLUGIN_CHANNEL => {
                 Ok(RpcReply::Stream(self.inner.channel.subscribe(|| {})))
+            }
+            methods::WATCH_THEMES => Ok(RpcReply::Stream(self.inner.themes.subscribe(|| {}))),
+            method if themes::handles(method) => {
+                if let Some(by) = zeron_rpc::caller().record() {
+                    tracing::info!(method, %by, "themes: asked by an agent");
+                }
+                let (data_dir, asked) = (self.inner.data_dir.clone(), method.to_owned());
+                let reply = tokio::task::spawn_blocking(move || themes::answer(&data_dir, &asked, &params))
+                    .await
+                    .map_err(|_| failed("Couldn't reach the themes"))?
+                    .map_err(failed)?;
+                if themes::changes(method) {
+                    self.inner.themes.push(serde_json::json!({ "changed": true }));
+                }
+                RpcReply::value(&reply)
             }
             methods::LIST_TEMPLATES
             | methods::CREATE_TEMPLATE

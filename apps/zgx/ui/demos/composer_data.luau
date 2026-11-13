@@ -158,7 +158,71 @@ function M.tasks(): { Dock.Task }
 		{ id = "k1", kind = "terminal", name = "cargo test -p zeron-ui", detail = "composer::queue", since = ago(134) },
 		{ id = "k2", kind = "process", name = "vite dev", detail = ":5173", since = ago(1812) },
 		{ id = "k3", kind = "agent", name = "Reviewing the diff", detail = "14 files read", since = ago(41) },
+		-- A described command: its name, then the command itself, long.
+		{
+			id = "k4",
+			kind = "process",
+			name = "Build with the webkitgtk feature",
+			detail = "cd ~/dev/zeron/apps/zgx && cargo build --release -j 4 --features webkitgtk 2>&1 | tee build.log",
+			since = ago(420),
+		},
 	}
+end
+
+-- A session fanning work out to subagents: `n` of them, about a third still
+-- running and the rest done (every seventh failed), with titles of every
+-- length, and the two processes the agent left behind: a polling loop on a
+-- long command, and a dev server. Running subagents first, as the chat's
+-- tray lists them, then the processes, then the finished (newest first).
+local TITLES = {
+	"scan the repo",
+	"Audit the sync engine's retry and backoff paths for races",
+	"read the docs",
+	"find the flaky test",
+	"Reproduce the transcript scroll jump on a 4,000-message chat and bisect it",
+	"check the lockfile",
+	"summarise PR 1171",
+	"trace the composer's tray heights through a reload",
+	"list every caller of Dock.Task",
+	"draft the release notes",
+}
+-- What to know about the chat, worst first.
+function M.alerts(): { Dock.Alert }
+	return {
+		{ id = "al1", tone = "danger", title = "github MCP server failed to start", detail = "exit 127: npx not found", action = "Retry" },
+		{ id = "al2", tone = "warning", title = "Context 92% full", detail = "older turns will be compacted soon", action = "Compact" },
+		{ id = "al3", tone = "warning", title = "Rate limited", detail = "resets at 3:40 PM" },
+		{ id = "al4", tone = "info", title = "pre-commit hook skipped", detail = "no hooks in this worktree" },
+	}
+end
+
+function M.subagents(n: number): { Dock.Task }
+	local running, finished = {}, {}
+	local live = math.max(1, math.ceil(n / 3))
+	for i = 1, n do
+		local name = TITLES[(i - 1) % #TITLES + 1]
+		if n > #TITLES then
+			name = `{name} ({i})`
+		end
+		if i <= live then
+			table.insert(running, { id = `sub{i}`, kind = "agent", name = name } :: Dock.Task)
+		else
+			local failed = i % 7 == 0
+			table.insert(finished, 1, { id = `sub{i}`, kind = "agent", name = name, ended = if failed then "failed" else "done", failed = failed or nil } :: Dock.Task)
+		end
+	end
+	local out: { Dock.Task } = running
+	table.insert(out, {
+		id = "poll",
+		kind = "process",
+		name = 'until grep -q "^exit" /tmp/build-7f3a/status; do sleep 2; done',
+		since = ago(212),
+	} :: Dock.Task)
+	table.insert(out, { id = "dev", kind = "process", name = "vite dev", detail = ":5173", since = ago(1812) } :: Dock.Task)
+	for _, t in finished do
+		table.insert(out, t)
+	end
+	return out
 end
 
 local QUESTION: Ask.Question = {

@@ -18,7 +18,109 @@ local sessions = require("@account/sessions")
 require("@app/screens/shell/route").launched:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
+-- The host's chats, as the engine has them: one record a chat (its session,
+-- its messages, its reply streaming), shown by every view watching it: the
+-- window's open chat (screens/chat/store) and each lane (a split's chats).
+-- A test changes a chat by setting `fixture.chats` (`{ [id]: { session?,
+-- messages?, draft? } }`); what's watched is kept in `split_lanes`. A chat
+-- with no record shows its own words, "This is <id>", in a lane.
+local lanes = require("@app/screens/chat/lanes")
+local split_lanes = ui.state("split_lanes", {} :: { [string]: string })
+local fixture_chats = ui.shared("fixture.chats", {} :: { [string]: any })
+local open_chat = ui.state("fixture_open_chat", "")
+local function project(view: any, id: string, lane: boolean)
+	local c = fixture_chats:peek()[id]
+	if not c then
+		if lane then
+			-- (Asked again for the chat it has, as a reload asks, it keeps
+			-- what it has, as the host does.)
+			local first = view.messages:peek()[1]
+			if not (first and first.id == `{id}-m`) then
+				view.messages:set({ { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
+			end
+		end
+		return
+	end
+	view.messages:set(c.messages or { { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
+	view.draft:set(c.draft or { id = "", text = "" })
+	view.session:set(c.session)
+end
+local stub_lanes = lanes :: any
+stub_lanes.watch = function(slot: string, id: string?)
+	split_lanes:set_key(slot, id)
+	if id then
+		project(lanes.view(slot), id, true)
+	end
+end
+-- (The window's open chat: in place of the store's, below.)
+local function open_store(id: string?)
+	open_chat:set(id or "")
+	if id then
+		project(store, id, false)
+	end
+end
+ui.effect(function()
+	fixture_chats:get()
+	for slot, id in split_lanes:peek() do
+		if id then
+			project(lanes.view(slot), id, true)
+		end
+	end
+	local id = open_chat:peek()
+	if id ~= "" then
+		project(store, id, false)
+	end
+end)
 -- Settings' host calls, answered as the host would (settings_stub.luau).
+-- (Answered at once, as the host's calls do a beat later.)
+local function answered(value: any): any
+	return {
+		after = function(_, ok: (any) -> ())
+			ui.after(0, function()
+				ok(value)
+			end)
+		end,
+	}
+end
+-- (A terminal's host and zgx's terminal, stood in for: an engine terminal
+-- a number, its view a column saying which, as ui/panel_fixture's.)
+local tapi = require("@app/screens/panel/terminal_api") :: any
+local terms = ui.state("fixture_terms", 0)
+local term_sessions: { [string]: any } = {}
+tapi.start = function(_target: any): any
+	terms:add(1)
+	return answered({ command = `bridge term-{terms:peek()}`, claim = `claim-{terms:peek()}` })
+end
+tapi.claimed = function(claim: string): any
+	return answered(`term-{string.match(claim, "%d+")}`)
+end
+tapi.command = function(id: string): any
+	return answered(`bridge {id}`)
+end
+tapi.status = function(): any
+	return answered({ busy = false, exited = false })
+end
+tapi.close = function(): any
+	return answered(nil)
+end
+tapi.write = function(): any
+	return answered(nil)
+end
+tapi.term = function(key: string, options: any?): any
+	local s = term_sessions[key]
+	if not s and options then
+		s = { title = nil, close = function()
+			term_sessions[key] = nil
+		end, focus = function() end }
+		term_sessions[key] = s
+	end
+	return s
+end
+tapi.view = function(props: any): Node
+	return ui.column { grow = 1, label = "Terminal", ui.text { `terminal {props.label}`, literal = true } }
+end
+-- (Before Settings' stand-ins, which put theirs over these: the
+-- registry's sign-in terminal, every other one as here.)
 require("./settings_stub")
 
 -- No window chrome to restyle headless, and no chat to open (the chat
@@ -93,6 +195,8 @@ for name, f in chat_store do
 		chat_store[name] = function() end
 	end
 end
+-- (Its open chat shown as the host's chats have it, above.)
+chat_store.open = open_store
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
@@ -286,6 +390,45 @@ stub.rename = function(id: string, title: string)
 	note(`rename:{id}:{title}`)
 	find(id).title = title
 	publish()
+end
+-- Sleep, as the engine keeps it: until a time (none, awake).
+stub.sleep = function(id: string, until_at: number?): any
+	note(`sleep:{id}:{tostring(until_at)}`)
+	local c = find(id)
+	if c then
+		c.sleep_until = until_at
+		c.woke = nil
+	end
+	publish()
+	return { after = function(_, ok: any)
+		if ok then
+			ok(nil)
+		end
+	end }
+end
+-- Stop waiting: the processes it waited on no longer hold it; with nothing
+-- else to wait on, its turn's end stands (finished, unseen).
+stub.stop_waiting = function(id: string): any
+	note(`stop_waiting:{id}`)
+	local c = find(id)
+	if c and c.waiting then
+		local kept = {}
+		for _, w in c.waiting do
+			if w.kind ~= "process" then
+				table.insert(kept, w)
+			end
+		end
+		c.waiting = if #kept > 0 then kept else nil
+		if not c.waiting then
+			c.status = "done"
+		end
+	end
+	publish()
+	return { after = function(_, ok: any)
+		if ok then
+			ok(nil)
+		end
+	end }
 end
 stub.seen = function(id: string)
 	note(`seen:{id}`)
@@ -502,7 +645,73 @@ projects_stub.delete = function(id: string): any
 	return answer(nil)
 end
 
+-- What opens tabs in the panel, as plugins, links and the panel home do:
+-- each its own tab (a PR from the GitHub plugin's board, a file, a page, a
+-- terminal), named by a count.
+local opened_tabs = ui.state("fixture_opened_tabs", 0)
+local function panel_screen(): any
+	return require("@app/screens/panel")
+end
+local function here(): string?
+	local s = require("@app/screens/shell/route").session:peek()
+	return if s then s.id else nil
+end
+for _, source in { "pr", "file", "url", "terminal" } do
+	ui.command {
+		id = `fixture.open_{source}`,
+		title = `Fixture: open a {source} in the panel`,
+		run = function()
+			opened_tabs:add(1)
+			local n, p = opened_tabs:peek(), panel_screen()
+			if source == "pr" then
+				p.open_plugin_tab(here(), { plugin = "github", kind = "pr", title = `PR #{n}`, data = { key = `pr{n}` } })
+			elseif source == "file" then
+				p.open_file(here(), `src/file{n}.rs`)
+			elseif source == "url" then
+				p.open_url(here(), `https://example.com/{n}`)
+			else
+				local state = require("@app/screens/panel/state")
+				local k = state.key(here(), nil)
+				if k then
+					state.open(k, "terminal")
+				end
+			end
+		end,
+	}
+end
+
 -- What changes on the engine's side.
+-- The engine's Waiting: Write the docs ends its turn waiting on its tests.
+ui.command {
+	id = "wait_on_tests",
+	title = "Write the docs waits on its tests",
+	run = function()
+		local c = find("a2")
+		c.status = "waiting"
+		c.waiting = { { id = "bn1", kind = "process", label = "cargo test" } }
+		publish()
+	end,
+}
+-- Put to sleep for two hours and a minute (its corner: "3h").
+ui.command {
+	id = "sleep_a3",
+	title = "Tidy the tests sleeps",
+	run = function()
+		stub.sleep("a3", os.time() + 2 * 3600 + 60)
+	end,
+}
+-- Woken from sleep (its time came), not looked at since.
+ui.command {
+	id = "woke",
+	title = "Tidy the tests woke from sleep",
+	run = function()
+		local c = find("a3")
+		c.sleep_until = nil
+		c.woke = os.time() - 30
+		c.updated = os.time() - 30
+		publish()
+	end,
+}
 ui.command {
 	id = "work",
 	title = "Write the docs starts working",
@@ -631,6 +840,36 @@ ui.command {
 		publish()
 	end,
 }
+-- Thousands archived (Settings → Archived builds what it shows): `Chat <n>`,
+-- each seventh with no project nor a device still known, so nothing under
+-- its name. (Kept across a reload, as the host's sessions are.)
+local thousands = ui.state("fixture_archive_thousands", false)
+local function archive_thousands()
+	for i = 1, 2000 do
+		local plain = i % 7 == 0
+		table.insert(model.archived, {
+			id = `many{i}`,
+			title = `Chat {i}`,
+			project = if plain then nil else "atlas",
+			device = if plain then "gone" else "mac",
+			updated = NOW - (200 + i) * HOUR,
+			created = NOW - (300 + i) * HOUR,
+			agent = "claude",
+		})
+	end
+	publish()
+end
+if thousands:peek() then
+	archive_thousands()
+end
+ui.command {
+	id = "archive_thousands",
+	title = "Two thousand sessions archived",
+	run = function()
+		thousands:set(true)
+		archive_thousands()
+	end,
+}
 -- Subagents running under Fix the build (`subagents_<n>`).
 for _, n in { 0, 3, 120 } do
 	ui.command {
@@ -695,7 +934,7 @@ ui.command {
 		publish()
 	end,
 }
--- Five hundred repositories on this Mac and fifteen hundred sessions in
+-- Five hundred repositories on this computer and fifteen hundred sessions in
 -- them, three each on branches of their own (`r<i>-<k>`): fifty touched in
 -- the last day, four hundred and fifty in the last fortnight, the rest
 -- older (GitHub's watch at scale: examples_tests' github_scale).
@@ -736,17 +975,96 @@ ui.command {
 		require("@app/screens/shell/route").plugin_page("fixture", "board")
 	end,
 }
--- Six more projects on this Mac, a session each, older than Atlas's (Proj 1
+-- Six more projects on this computer, a session each, older than Atlas's (Proj 1
 -- the newest): by device then project, MacBook Pro holds seven project
 -- groups, its first five then "Show 2 more" (tests/sidebar_tree).
 ui.command {
 	id = "many_projects",
-	title = "Six more projects on this Mac",
+	title = "Six more projects on this computer",
 	run = function()
 		for i = 1, 6 do
 			table.insert(model.projects, { id = `p{i}`, name = `Proj {i}`, device = "mac", path = `/work/p{i}`, git = true })
 			table.insert(model.chats, { id = `q{i}`, title = `Work in Proj {i}`, project = `p{i}`, device = "mac", updated = NOW - (10 + i) * HOUR, created = NOW - (20 + i) * HOUR, agent = "claude" })
 		end
+		publish()
+	end,
+}
+-- Three more projects on this computer: Cobalt and Dune with every session
+-- archived (empty: folded into the sidebar's "2 empty projects"), and Ember,
+-- just added, with none at all (not empty: a new chat is about to start
+-- in it) (tests/sidebar_empty_projects).
+ui.command {
+	id = "empty_projects",
+	title = "Two projects with only archived sessions, one just added",
+	run = function()
+		table.insert(model.projects, { id = "cobalt", name = "Cobalt", device = "mac", path = "/work/cobalt", git = true })
+		table.insert(model.projects, { id = "dune", name = "Dune", device = "box", path = "/srv/dune", git = true })
+		table.insert(model.projects, { id = "ember", name = "Ember", device = "mac", path = "/work/ember", git = true })
+		table.insert(model.archived, { id = "c1", title = "Old Cobalt work", project = "cobalt", device = "mac", updated = NOW - 72 * HOUR, created = NOW - 80 * HOUR, agent = "claude" })
+		table.insert(model.archived, { id = "d1", title = "Old Dune work", project = "dune", device = "box", updated = NOW - 96 * HOUR, created = NOW - 100 * HOUR, agent = "claude" })
+		publish()
+	end,
+}
+-- Sixty projects with every session archived (Gone 1…60): the fold opened
+-- is a long run of headers, built only as they show.
+ui.command {
+	id = "many_empty_projects",
+	title = "Sixty projects with only archived sessions",
+	run = function()
+		for i = 1, 60 do
+			table.insert(model.projects, { id = `g{i}`, name = `Gone {i}`, device = "mac", path = `/work/g{i}`, git = true })
+			table.insert(model.archived, { id = `ga{i}`, title = `Gone work {i}`, project = `g{i}`, device = "mac", updated = NOW - (200 + i) * HOUR, created = NOW - (210 + i) * HOUR, agent = "claude" })
+		end
+		publish()
+	end,
+}
+-- Links clicked in a chat: a pull request's, an issue's, another site's
+-- (tests/plugin_links).
+for id, url in {
+	click_pr_link = "https://github.com/acme/atlas/pull/12/files",
+	click_issue_link = "https://github.com/acme/atlas/issues/12",
+	click_other_link = "https://example.com/acme/atlas/pull/12",
+} do
+	ui.command {
+		id = id,
+		title = id,
+		run = function()
+			require("@ds/links").take(url)
+		end,
+	}
+end
+-- Atlas cloned on the devbox too, with a session there (tests/sidebar_repository).
+ui.command {
+	id = "atlas_cloned_on_box",
+	title = "Atlas is cloned on devbox",
+	run = function()
+		for _, p in model.projects do
+			if p.id == "atlas" then
+				p.repository, p.created = "commit:atlas", 100
+			end
+		end
+		table.insert(model.projects, { id = "atlas-clone", name = "atlas-clone", device = "box", path = "/srv/atlas-clone", git = true, repository = "commit:atlas", created = 200 })
+		table.insert(model.chats, { id = "cl1", title = "On the clone", project = "atlas-clone", device = "box", updated = NOW - 30 * HOUR, created = NOW - 30 * HOUR })
+		publish()
+	end,
+}
+-- A chat beside each of the five, to compose tabs from (tests/session_tabs).
+ui.command {
+	id = "partner_chats",
+	title = "Five more chats",
+	run = function()
+		for i = 1, 5 do
+			table.insert(model.chats, { id = `p{i}`, title = `Partner {i}`, project = "atlas", device = "mac", updated = NOW - 40 * HOUR - i, created = NOW - 40 * HOUR - i })
+		end
+		publish()
+	end,
+}
+-- A session starts in Cobalt (another device's, say): it has one again.
+ui.command {
+	id = "cobalt_arrives",
+	title = "A session starts in Cobalt",
+	run = function()
+		table.insert(model.chats, 1, { id = "c2", title = "Back in Cobalt", project = "cobalt", device = "mac", status = "working", updated = os.time(), created = os.time(), agent = "claude" })
 		publish()
 	end,
 }
@@ -770,7 +1088,18 @@ ui.command {
 		publish()
 	end,
 }
--- Fix the build's side chats, on this Mac as Tidy the tests is (no branch):
+-- Atlas's folder on devbox too, a project of its own there (the same
+-- repository on another computer): a new chat in Atlas on devbox starts in
+-- it (tests/sidebar_device_new_chat).
+ui.command {
+	id = "atlas_twin_on_box",
+	title = "Atlas has a folder on devbox too",
+	run = function()
+		table.insert(model.projects, { id = "atlas-box", name = "Atlas", device = "box", path = "/srv/atlas", git = true })
+		publish()
+	end,
+}
+-- Fix the build's side chats, on this computer as Tidy the tests is (no branch):
 -- the panel home's rows to set beside the sidebar's (tests/
 -- sidebar_panel_parity). One moved last and made first, one the other way.
 ui.command {
@@ -955,8 +1284,8 @@ ui.command {
 		settings.add { id = "profile", title = "Profile", group = "Personal", before = "general", view = function(): Node
 			return ui.text { "Your profile" }
 		end }
-		settings.add { id = "devices", title = "This Mac", group = "Devices", before = "archived", view = function(): Node
-			return ui.text { "This Mac" }
+		settings.add { id = "devices", title = "This computer", group = "Devices", before = "archived", view = function(): Node
+			return ui.text { "This computer" }
 		end }
 	end,
 }

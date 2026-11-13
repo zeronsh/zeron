@@ -1,5 +1,5 @@
-//! The authoring guides agents read: how to write a plugin and a template
-//! (apps/zgx/docs/plugins.md, templates.md), kept in the engine so every
+//! The authoring guides agents read: how to write a plugin, a template and
+//! a theme (apps/zgx/docs/plugins.md, templates.md, themes.md), kept in the engine so every
 //! device has them, written into `<data>/docs/` as the tools that need them
 //! answer, and linked from each plugin's and template's README.
 
@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub const PLUGINS: &str = include_str!("../../../../apps/zgx/docs/plugins.md");
 pub const TEMPLATES: &str = include_str!("../../../../apps/zgx/docs/templates.md");
+pub const THEMES: &str = include_str!("../../../../apps/zgx/docs/themes.md");
 
 /// Where the guides are written, in the data dir.
 pub const DIR: &str = "docs";
@@ -30,6 +31,18 @@ pub fn ensure(data_dir: &Path) -> (PathBuf, PathBuf) {
         path
     };
     (write("plugins.md", PLUGINS), write("templates.md", TEMPLATES))
+}
+
+/// The themes guide in `<data_dir>/docs/`, written where missing or
+/// changed: its path.
+pub fn themes(data_dir: &Path) -> PathBuf {
+    let dir = data_dir.join(DIR);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("themes.md");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(THEMES) {
+        let _ = std::fs::write(&path, THEMES);
+    }
+    path
 }
 
 /// A new plugin's README: what it is and where the guide is.

@@ -233,10 +233,12 @@ test("a message that didn't go says so above the side chat's composer, never ove
 	app:frames(30)
 	app:type('.side-chat-tab >> role:textbox', "lost words")
 	app:key("Enter")
-	app:wait('.side-chat-tab >> "Your message didn\'t send"', { timeout_ms = 3000 })
-	app:frames(10)
+	-- An alert of the composer's deck: in its pill, opened to read.
+	app:wait('.side-chat-tab >> role:button "Open Alerts"', { timeout_ms = 3000 })
+	app:click('.side-chat-tab >> role:button "Open Alerts"')
+	app:frames(30)
 	expect(app:has('.side-chat-tab >> "Your message didn\'t send"')).to_be(true)
-	-- Its line above the composer's box, not a toast over it.
+	-- Above the composer's box, not a toast over it.
 	expect(calls(app)).never.to_contain("toast:")
 	local said = y_of(app, '.side-chat-tab >> "Your message didn\'t send"') :: number
 	local box = y_of(app, '.side-chat-tab >> role:textbox') :: number

@@ -25,8 +25,11 @@
 --                         messages, draft } states; `lanes.watch(slot, id)`
 --   lanes.open(session, lane)  a lane in the session's panel, as a tab
 --                         ({ kind = "side_chat" | "subagent", id, title })
---   lanes.new_side_chat(session), lanes.fork(session)  the shipping app's
---                         "New side chat" and "Fork chat"
+--   lanes.new_side_chat(session, at?), lanes.fork(session)  the shipping
+--                         app's "New side chat" and "Fork chat"; `at`
+--                         ({ project?, device? }) where its composer's place
+--                         starts instead of its parent's (the panel home's
+--                         group "+")
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
@@ -83,7 +86,8 @@ function M.side(id: string?): { sessions.Child }
 end
 
 -- A transcript's subagents: each spawn chip that names its doc, once, in
--- the order they were spawned, with when their turn began.
+-- the order they were spawned, with when their turn began. (As the host says
+-- them: for a fixture, which has no host.)
 function M.subagents_of(messages: { any }): { any }
 	local out, seen = {}, {}
 	local function walk(tools: { any }?, at: number?)
@@ -108,12 +112,51 @@ function M.subagents_of(messages: { any }): { any }
 	return out
 end
 
+-- (The host says them, so this doesn't read a whole transcript each time it moves.)
+local published = ui.shared("chat.subagents", {} :: { any })
 local subagents = ui.computed(function(): { any }
-	return M.subagents_of(store.messages:get())
+	local out: { any } = {}
+	for _, s in published:get() do
+		table.insert(out, { ref = s.ref, title = s.title or locale.s("chat.lanes.subagent"), status = s.status, at = s.at })
+	end
+	return out
 end)
 
 function M.subagents(): { any }
 	return subagents:get()
+end
+
+-- The open chat's subagents as the composer's Running tray lists them (its
+-- tasks, ds/composer_dock): running first, in the order they were spawned,
+-- the finished (done or failed) after, newest first, as the lanes card
+-- orders them. A subagent not heard from yet counts as running, as it does
+-- there. Each task's id is the subagent's doc (`ref`).
+function M.tasks(): { any }
+	local active, finished = {}, {}
+	for _, s in subagents:get() do
+		local task = { id = s.ref, kind = "agent", name = s.title }
+		if s.status == "done" or s.status == "failed" then
+			task.ended = s.status
+			task.failed = s.status == "failed" or nil
+			table.insert(finished, 1, task)
+		else
+			table.insert(active, task)
+		end
+	end
+	for _, t in finished do
+		table.insert(active, t)
+	end
+	return active
+end
+
+-- A tray row's subagent, opened as a tab of the session's panel.
+function M.open_task(session: string, ref: string)
+	for _, s in subagents:peek() do
+		if s.ref == ref then
+			M.open_subagent(session, s)
+			return
+		end
+	end
 end
 
 -- A lane's chat, as the host watches it in `slot`.
@@ -175,6 +218,10 @@ end
 -- has nothing of one until its first message (the shipping app's
 -- `create_child_chat` writes nothing until then).
 M.unsent = ui.state("chat_lanes_unsent", {} :: { [string]: string })
+M.take_keys = ui.state("chat_lanes_take_keys", {} :: { [string]: boolean })
+-- Where an unsent side chat's composer starts, where it isn't its
+-- parent's (screens/chat/lane_tab reads it once, as it seeds the place).
+M.starts = ui.state("chat_lanes_starts", {} :: { [string]: { project: string?, device: string? } })
 
 local function set_in(s: State<any>, key: string, value: any)
 	local now = table.clone(s:peek())
@@ -184,13 +231,18 @@ end
 
 -- The shipping app's "New side chat": a side chat of the session, opened in
 -- its panel; made, where its parent is, as its first message is sent.
-function M.new_side_chat(session: string?)
+function M.new_side_chat(session: string?, at: { project: string?, device: string? }?)
 	if not session then
 		ds.toast.show { title = locale.s("chat.lanes.need_conversation"), tone = "warning" }
 		return
 	end
 	local id = M.new_id()
+	if at and (at.project or at.device) then
+		set_in(M.starts, id, { project = at.project, device = at.device })
+	end
 	set_in(M.unsent, id, session)
+	-- (Its composer takes the keys as it's made: nothing to read yet.)
+	set_in(M.take_keys, id, true)
 	M.open(session, { kind = "side_chat", id = id, title = locale.s("chat.lanes.new_side_chat") })
 end
 

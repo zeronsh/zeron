@@ -1193,7 +1193,7 @@ local function component(props: Props): Node
 			-- Its level, as an icon button's text: wider, the same states.
 			IconButton {
 				label = locale.t("ds.file_viewer.fit_or_actual"),
-				tooltip = locale.s("ds.file_viewer.fit_or_actual_tip"),
+				tooltip = locale.s("ds.file_viewer.fit_or_actual_tip", { fit = ui.shortcut_text("cmd+0"), actual = ui.shortcut_text("cmd+1") }),
 				size = "lg",
 				w = 52,
 				on_click = zoom("toggle"),
@@ -1608,12 +1608,6 @@ local function component(props: Props): Node
 				justify = "center",
 				gap = "$space.3",
 				ui.text { locale.t("ds.file_viewer.choose"), text_size = "$font.size.md", color = "$text.tertiary" },
-				ui.row {
-					gap = "$space.4",
-					ui.row { gap = "$space.1", items = "center", Kbd { text = "/" }, ui.text { locale.t("ds.file_viewer.hint_filter"), text_size = "$font.size.sm", color = "$text.tertiary" } },
-					ui.row { gap = "$space.1", items = "center", Kbd { keys = "up" }, Kbd { keys = "down" }, ui.text { locale.t("ds.file_viewer.hint_move"), text_size = "$font.size.sm", color = "$text.tertiary" } },
-					ui.row { gap = "$space.1", items = "center", Kbd { keys = "enter" }, ui.text { locale.t("ds.file_viewer.hint_open"), text_size = "$font.size.sm", color = "$text.tertiary" } },
-				},
 			}
 		end
 		local doc_: Doc = d

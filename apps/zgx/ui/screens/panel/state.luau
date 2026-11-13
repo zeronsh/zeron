@@ -56,6 +56,10 @@ local next_id = ui.state("panel_next_id", 1)
 
 local EMPTY: Session = { tabs = {}, visited = {} }
 
+-- A new chat with no project's tabs (v3's page asks for it): a panel of its own all the
+-- same, with what needs no folder.
+M.NO_PROJECT = "no-project"
+
 -- Which session's tabs: its id's, or its project's; a plugin's page's,
 -- on one (`page`: `{ plugin, id }`).
 function M.key(session: any, project: any, page: any?): string?
@@ -207,7 +211,9 @@ function M.activate(key: string, id: string?)
 	end
 	s.active = id
 	visit(s, id)
-	write(key, s)
+	ui.batch(function()
+		write(key, s)
+	end)
 	M.want_keys(key, id)
 end
 
@@ -238,27 +244,32 @@ function M.close(key: string, id: string)
 	if v then
 		table.remove(s.visited, v)
 	end
-	if s.active == id then
-		local next_active: string? = nil
-		for _, seen in s.visited do
-			for _, t in s.tabs do
-				if t.id == seen then
-					next_active = seen
+	local was_active = s.active == id
+	ui.batch(function()
+		if was_active then
+			local next_active: string? = nil
+			for _, seen in s.visited do
+				for _, t in s.tabs do
+					if t.id == seen then
+						next_active = seen
+						break
+					end
+				end
+				if next_active then
 					break
 				end
 			end
-			if next_active then
-				break
-			end
+			s.active = next_active or (if s.tabs[1] then s.tabs[1].id else nil)
+			write(key, s)
+		else
+			write(key, s)
 		end
-		s.active = next_active or (if s.tabs[1] then s.tabs[1].id else nil)
-		write(key, s)
+	end)
+	if was_active then
 		-- (A terminal in front now: the keyboard, as the shipping app's
 		-- `close_right_surface`.)
 		M.want_keys(key, s.active)
-		return
 	end
-	write(key, s)
 end
 
 -- A terminal tab's engine terminal, once opened (kept with the tab, so a

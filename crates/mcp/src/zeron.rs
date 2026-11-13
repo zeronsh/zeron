@@ -14,7 +14,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use zeron_doc::{
-    SessionCommandPayload, SessionMessageEntry, TranscriptFrame, apply_transcript_frame,
+    SessionCommandPayload, SessionMessageEntry, TranscriptFrame, TranscriptWindow,
+    TranscriptWindowInfo, apply_transcript_frame,
 };
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
@@ -28,6 +29,10 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 /// boundary (chat2 cutover etc.) — the same contract the UI follows.
 const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
 
+/// How long a transcript read may take. A full read of a long chat crosses
+/// the relay at the uplink's speed.
+const TRANSCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Which chat this server speaks for, when the engine injected it into a
 /// harness. Unset when a human runs `zeron mcp` from a terminal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +42,10 @@ pub struct Origin {
     /// The host launched the agent without its own subagent tools
     /// ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
     pub side_chats_only: bool,
+    /// The agent's runtime brings it back on its own as background work
+    /// ends, so it may say it waits on that work
+    /// ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
+    pub waits_on_background: bool,
 }
 
 impl Origin {
@@ -51,6 +60,9 @@ impl Origin {
             chat_id: read("ZERON_CHAT_ID"),
             device_id: read("ZERON_DEVICE_ID"),
             side_chats_only: read(zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV).as_deref()
+                == Some("1"),
+            waits_on_background: read(zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV)
+                .as_deref()
                 == Some("1"),
         }
     }
@@ -389,37 +401,60 @@ impl Zeron {
         chat_id: &str,
         device: Option<&str>,
     ) -> anyhow::Result<Vec<SessionMessageEntry>> {
+        let mut follow = self.open_transcript(chat_id, device, None).await?;
+        tokio::time::timeout(TRANSCRIPT_TIMEOUT, follow.next())
+            .await
+            .map_err(|_| no_transcript())??;
+        Ok(follow.entries)
+    }
+
+    /// One window of the transcript, read and released.
+    pub async fn transcript_window(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+        window: TranscriptWindow,
+    ) -> anyhow::Result<TranscriptView> {
+        let mut follow = self.open_transcript(chat_id, device, Some(window)).await?;
+        tokio::time::timeout(TRANSCRIPT_TIMEOUT, follow.next())
+            .await
+            .map_err(|_| no_transcript())??;
+        Ok(follow.view())
+    }
+
+    /// A window kept up to date by the host's deltas: call
+    /// [`TranscriptFollow::next`] for each change, the first being the window
+    /// as it stands.
+    pub async fn follow_transcript(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+        window: TranscriptWindow,
+    ) -> anyhow::Result<TranscriptFollow> {
+        self.open_transcript(chat_id, device, Some(window)).await
+    }
+
+    async fn open_transcript(
+        &self,
+        chat_id: &str,
+        device: Option<&str>,
+        window: Option<TranscriptWindow>,
+    ) -> anyhow::Result<TranscriptFollow> {
         let mut params = json!({ "chatId": chat_id });
         if let Some(device) = device {
             params["targetDeviceId"] = json!(device);
         }
-        let mut rx = self.subscribe(methods::WATCH_DOC_MESSAGES, params).await?;
-        let mut entries = Vec::new();
-        let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                bail!(
-                    "WatchDocMessages: no transcript within {}s",
-                    SNAPSHOT_TIMEOUT.as_secs()
-                );
-            }
-            let item = match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(item)) => item,
-                Ok(None) => bail!("WatchDocMessages: stream ended before the transcript arrived"),
-                Err(_) => bail!(
-                    "WatchDocMessages: no transcript within {}s",
-                    SNAPSHOT_TIMEOUT.as_secs()
-                ),
-            };
-            let is_reset = item.get("reset").is_some();
-            let frame: TranscriptFrame =
-                serde_json::from_value(item).context("WatchDocMessages: bad frame")?;
-            apply_transcript_frame(&mut entries, frame).map_err(|e| anyhow!("transcript: {e}"))?;
-            if is_reset {
-                return Ok(entries);
-            }
+        if let Some(window) = &window {
+            params["window"] = json!(window);
         }
+        let rx = self.subscribe(methods::WATCH_DOC_MESSAGES, params).await?;
+        Ok(TranscriptFollow {
+            rx,
+            window,
+            entries: Vec::new(),
+            info: None,
+            opened: false,
+        })
     }
 
     // ---- writes ------------------------------------------------------------
@@ -631,6 +666,15 @@ impl Zeron {
                     SessionStatus::Errored if advanced || saw_working => {
                         return Ok((TurnOutcome::Errored, Some(session)));
                     }
+                    // Its turn ended into a wait on background work that will
+                    // wake its agent: it isn't done yet, and its finish is
+                    // marked when the wait is over.
+                    SessionStatus::Idle
+                        if zeron_proto::view::waiting(Some(&session), chrono::Utc::now()).is_some() =>
+                    {
+                        saw_working = true;
+                        last = Some(session);
+                    }
                     SessionStatus::Idle => {
                         if session
                             .last_turn_outcome
@@ -659,6 +703,86 @@ impl Zeron {
                     _ => {
                         last = Some(session);
                     }
+                }
+            }
+        }
+    }
+}
+
+fn no_transcript() -> anyhow::Error {
+    anyhow!(
+        "WatchDocMessages: no transcript within {}s",
+        TRANSCRIPT_TIMEOUT.as_secs()
+    )
+}
+
+/// A window of a transcript and the facts about the rest of it.
+#[derive(Debug, Clone)]
+pub struct TranscriptView {
+    pub entries: Vec<SessionMessageEntry>,
+    pub info: TranscriptWindowInfo,
+}
+
+/// A live `WatchDocMessages` subscription. Dropping it cancels on the host.
+pub struct TranscriptFollow {
+    rx: RpcSubscription,
+    window: Option<TranscriptWindow>,
+    /// The slice from a host that applied the window, else everything.
+    entries: Vec<SessionMessageEntry>,
+    info: Option<TranscriptWindowInfo>,
+    opened: bool,
+}
+
+impl TranscriptFollow {
+    /// Wait for the next change. Before the opening `reset` nothing else
+    /// counts; an error means this subscription is over.
+    pub async fn next(&mut self) -> anyhow::Result<()> {
+        loop {
+            let Some(mut item) = self.rx.recv().await else {
+                bail!("WatchDocMessages: stream ended before the transcript arrived");
+            };
+            let is_reset = item.get("reset").is_some();
+            if let Some(info) = item.get_mut("window").map(Value::take) {
+                self.info =
+                    Some(serde_json::from_value(info).context("WatchDocMessages: bad window")?);
+            }
+            let frame: TranscriptFrame =
+                serde_json::from_value(item).context("WatchDocMessages: bad frame")?;
+            apply_transcript_frame(&mut self.entries, frame)
+                .map_err(|e| anyhow!("transcript: {e}"))?;
+            self.opened |= is_reset;
+            if self.opened {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Whether the opening `reset` arrived on this subscription.
+    pub fn opened(&self) -> bool {
+        self.opened
+    }
+
+    /// The window as of the last [`Self::next`]. An older host ignored the
+    /// window and sent everything: the same slice is taken here.
+    pub fn view(&self) -> TranscriptView {
+        match (&self.info, &self.window) {
+            (Some(info), _) => TranscriptView {
+                entries: self.entries.clone(),
+                info: info.clone(),
+            },
+            (None, Some(window)) => {
+                let (slice, info) = window.apply(&self.entries);
+                TranscriptView {
+                    entries: slice.to_vec(),
+                    info,
+                }
+            }
+            (None, None) => {
+                let window = TranscriptWindow::tail(self.entries.len());
+                let (slice, info) = window.apply(&self.entries);
+                TranscriptView {
+                    entries: slice.to_vec(),
+                    info,
                 }
             }
         }
@@ -826,6 +950,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_turn_ending_into_a_wait_is_not_its_finish() {
+        use futures::StreamExt;
+        struct Service(Vec<Session>);
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Service {
+            async fn handle(&self, _: &str, _: Value) -> Result<zeron_rpc::RpcReply, RpcError> {
+                let frames: Vec<Value> = self.0.iter().map(|s| json!([s])).collect();
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::iter(frames).chain(futures::stream::pending()).boxed(),
+                ))
+            }
+        }
+        let now = Utc::now();
+        let row = |status: &str, completed: Option<&str>, waiting: bool| -> Session {
+            let mut v = json!({
+                "chatId": "chat", "deviceId": "dev", "status": status, "updatedAt": now,
+                "lastCompletedTurn": completed,
+            });
+            if waiting {
+                v["waiting"] = json!({ "since": now, "on": [{ "id": "bn1", "kind": "process", "label": "cargo test" }] });
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        let baseline = row("idle", Some("t0"), false);
+        // Working, then its turn ends into a wait: still going.
+        let rpc = zeron_rpc::memory_client(Arc::new(Service(vec![
+            row("working", Some("t0"), false),
+            row("idle", Some("t0"), true),
+        ])));
+        let client = Zeron::with_client(rpc, Origin::default());
+        let (outcome, _) = client
+            .wait_for_turn(&chat("chat", None), Some(&baseline), true, Duration::from_millis(80))
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::TimedOut);
+        // The wait over, its finish marked: completed.
+        let rpc = zeron_rpc::memory_client(Arc::new(Service(vec![
+            row("working", Some("t0"), false),
+            row("idle", Some("t0"), true),
+            row("idle", Some("t1"), false),
+        ])));
+        let client = Zeron::with_client(rpc, Origin::default());
+        let (outcome, _) = client
+            .wait_for_turn(&chat("chat", None), Some(&baseline), true, Duration::from_millis(80))
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::Completed);
+    }
+
+    #[tokio::test]
     async fn one_shot_reads_release_quiet_watches() {
         use futures::StreamExt;
         struct Service(tokio::sync::watch::Sender<()>);
@@ -900,6 +1074,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sleep: None,
         }
     }
 

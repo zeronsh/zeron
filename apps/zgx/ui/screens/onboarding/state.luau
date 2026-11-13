@@ -23,6 +23,11 @@ M.PATHS = {
 	skipped = { "signin", "appearance", "providers", "done" },
 } :: { [Path]: { Step } }
 
+-- Someone who already had Zeron, first in this interface: the intro, then only
+-- their username and card (those not finished before), once.
+M.WELCOME = { "signin", "username", "card", "done" } :: { Step }
+M.welcome = ui.shared("onboarding.welcome", false):peek() == true
+
 -- Which steps are pages that are finished once and remembered, and where:
 -- an account's on the account (Zeron's `/onboarding`, so another Mac
 -- passes over them), a device's on this Mac. Sign-in and done are not
@@ -103,9 +108,15 @@ M.appearance = ui.persist("appearance", "system" :: Appearance)
 -- The organization worked in: the one made, or the one the account was in.
 M.last_org = ui.persist("last_org", "")
 
+-- The way through this run takes.
+local function way(): { Step }
+	local path = M.path:get()
+	return if M.welcome and path == "signed_in" then M.WELCOME else M.PATHS[path]
+end
+
 -- The active path's steps, less the ones this run passes over.
 function M.order(): { Step }
-	local order = M.PATHS[M.path:get()]
+	local order = way()
 	local name_done, org_done = M.name_done:get(), M.org_done:get()
 	local out: { Step } = {}
 	for _, s in order do
@@ -126,7 +137,7 @@ end
 function M.position(step: Step): (number?, number)
 	local n: number? = nil
 	local count = 0
-	for _, s in M.PATHS[M.path:get()] do
+	for _, s in way() do
 		if s ~= "signin" then
 			count += 1
 			if s == step then

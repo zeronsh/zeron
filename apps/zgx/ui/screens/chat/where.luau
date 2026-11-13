@@ -22,8 +22,9 @@
 -- - Sent: a local checkout runs in the project's folder (or, for a ref
 --   checked out in a worktree of its own, in that worktree), the ref named
 --   on the chat; a worktree is made off the ref as the run starts (HEAD if
---   the refs never came). On Cloud, the chat is made there (`cloud`) and
---   runs in its machine's checkout.
+--   the refs never came). A folder with no git runs in place, whichever
+--   checkout was picked. On Cloud, the chat is made there (`cloud`) and runs
+--   in its machine's checkout.
 --
 -- `Where.bind { device, project, checkout, branch, active, slot?, remember? }`
 -- (in a component): the composer's choices, and while `active` (a new chat,
@@ -231,7 +232,7 @@ function M.bind(c: Choices)
 		local out = {}
 		for _, p in on_device(c.device:get()) do
 			local l = route.look(p.id) or { hue = route.hue(p.id) }
-			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji })
+			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, plain = not p.git or nil })
 		end
 		local chosen = c.project:get()
 		if chosen and chosen ~= M.NO_PROJECT then
@@ -549,7 +550,9 @@ function M.bind(c: Choices)
 		if c.device:peek() == M.CLOUD and cloud_repo(p) then
 			return { project = p.id, device = nil, branch = name, cwd = nil, worktree = false, cloud = true }
 		end
-		if c.checkout:peek() == "worktree" then
+		-- (Only a repository can make a worktree: in a plain folder the host
+		-- would refuse the run, so the pick waits for the next repository.)
+		if c.checkout:peek() == "worktree" and p.git then
 			return { project = p.id, device = p.device, branch = name, cwd = p.path, worktree = true }
 		end
 		-- A local checkout: the folder as it is; a ref checked out in a

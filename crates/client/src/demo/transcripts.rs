@@ -41,6 +41,7 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
         preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
+        output_lines: None,
     }
 }
 

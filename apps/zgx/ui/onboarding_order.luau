@@ -157,7 +157,7 @@ test("a returning account opens on its first page left, and Continue goes throug
 	expect(forward("appearance")).to_equal({ "appearance", "card", "invite", "github", "providers", "done" })
 end)
 
-test("a page finished on this Mac counts at the start too", function()
+test("a page finished on this computer counts at the start too", function()
 	state.path:set("signed_in")
 	state.name_done:set(true)
 	state.org_done:set(true)
@@ -220,6 +220,28 @@ test("the dots count every step and never move", function()
 	expect(few).to_be(3)
 	local last = state.position("done")
 	expect(last).to_be(3)
+end)
+
+test("someone who already had Zeron is welcomed with only their username and card", function()
+	state.welcome = true
+	-- No username yet, whatever else their account had finished.
+	expect(run { path = "signed_in", passed = { "appearance", "org", "invite", "github", "providers" } }).to_be("username")
+	expect(forward("username")).to_equal({ "username", "card", "done" })
+	-- (Back doesn't return to claiming a username, as in every run, nor to Sign in.)
+	expect(backward("card")).to_equal({ "card" })
+	local _, count = state.position("username")
+	expect(count).to_be(3)
+	-- Claiming one goes to the card.
+	state.step:set("username")
+	actions.claimed_username({} :: any)
+	expect(state.step:peek()).to_be("card")
+	-- A username had: its card.
+	expect(run { path = "signed_in", name_done = true }).to_be("card")
+	-- Both finished before: straight to the end.
+	expect(run { path = "signed_in", name_done = true, passed = { "card" } }).to_be("done")
+	-- Not signed in after all (a session gone): the usual way, for them.
+	expect(run { path = "skipped" }).to_be("appearance")
+	state.welcome = false
 end)
 
 return ui.text {

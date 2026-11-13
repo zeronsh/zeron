@@ -675,6 +675,21 @@ describe("V3 BETA", () => {
     expect((await ids("orderfirst")).sort()).toEqual(["order-tester", "v3-beta"]);
   });
 
+  it("puts maintainer first, though it was defined last", async () => {
+    await signUp("user_maint");
+    at(V3_BETA_CUTOFF_MS - HOUR);
+    await admin("/admin/badges", { id: "early-tester", name: "Early Tester" });
+    await admin("/admin/badges/grant", { badgeId: "early-tester", userIds: ["user_maint"] });
+    await claim("user_maint", "maintfirst");
+    await admin("/admin/badges", { id: "maintainer", name: "Maintainer" });
+    await admin("/admin/badges/grant", { badgeId: "maintainer", userIds: ["user_maint"] });
+    await runInDurableObject(directory(), (instance: UserDirectory) => {
+      const ids = instance.card("maintfirst")!.badges.map((b) => b.id);
+      expect(ids[0]).toBe("maintainer");
+      expect(ids.slice(1).sort()).toEqual(["early-tester", "v3-beta"]);
+    });
+  });
+
   it("judges names claimed before claim times were stored by their first name", async () => {
     // Before the cutoff: the deploy that adds the column.
     at(V3_BETA_CUTOFF_MS - 2 * 86_400_000);

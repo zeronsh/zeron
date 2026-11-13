@@ -148,10 +148,28 @@ pub fn data_dir() -> Option<&'static Path> {
 /// The channel this process's updater follows: the record's on a macOS app
 /// install, stable everywhere else.
 pub fn selected() -> Channel {
-    if !matches!(crate::detect_install(), crate::InstallKind::MacApp { .. }) {
+    let crate::InstallKind::MacApp { bundle } = crate::detect_install() else {
         return Channel::Stable;
+    };
+    choice_for(
+        data_dir().and_then(recorded),
+        crate::bundle_app_version(&bundle).as_deref(),
+    )
+}
+
+/// What's recorded, when there's a record to read.
+fn recorded(dir: &Path) -> Option<ChannelRecord> {
+    serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
+}
+
+/// A choice someone made stands. With none on record (the app hasn't run since it
+/// was installed, say) an app stays on the channel it was built for: an update
+/// asked from another device must not move a beta app off beta by default.
+fn choice_for(record: Option<ChannelRecord>, app_version: Option<&str>) -> Channel {
+    match record {
+        Some(record) => record.channel,
+        None => app_version.map(Channel::of_version).unwrap_or_default(),
     }
-    data_dir().map(|dir| read(dir).channel).unwrap_or_default()
 }
 
 /// This Mac's macOS version (`sw_vers -productVersion`), once.
@@ -219,6 +237,17 @@ mod tests {
     fn beta_reads_its_own_folder() {
         assert_eq!(Channel::Stable.base("https://edge.zeron.sh/releases/"), "https://edge.zeron.sh/releases");
         assert_eq!(Channel::Beta.base("https://edge.zeron.sh/releases"), "https://edge.zeron.sh/releases/beta");
+    }
+
+    #[test]
+    fn a_choice_stands_and_without_one_an_app_stays_on_its_own_channel() {
+        let chose = |channel| Some(ChannelRecord { channel, claimed_by: None });
+        // Someone turned beta off at that Mac: their choice, on a beta build.
+        assert_eq!(choice_for(chose(Channel::Stable), Some("0.2.136-beta.1")), Channel::Stable);
+        assert_eq!(choice_for(chose(Channel::Beta), Some("0.2.136")), Channel::Beta);
+        assert_eq!(choice_for(None, Some("0.2.136-beta.1")), Channel::Beta);
+        assert_eq!(choice_for(None, Some("0.2.136")), Channel::Stable);
+        assert_eq!(choice_for(None, None), Channel::Stable);
     }
 
     #[test]

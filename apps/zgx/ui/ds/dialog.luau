@@ -51,6 +51,8 @@ export type DialogProps = {
 	size: ("sm" | "md" | "lg")?,
 	confirm: Action?,
 	cancel: (string | Message | false)?,
+	-- A third way out, set apart at the foot's start ("Skip these updates").
+	aside: Action?,
 	-- A word to type before the confirm will go.
 	confirm_text: string?,
 	-- Whether a click outside closes it (not for one that must be answered).
@@ -132,7 +134,9 @@ end
 local function panel(props: ContainerProps): ContainerProps
 	glass.style(props, "menu")
 	props.bg = function()
-		return if material.frosted:get() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
+		-- (As its glass above: solid where a popup can't blur, or what's behind shows
+		-- through sharp.)
+		return if material.menus_see_through() then "$zeron.dialog.tint" else "$zeron.dialog.solid"
 	end
 	props.rounded = "$zeron.dialog.radius"
 	props.shadow = "$zeron.dialog.shadow"
@@ -236,6 +240,23 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 			gap = "$space.2",
 			justify = "end",
 			items = "center",
+			if props.aside
+				then ui.div {
+					grow = 1,
+					min_w = 0,
+					Button {
+						props.aside.label,
+						tone = "ghost",
+						on_click = function()
+							close()
+							local run = (props.aside :: Action).on_click
+							if run then
+								run()
+							end
+						end,
+					},
+				}
+				else nil,
 			if props.cancel ~= false
 				then Button { (props.cancel or locale.t("common.cancel")) :: any, tone = "secondary", on_click = close }
 				else nil,

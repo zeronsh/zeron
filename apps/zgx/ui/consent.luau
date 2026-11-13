@@ -19,9 +19,13 @@ actions.apply_scheme(onboarding.appearance:peek())
 return ui.column {
 	w_full = true,
 	h_full = true,
+	relative = true,
 	-- The window's glass, or (opaque) its colour: the main window's.
 	bg = function(): string
 		return if material.frosted:get() then "$zeron.window" else "$background"
 	end,
 	consent.View(),
+	-- Its title bar's room, above the sheet (its top padding), moves the
+	-- window: the sheet's content would take the drag otherwise.
+	ui.div { absolute = true, left = 0, right = 0, top = 0, h = "$space.7", window_drag = true },
 }

@@ -89,7 +89,7 @@ function M.Frame(props: FrameProps): Node
 	local opaque = props.opaque
 	local frosted = ui.computed(function(): number
 		local held = if opaque then opaque() else false
-		return if material.frosted:get() and not held then 1 else 0
+		return if material.see_through() and not held then 1 else 0
 	end)
 	return ui.column {
 		id = "onboarding",

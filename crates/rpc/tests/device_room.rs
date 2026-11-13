@@ -51,6 +51,8 @@ struct RelayState {
     /// Zombie-path simulation: the host stays "connected" (no bounce) but
     /// client→host frames vanish — the 2026-08-19 dead edge↔host leg.
     blackhole_host_bound: bool,
+    /// The largest message a host sent the room.
+    largest_host_message: usize,
 }
 
 struct FakeRelay {
@@ -127,13 +129,22 @@ fn relay_error(code: &str) -> Vec<u8> {
 
 async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayState>>) {
     let mut uri = String::new();
-    let ws =
-        match tokio_tungstenite::accept_hdr_async(stream, |req: &WsRequest, res: WsResponse| {
+    // A Durable Object takes what the test's raw hosts send in one frame.
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(1 << 30),
+        max_frame_size: Some(1 << 30),
+        ..Default::default()
+    };
+    let ws = match tokio_tungstenite::accept_hdr_async_with_config(
+        stream,
+        |req: &WsRequest, res: WsResponse| {
             uri = req.uri().to_string();
             Ok(res)
-        })
-        .await
-        {
+        },
+        Some(config),
+    )
+    .await
+    {
             Ok(ws) => ws,
             Err(_) => return,
         };
@@ -192,6 +203,9 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
             break;
         };
         let mut st = state.lock().expect("lock");
+        if is_host {
+            st.largest_host_message = st.largest_host_message.max(bytes.len());
+        }
         if !is_host {
             if st.blackhole_host_bound {
                 continue; // zombie path: frame vanishes, no bounce
@@ -297,6 +311,11 @@ impl RpcService for TestService {
             "Echo" => Ok(RpcReply::Value(
                 serde_json::json!({ "host": self.label, "params": params }),
             )),
+            "Big" => {
+                let bytes = params.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                // Multi-byte chars, so a piece's edge lands inside one.
+                Ok(RpcReply::Value(serde_json::json!("é".repeat(bytes / 2))))
+            }
             "Count" => {
                 let n = params.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
                 Ok(RpcReply::Stream(
@@ -864,4 +883,167 @@ async fn nudge_ack_requires_durable_acceptance_and_echoes_the_exact_token() {
         relay.state.lock().unwrap().nudge_acks[0],
         serde_json::json!({"chatId":"chat","token":"receipt-v2"})
     );
+}
+
+/// A reply far past every relay limit reaches a client that reassembles, in
+/// pieces the relay will carry. (Past 32 MiB in one message, workerd closes
+/// the host's socket; past 16 MiB in one frame, older clients drop the link.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_huge_reply_crosses_the_relay_in_pieces() {
+    let relay = FakeRelay::start().await;
+    let _host = HostRelay::spawn(
+        relay_config(&relay.edge_url(), 100),
+        TestService::new("host"),
+        noop_nudge(),
+    );
+    relay.wait_host_connected().await;
+    let links = cache(&relay.edge_url());
+    let client = links.client("dev-a").await.expect("dial");
+
+    let bytes = 40usize << 20;
+    let reply = client
+        .call("Big", serde_json::json!({ "bytes": bytes }))
+        .await
+        .expect("the whole reply arrives");
+    assert_eq!(reply.as_str().unwrap().len(), bytes);
+    let largest = relay.state.lock().unwrap().largest_host_message;
+    assert!(
+        largest <= 1 << 20,
+        "a {largest}-byte message reached the relay"
+    );
+
+    // Same link, nothing lost: smaller replies keep flowing after it.
+    let echoed = client
+        .call("Echo", serde_json::json!(1))
+        .await
+        .expect("echo");
+    assert_eq!(echoed["params"], 1);
+}
+
+async fn raw_client(
+    relay: &FakeRelay,
+    conn: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let url = device_room_ws_url(&relay.edge_url(), "dev-a", "client", Some(conn), "t");
+    tokio_tungstenite::connect_async(url)
+        .await
+        .expect("raw dial")
+        .0
+}
+
+async fn raw_call(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let request = serde_json::json!({ "id": id, "method": method, "params": params });
+    let frame = encode_device_frame(
+        &DeviceFrameHeader::new("rpc", "rpc"),
+        request.to_string().as_bytes(),
+    )
+    .unwrap();
+    ws.send(WsMessage::Binary(frame)).await.unwrap();
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(20), ws.next())
+            .await
+            .expect("a reply in time")
+            .expect("socket open")
+            .expect("frame within this client's caps");
+        let WsMessage::Binary(bytes) = message else {
+            continue;
+        };
+        let (header, payload) = decode_device_frame(&bytes).unwrap();
+        assert_eq!(header.k, "rpc", "this client only understands plain frames");
+        let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        if reply["id"] == id {
+            return reply;
+        }
+    }
+}
+
+/// A build from before pieces asks for what it always asked for: plain frames
+/// while they fit, and past its own frame cap an error for that one request
+/// instead of a frame that would end its whole link.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_cant_reassemble_keeps_its_link_when_a_reply_is_too_big() {
+    let relay = FakeRelay::start().await;
+    let _host = HostRelay::spawn(
+        relay_config(&relay.edge_url(), 100),
+        TestService::new("host"),
+        noop_nudge(),
+    );
+    relay.wait_host_connected().await;
+    let mut old = raw_client(&relay, "old-client").await;
+
+    let fits = raw_call(&mut old, 1, "Big", serde_json::json!({ "bytes": 2 << 20 })).await;
+    assert_eq!(fits["ok"].as_str().unwrap().len(), 2 << 20);
+
+    let too_big = raw_call(&mut old, 2, "Big", serde_json::json!({ "bytes": 20 << 20 })).await;
+    assert!(
+        too_big["err"].as_str().unwrap().contains("too large"),
+        "{too_big}"
+    );
+
+    let echoed = raw_call(&mut old, 3, "Echo", serde_json::json!(1)).await;
+    assert_eq!(echoed["ok"]["params"], 1);
+}
+
+/// A new client reading from a host that still sends one big frame: the room
+/// delivers it whole, past tungstenite's default 16 MiB frame cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_big_frame_from_an_older_host_does_not_end_the_link() {
+    let relay = FakeRelay::start().await;
+    let url = device_room_ws_url(&relay.edge_url(), "dev-a", "host", None, "t");
+    let (mut host, _) = tokio_tungstenite::connect_async_with_config(
+        url,
+        Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+            max_frame_size: Some(1 << 30),
+            max_message_size: Some(1 << 30),
+            ..Default::default()
+        }),
+        false,
+    )
+    .await
+    .expect("host dial");
+    relay.wait_host_connected().await;
+    tokio::spawn(async move {
+        while let Some(Ok(message)) = host.next().await {
+            let WsMessage::Binary(bytes) = message else {
+                continue;
+            };
+            let (header, payload) = decode_device_frame(&bytes).unwrap();
+            if header.k != "rpc" {
+                continue;
+            }
+            let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            let reply = serde_json::json!({
+                "id": request["id"],
+                "ok": "x".repeat(20 << 20),
+            });
+            let frame = encode_device_frame(
+                &DeviceFrameHeader::new("rpc", "rpc").with_to(header.from.unwrap()),
+                reply.to_string().as_bytes(),
+            )
+            .unwrap();
+            host.send(WsMessage::Binary(frame)).await.unwrap();
+        }
+    });
+    let url = device_room_ws_url(
+        &relay.edge_url(),
+        "dev-a",
+        "client",
+        Some("new-client"),
+        "t",
+    );
+    let link = DeviceLink::connect(&url).await.expect("dial");
+    let reply = link
+        .client()
+        .call("Anything", serde_json::json!({}))
+        .await
+        .expect("the frame arrives");
+    assert_eq!(reply.as_str().unwrap().len(), 20 << 20);
+    assert!(!link.is_closed());
 }

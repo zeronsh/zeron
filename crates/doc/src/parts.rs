@@ -72,7 +72,8 @@ pub const COMMAND_TAIL_MAX_LINES: usize = 10;
 /// Bytes of a command's output the doc keeps ([`command_output_tail`]).
 pub const COMMAND_TAIL_MAX_BYTES: usize = 1024;
 
-/// What the doc keeps of a command's output.
+/// What the doc keeps of a command's output (or, through
+/// [`command_output_end`], what its host serves of it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandTail {
     /// The output's last [`COMMAND_TAIL_MAX_LINES`] lines or
@@ -80,6 +81,9 @@ pub struct CommandTail {
     pub text: String,
     /// The output's whole size, as the harness gave it.
     pub bytes: u64,
+    /// Lines in the whole redacted output, so "Show all N lines" can say N
+    /// before the rest is fetched.
+    pub lines: u64,
     /// Earlier output was let go.
     pub truncated: bool,
 }
@@ -99,6 +103,21 @@ pub struct CommandTail {
 /// The cut starts on a line where it can: a single line longer than the
 /// byte budget keeps its end. `None` when nothing but whitespace is left.
 pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
+    command_output_end(command, text, COMMAND_TAIL_MAX_LINES, COMMAND_TAIL_MAX_BYTES)
+}
+
+/// The end of `command`'s output, at most `max_lines` lines and `max_bytes`
+/// bytes, made safe to leave its host exactly as [`command_output_tail`]
+/// makes the doc's tail: the withheld note for a command that prints
+/// secrets, else redacted first and cut after. The host's whole-output read
+/// (`ReadToolOutput`) goes through here too, with a wider budget, so what a
+/// person expands is never less redacted than what the chat kept.
+pub fn command_output_end(
+    command: &str,
+    text: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Option<CommandTail> {
     let bytes = text.len() as u64;
     if text.trim().is_empty() {
         return None;
@@ -107,6 +126,7 @@ pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
         return Some(CommandTail {
             text: zeron_proto::redact::SECRET_OUTPUT_WITHHELD.to_owned(),
             bytes,
+            lines: 1,
             truncated: false,
         });
     }
@@ -115,6 +135,7 @@ pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
     if body.trim().is_empty() {
         return None;
     }
+    let lines = body.bytes().filter(|b| *b == b'\n').count() as u64 + 1;
     // The last N lines: the start of the line after the Nth newline from
     // the end.
     let mut start = 0;
@@ -122,14 +143,14 @@ pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
     for (i, b) in body.bytes().enumerate().rev() {
         if b == b'\n' {
             newlines += 1;
-            if newlines == COMMAND_TAIL_MAX_LINES {
+            if newlines == max_lines {
                 start = i + 1;
                 break;
             }
         }
     }
-    if body.len() - start > COMMAND_TAIL_MAX_BYTES {
-        let mut cut = body.len() - COMMAND_TAIL_MAX_BYTES;
+    if body.len() - start > max_bytes {
+        let mut cut = body.len() - max_bytes;
         while !body.is_char_boundary(cut) {
             cut += 1;
         }
@@ -142,6 +163,7 @@ pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
     Some(CommandTail {
         text: body[start..].to_owned(),
         bytes,
+        lines,
         truncated: start > 0,
     })
 }
@@ -294,6 +316,11 @@ pub enum MessagePart {
         /// `output_bytes`): the UI says earlier output was trimmed.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         output_truncated: bool,
+        /// Lines in the whole (redacted) command output, set only with
+        /// `output_truncated`: the UI's "Show all N lines" before the rest
+        /// is read from the host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_lines: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -511,6 +538,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     preview_paths: Vec::new(),
                     exit_code: None,
                     output_truncated: false,
+                    output_lines: None,
                 });
             }
         }
@@ -536,6 +564,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     preview_paths: stored,
                     exit_code: exit_slot,
                     output_truncated,
+                    output_lines,
                     ..
                 } = p
                     && pid == id
@@ -558,7 +587,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     // terminal would. Bounded per part, so a long session
                     // grows by at most ~1 KB per command; file reads,
                     // searches, fetches and MCP results stay out. The whole
-                    // output stays in the host's run journal, never synced.
+                    // output stays in the host's run journal, never synced;
+                    // a reader who expands it asks the host for it
+                    // (`ReadToolOutput`, redacted the same way).
                     let tail = match (&*call, output.as_deref()) {
                         (ToolCall::Exec { command }, Some(output)) => {
                             command_output_tail(command, output)
@@ -575,11 +606,13 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                             *out_slot = Some(tail.text);
                             *output_bytes = Some(tail.bytes);
                             *output_truncated = tail.truncated;
+                            *output_lines = tail.truncated.then_some(tail.lines);
                         }
                         None => {
                             *out_slot = None;
                             *output_bytes = None;
                             *output_truncated = false;
+                            *output_lines = None;
                         }
                     }
                     *diff_slot = None;
@@ -1312,6 +1345,7 @@ mod tests {
                 preview_paths: Vec::new(),
                 exit_code: None,
                 output_truncated: false,
+                output_lines: None,
             },
         ];
         let chunks = split_parts(&parts);
@@ -1428,12 +1462,14 @@ mod tests {
             output: Some(tail),
             output_bytes,
             output_truncated,
+            output_lines,
             exit_code,
             ..
         } = fold_command(&full, Some(1))
         else {
             panic!("no tail");
         };
+        assert_eq!(output_lines, Some(40), "the whole output's lines");
         assert_eq!(tail.lines().count(), COMMAND_TAIL_MAX_LINES);
         assert!(tail.starts_with("line 31\n") && tail.ends_with("line 40"));
         assert!(output_truncated);
@@ -1475,7 +1511,7 @@ mod tests {
         assert!(
             matches!(
                 &part,
-                MessagePart::Tool { output: Some(o), output_truncated: false, exit_code: Some(0), output_bytes: Some(13), .. }
+                MessagePart::Tool { output: Some(o), output_truncated: false, output_lines: None, exit_code: Some(0), output_bytes: Some(13), .. }
                     if o == "ok"
             ),
             "{part:?}"

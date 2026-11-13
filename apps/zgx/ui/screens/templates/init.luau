@@ -12,7 +12,7 @@ settings.add {
 	title = "Templates",
 	icon = "gallery",
 	view = page.View,
-	group = "Organization",
+	group = "Customize",
 	before = "archived",
 }
 

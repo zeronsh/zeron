@@ -304,6 +304,26 @@ fn risk_says_what_can_do_anything() {
     assert!(!any_can_do_anything(&allowed(&["date", "jq"])));
 }
 
+/// The consent window's words: a shell or interpreter is said to be full
+/// control, git and gh as what they do, and neither changes `risk`.
+#[test]
+fn which_programs_are_full_control() {
+    for full in ["sh", "bash", "zsh", "python", "python3", "python3.12", "Python3", "node", "perl", "ruby", "osascript", "pwsh", "powershell.exe", "bash.exe"] {
+        assert!(full_control(full), "{full}");
+        assert_eq!(risk(full), Risk::Anything, "{full}");
+    }
+    for not in ["git", "gh", "jq", "date", "rg", "curl", "some-tool", "nodemon", "shasum", "rustc", "r2"] {
+        assert!(!full_control(not), "{not}");
+    }
+    for own in ["git", "gh", "GIT", "git.exe"] {
+        assert!(held_to_its_own_rules(own), "{own}");
+        assert_eq!(risk(own), Risk::Anything, "{own}");
+    }
+    for not in ["sh", "python3", "git-lfs", "some-tool"] {
+        assert!(!held_to_its_own_rules(not), "{not}");
+    }
+}
+
 /// In a checkout of yours, a commit runs your hooks (pre-commit, as git
 /// always does); reading never does, nor does anything elsewhere, and the
 /// filesystem monitor is off for all of them.

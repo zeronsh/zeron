@@ -1,6 +1,8 @@
 -- Settings → Appearance: how Zeron looks on this Mac, the shell's own
 -- look (screens/shell/appearance: the scheme, which setup chose too; a new
--- chat's wallpaper and its effect) and the window's glass (ds.material).
+-- chat's wallpaper and its effect), the theme each scheme wears (a quick
+-- pick; every theme is on the Themes page, screens/themes) and the window's
+-- glass (ds.material).
 
 local ds = require("@ds")
 local material = require("@ds/material")
@@ -8,10 +10,13 @@ local math_ = require("@ds/math")
 local appearance = require("@app/screens/shell/appearance")
 local search = require("@app/screens/settings/search")
 local prefs = require("@app/screens/settings/prefs")
+local host = require("@app/screens/settings/host")
 local wallpaper = require("@app/screens/settings/wallpaper")
 local plugin_settings = require("@app/screens/plugins/settings")
 local motion = require("@ds/motion")
 local prefers = require("@ds/prefers")
+local themes = require("@app/screens/themes/state")
+local route = require("@app/screens/shell/route")
 
 local M = {}
 
@@ -20,10 +25,15 @@ M.TITLE = "Appearance"
 
 search.index(M.ID, ui.t("settings.appearance.title"), ui.t("settings.appearance.terms"), {
 	{ key = "scheme", title = ui.t("settings.appearance.scheme.label"), terms = ui.t("settings.appearance.scheme.terms") },
+	{ key = "theme_light", title = ui.t("settings.appearance.theme.light"), terms = ui.t("settings.appearance.theme.terms") },
+	{ key = "theme_dark", title = ui.t("settings.appearance.theme.dark"), terms = ui.t("settings.appearance.theme.terms") },
+	{ key = "themes", title = ui.t("settings.appearance.theme.more"), terms = ui.t("settings.appearance.theme.terms") },
 	{ key = "accent", title = ui.t("settings.appearance.accent.label"), terms = ui.t("settings.appearance.accent.terms") },
 	{ key = "reduce_motion", title = ui.t("settings.appearance.reduce_motion.label"), section = ui.t("settings.appearance.motion"), terms = ui.t("settings.appearance.reduce_motion.terms") },
 	{ key = "glass", title = ui.t("settings.appearance.glass.label"), terms = ui.t("settings.appearance.glass.terms") },
+	{ key = "interface_font", title = ui.t("settings.appearance.interface_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.interface_font.terms") },
 	{ key = "text_size", title = ui.t("settings.appearance.text_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.text_size.terms") },
+	{ key = "code_font", title = ui.t("settings.appearance.code_font.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font.terms") },
 	{ key = "code_font_size", title = ui.t("settings.appearance.code_font_size.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.code_font_size.terms") },
 	{ key = "conversation_width", title = ui.t("settings.appearance.conversation_width.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.conversation_width.terms") },
 	{ key = "render_math", title = ui.t("settings.appearance.render_math.label"), section = ui.t("settings.appearance.fonts"), terms = ui.t("settings.appearance.render_math.terms") },
@@ -42,6 +52,62 @@ end
 -- rules are between rows that are there, never under the last).
 local function later(on: () -> boolean, node: Node): Node
 	return ui.show(on, ui.column { w_full = true, ds.Settings.Rule(), node })
+end
+
+-- The fonts installed on this computer (src/fonts.rs: `{ { family, mono }
+-- }`, by name), asked for once a font picker opens; nil until they come.
+local installed = ui.state("settings_installed_fonts", nil :: { { family: string, mono: boolean } }?)
+local asked = false
+local function ask_fonts()
+	if asked then
+		return
+	end
+	asked = true
+	host.call("fonts.list"):after(function(list: any)
+		installed:set(if type(list) == "table" then list else {})
+	end, function()
+		-- (Asked again as a picker next opens.)
+		asked = false
+		installed:set({})
+	end)
+end
+
+-- A font picker (the interface's, or code's, which lists monospaced fonts
+-- alone: a terminal's grid and code's columns need every letter one width):
+-- the theme's own first ("Default (Geist)", its value ""), then this
+-- computer's, searched by name. One chosen but no longer installed stays
+-- listed, so the picker still says what's chosen (the theme's own draws).
+local function font_picker(kind: "interface" | "code", value: State<string>, label: Message): Node
+	local token = if kind == "code" then "font.mono" else "font.sans"
+	local fallback = if kind == "code" then "Geist Mono" else "Geist"
+	return ds.Dropdown {
+		value = value :: any,
+		label = label,
+		width = 280,
+		search = ui.t("settings.appearance.font_search"),
+		on_open = ask_fonts,
+		items = function(): { any }
+			local chosen = value:get()
+			local own = ui.theme.get(token)
+			local out: { any } = {
+				{ value = "", label = ui.t("settings.appearance.font_default", { name = if type(own) == "string" and own ~= "" then own else fallback }):get() },
+			}
+			local listed = chosen == ""
+			for _, font in installed:get() or {} do
+				if kind == "interface" or font.mono then
+					table.insert(out, { value = font.family, label = font.family })
+					listed = listed or font.family == chosen
+				end
+			end
+			if not listed then
+				table.insert(out, 2, { value = chosen, label = chosen })
+			end
+			return out
+		end,
+		empty = function(_query: string): any
+			return { title = ui.t("settings.appearance.font_none") }
+		end,
+	}
 end
 
 -- Your picture, small, at the row's lead (nothing while there's none).
@@ -188,6 +254,76 @@ local function adjust_dialog(): Node
 	}
 end
 
+-- A scheme's theme, picked from every theme that has a variant for it,
+-- grouped as the Themes page's tabs are. Its label says which scheme while
+-- following the system ("Light theme"), else just "Theme".
+local GROUPS = { builtin = "themes.page.builtin", template = "themes.page.from_templates", imported = "themes.page.yours" }
+local function theme_row(kind: string): Node
+	local chosen = ui.state(`settings_theme_{kind}`, themes.worn(kind))
+	ui.effect(function()
+		local now = themes.worn(kind)
+		if chosen:peek() ~= now then
+			chosen:set(now)
+		end
+	end)
+	local function label(): string
+		local key = if appearance.scheme:get() == "system" then kind else "one"
+		return ui.t(`settings.appearance.theme.{key}`):get()
+	end
+	return row(`theme_{kind}`, {
+		label = label,
+		control = ds.Select {
+			value = chosen,
+			name = label,
+			w = 220,
+			on_change = function(id: string)
+				themes.use_for(kind, id)
+			end,
+			options = function(): { any }
+				local out = {}
+				for _, e in themes.entries:get() do
+					for _, id in e.variants do
+						local p = themes.palette(id)
+						if p and p.kind == kind then
+							-- A built-in theme by its name (Gruvbox, not Gruvbox
+							-- Dark); one of several variants of yours by both.
+							local name = if e.source == "builtin" or #e.variants == 1 or p.name == e.name then e.name else `{e.name} {p.name}`
+							table.insert(out, { value = id, label = name, group = ui.t(GROUPS[e.source] or GROUPS.builtin):get() })
+						end
+					end
+				end
+				return out
+			end,
+		},
+	})
+end
+
+-- The quick picks: one for each scheme showing (both, following the
+-- system), and the way to every theme.
+local function theme_rows(): Node
+	local scheme = appearance.scheme
+	return ui.column {
+		w_full = true,
+		ui.show(function(): boolean
+			return scheme:get() ~= "dark"
+		end, theme_row("light")),
+		ui.show(function(): boolean
+			return scheme:get() == "system"
+		end, ds.Settings.Rule()),
+		ui.show(function(): boolean
+			return scheme:get() ~= "light"
+		end, theme_row("dark")),
+		ds.Settings.Rule(),
+		row("themes", {
+			label = ui.t("settings.appearance.theme.more"),
+			description = ui.t("settings.appearance.theme.more_description"),
+			on_click = function()
+				route.settings("themes")
+			end,
+		}),
+	}
+end
+
 -- What the Wallpaper select shows: Appearance's choice, or nothing while a
 -- plugin's wallpaper is used (picking one then takes it back).
 local pick = ui.state("settings_wallpaper_pick", nil :: string?)
@@ -217,6 +353,7 @@ function M.view(): Node
 						} :: any,
 					},
 				}),
+				theme_rows(),
 				-- The accent: the theme's own, or one of Zeron's presets, the
 				-- whole window wearing it (ds.look).
 				row("accent", {
@@ -252,6 +389,14 @@ function M.view(): Node
 		ds.Settings.Section {
 			title = ui.t("settings.appearance.fonts"),
 			ds.Settings.Group {
+				-- The interface's font and code's (ds.look), as the shipping
+				-- app's Interface font and Code font: the window's font tokens,
+				-- so everything set in them follows at once.
+				row("interface_font", {
+					label = ui.t("settings.appearance.interface_font.label"),
+					description = ui.t("settings.appearance.interface_font.description"),
+					control = font_picker("interface", ds.look.interface_font, ui.t("settings.appearance.interface_font.label")),
+				}),
 				-- The interface's text: menus, settings, conversations, every
 				-- size and line height scaled from the body's (ds.look).
 				row("text_size", {
@@ -270,6 +415,11 @@ function M.view(): Node
 							return out
 						end,
 					},
+				}),
+				row("code_font", {
+					label = ui.t("settings.appearance.code_font.label"),
+					description = ui.t("settings.appearance.code_font.description"),
+					control = font_picker("code", ds.look.code_font, ui.t("settings.appearance.code_font.label")),
 				}),
 				-- Code's size: the editor, markdown's code and diffs (not
 				-- terminals), as the shipping app's Code & diff font.

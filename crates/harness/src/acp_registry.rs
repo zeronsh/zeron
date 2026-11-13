@@ -773,17 +773,31 @@ pub async fn install(entry: &Entry, icon_svg: Option<String>) -> Result<Record, 
     let previous = record_in(&dir).map(|r| r.program);
     write_record(&dir, &record)?;
     // Older versions go, but the one just replaced stays until the next
-    // update: a chat still running on it may load more of its files.
+    // update, and so does any a chat is still running on (updates don't wait
+    // for chats): it may load more of its files.
     if let Ok(children) = std::fs::read_dir(&dir) {
+        let running = crate::acp::running_command_lines();
         for child in children.filter_map(Result::ok) {
             let path = child.path();
-            let kept = path == version_dir || previous.as_ref().is_some_and(|p| p.starts_with(&path));
+            let kept = path == version_dir
+                || version_in_use(&path, running.as_deref())
+                || previous.as_ref().is_some_and(|p| p.starts_with(&path));
             if path.is_dir() && !kept && !child.file_name().to_string_lossy().starts_with('.') {
                 let _ = std::fs::remove_dir_all(path);
             }
         }
     }
     Ok(record)
+}
+
+/// Whether a process runs from this version's folder. If the processes can't be
+/// listed it counts as in use: keeping a folder costs less than pulling it out
+/// from under a chat.
+fn version_in_use(version_dir: &Path, running: Option<&[String]>) -> bool {
+    running.is_none_or(|lines| {
+        let dir = version_dir.to_string_lossy();
+        lines.iter().any(|line| line.contains(&*dir))
+    })
 }
 
 fn safe_component(text: &str) -> String {
@@ -1212,6 +1226,18 @@ mod tests {
             ],
             "extensions": []
         })
+    }
+
+    /// Updates don't wait for chats, so a chat can be several versions behind.
+    #[test]
+    fn a_version_a_chat_runs_from_is_kept() {
+        let dir = std::path::Path::new("/data/acp-registry/agent/1.0.0");
+        let running = |line: &str| vec![line.to_owned()];
+        assert!(version_in_use(dir, Some(&running("/data/acp-registry/agent/1.0.0/bin/agent --acp"))));
+        assert!(!version_in_use(dir, Some(&running("/data/acp-registry/agent/2.0.0/bin/agent --acp"))));
+        assert!(!version_in_use(dir, Some(&[])));
+        // Can't tell: keep it.
+        assert!(version_in_use(dir, None));
     }
 
     #[test]

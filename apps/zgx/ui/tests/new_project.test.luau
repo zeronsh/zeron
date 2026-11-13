@@ -71,7 +71,7 @@ test("the palette's New project slides to its steps in the palette, and back com
 	expect(app:state("shell_palette_open")).to_be(true)
 end)
 
-test("this Mac comes first, then its places, then its folders, hidden ones left out", function()
+test("this computer comes first, then its places, then its folders, hidden ones left out", function()
 	local app = open()
 	app:command("shell.new_project")
 	app:frames(20)

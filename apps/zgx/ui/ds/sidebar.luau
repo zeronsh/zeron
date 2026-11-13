@@ -37,6 +37,7 @@ local Mark = require("@self/mark")
 local status = require("@self/status")
 local FadeText = require("@self/fade_text")
 local island = require("@self/island")
+local TitleBar = require("@self/title_bar")
 local Tile = require("@self/tile")
 local Surface = require("@self/surface")
 local Avatar = require("@self/avatar")
@@ -52,7 +53,17 @@ local locale = require("@self/locale")
 -- A session's row, its corner, its group's header and pager: shared with
 -- every other list of sessions (the panel home's).
 local SessionRow = require("@self/session_row")
+local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
+
+-- The page's split chats (screens/shell/split, which keeps these):
+-- the chats side by side now, each row of theirs selected; and whether a
+-- chat is being dragged, so the split shows where it can land.
+local split_grouped = ui.shared("split.grouped", {} :: { string })
+local split_dragging = ui.shared("split.dragging", false)
+local function in_split(id: string): boolean
+	return table.find(split_grouped:get(), id) ~= nil
+end
 
 export type Session = {
 	id: string,
@@ -65,19 +76,31 @@ export type Session = {
 	-- Regular's second line: where it runs and on what.
 	device: string?,
 	branch: string?,
-	-- Subagents running under it (Zeron's "● N" pill beside its corner).
+	-- Subagents and side chats working under it (Zeron's "● N" pill beside
+	-- its corner).
 	subagents: number?,
 	-- Its pull request: a badge beside its corner.
 	pr: PullRequest?,
 	-- When it was made (as `time`), for sorting by it.
 	created: (number | string)?,
+	-- The Activity view's (`activity` on): the shelf it's on ("working",
+	-- "asleep"; nil, the list itself), and its place there (higher, nearer
+	-- the top).
+	shelf: string?,
+	rank: number?,
 }
 export type PullRequest = { number: number, state: ("open" | "merged" | "closed" | "draft")?, title: string? }
 -- (`src`: its own artwork, a picture chosen for it or its favicon, in place
 -- of its initial and hue; `emoji`: a chosen emoji, on a wash of its hue.)
 -- (`icon`: a group that is no folder, the chats in none, drawn as that
 -- glyph on a quiet wash in place of an initial on a hue.)
-export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, sessions: { Session } }
+-- (`empty`: the caller's word that it has no sessions but archived ones.
+-- Grouped by project first, those are listed after the rest, folded into
+-- one row of their own ("21 empty projects"), closed until it's opened;
+-- `details.empty_projects` off, not listed at all. A project with none at
+-- all, just added, isn't: a new chat starts in it. `unused` says so, and it's
+-- listed with the rest, until `details.empty_projects` is off.)
+export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, unused: boolean?, sessions: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -101,6 +124,10 @@ export type Details = {
 	archived: State<boolean>?,
 	-- A project filter over the list (Zeron's), where the caller has one.
 	project_filter: State<boolean>?,
+	-- The empty projects' fold at the end of the projects (those it says
+	-- are `empty`): listed there, or (off) not at all. On unless the caller
+	-- says.
+	empty_projects: State<boolean>?,
 	-- A folded group (or Pinned, or a section of yours) still lists its
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
@@ -150,20 +177,31 @@ export type Props = {
 	width: State<number>?,
 	selected: State<string?>,
 	pinned: Live<{ Session }>?,
+	card: boolean?,
 	projects: Live<{ Project }>,
 	-- (A state or a function for an account that arrives or changes.)
 	user: Live<User>?,
 	-- Room left at its top for a title bar laid over it (the window's
 	-- buttons): it runs to the window's top edge, its hairline with it.
 	top: number?,
-	-- A new chat: from the top (no project), or a project's header (its id).
-	on_new: ((project: string?) -> ())?,
+	-- A new chat: from the top (no project), or a project's header (its id);
+	-- from a device's header inside a project's (or a project's inside a
+	-- device's), on that device too (its name, as the sessions have it).
+	on_new: ((project: string?, device: string?) -> ())?,
 	on_search: (() -> ())?,
 	-- Plugins' pages ("pages.add"), each a row under Search: `{ plugin, id,
 	-- title, icon? }` as a state of a list, and what choosing one does.
 	pages: State<{ any }>?,
 	on_page: ((page: any) -> ())?,
 	on_archive: ((id: string) -> ())?,
+	-- The Activity view: on, one list of what needs you (each session by its
+	-- `rank`, those on a `shelf` left out), pinned above it, and at its foot
+	-- its shelves, folded until opened: Working, Asleep (as the sessions say)
+	-- and Archived (`archived`). How it groups, sorts and sections stands
+	-- aside meanwhile. Its settings open from the view menu
+	-- (`on_activity_settings`).
+	activity: State<boolean>?,
+	on_activity_settings: (() -> ())?,
 	-- You, at its foot, chosen (your profile), and whether your profile is
 	-- open (the row shows chosen).
 	on_user: (() -> ())?,
@@ -255,10 +293,11 @@ local URGENCY: { [string]: number } = {
 	failed = 3,
 	limited = 4,
 	working = 5,
-	connecting = 6,
-	plan = 7,
-	done = 8,
-	waiting = 9,
+	waiting = 6,
+	connecting = 7,
+	plan = 8,
+	woke = 9,
+	done = 10,
 }
 
 -- Sessions as a place holds them: a list read once, or a function a part
@@ -421,6 +460,13 @@ return ui.component(function(props: Props): Node
 	end
 	local function by_peek(): Organize
 		return SessionRow.organize_key(organize:peek())
+	end
+	-- The Activity view on (followed, or read).
+	local function act_now(): boolean
+		return props.activity ~= nil and props.activity:get() == true
+	end
+	local function act_peek(): boolean
+		return props.activity ~= nil and props.activity:peek() == true
 	end
 	local details: Details = props.details
 		or {
@@ -639,6 +685,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (Closing waits out the fade, so nothing is cut while it can be seen.)
 	local CLOSE, CLOSE_AFTER = 240, GO
 	local OPEN = 260
+	-- (The empty projects' fold: its tiles fly as it opens and closes, so it
+	-- moves in one stroke, quicker, its height and ink together.)
+	local FLY = 200
 	-- What fades with `shown`: away at once, back in once there is room.
 	-- (Its props, `props`, changed in place and returned.)
 	local function fades(props: ContainerProps, shown: () -> boolean): ContainerProps
@@ -1018,11 +1067,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local function standing(s: Session): Node
 		return SessionRow.standing(now_of(s))
 	end
-	-- Whether a session asks to be seen: in a state other than waiting, or
-	-- the one open.
+	-- Whether a session asks to be seen: in a state, or the one open.
 	local function active(s: Session): boolean
 		local cur = index:get().by_id[s.id] or s
-		return cur.status ~= nil and cur.status ~= "waiting"
+		return cur.status ~= nil
 	end
 
 	local pr_badge = SessionRow.pr_badge
@@ -1050,7 +1098,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- trunk ending at it.)
 	-- (In the sidebar's list, `list_now` and `tree_of` follow the row as it
 	-- moves between lists, the row staying itself.)
-	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
+	type Place = { wide: boolean?, on_pick: (() -> ())?, list: string?, list_now: (() -> string)?, by_now: (() -> Organize)?, at: (() -> number)?, tree: Tree?, tree_of: (() -> Tree?)? }
 	-- A row under its group's header (`tree_of`: its tree as it stands;
 	-- nil, out of any): a branch off the group's trunk (ds/session_row).
 	local function on_tree(body: Node, now_tree: () -> Tree?): Node
@@ -1169,7 +1217,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			return details.branch:get() and cur().branch ~= nil
 		end, second_line, fades)
 		local function strong(): boolean
-			return active(s) or selected:get() == s.id
+			return active(s) or selected:get() == s.id or in_split(s.id)
 		end
 		-- Its project's icon beside its title, where its group isn't its
 		-- project.
@@ -1244,13 +1292,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return cur().title
 			end, strong, nil)
 		)
-		if p and not SessionRow.groups_by(by, "project") then
+		-- (Its project's tile, unless the group it stands in now is its project:
+		-- a row dragged to another list keeps its node.)
+		if p then
 			title = ui.row {
 				grow = 1,
 				min_w = 0,
 				gap = "$zeron.space.tight",
 				items = "center",
-				ui.show(details.project_icon, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
+				ui.show(function(): boolean
+					local by_now = if place and place.by_now then place.by_now() else by
+					return details.project_icon:get() and not SessionRow.groups_by(by_now, "project")
+				end, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
 					local hue, src, emoji = look(p)
 					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16 }
 				end)() }),
@@ -1336,8 +1389,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				-- Pulled up under the title: the line's own inset is the row's.
 				ui.div { mt = ui.raw(-8, "up a row's inset, under the title"), second },
 			},
+			-- (Every chat of the split showing is selected too.)
 			selected = function(): boolean
-				return selected:get() == s.id
+				return selected:get() == s.id or in_split(s.id)
 			end,
 			on_click = function()
 				selected:set(s.id)
@@ -1384,7 +1438,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			return d ~= nil and d.id == s.id
 		end
 		local list_now = (place :: Place).list_now
+		local row_ref = ui.ref()
 		return ui.div {
+			ref = row_ref,
 			w_full = true,
 			shrink = 0,
 			opacity = function(): number
@@ -1400,14 +1456,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 				local from = if list_now then list_now() else list :: string
 				start_drag({ id = s.id, list = from, index = if at then at() else 1, h = session_h(cur(), by) + list_gap() })
+				-- (The page's split shows where it can land.)
+				split_dragging:set(true)
 				return { session = s.id }
 			end,
+			-- The row as it stands, on the window's colour. (Nothing here eases: a drag's
+			-- preview has no clock for it.)
 			drag_preview = function()
-				local card: ContainerProps = {
-					w = room_now() - PAD * 2,
+				local r = row_ref:peek()
+				return ui.row {
+					w = if r and r.width then r.width else room_now() - PAD * 2,
 					h = session_h(cur(), by),
 					items = "start",
 					rounded = "$radius.md",
+					bg = "$background",
+					shadow = "$shadow.sm",
 					ui.div {
 						w = SLOT,
 						h = SLOT,
@@ -1421,10 +1484,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					},
 					line(label(cur().title)),
 				}
-				Glass.style(card, "menu")
-				return ui.row(card)
 			end,
 			on_drag_end = function()
+				split_dragging:set(false)
 				end_drag()
 			end,
 			body,
@@ -1617,14 +1679,25 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		tile: (hidden: () -> boolean, sessions: Sessions?) -> Node,
 		sessions: Sessions,
 		new_in: boolean?,
-		-- A project's group: the project (a new chat in it).
+		-- A project's group: the project (a new chat in it); a device's
+		-- inside a project's, its project's too.
 		project: string?,
-		-- A device's group: the device's name.
+		-- A device's group: the device's name; a project's inside a
+		-- device's, that device's too (a new chat in it starts there).
 		device: string?,
+		-- The project's name, for a device's group inside it (its new chat's
+		-- tooltip).
+		project_name: string?,
 		shows_tile: (() -> boolean)?,
 		-- Its second level's groups, with both levels on (its sessions all
 		-- of theirs).
 		children: { Group }?,
+		-- A project's with none but archived sessions (its `empty`), at the
+		-- top level: listed in the empty projects' fold.
+		empty: boolean?,
+		-- A project's that has never had a session (its `unused`), at the top
+		-- level: listed with the rest, unless the empty projects are off.
+		unused: boolean?,
 	}
 	-- How long ago a session moved, in seconds (its `time`: a time, or as
 	-- it reads: "now", "5m", "3h", "1d", "2w"), for the most recent first.
@@ -1697,8 +1770,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local everything, devices = ix.everything, ix.devices
 		local levels = SessionRow.levels(by)
 		-- One level's groups of `subset` (nil: all; at the top, projects with
-		-- none show too, where a new chat starts), their keys under `prefix`.
-		local function level_groups(level: string, subset: { [string]: boolean }?, prefix: string): { Group }
+		-- none show too, where a new chat starts), their keys under `prefix`;
+		-- inside `outer`, its project or device carried (a new chat in an
+		-- inner group starts in both).
+		local function level_groups(level: string, subset: { [string]: boolean }?, prefix: string, outer: Group?): { Group }
+			-- (A device the sessions don't name is nowhere a chat can start.)
+			local outer_device = if outer and outer.device and outer.device ~= UNKNOWN then outer.device else nil
 			local groups: { Group } = {}
 			if level == "project" then
 				for _, p in ix.projects do
@@ -1721,6 +1798,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						sessions = own,
 						new_in = true,
 						project = p.id,
+						device = outer_device,
+						-- (Only at the top, and only while it holds none.)
+						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
+						unused = if subset == nil and p.unused == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -1760,10 +1841,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					if subset ~= nil and #on == 0 then
 						continue
 					end
+					-- (Inside a project's: a new chat in it, on this device.)
+					local in_project = outer ~= nil and outer.project ~= nil and d ~= UNKNOWN
 					table.insert(groups, {
 						key = `{prefix}device:{d}`,
 						name = d,
 						device = d,
+						new_in = if in_project then true else nil,
+						project = if in_project then (outer :: Group).project else nil,
+						project_name = if in_project then (outer :: Group).name :: string else nil,
 						sessions = on,
 						tile = function(hidden: () -> boolean, live: Sessions?): Node
 							return group_tile(QUIET, Icon { name = if d == ix.here then "laptop" else "remote-server", size = 12 }, live or on, hidden)
@@ -1781,7 +1867,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					for _, s in listed(g.sessions) do
 						subset[s.id] = true
 					end
-					g.children = level_groups(levels[2], subset, `{g.key}/`)
+					g.children = level_groups(levels[2], subset, `{g.key}/`, g)
 				end
 			end
 			return groups, if levels[1] == "project" then "ds.sidebar.projects" else "ds.sidebar.devices"
@@ -1836,6 +1922,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		return name
 	end
 
+	-- A group's new chat, under the pointer in its header's corner: in its
+	-- project, and (a group with both levels' say) on its device. (`now`:
+	-- the group as it stands, its project's id followed.)
+	local function new_corner(g: Group, now: () -> Group): Node
+		local project_name = g.project_name or g.name :: string
+		local key, args = "ds.sidebar.new_chat_in", { name = project_name } :: { [string]: any }
+		if g.device then
+			key, args = "ds.sidebar.new_chat_in_on", { name = project_name, device = g.device }
+		end
+		return corner(key, "plus", function()
+			if props.on_new then
+				local cur = now()
+				props.on_new(cur.project, cur.device)
+			end
+		end, args)
+	end
+
 	-- A group's tile on the rail, its flyout of its sessions hung off it.
 	local function group(g: Group, by: Organize): (Node, () -> number)
 		local given = g.name
@@ -1878,11 +1981,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						then ui.show(
 							hovered,
 							-- (A project's: its name is its own.)
-							corner("ds.sidebar.new_chat_in", "plus", function()
-								if props.on_new then
-									props.on_new(g.project)
-								end
-							end, { name = g.name :: string })
+							new_corner(g, function(): Group
+								return g
+							end)
 						)
 						else nil,
 				}
@@ -1942,7 +2043,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "plus", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.new_chat")
-			end, nil, "$font.weight.medium"), hint("⌘N")),
+			end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
 			on_click = function()
 				if props.on_new then
 					props.on_new(nil)
@@ -1956,7 +2057,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "search", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.search")
-			end), hint("⌘K")),
+			end), hint(ui.shortcut_text("cmd+k"))),
 			on_click = props.on_search,
 		},
 		if props.pages
@@ -1995,10 +2096,51 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- the old fading over the new, as the view's grouping or sort changes.
 	local pins_open = opened["::pinned"]
 	local archived_open = opened["::archived"]
+	-- The Activity view's list (open until folded) and its shelves (folded
+	-- until opened: kept with the folds, `folded`, as open, as the empty
+	-- projects' fold is).
+	local activity_open = opened["::activity"]
+	local function shelf_open(key: string): State<boolean>
+		local k = `::shelf:{key}`
+		return {
+			get = function(_): boolean
+				return folded:get()[k] == true
+			end,
+			peek = function(_): boolean
+				return folded:peek()[k] == true
+			end,
+			set = function(_, on: boolean)
+				local f = table.clone(folded:peek())
+				f[k] = if on then true else nil
+				folded:set(f)
+			end,
+		} :: any
+	end
 	-- How many of the Archived shelf show (Zeron's: 10, then 25 more a time).
 	local SHELF_FIRST, SHELF_MORE = 10, 25
 	local shelf_shown = ui.use_state(SHELF_FIRST)
 	local groups_open = opened["::groups"]
+	-- The empty projects' fold: closed until it's opened (kept with the
+	-- folds, `folded`, as open: the one fold that starts closed).
+	local EMPTIES = "::empty_projects"
+	local empties_open: State<boolean> = {
+		get = function(_): boolean
+			return folded:get()[EMPTIES] == true
+		end,
+		peek = function(_): boolean
+			return folded:peek()[EMPTIES] == true
+		end,
+		set = function(_, on: boolean)
+			local f = table.clone(folded:peek())
+			f[EMPTIES] = if on then true else nil
+			folded:set(f)
+		end,
+	} :: any
+	-- Whether the empty projects are listed (in their fold) at all.
+	local function empties_shown(): boolean
+		local st = (details :: any).empty_projects :: State<boolean>?
+		return st == nil or st:get()
+	end
 	-- The sessions put in a place, in its order (any no longer known left
 	-- out).
 	local function sessions_of(ids: { string }): { Session }
@@ -2106,14 +2248,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- fades in; `together`, both at once, for the last place, with nothing
 	-- after it to slide up), and whether its rows are in the list at all
 	-- (still there while it closes).
-	type Fold = { key: string, is_open: () -> boolean, write: (boolean) -> (), h: Anim, o: Anim, present: boolean, together: boolean }
+	-- (`dur`: one duration both ways, for a fold played together; else
+	-- OPEN and CLOSE.)
+	type Fold = { key: string, is_open: () -> boolean, write: (boolean) -> (), h: Anim, o: Anim, present: boolean, together: boolean, dur: number? }
 	local shape = ui.use_state(0)
 	local folds_by: { [string]: Fold } = {}
-	local function fold_of(key: string, is_open: () -> boolean, write: (boolean) -> (), together: boolean?): Fold
+	local function fold_of(key: string, is_open: () -> boolean, write: (boolean) -> (), together: boolean?, dur: number?): Fold
 		local f = folds_by[key]
 		if not f then
 			local on = is_open()
-			f = { key = key, is_open = is_open, write = write, h = still(if on then 1 else 0), o = still(if on then 1 else 0), present = on, together = together == true }
+			f = { key = key, is_open = is_open, write = write, h = still(if on then 1 else 0), o = still(if on then 1 else 0), present = on, together = together == true, dur = dur }
 			folds_by[key] = f
 		end
 		return f
@@ -2124,18 +2268,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- while it moves, those past what shows stand in as one; see
 		-- `build_shape`.)
 		shape:set(shape:peek() + 1)
+		local open, close = f.dur or OPEN, f.dur or CLOSE
 		if on then
 			f.present = true
-			f.h = anim(f.h, 1, OPEN, 0, function()
+			f.h = anim(f.h, 1, open, 0, function()
 				shape:set(shape:peek() + 1)
 			end)
-			f.o = anim(f.o, 1, if f.together then OPEN else COME, if f.together then 0 else COME_AFTER)
+			f.o = anim(f.o, 1, if f.together then open else COME, if f.together then 0 else COME_AFTER)
 			-- (Its height on the column motion's CSS ease, ds/motion: into
 			-- place with no overshoot, as it opens so it closes.)
 			f.h.css = true
 		else
-			f.o = anim(f.o, 0, if f.together then CLOSE else GO)
-			f.h = anim(f.h, 0, CLOSE, if f.together then 0 else CLOSE_AFTER, function()
+			f.o = anim(f.o, 0, if f.together then close else GO)
+			f.h = anim(f.h, 0, close, if f.together then 0 else CLOSE_AFTER, function()
 				if not f.is_open() and f.present then
 					f.present = false
 				end
@@ -2166,6 +2311,28 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			groups_open:set(on)
 		end, true)
 	end
+	local function empties_fold(): Fold
+		return fold_of("empties", function(): boolean
+			return empties_open:peek()
+		end, function(on: boolean)
+			empties_open:set(on)
+		end, true, FLY)
+	end
+	local function activity_fold(): Fold
+		return fold_of("activity", function(): boolean
+			return activity_open:peek()
+		end, function(on: boolean)
+			activity_open:set(on)
+		end)
+	end
+	local function shelf_fold(key: string): Fold
+		local st = shelf_open(key)
+		return fold_of(`shelf:{key}`, function(): boolean
+			return st:peek()
+		end, function(on: boolean)
+			st:set(on)
+		end)
+	end
 	local function group_fold(key: string): Fold
 		local st = opened[key]
 		return fold_of(key, function(): boolean
@@ -2194,13 +2361,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end)
 	end
 	-- A section folded or opened from outside (the caller's `folded`: on
-	-- another device, say): its fold plays as a click's would.
+	-- another device, say), or the empty projects': its fold plays as a
+	-- click's would.
 	ui.effect(function()
 		local f = folded:get()
 		for key, fold in folds_by do
 			local id = string.match(key, "^sec:(.*)$")
 			if id and (fold.h.to == 1) == (f[id] == true) then
 				fold_set(fold, not f[id])
+			elseif key == "empties" and (fold.h.to == 1) ~= (f[EMPTIES] == true) then
+				fold_set(fold, f[EMPTIES] == true)
 			end
 		end
 	end)
@@ -2358,9 +2528,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A pager's own key, where it isn't its group's sessions' (an outer
 		-- group's inner groups: `{key}/groups`).
 		pkey: string?,
+		-- The empty projects' row: the projects (their tiles stack on it).
+		gs: { Group }?,
 	}
 	type Shape = { items: { Item }, at: { [string]: number }, counts: { [string]: number } }
-	local function build_shape(by: Organize): Shape
+	local function build_shape(by: Organize, act: boolean?): Shape
 		shape:get()
 		gaps_shape:get()
 		local p = places:get()
@@ -2382,13 +2554,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 		end
 		-- Whether a session stays in its list with its place folded: it's in a
-		-- state (its corner a glyph, "waiting" none), and folded places keep
+		-- state (its corner a glyph), and folded places keep
 		-- those (`keep_active`).
 		local keep = keep_active:get()
 		-- (The session open shows in its group however far down it is.)
 		local open_id = selected:get()
 		local function peeks(s: Session): boolean
-			return keep and s.status ~= nil and s.status ~= "waiting"
+			return keep and s.status ~= nil
 		end
 		-- Each session's folds in a place folding at `f` (inside `outer`): its
 		-- own, kept in the list as `f` folds when it peeks; nil, not in the
@@ -2470,6 +2642,74 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end })
 		end
 
+		-- The list's rows as they're laid out (every place's added).
+		local function finish(): Shape
+			-- A place folding or unfolding moves only the rows that can show:
+			-- those past a list's height into it stand in as one row, so the
+			-- list (whose rows all shrink together) never finds a thousand tiny
+			-- ones in view and builds them all.
+			local t = clock:peek()
+			-- (As the list stands now, not followed: a ref's field follows its
+			-- whole box, and every frame of the sidebar's edge dragged or the
+			-- window resized would build this again, for every row.)
+			local list_now = list_view:peek()
+			local view = ((list_now and list_now.height) or 0) + 2 * SLOT
+			if view < 600 then
+				view = 600
+			end
+			local seen: { [Fold]: boolean } = {}
+			for _, it in items do
+				for _, f in it.chain do
+					seen[f] = true
+				end
+			end
+			for f in seen do
+				if t < f.h.at + f.h.delay + f.h.dur then
+					local kept: { Item } = {}
+					local run, inside, rest, rest_chain = 0, false, 0, nil :: { Fold }?
+					for _, it in items do
+						local holds = table.find(it.chain, f) ~= nil
+						if holds and run >= view then
+							rest += it.base()
+							if not rest_chain then
+								local upto: { Fold } = {}
+								for _, c in it.chain do
+									table.insert(upto, c)
+									if c == f then
+										break
+									end
+								end
+								rest_chain = upto
+							end
+							inside = true
+						else
+							if inside and not holds then
+								table.insert(kept, { kind = "rest", key = `rest:{f.key}`, place = it.place, chain = rest_chain :: { Fold }, base = function(): number
+									return rest
+								end })
+								inside = false
+							end
+							if holds then
+								run += it.base()
+							end
+							table.insert(kept, it)
+						end
+					end
+					if inside then
+						table.insert(kept, { kind = "rest", key = `rest:{f.key}`, place = "regular", chain = rest_chain :: { Fold }, base = function(): number
+							return rest
+						end })
+					end
+					items = kept
+				end
+			end
+			local at: { [string]: number } = {}
+			for i, it in items do
+				at[it.key] = i
+			end
+			return { items = items, at = at, counts = counts }
+		end
+
 		-- Pinned: while it has any, or while a session is dragged (to be
 		-- pinned there).
 		local pins = sessions_of(p.pinned)
@@ -2496,6 +2736,76 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				room(zoned({ f }, for_drag), "pinned", "pinned")
 			end
 		end
+		-- The Activity view: one list (every session not pinned, the one back
+		-- last first), then its shelves at the list's foot, each folded until
+		-- opened: Working, Asleep, Archived. No sections, no groups.
+		if act then
+			local list: { Session } = {}
+			local shelved: { [string]: { Session } } = { working = {}, asleep = {} }
+			for _, s in index:get().everything do
+				if placed[s.id] == "pinned" then
+					continue
+				end
+				local on = if s.shelf then shelved[s.shelf] else nil
+				table.insert(on or list, s)
+			end
+			local function ranked(all: { Session }): { Session }
+				table.sort(all, function(a: Session, b: Session): boolean
+					local x, y = a.rank or 0, b.rank or 0
+					if x ~= y then
+						return x > y
+					end
+					return a.id < b.id
+				end)
+				return all
+			end
+			local lf = activity_fold()
+			add({ kind = "title", key = "title:activity", place = "regular", chain = {}, title = "ds.sidebar.activity", n = #list, fold = activity_fold, open = activity_open, base = title_h })
+			if lf.present then
+				sessions_rows("activity", ranked(list), "none", { lf }, "regular")
+			end
+			local shelves = {
+				{ key = "working", title = "ds.sidebar.working", sessions = ranked(shelved.working) },
+				{ key = "asleep", title = "ds.sidebar.asleep", sessions = ranked(shelved.asleep) },
+			}
+			local stored: { Session } = if props.archived then follow(props.archived, {} :: { Session }) else {}
+			-- (The room the rest leave, so the shelves stand at the foot: its
+			-- height is the list's to work out, `heights`.)
+			if #shelved.working + #shelved.asleep + #stored > 0 then
+				add({ kind = "spacer", key = "spacer", place = "regular", chain = {}, base = function(): number
+					return 0
+				end })
+			end
+			for _, one in shelves do
+				if #one.sessions > 0 then
+					local key = one.key
+					local f = shelf_fold(key)
+					add({ kind = "title", key = `title:{key}`, place = "regular", chain = {}, title = one.title, n = #one.sessions, fold = function(): Fold
+						return shelf_fold(key)
+					end, open = shelf_open(key), base = title_h })
+					if f.present then
+						sessions_rows(key, one.sessions, "none", { f }, "regular")
+					end
+				end
+			end
+			-- Archived: its first few, and a row for more, as the shelf has them.
+			if #stored > 0 then
+				local af = shelf_fold("archived")
+				add({ kind = "title", key = "title:archived", place = "archived", chain = {}, title = "ds.sidebar.archived", n = #stored, fold = function(): Fold
+					return shelf_fold("archived")
+				end, open = shelf_open("archived"), base = title_h })
+				if af.present then
+					local n = math.min(#stored, shelf_shown:get())
+					sessions_rows("archived", { table.unpack(stored, 1, n) }, "none", { af }, "archived")
+					if #stored > n then
+						add({ kind = "more", key = "more:archived", place = "archived", chain = { af }, n = #stored - n, base = function(): number
+							return SLOT + gap_after
+						end })
+					end
+				end
+			end
+			return finish()
+		end
 		-- Your sections.
 		local narrow = props.narrowed ~= nil and props.narrowed()
 		for _, sec in p.sections do
@@ -2518,9 +2828,24 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 		end
 		-- The groups.
-		local gs, title = groups_of(by, placed)
+		local all_groups, title = groups_of(by, placed)
+		-- (Projects with none but archived sessions: after the rest, in a
+		-- fold of their own; or, not shown, nowhere.)
+		local gs: { Group } = {}
+		local empties: { Group } = {}
+		local show_empties = empties_shown()
+		for _, g in all_groups do
+			if g.unused and not show_empties then
+				continue
+			end
+			if not g.empty then
+				table.insert(gs, g)
+			elseif show_empties then
+				table.insert(empties, g)
+			end
+		end
 		local gf = groups_fold()
-		local count = if by == "none" then #listed(gs[1].sessions) else #gs
+		local count = if by == "none" then #listed(gs[1].sessions) else #gs + #empties
 		add({ kind = "title", key = "title:groups", place = "regular", chain = {}, title = title, n = count, fold = groups_fold, open = groups_open, base = title_h })
 		if gf.present then
 			-- A group's header, then what's under it: its sessions (its first
@@ -2668,6 +2993,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					emit_group(g, base, false, nil)
 				end
 			end
+			-- The empty projects: one row saying how many, its chevron
+			-- opening them under it, each a project's header as any other
+			-- (its new chat, its menu); closed, none of them in the list.
+			if #empties > 0 then
+				local ef = empties_fold()
+				add({ kind = "empties", key = "empties", place = "regular", chain = base, n = #empties, gs = empties, base = function(): number
+					return TITLE + gap_after
+				end })
+				if ef.present then
+					local inner = { gf, ef }
+					for _, g in empties do
+						emit_group(g, inner, false, nil)
+					end
+				end
+			end
 		end
 		-- The Archived shelf, last, while it's shown and has any: its first
 		-- few, and a row for more.
@@ -2687,66 +3027,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 			end
 		end
-		-- A place folding or unfolding moves only the rows that can show:
-		-- those past a list's height into it stand in as one row, so the
-		-- list (whose rows all shrink together) never finds a thousand tiny
-		-- ones in view and builds them all.
-		local t = clock:peek()
-		local view = (list_view.height or 0) + 2 * SLOT
-		if view < 600 then
-			view = 600
-		end
-		local seen: { [Fold]: boolean } = {}
-		for _, it in items do
-			for _, f in it.chain do
-				seen[f] = true
-			end
-		end
-		for f in seen do
-			if t < f.h.at + f.h.delay + f.h.dur then
-				local kept: { Item } = {}
-				local run, inside, rest, rest_chain = 0, false, 0, nil :: { Fold }?
-				for _, it in items do
-					local holds = table.find(it.chain, f) ~= nil
-					if holds and run >= view then
-						rest += it.base()
-						if not rest_chain then
-							local upto: { Fold } = {}
-							for _, c in it.chain do
-								table.insert(upto, c)
-								if c == f then
-									break
-								end
-							end
-							rest_chain = upto
-						end
-						inside = true
-					else
-						if inside and not holds then
-							table.insert(kept, { kind = "rest", key = `rest:{f.key}`, place = it.place, chain = rest_chain :: { Fold }, base = function(): number
-								return rest
-							end })
-							inside = false
-						end
-						if holds then
-							run += it.base()
-						end
-						table.insert(kept, it)
-					end
-				end
-				if inside then
-					table.insert(kept, { kind = "rest", key = `rest:{f.key}`, place = "regular", chain = rest_chain :: { Fold }, base = function(): number
-						return rest
-					end })
-				end
-				items = kept
-			end
-		end
-		local at: { [string]: number } = {}
-		for i, it in items do
-			at[it.key] = i
-		end
-		return { items = items, at = at, counts = counts }
+		return finish()
 	end
 
 	-- Each row's height now: its own, as its folds have it (a dragged one's
@@ -3099,12 +3380,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					weight = "$font.weight.medium",
 				}
 			),
+			-- (On the line of every other section's count: its "…" stands a step
+			-- further out than words do.)
 			ui.show(function(): boolean
 				return not open() and not editing() and not hovered:get() and not menu_open:get()
-			end, hint(function(): string
-				local _, n = now()
-				return tostring(n)
-			end)),
+			end, ui.row {
+				shrink = 0,
+				pr = "$space.1",
+				hint(function(): string
+					local _, n = now()
+					return tostring(n)
+				end),
+			}),
 			ui.show(function(): boolean
 				return (hovered:get() or menu_open:get()) and not editing()
 			end, menu),
@@ -3153,13 +3440,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					return tostring(#sessions())
 				end,
 				hidden,
-				if g.new_in
-					then corner("ds.sidebar.new_chat_in", "plus", function()
-						if props.on_new then
-							props.on_new(now().project)
-						end
-					end, { name = g.name :: string })
-					else nil,
+				if g.new_in then new_corner(g, now) else nil,
 				if g.new_in
 					then function(): boolean
 						return hovered:get()
@@ -3211,7 +3492,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- Its sessions in the list's order, as plugins under it read them.
 	local order = ui.use_state({} :: { string })
 	local live: { shape: Shape?, heights: { number } } = { shape = nil, heights = {} }
-	local function the_list(by: Organize): Node
+	local function the_list(by: Organize, act: boolean?): Node
 		-- (A computed holds plain data: the shape, with its rows' functions,
 		-- is kept beside it, the computed counting its versions for what
 		-- follows it.)
@@ -3231,7 +3512,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local grows: { [string]: Anim } = {}
 		local going: { [string]: { it: Item, after: string? } } = {}
 		local pending: { [string]: number }? = nil
-		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true }
+		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true, empties = true }
 		local function quiet(): boolean
 			return drag:peek() == nil and starting == nil
 		end
@@ -3368,7 +3649,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local old = laid.shape
 			local t = clock:peek()
 			local before = if old and quiet() then stood(old, laid.heights, t) else nil
-			current = reshaped(old, laid.heights, build_shape(by))
+			current = reshaped(old, laid.heights, build_shape(by, act == true))
 			pending = before
 			version += 1
 			return version
@@ -3386,7 +3667,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- (The list showing now's: one crossfading out leaves it be.)
 		ui.effect(function()
 			local s = sh:get()
-			if by ~= by_peek() then
+			if (act == true) ~= act_peek() or (not act and by ~= by_peek()) then
 				return
 			end
 			local ids: { string } = {}
@@ -3450,6 +3731,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				out[i] = h
 				total += h
 			end
+			-- (Activity's shelves stand at the view's foot: the room the rest
+			-- leave fills before them, following the view's height.)
+			local fill_at = s.at["spacer"]
+			if fill_at then
+				local view = list_view.height or 0
+				local fill = math.max(NONE, view - (total - out[fill_at]))
+				total += fill - out[fill_at]
+				out[fill_at] = fill
+			end
 			list_total = total
 			live.shape, live.heights = s, out
 			laid.shape, laid.heights = s, out
@@ -3460,6 +3750,220 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local i = s.at[key]
 			return if i then s.items[i] else nil
 		end
+		-- The empty projects' row (the Archived title's own frame, no
+		-- caret: the whole row folds): "Empty", a stack of their tiles
+		-- overlapping (as many as fit, at most EMPTY_TILES: whole tiles
+		-- dropped, never the word or the count cut), and how many at the
+		-- end. Its full phrase, "21 empty projects", names it and is its
+		-- tooltip. Opened, each tile of the stack flies down to be its
+		-- project's icon in the row under it (and back up as it closes),
+		-- on the fold's own motion; the stack's tiles are made once and
+		-- follow the projects in place.
+		local EMPTY_TILES = 5
+		local EMPTY_TILE, EMPTY_OVERLAP, EMPTY_GAP = 18, 6, 1.5
+		-- What the row keeps before the stack, points: its insets, the word
+		-- (an estimate, the longer of its locales'), the space, and the
+		-- count's digits.
+		local EMPTY_FIXED = 8 * 2 + 40 + 8 + 8
+		local EMPTY_DIGIT = 7
+		-- A tile's cut: a rounded square the next one's size, and a gap round it
+		-- (params[0]: its centre and half-side as fractions of the width,
+		-- params[1]: its corner), so the tile behind is notched to the shape of
+		-- the one over it, with no shadow, whatever shows through.
+		local NOTCH = ui.layer_shader([[
+fn layer(input:LayerInput)->vec4<f32> {
+ let w=input.size.x;
+ let c=vec2(input.params[0].x*w,.5*input.size.y);
+ let h=input.params[0].y*w;
+ let r=input.params[0].z*w;
+ let q=abs(input.p-c)-vec2(h-r);
+ let d=length(max(q,vec2(0.0)))+min(max(q.x,q.y),0.0)-r;
+ return vec4(input.color.rgb,input.color.a*smoothstep(-.5,.5,d));
+}
+]])
+		local function empties_row(now: () -> Item): Node
+			local function says(): string
+				return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
+			end
+			local function group_at(i: number): Group?
+				return (now().gs or {})[i]
+			end
+			local function project_at(i: number): Project?
+				local g = group_at(i)
+				return if g then index:get().by_project[g.project :: string] else nil
+			end
+			-- How many tiles the width keeps.
+			local function fit(): number
+				local free = room() - PAD * 2 - EMPTY_FIXED - EMPTY_DIGIT * #tostring(now().n or 0)
+				if free < EMPTY_TILE then
+					return 0
+				end
+				return math.min(EMPTY_TILES, 1 + math.floor((free - EMPTY_TILE) / (EMPTY_TILE - EMPTY_OVERLAP)))
+			end
+			local function shows(i: number): boolean
+				return i <= fit() and group_at(i) ~= nil
+			end
+			-- The fold's own motion (its height's progress, its ink): 0 closed,
+			-- 1 open.
+			local function flown(): number
+				return value(empties_fold().h, clock:get())
+			end
+			local stack_ref = ui.ref()
+			local STEP = EMPTY_TILE - EMPTY_OVERLAP
+			-- Where tile `i` lands, from where it stands: its project's row
+			-- icon (the rows' own tile slot, centred on its slot).
+			local function lands(i: number): (number, number)
+				local g = group_at(i)
+				local sh0 = sh:peek()
+				local from, to = sh0.at["empties"], if g then sh0.at[`group:{g.key}`] else nil
+				local box, list = stack_ref:peek(), list_view:peek()
+				if not (from and to and box and list) then
+					return 0, 0
+				end
+				local dy = (SLOT - TITLE) / 2
+				for k = from, to - 1 do
+					dy += sh0.items[k].base()
+				end
+				local dx = list.x + PAD + (SLOT - EMPTY_TILE) / 2 - (box.x + (i - 1) * STEP)
+				return dx, dy
+			end
+			local function tile(i: number, cut: boolean): Node
+				local held: { [any]: any } = {
+					shrink = 0,
+					w = EMPTY_TILE,
+					h = EMPTY_TILE,
+					Tile {
+						size = EMPTY_TILE,
+						label = function(): string
+							local p = project_at(i)
+							return if p then p.name else ""
+						end,
+						hue = function(): string?
+							local p = project_at(i)
+							return (p and p.hue) or "gray"
+						end,
+						src = function(): string?
+							local p = project_at(i)
+							return if p then p.src else nil
+						end,
+						emoji = function(): string?
+							local p = project_at(i)
+							return if p then p.emoji else nil
+						end,
+					},
+				}
+				if cut then
+					held.layer_shader = NOTCH
+					local half = EMPTY_TILE / 2 + EMPTY_GAP
+					local radius = ((ui.theme.get("radius.sm") :: number?) or 4) + EMPTY_GAP
+					held.layer_params = {
+						{ (STEP + EMPTY_TILE / 2) / EMPTY_TILE, half / EMPTY_TILE, radius / EMPTY_TILE, 0 },
+						{ 0, 0, 0, 0 },
+						{ 0, 0, 0, 0 },
+						{ 0, 0, 0, 0 },
+					}
+				end
+				return ui.div(held)
+			end
+			local function slot(i: number): Node
+				return ui.show(function(): boolean
+					return shows(i)
+				end, ui.div {
+					shrink = 0,
+					ml = if i == 1 then 0 else ui.raw(-EMPTY_OVERLAP, "tiles overlap by a third"),
+					-- (Flying: down to its row's icon as the fold opens, back as
+					-- it closes; whole while it flies, it hands over to the
+					-- row's own icon, fading in under it, over the last stretch.)
+					x = function(): number
+						local p = flown()
+						return if p > 0 then p * (lands(i)) else 0
+					end,
+					y = function(): number
+						local p = flown()
+						if p <= 0 then
+							return 0
+						end
+						local _, dy = lands(i)
+						return p * dy
+					end,
+					opacity = function(): number
+						return 1 - math.clamp((flown() - 0.75) / 0.25, 0, 1)
+					end,
+					-- (The notch only while it sits in the stack.)
+					ui.show(function(): boolean
+						return not (i < EMPTY_TILES and shows(i + 1)) or flown() > 0
+					end, tile(i, false)),
+					if i < EMPTY_TILES
+						then ui.show(function(): boolean
+							return shows(i + 1) and flown() <= 0
+						end, tile(i, true))
+						else nil,
+				})
+			end
+			local slots: { Node } = {}
+			for i = 1, EMPTY_TILES do
+				table.insert(slots, slot(i))
+			end
+			local frame: { [any]: any } = {
+				class = "empty-projects",
+				role = "button",
+				label = says,
+				w = function(): number
+					return room() - PAD * 2
+				end,
+				h = TITLE,
+				shrink = 0,
+				pl = "$space.2",
+				pr = "$space.2",
+				items = "center",
+				color = "$text.tertiary",
+				cursor = "pointer",
+				hover = { color = "$text.secondary" },
+				on_click = function()
+					fold_set(empties_fold(), not empties_open:peek())
+				end,
+				ui.text {
+					locale.t("ds.sidebar.empty_projects_word"),
+					shrink = 0,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+				-- (Gone from the header once they've landed in the rows.)
+				ui.show(function(): boolean
+					return flown() < 1 or not empties_open:get()
+				end, ui.row {
+					class = "empty-projects-stack",
+					ref = stack_ref,
+					ml = "$space.2",
+					shrink = 1,
+					min_w = 0,
+					items = "center",
+					table.unpack(slots),
+				}),
+				ui.div { grow = 1 },
+				ui.text {
+					function(): string
+						return tostring(now().n or 0)
+					end,
+					shrink = 0,
+					text_size = "$font.size.xs",
+					tabular = true,
+				},
+				ui.presence(says, function(name: string): Node
+					return ui.div { absolute = true, left = 0, top = 0, w_full = true, h_full = true, tooltip = name, tooltip_delay = 150, pointer_events = "none" }
+				end),
+			}
+			frame.relative = true
+			-- (No folding frame round it, which would clip: its tiles fly out.)
+			return ui.div {
+				w_full = true,
+				h = TITLE,
+				ui.row(fades(frame :: any, function(): boolean
+					return not railed()
+				end)),
+			}
+		end
+
 		local function build(key: string): Node
 			local it = item_of(key)
 			if not it then
@@ -3524,6 +4028,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						local now = item_of(key)
 						return if now and now.list then now.list else it.list :: string
 					end,
+					by_now = function(): Organize
+						local now = item_of(key)
+						return if now and now.by then now.by :: Organize else it.by :: Organize
+					end,
 					at = at,
 					-- Its trunk while it sits in a group that draws one.
 					tree_of = tree_at(),
@@ -3562,6 +4070,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					},
 					tree_now
 				)
+			elseif it.kind == "empties" then
+				-- The Archived row's own (a section's title: its height, its
+				-- words, its ink) with a chevron before: "Empty", the first
+				-- projects' tiles stacked, the count at its end.
+				node = empties_row(now)
 			elseif it.kind == "more" then
 				-- "Show N more": the shelf's next few.
 				node = row {
@@ -3593,7 +4106,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					local a = slides[key]
 					return if a then value(a, clock:get()) else 0
 				end,
-				overflow = "hidden",
+				-- (The empty projects' row lets its tiles fly out of it.)
+				overflow = if it.kind == "empties" then "visible" else "hidden",
 				opacity = function(): number
 					local now = item_of(key)
 					local t = clock:get()
@@ -3697,8 +4211,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return math.max(0, list_total - (list_view.height or 0))
 			end),
 			-- Sessions dropped on it land where it shows; sections, among yours.
+			-- (A split pane's head carried over it isn't a row to place.)
 			drop_when = function(payload: any): boolean
-				return type(payload) == "table" and (payload.session ~= nil or payload.section ~= nil)
+				return type(payload) == "table" and payload.split_pane == nil and (payload.session ~= nil or payload.section ~= nil)
 			end,
 			on_drag_over = function(payload: any, e)
 				drag_y = e.y
@@ -3750,9 +4265,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		exit = { opacity = 0, duration = GO },
 	}
 	local middle: Node = ui.presence(function(): string
-		return `{by_now()}/{sort:get()}`
+		return if act_now() then "activity" else `{by_now()}/{sort:get()}`
 	end, function(): Node
-		return the_list(by_peek())
+		-- (Activity's rows say where each runs, as one list's do.)
+		local act = act_peek()
+		return the_list(if act then "none" else by_peek(), act)
 	end, REGROUP)
 
 	-- A new section of your own, at the end of yours, its name being typed.
@@ -3878,7 +4395,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					table.insert(out, { key = `section:{sec.id}`, name = sec.name, sessions = own })
 				end
 				for _, g in (groups_of(by, placed_in(p))) do
-					table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
+					-- (The empty projects aren't on the rail: their fold is
+					-- the list's.)
+					if not g.empty and not (g.unused and not empties_shown()) then
+						table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
+					end
 				end
 				return out
 			end)
@@ -3961,6 +4482,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					sessions = sessions(key),
 					tile = g.tile,
 					new_in = g.new_in,
+					-- (Its project and device: where its new chat starts.)
+					project = g.project,
+					device = g.device,
+					project_name = g.project_name,
 					shows_tile = g.shows_tile,
 				}, by))
 			end
@@ -4045,8 +4570,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local view_open = ui.use_state(false)
 	-- (The menu is built as it opens: its words, read then, are the locale's.
 	-- Each row's `label` its message's key.)
-	local function menu_row(icon: Icon.Name, name: string, on: () -> boolean, pick: () -> ()): Node
-		return Menu.Row { icon = icon, label = name, checked = on, on_click = pick }
+	-- (`off`: out of reach, as what Activity stands aside from is while it's on.)
+	local function menu_row(icon: Icon.Name, name: string, on: () -> boolean, pick: () -> (), off: boolean?): Node
+		return Menu.Row { icon = icon, label = name, checked = on, on_click = pick, disabled = off }
 	end
 	local ORGANIZE: { { value: Organize, label: string, icon: Icon.Name } } = {
 		{ value = "project", label = "ds.sidebar.view.by_project", icon = "folder" },
@@ -4073,6 +4599,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	if (details :: any).archived then
 		table.insert(SHOW, { key = "archived", label = "ds.sidebar.view.archived", icon = "archive-minimalistic" })
 	end
+	if (details :: any).empty_projects then
+		table.insert(SHOW, { key = "empty_projects", label = "ds.sidebar.view.empty_projects", icon = "inbox" })
+	end
 	-- Opens it. (A press anywhere outside it closes it, this one too, as
 	-- zgx closes any popover: toggling here would open it again.)
 	local view_trigger = IconButton {
@@ -4091,7 +4620,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- Beside the sidebar, not over it, so what it changes shows as it's
 		-- changed: past its edge as far as the rail's flyouts are (the
 		-- trigger sits its inset in from it).
-		placement = { side = "right", align = "start", offset = PAD + 4 },
+		placement = if props.card then { side = "bottom", align = "start", offset = 4 } else { side = "right", align = "start", offset = PAD + 4 },
 		w = "$zeron.menu.width",
 		p = 0,
 		gap = 0,
@@ -4265,8 +4794,20 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					rows_order:set(now)
 				end
 			end)
+			-- (Read as it opens: Activity turned on or off closes it.)
+			local act = act_peek()
 			local organize_rows: { Node } = { heading = locale.s("ds.sidebar.view.organize") } :: any
-			table.insert(
+			if act then
+				for _, level in order_now() do
+					table.insert(
+						organize_rows,
+						menu_row(if level == "project" then "folder" else "laptop", locale.s(LABEL[level]), function(): boolean
+							return table.find(levels(), level) ~= nil
+						end, function() end, true)
+					)
+				end
+			end
+			if not act then table.insert(
 				organize_rows,
 				ui.each(
 					rows_order,
@@ -4281,7 +4822,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						animate = motion.layout({ duration = motion.BASE, ease = motion.EASE }),
 					}
 				)
-			)
+			) end
 			for _, o in ORGANIZE do
 				if o.value == "none" then
 					table.insert(
@@ -4290,7 +4831,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							return #levels() == 0
 						end, function()
 							organize:set({})
-						end)
+						end, act)
 					)
 				end
 			end
@@ -4303,24 +4844,60 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end, function()
 						sort:set(o.value)
 						view_open:set(false)
-					end)
+					end, act)
 				)
 			end
 			local show_rows: { Node } = { heading = locale.s("ds.sidebar.view.show") } :: any
+			-- (Activity keeps its own: the Archived shelf always, folded; no
+			-- groups to fold or empty projects to list.)
+			local ACTIVITY_OWNS: { [string]: boolean } = { keep_active = true, empty_projects = true, archived = true }
 			for _, d in SHOW do
 				local st = (details :: any)[d.key] :: State<boolean>
+				local owned = act and ACTIVITY_OWNS[d.key] == true
 				table.insert(
 					show_rows,
 					menu_row(d.icon, locale.s(d.label), function(): boolean
-						return st:get()
+						return if owned and d.key == "archived" then true else st:get()
 					end, function()
 						st:set(not st:peek())
-					end)
+					end, owned)
 				)
+			end
+			-- Activity: the view itself (a choice: the menu closes on it), and the
+			-- way to its settings.
+			local activity_rows: Node? = nil
+			if props.activity then
+				local on = props.activity
+				activity_rows = Menu.Group {
+					Menu.Row {
+						icon = "inbox",
+						label = locale.s("ds.sidebar.view.activity"),
+						checked = function(): boolean
+							return on:get() == true
+						end,
+						on_click = function()
+							on:set(not on:peek())
+							view_open:set(false)
+						end,
+					},
+					if props.on_activity_settings
+						then Menu.Row {
+							icon = "settings",
+							label = locale.s("ds.sidebar.view.activity_settings"),
+							on_click = function()
+								local open_settings = props.on_activity_settings :: () -> ()
+								view_open:set(false)
+								open_settings()
+							end,
+						}
+						else nil,
+				}
 			end
 			return ui.column {
 				w_full = true,
 				gap = 0,
+				activity_rows,
+				if activity_rows then Menu.Rule() else nil,
 				Menu.Group(organize_rows :: any),
 				Menu.Rule(),
 				Menu.Group(sort_rows :: any),
@@ -4336,10 +4913,17 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						active = {},
 						trail = { Switch { value = compact, label = locale.s("ds.sidebar.view.compact") } },
 					},
-					menu_item("plus", locale.s("ds.sidebar.view.create_section"), function()
-						view_open:set(false)
-						new_section()
-					end),
+					Menu.Row {
+						icon = "plus",
+						label = locale.s("ds.sidebar.view.create_section"),
+						role = "menuitem",
+						-- (Activity lists no sections.)
+						disabled = act,
+						on_click = function()
+							view_open:set(false)
+							new_section()
+						end,
+					},
 				},
 			}
 		end,
@@ -4398,7 +4982,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		h_full = true,
 		shrink = 0,
 		px = ui.raw(PAD, "its inset, counted in its rows' widths"),
-		pt = ui.raw((props.top or 0) + 4, "the title bar's strip over it, then its own inset"),
+		pt = ui.raw(if props.card then PAD else (props.top or 0) + 4, "the title bar's strip over it, then its own inset"),
 		gap = "$space.2",
 		top,
 	}
@@ -4452,78 +5036,17 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	if #feet > 0 then
 		table.insert(body, ui.column { w_full = true, shrink = 0, gap = "$zeron.list.gap", table.unpack(feet) })
 	end
-	return ui.column {
-		id = if is_island then "rail" else nil,
-		w = function(): number
-			return shown_w:get()
-		end,
-		-- Folded away, out of layout and out of reach (no row to tab to),
-		-- its scroll and folds kept for when it opens.
-		hidden = function(): boolean
-			return collapsed:get() and shown_w:get() <= 0
-		end,
-		h_full = true,
-		shrink = 0,
-		overflow = "hidden",
-		relative = true,
-		ui.column(body),
-		-- Under a title bar laid over it, its head is the window's to move it
-		-- by (a double click zooms it), as a title bar is: under its "…" and
-		-- its edge, which keep their presses.
-		if props.top
-			then ui.div {
-				id = "sidebar-drag",
-				absolute = true,
-				left = 0,
-				right = 0,
-				top = 0,
-				h = props.top,
-				window_drag = true,
-			}
-			else ui.div {},
-		-- Its view options, at its top right: on the title bar's line when one
-		-- lies over it (its controls centred halfway down it, under its top
-		-- inset: Zeron's 38 and 4), else at its own inset. Where it stands
-		-- open, whatever its width as it folds or comes back: its edge clips
-		-- it there, as it clips the rest, so it never slides under the title
-		-- bar's controls and the window's buttons on the way.
-		ui.div {
+	-- Its edge: dragged, it resizes (242 to 400), following the pointer at once.
+	-- (Pressed itself, so it keeps the pointer as it's dragged.) A card's reaches
+	-- across the gap beside it, which lights as it does between the panel and the
+	-- page, over the card's height; `gap`: how far past the sidebar that is.
+	local function edge_handle(gap: number, top: number, bottom: number): Node
+		return ui.div {
 			absolute = true,
-			left = function(): number
-				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
-				return room() - PAD - button
-			end,
-			top = if props.top then (props.top + 4) / 2 - 12 else PAD,
-			opacity = shown_wide,
-			pointer_events = function()
-				return if collapsed:get() then "none" else "auto"
-			end,
-			view_menu,
-		},
-		-- A hairline down its right, between it and what it opens, full
-		-- height (stronger under the pointer at its edge, and as it's
-		-- dragged); collapsed, gone (the rail sits on the window as its
-		-- icons).
-		ui.div {
-			absolute = true,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			w = 1,
-			pointer_events = "none",
-			bg = function()
-				return if edge_over:get() or dragging:get() then "$border.strong" else "$border.subtle"
-			end,
-			opacity = shown_wide,
-		},
-		-- Its edge: dragged, it resizes (242 to 400), following the pointer at
-		-- once. (Pressed itself, so it keeps the pointer as it's dragged.)
-		ui.div {
-			absolute = true,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			w = 6,
+			right = ui.raw(-gap, "over the gap beside it"),
+			top = top,
+			bottom = bottom,
+			w = ui.raw(6 + gap, "a little into it, and the gap"),
 			cursor = "col_resize",
 			label = locale.t("ds.sidebar.resize"),
 			pointer_events = function()
@@ -4546,6 +5069,135 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				resizing = false
 				dragging:set(false)
 			end,
+		}
+	end
+	local root = ui.column {
+		id = if is_island then "rail" else nil,
+		w = if props.card
+			then "100%" :: any
+			else function(): number
+				return shown_w:get()
+			end,
+		-- Folded away, out of layout and out of reach (no row to tab to),
+		-- its scroll and folds kept for when it opens.
+		hidden = function(): boolean
+			return collapsed:get() and shown_w:get() <= 0
+		end,
+		h_full = true,
+		shrink = 0,
+		overflow = "hidden",
+		relative = true,
+		-- (`card`: a card of its own under the top bar, as the page's.)
+		if props.card
+			then ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = props.top or 0,
+				bottom = 5,
+				overflow = "hidden",
+				rounded = "$zeron.inset.radius",
+				bg = "$zeron.inset.bg",
+				ui.column(body),
+			}
+			else ui.column(body),
+		-- Under a title bar laid over it, its head is the window's to move it
+		-- by (a double click zooms it), as a title bar is: under its "…" and
+		-- its edge, which keep their presses.
+		if props.top
+			then ui.div {
+				id = "sidebar-drag",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				h = props.top,
+				window_drag = true,
+			}
+			else ui.div {},
+		-- Its view options, at its top right: on the title bar's line when one
+		-- lies over it (`TitleBar.middle`: halfway down it under its top inset,
+		-- Zeron's 38 and 4, or the window's own buttons' line), else at its
+		-- own inset. Where it stands
+		-- open, whatever its width as it folds or comes back: its edge clips
+		-- it there, as it clips the rest, so it never slides under the title
+		-- bar's controls and the window's buttons on the way.
+		ui.div {
+			absolute = true,
+			left = function(): number
+				-- (A card's: on the top bar, past Back and Forward, the window's
+				-- gap before the card taken off.)
+				if props.card then
+					-- (`controls_end` holds the row's own 10 past its last control.)
+					return ui.raw(TitleBar.controls_end() - 10 + 8 - 5, "past the title bar's controls, by its group gap")
+				end
+				local button = (ui.theme.get("zeron.icon_button.md") :: number?) or 24
+				return room() - PAD - button
+			end,
+			top = if props.top
+				then function(): number
+					return TitleBar.middle() - 12
+				end
+				else PAD,
+			opacity = shown_wide,
+			pointer_events = function()
+				return if collapsed:get() then "none" else "auto"
+			end,
+			view_menu,
 		},
+		-- A hairline down its right, between it and what it opens, full
+		-- height (stronger under the pointer at its edge, and as it's
+		-- dragged); collapsed, gone (the rail sits on the window as its
+		-- icons). (A card's lights the gap instead: below.)
+		if props.card
+			then nil
+			else ui.div {
+				absolute = true,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				w = 1,
+				pointer_events = "none",
+				bg = function()
+					-- (The cards beside it are its edge at rest; the
+					-- hairline shows only under the pointer and as it's dragged.)
+					return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
+				end,
+				opacity = shown_wide,
+			},
+		if props.card then nil else edge_handle(0, 0, 0),
+	}
+	if not props.card then
+		return root
+	end
+	-- (A card's root clips what it holds as it folds; its edge, in the gap beside it,
+	-- stands outside that.)
+	local gap = (ui.theme.get("zeron.inset.gap") :: number?) or 4
+	local card_top = props.top or 0
+	return ui.div {
+		relative = true,
+		w = function(): number
+			return shown_w:get()
+		end,
+		hidden = function(): boolean
+			return collapsed:get() and shown_w:get() <= 0
+		end,
+		h_full = true,
+		shrink = 0,
+		root,
+		ui.div {
+			absolute = true,
+			right = ui.raw(-gap, "the gap beside it"),
+			top = card_top,
+			bottom = 5,
+			w = gap,
+			rounded = "$radius.full",
+			pointer_events = "none",
+			bg = function()
+				return if edge_over:get() or dragging:get() then "$border.strong" else "#00000000"
+			end,
+			opacity = shown_wide,
+		},
+		edge_handle(gap, card_top, 5),
 	}
 end)

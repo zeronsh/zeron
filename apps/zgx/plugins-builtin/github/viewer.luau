@@ -2151,6 +2151,8 @@ return function(zeron: any, pulls: any): (props: { tab: any }) -> Node
 			class = "github-pr",
 			w_full = true,
 			h_full = true,
+			-- (Its words can be selected and copied, as a chat's can.)
+			selectable = true,
 			on_resize = function(size)
 				-- (Whole points: a sub-point wobble is no new width. And no
 				-- width at all is no width: the panel closing lays its content

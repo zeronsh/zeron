@@ -122,7 +122,7 @@ async fn plugins_new_plugin_scaffolds_signs_and_is_on() {
         serde_json::json!({ "id": "zeron", "name": "Z" }),
     )
     .await;
-    assert_eq!(reserved.unwrap_err(), "That name is Zeron's own");
+    assert_eq!(reserved.unwrap_err(), "Zeron already uses that name");
     assert!(
         call(
             &f.plugins,
@@ -551,7 +551,7 @@ async fn plugins_list_is_sorted_and_reports_broken() {
     };
     assert_eq!(by_id("bad")["status"], "broken");
     assert!(by_id("bad")["error"].as_str().unwrap().contains("native"));
-    assert_eq!(by_id("app")["error"], "That name is Zeron's own");
+    assert_eq!(by_id("app")["error"], "Zeron already uses that name");
     #[cfg(unix)]
     assert_eq!(by_id("linky")["error"], files::LINK_ERROR);
     assert!(
@@ -1056,7 +1056,7 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
     let off = list["plugins"].as_array().unwrap().iter().find(|p| p["builtin"] == true).unwrap().clone();
     assert_eq!(off["status"], "off");
     let removed = call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await;
-    assert!(removed.unwrap_err().contains("turned off, not removed"));
+    assert!(removed.unwrap_err().contains("turned off, but not removed"));
     // A new version asking more is allowed it as it ships.
     write_plugin(&shipped, "github", serde_json::json!({ "name": "GitHub", "permissions": ["ui.add", "github", "panel.tabs"] }), None);
     call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "github", "off": false })).await.unwrap();
@@ -1343,4 +1343,32 @@ async fn plugins_export_packs_a_plugin_that_installs_elsewhere() {
     // Over a plugin you're making here, refused.
     let here = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap_err();
     assert!(here.contains("making a plugin called hello"), "{here}");
+}
+
+/// The theme tools' methods over this device's files, and the window told
+/// of each change (`WatchThemes`) so it reads them again.
+#[tokio::test]
+async fn theme_methods_write_this_device_s_files_and_tell_the_window() {
+    let f = fixture();
+    let mut told = match f.plugins.dispatch(methods::WATCH_THEMES, serde_json::json!({})).await {
+        Ok(RpcReply::Stream(stream)) => stream,
+        _ => panic!("stream"),
+    };
+    let nord = zeron_theme::builtin_registry().families.iter().flat_map(|fam| &fam.variants).find(|v| v.id == "nord").unwrap();
+    let dark = zeron_theme::catalog::Palette::of(nord).to_json(None);
+    let made = call(&f.plugins, methods::CREATE_THEME, serde_json::json!({ "name": "Ink", "dark": dark })).await.unwrap();
+    assert_eq!(made["id"], "custom-ink");
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert!(zeron_theme::CustomThemeLibrary::load(&f.data).unwrap().entry("custom-ink").is_some(), "in the data dir");
+    call(&f.plugins, methods::USE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert_eq!(zeron_theme::catalog::chosen(&f.data).dark.as_deref(), Some("custom-ink-dark"));
+    // Reading tells nothing; a refusal says why and changes nothing.
+    let listed = call(&f.plugins, methods::LIST_THEMES, serde_json::json!({})).await.unwrap();
+    assert_eq!(listed["wearing"]["dark"]["theme"], "custom-ink");
+    let refused = call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "gruvbox" })).await.unwrap_err();
+    assert!(refused.contains("built in"), "{refused}");
+    call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert!(zeron_theme::catalog::chosen(&f.data).is_empty());
 }

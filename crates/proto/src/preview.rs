@@ -40,6 +40,11 @@ pub struct PreviewService {
     /// The chat whose agent or terminal started it (see [`ORIGIN_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    /// What listens, in a few words (`node server.js`, `python3 -m
+    /// http.server`): its program and the script or module it runs, never
+    /// its other arguments. Empty from engines that predate it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process: String,
 }
 
 impl PreviewService {

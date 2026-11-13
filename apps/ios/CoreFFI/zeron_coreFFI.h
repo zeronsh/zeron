@@ -718,6 +718,16 @@ void uniffi_zeron_mobile_fn_method_coreclient_set_session_config(uint64_t ptr, R
 void uniffi_zeron_mobile_fn_method_coreclient_shutdown(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SLEEP_SESSION
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SLEEP_SESSION
+void uniffi_zeron_mobile_fn_method_coreclient_sleep_session(uint64_t ptr, RustBuffer chat_id, RustBuffer until_ms, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_STOP_WAITING
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_STOP_WAITING
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_stop_waiting(uint64_t ptr, RustBuffer chat_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SWITCH_REF
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_SWITCH_REF
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_switch_ref(uint64_t ptr, RustBuffer device_id, RustBuffer repo_path, RustBuffer ref_name
@@ -2511,6 +2521,18 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_set_session_config(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SHUTDOWN
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_shutdown(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SLEEP_SESSION
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_SLEEP_SESSION
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_sleep_session(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_STOP_WAITING
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_STOP_WAITING
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_stop_waiting(void
     
 );
 #endif

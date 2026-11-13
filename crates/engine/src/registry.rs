@@ -424,6 +424,11 @@ impl HarnessRegistry {
         self.gate(id).write_owned().await
     }
 
+    /// The exclusive lease, if nothing is using this CLI right now.
+    pub fn try_update_lease(&self, id: HarnessId) -> Option<tokio::sync::OwnedRwLockWriteGuard<()>> {
+        self.gate(id).try_write_owned().ok()
+    }
+
     /// Mark an accepted update before queueing its writer. Existing persistent
     /// runtimes use this signal to retire at their next turn boundary instead
     /// of parking indefinitely while the writer waits.

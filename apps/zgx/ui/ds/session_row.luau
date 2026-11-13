@@ -18,7 +18,7 @@
 --   SessionRow.Corner { cur, hovered, jump?, action? }
 --                                         the corner as a row wears it: its
 --                                         action under the pointer, ⌘N while
---                                         ⌘ is held, its width kept
+--                                         ⌘ is held, as wide as the wider
 --   SessionRow.pr_badge(pr)               its pull request
 --   SessionRow.subagents(n)               subagents running under it
 --   SessionRow.on_tree(body, tree, lead)  under a group: a branch off the
@@ -232,22 +232,23 @@ export type CornerProps = {
 
 -- The corner as a row wears it: its state (or time) at rest; under the
 -- pointer, its action, its glyph on the state's own centre; ⌘ held alone,
--- its jump's keys over both (as Zeron's). What's at rest stays in place,
--- unseen, so its width holds and the title and badges before it never
--- shift.
+-- its jump's keys in its place (as Zeron's). The two share one box as wide
+-- as the wider (what's at rest stays, unseen, so its width holds): ⌘1 fits
+-- where a time stood and nothing moves, and a wider Ctrl+1 widens the
+-- corner, the badges before it giving way, never drawn over.
 function M.Corner(props: CornerProps): Node
 	local hovered = props.hovered
 	local jump = props.jump or function(): number?
 		return nil
 	end
 	local action = props.action
-	return ui.row {
+	return ui.overlay {
 		shrink = 0,
 		relative = true,
 		min_w = 16,
 		h = 16,
-		items = "center",
-		justify = "end",
+		items = "end",
+		justify = "center",
 		ui.div {
 			opacity = function(): number
 				return if (action ~= nil and hovered:get()) or jump() ~= nil then 0 else 1
@@ -261,14 +262,11 @@ function M.Corner(props: CornerProps): Node
 			end,
 			ui.div {
 				class = "jump-hint",
-				absolute = true,
-				right = 0,
-				top = 0,
 				h = 16,
-				items = "center",
+				justify = "center",
 				pointer_events = "none",
 				M.hint(function(): string
-					return `⌘{jump() or ""}`
+					return ui.shortcut_text(`cmd+{jump() or ""}`)
 				end),
 			}
 		),
@@ -573,6 +571,11 @@ export type SectionProps = {
 	-- Its row's props, wrapped before it's made (the sidebar fades it
 	-- with its rail).
 	wrap: ((ContainerProps) -> ContainerProps)?,
+	-- At its end while `trail_shown` says (a section's "…" under the
+	-- pointer, as the sidebar's own sections have it), in the place of how
+	-- many it holds.
+	trail: Node?,
+	trail_shown: (() -> boolean)?,
 }
 
 -- A section's title, over its groups (Pinned, a section of yours, the
@@ -582,11 +585,16 @@ M.TITLE = 24
 function M.Section(props: SectionProps): Node
 	local open = props.open
 	local foldable = open ~= nil and props.on_toggle ~= nil
+	local trail, trail_shown = props.trail, props.trail_shown
+	local function trailing(): boolean
+		return trail ~= nil and trail_shown ~= nil and trail_shown()
+	end
 	local row: { [any]: any } = {
 		id = props.id,
 		h = M.TITLE,
 		pl = "$space.2",
-		pr = "$space.2",
+		-- (With a trail, a step in, as the sidebar's own section's "…".)
+		pr = if trail then "$space.1" else "$space.2",
 		items = "center",
 		color = "$text.tertiary",
 		cursor = if foldable then "pointer" else nil,
@@ -600,12 +608,21 @@ function M.Section(props: SectionProps): Node
 		},
 		if foldable and props.count
 			then ui.show(function(): boolean
-				return not (open :: () -> boolean)()
-			end, M.hint(function(): string
-				return tostring((props.count :: () -> number)())
-			end))
+				return not (open :: () -> boolean)() and not trailing()
+			end, ui.row {
+				shrink = 0,
+				-- (With a trail, back on the line of a section's count without
+				-- one: its trail stands a step further out than words do.)
+				pr = if trail then "$space.1" else nil,
+				M.hint(function(): string
+					return tostring((props.count :: () -> number)())
+				end),
+			})
 			else nil,
 	}
+	if trail then
+		table.insert(row, ui.show(trailing, trail))
+	end
 	for k, v in props.frame or { w_full = true } do
 		row[k] = v
 	end
@@ -639,10 +656,10 @@ M.URGENCY = {
 	failed = 3,
 	limited = 4,
 	working = 5,
-	connecting = 6,
-	plan = 7,
-	done = 8,
-	waiting = 9,
+	waiting = 6,
+	connecting = 7,
+	plan = 8,
+	done = 9,
 } :: { [string]: number }
 function M.pressing(sessions: { { status: status.Kind? } }): status.Kind?
 	local best: status.Kind? = nil
@@ -798,7 +815,7 @@ function M.Row(props: RowProps): Node
 	local hovered = ui.use_state(false)
 	local function strong(): boolean
 		local s = cur()
-		return (s.status ~= nil and s.status ~= "waiting") or (props.selected ~= nil and props.selected())
+		return s.status ~= nil or (props.selected ~= nil and props.selected())
 	end
 	local harness = props.harness or function(): boolean
 		return true
@@ -915,6 +932,9 @@ export type HeaderProps = {
 	-- step, a branch to its tile).
 	tree: (() -> Tree?)?,
 	gap: number?,
+	-- At its end under the pointer, in the place of how many it holds (a
+	-- project's new chat, as the sidebar's group headers have it: `corner_button`).
+	trail: Node?,
 }
 
 -- A group's header: its tile and name; a click folds it (folded, how many
@@ -926,9 +946,11 @@ function M.Header(props: HeaderProps): Node
 	end
 	local tree = props.tree
 	local leads = props.leads
+	local hovered = ui.use_state(false)
 	local body = M.Frame {
 		id = props.id,
 		class = "section-header",
+		hovered = hovered,
 		indent = if tree
 			then function(): number
 				local t = tree()
@@ -946,9 +968,19 @@ function M.Header(props: HeaderProps): Node
 			end
 			return M.tile(Icon { name = props.icon or "folder", size = 12 }, badge)
 		end)(),
-		words = M.header_words(props.name, function(): string
-			return tostring(props.count())
-		end, folded),
+		words = M.header_words(
+			props.name,
+			function(): string
+				return tostring(props.count())
+			end,
+			folded,
+			props.trail,
+			if props.trail
+				then function(): boolean
+					return hovered:get()
+				end
+				else nil
+		),
 		on_click = props.on_toggle,
 	}
 	if tree then

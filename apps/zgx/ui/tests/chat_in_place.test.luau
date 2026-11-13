@@ -316,57 +316,71 @@ local function _y_of(app: any, words: string): number?
 	return nil
 end
 
-test("a sent prompt glides into its runway, and stays as its reply comes", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(900, 700)
-	open(app, "s1")
-	app:type('role:textbox "Message"', "Rise into place")
+-- A send's glide, sampled: the prompt's y on each frame from the one it
+-- joins in, whether the way back to the latest showed, and the prompt's id.
+-- (A frame at a time: `app:wait` delivers as many frames as fit in its
+-- wall-clock time, so a sample spanned three frames or five as the machine
+-- was busy, and five crossed the bound below.)
+local function glide(app: any, words: string): ({ number }, boolean, string?)
+	app:type('role:textbox "Message"', words)
 	app:key("Enter")
-	-- The prompt's own node, sampled as often as the runner gives frames
-	-- (its whole tree is too slow to read every frame).
 	local id: string? = nil
 	local ys: { number } = {}
+	local pill = false
 	for _ = 1, 60 do
-		app:wait("#never-shown", { timeout_ms = 4 })
+		app:frames(1)
 		if not id then
 			local ms = app:state("chat.messages")
 			local last = ms[#ms]
-			if last and last.text == "Rise into place" then
+			if last and last.text == words then
 				id = last.id
 			end
 		end
 		if id then
+			-- The prompt's own node (the whole tree is too slow to read
+			-- every frame).
 			local first: string = app:tree("#" .. id):match("[^\n]+") or ""
 			local y = tonumber(first:match(" %-?%d+,(%-?%d+) "))
 			if y then
 				table.insert(ys, y)
 			end
 		end
-		-- The way back to the latest never shows for a send's own glide.
-		if app:has('role:button "Jump to latest"') then
-			error("the way back to the latest showed during the send's glide")
-		end
+		pill = pill or app:has('role:button "Jump to latest"')
 	end
+	return ys, pill, id
+end
+
+-- Why a glide sampled so isn't one, or nil: it starts at the foot and lands
+-- near the top, only ever up, no frame covering more than a fifth of the
+-- way (a glide's most is under a tenth), through several frames between.
+local function eased(ys: { number }): string?
 	local from, to = ys[1], ys[#ys]
-	-- It starts at the foot (where the composer is) and lands near the top.
-	expect(from > 500).to_be(true)
-	expect(to < 120).to_be(true)
-	-- Gradually: only ever up, through several places between, no frame
-	-- covering more than 40% of the way.
+	if not from or from < 500 or to > 120 then
+		return `from {from} to {to}: not from the foot to the top`
+	end
 	local between = 0
 	for i = 2, #ys do
 		local step = ys[i - 1] - ys[i]
-		if step < -0.5 then
-			error(`frame {i}: the prompt moved down, {ys[i - 1]} to {ys[i]}`)
-		end
-		if step > 0.4 * (from - to) then
-			error(`frame {i}: one frame covered {math.floor(100 * step / (from - to))}% of the way ({ys[i - 1]} to {ys[i]})`)
+		if step < -0.5 or step > 0.2 * (from - to) then
+			return `frame {i}: {ys[i - 1]} to {ys[i]}`
 		end
 		if ys[i] < from - 2 and ys[i] > to + 2 then
 			between += 1
 		end
 	end
-	expect(between >= 3).to_be(true)
+	return if between >= 6 then nil else `only {between} frames between`
+end
+
+test("a sent prompt glides into its runway, and stays as its reply comes", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	-- From the foot (where the composer is) to near the top, gradually,
+	-- and the way back to the latest never shows for a send's own glide.
+	local ys, pill, id = glide(app, "Rise into place")
+	expect(eased(ys)).to_be_nil()
+	expect(pill).to_be(false)
+	local to = ys[#ys]
 	-- The engine's copy landing, the reply arriving and growing: it stays.
 	local function at(): number?
 		return tonumber((app:tree("#" .. (id :: string)):match("[^\n]+") or ""):match(" %-?%d+,(%-?%d+) "))
@@ -442,53 +456,6 @@ test("long messages open folded, never at their whole height first; a click ease
 	local again = bubbles(app)
 	expect(again[#again]).to_be(full)
 end)
-
--- A send's glide, sampled: the prompt's y on each frame the runner gives,
--- from the moment it joins, and whether the way back to the latest showed.
-local function glide(app: any, words: string): ({ number }, boolean)
-	app:type('role:textbox "Message"', words)
-	app:key("Enter")
-	local id: string? = nil
-	local ys: { number } = {}
-	local pill = false
-	for _ = 1, 60 do
-		app:wait("#never-shown", { timeout_ms = 4 })
-		if not id then
-			local ms = app:state("chat.messages")
-			local last = ms[#ms]
-			if last and last.text == words then
-				id = last.id
-			end
-		end
-		if id then
-			local first: string = app:tree("#" .. id):match("[^\n]+") or ""
-			local y = tonumber(first:match(" %-?%d+,(%-?%d+) "))
-			if y then
-				table.insert(ys, y)
-			end
-		end
-		pill = pill or app:has('role:button "Jump to latest"')
-	end
-	return ys, pill
-end
-
-local function eased(ys: { number }): string?
-	local from, to = ys[1], ys[#ys]
-	if not from or from < 500 or to > 120 then
-		return `from {from} to {to}: not from the foot to the top`
-	end
-	local between = 0
-	for i = 2, #ys do
-		local step = ys[i - 1] - ys[i]
-		if step < -0.5 or step > 0.4 * (from - to) then
-			return `frame {i}: {ys[i - 1]} to {ys[i]}`
-		end
-		if ys[i] < from - 2 and ys[i] > to + 2 then
-			between += 1
-		end
-	end
-	return if between >= 3 then nil else `only {between} frames between`
-end
 
 test("every send glides: the first after opening, and the next after a glide lands", function()
 	local app = mount("chat_fixture.luau")
@@ -777,11 +744,12 @@ test("the conversation width setting widens the transcript and the composer", fu
 		return w
 	end
 	expect(width("#chat-composer")).to_be(660)
-	expect(widest_reply() <= 660).to_be(true)
+	-- (The transcript a little wider than the composer each side, to fade behind it.)
+	expect(widest_reply() <= 660 + 24).to_be(true)
 	app:set_state("settings_conversation_width", 900)
 	app:wait("#never-shown", { timeout_ms = 900 })
 	settle(app)
 	expect(width("#chat-composer")).to_be(900)
 	local w = widest_reply()
-	expect(w > 660 and w <= 900).to_be(true)
+	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
 end)
