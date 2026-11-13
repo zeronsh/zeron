@@ -18,7 +18,10 @@
 --                                (`{ op = "dump", text }`): a promise of its
 --                                reply
 --   orchestration.dump(text)     the Brain dump takes it: a promise of its id
---   orchestration.answer(id, text)   an ask answered
+--   orchestration.answer(id, { option?, text? })  an ask answered (option
+--                                1-based); orchestration.answer_ask on the host
+--   orchestration.defer(id, until_ms?)  an ask put off (nil: back now);
+--                                orchestration.defer_ask on the host
 --   orchestration.dismiss(id)    an ask put away
 --   orchestration.reroute(dump, route, target)  a route moved (or an unsure
 --                                one placed): `target` as a route's
@@ -183,8 +186,27 @@ function M.dump(text: string, attachments: { any }?, chat: string?, picks: { [st
 	return M.op(op)
 end
 
-function M.answer(ask_id: string, text: string): any
-	return M.op({ op = "answerAsk", id = ask_id, answer = text })
+-- An ask answered: an option of it (1-based, as Luau counts), words of
+-- the person's, or both (one of them, at least). Needs you, a board card
+-- and the decision overlay all answer through here. (A plain string is
+-- taken as the words.) A promise of the engine's `{ id }`.
+function M.answer(ask_id: string, opts: { option: number?, text: string? } | string): any
+	local o: { option: number?, text: string? } = if type(opts) == "string" then { text = opts } else opts
+	local call: { [string]: any } = { id = ask_id }
+	call.option = o.option
+	if o.text and o.text ~= "" then
+		call.text = o.text
+	end
+	return ui.call("orchestration.answer_ask", call)
+end
+
+-- An ask put off until `until_ms` (Unix milliseconds): out of Needs you,
+-- "Deferred" on its card, back (and said again) when the time comes. No
+-- time: back now. A promise of the engine's `{ id }`.
+function M.defer(ask_id: string, until_ms: number?): any
+	local call: { [string]: any } = { id = ask_id }
+	call["until"] = if until_ms then math.floor(until_ms / 1000) else nil
+	return ui.call("orchestration.defer_ask", call)
 end
 
 function M.dismiss(ask_id: string): any
