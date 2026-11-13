@@ -329,7 +329,9 @@ local function capture(): Node
 		end
 		return out
 	end)
-	return ui.column {
+	-- (All of it a drop zone for the composer's draft: a sidebar chat
+	-- dropped is an @-mention, files are carried with the dump.)
+	return LaneTab.DropZone { slot = "control-capture", chat = brain_dump, ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
@@ -420,7 +422,7 @@ local function capture(): Node
 				end, w_full = true, gap = "$zeron.space.hair" }),
 			}),
 		}),
-	}
+	} }
 end
 
 -- The board: every orchestrator's work, its filter over it, loose items in

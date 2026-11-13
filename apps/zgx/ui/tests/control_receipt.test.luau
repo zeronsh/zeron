@@ -384,3 +384,18 @@ test("what the person dumped with it: a picture as a thumbnail, a file as a chip
 	expect(app:count("#control-capture >> .orch-dump-picture")).to_be(1)
 	expect(app:has('#control-capture >> .orch-dump-file >> "notes.txt"')).to_be(true)
 end)
+
+test("capture takes a chat dragged from the sidebar as an @-mention", function()
+	local app = mount("control_fixture.luau")
+	app:resize(1440, 900)
+	app:frames(30)
+	app:drag('#sidebar >> role:button "Linux titlebar toggle"', `{COMPOSER} >> role:textbox`)
+	app:frames(10)
+	-- A chip of it on the draft, as a chat's composer has one.
+	expect(app:has(`{COMPOSER} >> role:button "Remove Linux titlebar toggle"`)).to_be(true)
+	-- Sent, it goes with the dump.
+	app:type(`{COMPOSER} >> role:textbox`, "same fix here")
+	app:key("Enter")
+	app:frames(5)
+	expect(tostring(app:state("calls") or "")).to_contain("dump:same fix here")
+end)

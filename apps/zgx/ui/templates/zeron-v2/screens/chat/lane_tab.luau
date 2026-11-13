@@ -738,14 +738,28 @@ local function forking(chat: string): Node
 	end, { grow = 1, w_full = true })
 end
 
+-- Each page composer's focus, by its slot (`LaneTab.Composer`, its
+-- `DropZone`): bumped, it takes the keys.
+local focuses: { [string]: State<number> } = {}
+local function focus_of(slot: string): State<number>
+	local f = focuses[slot]
+	if not f then
+		f = ui.state(`lane_focus_{slot}`, 0)
+		focuses[slot] = f
+	end
+	return f
+end
+
 -- A chat's composer on a page of its own, outside the panel's tabs (the
 -- default layout's `LaneTab.Composer`, as v2 draws a side chat's): bound to
 -- chat `chat` in `slot`, its session watched while it shows, its sends
 -- taken by `take` where given (the Control room's Capture: each a dump).
-M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, id: string? }): Node
+M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, drop: boolean?, id: string? }): Node
 	local slot = props.slot
 	local view = lanes.view(slot)
-	local focus = ui.use_state(0)
+	-- (Its focus, by its slot: a drop zone of its, around it or anywhere on
+	-- its page, gives it the keys as something lands.)
+	local focus = focus_of(slot)
 	ui.effect(function()
 		lanes.watch(slot, props.chat())
 	end)
@@ -758,12 +772,48 @@ M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, t
 		if id == "" then
 			return ui.div {}
 		end
+		-- (Its `id` is the component's node's: zgx gives it there.)
 		return ui.column {
-			id = props.id,
 			w_full = true,
-			composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer),
+			if props.drop then M.DropZone { slot = slot, chat = props.chat, composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer) } else composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer),
 		}
 	end, { w_full = true })
+end)
+
+-- A drop zone for `LaneTab.Composer`'s draft (bound to `chat`, in
+-- `slot`), round whatever it's given: a chat dragged from the sidebar
+-- lands as an @-mention of it, files (and the files pane's) as chips to
+-- send with it, the chat page's own overlays saying so while they're over
+-- it; its composer takes the keys as one lands. A page puts it round as
+-- much as it likes (the Control room: all of Capture); `LaneTab.Composer`'s
+-- `drop = true`, round the composer alone.
+--
+--   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, node }
+M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, [number]: Node }): Node
+	local slot = props.slot
+	local focus = focus_of(slot)
+	local body = ui.presence(function(): string
+		return props.chat() or ""
+	end, function(id: string): Node
+		local zone_name = `lane.{slot}`
+		local node: { [any]: any } = { w_full = true, relative = true }
+		for _, child in ipairs(props :: any) do
+			table.insert(node, child)
+		end
+		if id == "" then
+			return ui.column(node :: any)
+		end
+		local zone, carrying, carrying_session = Shared.own_drop_zone(zone_name, id, function()
+			focus:add(1)
+		end)
+		for k, v in zone do
+			node[k] = v
+		end
+		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}` })
+		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+		return ui.column(node :: any)
+	end, { w_full = true })
+	return body
 end)
 
 M.Tab = ui.component(function(props: { tab: any }): Node
