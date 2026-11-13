@@ -480,6 +480,7 @@ M.View = ui.component(function(props: {
 			return k
 		end
 		local labels: { any } = {}
+		local leaders: { any } = {}
 		-- A name's place: tried in one line, then two, on each side (right,
 		-- left, centred on the mark; then below, above), and for a name that
 		-- must show (a leader's, a working thread's) hanging under or over
@@ -488,7 +489,8 @@ M.View = ui.component(function(props: {
 			local x, y = at(n)
 			local base = (if n.kind == "thread" then 9 else reach(n)) + 8
 			local best: any, least = nil, math.huge
-			for _, far in (if must then { 0, 8 } else { 0 }) do
+			-- (Only a working thread's name steps out, a leader tying it back.)
+			for _, far in (if must and n.kind == "thread" then { 0, 10, 24 } else { 0 }) do
 				local r = base + far
 				for _, text in forms do
 					local tw, lh = 0, 0
@@ -501,16 +503,16 @@ M.View = ui.component(function(props: {
 					local spots = {
 						{ x + r, y - th / 2, "start" },
 						{ x - r - tw, y - th / 2, "end" },
-						{ x - tw / 2, y + r - 3, "center" },
-						{ x - tw / 2, y - r - th + 3, "center" },
+						{ x - tw / 2, y + r - 1, "center" },
+						{ x - tw / 2, y - r - th + 1, "center" },
 					}
 					if must then
 						-- (Then hanging under or over it, either way; then the
 						-- corners, close in.)
-						table.insert(spots, { x - 8, y + r - 3, "start" })
-						table.insert(spots, { x + 8 - tw, y + r - 3, "end" })
-						table.insert(spots, { x - 8, y - r - th + 3, "start" })
-						table.insert(spots, { x + 8 - tw, y - r - th + 3, "end" })
+						table.insert(spots, { x - 8, y + r + 1, "start" })
+						table.insert(spots, { x + 8 - tw, y + r + 1, "end" })
+						table.insert(spots, { x - 8, y - r - th - 1, "start" })
+						table.insert(spots, { x + 8 - tw, y - r - th - 1, "end" })
 						local d = r * 0.72
 						table.insert(spots, { x + d, y + d - th / 2, "start" })
 						table.insert(spots, { x + d, y - d - th / 2, "start" })
@@ -518,7 +520,7 @@ M.View = ui.component(function(props: {
 						table.insert(spots, { x - d - tw, y - d - th / 2, "end" })
 					end
 					for _, sp in spots do
-						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id) + far * 0.02
+						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id) + far * 0.03
 						if k < least then
 							best, least = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text }, k
 						end
@@ -538,6 +540,15 @@ M.View = ui.component(function(props: {
 				return
 			end
 			table.insert(taken, { best.x - 3, best.y - 1, best.x + best.tw + 3, best.y + best.th + 1 })
+			-- (Set off from its mark: a fine leader ties it back.)
+			local mr = if n.kind == "thread" then 9 else reach(n)
+			local qx = math.clamp(x, best.x, best.x + best.tw)
+			local qy = math.clamp(y, best.y, best.y + best.th)
+			local gx, gy = qx - x, qy - y
+			local gd = math.sqrt(gx * gx + gy * gy)
+			if gd - mr > 20 then
+				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
+			end
 			for i, t in best.text do
 				local o = table.clone(opts)
 				o.baseline = "middle"
@@ -739,7 +750,10 @@ M.View = ui.component(function(props: {
 			end
 		end
 
-		-- 5. The names.
+		-- 5. The names, and the leaders of those set off.
+		for _, l in leaders do
+			c:line(l[1], l[2], l[3], l[4], ink(0.32, l[5]), 1, { cap = "round" })
+		end
 		for _, rim in rims do
 			c:text(rim.n.title, rim.nx, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), baseline = "middle" })
 		end
