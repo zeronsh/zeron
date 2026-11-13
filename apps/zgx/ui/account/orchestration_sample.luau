@@ -191,6 +191,7 @@ local asks = {
 local dumps = {
 	{
 		id = "dp-2",
+		attachments = { { path = "assets/favicons/zeron.png", name = "board.png" }, { path = "pending://up-1/notes.txt", name = "notes.txt" } },
 		text = "ok so the orchestrator page should be side by side not tabs, also remind me to rerun omarchy update it needs sudo. and ask the vpn guy whether moscow rebooted fine. the CI thing can wait till next week, and is the engine state thread still on the registry part?",
 		state = "routed",
 		summary = "5 parts: 2 to Orchestrators, 1 to Exnomic VPN, 1 to CI speed, 1 to your inbox.",
@@ -198,7 +199,8 @@ local dumps = {
 		created = ago(40),
 		routes = {
 			{ id = "rt-5", excerpt = "the orchestrator page should be side by side not tabs", span = { from = 6, to = 59 },
-				target = { kind = "chat", id = "th-ui-orch" }, intent = "info", message = "Decision from the person: side by side (chat left, crew + board right), not tabs.", state = "delivered", candidates = {} },
+				target = { kind = "chat", id = "th-ui-orch" }, intent = "info", message = "Decision from the person: side by side (chat left, crew + board right), not tabs.", state = "done", candidates = {},
+				answer = "Switched to side by side; the tabs are gone.", answer_full = "Done: the orchestrator page is **side by side** now (chat left, crew and board right). Tabs removed in `ui/screens/orchestrator/page.luau`." },
 			{ id = "rt-6", excerpt = "remind me to rerun omarchy update it needs sudo", span = { from = 66, to = 113 },
 				target = { kind = "item", id = "it-omarchy" }, intent = "task", message = "Rerun omarchy-update (needs sudo).", state = "delivered", candidates = {}, item_id = "it-omarchy" },
 			{ id = "rt-7", excerpt = "ask the vpn guy whether moscow rebooted fine", span = { from = 119, to = 163 },
@@ -272,6 +274,7 @@ for _, c in {
 	{ id = "cm-11", kind = "ask", from = "orc-vpn", to = "you", summary = "Reboot Moscow at 02:00 MSK?", at = ago(3400) },
 	{ id = "cm-12", kind = "message", from = "orc-orch", to = "th-engine-flow", summary = "Coalesce wakes within 2 s", at = ago(5) },
 	{ id = "cm-13", kind = "report", from = "th-vpn-merge", to = "orc-vpn", summary = "Checks green, merging #412", at = ago(10) },
+	{ id = "cm-14", kind = "answer", from = "th-ui-orch", to = "you", summary = "Switched to side by side; the tabs are gone.", at = ago(12) },
 } do
 	table.insert(comms, c)
 end

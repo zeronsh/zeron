@@ -21,7 +21,7 @@ test("the newest dump's parts each have a chip saying where they went", function
 	-- reach.
 	expect(app:has('#control-capture >> .orch-receipt-text >> "registry "')).to_be(true)
 	expect(app:count("#control-capture >> .orch-part") >= 5).to_be(true)
-	expect(app:has('#control-capture >> role:button "Orchestrator screen, Context, Delivered"')).to_be(true)
+	expect(app:has('#control-capture >> role:button "Orchestrator screen, Context, Done"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "Inbox, Task, Delivered"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
 	expect(app:has('#control-capture >> role:button "CI speed, Priority, Delivered"')).to_be(true)
@@ -34,10 +34,11 @@ test("a question's answer comes back as a reply line, with a way into its thread
 	local app = open()
 	-- There without a click: the answer, quiet, under the chips.
 	expect(app:has('#control-capture >> .orch-answer >> ~"waiting on your approval"')).to_be(true)
-	expect(app:count("#control-capture >> .orch-answer")).to_be(1)
+	-- (Its, and the done context part's outcome.)
+	expect(app:count("#control-capture >> .orch-answer")).to_be(2)
 	-- One line: the condensed answer, never the whole reply.
 	expect(app:has('#control-capture >> .orch-answer >> ~"wg show"')).to_be(false)
-	app:click('#control-capture >> .orch-answer-open')
+	app:click('#control-capture >> .orch-answer-open [2]')
 	app:frames(5)
 	expect(app:error()).to_be_nil()
 end)
@@ -211,7 +212,7 @@ local function box(app: any, target: string): (number, number, number, number)
 	return tonumber(x) or -1, tonumber(y) or -1, tonumber(w) or -1, tonumber(h) or -1
 end
 local LAST = '#orch-chips >> role:button "Engine: orchestration state, Question, Delivered"'
-local FIRST = '#orch-chips >> role:button "Orchestrator screen, Context, Delivered"'
+local FIRST = '#orch-chips >> role:button "Orchestrator screen, Context, Done"'
 
 test("the chips stand in one row at any width, never wrapping", function()
 	local app = open()
@@ -364,4 +365,22 @@ test("capture: a file attached goes with the dump, as a chat message's do", func
 	expect(calls(app)).to_contain("dump:look at this")
 	-- (Named as the composer names a picture, its path kept.)
 	expect(calls(app)).to_contain("dump-file:image:")
+end)
+
+test("every part says what came of it: a task's outcome too, its state as Zeron says it", function()
+	local app = open()
+	-- The outcome lines: the question's answer, and the context part's (done).
+	expect(app:count("#control-capture >> .orch-answer")).to_be(2)
+	expect(app:has('#control-capture >> .orch-answer >> ~"the tabs are gone"')).to_be(true)
+	-- Each chip's mark: done, answered (still going), sent.
+	expect(app:has('#control-capture >> role:button "Orchestrator screen, Context, Done"')).to_be(true)
+	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
+	expect(app:has('#control-capture >> role:button "Inbox, Task, Delivered"')).to_be(true)
+	expect(app:count("#control-capture >> .orch-chip >> .orch-route-mark") >= 4).to_be(true)
+end)
+
+test("what the person dumped with it: a picture as a thumbnail, a file as a chip", function()
+	local app = open()
+	expect(app:count("#control-capture >> .orch-dump-picture")).to_be(1)
+	expect(app:has('#control-capture >> .orch-dump-file >> "notes.txt"')).to_be(true)
 end)

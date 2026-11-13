@@ -25,8 +25,10 @@
 //!                  created, answered? } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
-//!                   candidates = { target }, answer?, answer_full?, item_id? } },
-//!                   summary?, device, created, updated } } (newest first) }
+//!                   candidates = { target }, answer?, answer_full?, item_id?,
+//!                   attachments = { path } } },
+//!                   summary?, device, created, updated,
+//!                   attachments = { { path, name } } } } (newest first) }
 //!   `orchestration.loads`  { [device id] = { cpu?, mem_used?, mem_total?, load1?,
 //!                            cores?, online, at,
 //!                            history = { { at, cpu } } } } (while a screen
@@ -575,6 +577,8 @@ fn route_value(r: &Route) -> Value {
         ("answer", opt_str(r.answer.as_deref())),
         ("answer_full", opt_str(r.answer_full.as_deref())),
         ("item_id", opt_str(r.item_id.as_deref())),
+        // The files it went with (paths where its target reads them).
+        ("attachments", Value::List(r.attachments.iter().map(|p| Value::from(p.as_str())).collect())),
     ])
 }
 
@@ -588,6 +592,16 @@ fn dump_value(d: &Dump) -> Value {
         ("device", Value::from(d.device_id.as_str())),
         ("created", secs(&d.created_at)),
         ("updated", secs(&d.updated_at)),
+        // The files the person dumped with it: `{ path, name }`.
+        (
+            "attachments",
+            Value::List(
+                d.attachments
+                    .iter()
+                    .map(|a| Value::record([("path", Value::from(a.path.as_str())), ("name", Value::from(a.name.as_str()))]))
+                    .collect(),
+            ),
+        ),
     ])
 }
 
@@ -999,6 +1013,24 @@ mod tests {
         // Something unreadable: told, and the ring stands.
         assert!(comms.heard(&json!({ "id": "x" })).is_err());
         assert_eq!(comms.events.len(), COMMS);
+    }
+
+    #[test]
+    fn a_dump_and_its_routes_carry_their_files_and_a_route_can_be_done() {
+        let d: Dump = serde_json::from_value(json!({
+            "id": "dp", "text": "look", "state": "routed", "deviceId": "dev", "createdAt": iso(NOW), "updatedAt": iso(NOW),
+            "attachments": [{ "path": "/tmp/a.png", "name": "a.png" }],
+            "routes": [{ "id": "rt", "excerpt": "look", "target": { "kind": "inbox" }, "intent": "task", "message": "m",
+                         "state": "done", "answer": "Fixed in `abc`.", "answerFull": "Fixed.\n\nAll green.", "attachments": ["/srv/a.png"] }],
+        }))
+        .unwrap();
+        let v = dump_value(&d);
+        let file = &v.field("attachments").unwrap().list()[0];
+        assert_eq!(text(file.field("name")).as_deref(), Some("a.png"));
+        let route = &v.field("routes").unwrap().list()[0];
+        assert_eq!(text(route.field("state")).as_deref(), Some("done"));
+        assert_eq!(text(route.field("answer_full")).as_deref(), Some("Fixed.\n\nAll green."));
+        assert_eq!(text(Some(&route.field("attachments").unwrap().list()[0])).as_deref(), Some("/srv/a.png"));
     }
 
     #[test]

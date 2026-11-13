@@ -29,7 +29,7 @@ local locale = require("@self/locale")
 local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
-local hold = require("@self/orch_hold")
+local RouteMark = require("@self/orch_route_mark")
 local PartCard = require("@self/orch_part_card")
 local IconButton = require("@self/icon_button").IconButton
 local Markdown = require("@self/markdown")
@@ -490,22 +490,17 @@ return ui.component(function(props: Props): Node
 	-- How a part stands, as Zeron says it: on its way (the ring, quiet),
 	-- delivered or answered (done), failed; moved, the refresh glyph. Held
 	-- 300 ms at least (ds/orch_hold).
+	-- How a part stands, as Zeron says it (ds/orch_route_mark).
 	local function state_mark(row: State<any>): Node
-		local kind = hold.value(function(): string
-			local r = row:get()
-			if r.target and r.target.kind == "unsure" then
-				return "unsure"
-			end
-			return r.state or "pending"
-		end)
-		return ui.switch(kind, {
-			pending = ui.div { class = "orch-chip-state", status.Spinner { size = 12, ink = "$text.tertiary" } },
-			delivered = ui.div { class = "orch-chip-state", status.StatusIcon { kind = "done", size = 13 } },
-			answered = ui.div { class = "orch-chip-state", status.StatusIcon { kind = "done", size = 13 } },
-			undone = ui.div { class = "orch-chip-state", color = "$text.tertiary", Icon { name = "refresh", size = 12 } },
-			failed = ui.div { class = "orch-chip-state", status.StatusIcon { kind = "failed", size = 13 } },
-			unsure = ui.div {},
-		}, ui.div {})
+		return RouteMark.Mark {
+			state = function(): string
+				local r = row:get()
+				if r.target and r.target.kind == "unsure" then
+					return "unsure"
+				end
+				return r.state or "pending"
+			end,
+		}
 	end
 
 	local function candidate(dump_id: () -> string, row: State<any>, c: any): Node
@@ -837,6 +832,54 @@ return ui.component(function(props: Props): Node
 		return ui.scroll_x(p)
 	end
 
+	-- What the person dumped with it: a picture as a small thumbnail, any
+	-- other file as a chip of its name.
+	local files = ui.computed(function(): { any }
+		local d = props.dump()
+		return (d and d.attachments) or {}
+	end)
+	local function picture(name: string): boolean
+		local ext = string.lower(string.match(name, "%.([%w]+)$") or "")
+		return ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "gif" or ext == "webp" or ext == "heic"
+	end
+	local function file(f: any, _i: number): Node
+		local name = f.name or f.path or ""
+		-- (A file still on its way to the engine is a `pending://` ref: a chip.)
+		if picture(name) and type(f.path) == "string" and not string.match(f.path, "^pending://") then
+			return ui.div {
+				class = "orch-dump-picture",
+				w = 56,
+				h = 40,
+				shrink = 0,
+				rounded = "$radius.md",
+				overflow = "hidden",
+				border = 1,
+				border_color = "$zeron.composer.chip.edge",
+				border_over = true,
+				tooltip = name,
+				ui.image {
+					src = f.path,
+					fit = "cover",
+					w_full = true,
+					h_full = true,
+					fallback = ui.div { w_full = true, h_full = true, items = "center", justify = "center", color = "$text.tertiary", Icon { name = "gallery", size = 16 } },
+				},
+			}
+		end
+		return ui.row {
+			class = "orch-dump-file",
+			h = 26,
+			px = "$space.2",
+			gap = "$space.1",
+			items = "center",
+			shrink = 0,
+			rounded = "$radius.md",
+			bg = "$hover",
+			ui.div { color = "$text.tertiary", Icon { name = if picture(name) then "gallery" else "document", size = 12 } },
+			ui.text { name, literal = true, truncate = true, max_w = 200, text_size = "$font.size.xs", color = "$text.secondary" },
+		}
+	end
+
 	local function routing(): boolean
 		local d = props.dump()
 		return d ~= nil and d.state == "routing"
@@ -847,6 +890,11 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		gap = "$space.3",
 		ui.presence(paragraph_key, paragraph, { w_full = true }),
+		ui.show(function(): boolean
+			return #files:get() > 0
+		end, ui.each(files, file, { key = function(f: any): string
+			return f.path or f.name or ""
+		end, class = "orch-dump-files", direction = "row", flex_wrap = true, gap = "$space.2", items = "center", w_full = true })),
 		ui.show(routing, ui.row {
 			gap = "$space.2",
 			items = "center",
