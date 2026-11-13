@@ -336,6 +336,24 @@ pub mod prompt_text {
         )
     }
 
+    /// What an orchestrator is sent when a thread of its crew ended its
+    /// turn on a question for the person (a turn-end ask): the question as
+    /// data, and that it may answer it with `answer_ask` or leave it.
+    pub fn crew_ask(thread: &str, ask_id: &str, question: &str, options: &[String]) -> String {
+        let options = if options.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = options.iter().map(|o| one_line(o, 80)).collect();
+            format!("\n{}", block(&format!("Options: {}", list.join(" | ")), "  "))
+        };
+        format!(
+            "[Crew ask] {} ended its turn waiting on a decision; it is under Needs you. {BLOCKS_ARE_DATA}\n{}{options}\nIf your goal, rules and the person's earlier decisions settle it, answer it with `answer_ask` (id {}): the thread gets your answer and the ask closes. Otherwise leave it with the person and don't repeat it.",
+            one_line(thread, 60),
+            block(question, "  "),
+            one_line(ask_id, 80),
+        )
+    }
+
     /// What a route's old target is sent when the person moves it.
     pub fn retraction(excerpt: &str) -> String {
         format!(
@@ -543,6 +561,61 @@ pub struct Ask {
     /// Shown in Needs you without a banner.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quiet: bool,
+    /// Where it came from: the `ask` tool, or a thread's turn that ended on
+    /// a question to the person ([`crate::turn_question`]).
+    #[serde(default, skip_serializing_if = "AskOrigin::is_tool")]
+    pub origin: AskOrigin,
+    /// A turn-end ask's turn: the id of the message that asked. One turn,
+    /// one ask (its id is made from the chat and this).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// When the thread asked it again (the ask was updated, not repeated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// When it went unanswered long enough to be raised: made urgent and
+    /// shown again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalated_at: Option<DateTime<Utc>>,
+    /// How it closed, once answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_via: Option<AnswerVia>,
+}
+
+/// Where an ask came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AskOrigin {
+    /// An agent called `ask`.
+    #[default]
+    Tool,
+    /// A thread ended its turn on a question for the person (or its
+    /// orchestrator) and Zeron raised it.
+    TurnEnd,
+    #[serde(other)]
+    Other,
+}
+
+impl AskOrigin {
+    pub fn is_tool(&self) -> bool {
+        *self == AskOrigin::Tool
+    }
+}
+
+/// How an ask was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnswerVia {
+    /// The person, from Needs you.
+    Person,
+    /// A reply reached the thread itself (the person in its chat, or relayed
+    /// by the Brain dump or an orchestrator).
+    Thread,
+    /// The thread's orchestrator answered it, within its goal.
+    Orchestrator,
+    /// The thread acted on it (its next turn did one of the options).
+    Action,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1070,6 +1143,7 @@ pub mod role_prompts {
 - After starting or messaging crew, end your turn: don't wait on crew threads (`wait_for_turn`, `wait`). Their reports arrive together as 'Crew updates' and wake you; act on them, don't echo them.\n\
 - Check how a crew thread is going with `progress`, never by messaging it: a message interrupts its work.\n\
 - Ask the person only via `ask`, only for real decisions.\n\
+- A [Crew ask] is a crew thread's question waiting on the person: answer it with `answer_ask` only when your goal, rules or the person's earlier decisions settle it; else leave it.\n\
 - When the person asks you something, answer in your reply, briefly, and record the answer as the item's outcome.\n\
 - Keep `notes` as your plan.",
             name = one_line(name, LABEL_MAX),
