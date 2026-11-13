@@ -57,6 +57,9 @@ export type Props = {
 	context: (() -> string?)?,
 	now: (() -> number)?,
 	lean: boolean?,
+	-- Said quietly where its note would be, while it has none ("No
+	-- details yet").
+	placeholder: (() -> string?)?,
 	on_check: (() -> ())?,
 	checking: (() -> boolean)?,
 	cooling: (() -> boolean)?,
@@ -247,6 +250,14 @@ M.Progress = ui.component(function(props: Props): Node
 		local r = row()
 		return (r and r.note) or ""
 	end
+	-- Its note, or what's said in its place.
+	local function said_text(): string
+		local n = note()
+		if n ~= "" then
+			return n
+		end
+		return (if props.placeholder then props.placeholder() else nil) or ""
+	end
 	local function refreshing(): boolean
 		local r = row()
 		return (r ~= nil and r.refreshing == true) or (props.checking ~= nil and props.checking())
@@ -383,7 +394,7 @@ M.Progress = ui.component(function(props: Props): Node
 				status.Spinner { size = 10 },
 			}),
 			ui.text {
-				note,
+				said_text,
 				class = "orch-progress-note-text",
 				literal = true,
 				grow = 1,
@@ -395,12 +406,12 @@ M.Progress = ui.component(function(props: Props): Node
 				text_size = props2.text_size or "$font.size.sm",
 				line_height = props2.line_height,
 				color = function(): string
-					return if refreshing() then "$text.tertiary" else "$text.secondary"
+					return if refreshing() or note() == "" then "$text.tertiary" else "$text.secondary"
 				end,
 			},
 		}
 		return ui.show(function(): boolean
-			return note() ~= ""
+			return said_text() ~= "" or refreshing()
 		end, ui.row(p :: any))
 	end
 

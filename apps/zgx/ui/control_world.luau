@@ -215,8 +215,40 @@ return function()
 		sessions.now:set(copy)
 	end }
 	-- Nothing working anywhere (the Progress widget's quiet line).
-	ui.command { id = "fixture.progress_none", title = "Fixture: nothing working", run = function()
+	-- A host that writes no progress (an older engine): no rows at all.
+	ui.command { id = "fixture.progress_none", title = "Fixture: no progress rows", run = function()
 		orchestration.progress:set({})
+	end }
+	-- A proxy's row (the engine's, for a host that writes none).
+	ui.command { id = "fixture.progress_proxy", title = "Fixture: a proxy row", run = function()
+		local rows = table.clone(orchestration.progress:peek())
+		rows["th-engine-state"] = {
+			chat_id = "th-engine-state", device_id = "dev-desk", state = "working", started = os.time() - 900,
+			last_step = os.time() - 60, note = "Proxy: running the engine tests.", note_at = os.time() - 30,
+			stalled = false, refreshing = false, updated = os.time() - 30, proxy = true,
+		}
+		orchestration.progress:set(rows)
+	end }
+	-- Every chat at rest.
+	ui.command { id = "fixture.all_idle", title = "Fixture: nothing working", run = function()
+		local n: any = table.clone(sessions.now:peek())
+		local function rest(list: { any }): { any }
+			local out = {}
+			for _, c in list do
+				c = table.clone(c)
+				c.status = nil
+				c.activity = nil
+				table.insert(out, c)
+			end
+			return out
+		end
+		n.chats = rest(n.chats or {})
+		local kids = {}
+		for parent, list in n.children or {} do
+			kids[parent] = rest(list)
+		end
+		n.children = kids
+		sessions.now:set(n)
 	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)

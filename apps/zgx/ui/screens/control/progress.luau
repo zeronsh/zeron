@@ -1,5 +1,9 @@
 -- Progress, the app's side of ds/orch_progress: the engine's rows
--- (account/orchestration's `progress`) joined with the chats they're of,
+-- (account/orchestration's `progress`) joined with the chats they're of;
+-- a chat working (or waiting) that has none (its host writes none yet) is
+-- drawn from what its session row says: its state, how long it has been at
+-- it (since this app saw it start, `orchestration.timeline`), what it's
+-- doing, where; no steps, no note;
 -- the threads pinned to the Control room's Progress widget (this device's),
 -- and "What's up?" (a fresh note asked of the host, never of the agent),
 -- held off for 15 seconds after it's used.
@@ -46,6 +50,84 @@ local all = ui.state("progress_all", false)
 local chats_now = ui.computed(function(): { [string]: any }
 	return data.chats(sessions.now:get())
 end)
+-- Chats a check found nothing to say about yet.
+local quiet = ui.state("progress_quiet", {} :: { [string]: boolean })
+-- What each chat has done lately (src/orchestration_timeline.rs).
+local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
+
+-- A session's status as a progress row's state.
+local STATE: { [string]: string } = { working = "working", waiting = "waiting", input = "awaiting_input", approval = "awaiting_input" }
+
+-- When its current stretch began, as far as this app saw: the first of its
+-- latest unbroken run of busy entries; else when its activity began; else
+-- its last change.
+local function stretch_start(c: any): number?
+	local entries = timeline:get()[c.id]
+	local start: number? = nil
+	if entries then
+		for i = #entries, 1, -1 do
+			local e = entries[i]
+			if STATE[e.status or ""] then
+				start = e.at
+			else
+				break
+			end
+		end
+	end
+	if start then
+		return start
+	end
+	local a = c.activity
+	if type(a) == "table" and type(a.since) == "number" then
+		return a.since
+	end
+	return c.updated
+end
+
+-- Every chat at work now that isn't archived: a row drawn from its session.
+local stood_in = ui.computed(function(): { [string]: any }
+	local now = sessions.now:get()
+	local out: { [string]: any } = {}
+	local function take(c: any)
+		local state = STATE[c.status or ""]
+		if state then
+			out[c.id] = {
+				chat_id = c.id,
+				device_id = c.device,
+				state = state,
+				started = stretch_start(c),
+				stalled = false,
+				refreshing = false,
+				updated = c.updated,
+				-- (Not the engine's: drawn from the session.)
+				session_only = true,
+			}
+		end
+	end
+	if now then
+		for _, c in now.chats or {} do
+			take(c)
+		end
+		for _, kids in now.children or {} do
+			for _, c in kids do
+				take(c)
+			end
+		end
+	end
+	return out
+end)
+
+-- Every row: the engine's (its proxies too), and one for each chat at work
+-- it has none for.
+M.rows = ui.computed(function(): { [string]: any }
+	local out = table.clone(orchestration.progress:get())
+	for id, r in stood_in:get() do
+		if out[id] == nil then
+			out[id] = r
+		end
+	end
+	return out
+end)
 
 local function with(map: State<{ [string]: boolean }>, id: string, on: boolean)
 	local copy = table.clone(map:peek())
@@ -78,11 +160,14 @@ function M.check(id: string)
 	ui.after(M.COOLDOWN * 1000, function()
 		with(resting, id, false)
 	end)
-	orchestration.check(id):after(function()
+	-- (Nothing back, or nothing to say, or a host that can't be asked yet:
+	-- "No details yet", quietly.)
+	orchestration.check(id):after(function(row: any)
 		with(asking, id, false)
+		with(quiet, id, type(row) ~= "table" or ((row.note == nil or row.note == "") and not row.refreshing))
 	end, function(_e: any)
 		with(asking, id, false)
-		ds.toast.show { title = locale.s("control.progress.failed"), tone = "danger" }
+		with(quiet, id, true)
 	end)
 end
 
@@ -98,7 +183,7 @@ function M.open(id: string)
 end
 
 local function row_of(id: string): any
-	return orchestration.progress:get()[id]
+	return M.rows:get()[id]
 end
 
 -- Whose work it is and where it runs: its orchestrator (or project) and
@@ -137,6 +222,9 @@ local function unit(id: string, variant: Unit.Variant, lean: boolean?): Node
 		lean = lean,
 		row = function(): any
 			return row_of(id)
+		end,
+		placeholder = function(): string?
+			return if quiet:get()[id] then locale.s("control.progress.no_details") else nil
 		end,
 		chat = function(): any
 			return chats_now:get()[id]
@@ -187,7 +275,7 @@ end
 -- The widget's threads: those pinned first (in their order), then every
 -- one working now, the latest started first.
 M.listed = ui.computed(function(): { { id: string } }
-	local rows = orchestration.progress:get()
+	local rows = M.rows:get()
 	local out, seen = {}, {}
 	for _, id in M.pins:get() do
 		if rows[id] and not seen[id] then
@@ -217,7 +305,7 @@ end)
 -- How many work now, and how many of those are stalled.
 local function counts(): (number, number)
 	local working, stalled = 0, 0
-	for _, r in orchestration.progress:get() do
+	for _, r in M.rows:get() do
 		if r.state == "working" or r.state == "waiting" then
 			working += 1
 		end
