@@ -956,6 +956,7 @@ return {
 	["ds.orch.map.empty"] = "No machines online",
 	["ds.orch.map.idle"] = "Nothing running",
 	["ds.orch.map.this_device"] = "This device",
+	["ds.orch.map.menu"] = "Actions",
 	["ds.orch.map.now"] = "now",
 	["ds.orch.map.view"] = "View",
 	["ds.orch.map.variant.topology"] = "Topology",

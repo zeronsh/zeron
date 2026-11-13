@@ -9,8 +9,15 @@
 --   kit.since(t)             seconds since `t`, moving on with the clock
 --   kit.held(chat)           a thread's state and activity as shown, each
 --                            held 300 ms at least (ds/orch_hold; in a build)
+--   kit.MenuField { menu, register, key, hit, center, child }
+--                            `child` with a secondary click's menu: what
+--                            `hit(x, y)` finds there (an id) and `menu(id)`
+--                            offers; `register(key, open)` hands the Map a
+--                            way to open it for an id (`center(id)`: where)
 
 local status = require("@self/status")
+local ContextMenu = require("@self/context_menu")
+local locale = require("@self/locale")
 local hold = require("@self/orch_hold")
 local model = require("@self/orch_map_model")
 
@@ -83,6 +90,51 @@ function M.held(chat: () -> any): (() -> string, () -> any)
 		return if a and a.kind == k then a else { kind = k }
 	end
 	return st, activity
+end
+
+export type MenuProps = {
+	menu: ((id: string) -> { any }?)?,
+	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
+	key: string,
+	hit: (x: number, y: number) -> string?,
+	center: (id: string) -> (number?, number?),
+	child: Node,
+}
+
+function M.MenuField(p: MenuProps): Node
+	local menu = p.menu
+	if not menu then
+		return p.child
+	end
+	local opener: ((x: number, y: number) -> boolean)? = nil
+	local origin: any = nil
+	if p.register then
+		p.register(p.key, function(id: string): boolean
+			local x, y = p.center(id)
+			if not (opener and origin and x and y) then
+				return false
+			end
+			return (opener :: any)(origin.x + x, origin.y + (y :: number)) ~= false
+		end)
+		ui.on_cleanup(function()
+			(p.register :: any)(p.key, nil)
+		end)
+	end
+	return ContextMenu {
+		items = function(at: any): { any }?
+			local id = p.hit(at.local_x, at.local_y)
+			return if id then menu(id) else nil
+		end,
+		hook = function(open: any)
+			opener = open
+		end,
+		on_visible = function(_v: boolean, el: Element)
+			origin = el
+		end,
+		label = locale.t("ds.orch.map.menu"),
+		w_full = true,
+		p.child,
+	}
 end
 
 return M

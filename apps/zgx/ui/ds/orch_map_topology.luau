@@ -31,6 +31,9 @@ export type Props = {
 	comms: () -> { any },
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
+	-- A secondary click's menu, and a way for the Map to open it (kit.MenuField).
+	menu: ((id: string) -> { any }?)?,
+	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 }
 
 local PULSE_MS = 900
@@ -599,7 +602,40 @@ return ui.component(function(props: Props): Node
 			py = "$space.3",
 			ui.text { locale.t("ds.orch.map.empty"), text_size = "$font.size.sm", color = "$text.tertiary" },
 		}),
-		ui.column {
+		-- A secondary click on a row (a machine's head): its menu.
+		kit.MenuField {
+			menu = props.menu,
+			register = props.register,
+			key = "topology",
+			hit = function(x: number, y: number): string?
+				local l = layout:peek()
+				for _, r in l.rows do
+					if x >= r.x and x <= r.x + r.w and y >= r.y and y < r.y + r.h then
+						return r.id
+					end
+				end
+				for _, lane in l.lanes do
+					if y >= lane.y and y < lane.y + Layout.HEAD_H then
+						return `dev:{lane.id}`
+					end
+				end
+				return nil
+			end,
+			center = function(id: string): (number?, number?)
+				local l = layout:peek()
+				for _, r in l.rows do
+					if r.id == id then
+						return r.x + 24, r.mid
+					end
+				end
+				for _, lane in l.lanes do
+					if `dev:{lane.id}` == id then
+						return 24, lane.y + Layout.HEAD_Y + 14
+					end
+				end
+				return nil, nil
+			end,
+			child = ui.column {
 			class = "orch-map-field",
 			id = "orch-map-field",
 			relative = true,
@@ -621,6 +657,7 @@ return ui.component(function(props: Props): Node
 			},
 			ui.each(rows, any_row, { key = by_id, absolute = true, left = 0, top = 0, w = 0, h = 0 }),
 			ui.each(pulses, pulse_row, { key = by_id, absolute = true, left = 0, top = 0, w = 0, h = 0, pointer_events = "none" }),
+		},
 		},
 	}
 end)
