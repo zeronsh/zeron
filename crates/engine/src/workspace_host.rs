@@ -469,6 +469,9 @@ impl WorkspaceHost {
                 whole_saves: std::sync::atomic::AtomicUsize::new(0),
             }),
         };
+        // A name an earlier device already has is numbered now, not after
+        // the first change.
+        host.inner.dedupe_own_name();
         // Persist immediately: after this boot the migration source is never
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
@@ -1622,6 +1625,32 @@ impl WorkspaceHostInner {
 
     fn publish(&self) {
         self.publish_lists(false);
+        // (Any device row may have changed: one came in, or the person
+        // renamed one.)
+        self.dedupe_own_name();
+    }
+
+    /// When an earlier device has this device's name, this device takes the
+    /// lowest free `<name>-N` (`device_names`). Only ever this device's own
+    /// row; a no-op when its name is its own.
+    fn dedupe_own_name(&self) {
+        let me = self.config.device_id.as_str();
+        let renamed = {
+            let mut doc = lock(&self.reg);
+            let Ok(devices) = doc.read_devices() else { return };
+            let Some(name) = crate::device_names::deduped_name(&devices, me) else {
+                return;
+            };
+            tracing::info!(%name, "devices: an earlier device has this name; numbered");
+            doc.rename_device(me, &name).unwrap_or(false)
+        };
+        if renamed {
+            self.local_unsaved.store(true, Ordering::Release);
+            self.bump_changed();
+            if let Some(room) = lock(&self.room).as_ref() {
+                room.nudge();
+            }
+        }
     }
 
     /// One registry room event; `false` when the client is gone.
@@ -2375,6 +2404,65 @@ mod tests {
             assert!(message.contains("injected DNS lookup failure"), "{message}");
             assert!(!message.contains("token-secret"), "{message}");
         }
+    }
+
+    /// An earlier device with this device's name: this one becomes
+    /// "<name>-1", on its own row, as soon as it sees it; a person's rename
+    /// to a taken name is numbered the same way, and a unique one stays.
+    #[tokio::test]
+    async fn a_device_whose_name_is_taken_numbers_itself() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "honeypot".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        let own_name = |host: &WorkspaceHost| {
+            host.read_devices().unwrap().into_iter().find(|d| d.id == "test-device").unwrap().name
+        };
+        let settled = |host: WorkspaceHost, want: &'static str| async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while own_name(&host) != want {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("own name {:?}, wanted {want}", own_name(&host)));
+        };
+        assert_eq!(own_name(&host), "honeypot");
+        let older = |id: &str, name: &str| Device {
+            id: id.into(),
+            name: name.into(),
+            platform: "linux".into(),
+            last_seen_at: None,
+            created_at: chrono::DateTime::from_timestamp_millis(1),
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: vec![],
+        };
+        host.upsert_device_row(&older("older-device", "Honeypot"));
+        settled(host.clone(), "honeypot-1").await;
+        // The older one keeps its name.
+        let names: Vec<String> = host.read_devices().unwrap().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"Honeypot".to_string()), "{names:?}");
+
+        // The person names it something unique: it stays.
+        host.rename_device("test-device", "studio").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(own_name(&host), "studio");
+        // Or something taken: numbered.
+        host.upsert_device_row(&older("other-older", "laptop"));
+        host.rename_device("test-device", "Laptop").unwrap();
+        settled(host.clone(), "Laptop-1").await;
     }
 
     /// The event pump falling behind (the broadcast channel overflowed)

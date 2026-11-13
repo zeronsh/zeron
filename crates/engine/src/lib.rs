@@ -49,6 +49,7 @@ pub mod credentials;
 pub mod deferred;
 pub mod desktop_notify;
 pub mod device_stats;
+mod device_names;
 pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
