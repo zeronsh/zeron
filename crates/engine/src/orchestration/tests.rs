@@ -261,7 +261,8 @@ async fn a_dump_is_routed_and_each_fragment_delivered_where_it_goes() {
         &core,
         agent(&brain),
         json!({"op":"route","dumpId":dump,"excerpt":"maybe the docs or the site?","target":{"kind":"unsure"},
-            "intent":"task","message":"Update the docs","candidates":[{"kind":"orchestrator","id":auth}]}),
+            "intent":"task","message":"Update the docs",
+            "candidates":[{"kind":"orchestrator","id":auth},{"kind":"chat","id":"notes-chat"}]}),
     )
     .await
     .unwrap();
@@ -279,6 +280,14 @@ async fn a_dump_is_routed_and_each_fragment_delivered_where_it_goes() {
         .unwrap();
     assert_eq!(d.state, DumpState::NeedsYou);
     assert_eq!(d.summary.as_deref(), Some("3 places, 1 to pick"));
+    // The unsure one asks the person where it goes.
+    let where_ask = core
+        .workspace
+        .read_orchestration_with(|doc| doc.read_asks())
+        .into_iter()
+        .find(|a| a.route_id.as_deref() == Some(unsure.as_str()))
+        .unwrap();
+    assert_eq!(where_ask.state, AskState::Open);
     let first = d.routes.iter().find(|r| r.id == to_auth).unwrap();
     assert_eq!(
         (first.state, first.span),
@@ -318,6 +327,9 @@ async fn a_dump_is_routed_and_each_fragment_delivered_where_it_goes() {
         .read_orchestration_with(|doc| doc.dump(&dump))
         .unwrap();
     assert_eq!(d.state, DumpState::Routed);
+    // Moving it settles its ask.
+    let settled = core.workspace.read_orchestration_with(|doc| doc.ask(&where_ask.id)).unwrap();
+    assert_eq!(settled.state, AskState::Answered);
     let to_notes = sent(&core, "notes-chat");
     let (_, body) = agent_messages::agent_message_sender(to_notes.last().unwrap()).unwrap();
     assert_eq!(body, "Update the docs");

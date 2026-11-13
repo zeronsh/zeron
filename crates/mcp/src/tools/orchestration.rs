@@ -229,7 +229,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ROUTE,
-            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (existing, by id), newOrchestrator (create it first with orchestrator_create) or newThread (create it first with create_chat), item (a loose board item: create it with item_upsert), note (kept in your notes), unsure (with candidates, best first: the person picks).",
+            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a loose board item: create it with item_upsert); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes)",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -239,6 +239,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "intent": { "type": "string", "enum": ["task", "info", "question", "priority", "cancel", "note"] },
                     "message": s("What the target is sent."),
                     "candidates": { "type": "array", "items": target_schema("A likely place."), "description": "For unsure: the likely places, best first." },
+                    "project": s("For newThread/newOrchestrator: the project it is about (id, name or path, from world)."),
+                    "device": s("For newThread/newOrchestrator: the device (id or name); with a project, that project's own."),
                     "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." }
                 },
                 "required": ["dump", "excerpt", "target", "intent"]
@@ -363,6 +365,13 @@ struct RouteArgs {
     candidates: Vec<RouteTarget>,
     #[serde(default)]
     progress: bool,
+    /// Resolved before the op (see `orchestration_tool`).
+    #[serde(default)]
+    #[allow(dead_code)]
+    project: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    device: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -499,7 +508,9 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             if intent == RouteIntent::Other || a.target == RouteTarget::Other {
                 return Err("unknown intent or target kind".into());
             }
-            let needs_id = !matches!(a.target, RouteTarget::Note | RouteTarget::Unsure);
+            // A new thread or orchestrator may come without an id: Zeron
+            // starts it, in `project`.
+            let needs_id = matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. } | RouteTarget::Item { .. });
             let has_id = match &a.target {
                 RouteTarget::Orchestrator { id }
                 | RouteTarget::Chat { id }
@@ -511,13 +522,13 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             if needs_id && !has_id {
                 return Err("this target needs an id".into());
             }
-            if a.target == RouteTarget::Unsure && a.candidates.is_empty() {
-                return Err("unsure needs candidates".into());
+            if a.target == RouteTarget::Unsure && a.candidates.len() < 2 {
+                return Err("unsure is for two or more existing owners that fit (as candidates). With one, route it there; with none, it's a newThread in the project it is about".into());
             }
             if a.progress && intent != RouteIntent::Question {
                 return Err("progress is for a question about how a thread is going".into());
             }
-            if needs_id && matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. } | RouteTarget::NewOrchestrator { .. } | RouteTarget::NewThread { .. }) && a.message.trim().is_empty() {
+            if matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. } | RouteTarget::NewOrchestrator { .. } | RouteTarget::NewThread { .. }) && a.message.trim().is_empty() {
                 return Err("message is empty: say what the target should do".into());
             }
             Ok(json!({
@@ -699,7 +710,25 @@ impl Tools {
             }
         }
         match tool {
-            REPORT | ASK | ITEM_UPSERT | NOTES_SET | ROUTE | DUMP_DONE => {
+            ROUTE => {
+                // The project/device a new thread or orchestrator starts in.
+                let project = args.get("project").and_then(Value::as_str).map(str::to_owned);
+                let device = args.get("device").and_then(Value::as_str).map(str::to_owned);
+                let mut op = op_for(tool, args, &role)?;
+                let project = project.filter(|p| !p.trim().is_empty());
+                let device = device.filter(|d| !d.trim().is_empty());
+                if project.is_some() || device.is_some() {
+                    let (space, device) = self
+                        .zeron
+                        .resolve_target(project.as_deref(), device.as_deref())
+                        .await
+                        .map_err(|e| format!("{e:#}"))?;
+                    op["spaceId"] = json!(space.map(|s| s.id));
+                    op["deviceId"] = json!(device);
+                }
+                self.orchestrate(op).await
+            }
+            REPORT | ASK | ITEM_UPSERT | NOTES_SET | DUMP_DONE => {
                 let op = op_for(tool, args, &role)?;
                 self.orchestrate(op).await
             }
@@ -809,6 +838,8 @@ impl Tools {
         let state = self.orchestration_state().await?;
         let (chats, sessions, spaces, devices) =
             tokio::try_join!(self.zeron.chats(), self.zeron.sessions(), self.zeron.spaces(), self.zeron.devices())?;
+        let here = self.zeron.local_device_id().await.unwrap_or_default();
+        let projects = world_projects(&spaces, &chats, &devices, &here);
         let in_orchestration = |id: &str| state.orchestrators.iter().any(|o| o.id == id);
         let orchestrators: Vec<Value> = state
             .orchestrators
@@ -848,13 +879,14 @@ impl Tools {
         top.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
         let recent: Vec<Value> = top
             .into_iter()
-            .take(30)
+            .take(20)
             .map(|c| {
                 let session = session_for(&sessions, c);
                 let project = c.space_id.as_deref().and_then(|id| spaces.iter().find(|s| s.id == id));
                 json!({
                     "id": c.id, "title": c.title, "status": status_of(session.as_ref()).0,
                     "project": project.map(|p| p.display_name()), "deviceId": c.device_id,
+                    "lastMessageAt": c.last_message_at,
                 })
             })
             .collect();
@@ -870,12 +902,46 @@ impl Tools {
             .collect();
         Ok(json!({
             "orchestrators": orchestrators,
+            "projects": projects,
             "chats": recent,
             "looseItems": loose,
             "devices": devices,
-            "note": "Crew threads are listed under their orchestrator. A task, priority or cancel for one goes to that orchestrator (name the thread in message); info and questions may go to the thread.",
+            "note": "Crew threads are listed under their orchestrator. A task, priority or cancel for one goes to that orchestrator (name the thread in message); info and questions may go to the thread. A task with no owner is a newThread in the project it's about (projects: most recently active first; prefer one the text names, then one here). Recent chats are context, not owners: route to one only when it is doing that very work.",
         }))
     }
+}
+
+/// The projects as `world` lists them: compact, most recently active first
+/// (this device's first among equals).
+pub(super) fn world_projects(
+    spaces: &[zeron_proto::Space],
+    chats: &[zeron_proto::Chat],
+    devices: &[zeron_proto::Device],
+    here: &str,
+) -> Vec<Value> {
+    let mut rows: Vec<(Option<chrono::DateTime<chrono::Utc>>, bool, Value)> = spaces
+        .iter()
+        .map(|s| {
+            let last = chats
+                .iter()
+                .filter(|c| c.space_id.as_deref() == Some(s.id.as_str()))
+                .filter_map(|c| c.last_message_at)
+                .max();
+            let device = devices.iter().find(|d| d.id == s.device_id).map(|d| d.name.clone());
+            let here = s.device_id == here;
+            (
+                last,
+                here,
+                json!({
+                    "id": s.id, "name": s.display_name(), "path": s.path, "deviceId": s.device_id,
+                    "device": device, "here": here, "git": s.git_detected,
+                    "repo": s.github_repo, "lastActive": last,
+                }),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    rows.into_iter().map(|(_, _, v)| v).collect()
 }
 
 /// `progressCheck`'s reply as an agent reads it: the clocks as numbers,
@@ -1028,6 +1094,53 @@ mod tests {
         assert_eq!(crew_refusal(&o, 2, false), None, "a thread that doesn't start yet is fine");
         o.paused = true;
         assert!(crew_refusal(&o, 0, false).unwrap().contains("paused"));
+    }
+
+    #[test]
+    fn unsure_needs_two_owners_and_new_work_needs_no_id() {
+        let brain = Role::BrainDump { id: "b".into() };
+        let route = |target: Value, candidates: Value| {
+            op_for(
+                ROUTE,
+                json!({ "dump": "d", "excerpt": "x", "target": target, "intent": "task", "message": "do x", "candidates": candidates }),
+                &brain,
+            )
+        };
+        let one = route(json!({ "kind": "unsure" }), json!([{ "kind": "chat", "id": "c1" }]));
+        assert!(one.unwrap_err().contains("newThread"), "never unsure because nothing fits");
+        assert!(route(json!({ "kind": "unsure" }), json!([{ "kind": "chat", "id": "c1" }, { "kind": "orchestrator", "id": "o1" }])).is_ok());
+        let fresh = route(json!({ "kind": "newThread" }), json!([])).unwrap();
+        assert_eq!(fresh["target"], json!({ "kind": "newThread", "id": "" }));
+        assert!(route(json!({ "kind": "newOrchestrator" }), json!([])).is_ok());
+        assert!(route(json!({ "kind": "chat" }), json!([])).is_err(), "an existing owner needs its id");
+    }
+
+    #[test]
+    fn world_lists_projects_by_recent_work_here_first() {
+        let space = |id: &str, device: &str| -> zeron_proto::Space {
+            serde_json::from_value(json!({ "id": id, "deviceId": device, "path": format!("/src/{id}"), "name": id,
+                "gitDetected": true, "createdAt": "2026-11-01T00:00:00Z" }))
+            .unwrap()
+        };
+        let chat = |space: &str, at: &str| -> zeron_proto::Chat {
+            serde_json::from_value(json!({ "id": format!("c-{space}"), "deviceId": "d1", "spaceId": space, "archived": false,
+                "lastMessageAt": at, "createdAt": "2026-11-01T00:00:00Z" }))
+            .unwrap()
+        };
+        let device: zeron_proto::Device =
+            serde_json::from_value(json!({ "id": "honeypot", "name": "honeypot", "platform": "linux" })).unwrap();
+        let rows = world_projects(
+            &[space("old", "d1"), space("zeron", "honeypot"), space("idle", "d1")],
+            &[chat("old", "2026-11-02T00:00:00Z"), chat("zeron", "2026-11-12T00:00:00Z")],
+            &[device],
+            "d1",
+        );
+        let names: Vec<_> = rows.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["zeron", "old", "idle"]);
+        assert_eq!(rows[0]["device"], "honeypot");
+        assert_eq!(rows[0]["here"], false);
+        assert_eq!(rows[1]["here"], true);
+        assert_eq!(rows[0]["path"], "/src/zeron");
     }
 
     #[test]

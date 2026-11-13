@@ -176,6 +176,8 @@ impl EngineRpc {
         message: String,
         candidates: Vec<RouteTarget>,
         progress: bool,
+        space_id: Option<String>,
+        device_id: Option<String>,
     ) -> Result<String, RpcError> {
         let orch = self.orchestration().clone();
         let dump = orch
@@ -188,6 +190,22 @@ impl EngineRpc {
         // Work for a crew thread goes through its orchestrator, so its board
         // sees it; info and questions may go to the thread itself.
         let (target, message) = self.through_owner(target, intent, message);
+        // Unsure only between existing places: with fewer than two it does
+        // the work instead, in a new thread in the best project.
+        let candidates = self.existing_candidates(candidates);
+        let target = if target == RouteTarget::Unsure && candidates.len() < super::placement::UNSURE_MIN {
+            RouteTarget::NewThread { id: String::new() }
+        } else {
+            target
+        };
+        let candidates = if target == RouteTarget::Unsure { candidates } else { Vec::new() };
+        // Where a new thread or orchestrator starts: as named, else placed.
+        let (space_id, device_id) = match &target {
+            RouteTarget::NewThread { id } | RouteTarget::NewOrchestrator { id } if id.is_empty() => {
+                self.place(&format!("{excerpt_text} {message}"), space_id, device_id)?
+            }
+            _ => (None, None),
+        };
         let mut route = Route {
             id: uuid::Uuid::new_v4().simple().to_string(),
             span: span_of(&dump.text, &excerpt_text),
@@ -200,6 +218,8 @@ impl EngineRpc {
             answer: None,
             answer_full: None,
             item_id: None,
+            space_id,
+            device_id,
         };
         let brain = self.brain_of(&dump);
         let answered = match (&route.target, intent == RouteIntent::Question && progress) {
@@ -214,6 +234,10 @@ impl EngineRpc {
                 orch.comms().say(CommKind::Answer, &to, super::comms::YOU, &answer);
             }
             None => self.deliver_route(&dump, &mut route, brain.as_deref()).await?,
+        }
+        // Not sure between places: the person picks, from Needs you.
+        if route.target == RouteTarget::Unsure {
+            self.ask_where(&dump, &mut route, brain.as_deref());
         }
         orch.workspace().write_orchestration(|doc| {
             let Some(mut current) = doc.dump(dump_id) else {
@@ -339,12 +363,26 @@ impl EngineRpc {
         });
         orch.comms()
             .say(CommKind::Route, super::comms::YOU, &to, &route.excerpt);
+        // Its "Where should this go?" is settled by the move.
+        orch.workspace().write_orchestration(|doc| {
+            for mut ask in doc.read_asks() {
+                if ask.state == zeron_proto::orchestration::AskState::Open
+                    && ask.dump_id.as_deref() == Some(dump_id)
+                    && ask.route_id.as_deref() == Some(route_id)
+                {
+                    ask.state = zeron_proto::orchestration::AskState::Answered;
+                    ask.answer.get_or_insert_with(|| to.clone());
+                    ask.answered_at = Some(Utc::now());
+                    doc.upsert_ask(&ask);
+                }
+            }
+        });
         Ok(route.id)
     }
 
     /// The Brain dump a dump was routed by: the one hosted where it was
     /// dumped, else any.
-    fn brain_of(&self, dump: &Dump) -> Option<String> {
+    pub(crate) fn brain_of(&self, dump: &Dump) -> Option<String> {
         let chats = self.workspace_host().read_chats().unwrap_or_default();
         let brains: Vec<Orchestrator> = self
             .orchestration()
@@ -404,8 +442,8 @@ impl EngineRpc {
                         goal: message.clone(),
                         rules: String::new(),
                         crew_rules: String::new(),
-                        space_id: None,
-                        device_id: None,
+                        space_id: route.space_id.clone(),
+                        device_id: route.device_id.clone(),
                         harness: None,
                         model: None,
                         crew: CrewPolicy::default(),
@@ -423,7 +461,20 @@ impl EngineRpc {
                     id
                 } else {
                     let id = uuid::Uuid::new_v4().to_string();
-                    self.create_chat_for(&id, None, None, None, None, None)?;
+                    if route.space_id.is_none() && route.device_id.is_none() {
+                        let (space, device) =
+                            self.place(&format!("{} {}", route.excerpt, message), None, None)?;
+                        route.space_id = space;
+                        route.device_id = device;
+                    }
+                    self.create_chat_for(
+                        &id,
+                        route.space_id.as_deref(),
+                        route.device_id.as_deref(),
+                        None,
+                        None,
+                        None,
+                    )?;
                     if !title.is_empty() {
                         self.workspace_host()
                             .rename_chat(&id, &title)

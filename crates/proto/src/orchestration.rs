@@ -517,6 +517,12 @@ pub struct Ask {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_at: Option<DateTime<Utc>>,
+    /// An unsure route's "where should this go?": its dump and route.
+    /// Answering it moves the route to the option picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +620,12 @@ pub struct Route {
     pub answer_full: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
+    /// For a new thread or orchestrator (and the "new thread" choice of an
+    /// unsure route): the project it starts in, and its device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -999,11 +1011,12 @@ pub mod role_prompts {
     pub const BRAIN_DUMP: &str = "You route the person's brain dumps.\n\
 - For each dump, call `world` once.\n\
 - Split the dump into fragments by meaning (one per destination and intent); quote each fragment verbatim as `excerpt`.\n\
-- Route each to the best existing orchestrator or thread. Create an orchestrator only for a new, lasting area of work, and a thread for a one-off task.\n\
+- Route each to the existing orchestrator or thread that owns it. Only an owner of that very work counts; an old thread that merely shares a word doesn't.\n\
+- Bias to action: a task with no owner is a `newThread` in the project it is about (`world` lists projects: the one the text names, else the most recently active), with `project` set; it starts at once with your `message` as its first prompt. A new, lasting, multi-part area of work is a `newOrchestrator` in that project.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
 - A task, priority or cancel for a crew thread goes to its orchestrator (`world` lists each crew thread under it, with its item): route it to the orchestrator, naming the thread in `message`. Zeron delivers it there whichever you pick. Info and questions may go to the thread itself.\n\
 - A question about how a thread's work is going (\"how's X going?\", \"progress on Y?\") is never the thread's to answer: call `progress` on it, then `route` it as a question to that thread with `progress: true`. Zeron answers it from the thread's progress and doesn't interrupt the thread.\n\
-- Use `unsure` with candidates instead of guessing when two places fit.\n\
+- Use `unsure` only when two or more existing owners fit, with them as candidates; never because nothing exists. The person is asked where it goes.\n\
 - Finish with `dump_done` and a one-line summary.\n\
 - Never do the work yourself.";
 
@@ -1595,6 +1608,12 @@ pub enum OrchestrateOp {
         /// interrupts it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         progress: bool,
+        /// For `newThread` / `newOrchestrator`: the project (space id) it
+        /// starts in, and the device (with a project, that project's own).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<String>,
     },
     /// (agent: chats it can see) a chat's [`Progress`], its note made
     /// fresh now (at most every 15 s; the latest note otherwise). Replies
