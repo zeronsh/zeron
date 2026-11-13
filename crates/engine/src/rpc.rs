@@ -60,6 +60,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+pub(crate) use agent_gate::run_as_chat_is_set;
 mod crew_messages;
 mod device_stats;
 mod remote_plugins;
@@ -3523,6 +3524,12 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
+                // Reports are Zeron's to file (`report` op), never a caller's.
+                if matches!(p.command, zeron_doc::SessionCommandPayload::CrewReport { .. })
+                    && !zeron_rpc::caller().is_local()
+                {
+                    return Err(RpcError::BadParams("Only Zeron files crew reports".into()));
+                }
                 let command_id = self
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)

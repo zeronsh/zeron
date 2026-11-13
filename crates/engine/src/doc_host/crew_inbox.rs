@@ -97,7 +97,82 @@ fn append(handle: &ChatDocHandle, device_id: &str, pending: &mut Pending, report
     Ok(())
 }
 
+/// Most links a filed report keeps.
+const LINKS_MAX: usize = 10;
+
 impl DocHost {
+    /// `report` as this host files it, everything re-derived from the rows:
+    /// it must come from a thread in `chat`'s own crew, its orchestrator is
+    /// `chat`, its item one on `chat`'s board (else the thread's own), and
+    /// its text is capped. `None` when it isn't this crew's.
+    fn admit_report(&self, chat: &str, report: &Report) -> Option<Report> {
+        use zeron_proto::orchestration::prompt_text::{BLOCK_MAX, LABEL_MAX, SUMMARY_MAX, TARGET_MAX, one_line};
+        let ws = self.workspace()?;
+        let (member, item) = ws.read_orchestration_with(|doc| {
+            let member = doc.crew_member(&report.from_chat);
+            let item = report.item_id.as_deref().and_then(|id| doc.work_item(id));
+            (member, item)
+        });
+        let member = member.filter(|m| m.orchestrator_id == chat)?;
+        let item_id = item
+            .filter(|i| i.orchestrator_id.as_deref() == Some(chat))
+            .map(|i| i.id)
+            .or(member.item_id);
+        let summary = one_line(&report.summary, SUMMARY_MAX);
+        Some(Report {
+            id: one_line(&report.id, LABEL_MAX),
+            orchestrator_id: chat.to_owned(),
+            from_chat: member.chat_id,
+            item_id,
+            state: report.state,
+            summary: if summary.is_empty() { "Report".into() } else { summary },
+            detail: report.detail.chars().take(BLOCK_MAX).collect(),
+            links: report
+                .links
+                .iter()
+                .take(LINKS_MAX)
+                .map(|l| zeron_proto::orchestration::WorkLink {
+                    kind: l.kind,
+                    label: one_line(&l.label, LABEL_MAX),
+                    target: one_line(&l.target, TARGET_MAX),
+                })
+                .collect(),
+            progress: report.progress.filter(|p| p.is_finite()).map(|p| p.clamp(0.0, 1.0)),
+            at: report.at,
+        })
+    }
+
+    /// The wake turn's run: as the orchestrator's chat is set (its own
+    /// harness, model, sandbox, access and folder), never what an earlier
+    /// run carried, with the same sanitizing an agent's run gets.
+    fn wake_request(&self, sessions: &SessionsEngine, chat: &str, prompt: String) -> Option<zeron_proto::RunRequest> {
+        let ws = self.workspace()?;
+        let row = ws.chat(chat).ok().flatten()?;
+        let mut request = self.request_from_chat_row(chat, &prompt)?;
+        if request.cwd.trim().is_empty() {
+            request.cwd = row
+                .space_id
+                .as_deref()
+                .and_then(|id| ws.space(id).ok().flatten())
+                .map(|space| space.path)
+                .or_else(|| sessions.last_request(chat).map(|r| r.cwd))
+                .unwrap_or_else(|| "~".into());
+        }
+        request.attachments = Vec::new();
+        request.resume = None;
+        request.worktree = None;
+        request.env = Default::default();
+        let mut value = serde_json::to_value(&request).ok()?;
+        crate::rpc::run_as_chat_is_set(
+            &mut value,
+            Some(&row),
+            (zeron_proto::SandboxLevel::WorkspaceWrite, zeron_proto::AccessMode::Supervised),
+        );
+        let mut request: zeron_proto::RunRequest = serde_json::from_value(value).ok()?;
+        request.prompt = prompt;
+        Some(request)
+    }
+
     /// How long an idle orchestrator waits for more reports before it wakes
     /// ([`WAKE_DEBOUNCE`] by default). For tests.
     #[doc(hidden)]
@@ -125,15 +200,10 @@ impl DocHost {
         report: &Report,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat = handle.chat_id.clone();
-        if report.orchestrator_id != chat {
-            return Ok((SessionCommandStatus::Rejected, Some("a report for another orchestrator".into())));
-        }
-        let member = self
-            .workspace()
-            .and_then(|ws| ws.read_orchestration_with(|doc| doc.crew_member(&report.from_chat)));
-        if member.is_none_or(|m| m.orchestrator_id != chat) {
+        let Some(report) = self.admit_report(&chat, report) else {
             return Ok((SessionCommandStatus::Rejected, Some("not from this orchestrator's crew".into())));
-        }
+        };
+        let report = &report;
         let debounce = self.crew_wake_debounce();
         let spawn = {
             let mut chats = lock(&self.inner.crew_inbox.chats);
@@ -213,15 +283,8 @@ impl DocHost {
                     .as_ref()
                     .map(|(id, _)| id.clone())
                     .unwrap_or_else(|| format!("crew-{}", new_id()));
-                let request = sessions
-                    .last_request(&chat)
-                    .or_else(|| self.request_from_chat_row(&chat, &prompt));
-                match request {
-                    Some(mut request) => {
-                        request.prompt = prompt;
-                        request.resume = None;
-                        request.attachments = Vec::new();
-                        request.worktree = None;
+                match self.wake_request(&sessions, &chat, prompt) {
+                    Some(request) => {
                         if let Err(err) =
                             self.queue_command(&chat, SessionCommandPayload::Run { request, message_id })
                         {
