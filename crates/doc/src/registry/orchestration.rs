@@ -598,6 +598,7 @@ mod tests {
             device_id: None,
             attachments: Default::default(),
             delivered_at: Default::default(),
+            reference: None,
         }
     }
 
@@ -612,6 +613,7 @@ mod tests {
             created_at: ts(2_000),
             updated_at: ts(2_000),
             attachments: Default::default(),
+            refs: Vec::new(),
         }
     }
 

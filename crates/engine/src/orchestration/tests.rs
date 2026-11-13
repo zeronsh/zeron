@@ -1958,5 +1958,170 @@ async fn a_thread_on_an_older_host_is_asked_for_by_the_engine_that_launched_it()
     turn_ended(&core, "9ad131f1-map").await;
     turn_ended(&core, "9ad131f1-map").await;
     assert_eq!(asks_from(&core, "9ad131f1-map").len(), 1);
+/// The Brain dump's id (after a dump made it).
+fn brain_of(core: &crate::EngineCore) -> String {
+    core.orchestration
+        .state()
+        .orchestrators
+        .into_iter()
+        .find(|o| o.kind == OrchestratorKind::BrainDump)
+        .unwrap()
+        .id
+}
+
+fn route_row(core: &crate::EngineCore, dump: &str, route: &str) -> Route {
+    core.workspace
+        .read_orchestration_with(|d| d.dump(dump))
+        .unwrap()
+        .routes
+        .into_iter()
+        .find(|r| r.id == route)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_reply_on_an_ask_reference_answers_the_ask() {
+    let (_temp, core) = core().await;
+    chat(&core, "asker", "Asker", None).await;
+    let ask = op(
+        &core,
+        agent("asker"),
+        json!({"op":"ask","kind":"decision","question":"Merge now or wait?","options":[{"label":"Merge"},{"label":"Wait"}]}),
+    )
+    .await
+    .unwrap();
+    let dump = op(
+        &core,
+        Caller::Local,
+        json!({"op":"dump","text":"merge","refs":[
+            {"kind":"ask","id":ask,"label":"Merge now or wait?","context":{"chat":"asker","options":"Merge / Wait"}},
+            {"kind":"hologram","id":"h"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let brain = brain_of(&core);
+    let row = core.workspace.read_orchestration_with(|d| d.dump(&dump)).unwrap();
+    assert_eq!(row.refs.len(), 1, "an unknown kind is dropped: {:?}", row.refs);
+    let to_brain = sent(&core, &brain);
+    assert!(to_brain.last().unwrap().contains(&format!("@ask id={ask}")), "{to_brain:?}");
+
+    // Only a reference the dump has.
+    let route = |reference: &str| json!({"op":"route","dumpId":dump,"excerpt":"merge","target":{"kind":"note"},
+        "intent":"info","message":"merge","reference":reference});
+    let wrong = op(&core, agent(&brain), route("not-a-ref")).await.unwrap_err();
+    assert!(wrong.contains("not one of"), "{wrong}");
+
+    let id = op(&core, agent(&brain), route(&ask)).await.unwrap();
+    let answered = core.workspace.read_orchestration_with(|d| d.ask(&ask)).unwrap();
+    assert_eq!(answered.state, AskState::Answered);
+    assert_eq!(answered.answer.as_deref(), Some("Merge"), "the reply picks the option it names");
+    assert_eq!(answered.answered_via, Some(AnswerVia::Person));
+    let to_asker = sent(&core, "asker");
+    assert!(
+        to_asker.last().unwrap().starts_with("[Answer from you] Merge now or wait? \u{2192} Merge"),
+        "{to_asker:?}"
+    );
+    let r = route_row(&core, &dump, &id);
+    assert_eq!(r.target, RouteTarget::Chat { id: "asker".into() });
+    assert_eq!((r.state, r.intent), (RouteState::Delivered, RouteIntent::Info));
+    assert_eq!(r.reference.as_deref(), Some(ask.as_str()));
+    assert!(r.delivered_at.is_some());
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
+    let (_temp, core) = core().await;
+    chat(&core, "worker", "Worker", None).await;
+    let card = op(
+        &core,
+        Caller::Local,
+        json!({"op":"upsertItem","item":{"title":"Topology lines","threads":["worker"],"state":"review"}}),
+    )
+    .await
+    .unwrap();
+    let loose = op(&core, Caller::Local, json!({"op":"upsertItem","item":{"title":"Someday","detail":"Old idea"}}))
+        .await
+        .unwrap();
+    let dump = op(
+        &core,
+        Caller::Local,
+        json!({"op":"dump","text":"looks good, ship it. and use dashed lines there",
+            "refs":[{"kind":"card","id":card,"label":"Topology lines"},{"kind":"card","id":loose,"label":"Someday"}]}),
+    )
+    .await
+    .unwrap();
+    let brain = brain_of(&core);
+    let before = sent(&core, "worker").len();
+    let id = op(
+        &core,
+        agent(&brain),
+        json!({"op":"route","dumpId":dump,"excerpt":"looks good, ship it","target":{"kind":"note"},
+            "intent":"info","message":"Looks good, ship it.","reference":card}),
+    )
+    .await
+    .unwrap();
+    let to_worker = sent(&core, "worker");
+    assert_eq!(to_worker.len(), before + 1);
+    assert!(
+        to_worker.last().unwrap().contains("[On your card \"Topology lines\"] Looks good, ship it."),
+        "{to_worker:?}"
+    );
+    let r = route_row(&core, &dump, &id);
+    assert_eq!((r.target.clone(), r.state), (RouteTarget::Chat { id: "worker".into() }, RouteState::Delivered));
+    assert_eq!(r.item_id, None, "the card stays its own route's");
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Review);
+
+    // A card with no thread or owner keeps the comment.
+    let id = op(
+        &core,
+        agent(&brain),
+        json!({"op":"route","dumpId":dump,"excerpt":"use dashed lines there","target":{"kind":"note"},
+            "intent":"info","message":"Use dashed lines","reference":loose}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(core.orchestration.item(&loose).unwrap().detail, "Old idea\n\nUse dashed lines");
+    assert_eq!(route_row(&core, &dump, &id).target, RouteTarget::Item { id: loose.clone() });
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_device_reference_is_context_and_the_place_a_new_card_goes() {
+    let (_temp, core) = core().await;
+    core.workspace.upsert_device_row(&zeron_proto::Device {
+        id: "dev-x".into(),
+        name: "x16-win".into(),
+        platform: "windows".into(),
+        last_seen_at: Some(chrono::Utc::now()),
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    });
+    let dump = op(
+        &core,
+        Caller::Local,
+        json!({"op":"dump","text":"later: fix the installer there",
+            "refs":[{"kind":"device","id":"dev-x","label":"x16-win","context":{"os":"windows"}},
+                    {"kind":"device","id":"dev-gone","label":"old box"}]}),
+    )
+    .await
+    .unwrap();
+    let brain = brain_of(&core);
+    let row = core.workspace.read_orchestration_with(|d| d.dump(&dump)).unwrap();
+    assert_eq!(row.refs[0].context("os"), Some("windows"));
+    let route = |reference: &str| json!({"op":"route","dumpId":dump,"excerpt":"later: fix the installer there",
+        "target":{"kind":"item"},"intent":"task","message":"Fix the installer","title":"Fix the installer","reference":reference});
+    let id = op(&core, agent(&brain), route("dev-x")).await.unwrap();
+    let r = route_row(&core, &dump, &id);
+    assert_eq!(r.reference.as_deref(), Some("dev-x"));
+    assert_eq!(r.device_id.as_deref(), Some("dev-x"), "the device hint places it");
+    let card = core.orchestration.item(r.item_id.as_deref().unwrap()).unwrap();
+    assert_eq!(card.device_id.as_deref(), Some("dev-x"));
+    // A device Zeron doesn't know is no hint (and no error).
+    let id = op(&core, agent(&brain), route("dev-gone")).await.unwrap();
+    assert_ne!(route_row(&core, &dump, &id).device_id.as_deref(), Some("dev-gone"));
     core.sessions.shutdown().await;
 }

@@ -289,6 +289,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 attachments: Default::default(),
+                refs: Vec::new(),
             }],
             settings: Default::default(),
         }

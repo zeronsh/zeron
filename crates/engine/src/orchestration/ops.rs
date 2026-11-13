@@ -390,56 +390,7 @@ impl EngineRpc {
                 orch.comms().say(CommKind::Ask, chat, YOU, &ask.question);
                 Ok(json!({ "id": ask.id }))
             }
-            OrchestrateOp::AnswerAsk { id, answer } => {
-                let answer = answer.trim().to_owned();
-                if answer.is_empty() {
-                    return Err(RpcError::BadParams("An answer can't be empty".into()));
-                }
-                let ask = orch.workspace().write_orchestration(|doc| {
-                    let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
-                    if ask.state != AskState::Open {
-                        return Err(failed("That ask was already answered or dismissed"));
-                    }
-                    if let Who::Agent { role: ChatRole::Orchestrator { id: mine }, .. } = who
-                        && !orchestrator_may_answer(&ask, mine, doc.crew_member(&ask.from_chat).as_ref())
-                    {
-                        return Err(failed("Only the person answers that ask"));
-                    }
-                    ask.state = AskState::Answered;
-                    ask.answer = Some(answer.clone());
-                    ask.answered_at = Some(now);
-                    ask.answered_via = Some(match who {
-                        Who::Agent { .. } => AnswerVia::Orchestrator,
-                        _ => AnswerVia::Person,
-                    });
-                    doc.upsert_ask(&ask);
-                    Ok(ask)
-                })?;
-                // Who answered: the person, or (its crew's ask) an orchestrator.
-                let answerer = match who {
-                    Who::Agent { chat, .. } => chat.as_str(),
-                    _ => YOU,
-                };
-                // "Where should this go?" moves its route to the pick; "hasn't
-                // answered" asks again or lets it be. A thread's own question
-                // on a route goes back to it, below.
-                if self.answer_route_ask(&ask, &answer).await? {
-                    orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
-                    return Ok(json!({ "id": id }));
-                }
-                // One line each: an ask's text can't pass for another message.
-                let text =
-                    zeron_proto::orchestration::prompt_text::answer_delivery(&ask.question, &answer);
-                let text = match who {
-                    Who::Agent { .. } => text.replacen("[Answer from you]", "[Answer from your orchestrator]", 1),
-                    _ => text,
-                };
-                deliver(self, &ask.from_chat, &text, None, When::Now)?;
-                orch.comms()
-                    .say(CommKind::Answer, answerer, &ask.from_chat, &answer);
-                self.sync_cards_of(&ask.from_chat);
-                Ok(json!({ "id": id }))
-            }
+            OrchestrateOp::AnswerAsk { id, answer } => self.answer_ask(who, id, answer).await,
             OrchestrateOp::DismissAsk { id } => {
                 let asker = orch.workspace().write_orchestration(|doc| {
                     let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
@@ -453,8 +404,8 @@ impl EngineRpc {
                 self.sync_cards_of(&asker);
                 Ok(json!({ "id": id }))
             }
-            OrchestrateOp::Dump { text, attachments, transfers, config } => {
-                let id = self.dump(&text, attachments, transfers, config).await?;
+            OrchestrateOp::Dump { text, attachments, transfers, config, refs } => {
+                let id = self.dump(&text, attachments, transfers, config, refs).await?;
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::Route {
@@ -470,6 +421,7 @@ impl EngineRpc {
                 device_id,
                 attachments,
                 item_state,
+                reference,
             } => {
                 let id = self
                     .route(
@@ -485,6 +437,7 @@ impl EngineRpc {
                         device_id,
                         attachments,
                         item_state,
+                        reference,
                     )
                     .await?;
                 Ok(json!({ "id": id }))
@@ -505,6 +458,63 @@ impl EngineRpc {
                 Ok(json!({ "id": id }))
             }
         }
+    }
+
+    /// `who` answers ask `id`: it is marked answered and the answer goes to
+    /// the asker (a Brain dump's "where does this go?" moves its route
+    /// instead). The person's `answerAsk` op, and a dump's reply on an
+    /// `@ask` reference (brain.rs `route`).
+    pub(crate) async fn answer_ask(&self, who: &Who, id: String, answer: String) -> Result<Value, RpcError> {
+        let orch = self.orchestration().clone();
+        let now = Utc::now();
+        let answer = answer.trim().to_owned();
+        if answer.is_empty() {
+            return Err(RpcError::BadParams("An answer can't be empty".into()));
+        }
+        let ask = orch.workspace().write_orchestration(|doc| {
+            let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
+            if ask.state != AskState::Open {
+                return Err(failed("That ask was already answered or dismissed"));
+            }
+            if let Who::Agent { role: ChatRole::Orchestrator { id: mine }, .. } = who
+                && !orchestrator_may_answer(&ask, mine, doc.crew_member(&ask.from_chat).as_ref())
+            {
+                return Err(failed("Only the person answers that ask"));
+            }
+            ask.state = AskState::Answered;
+            ask.answer = Some(answer.clone());
+            ask.answered_at = Some(now);
+            ask.answered_via = Some(match who {
+                Who::Agent { .. } => AnswerVia::Orchestrator,
+                _ => AnswerVia::Person,
+            });
+            doc.upsert_ask(&ask);
+            Ok(ask)
+        })?;
+        // Who answered: the person, or (its crew's ask) an orchestrator.
+        let answerer = match who {
+            Who::Agent { chat, .. } => chat.as_str(),
+            _ => YOU,
+        };
+        // "Where should this go?" moves its route to the pick; "hasn't
+        // answered" asks again or lets it be. A thread's own question
+        // on a route goes back to it, below.
+        if self.answer_route_ask(&ask, &answer).await? {
+            orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+            return Ok(json!({ "id": id }));
+        }
+        // One line each: an ask's text can't pass for another message.
+        let text =
+            zeron_proto::orchestration::prompt_text::answer_delivery(&ask.question, &answer);
+        let text = match who {
+            Who::Agent { .. } => text.replacen("[Answer from you]", "[Answer from your orchestrator]", 1),
+            _ => text,
+        };
+        deliver(self, &ask.from_chat, &text, None, When::Now)?;
+        orch.comms()
+            .say(CommKind::Answer, answerer, &ask.from_chat, &answer);
+        self.sync_cards_of(&ask.from_chat);
+        Ok(json!({ "id": id }))
     }
 
     /// Put `chat_id` in `orchestrator_id`'s crew (moving it from another),
