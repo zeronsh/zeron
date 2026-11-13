@@ -4085,7 +4085,12 @@
       "queued": "Queued",
       "start_failed": "Couldn't start it",
       "needs_you": "Needs you",
-      "waiting_on_you": "Waiting on you"
+      "waiting_on_you": "Waiting on you",
+      "show_more": "Show {n} more",
+      "show_less": "Show less",
+      "clear_done": "Clear all done",
+      "clear": "Clear",
+      "cleared": "{n, plural, one {Cleared # done card} other {Cleared # done cards}}"
     },
     "reports": {
       "title": "Crew updates",

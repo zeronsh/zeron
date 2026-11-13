@@ -7,7 +7,13 @@
 --
 -- The columns share the board's width evenly, each a lane of its own, its
 -- name, glyph and count on one line across them all; an empty one keeps
--- its width, quiet. Narrower than the columns need, they stand in rows of
+-- its width, quiet, but Inbox and Blocked, which stand only while they
+-- hold a card (Blocked too while one is carried, to be put there): the
+-- others take their room. Each shows ten cards at most, "Show N more" under
+-- the rest; shown, every column shows all of its (one choice for them all,
+-- `expanded`), and "Show less" puts them all back. Done's head clears it:
+-- every card in it taken off the board at once, as Delete takes one, one
+-- Undo putting them all back. Narrower than the columns need, they stand in rows of
 -- three, as wide as each other still; narrower still (a page's side pane),
 -- one under another. A board with nothing on it (or nothing of the
 -- orchestrator chosen) is one quiet line.
@@ -70,6 +76,9 @@
 --                                -- given without `show_filter`)
 --     progress_of = fn(chat) -> Row?,  -- its lead thread's progress row
 --                                -- (orchestration.progress[chat]): its clocks
+--     expanded = state,          -- whether every column shows all its cards
+--                                -- (a boolean state, kept where the page
+--                                -- keeps its view; else the board's own)
 --   }
 
 local Icon = require("@self/icon")
@@ -144,6 +153,7 @@ export type Props = {
 	compact: boolean?,
 	project_of: ((chat: string) -> string?)?,
 	context: boolean?,
+	expanded: any?,
 	id: string?,
 }
 
@@ -165,6 +175,10 @@ local PRIORITIES = { "urgent", "high", "normal", "low" }
 -- they stand in rows of `PER_ROW`; narrower than that for those, one under
 -- another.
 local COLUMN_MIN = 160
+-- The most cards a column shows until its cards are all shown.
+local CAP = 10
+-- The columns that stand only while they hold a card.
+local ONLY_HELD: { [string]: boolean } = { inbox = true, blocked = true }
 local PER_ROW = 3
 -- Each column's glyph at its head: how its cards stand.
 local COLUMN_GLYPH: { [string]: Icon.Name } = {
@@ -369,6 +383,24 @@ local OrchBoard = ui.component(function(props: Props): Node
 		return nil
 	end
 
+	-- Whether every column shows all its cards: one choice for them all.
+	local own_expanded = ui.use_state(false)
+	local function expanded(): boolean
+		local e = props.expanded
+		if e ~= nil then
+			return (e :: any):get() == true
+		end
+		return own_expanded:get()
+	end
+	local function set_expanded(on: boolean)
+		local e = props.expanded
+		if e ~= nil then
+			(e :: any):set(on)
+		else
+			own_expanded:set(on)
+		end
+	end
+
 	local columns: { Column } = if props.inbox then { INBOX, table.unpack(COLUMNS) } else table.clone(COLUMNS)
 
 	-- A card just dropped, where it went, until the items say so (the
@@ -550,7 +582,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		local key = best.key
 		local body = rect_of(body_refs[key])
+		-- (Among the cards it shows: past ten, the rest are under "Show more".)
 		local list = others(key, c)
+		if not expanded() and #list > CAP then
+			list = table.move(list, 1, CAP, 1, {})
+		end
 		local index = #list + 1
 		local tops: { number } = {}
 		for i, it in list do
@@ -753,6 +789,65 @@ local OrchBoard = ui.component(function(props: Props): Node
 						if back ~= nil and (back :: any).after ~= nil then
 							(back :: any):after(function() end, undo_failed)
 						end
+					end,
+				}
+				else nil,
+		}
+	end
+
+	-- Every Done card taken off the board at once, as Delete takes one (each
+	-- kept, its chat untouched); one Undo puts them all back.
+	local function clear_done()
+		local on_remove = props.on_remove
+		if not on_remove then
+			return
+		end
+		local list = table.clone(shown:peek().done or {})
+		if #list == 0 then
+			return
+		end
+		local hidden = table.clone(gone:peek())
+		for _, it in list do
+			hidden[it.id] = true
+		end
+		gone:set(hidden)
+		local failed = false
+		for _, it in list do
+			local id = it.id
+			local sent = on_remove(id)
+			if sent and (sent :: any).after then
+				(sent :: any):after(function() end, function()
+					set_gone(id, false)
+					if not failed then
+						failed = true
+						toast.show { title = locale.s("orch.board.delete_failed"), tone = "danger" }
+					end
+				end)
+			end
+		end
+		toast.show {
+			key = "orch-board-cleared-done",
+			title = locale.s("orch.board.cleared", { n = #list }),
+			duration = 6000,
+			action = if props.on_restore
+				then {
+					label = locale.s("orch.board.undo"),
+					run = function()
+						local back = table.clone(gone:peek())
+						local undo_failed = false
+						for _, it in list do
+							back[it.id] = nil
+							local sent: any = (props.on_restore :: any)(it)
+							if sent ~= nil and (sent :: any).after ~= nil then
+								(sent :: any):after(function() end, function()
+									if not undo_failed then
+										undo_failed = true
+										toast.show { title = locale.s("orch.board.undo_failed"), tone = "danger" }
+									end
+								end)
+							end
+						end
+						gone:set(back)
 					end,
 				}
 				else nil,
@@ -1441,10 +1536,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 			rounded = "$radius.lg",
 			bg = material.pick("$zeron.settings.note", "$surface.sunken"),
 			-- (Stacked in a page's side pane, an empty column stands aside
-			-- until a card is carried: then it's somewhere to put one.)
+			-- until a card is carried: then it's somewhere to put one. Inbox
+			-- and Blocked stand only while they hold one; Blocked too while
+			-- one is carried, to be put there.)
 			hidden = if stacked and compact
 				then function(): boolean
 					return #list() == 0 and carry:get() == nil
+				end
+				elseif ONLY_HELD[col.key] then function(): boolean
+					return #list() == 0 and not (col.key == "blocked" and carry:get() ~= nil)
 				end
 				else nil,
 			gap = "$space.1",
@@ -1484,6 +1584,32 @@ local OrchBoard = ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 				},
+				-- Done's: clear it.
+				if col.key == "done" and props.on_remove
+					then ui.row {
+						grow = 1,
+						justify = "end",
+						ui.show(function(): boolean
+							return #list() > 0
+						end, ui.button {
+							class = "orch-clear-done",
+							label = locale.t("orch.board.clear_done"),
+							tooltip = locale.s("orch.board.clear_done"),
+							tooltip_delay = 300,
+							h = 22,
+							px = "$space.2",
+							items = "center",
+							rounded = "$radius.md",
+							shrink = 0,
+							color = "$text.tertiary",
+							bg = "#00000000",
+							hover = { bg = "$hover", color = "$text.secondary" },
+							active = { bg = "$pressed" },
+							on_click = clear_done,
+							ui.text { locale.t("orch.board.clear"), text_size = "$font.size.xs", weight = "$font.weight.medium" },
+						}),
+					}
+					else nil,
 			},
 			ui.column {
 				ref = body,
@@ -1520,12 +1646,51 @@ local OrchBoard = ui.component(function(props: Props): Node
 					end,
 					pointer_events = "none",
 				}),
-				ui.each(ui.computed(list), function(it: Item, i: any, row: any): Node
+				ui.each(ui.computed(function(): { Item }
+					local l = list()
+					if expanded() or #l <= CAP then
+						return l
+					end
+					return table.move(l, 1, CAP, 1, {})
+				end), function(it: Item, i: any, row: any): Node
 					return card(it, i, row, col)
 				end, { key = function(it: Item): string
 					return it.id
 				end, w_full = true }),
 			},
+			-- Past ten: the rest, for every column at once (and back).
+			ui.show(function(): boolean
+				return #list() > CAP and carry:get() == nil
+			end, ui.button {
+				class = "orch-column-more",
+				label = function(): string
+					return if expanded()
+						then locale.s("orch.board.show_less")
+						else locale.s("orch.board.show_more", { n = #list() - CAP })
+				end,
+				w_full = true,
+				h = 28,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				rounded = CARD_RADIUS,
+				color = "$text.tertiary",
+				bg = "#00000000",
+				hover = { bg = "$hover", color = "$text.secondary" },
+				active = { bg = "$pressed" },
+				on_click = function()
+					set_expanded(not expanded())
+				end,
+				ui.text {
+					function(): string
+						return if expanded()
+							then locale.s("orch.board.show_less")
+							else locale.s("orch.board.show_more", { n = #list() - CAP })
+					end,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+			}),
 		}
 	end
 
@@ -1628,9 +1793,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local function need(n: number): number
 		return n * COLUMN_MIN + (n - 1) * space("space.2", 8)
 	end
+	-- The columns that stand now (Inbox and Blocked only while they hold a
+	-- card): how many the width must hold.
+	local function standing(): number
+		local n = 0
+		local lists = shown:get()
+		for _, c in columns do
+			-- (Not Blocked standing for a carried card: the layout never
+			-- changes under a drag.)
+			if not ONLY_HELD[c.key] or #(lists[c.key] or {}) > 0 then
+				n += 1
+			end
+		end
+		return n
+	end
 	local mode = ui.computed(function(): string
 		local w = width:get()
-		if w <= 0 or w >= need(#columns) then
+		if w <= 0 or w >= need(standing()) then
 			return "side"
 		end
 		return if w >= need(PER_ROW) then "rows" else "stacked"

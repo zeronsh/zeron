@@ -4085,7 +4085,12 @@
       "queued": "Queued",
       "start_failed": "Couldn't start it",
       "needs_you": "Needs you",
-      "waiting_on_you": "等你回复"
+      "waiting_on_you": "等你回复",
+      "show_more": "再显示 {n} 张",
+      "show_less": "收起",
+      "clear_done": "清除所有已完成",
+      "clear": "清除",
+      "cleared": "已清除 {n} 张已完成卡片"
     },
     "reports": {
       "title": "Crew updates",

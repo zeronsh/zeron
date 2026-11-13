@@ -560,6 +560,7 @@ local function board(): Node
 		end,
 		on_remove = orchestration.remove_item,
 		on_restore = orchestration.restore_item,
+		expanded = M.board_expanded,
 		on_start = orchestration.start_item,
 		space_name = function(id: string): string?
 			for _, p in sessions.projects:get() or {} do
@@ -609,6 +610,9 @@ end
 -- span), on this device; what each thread did lately, as the host keeps it
 -- (src/orchestration_timeline.rs).
 M.map_view = ui.persist("control_map", OrchMap.DEFAULT)
+-- Whether the board's columns show all their cards (past ten): kept, as
+-- the map's view is.
+M.board_expanded = ui.persist("control_board_expanded", false)
 local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
 
 local function map(): Node
