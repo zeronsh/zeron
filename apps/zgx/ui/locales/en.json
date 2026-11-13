@@ -1220,7 +1220,8 @@
           "done": "Done",
           "failed": "Failed",
           "merged": "Merged"
-        }
+        },
+        "reference": "Drag to reference"
       },
       "machines": {
         "running": "{n} running",

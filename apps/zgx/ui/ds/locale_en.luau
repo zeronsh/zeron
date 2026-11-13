@@ -983,6 +983,7 @@ return {
 	["ds.orch.map.tick.done"] = "Done",
 	["ds.orch.map.tick.failed"] = "Failed",
 	["ds.orch.map.tick.merged"] = "Merged",
+	["ds.orch.map.reference"] = "Drag to reference",
 	["ds.orch.machines.running"] = "{n} running",
 	["ds.orch.machines.memory"] = "{used} / {total} GB",
 	["ds.orch.machines.cpu"] = "CPU",

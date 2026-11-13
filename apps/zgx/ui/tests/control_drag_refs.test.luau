@@ -234,3 +234,52 @@ test("drag refs: dropped on the floating composer, the chip is on the same draft
 	app:frames(30)
 	expect(app:has(`{COMPOSER} >> role:button ~"Remove @chat:"`)).to_be(true)
 end)
+
+-- The Graph: a node's grip (under the pointer, at its edge) drags a
+-- reference to it; a plain drag of the node still places it.
+local function graph(): any
+	local app = tall()
+	app:set_state("control_map", { variant = "graph", window = 15 })
+	app:frames(90)
+	return app
+end
+
+local function grip_drag(app: any, node: string): any
+	app:hover(`#control-widget-map >> {node}`)
+	app:frames(5)
+	expect(app:has("#orch-graph-grip")).to_be(true)
+	return dropped(app, "#orch-graph-grip")
+end
+
+test("drag refs: the Graph's thread, by its grip", function()
+	local app = graph()
+	local chip = grip_drag(app, '.orch-graph-thread ~"Moscow node reboot plan"')
+	expect_ref(chip, "chat", "th-vpn-moscow", '@chat:"Moscow node reboot plan"')
+	expect(chip.ref.context.orchestrator).to_be("orc-vpn")
+	-- (Not moved by it.)
+	expect((app:state("control_map_graph_pins") or {})["th-vpn-moscow"]).to_be_nil()
+end)
+
+test("drag refs: the Graph's orchestrator, by its grip", function()
+	local app = graph()
+	local chip = grip_drag(app, '.orch-graph-orchestrator ~"Exnomic VPN"')
+	expect_ref(chip, "orchestrator", "orc-vpn", '@orchestrator:"Exnomic VPN"')
+end)
+
+test("drag refs: the Graph's machine, by its grip", function()
+	local app = graph()
+	-- (A machine is hit by its tab, drawn on the canvas: the pointer there.)
+	app:set_state("control_map_graph_hover", "dev:dev-mac")
+	app:frames(5)
+	expect(app:has("#orch-graph-grip")).to_be(true)
+	local chip = dropped(app, "#orch-graph-grip")
+	expect_ref(chip, "device", "dev-mac", "@device:macbook")
+end)
+
+test("drag refs: a Graph node dragged plainly still moves, no chip made", function()
+	local app = graph()
+	app:drag('#control-widget-map >> .orch-graph-thread ~"Moscow node reboot plan"', '#control-widget-map >> .orch-graph-device ~"Cloud"')
+	app:frames(30)
+	expect((app:state("control_map_graph_pins") or {})["th-vpn-moscow"] ~= nil).to_be(true)
+	expect(#refs_of(app)).to_be(0)
+end)
