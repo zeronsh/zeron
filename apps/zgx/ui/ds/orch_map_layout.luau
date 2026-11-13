@@ -49,7 +49,9 @@ M.GAP = 3
 local HEAD_H, PROJECT_H, ROW_H, NODE_H, LANE_PAD = M.HEAD_H, M.PROJECT_H, M.ROW_H, M.NODE_H, M.LANE_PAD
 local INSET, DOT, DOT_R, INDENT, CHANNEL, CORNER, GAP = M.INSET, M.DOT, M.DOT_R, M.INDENT, M.CHANNEL, M.CORNER, M.GAP
 
-export type Lane = { id: string, name: string, y: number, h: number, online: boolean, here: boolean, platform: string?, cloud: boolean, device: any, count: number }
+-- `idle_x`: where a machine with nothing at work says so (right of any
+-- rail running down past it, like a project's name).
+export type Lane = { id: string, name: string, y: number, h: number, online: boolean, here: boolean, platform: string?, cloud: boolean, device: any, count: number, idle_x: number }
 export type Label = { id: string, lane: string, name: string, y: number, x: number }
 -- A row: an orchestrator's (`kind` "orchestrator"), a crew thread's or a
 -- thread of the person's own. `mid` its middle's y.
@@ -170,7 +172,7 @@ function M.layout(world: any, width: number): Layout
 	local y = 0
 	local by_orch: { [string]: { Row } } = {}
 	for li, m in fleet.machines do
-		local lane: Lane = { id = m.id, name = m.name, y = y, h = 0, online = m.online, here = m.here, platform = m.platform, cloud = m.cloud, device = m.device, count = m.count }
+		local lane: Lane = { id = m.id, name = m.name, y = y, h = 0, online = m.online, here = m.here, platform = m.platform, cloud = m.cloud, device = m.device, count = m.count, idle_x = 0 }
 		local top = y
 		y += HEAD_H
 		local groups = table.clone(m.groups)
@@ -378,20 +380,25 @@ function M.layout(world: any, width: number): Layout
 		})
 	end
 
-	-- A project's name: where its rows start, or with the crew where a
-	-- rail runs on past it.
-	for _, label in out.labels do
-		local mid = label.y + PROJECT_H / 2
-		label.x = base
+	-- A project's name, and a machine's word that nothing runs there: where
+	-- its rows start, or with the crew where a rail runs on past it.
+	local function past_rail(mid: number): boolean
 		for _, rail in out.rails do
 			for _, run in rail.runs do
 				for i = 1, #run - 3, 2 do
 					if run[i] == rail.x and run[i + 2] == rail.x and mid > math.min(run[i + 1], run[i + 3]) and mid < math.max(run[i + 1], run[i + 3]) then
-						label.x = base + DOT + INDENT - 4
+						return true
 					end
 				end
 			end
 		end
+		return false
+	end
+	for _, label in out.labels do
+		label.x = if past_rail(label.y + PROJECT_H / 2) then base + DOT + INDENT - 4 else base
+	end
+	for _, lane in out.lanes do
+		lane.idle_x = if lane.count == 0 and past_rail(lane.y + HEAD_H + ROW_H / 2) then base + DOT + INDENT - 4 else base + 4
 	end
 
 	-- Each crew row's way back to its orchestrator's dot, for a pulse: up

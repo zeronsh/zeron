@@ -149,10 +149,12 @@ ui.command { id = "map_live", title = "Map: the live shape", run = function()
 	local here = { id = "dev-hp1", name = "honeypot-1", platform = "linux", here = true, online = true }
 	local hp = { id = "dev-hp", name = "honeypot", platform = "linux", online = true }
 	local win = { id = "dev-win", name = "DESKTOP-3NFV6JC", platform = "windows", online = true }
+	-- (One with nothing at work, a rail running past it.)
+	local m2a = { id = "dev-m2a", name = "M2A", platform = "macos", online = true }
 	sessions.now:set({
 		state = "ready",
 		here = "dev-hp1",
-		devices = { here, hp, win },
+		devices = { here, hp, win, m2a },
 		projects = { { id = "p-zeron", name = "zeron", device = "dev-hp1", path = "/home/you/zeron", git = true } },
 		chats = {
 			{ id = "orc-brain", title = "Brain dump", device = "dev-hp1", status = "working", updated = t - 30, created = t - 9000, agent = "claude",

@@ -210,7 +210,7 @@ return ui.component(function(props: Props): Node
 				locale.t("ds.orch.map.idle"),
 				absolute = true,
 				left = function(): number
-					return layout:get().content_x + 4
+					return row:get().idle_x or (layout:get().content_x + 4)
 				end,
 				top = Layout.HEAD_H + 6,
 				text_size = "$font.size.xs",

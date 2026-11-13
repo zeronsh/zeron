@@ -707,3 +707,40 @@ test("the menu's Stop and Archive do what they say", function()
 	choose("th-ui-control", "Release from crew")
 	expect(string.find(app:state("calls"), "op:releaseFromCrew:th-ui-control", 1, true) ~= nil).to_be(true)
 end)
+
+test("topology: a rail running past a machine with nothing at work never crosses its words", function()
+	local t = os.time()
+	local sessions_now = {
+		chats = {
+			{ id = "orc-brain", title = "Brain dump", device = "hp1", updated = t - 30, created = t - 9000 },
+			{ id = "th-codex", title = "Codex Slash Commands Missing", device = "hp", status = "done", updated = t - 60, created = t - 900, started_by = "orc-brain" },
+		},
+		children = {},
+	}
+	local orch = { id = "orc-brain", kind = "brain_dump", name = "Brain dump", hue = 172, archived = false, paused = false }
+	local w = {
+		now = { orchestrators = { orch }, crew = {}, items = {}, dumps = {} },
+		chats = data.chats(sessions_now),
+		devices = {
+			{ id = "hp1", name = "honeypot-1", platform = "linux", here = true, online = true },
+			{ id = "win", name = "DESKTOP-3NFV6JC", platform = "windows", online = true },
+			{ id = "m2a", name = "M2A", platform = "macos", online = true },
+			{ id = "hp", name = "honeypot", platform = "linux", online = true },
+		},
+		projects = {},
+		loads = {},
+		here = "hp1",
+	}
+	local l = Layout.layout(w, 700)
+	expect(#l.rails).to_be(1)
+	local rail = l.rails[1]
+	local empty = 0
+	for _, lane in l.lanes do
+		if lane.count == 0 then
+			empty += 1
+			-- (The rail passes it: its words start right of the rail, clear.)
+			expect(lane.idle_x > rail.x + 6).to_be(true)
+		end
+	end
+	expect(empty).to_be(2)
+end)
