@@ -27,6 +27,7 @@ pub(crate) mod incoming;
 pub mod comms;
 pub(crate) mod loads;
 pub(crate) mod ops;
+pub(crate) mod queue;
 pub(crate) mod progress;
 pub mod report;
 pub(crate) mod board_cards;
@@ -262,6 +263,7 @@ impl Orchestration {
             wake::start(self.clone());
             watchers::start(self.clone());
             progress::start(self.clone());
+            queue::start(self.clone());
         }
     }
 
@@ -321,6 +323,9 @@ pub(crate) fn apply_item_patch(
                 done_at: None,
                 removed: Default::default(),
                 removed_at: Default::default(),
+                space_id: None,
+                device_id: None,
+                waiting: None,
             }
         }
     };
@@ -372,6 +377,18 @@ pub(crate) fn apply_item_patch(
     }
     if let Some(order) = patch.order.filter(|o| o.is_finite()) {
         item.order = order;
+    }
+    if let Some(space) = patch.space_id {
+        item.space_id = space.filter(|s| !s.trim().is_empty());
+    }
+    if let Some(device) = patch.device_id {
+        item.device_id = device.filter(|d| !d.trim().is_empty());
+    }
+    // A card that leaves Next waits on nothing.
+    match patch.waiting {
+        Some(waiting) => item.waiting = waiting.map(|w| excerpt(&w, 140)).filter(|w| !w.is_empty()),
+        None if item.state != WorkState::Planned => item.waiting = None,
+        None => {}
     }
     item.updated_at = now;
     let id = item.id.clone();

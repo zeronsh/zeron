@@ -1229,8 +1229,11 @@ impl Tools {
             (ChatKind::Crew, Some(orchestrator)) => Some(orchestrator.to_owned()),
             _ => None,
         };
-        if let Some(orchestrator) = crew_of.as_deref() {
-            self.apply_crew_policy(orchestrator, &mut args).await?;
+        // Its crew full: the work waits in Next and starts when one frees.
+        if let Some(orchestrator) = crew_of.as_deref()
+            && let Some(waiting) = self.apply_crew_policy(orchestrator, &mut args).await?
+        {
+            return self.queue_crew_card(&args, waiting).await;
         }
 
         // Delegation depth: a top-level chat (an orchestrator too) creates

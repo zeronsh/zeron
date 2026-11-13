@@ -440,6 +440,17 @@ pub struct WorkItem {
     pub removed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_at: Option<DateTime<Utc>>,
+    /// Where its thread starts when it's started (`startItem`, or moved to
+    /// Now): a project (space id) and its device, or a device alone. `None`:
+    /// its orchestrator's crew policy, else the best project for its text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Why a Next card waits, one line ("Auth's crew is full: 2 of 2
+    /// working"). Cleared when it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,8 +720,12 @@ pub enum RouteTarget {
         #[serde(default)]
         id: String,
     },
-    /// A loose board item (no owner yet).
-    Item { id: String },
+    /// A loose board item (no owner yet). (Empty while not made yet: a
+    /// new card, for what should wait.)
+    Item {
+        #[serde(default)]
+        id: String,
+    },
     /// Kept in the Brain dump's notes; nothing to do yet.
     Note,
     /// Not sure; see `Route::candidates`.
@@ -1080,6 +1095,7 @@ pub mod role_prompts {
 - Split the dump into fragments by meaning (one per destination and intent); quote each fragment verbatim as `excerpt`.\n\
 - Route each to the existing orchestrator or thread that owns it. Only an owner of that very work counts; an old thread that merely shares a word doesn't.\n\
 - Bias to action: a task with no owner is a `newThread` in the project it is about (`world` lists projects: the one the text names, else the most recently active), with `project` set; it starts at once with your `message` as its first prompt. A new, lasting, multi-part area of work is a `newOrchestrator` in that project.\n\
+- But don't start what the person says should wait. Something for later (\"later\", \"someday\", \"remind me\", \"next week\", \"when I get a chance\", \"at some point\", a reminder) is an Inbox card: target `item` with no id, `project` set. Something to do after something else (\"after X\", \"once Y is done\", \"then\", low priority) is a Next card: target `item` with no id, `card: next`, `project` set. Either way give it a `title`; the person starts it from the board.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
 - Give every task a `title`: 3 to 6 words naming the work, as a board card would (\"Delete cards from the Board\", \"Fix slash menu in Codex chats\"); never the message's opening words.\n\
 - Intent `question` is only for a question the person wants answered (\"are X ever used?\", \"when does 2.0 ship?\"): its answer waits for them in the Control room. A question that is part of work they hand over (\"fix X, and can you also check Y?\", \"why does X happen? find the root cause and fix it\", \"could you add Z?\") is a `task`; a rhetorical one (\"so much better, right?\") is `info`.\n\
@@ -1716,7 +1732,22 @@ pub enum OrchestrateOp {
         /// dump). `None`: all of them for a task or info, none otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attachments: Option<Vec<String>>,
+        /// For an `item` target: the column its new card goes in, `inbox`
+        /// (captured, for later; the default) or `planned` (Next: queued,
+        /// after something else). A `newThread` whose wording says it
+        /// should wait becomes such a card too (see [`queue_of`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_state: Option<WorkState>,
     },
+    /// Start a card: an Inbox or Next card with no thread gets one, in its
+    /// project (else its orchestrator's crew policy, else the best project),
+    /// its title and detail as the first prompt; the card goes to Now.
+    /// Replies `{ id, threadId }`; already started: the thread it has. An
+    /// orchestrator's crew that is full keeps it in Next for an agent
+    /// (`{ id, queued: true, waiting }`); the person starts it anyway.
+    /// (agent: an orchestrator, its own cards)
+    #[serde(rename_all = "camelCase")]
+    StartItem { id: String },
     /// (agent: chats it can see) a chat's [`Progress`], its note made
     /// fresh now (at most every 15 s; the latest note otherwise). Replies
     /// the `Progress` plus `refreshing: true` while the fresh note is still
@@ -1766,6 +1797,47 @@ pub struct WorkItemPatch {
     pub source: Option<RouteRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<f64>,
+    /// Where it starts (see [`WorkItem::space_id`]); `Some(None)` clears.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub space_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub device_id: Option<Option<String>>,
+    /// Why it waits; `Some(None)` clears.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub waiting: Option<Option<String>>,
+}
+
+/// The column a task's wording says it waits in, or `None` (start it now):
+/// [`WorkState::Inbox`] for something captured for later ("later",
+/// "someday", "remind me", "next week", "when I get a chance", "at some
+/// point"), [`WorkState::Planned`] (Next) for something queued after
+/// something else ("after X", "once Y is done", "then …", "low priority").
+pub fn queue_of(text: &str) -> Option<WorkState> {
+    let t = format!(" {} ", text.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "));
+    let t = t.replace([',', '.', ';', ':', '!', '?', '(', ')', '"'], " ");
+    let t = format!(" {} ", t.split_whitespace().collect::<Vec<_>>().join(" "));
+    let has = |phrases: &[&str]| phrases.iter().any(|p| t.contains(&format!(" {p} ")));
+    if has(&[
+        "later", "someday", "some day", "one day", "remind me", "next week", "next month",
+        "when i get a chance", "when you get a chance", "when i have time", "at some point", "eventually",
+        "sometime", "not now", "for the backlog", "to the backlog",
+    ]) {
+        return Some(WorkState::Inbox);
+    }
+    let first = t.split_whitespace().next().unwrap_or("");
+    let done_words = ["done", "finished", "merged", "lands", "landed", "fixed", "ships", "shipped"];
+    let after_something = ["once", "after", "when"].iter().any(|lead| {
+        t.split(&format!(" {lead} "))
+            .skip(1)
+            .any(|rest| rest.split_whitespace().take(6).any(|w| done_words.contains(&w)))
+    });
+    if matches!(first, "then" | "afterwards" | "after" | "once" | "next")
+        || has(&["after that", "and then", "low priority", "lower priority", "not urgent", "no rush", "can wait"])
+        || after_something
+    {
+        return Some(WorkState::Planned);
+    }
+    None
 }
 
 /// Id prefix of a Brain dump's chat. Like the voice orchestrator's, that
@@ -1795,6 +1867,40 @@ pub fn seed_hue(id: &str) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use super::queue_of;
+
+    #[test]
+    fn wording_says_when_a_task_waits() {
+        for later in [
+            "Remind me to renew the cert next week",
+            "someday: port the CLI to Windows",
+            "Look at flaky tests when I get a chance",
+            "At some point, tidy the docs.",
+            "update the readme later",
+        ] {
+            assert_eq!(queue_of(later), Some(WorkState::Inbox), "{later}");
+        }
+        for next in [
+            "After the auth PR is merged, bump the SDK",
+            "then deploy the docs",
+            "Once the migration is done, drop the old table",
+            "rename the flag (low priority)",
+            "and then update the changelog",
+        ] {
+            assert_eq!(queue_of(next), Some(WorkState::Planned), "{next}");
+        }
+        for now in [
+            "Fix the login redirect loop",
+            "Fix the crash after deploy",
+            "show the latest version in the footer",
+            "make the toast fade when it fails in Safari",
+            "the reminder emails go out twice",
+            "the page takes some time to load",
+        ] {
+            assert_eq!(queue_of(now), None, "{now}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1971,6 +2077,7 @@ mod tests {
         assert!(c.starts_with("You are on Ops's crew, working on Auth PR.\n- Crew rules: Run tests first."), "{c}");
         assert!(role_prompts::crew("Ops", None, "").contains("working on what it sends you"));
         assert!(role_prompts::BRAIN_DUMP.contains("dump_done"));
+        assert!(role_prompts::BRAIN_DUMP.contains("card: next"));
         assert_eq!(role_prompts::crew_rules_block("Ops", " be brief "), "[Crew rules from Ops]\nbe brief\n\n");
     }
 

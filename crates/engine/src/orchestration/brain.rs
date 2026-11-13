@@ -58,6 +58,23 @@ fn target_chat(target: &RouteTarget) -> Option<&str> {
     }
 }
 
+/// The column a route's new card goes in, when it makes one: an `item`
+/// with no id (as asked, else as its wording says, else Inbox), or a task
+/// for a new thread whose wording says it waits (`queue_of`). `None`: not a
+/// new card.
+pub(crate) fn waits(target: &RouteTarget, intent: RouteIntent, asked: Option<WorkState>, text: &str) -> Option<WorkState> {
+    let asked = asked.map(|s| if s == WorkState::Planned { WorkState::Planned } else { WorkState::Inbox });
+    match target {
+        RouteTarget::Item { id } if id.is_empty() => {
+            Some(asked.or_else(|| zeron_proto::orchestration::queue_of(text)).unwrap_or(WorkState::Inbox))
+        }
+        RouteTarget::NewThread { id } if id.is_empty() && intent == RouteIntent::Task => {
+            asked.or_else(|| zeron_proto::orchestration::queue_of(text))
+        }
+        _ => None,
+    }
+}
+
 /// Intents the owner of a crew thread decides on (it keeps its board).
 pub(crate) fn owner_decides(intent: RouteIntent) -> bool {
     matches!(intent, RouteIntent::Task | RouteIntent::Priority | RouteIntent::Cancel)
@@ -199,6 +216,7 @@ impl EngineRpc {
         space_id: Option<String>,
         device_id: Option<String>,
         attachments: Option<Vec<String>>,
+        item_state: Option<WorkState>,
     ) -> Result<String, RpcError> {
         let orch = self.orchestration().clone();
         let dump = orch
@@ -223,9 +241,16 @@ impl EngineRpc {
             target
         };
         let candidates = if target == RouteTarget::Unsure { candidates } else { Vec::new() };
-        // Where a new thread or orchestrator starts: as named, else placed.
+        // What the person says should wait is a card, not a thread: Inbox
+        // for later, Next for after something else.
+        let card = waits(&target, intent, item_state, &format!("{excerpt_text} {message}"));
+        let target = if card.is_some() { RouteTarget::Item { id: String::new() } } else { target };
+        // Where a new thread or orchestrator starts (and where a new card's
+        // will): as named, else placed.
         let (space_id, device_id) = match &target {
-            RouteTarget::NewThread { id } | RouteTarget::NewOrchestrator { id } if id.is_empty() => {
+            RouteTarget::NewThread { id } | RouteTarget::NewOrchestrator { id } | RouteTarget::Item { id }
+                if id.is_empty() =>
+            {
                 self.place(&format!("{excerpt_text} {message}"), space_id, device_id)?
             }
             _ => (None, None),
@@ -262,7 +287,7 @@ impl EngineRpc {
                 route.answered_at = Some(Utc::now());
                 orch.comms().say(CommKind::Answer, &to, super::comms::YOU, &answer);
             }
-            None => self.deliver_route(&dump, &mut route, brain.as_deref()).await?,
+            None => self.deliver_route(&dump, &mut route, brain.as_deref(), card).await?,
         }
         // Not sure between places: the person picks, from Needs you.
         if route.target == RouteTarget::Unsure {
@@ -379,7 +404,12 @@ impl EngineRpc {
         route.state = RouteState::Pending;
         route.answer = None;
         route.answer_full = None;
-        self.deliver_route(&dump, &mut route, brain.as_deref())
+        // (The person's move to a new thread starts it, whatever it says.)
+        let card = match route.target {
+            RouteTarget::Item { .. } => waits(&route.target, route.intent, None, &format!("{} {}", route.excerpt, route.message)),
+            _ => None,
+        };
+        self.deliver_route(&dump, &mut route, brain.as_deref(), card)
             .await?;
         if route.state == RouteState::Delivered {
             route.delivered_at = Some(Utc::now());
@@ -447,6 +477,7 @@ impl EngineRpc {
         dump: &Dump,
         route: &mut Route,
         brain: Option<&str>,
+        card: Option<WorkState>,
     ) -> Result<(), RpcError> {
         let orch = self.orchestration().clone();
         let message = if route.message.trim().is_empty() {
@@ -536,17 +567,16 @@ impl EngineRpc {
                     Some(item) => item.id,
                     None => orch
                         .patch_item(WorkItemPatch {
-                            title: Some(if title.is_empty() {
-                                "Untitled".into()
-                            } else {
-                                title.clone()
-                            }),
+                            title: Some(super::board_cards::route_card_title(route, &message)),
                             detail: Some(message.clone()),
-                            state: Some(WorkState::Inbox),
+                            state: Some(card.unwrap_or(WorkState::Inbox)),
+                            priority: Some(super::board_cards::priority_of(&format!("{} {message}", route.excerpt))),
                             source: Some(RouteRef {
                                 dump_id: dump.id.clone(),
                                 route_id: route.id.clone(),
                             }),
+                            space_id: Some(route.space_id.clone()),
+                            device_id: Some(route.device_id.clone()),
                             ..Default::default()
                         })
                         .map_err(RpcError::Failed)?,
