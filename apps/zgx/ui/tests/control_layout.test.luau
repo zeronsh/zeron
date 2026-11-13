@@ -130,3 +130,30 @@ test("machines: each device's live line, memory, and the threads running there",
 	expect(app:has('#control-widget-machines >> .orch-machine-job >> ~"cargo test -p zeron-engine --lib orchestration"')).to_be(true)
 	expect(app:has('#control-widget-machines >> ~"41 / 62 GB"')).to_be(true)
 end)
+
+-- A text's baseline from its box (`app:tree`'s): a centred line's stands
+-- K of its size below its middle (ds/orch_block's `baseline`, 0.38).
+local function baseline(app: any, target: string, size: number): number
+	local line = app:tree(target):match("[^\n]+") or ""
+	local y, h = line:match(" %-?[%d%.]+,(%-?[%d%.]+) [%d%.]+x([%d%.]+)")
+	return (tonumber(y) or 0) + (tonumber(h) or 0) / 2 + 0.38 * size
+end
+
+test("titles and their smaller figures share a baseline", function()
+	-- (The tree's boxes are whole points: a baseline is known to within one.
+	-- The drawn rows measure equal to the pixel: see the shots.)
+	local app = open(1440, 900)
+	-- A block's head: its title (sm, 12) and its figures (xs, 11).
+	local title = baseline(app, "#control-widget-machines >> .orch-block-title", 12)
+	local figure = baseline(app, '#control-widget-machines >> .orch-block-figures >> "3 machines"', 11)
+	expect(math.abs(title - figure) < 1).to_be(true)
+	-- A machine's name and "this one".
+	local name = baseline(app, '#control-widget-machines >> .orch-machine >> "desk"', 12)
+	local here = baseline(app, "#control-widget-machines >> .orch-machine-here", 11)
+	expect(math.abs(name - here) < 1).to_be(true)
+	-- The page's title (lg, 15) and what's going on (sm, 12).
+	local head = baseline(app, '#control-head >> "Control room"', 15)
+	local summary = baseline(app, "#control-summary", 12)
+	-- (Three sizes apart, the nudge is past the rounding: it shows.)
+	expect(math.abs(head - summary) < 0.5).to_be(true)
+end)

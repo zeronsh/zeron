@@ -25,7 +25,7 @@
 //!                  created, answered? } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
-//!                   candidates = { target }, answer?, item_id? } },
+//!                   candidates = { target }, answer?, answer_full?, item_id? } },
 //!                   summary?, device, created, updated } } (newest first) }
 //!   `orchestration.loads`  { [device id] = { cpu?, mem_used?, mem_total?, load1?,
 //!                            cores?, online, at,
@@ -547,6 +547,7 @@ fn route_value(r: &Route) -> Value {
         ("state", word(&r.state)),
         ("candidates", list(&r.candidates, target_value)),
         ("answer", opt_str(r.answer.as_deref())),
+        ("answer_full", opt_str(r.answer_full.as_deref())),
         ("item_id", opt_str(r.item_id.as_deref())),
     ])
 }

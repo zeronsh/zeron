@@ -19,6 +19,7 @@ local kit = require("@self/orch_map_kit")
 local Cells = require("@self/orch_cells")
 local Counter = require("@self/orch_counter")
 local Spark = require("@self/orch_spark")
+local Block = require("@self/orch_block")
 local model = require("@self/orch_map_model")
 
 local M = {}
@@ -213,6 +214,8 @@ M.View = ui.component(function(props: {
 					return ""
 				end,
 				text_size = "$font.size.xs",
+				-- (On the title's baseline.)
+				y = Block.baseline("$font.size.sm", "$font.size.xs"),
 				color = function(): string
 					local s = st()
 					if s == "input" or s == "approval" or s == "failed" then
@@ -256,6 +259,7 @@ M.View = ui.component(function(props: {
 				tabular = true,
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
+				y = Block.baseline("$font.size.sm", "$font.size.xs"),
 			},
 		}
 	end
