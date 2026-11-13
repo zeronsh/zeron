@@ -535,18 +535,10 @@ impl Appshots {
     }
 }
 
+pub(crate) static SOUND: &[u8] = include_bytes!("../../../../crates/ui/assets/sounds/appshot.wav");
+
 fn play_sound() {
-    static SOUND: &[u8] = include_bytes!("../../../../crates/ui/assets/sounds/appshot.wav");
-    std::thread::spawn(|| {
-        let path = std::env::temp_dir().join(format!("zeron-zgx-appshot-{}.wav", std::process::id()));
-        if std::fs::write(&path, SOUND).is_ok() {
-            let _ = std::process::Command::new(if cfg!(target_os = "macos") { "afplay" } else { "paplay" })
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    });
+    std::thread::spawn(|| crate::settings::play(SOUND));
 }
 
 /// Whether one of the app's windows is in front (a press then is ignored:

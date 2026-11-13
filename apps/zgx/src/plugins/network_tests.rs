@@ -15,17 +15,20 @@ use zgx_script::{Capability, FetchPolicy, Plugin, ScriptHost, Url};
 use super::network::Network;
 
 /// A server on this machine: `/hop` redirects to `location`, the rest is 200
-/// with the Host header it was sent. How many requests reached it.
+/// with the Host header it was sent. How many requests reached it, and the
+/// path each asked for.
 struct Server {
     port: u16,
     hits: Arc<AtomicUsize>,
+    asked: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 fn serve(location: &str) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let hits = Arc::new(AtomicUsize::new(0));
-    let (counted, location) = (hits.clone(), location.to_owned());
+    let asked_paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let (counted, location, noted) = (hits.clone(), location.to_owned(), asked_paths.clone());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
             counted.fetch_add(1, Ordering::SeqCst);
@@ -39,6 +42,7 @@ fn serve(location: &str) -> Server {
             }
             let head = String::from_utf8_lossy(&asked).into_owned();
             let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+            noted.lock().unwrap().push(path.clone());
             let reply = if path == "/hop" {
                 format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             } else {
@@ -47,7 +51,7 @@ fn serve(location: &str) -> Server {
             let _ = stream.write_all(reply.as_bytes());
         }
     });
-    Server { port, hits }
+    Server { port, hits, asked: asked_paths }
 }
 
 /// `ui.fetch(url, opts)`, its answer in the text `out`.
@@ -249,11 +253,15 @@ fn a_plugin_s_picture_is_held_to_the_rule() {
         app.frames(2);
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert_eq!(hits(&server), 0, "a plugin's picture reached this device");
+    // (Its picture's path, not any connection: with the suite's other
+    // servers coming and going on this machine's ports, one may yet reach
+    // this port that isn't the plugin's.)
+    let pictures = |server: &Server| server.asked.lock().unwrap().iter().filter(|p| p.as_str() == "/a.png").count();
+    assert_eq!(pictures(&server), 0, "a plugin's picture reached this device");
     // (Named, it goes: the wait above is long enough to have seen it.)
     let named = format!("127.0.0.1:{}", server.port);
     let mut app = as_plugin(&code, &[&named]);
-    assert!(app.wait_until(|_| hits(&server) > 0), "a picture it names never went");
+    assert!(app.wait_until(|_| pictures(&server) > 0), "a picture it names never went");
 }
 
 /// A plugin not on the list (withdrawn while its request ran) reaches

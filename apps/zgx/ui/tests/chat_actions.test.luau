@@ -655,6 +655,23 @@ test("the model picker opens from a shortcut", function()
 	expect(listed()).to_be(true)
 end)
 
+-- A composer that replaced another still takes the shortcut: a page that
+-- swaps its composer mounts the new one before the old one's cleanup runs,
+-- and a flag that cleanup cleared left ⌘/ doing nothing under the new one
+-- (seen on Windows, on the new chat page). screens/chat/shared counts the
+-- composers mounted instead; a template's composer from before the count
+-- (true or false) still reads as one or none.
+test("the model picker opens from a shortcut after the composer is swapped", function()
+	local app = mount("composer_count_fixture.luau")
+	app:command("overlap")
+	app:frames(2)
+	expect(app:state("calls")).to_be("none:false,swapped:true,gone:false,floor:0")
+	app:command("legacy")
+	app:frames(2)
+	expect(app:state("calls")).to_contain("true:true,counted:true,false:false")
+	expect(app:error()).to_be(nil)
+end)
+
 -- An agent's completion settings (Settings → Providers): "Use $ for skills"
 -- off makes `$` ordinary text; "Separate / commands" off lists the skills
 -- under `/` with the commands (Zeron's composer.rs `completion_trigger`).
@@ -770,7 +787,8 @@ test("a chat mentioned (a session dropped from the sidebar) goes as production's
 	settle(app)
 	app:wait("#never-shown", { timeout_ms = 100 })
 	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:Compare with [")
+	-- (In its block after the words, as an attachment: carried.luau.)
+	expect(calls).to_contain("send:s2:Compare with\n\nChats attached:\n- [")
 	expect(calls).to_contain("](zeron-chat:s1)")
 	-- (Once, though mentioned twice.)
 	local _, n = string.gsub(calls, "zeron%-chat:s1", "")

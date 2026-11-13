@@ -124,7 +124,9 @@ fun Composer(
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
     var delivery by remember { mutableStateOf(Delivery.Queue) }
-    val running = c.live.turnRunning
+    // A turn saved mid-stream with no path or no host reads as running, but a stop would
+    // only wait in the doc and could land on a later turn.
+    val running = c.live.turnRunning && c.live.canInterrupt
     val canSteer = c.host.capabilities.midTurnSteering == true
 
     // Queue editing: the row being edited, its lease, and the user's own draft parked meanwhile.

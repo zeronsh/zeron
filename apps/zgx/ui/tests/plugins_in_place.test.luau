@@ -259,7 +259,8 @@ test("an update signed by someone else says so and offers nothing to press", fun
 	local app = open()
 	app:command("update_refused")
 	app:frames(20)
-	expect(app:tree()).to_contain("wasn't installed")
+	expect(app:tree()).to_contain("Version 6.6.6 wasn't installed: The new version is signed")
+	expect(app:tree()).never.to_contain("new_signer")
 	expect(app:has('role:button "Update"')).to_be(false)
 end)
 
@@ -295,6 +296,9 @@ test("an install that fails keeps the dialog, to try again", function()
 	expect(app:state("plugins_installing")).to_be(true)
 	expect(app:state("plugins_install_busy")).to_be(false)
 	expect(app:has('role:dialog >> role:button "Install"')).to_be(true)
+	-- GitHub turning requests away says so, in the locale's words.
+	expect(app:state("calls")).to_contain("toast:GitHub is turning away requests from this device for now. Try again later")
+	expect(app:state("calls")).never.to_contain("rate_limited")
 end)
 
 test("one Zeron can't vouch for says Unverified by its version, and where it came from", function()

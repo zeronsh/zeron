@@ -12,7 +12,10 @@
 	"tokens": {
 		// The window's scrim over the under-window blur.
 		"background": "#0b0b0dcc",
-		"glass.tint": "#0b0b0dcc",
+		// The window's frost (Zeron's theme.rs `glass`: its shell #0d0d0d at
+		// GLASS_ALPHA 0.80); `background`, the same scrim as it was, stays
+		// what opaque reads (a button's ink, the dims).
+		"glass.tint": "#0d0d0dcc",
 		// zgx's own surfaces (its tooltips): lifted above the menus it shows over (a deep charcoal), opaque, so a tooltip reads as one.
 		"popover.bg": "#2a2a2f",
 		"surface": {
@@ -55,6 +58,20 @@
 			"thumb": "alpha({text.primary}, 0.26)",
 			"thumb.active": "alpha({text.primary}, 0.44)"
 		},
+		// Windows' caption buttons, as Zeron's (shell.rs
+		// `windows_caption_button`): the text's ink at rest, under the
+		// pointer and in a window not focused; the title bar's wash under
+		// the pointer, 0.7 of it pressed; close red (#e81123), white ink,
+		// both at 0.8 pressed.
+		"caption.text": "{text.primary}",
+		"caption.text.hover": "{text.primary}",
+		"caption.text.inactive": "{text.primary}",
+		"caption.hover": "{zeron.bar.hover}",
+		"caption.pressed": "#ebebeb14",
+		"caption.close": "#e81123",
+		"caption.close.pressed": "#e81123cc",
+		"caption.close.text": "#ffffff",
+		"caption.close.text.pressed": "#ffffffcc",
 		// What dims the window under a dialog: deep, so the dialog is all
 		// there is.
 		"backdrop": "#00000059",
@@ -79,6 +96,17 @@
 
 		"zeron": {
 			"window": "#0e0e10",
+			// The title bar's controls' wash, shipping's (theme.rs
+			// `element_hover` hsla(0, 0, 0.92, 0.11), `element_active` 0.16),
+			// and its glyph solid: the secondary over the window, as Zeron's
+			// strip reads (148, 148, 150).
+			"bar": { "hover": "#ebebeb1c", "pressed": "#ebebeb29", "ink": "#949496" },
+			// The sidebar's card, frosted: shipping's sidebar tone (shell.rs
+			// `sidebar_tone`, theme.rs `wash(0.05)`: hsla(0, 0, 0.92, 0.05)).
+			"sidebar": { "tint": "#ebebeb0d" },
+			// A panel's tab: shipping's `tab_frame` wash(0.10) chosen, `tab`'s
+			// wash(0.06) under the pointer (hsla(0, 0, 0.92, a)).
+			"tab": { "selected": "#ebebeb1a", "hover": "#ebebeb0f" },
 			// A wall of printed cards in a dark room: the window's colour over
 			// each, so their paper reads as lit from the words' side, not
 			// brighter than the way on.
@@ -158,14 +186,17 @@
 			"accent.active": "#83699f",
 			// Menus and dropdowns: a deep charcoal over macOS's popover material
 			// (a light grey frost in dark), so it reads as our dark glass.
-			"menu": { "tint": "#111113a6", "solid": "#1c1c1f", "shadow": "0 20 56 0 #00000052", "selected": "#ebebeb17" },
+			"menu": { "tint": "#08080826", "solid": "#1c1c1f", "shadow": "0 20 56 0 #00000052", "selected": "#ebebeb17" },
 			// A search's matched letters: the accent's wash firmer than light's
 			// (a faint violet on charcoal all but vanishes).
 			"match": { "wash": "alpha({accent}, 0.34)" },
 			// A field: cut into the glass (a darker wash than the window, as
 			// the composer sits), its edge a faint light hairline that firms
-			// under the pointer.
-			"field": { "bg": "#00000038", "hover": "#0000004d", "edge": "#ffffff14", "edge_hover": "#ffffff26" },
+			// under the pointer. Frosted, a settings select's wash, as Zeron's
+			// (settings/widgets.rs `select_fill`: wash 0.06, 0.10 under the
+			// pointer), so the glass shows through it: the composer's
+			// `input_glass_bg` (#343438b8) drew a solid grey box there.
+			"field": { "bg": "#00000038", "glass": "#ebebeb0f", "glass_hover": "#ebebeb1a", "hover": "#0000004d", "edge": "#ffffff14", "edge_hover": "#ffffff26" },
 			"check": { "bg": "#00000038", "edge": "#ffffff38" },
 			// Tones: the palette's 300s and 400s, pale enough to read on dark
 			// glass; their washes a touch firmer than light's (a faint hue
@@ -187,7 +218,7 @@
 			// each at this theme's step: lighter on dark.
 			"accents": { "default": "#9277b0", "zeron": "{palette.violet.400}", "orange": "{palette.orange.400}", "amber": "{palette.amber.400}", "green": "{palette.green.400}", "cyan": "{palette.cyan.400}", "blue": "{palette.blue.400}", "pink": "{palette.pink.400}" },
 			// A dialog: the menu's glass, over a deep dim.
-			"dialog": { "shadow": "0 24 64 0 #00000080" },
+			"dialog": { "tint": "{zeron.menu.tint}", "shadow": "0 24 64 0 #00000080" },
 			// The composer: a darker wash than the window under it (the pill
 			// sits into the glass, as Zeron's does), a faint cool hairline;
 			// opaque, a lifted charcoal.
@@ -198,7 +229,18 @@
 			// The lightbox: a deep scrim over a blur of the window, the picture
 			// on it with no edge of its own (dark reads it by light).
 			"lightbox": { "scrim": "#060607e0", "shadow": "0 0 0 0 #00000000" },
-			"composer": { "tint": "#08080a59", "solid": "#18181b", "edge": "#c7d2de17", "shadow": "0 12 32 0 #00000066" }
+			"composer": { "tint": "#08080826", "tray": { "tint": "{zeron.composer.tint}" }, "solid": "#18181b", "edge": "#c7d2de17", "shadow": "0 12 32 0 #00000066" },
+			// Frosted, as Zeron's (crates/ui/src): menus, popovers, the palette and
+			// dialogs the composer's dark tint / the overlay glass (popover.rs
+			// `surface_bg`), the island its overlay glass (shell.rs, theme.rs
+			// `glass_overlay`), the composer and its trays `composer_surface_bg`,
+			// settings' cards `block_fill` (wash 0.045), fields `select_fill`.
+			// The panel keeps ds/tokens' own (the page's card's wash), level
+			// with the page and sidebar: Zeron's `panel_bg` (its background at
+			// 0.4) sank it below them, darkest where the glass is darkest.
+			"island": { "tint": "#1b1b1cbf" },
+			"palette": { "tint": "{zeron.menu.tint}" },
+			"settings": { "tint": "#ebebeb0b", "note": "#ffffff09", "comment": "#ffffff0d" }
 		}
 	}
 }

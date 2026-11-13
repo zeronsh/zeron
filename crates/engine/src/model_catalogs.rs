@@ -105,6 +105,17 @@ async fn list_inner(
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
 ) -> Result<Vec<Model>, HarnessError> {
+    // Applied to what is served, never to what is saved: the disk copy stays
+    // the CLI's own answer, so a later list (or none) re-applies cleanly.
+    let hosted = crate::hosted_models::HostedModels::shared(root);
+    let overlay = |catalog: ModelCatalog, cli: Option<&str>| {
+        let source = if catalog.source == "static" {
+            crate::hosted_models::Source::BuiltIn
+        } else {
+            crate::hosted_models::Source::Cli
+        };
+        hosted.apply(harness.id(), catalog.models, cli, source)
+    };
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
         tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
@@ -113,7 +124,7 @@ async fn list_inner(
         return harness
             .model_catalog(force)
             .await
-            .map(|catalog| catalog.models);
+            .map(|catalog| overlay(catalog, None));
     };
     let path = location(root, harness.as_ref(), &context);
     let disk = read(&path, &context);
@@ -203,7 +214,7 @@ async fn list_inner(
         }
     };
     tracing::info!(harness = ?harness.id(), source = catalog.source, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, model_count = catalog.models.len(), "Model discovery");
-    Ok(catalog.models)
+    Ok(overlay(catalog, context.binary_version.as_deref()))
 }
 
 #[cfg(test)]
@@ -218,6 +229,7 @@ mod tests {
     }
     fn models() -> Vec<Model> {
         vec![Model {
+            default: false,
             id: "live".into(),
             label: "Live".into(),
             description: None,

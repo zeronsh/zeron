@@ -154,6 +154,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             match edge_bytes("PUT", "/auth/me/images".into(), png, "image/png").await? {
                 (200, body) => body["url"].as_str().map(Value::from).ok_or_else(|| "failed".to_string()),
                 (413, _) => Err("too_large".into()),
+                // An edge without images of yours yet (production, before
+                // its deploy): said plainly, so an emoji or a color is chosen.
+                (404 | 405, _) => Err("unavailable".into()),
                 (status, body) => Err(outcome(status, &body).into()),
             }
         }
@@ -494,22 +497,48 @@ fn write_settings_at(path: &std::path::Path, changes: serde_json::Map<String, Js
     })
 }
 
-/// A chime, through the system's player, from a file of its own that goes
-/// once it has played.
-fn play(data: &[u8]) {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("zeron-zgx-sound-{}-{id}.wav", std::process::id()));
-    if std::fs::write(&path, data).is_err() {
-        return;
+/// A chime, from a file of its own that goes once it has played: on macOS
+/// through the System Sound server (src/system_sound.rs says why not
+/// `afplay`), on Linux through `paplay`; on Windows, `PlaySound` straight
+/// from memory. It returns once the sound has played.
+pub fn play(data: &[u8]) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
+        // SAFETY: with SND_MEMORY the first argument is the WAV's bytes,
+        // which `data` keeps alive for the whole (synchronous) play.
+        unsafe { PlaySoundW(data.as_ptr().cast(), std::ptr::null_mut(), SND_MEMORY | SND_SYNC | SND_NODEFAULT) };
     }
-    let player = if cfg!(target_os = "macos") { "afplay" } else { "paplay" };
-    let _ = std::process::Command::new(player)
+    #[cfg(not(windows))]
+    play_file(data);
+}
+
+#[cfg(not(windows))]
+fn play_file(data: &[u8]) {
+    let Some(path) = sound_file(data) else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    if let Err(error) = crate::system_sound::play_file(&path) {
+        eprintln!("zeron-zgx: sound: {error}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = std::process::Command::new("paplay")
         .arg(&path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
     let _ = std::fs::remove_file(&path);
+}
+
+/// `data` in a temp file of its own, named for this process.
+#[cfg(not(windows))]
+fn sound_file(data: &[u8]) -> Option<std::path::PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("zeron-zgx-sound-{}-{id}.wav", std::process::id()));
+    std::fs::write(&path, data).ok()?;
+    Some(path)
 }
 
 /// `/auth/orgs/{organization_id}/{kind}/{id}[/{then}]`.
@@ -811,6 +840,41 @@ fn snake(item: &Json) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Registering is everything short of sounding: the System Sound server
+    // opens and accepts every sound zgx plays, from the file it's played
+    // from. (A test can't listen for it.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_sound_registers_with_the_system_sound_server() {
+        for data in [SOUND_DONE, SOUND_REQUEST, SOUND_ATTENTION, crate::appshots::SOUND] {
+            let path = sound_file(data).expect("write the sound");
+            let registered = crate::system_sound::register(&path);
+            let _ = std::fs::remove_file(&path);
+            registered.expect("the sound server should take the sound");
+        }
+    }
+
+    // Sounds a chime, the app's own way, for checking by hand who holds the
+    // audio assertion: `log stream --process runningboardd` should name
+    // systemsoundserverd, not this process. Returns once it has played and
+    // its file is gone.
+    #[test]
+    #[ignore = "plays a sound"]
+    fn a_chime_plays_and_its_file_goes() {
+        let before = std::time::Instant::now();
+        play(SOUND_DONE);
+        eprintln!("played in {} ms", before.elapsed().as_millis());
+        #[cfg(not(windows))]
+        {
+            let prefix = format!("zeron-zgx-sound-{}-", std::process::id());
+            let left = std::fs::read_dir(std::env::temp_dir())
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+            assert!(!left, "the chime's file should be gone");
+        }
+    }
 
     #[test]
     fn signing_keys_read_as_the_scripts_do() {

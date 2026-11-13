@@ -66,9 +66,18 @@ function M.combo_of(e: KeyEvent): string?
 	if not key then
 		return nil
 	end
+	-- `cmd` is the platform's command key, as commands spell it: Command on
+	-- macOS, Ctrl elsewhere (`e.cmd` follows `e.ctrl` there), so Ctrl+B
+	-- off a Mac is `cmd+b`, the key Toggle sidebar holds. The other key
+	-- goes by its own name: Control on a Mac (`ctrl`), Super elsewhere
+	-- (`meta`). (Both held, which is which can't be told: a Mac's.)
+	local off_mac = e.cmd ~= e.meta
 	local parts = {}
-	if e.ctrl then
+	if e.ctrl and not off_mac then
 		table.insert(parts, "ctrl")
+	end
+	if e.meta and off_mac then
+		table.insert(parts, "meta")
 	end
 	if e.alt then
 		table.insert(parts, "alt")
@@ -76,7 +85,7 @@ function M.combo_of(e: KeyEvent): string?
 	if e.shift then
 		table.insert(parts, "shift")
 	end
-	if e.meta then
+	if (e.meta and not off_mac) or (e.ctrl and off_mac) then
 		table.insert(parts, "cmd")
 	end
 	table.insert(parts, key)

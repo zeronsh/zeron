@@ -37,7 +37,7 @@ local function all(): { sessions.Chat }
 	return sessions.now:get().archived or {}
 end
 local function device_of(id: string?): sessions.Device?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.id == id then
 			return d
 		end
@@ -45,7 +45,7 @@ local function device_of(id: string?): sessions.Device?
 	return nil
 end
 local function project_of(id: string?): sessions.Project?
-	for _, p in sessions.now:get().projects or {} do
+	for _, p in sessions.projects:get() or {} do
 		if p.id == id then
 			return p
 		end
@@ -173,7 +173,7 @@ local Row = ui.component(function(props: { now: State<any> }): Node
 			}
 		end
 		local l = route.look(p.id) or { hue = route.hue(p.id) }
-		return Tile { label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, size = 28 }
+		return Tile { label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, size = 28, project = p.id }
 	end)
 	local function lit(): boolean
 		return over:get()

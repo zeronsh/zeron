@@ -45,6 +45,7 @@ local material = require("@self/material")
 local control = require("@self/control")
 local cargo = require("@self/composer_cargo")
 local locale = require("@self/locale")
+local Grid = require("@self/grid")
 
 local M = {}
 
@@ -56,6 +57,14 @@ export type Queued = {
 	editing: boolean?,
 	-- Held elsewhere: by whom ("Editing on devbox").
 	locked: string?,
+	-- Kept back until something happens ("Waits for a size"): it can't be
+	-- sent or edited yet, only removed. Its words stand in its action's place.
+	waiting: string?,
+	-- How long it has waited, said beside it once that's worth knowing
+	-- ("3 days ago").
+	age: string?,
+	-- false: it can't be taken back from here (no Remove).
+	removable: boolean?,
 }
 export type TodoState = "done" | "doing" | "pending"
 export type Todo = { id: string, text: string, state: TodoState }
@@ -80,8 +89,36 @@ export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
 export type AlertTone = "info" | "warning" | "danger"
 -- `spinner`: still being worked on (reconnecting), the working ring in its
 -- glyph's place. `dismissable = false`: it stays until what it says is
--- over (not connected), no × of its own.
-export type Alert = { id: string, tone: AlertTone, title: string, detail: string?, action: string?, spinner: boolean?, dismissable: boolean? }
+-- over (not connected), no × of its own. `body`: what its row's one line
+-- can't hold, wrapped under it. `more`: choices listed under it, each a row
+-- of its own whose action comes to `on_alert_action` by its id. They're a grid
+-- (`grid`): every row's name, `cells` and trailing slot on the same lines,
+-- whatever their words; a column goes once the list is narrower than its `min`,
+-- from every row at once, so nothing's ever out of line. The trailing slot holds
+-- its action, or `trail`, why there's none. `disabled`: there, but not to be
+-- taken (dimmed, unless it's `current`: the one in use isn't out of reach).
+-- `note`: said under those. `quiet`: there to read once the alerts are open,
+-- but it raises nothing of its own (no pill, no count): a state worth knowing,
+-- not one to act on.
+export type GridColumn = Grid.Column
+export type Alert = {
+	id: string,
+	tone: AlertTone,
+	title: string,
+	detail: string?,
+	action: string?,
+	spinner: boolean?,
+	dismissable: boolean?,
+	body: string?,
+	more: { Alert }?,
+	grid: { name: number, columns: { GridColumn } }?,
+	note: string?,
+	disabled: boolean?,
+	current: boolean?,
+	cells: { string }?,
+	trail: string?,
+	quiet: boolean?,
+}
 export type Props = {
 	queue: State<{ Queued }>?,
 	-- Whether the agent takes a word mid-turn (a row's action is then Steer).
@@ -595,7 +632,11 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	local function pill(): Node
 		local p = glass.style({
 			h = PILL_H,
-			px = ui.raw(PILL_PAD, "the capsules' inset in the pill"),
+			-- The capsules' inset, the same on all four sides: the glass's 1
+			-- point border is laid out inside the pill, so the padding is the
+			-- inset less it (a side padding alone left the ends a point wider
+			-- than the top and bottom).
+			p = ui.raw(PILL_PAD - 1, "the capsules' inset in the pill, less its border"),
 			gap = "$zeron.space.hair",
 			items = "center",
 			shrink = 0,
@@ -726,6 +767,10 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 			local w = pill_w:get()
 			report(if any() and not is_open() and w > 0 then w else nil)
 		end)
+		-- (Gone with it: a pill beside it no longer moves aside for it.)
+		ui.on_cleanup(function()
+			report(nil)
+		end)
 	end
 	return top, floating
 end
@@ -823,6 +868,9 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 	local function editing(): boolean
 		return now().editing == true
 	end
+	local function waits(): boolean
+		return now().waiting ~= nil
+	end
 	local function send()
 		if props.on_queue_send then
 			props.on_queue_send(q.id)
@@ -869,21 +917,34 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			icon = function(): Icon.Name
 				return if action() == "steer" then "arrow-right" else "arrow-up"
 			end,
-			label = words,
+			label = function(): string
+				return now().waiting or words()
+			end,
 			tooltip = hint(),
 			size = "sm",
-			disabled = locked,
+			disabled = function(): boolean
+				return locked() or waits()
+			end,
 			on_click = send,
 		}
 		local primary: Node = ui.show(narrow, IconButton(compact), Button {
 			size = "sm",
 			tone = "secondary",
 			h = 24,
-			label = words,
+			label = function(): string
+				return now().waiting or words()
+			end,
 			tooltip = hint(),
-			disabled = locked,
+			disabled = function(): boolean
+				return locked() or waits()
+			end,
 			on_click = send,
-			ui.text { words, text_size = "$font.size.xs" },
+			ui.text {
+				function(): string
+					return now().waiting or words()
+				end,
+				text_size = "$font.size.xs",
+			},
 		})
 		return ui.row {
 			gap = "$zeron.space.hair",
@@ -899,14 +960,18 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 					tooltip = locale.s("ds.composer_dock.edit"),
 					size = "sm",
 					tone = "quiet",
-					disabled = locked,
+					disabled = function(): boolean
+						return locked() or waits()
+					end,
 					on_click = function()
 						if props.on_queue_edit then
 							props.on_queue_edit(q.id)
 						end
 					end,
 				},
-				IconButton {
+				ui.show(function(): boolean
+					return now().removable ~= false
+				end, IconButton {
 					icon = "trash-bin-minimalistic",
 					label = locale.t("ds.composer_dock.remove"),
 					tooltip = locale.s("ds.composer_dock.remove"),
@@ -918,7 +983,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 							props.on_queue_remove(q.id)
 						end
 					end,
-				},
+				}),
 			},
 			primary,
 		}
@@ -984,6 +1049,16 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 				return if editing() or locked() then "$text.tertiary" else "$text.primary"
 			end,
 		},
+		ui.show(function(): boolean
+			return now().age ~= nil
+		end, ui.text {
+			function(): string
+				return now().age or ""
+			end,
+			shrink = 0,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+		}),
 		ui.show(editing, editing_side, side()),
 	}
 end
@@ -1079,7 +1154,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		return row:get().ended ~= nil
 	end
 	local agent = t.kind == "agent"
-	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "bot" else "action-play"
+	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "side-chat" else "action-play"
 	local opens = agent and props.on_open_task ~= nil
 	local function open()
 		if props.on_open_task then
@@ -1190,11 +1265,42 @@ end
 
 -- An alert: its tone's glyph in its ink, what it is, a word more, its
 -- action, and letting it go.
-local function alert_row(a: Alert, row: State<Alert>, props: Props, height: number): Node
+-- Whether any of these alerts raises the tab (one that isn't quiet).
+local function loud_in(list: { Alert }): boolean
+	for _, x in list do
+		if not x.quiet then
+			return true
+		end
+	end
+	return false
+end
+
+local function alert_row(a: Alert, row: State<Alert>, props: Props, height: number, width: State<number>, grid: { name: number, columns: { GridColumn } }?): Node
+	local choice = grid ~= nil
 	local function ink(): string
 		return `$zeron.tone.{row:get().tone}.ink`
 	end
+	local function off(): boolean
+		return row:get().disabled == true
+	end
+	-- Alone, the tab's glyph over it says its tone: a second would only repeat
+	-- it. (Still working, its ring says what the tab's glyph doesn't. With
+	-- others, each says its own.)
+	local function has_glyph(): boolean
+		if props.alerts ~= nil and #props.alerts:get() == 1 then
+			return not choice and row:get().spinner == true
+		end
+		return true
+	end
 	local parts: { [any]: any } = {
+		-- (A choice is told from the next by its name.)
+		label = if choice then function(): string
+			return row:get().title
+		end else nil,
+		disabled = if choice then off else nil,
+		opacity = if choice then function(): any
+			return if off() and row:get().current ~= true then "$zeron.disabled" else 1
+		end else nil,
 		min_h = height,
 		pl = "$space.2",
 		pr = "$space.1",
@@ -1210,7 +1316,11 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 			items = "center",
 			justify = "center",
 			color = ink,
-			ui.show(function(): boolean
+			hidden = function(): boolean
+				return not has_glyph()
+			end,
+			-- (A choice has no glyph, only its place: its alert's above it.)
+			if choice then nil else ui.show(function(): boolean
 				return row:get().spinner == true
 			end, status.StatusIcon { kind = "working", size = 14 }, Icon {
 				name = function(): Icon.Name
@@ -1219,17 +1329,35 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 				size = 14,
 			}),
 		},
-		FadeText {
-			function(): string
-				return row:get().title
-			end,
+	}
+	local function title(): string
+		return row:get().title
+	end
+	if grid then
+		-- A row of the grid (ds/grid): its name, its cells, and the trailing
+		-- slot (its action, or why there's none) at its end.
+		table.insert(parts, Grid.name(grid, title))
+		for _, cell in Grid.cells(grid, width, function(): { string }?
+			return row:get().cells
+		end) do
+			table.insert(parts, cell)
+		end
+		table.insert(parts, Grid.gap())
+		table.insert(parts, Grid.trail(function(): string?
+			return row:get().trail
+		end, function(): boolean
+			return row:get().current == true
+		end))
+	else
+		table.insert(parts, FadeText {
+			title,
 			literal = true,
 			shrink = 1,
 			min_w = 48,
 			text_size = "$font.size.md",
 			color = "$text.primary",
-		},
-		FadeText {
+		})
+		table.insert(parts, FadeText {
 			function(): string
 				return row:get().detail or ""
 			end,
@@ -1238,8 +1366,8 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 			basis = 0,
 			text_size = "$font.size.sm",
 			color = "$text.tertiary",
-		},
-	}
+		})
+	end
 	if props.on_alert_action then
 		table.insert(parts, ui.show(function(): boolean
 			return row:get().action ~= nil
@@ -1260,7 +1388,7 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 			end,
 		}))
 	end
-	if props.on_dismiss_alert then
+	if props.on_dismiss_alert and not choice then
 		table.insert(parts, ui.show(function(): boolean
 			return row:get().dismissable ~= false
 		end, IconButton {
@@ -1278,7 +1406,50 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 	else
 		table.insert(parts, ui.div { w = 6, shrink = 0 })
 	end
-	return ui.row(parts)
+	if choice then
+		return ui.row(parts)
+	end
+	-- What it says past its one line, under its words (past the glyph).
+	local function words(text: () -> string?): Node
+		return ui.show(function(): boolean
+			return text() ~= nil
+		end, ui.text {
+			function(): string
+				return text() or ""
+			end,
+			literal = true,
+			wrap = true,
+			pl = function(): any
+				return if has_glyph() then ui.raw(34, "under the row's words: its inset, the glyph and the gap") else "$space.2"
+			end,
+			pr = "$space.2",
+			pb = "$space.1",
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = "$text.secondary",
+		})
+	end
+	local more = ui.computed(function(): { Alert }
+		return row:get().more or {}
+	end)
+	return ui.column {
+		w_full = true,
+		ui.row(parts),
+		words(function(): string?
+			return row:get().body
+		end),
+		ui.each(more, function(x: Alert, _i: number, now: State<Alert>): Node
+			return alert_row(x, now, props, height, width, row:peek().grid or { name = 0, columns = {} })
+		end, {
+			key = function(x: Alert): string
+				return x.id
+			end,
+			w_full = true,
+		}),
+		words(function(): string?
+			return row:get().note
+		end),
+	}
 end
 
 -- "3 finished": a row that opens the subagents that are done, or folds them.
@@ -1377,7 +1548,7 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			open:set(nil)
 		elseif (now == "tasks" or now == "agents") and not has(now) then
 			open:set(nil)
-		elseif now == "alerts" and (props.alerts == nil or #props.alerts:get() == 0) then
+		elseif now == "alerts" and (props.alerts == nil or not loud_in(props.alerts:get())) then
 			open:set(nil)
 		end
 	end)
@@ -1389,6 +1560,19 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 	-- What to know: first, as the most pressing.
 	if props.alerts then
 		local alerts = props.alerts
+		-- (How wide its rows are, for what their grid can hold.)
+		local alerts_w = ui.use_state(0)
+		-- What raises the tab: the alerts that aren't quiet. A quiet one is read
+		-- with them, never on its own.
+		local function loud(): number
+			local n = 0
+			for _, x in alerts:get() do
+				if not x.quiet then
+					n += 1
+				end
+			end
+			return n
+		end
 		local function worst(): AlertTone
 			local w: AlertTone = "info"
 			for _, x in alerts:get() do
@@ -1413,6 +1597,7 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			pb = "$space.1",
 			role = "list",
 			label = locale.t("ds.composer_dock.alerts"),
+			on_resize = Grid.measure(alerts_w),
 			ui.each(alerts, function(x: Alert): Node
 				local row = ui.computed(function(): Alert
 					for _, y in alerts:get() do
@@ -1422,7 +1607,7 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 					end
 					return x
 				end)
-				return alert_row(x, row, props, geometry.row)
+				return alert_row(x, row, props, geometry.row, alerts_w)
 			end, {
 				key = function(x: Alert): string
 					return x.id
@@ -1438,15 +1623,19 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			pill_glyph = glyph(14),
 			title = "ds.composer_dock.alerts",
 			count = function()
-				return tostring(#alerts:get())
+				return tostring(loud())
 			end,
 			summary = function(): string
-				local first = alerts:get()[1]
-				return if first then first.title else ""
+				for _, x in alerts:get() do
+					if not x.quiet then
+						return x.title
+					end
+				end
+				return ""
 			end,
 			body = body,
 			present = function(): boolean
-				return #alerts:get() > 0
+				return loud() > 0
 			end,
 			tone = worst,
 		})

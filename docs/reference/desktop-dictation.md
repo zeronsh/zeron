@@ -33,3 +33,7 @@ Real-model verification is an explicit development check using the `verify` exam
 Future mobile implementation is scoped in the [PR #591 handoff](https://github.com/zeronsh/zeron/pull/591#issuecomment-5869764738), including native capture, lifecycle cancellation, mobile inference benchmarks, UTF-16/UTF-8 selection handling and preservation of iOS delivery modes.
 
 See the task evidence under `/Users/gaelcado/zeron/evidence/voice/` for actual runtime transcripts, hardware measurements and native build captures. Standalone synthetic model accuracy is distinct from a live microphone test.
+
+## ZGX
+
+ZGX has the same dictation as a feature of the app (`apps/zgx/src/dictation.rs`, `ui/screens/chat/dictation.luau`, Settings → Voice), with the same `zeron-voice` model cache. It runs in the window: the engine has no part in it.

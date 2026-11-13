@@ -34,8 +34,15 @@ pub const CLOUD_HARNESSES: &[&str] = &["codex", "claude-code"];
 /// A Cloud session machine's own setup steps — started or woke, cloned the
 /// project, checked out the session branch — shown as tool chips that open
 /// the first answer after it boots: `ToolCall::Unknown { name, input }` whose
-/// input carries this key (`"start"`, `"wake"`, `"clone"`, `"branch"`).
+/// input carries this key (`"start"`, `"wake"`, `"update"`, `"clone"`, `"branch"`).
 pub const CLOUD_SETUP_KEY: &str = "cloudSetup";
+
+/// [`CloudSession::stage`] while its machine installs a release before answering.
+pub const CLOUD_STAGE_UPDATING: &str = "updating";
+/// `CloudSession::stage` while a wake takes far longer than normal (a resume
+/// stuck at the provider, or a machine up with no engine yet): the edge kicks
+/// it, and the apps say it's taking longer than usual.
+pub const CLOUD_STAGE_SLOW: &str = "slow";
 
 /// The setup step a tool call records, if it is one ([`CLOUD_SETUP_KEY`]).
 pub fn cloud_setup_step(call: &crate::ToolCall) -> Option<&str> {
@@ -72,6 +79,13 @@ pub fn is_cloud_device(device_id: &str, platform: &str) -> bool {
     platform == CLOUD_PLATFORM || device_id.starts_with(CLOUD_DEVICE_PREFIX)
 }
 
+/// Names the states beyond the ones every shipped engine knows that this client
+/// can parse, on its requests to the edge's session routes.
+pub const CLOUD_STATES_HEADER: &str = "x-zeron-cloud-states";
+
+/// What this build sends in [`CLOUD_STATES_HEADER`].
+pub const CLOUD_STATES_UNDERSTOOD: &str = "data_expired";
+
 /// Lifecycle state of the Cloud account (`Off` · `Ready` · `Deleting` ·
 /// `Error`) or of one session's sandbox (any).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -94,6 +108,62 @@ pub enum CloudState {
     Deleting,
     /// Last lifecycle step failed; see `error` / `failed_action`.
     Error,
+    /// Session: the provider deleted the stopped machine's disk. The transcript
+    /// is safe; `CloudSessionRetry` starts a fresh machine on the same repo and
+    /// branch. The one state whose wire name has an underscore. An edge only
+    /// sends it to a client naming it in [`CLOUD_STATES_HEADER`]: to an engine
+    /// without this variant, it would fail the whole session list.
+    #[serde(rename = "data_expired", alias = "dataExpired")]
+    DataExpired,
+    /// A state this build doesn't know yet (a newer edge).
+    #[serde(other)]
+    Unknown,
+}
+
+/// One size of Cloud machine, as the edge offers it. The edge's list is the
+/// truth: clients show what it says and never assume a set of sizes.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMachine {
+    /// What's sent back to pick it (`small`, `default`, `large`, `xlarge`).
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vcpu: f64,
+    #[serde(default, rename = "memoryGB")]
+    pub memory_gb: f64,
+    /// What a machine of this size holds: the limit a wake is refused against.
+    #[serde(default, rename = "diskGiB")]
+    pub disk_gib: f64,
+    /// Credits per minute relative to the standard machine (xlarge: 5.56).
+    #[serde(default)]
+    pub credit_multiplier: f64,
+}
+
+/// How full a session machine's disk is, against what its size holds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDisk {
+    #[serde(default, rename = "usedGiB")]
+    pub used_gib: f64,
+    #[serde(default, rename = "capacityGiB")]
+    pub capacity_gib: f64,
+    /// `ok` · `warn` · `critical` (a string: a level this build doesn't know
+    /// must not fail the whole list).
+    #[serde(default)]
+    pub level: String,
+}
+
+/// Why a session can't wake on the machine it has.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWakeBlocked {
+    /// `disk_too_small`.
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, rename = "neededGiB", skip_serializing_if = "Option::is_none")]
+    pub needed_gib: Option<f64>,
 }
 
 /// `CloudStatus` / `CloudEnable` / `CloudDelete` reply: the account.
@@ -129,10 +199,16 @@ pub struct CloudStatus {
     /// or wake at zero or below. `None` from an edge that predates credits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<f64>,
+    /// Every machine size a user can pick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<CloudMachine>,
+    /// The account's default size: what new sessions start on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// One Cloud session: a top-level chat run on Cloud and its sandbox.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSession {
     pub chat_id: String,
@@ -153,10 +229,29 @@ pub struct CloudSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<i64>,
     pub created_at: i64,
+    /// The size it is on, or will come back on when picked asleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// Omitted until its engine first reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<CloudDisk>,
+    /// Waiting for the user to pick a size its disk fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_blocked: Option<CloudWakeBlocked>,
+    /// Unix ms the provider deletes its disk, while it sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<f64>,
+    /// How far a waking machine has got, where the edge says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// Unix ms the machine last found its chat store damaged and rebuilt it
+    /// from the server copy of its chats. Older edges omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_recovered_at: Option<f64>,
 }
 
 /// `CloudSessions` reply.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSessions {
     #[serde(default)]
@@ -198,7 +293,7 @@ pub struct CloudUsage {
     pub available: bool,
 }
 
-/// One monthly plan. A credit is a minute of the default machine.
+/// One monthly plan. A credit is a minute of a small machine.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingPlan {
@@ -373,6 +468,9 @@ pub struct VaultAccount {
     pub organization: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// GitHub logins: their picture on github.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub authorized_devices: Vec<String>,
     #[serde(default)]
@@ -459,12 +557,16 @@ pub struct GithubConnectProgress {
     /// GitHub login once connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Connected, but as a login already connected: nothing was added (GitHub
+    /// approves as whoever the browser is signed in as).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_connected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// One repository from `ListGithubRepos`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubRepo {
     /// `owner/name`.
@@ -477,6 +579,16 @@ pub struct GithubRepo {
     /// Unix ms of the last push, for sorting.
     #[serde(default)]
     pub pushed_at: i64,
+    /// The GitHub App installation that gives access to it. Access comes from
+    /// here; logins say who may use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<i64>,
+    /// The connected login a new session on it would use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Every connected login that reaches it, the one above first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<String>,
 }
 
 #[cfg(test)]
@@ -493,6 +605,16 @@ mod tests {
 
     #[test]
     fn status_defaults_tolerate_missing_fields() {
+        // What an edge adds later never fails the list it's in.
+        let unknown: CloudState = serde_json::from_str(r#""hibernating""#).unwrap();
+        assert_eq!(unknown, CloudState::Unknown);
+        let expired: CloudState = serde_json::from_str(r#""data_expired""#).unwrap();
+        assert_eq!(expired, CloudState::DataExpired);
+        // What this build names is what it parses.
+        for state in CLOUD_STATES_UNDERSTOOD.split(',') {
+            let parsed: CloudState = serde_json::from_value(state.trim().into()).unwrap();
+            assert_ne!(parsed, CloudState::Unknown, "{state}");
+        }
         let status: CloudStatus = serde_json::from_str(r#"{"state":"sleeping"}"#).unwrap();
         assert_eq!(status.state, CloudState::Sleeping);
         assert!(!status.available);

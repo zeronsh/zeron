@@ -1,0 +1,295 @@
+name: zgx build
+
+# The Zeron app (apps/zgx, its `beta` feature) built and packaged for every
+# platform, with the engine from this same commit inside: on macOS
+# (scripts/package-zgx-macos.sh), Linux (scripts/package-linux.sh) and Windows
+# (scripts/package-windows.ps1). Called by release.yml for a stable release
+# (`version` = the workspace's) and by zgx-beta.yml for a beta
+# (`<workspace version>-beta.<n>`); each publishes the artifacts itself.
+#
+# Signed as release.yml always signed: macOS only, and only in a run of a
+# release tag (`v*`, `beta-v*`), which the `apple-release` environment admits.
+# Any other run is ad-hoc signed.
+#
+# Artifacts: zgx-<platform>-<arch>, each of the files the feed carries.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The app's version, the workspace's or a beta of it.
+        type: string
+        required: true
+      platforms:
+        description: Which to build.
+        type: string
+        default: macos linux windows
+      windows-feed:
+        description: zeron-update.json's releases_url for Windows installs.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Apple silicon only, as the old app's build.
+  macos:
+    if: contains(inputs.platforms, 'macos')
+    runs-on: macos-latest
+    timeout-minutes: 120
+    environment: ${{ (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/beta-v')) && 'apple-release' || '' }}
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+      ZGX_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      # zgx's terminals are Ghostty's, built with Zig 0.16 (zgx-ghostty-sys).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
+          restore-keys: zgx-ghostty-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-beta
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+      - name: the engine, from this commit
+        env:
+          ZERON_ENGINE_VERSION: ${{ inputs.version }}
+          # Luau without its asserts (a fifth of script time). Here, not in a
+          # root .cargo/config.toml, so test builds keep them; the package
+          # refuses an engine that has them.
+          LUAU_CXXFLAGS: -DNDEBUG
+        run: cargo build --release --locked -p zeron --bin zeron-engine
+      - name: import Developer ID certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          pass="$(openssl rand -hex 16)"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          printf '%s' "$MACOS_CERT_P12" | base64 -d >"$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+          [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
+          echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+      - name: notary credentials
+        if: env.AC_API_KEY_P8 != ''
+        run: |
+          printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
+          {
+            echo "NOTARY_KEY_PATH=$RUNNER_TEMP/ac_api_key.p8"
+            echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
+            echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
+          } >>"$GITHUB_ENV"
+      - name: package dmg
+        env:
+          CARGO_FLAGS: --locked
+        run: ZGX_ENGINE="$GITHUB_WORKSPACE/target/release/zeron-engine" scripts/package-zgx-macos.sh
+      - name: inspect the bundle
+        run: |
+          app="target/package-zgx/Zeron.app"
+          plist="$app/Contents/Info.plist"
+          plutil -p "$plist"
+          test "$(plutil -extract CFBundleIdentifier raw "$plist")" = sh.zeron.app
+          test "$(plutil -extract ZeronVersion raw "$plist")" = "$ZGX_VERSION"
+          test "$(plutil -extract LSMinimumSystemVersion raw "$plist")" = 13.0
+          # Always up (scripts/package-zgx-macos.sh): <x.y.z>.<n> for beta n,
+          # <x.y.z>.9999 for the release.
+          case "$ZGX_VERSION" in
+            *-beta.*) want="${ZGX_VERSION%-beta.*}.${ZGX_VERSION##*-beta.}" ;;
+            *) want="$ZGX_VERSION.9999" ;;
+          esac
+          test "$(plutil -extract CFBundleVersion raw "$plist")" = "$want"
+          test "$("$app/Contents/MacOS/zeron" --version)" = "zeron $ZGX_VERSION"
+          test -x "$app/Contents/MacOS/Zeron Engine"
+          test -f "$app/Contents/Resources/ui/app.luau"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$app"
+          if [ -n "${NOTARY_KEY_PATH:-}" ]; then
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+          fi
+          test "$(plutil -extract ZeronEngineVersion raw "$plist")" = "$ZGX_VERSION"
+          du -sh "$app"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zgx-macos-${{ runner.arch }}
+          path: |
+            target/package-zgx/*.dmg
+            target/package-zgx/*.tar.gz
+          if-no-files-found: error
+
+  linux:
+    if: contains(inputs.platforms, 'linux')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04 # x86_64
+          - runner: ubuntu-24.04-arm # aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      ZGX_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: system deps (the old app's)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev \
+            libfontconfig1-dev libfreetype-dev libasound2-dev \
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-beta
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+      - name: the engine, from this commit
+        env:
+          ZERON_ENGINE_VERSION: ${{ inputs.version }}
+          # Luau without its asserts (a fifth of script time). Here, not in a
+          # root .cargo/config.toml, so test builds keep them; the package
+          # refuses an engine that has them.
+          LUAU_CXXFLAGS: -DNDEBUG
+        run: cargo build --release --locked -p zeron --bin zeron-engine
+      - name: package
+        run: ZGX_ENGINE="$GITHUB_WORKSPACE/target/release/zeron-engine" scripts/package-linux.sh
+      - name: inspect and install the tarball
+        run: |
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$RUNNER_TEMP/unpacked" "$home"
+          tar -xzf "target/package/zeron-$ZGX_VERSION-linux-$(uname -m).tar.gz" -C "$RUNNER_TEMP/unpacked"
+          dir="$RUNNER_TEMP/unpacked/zeron-$ZGX_VERSION-linux-$(uname -m)"
+          test "$("$dir/zeron" --version)" = "zeron $ZGX_VERSION"
+          test "$("$dir/zeron-engine" --version)" = "zeron-engine $ZGX_VERSION"
+          test -f "$dir/ui/app.luau"
+          test -d "$dir/plugins-builtin"
+          test ! -e "$dir/ui/tests"
+          # A headless server or Cloud machine runs this `zeron` too (`zeron
+          # headless`): it may need no library the old app didn't.
+          readelf -d "$dir/zeron" | grep NEEDED
+          if readelf -d "$dir/zeron" | grep NEEDED | grep -qvE 'lib(c|m|gcc_s|stdc\+\+|asound|z|xcb|xkbcommon|xkbcommon-x11)\.so|ld-linux'; then
+            echo "zeron needs a library the old app didn't"; exit 1
+          fi
+          # Its install.sh, in a home of its own: the version's directory
+          # (a beta's is named apart, crates/update `managed_dir`), `current` on it.
+          HOME="$home" "$dir/install.sh"
+          case "$ZGX_VERSION" in
+            *-beta.*) want="beta-$ZGX_VERSION" ;;
+            *) want="$ZGX_VERSION" ;;
+          esac
+          test "$(basename "$(readlink "$home/.zeron/app/current")")" = "$want"
+          test "$("$home/.zeron/app/current/zeron" --version)" = "zeron $ZGX_VERSION"
+          du -sh "$dir"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zgx-linux-${{ runner.arch }}
+          path: target/package/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    if: contains(inputs.platforms, 'windows')
+    runs-on: windows-2022
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ZGX_VERSION: ${{ inputs.version }}
+    steps:
+      # The scripts ship as they are on the other platforms: no CRLF.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Locate Windows SDK shader compiler
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-beta
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+      # (A Windows release has no separate engine: it runs as `zeron.exe engine`.)
+      - name: the engine, from this commit
+        env:
+          ZERON_ENGINE_VERSION: ${{ inputs.version }}
+          # Luau without its asserts (a fifth of script time). Here, not in a
+          # root .cargo/config.toml, so test builds keep them; the package
+          # refuses an engine that has them.
+          LUAU_CXXFLAGS: -DNDEBUG
+        run: |
+          cargo build --release --locked -p zeron
+          if ($LASTEXITCODE -ne 0) { throw 'the engine failed to build' }
+          "ZGX_ENGINE=$((Resolve-Path -LiteralPath './target/release/zeron.exe').Path)" >> $env:GITHUB_ENV
+      - name: package installer and portable app
+        env:
+          FEED: ${{ inputs.windows-feed }}
+        run: ./scripts/package-windows.ps1 -ReleasesUrl $env:FEED -ZgxVersion $env:ZGX_VERSION -ZgxEngine $env:ZGX_ENGINE
+      - name: inspect the package
+        env:
+          FEED: ${{ inputs.windows-feed }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'unpacked'
+          Expand-Archive -LiteralPath "target/package/zeron-$env:ZGX_VERSION-windows-x86_64.zip" -DestinationPath $dir
+          $interface = (& "$dir/zeron.exe" --version | Out-String).Trim()
+          if ($interface -ne "zeron $env:ZGX_VERSION") { throw "the interface says '$interface'" }
+          $beta = $env:ZGX_VERSION -match '-beta\.\d+$'
+          $files = "$dir/beta/$env:ZGX_VERSION"
+          $engine = (& "$files/engine/zeron.exe" --version | Out-String).Trim()
+          if ($engine -ne "zeron $env:ZGX_VERSION") { throw "the engine says '$engine'" }
+          foreach ($path in @("$files/ui/app.luau", "$files/plugins-builtin", "$dir/zeron-update.json")) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "no $path in the package" }
+          }
+          if (Test-Path -LiteralPath "$files/ui/tests") { throw 'the tests are in the package' }
+          $feed = (Get-Content -Raw "$dir/zeron-update.json" | ConvertFrom-Json).releases_url
+          if ($feed -ne $env:FEED) { throw "the feed is $feed" }
+          # A stable release's standalone .exe (all the old app's updater
+          # installs) is the zip's own zeron.exe, and answers its version
+          # without its folder.
+          $standalone = "target/package/zeron-$env:ZGX_VERSION-windows-x86_64.exe"
+          if (-not $beta) {
+            if ((Get-FileHash $standalone).Hash -ne (Get-FileHash "$dir/zeron.exe").Hash) { throw 'the standalone .exe is not the zip''s' }
+            $alone = Join-Path $env:RUNNER_TEMP 'alone'
+            New-Item -ItemType Directory -Force -Path $alone | Out-Null
+            Copy-Item -LiteralPath $standalone -Destination "$alone/zeron.exe"
+            $said = (& "$alone/zeron.exe" --version | Out-String).Trim()
+            if ($said -ne "zeron $env:ZGX_VERSION") { throw "the standalone .exe says '$said'" }
+          } elseif (Test-Path -LiteralPath $standalone) { throw 'a beta has no standalone .exe' }
+          Get-ChildItem target/package -File | Select-Object Name, Length
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zgx-windows-${{ runner.arch }}
+          path: |
+            target/package/*.zip
+            target/package/*.exe
+          if-no-files-found: error

@@ -18,6 +18,10 @@
 --
 -- `ui.div { relative = true, ui.list { offset = at, … }, Rail { offset = at, extent = total, view = seen } }`
 --
+-- `horizontal`: along the view's foot, for a view that scrolls sideways.
+-- `hint`: shown while this holds too, for what can't be seen to scroll until
+-- it's tried (a table a pointer rests on).
+--
 -- It is the scroll view's sibling, not its child, on purpose: a view's edge
 -- `fade` masks everything inside it, the engine's own bar included, so a
 -- faded view's bar would fade with its rows. Over the view, the rail is
@@ -34,6 +38,8 @@ export type Props = {
 	extent: Length,
 	view: Length,
 	track: Length?,
+	horizontal: boolean?,
+	hint: (() -> boolean)?,
 	-- An id for the strip, for tools that look for it.
 	id: string?,
 }
@@ -47,6 +53,8 @@ local SIDE = 2
 local END = 4
 local MIN = 24
 local LINGER, FADE = 1400, 260
+-- How often a scroll under way is looked at, to tell when it has rested.
+local POLL = 50
 -- How long a view is taken to place itself once it mounts, its offset's
 -- changes meanwhile no scroll.
 local SETTLE = 600
@@ -57,6 +65,7 @@ end
 
 return ui.component(function(props: Props): Node
 	local offset = props.offset
+	local horizontal = props.horizontal == true
 	local hovered = ui.use_state(false)
 	local dragging = ui.use_state(false)
 	-- The view scrolled a moment ago.
@@ -98,25 +107,42 @@ return ui.component(function(props: Props): Node
 		settling = nil
 		settled = true
 	end)
-	local cancel: (() -> ())? = nil
+	-- Only a scroll's first move is heard: while the rail shows, a poll
+	-- every POLL ms sees whether the view has moved since (the effect then
+	-- reads nothing, so a scroll's frames run nothing here), and it goes
+	-- once the view has rested LINGER.
+	local seen, moved_at = offset:peek(), 0
+	local function poll()
+		-- (Next look a poll on, or when it will have rested, if sooner.)
+		ui.after(math.max(0, math.min(POLL, moved_at + LINGER - ui.now())), function()
+			local at = offset:peek()
+			if at ~= seen then
+				seen, moved_at = at, ui.now()
+			end
+			if ui.now() - moved_at >= LINGER then
+				recent:set(false)
+			else
+				poll()
+			end
+		end)
+	end
 	ui.effect(function()
-		offset:get()
+		if recent:get() then
+			-- (This run's: it goes as the next does, once at rest.)
+			poll()
+			return
+		end
+		local at = offset:get()
+		if at == seen then
+			return
+		end
+		seen, moved_at = at, ui.now()
 		if not settled then
 			return
 		end
 		recent:set(true)
-		if cancel then
-			cancel()
-		end
-		cancel = ui.after(LINGER, function()
-			cancel = nil
-			recent:set(false)
-		end)
 	end)
 	ui.on_cleanup(function()
-		if cancel then
-			cancel()
-		end
 		if settling then
 			settling()
 		end
@@ -126,14 +152,14 @@ return ui.component(function(props: Props): Node
 		return hovered:get() or dragging:get()
 	end
 	local function shown(): boolean
-		return not span:get().fits and (recent:get() or active())
+		return not span:get().fits and (recent:get() or active() or (props.hint ~= nil and props.hint()))
 	end
 
-	-- Where the pointer is along the track, from its top.
-	local function along(e: { local_y: number }): number
-		return e.local_y - END
+	-- Where the pointer is along the track, from its start.
+	local function along(e: any): number
+		return (if horizontal then e.local_x else e.local_y) - END
 	end
-	local function follow(e: { local_y: number })
+	local function follow(e: any)
 		local top, _, travel, limit = geometry()
 		if top == nil or travel <= 0 then
 			return
@@ -145,15 +171,17 @@ return ui.component(function(props: Props): Node
 	return ui.div {
 		id = props.id,
 		absolute = true,
-		top = 0,
-		h = if props.track
-			then function(): number
+		top = if horizontal then nil else 0,
+		left = if horizontal then 0 else nil,
+		h = if horizontal
+			then HIT
+			elseif props.track then function(): number
 				return read(props.track :: Length)
 			end
 			else nil,
 		bottom = if props.track then nil else 0,
 		right = 0,
-		w = HIT,
+		w = if horizontal then nil else HIT,
 		aria_hidden = true,
 		opacity = ui.tween(
 			ui.computed(function(): number
@@ -190,15 +218,30 @@ return ui.component(function(props: Props): Node
 		end,
 		ui.div {
 			absolute = true,
-			right = SIDE,
-			top = function(): number
-				local top = geometry()
-				return top or END
-			end,
+			right = if horizontal then nil else SIDE,
+			bottom = if horizontal then SIDE else nil,
+			top = if horizontal
+				then nil
+				else function(): number
+					local top = geometry()
+					return top or END
+				end,
+			left = if horizontal
+				then function(): number
+					local top = geometry()
+					return top or END
+				end
+				else nil,
 			w = function(): number
+				if horizontal then
+					return span:get().length
+				end
 				return if active() then THUMB_ACTIVE else THUMB
 			end,
 			h = function(): number
+				if horizontal then
+					return if active() then THUMB_ACTIVE else THUMB
+				end
 				return span:get().length
 			end,
 			rounded = "$radius.full",

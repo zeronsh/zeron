@@ -113,7 +113,13 @@ fn app_of(root: &Path, source: &str, items: &[Item], extra: Vec<zgx_script::Plug
 /// What records are made from, in these tests.
 fn sources() -> records::Sources {
     records::Sources {
-        sessions: json!({ "chats": [{ "id": "s1", "title": "Fix the build", "status": "working", "cwd": "/secret" }] }),
+        sessions: json!({
+            "chats": [{ "id": "s1", "title": "Fix the build", "status": "working", "cwd": "/secret" }],
+            "projects": [
+                { "id": "p1", "name": "Atlas", "device": "d1", "path": "/secret/atlas", "icon": { "emoji": "🚀", "hue": "teal" } },
+                { "id": "p2", "name": "Borealis", "device": "d1", "path": "/secret/borealis" },
+            ],
+        }),
         messages: json!([]),
         profile: json!({ "id": "u1", "name": "Ada", "email": "ada@example.com" }),
         hide_emails: false,
@@ -434,6 +440,70 @@ zeron.place { at = ".md-code", after = function()
     }
 end }
 "##;
+
+/// Two projects' icons as the app draws them (ds/tile's `project`): each
+/// `.project-icon` in a box giving its project's id.
+const PROJECT_ICONS_APP: &str = r#"
+local function icon(id: string, letter: string): Node
+    return ui.div {
+        provide = { project = id },
+        ui.div { class = "project-icon", ui.text { id = `tile-{id}`, letter } },
+    }
+end
+return ui.column { id = "root", icon("p1", "A"), icon("p2", "B") }
+"#;
+
+/// A plugin drawing each project's icon (`.project-icon`, replaced through
+/// `ui.change`): what it reads of the project there.
+const DRAWS_PROJECT_ICONS: &str = r##"
+local zeron = require("./zeron")("PLUGIN")
+zeron.place { at = ".project-icon", replace = function()
+    local p = zeron.live("project")
+    return ui.text { class = "drawn", function(): string
+        local now = p() or {}
+        local icon = now.icon or {}
+        return `{now.id or "-"}:{now.name or "-"}:{icon.emoji or "-"}`
+    end }
+end }
+"##;
+
+/// `.project-icon` (stable): a plugin allowed to change it draws each
+/// project's own, its project as its records hold it (the name, device and
+/// icon with "sessions.read"; only its id without); one not allowed to
+/// change it leaves Zeron's.
+#[test]
+fn a_plugin_draws_each_project_s_icon() {
+    let drawn = |a: &mut TestApp| -> Vec<String> {
+        let tree = a.tree();
+        let mut out: Vec<String> = tree
+            .lines()
+            .filter_map(|l| l.split('"').nth(1).filter(|t| t.starts_with('p')).map(str::to_string))
+            .collect();
+        out.sort();
+        out
+    };
+    let root = dir("project-icons");
+    let reads = plugin(&root, "icons", &DRAWS_PROJECT_ICONS.replace("PLUGIN", "icons"), &["ui.change", "sessions.read"], &[".project-icon"], &[]);
+    let (mut a, _) = app_of(&root, PROJECT_ICONS_APP, &[reads], vec![]);
+    a.frames(3);
+    assert_eq!(a.error(), None);
+    assert_eq!(drawn(&mut a), vec!["p1:Atlas:🚀".to_string(), "p2:Borealis:-".to_string()], "{}", a.tree());
+    assert!(a.find("tile-p1").is_none(), "Zeron's tile is replaced");
+    assert!(!a.tree().contains("/secret"), "no project's folder");
+
+    let root = dir("project-icons-ids");
+    let blind = plugin(&root, "blind", &DRAWS_PROJECT_ICONS.replace("PLUGIN", "blind"), &["ui.change"], &[".project-icon"], &[]);
+    let (mut b, _) = app_of(&root, PROJECT_ICONS_APP, &[blind], vec![]);
+    b.frames(3);
+    assert_eq!(drawn(&mut b), vec!["p1:-:-".to_string(), "p2:-:-".to_string()], "{}", b.tree());
+
+    let root = dir("project-icons-none");
+    let unlisted = plugin(&root, "unlisted", &DRAWS_PROJECT_ICONS.replace("PLUGIN", "unlisted"), &["ui.change", "sessions.read"], &[], &[]);
+    let (mut c, _) = app_of(&root, PROJECT_ICONS_APP, &[unlisted], vec![]);
+    c.frames(3);
+    assert!(c.find("tile-p1").is_some() && c.find("tile-p2").is_some(), "{}", c.tree());
+    assert!(drawn(&mut c).is_empty());
+}
 
 /// R10: what an element gives plugins is an id: a plugin with "ui.add"
 /// alone reads no file's path and no reply's code, however it asks (zgx
@@ -1051,4 +1121,50 @@ fn a_plugin_breaking_a_rule_fails_alone_and_says_why() {
         assert!(!why.contains("Capability"), "{id}: {why}");
     }
     assert_eq!(l.failed_plugins.why("fine"), None);
+}
+
+/// B10 (R26): a plugin removed is forgotten whole, what zgx holds of it this
+/// run included: put back before Zeron quits, it starts from its `initial`
+/// (it once came back with the values it had, and a write still waiting
+/// put its folder back).
+#[test]
+fn a_plugin_removed_and_put_back_starts_from_its_initial_state() {
+    let init = r#"
+local n = ui.persist("n", 0)
+n:set(n:peek() + 1)
+"#;
+    let root = dir("forget-state");
+    let id = format!("zz-forget-{}", std::process::id());
+    let item = plugin(&root, &id, init, &[], &[], &[]);
+    let p = item.plugin().expect("loads");
+    let state = root.join("state");
+    let entry = root.join("app/app.luau");
+    write(&root, "app/app.luau", APP);
+    let host_state = state.clone();
+    let a = TestApp::new(move |runtime| {
+        let host = ScriptHost::new(runtime, &entry).storage(host_state);
+        expose_surface(&host);
+        host.set_plugins(vec![p]);
+        host
+    });
+    a.frames(2);
+    assert_eq!(a.error(), None);
+    a.host.save();
+    let saved = || -> Option<String> {
+        let dir = std::fs::read_dir(&state).ok()?.flatten().find(|e| e.file_name().to_string_lossy().contains(&id))?;
+        std::fs::read_to_string(dir.path().join("n.json")).ok()
+    };
+    assert_eq!(saved().as_deref().map(str::trim), Some("1"));
+    // Removed: unloaded, and forgotten as the bridge forgets it.
+    a.host.set_plugins(vec![]);
+    a.host.reload().unwrap();
+    a.frames(2);
+    super::forget_state(&a.host, &id);
+    assert_eq!(saved(), None, "its folder");
+    // Put back: from 0 again, so 1, not 2.
+    a.host.set_plugins(vec![item.plugin().unwrap()]);
+    a.host.reload().unwrap();
+    a.frames(2);
+    a.host.save();
+    assert_eq!(saved().as_deref().map(str::trim), Some("1"), "starts from its initial");
 }

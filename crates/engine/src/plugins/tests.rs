@@ -576,11 +576,9 @@ async fn plugins_list_is_sorted_and_reports_broken() {
     .await
     .unwrap();
     assert!(!f.plugins.plugins_dir().join("aa").exists());
-    let removed: Vec<_> = std::fs::read_dir(f.plugins.plugins_dir().join(REMOVED_DIR))
-        .unwrap()
-        .flatten()
-        .collect();
-    assert!(removed[0].file_name().to_string_lossy().starts_with("aa-"));
+    // Taken away, not kept in `.removed`.
+    let removed = std::fs::read_dir(f.plugins.plugins_dir().join(REMOVED_DIR)).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(removed, 0);
     assert!(
         call(
             &f.plugins,
@@ -1055,6 +1053,9 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
     let list = call(&f.plugins, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
     let off = list["plugins"].as_array().unwrap().iter().find(|p| p["builtin"] == true).unwrap().clone();
     assert_eq!(off["status"], "off");
+    // Removing takes your folder away, and Zeron's own stays, still off.
+    call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await.unwrap();
+    assert_eq!(item(&f.plugins, "github").await["status"], "off");
     let removed = call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await;
     assert!(removed.unwrap_err().contains("turned off, but not removed"));
     // A new version asking more is allowed it as it ships.
@@ -1234,7 +1235,30 @@ async fn plugins_an_unknown_authors_update_keeps_consent_by_key() {
     assert_eq!(updated["plugin"]["ask"], serde_json::json!(["notifications"]));
     // Changed by hand after that: tampered, as before.
     std::fs::write(f.plugins.plugins_dir().join("zed/init.luau"), "changed()").unwrap();
+    let tampered = item(&f.plugins, "zed").await;
+    assert_eq!(tampered["status"], "tampered");
+    // Never allowed as it is now: removed, or installed again.
+    let refused = call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "zed", "allow": true, "hash": tampered["hash"] }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("changed after you allowed it"), "{refused}");
     assert_eq!(item(&f.plugins, "zed").await["status"], "tampered");
+    // Installed again from where it came from: what was signed, asking again.
+    let storage = f.plugins.plugins_dir().join(".storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(storage.join("zed.json"), "{\"kept\":1}").unwrap();
+    let again = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "reinstall": "zed" })).await.unwrap();
+    assert_eq!((again["plugin"]["status"].as_str(), again["plugin"]["version"].as_str()), (Some("pending"), Some("3")), "{again}");
+    assert_eq!(std::fs::read_to_string(f.plugins.plugins_dir().join("zed/init.luau")).unwrap(), "return 3");
+    assert!(storage.join("zed.json").exists(), "what it stored stays");
+    let incoming = f.plugins.plugins_dir().join(install::INCOMING_DIR);
+    assert_eq!(std::fs::read_dir(&incoming).unwrap().count(), 0, "nothing left aside");
+    // Its file gone: says so, and the installed one stays as it is.
+    std::fs::write(f.plugins.plugins_dir().join("zed/init.luau"), "changed()").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let gone = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "reinstall": "zed" })).await.unwrap_err();
+    assert_eq!(install::reason_of(&gone), Some(install::reason::NO_SOURCE), "{gone}");
+    assert_eq!(std::fs::read_to_string(f.plugins.plugins_dir().join("zed/init.luau")).unwrap(), "changed()");
 }
 
 #[tokio::test]
@@ -1371,4 +1395,140 @@ async fn theme_methods_write_this_device_s_files_and_tell_the_window() {
     call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
     assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
     assert!(zeron_theme::catalog::chosen(&f.data).is_empty());
+}
+
+// ── Launch checklist: key rotation, squatted ids, what removing leaves ─────
+
+/// B4: an update had to be signed by the installed one's own key, so an
+/// author on a new machine stranded everyone. Another live key of the same
+/// account updates it, and asks again; anyone else's, a revoked one, or one
+/// that can't be checked doesn't.
+#[tokio::test]
+async fn plugins_an_authors_new_key_updates_and_asks_again() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    let laptop = someone(&f, &fake, "ada");
+    let path = package_file(&f, "focus.zeron-plugin", &signed_package(&laptop, "focus", "1.0.0", &["ui.add"], "return 1"));
+    let installed = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
+    call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "focus", "allow": true, "hash": installed["plugin"]["hash"] }))
+        .await
+        .unwrap();
+
+    // Ada's new machine: found, not refused, said to be a new key.
+    let desktop = someone(&f, &fake, "ada");
+    std::fs::write(&path, signed_package(&desktop, "focus", "1.1.0", &["ui.add"], "return 2")).unwrap();
+    let checked = call(&f.plugins, methods::CHECK_PLUGIN_UPDATES, serde_json::json!({})).await.unwrap();
+    let found = &checked["updates"][0];
+    assert!(found.get("refused").is_none(), "{checked}");
+    assert_eq!(found["new_key"], true, "{checked}");
+    // Installed, and it waits for you, with what you allowed shown.
+    let updated = call(&f.plugins, methods::UPDATE_PLUGIN, serde_json::json!({ "id": "focus" })).await.unwrap();
+    assert_eq!((updated["update"].as_bool(), updated["waiting"].as_bool()), (Some(true), Some(true)), "{updated}");
+    let waiting = item(&f.plugins, "focus").await;
+    assert_eq!((waiting["version"].as_str(), waiting["status"].as_str()), (Some("1.1.0"), Some("pending")));
+    assert_eq!(waiting["allowed"], serde_json::json!(["ui.add"]));
+    call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "focus", "allow": true, "hash": waiting["hash"] }))
+        .await
+        .unwrap();
+    assert_eq!(item(&f.plugins, "focus").await["status"], "on");
+
+    // The old machine lost and its key revoked: still Ada's, so a later
+    // key of hers updates it (installing straight from the file too).
+    fake.keys.lock().unwrap().insert(
+        desktop.public(),
+        Lookup::Found { username: Some("ada".into()), mine: false, revoked: true, verified: Some(false) },
+    );
+    let phone = someone(&f, &fake, "ada");
+    let path = package_file(&f, "focus-2.zeron-plugin", &signed_package(&phone, "focus", "1.2.0", &["ui.add"], "return 3"));
+    let again = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
+    assert_eq!((again["plugin"]["version"].as_str(), again["waiting"].as_bool()), (Some("1.2.0"), Some(true)), "{again}");
+
+    // Someone else's key, a revoked key of Ada's, or Ada's when the edge
+    // can't be reached: refused, the installed one kept.
+    let eve = someone(&f, &fake, "eve");
+    let stolen = someone(&f, &fake, "ada");
+    fake.keys.lock().unwrap().insert(
+        stolen.public(),
+        Lookup::Found { username: Some("ada".into()), mine: false, revoked: true, verified: Some(false) },
+    );
+    let unchecked = someone(&f, &fake, "ada");
+    for (key, offline) in [(&eve, false), (&stolen, false), (&unchecked, true)] {
+        fake.unreachable.store(offline, std::sync::atomic::Ordering::SeqCst);
+        let path = package_file(&f, "focus-x.zeron-plugin", &signed_package(key, "focus", "9.0.0", &["ui.add"], "return 9"));
+        let refused = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap_err();
+        assert!(refused.contains("signed by someone else"), "{refused}");
+    }
+    fake.unreachable.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(item(&f.plugins, "focus").await["version"], "1.2.0");
+}
+
+/// B11 (R25c): a folder of yours under a built-in's id was the plugin
+/// `RemovePlugin` found when its name sorted first, so removing it wiped the
+/// built-in's decision and storage.
+#[tokio::test]
+async fn plugins_removing_a_folder_that_squats_a_builtin_keeps_the_builtins() {
+    let f = fixture();
+    let shipped = f.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(&shipped, "github", serde_json::json!({ "name": "GitHub", "permissions": ["ui.add"] }), None);
+    // Named to sort before Zeron's own.
+    write_plugin(f.plugins.plugins_dir(), "github", serde_json::json!({ "name": "Aardvark" }), None);
+    call(&f.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "github", "off": true })).await.unwrap();
+    let storage = f.plugins.plugins_dir().join(".storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(storage.join("github.json"), "{}").unwrap();
+    std::fs::write(storage.join("github.settings.json"), "{}").unwrap();
+
+    call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await.unwrap();
+    assert!(!f.plugins.plugins_dir().join("github").exists(), "your folder went");
+    assert!(storage.join("github.json").is_file() && storage.join("github.settings.json").is_file(), "the built-in's storage stays");
+    assert!(State::load(f.plugins.plugins_dir()).decisions.get("github").is_some_and(|d| d.off), "and its off switch");
+    let list = call(&f.plugins, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
+    let github: Vec<_> = list["plugins"].as_array().unwrap().iter().filter(|p| p["id"] == "github").collect();
+    assert_eq!(github.len(), 1, "{list}");
+    assert_eq!((github[0]["builtin"].as_bool(), github[0]["status"].as_str()), (Some(true), Some("off")));
+    // The built-in itself still can't be removed.
+    let refused = call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await.unwrap_err();
+    assert!(refused.contains("not removed"), "{refused}");
+}
+
+/// B12 (R29) and B8: a plugin new under an id starts with nothing a plugin
+/// once under it kept; a folder gone for a while keeps its storage; removing
+/// takes the folder away rather than leaving it in `.removed`.
+#[tokio::test]
+async fn plugins_storage_and_removed_folders_go_with_the_plugin() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    let ada = someone(&f, &fake, "ada");
+    let storage = f.plugins.plugins_dir().join(".storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    // Left by a plugin once called "focus", before this one.
+    std::fs::write(storage.join("focus.json"), "{\"secret\":1}").unwrap();
+    let path = package_file(&f, "focus.zeron-plugin", &signed_package(&ada, "focus", "1.0.0", &["ui.add"], "return 1"));
+    call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
+    assert!(!storage.join("focus.json").exists(), "a new plugin under the id inherits nothing");
+
+    // Its folder gone for a while (a rename by hand, an editor or sync tool
+    // replacing it): what it kept stays, and it's back as it was.
+    std::fs::write(storage.join("focus.json"), "{\"kept\":1}").unwrap();
+    let away = f.data.join("focus-away");
+    std::fs::rename(f.plugins.plugins_dir().join("focus"), &away).unwrap();
+    f.plugins.rescan().await;
+    std::fs::rename(&away, f.plugins.plugins_dir().join("focus")).unwrap();
+    f.plugins.rescan().await;
+    assert_eq!(std::fs::read_to_string(storage.join("focus.json")).unwrap(), "{\"kept\":1}");
+    std::fs::remove_dir_all(f.plugins.plugins_dir().join("focus")).unwrap();
+    f.plugins.rescan().await;
+
+    // Removed: nothing left in `.removed`.
+    call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
+    call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "focus" })).await.unwrap();
+    let removed = f.plugins.plugins_dir().join(REMOVED_DIR);
+    assert_eq!(std::fs::read_dir(&removed).map(|d| d.count()).unwrap_or(0), 0);
+    // What an older engine left there goes at the next start.
+    std::fs::create_dir_all(removed.join("old-1").join("lib")).unwrap();
+    std::fs::write(removed.join("old-1").join("lib").join("x.luau"), "return 1").unwrap();
+    sweep_removed(f.plugins.plugins_dir());
+    assert_eq!(std::fs::read_dir(&removed).unwrap().count(), 0);
 }

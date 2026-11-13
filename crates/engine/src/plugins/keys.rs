@@ -280,6 +280,24 @@ impl CachedKey {
     }
 }
 
+/// Whether a plugin installed from `old` may be updated by one signed with
+/// `new`: the author's key on a new machine. `new` must read as verified
+/// (live, its owner holding a username) and `old` (revoked or not: a lost
+/// machine's key is revoked) belong to the same owner, by the username the
+/// edge answers for each. Usernames are never handed to another account
+/// (`edge/src/user-directory.ts`), so the same name is the same account. A
+/// key whose owner was renamed between the two lookups doesn't match: the
+/// update is refused, as it was before.
+pub fn same_account(old: &CachedKey, new: &CachedKey) -> bool {
+    let Author::Verified { username: Some(name), .. } = new.author() else {
+        return false;
+    };
+    old.username
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|was| !was.is_empty() && was.eq_ignore_ascii_case(&name))
+}
+
 /// `<data>/plugin-keys.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -614,6 +632,26 @@ pub(crate) mod tests {
             let rows = self.rows.lock().unwrap().iter().filter(|r| r.created_at > since).cloned().collect();
             Ok((rows, self.now.load(std::sync::atomic::Ordering::SeqCst)))
         }
+    }
+
+    /// B4: an author's new key takes over a plugin only when it's live and
+    /// verified, and the old key (revoked or not) is the same account's.
+    #[test]
+    fn plugins_key_same_account_is_a_live_key_of_the_same_username() {
+        let key = |username: Option<&str>, revoked: bool, verified: Option<bool>| {
+            CachedKey::from_lookup(&Lookup::Found { username: username.map(str::to_owned), mine: false, revoked, verified }, "u", 0)
+        };
+        let ada = key(Some("ada"), false, Some(true));
+        assert!(same_account(&ada, &key(Some("ada"), false, Some(true))));
+        assert!(same_account(&ada, &key(Some("Ada"), false, None)), "an older edge's answer, any case");
+        assert!(same_account(&key(Some("ada"), true, Some(false)), &ada), "the old key revoked: a lost machine");
+        assert!(!same_account(&ada, &key(Some("ada"), true, Some(false))), "the new key revoked");
+        assert!(!same_account(&ada, &key(Some("eve"), false, Some(true))));
+        assert!(!same_account(&ada, &key(Some("ada"), false, Some(false))));
+        assert!(!same_account(&ada, &key(None, false, None)));
+        assert!(!same_account(&key(None, true, None), &ada));
+        let unknown = CachedKey::from_lookup(&Lookup::Unknown, "u", 0);
+        assert!(!same_account(&unknown, &ada) && !same_account(&ada, &unknown));
     }
 
     #[test]

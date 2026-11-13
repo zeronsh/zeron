@@ -249,27 +249,41 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
 /// app's modules) or through `.live` (as given, or as the system resolves
 /// it: macOS's `/var/…` is `/private/var/…` to scripts). The VM's own name
 /// before "runtime error" is who ran it, not where it failed, and is skipped.
+///
+/// Windows names them with `\` (`screens\card.luau:3`, `C:\…\.live\…`):
+/// read as `/`, the way `files` names a template's files, so a template
+/// file that breaks there falls back like anywhere. (A token stops at a `:`,
+/// so `.live`'s spellings are matched without their drive, or `\\?\`.)
 pub fn named(error: &str, templates: &Path) -> Vec<String> {
     let live = templates.join(LIVE);
-    let mut spellings = vec![format!("{}/", live.to_string_lossy())];
+    let spelt = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let text = text.strip_prefix("//?/").unwrap_or(&text);
+        let text = match text.as_bytes() {
+            [drive, b':', ..] if drive.is_ascii_alphabetic() => &text[2..],
+            _ => text,
+        };
+        format!("{text}/")
+    };
+    let mut spellings = vec![spelt(&live)];
     if let Ok(real) = std::fs::canonicalize(&live) {
-        spellings.push(format!("{}/", real.to_string_lossy()));
+        spellings.push(spelt(&real));
     }
     let body = match error.find(": runtime error: ") {
         Some(at) => &error[at + ": runtime error: ".len()..],
         None => error,
     };
-    let is_path = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@');
-    let mut out = Vec::new();
+    let is_path = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '@');
+    let mut out: Vec<String> = Vec::new();
     let mut from = 0;
     while let Some(at) = body[from..].find(".luau:") {
         let end = from + at + ".luau".len();
         let start = body[..end].rfind(|c: char| !is_path(c)).map(|i| i + 1).unwrap_or(0);
-        let token = &body[start..end];
+        let token = body[start..end].replace('\\', "/");
         let rel = spellings
             .iter()
             .find_map(|s| token.find(s.as_str()).map(|i| &token[i + s.len()..]))
-            .unwrap_or(token);
+            .unwrap_or(&token);
         if plain(rel) && live.join(rel).is_file() && !out.iter().any(|r| r == rel) {
             out.push(rel.to_string());
         }
@@ -601,6 +615,34 @@ mod tests {
         std::fs::metadata(path).unwrap().modified().unwrap()
     }
 
+    /// The files an error names, however the platform spells them: `/`, or
+    /// Windows' `\` (as zgx names the app's modules there, and in full
+    /// paths through `.live`); what isn't in `.live`, and the VM that ran
+    /// it, aren't.
+    #[test]
+    fn an_error_names_its_files_with_either_separator() {
+        let templates = dir("named");
+        let live = templates.join(LIVE);
+        write(&live, "screens/card.luau", "return 1");
+        write(&live, "app.luau", "return 1");
+        let names = |error: &str| named(error, &templates);
+        assert_eq!(names("app.luau: runtime error: screens/card.luau:3: broke"), vec!["screens/card.luau"]);
+        assert_eq!(
+            names("app.luau: runtime error: screens\\card.luau:3: broke later\nstack traceback:\n\t[C]: in function 'error'\n\tscreens\\card.luau:3: in function <screens\\card.luau:3>"),
+            vec!["screens/card.luau"],
+            "Windows' own spelling, named once"
+        );
+        let full = format!("{}\\screens\\card.luau", live.to_string_lossy().replace('/', "\\"));
+        assert_eq!(names(&format!("app.luau: runtime error: {full}:3: broke")), vec!["screens/card.luau"], "through .live, with `\\`");
+        assert_eq!(names("app.luau: runtime error: screens\\other.luau:1: not the template's"), Vec::<String>::new());
+        assert_eq!(names("screens\\card.luau: runtime error: elsewhere"), Vec::<String>::new(), "the VM that ran it");
+        assert_eq!(
+            names("app.luau: runtime error: screens\\other.luau:1: from\n\tscreens\\card.luau:3: in function"),
+            vec!["screens/card.luau"]
+        );
+        let _ = std::fs::remove_dir_all(&templates);
+    }
+
     /// A templates folder with a small Zeron and a template `t`.
     fn setup(name: &str) -> PathBuf {
         let root = dir(name);
@@ -804,7 +846,8 @@ mod tests {
         let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
         let t = setup("watched");
         let (files_, dirs) = watched(&t, &ui);
-        let rel = |p: &PathBuf| p.strip_prefix(&ui).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        // (By `/`, as on every platform: Windows' paths say `\`.)
+        let rel = |p: &PathBuf| p.strip_prefix(&ui).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         assert!(files_.iter().any(|p| rel(p) == "app.luau"));
         assert!(files_.iter().any(|p| rel(p).starts_with("ds/themes/") && rel(p).ends_with(".json")));
         assert!(!files_.iter().any(|p| rel(p).ends_with(".svg") || rel(p).ends_with(".webp")), "art is heard by its folder");

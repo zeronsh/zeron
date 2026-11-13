@@ -221,7 +221,7 @@ impl TitleGenerator {
             // without one there is no title to generate.
             self.inner
                 .registry
-                .prepare_run(harness_id, &mut request)
+                .prepare_run(harness_id, None, &mut request)
                 .await
                 .ok()?;
             match tokio::time::timeout(
@@ -343,6 +343,7 @@ mod tests {
 
     fn model(id: &str, label: &str) -> Model {
         Model {
+            default: false,
             id: id.into(),
             label: label.into(),
             description: None,

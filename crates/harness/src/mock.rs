@@ -204,6 +204,7 @@ impl Harness for MockHarness {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![
             Model {
+                default: false,
                 id: "mock-1".into(),
                 label: "Mock 1".into(),
                 description: None,
@@ -213,6 +214,7 @@ impl Harness for MockHarness {
             // Claude-mirroring demo model: lets scripted runs carry the same
             // chip labels ("Fable 5 · High") as a real Claude session.
             Model {
+                default: false,
                 id: "mock-fable-5".into(),
                 label: "Fable 5".into(),
                 description: None,

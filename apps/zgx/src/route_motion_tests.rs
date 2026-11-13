@@ -82,3 +82,109 @@ fn a_new_chat_and_a_session_switch_the_composer_at_once() {
         seen.iter().map(|s| s.2).collect::<Vec<_>>()
     );
 }
+
+/// What comes and goes with the panel stands still and only fades a little
+/// (ds/motion `content`), never popping: the panel's tabs as it opens and
+/// closes, the page as the panel expands over it and gives it back. Over
+/// each, it stays where it's laid out (no drift: a hundredth of a point at
+/// most), its opacity passes through between, a step at a time, never
+/// under the fade's floor (0.3) as it shows, and ends where it goes (the
+/// page under the panel expanded, hidden; the panel's content, closed, at
+/// the floor in a panel that shows none of it); settled, the layout warns
+/// of nothing new. (ui/tests/shell_route_motion.test.luau has their widths.)
+#[test]
+fn the_panel_s_content_and_the_page_only_fade_as_they_come_and_go() {
+    const FLOOR: f32 = 0.3;
+    let mut app = mount();
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    watch(&mut app, 20);
+    let warnings = |app: &mut TestApp| -> Vec<String> {
+        app.ui.prepare_frame();
+        zgx::inspect::layout_warnings(&app.ui).iter().map(|w| w.to_string()).collect()
+    };
+    // (Where its right edge is painted: it stands at its column's side by
+    // the window's edge, the panel's content at the window's right, the
+    // page at its left.)
+    let edge = |app: &mut TestApp, id: &str| -> f32 {
+        let node = app.find(&format!("#{id}")).expect("it");
+        app.ui.prepare_frame();
+        let b = app.ui.scene.borrow().transformed_bounds(node);
+        if id == "shell-page-room" { b.x } else { b.x + b.width }
+    };
+    // (What the fixture has before the panel ever opens.)
+    let before = warnings(&mut app);
+    let mut fade = |click: &str, id: &str, to: f32, what: &str| {
+        app.click(click);
+        let seen: Vec<(f32, f32, bool)> = (0..30)
+            .map(|_| {
+                app.frames(1);
+                std::thread::sleep(Duration::from_millis(12));
+                // (Whether its column shows: the panel under 2 points shows none.)
+                let shows = id == "shell-page-room" || app.opacity("shell-files") > 0.;
+                (app.opacity(id), edge(&mut app, id), shows)
+            })
+            .collect();
+        let (lo, hi) = seen.iter().filter(|s| s.2).fold((f32::MAX, f32::MIN), |(lo, hi), s| (lo.min(s.1), hi.max(s.1)));
+        let drift = hi - lo;
+        assert!(drift <= 0.011, "{what}: {id} moved {drift} points: {seen:?}");
+        let between = seen.iter().filter(|s| s.0 > 0.02 && s.0 < 0.98).count();
+        let jump = seen.windows(2).map(|w| (w[1].0 - w[0].0).abs()).fold(0., f32::max);
+        assert!(between >= 2 && jump <= 0.7, "{what}: {id} at {seen:?}");
+        let showing = seen.iter().filter(|s| (s.0 - to).abs() > 0.01).map(|s| s.0).fold(1., f32::min);
+        assert!(showing >= FLOOR - 0.01, "{what}: {id} fades only to the floor as it shows: {seen:?}");
+        assert!((seen.last().unwrap().0 - to).abs() < 0.01, "{what}: {id} ends at {seen:?}");
+        // At rest, nothing it holds is laid out in a box that shows none of
+        // it (`zgx inspect errors` names nothing new).
+        app.frames(30);
+        assert_eq!(warnings(&mut app), before, "{what}: settled, the layout's warnings");
+    };
+    fade("#titlebar >> role:button \"Panel\"", "shell-files-content", 1., "opening");
+    fade("#panel-expand", "shell-page-room", 0., "expanding");
+    fade("#panel-expand", "shell-page-room", 1., "collapsing");
+    fade("#titlebar >> role:button \"Panel\"", "shell-files-content", FLOOR, "closing");
+    assert!(app.opacity("shell-files") < 0.01, "closed, the panel shows none of it");
+}
+
+/// The sidebar folds and comes back as the panel opens and closes: its
+/// card's left edge and what's in it stand still as its right edge sweeps
+/// over them (no slide: the window's gap before it goes only with its last
+/// 5 points), what's in it only fades a little, from 0.3 (ds/motion
+/// `content`), and the page beside it keeps the gap between cards (4) as
+/// it follows the edge. (It used to slide 5 points with the gap closing on
+/// its own clock, the page's gap easing from 4 to 5 beside it.)
+#[test]
+fn the_sidebar_s_content_stands_still_and_only_fades_as_it_folds() {
+    const FLOOR: f32 = 0.3;
+    let mut app = mount();
+    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    watch(&mut app, 20);
+    let at = |app: &mut TestApp, sel: &str| -> Option<(f32, f32)> {
+        let node = app.find(sel)?;
+        app.ui.prepare_frame();
+        let b = app.ui.scene.borrow().transformed_bounds(node);
+        Some((b.x, b.width))
+    };
+    for what in ["folding", "coming back"] {
+        assert!(app.host.run_command("shell.toggle_sidebar"));
+        let mut rows = Vec::new();
+        for _ in 0..24 {
+            app.frames(1);
+            std::thread::sleep(Duration::from_millis(12));
+            let side = at(&mut app, "#shell-sidebar").expect("its column");
+            let page = at(&mut app, "#shell-page-room").expect("the page");
+            let row = at(&mut app, "#shell-sidebar >> role:button \"Fix the build\"");
+            let fade = if app.find("#sidebar-content").is_some() { app.opacity("sidebar-content") } else { 1. };
+            // (Its card more than the window's gap wide: the gap is whole.)
+            if side.1 > 10. {
+                rows.push(row.expect("its row").0);
+                assert!((page.0 - (side.0 + side.1) - 4.).abs() < 0.05, "{what}: the gap beside it, {}", page.0 - side.0 - side.1);
+                assert!(fade >= FLOOR - 0.01, "{what}: it fades only to the floor as it shows: {fade}");
+            }
+        }
+        let (lo, hi) = rows.iter().fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+        assert!(rows.len() >= 4 && hi - lo <= 0.011, "{what}: its row stands at {lo}..{hi} over {} frames", rows.len());
+        let end = if what == "folding" { FLOOR } else { 1. };
+        assert!((app.opacity("sidebar-content") - end).abs() < 0.01, "{what}: it ends faded to {end}");
+        app.frames(30);
+    }
+}

@@ -67,6 +67,8 @@ fn chat_key_schema(extra: Value) -> Value {
     json!({ "type": "object", "properties": properties, "required": ["chat"] })
 }
 
+const DEVICE_STATS: &str = "device_stats";
+
 fn device_schema() -> Value {
     json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
 }
@@ -82,6 +84,11 @@ fn catalog() -> Vec<ToolDef> {
             name: "list_devices",
             description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
             input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: DEVICE_STATS,
+            description: "One device's machine stats, asked live of that device (local when omitted): OS (name, version, kernel, architecture), CPU (model, physical and logical cores), memory (total and available bytes), storage (the volumes holding Zeron's data and the home folder, plus every local volume: mount point, filesystem, total/available/used bytes), GPU names where the platform says them cheaply, uptime, load average (Unix), battery, and the Zeron engine version. Any field is null when that machine can't say. Another device answers within about 5 s, or the error says it's offline (with when it was last seen) or its Zeron is too old. Reports are cached for 5 s.",
+            input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_projects",
@@ -442,6 +449,14 @@ warning, danger (status only); border (hairlines, gridlines); chart1, chart2, ch
 chart5, chart6 (series, in order; \
 chart1 is the accent). They follow the reader's theme, light or dark, on frosted glass or an opaque \
 surface, so never assume a background color.\n\
+\n\
+Hover must not move the page. A visual sits in a transcript, so anything you show only while the \
+pointer is on something (a custom readout, a detail line, a hint, a row's or canvas's hover state) must \
+not change the visual's height, or everything under it jumps as the pointer crosses it. Reserve its \
+space at rest (a placeholder or an empty line of the same height, e.g. ui.text { s.picked or \" \" }), \
+or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or a scene point's hint). \
+Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
+never changes the chart's height.\n\
 \n\
 Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
 of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
@@ -841,6 +856,7 @@ impl Tools {
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
+            DEVICE_STATS => self.device_stats(parse(args)?).await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
@@ -864,6 +880,7 @@ impl Tools {
             plugins::PLUGIN_STATUS => return self.plugin_status(args).await,
             plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
             plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
+            plugins::EXPORT_PLUGIN => return self.export_plugin(args).await,
             plugins::LIST_TEMPLATES
             | plugins::CREATE_TEMPLATE
             | plugins::USE_TEMPLATE
@@ -958,6 +975,35 @@ impl Tools {
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
             })).collect::<Vec<_>>()
+        }))
+    }
+
+    /// The chosen device's machine stats (`DeviceStats`, routed by
+    /// `targetDeviceId`). The engine words a remote failure (offline, too
+    /// old, no answer); only this engine lacking the method is said here.
+    async fn device_stats(&self, args: DeviceArgs) -> anyhow::Result<Value> {
+        let (devices, local) =
+            tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
+        let mut params = json!({});
+        if device != local {
+            params["targetDeviceId"] = json!(device);
+        }
+        let stats = match self
+            .zeron
+            .call_rpc(zeron_rpc::methods::DEVICE_STATS, params)
+            .await
+        {
+            Ok(stats) => stats,
+            Err(zeron_rpc::RpcError::UnknownMethod(_)) => anyhow::bail!(
+                "This device's running Zeron is too old to report stats: update Zeron and restart it"
+            ),
+            Err(error) => anyhow::bail!("{error}"),
+        };
+        let name = devices.iter().find(|d| d.id == device).map(|d| d.name.clone());
+        Ok(json!({
+            "device": { "id": device, "name": name, "local": device == local },
+            "stats": stats,
         }))
     }
 
@@ -1068,7 +1114,7 @@ impl Tools {
         // The chat's facts don't depend on reaching its host.
         match self
             .zeron
-            .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+            .window_of(&chat, TranscriptWindow::tail(1))
             .await
         {
             Ok(view) => {
@@ -1399,9 +1445,8 @@ impl Tools {
         let limit = args.limit.unwrap_or(40).clamp(1, 500);
         let view = self
             .zeron
-            .transcript_window(
-                &chat.id,
-                Some(&chat.device_id),
+            .window_of(
+                &chat,
                 TranscriptWindow {
                     limit,
                     offset: args.offset,
@@ -1624,7 +1669,7 @@ impl Tools {
             Some(id) => id,
             None => self
                 .zeron
-                .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+                .window_of(&chat, TranscriptWindow::tail(1))
                 .await?
                 .info
                 .pending_input
@@ -1972,9 +2017,14 @@ mod tests {
         accounts: Option<Value>,
         remote_accounts: Option<Value>,
         beta_remote: bool,
+        /// `dev-remote` is asleep: every read addressed to it fails, the way
+        /// a dial to a sleeping Cloud machine does.
+        remote_dark: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// `DeviceStats` reply; absent = an engine without the method.
+        stats: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1997,6 +2047,15 @@ mod tests {
                 }
             }
             let remote = params["targetDeviceId"] == "dev-remote";
+            if remote && self.remote_dark && method != methods::LIST_HARNESSES {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                return Err(RpcError::Transport(
+                    "peer dev-remote: device is offline (no recent presence)".into(),
+                ));
+            }
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
                 methods::ENGINE_INFO => RpcReply::Value(json!({
@@ -2117,6 +2176,13 @@ mod tests {
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
+                methods::DEVICE_STATS if self.stats.is_some() => {
+                    self.reads
+                        .lock()
+                        .unwrap()
+                        .push((method.into(), params.clone()));
+                    RpcReply::Value(self.stats.clone().unwrap_or_default())
+                }
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -2138,6 +2204,56 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn device_stats_asks_the_chosen_device_and_names_it() {
+        let def = catalog().into_iter().find(|d| d.name == DEVICE_STATS).expect("listed");
+        assert_eq!(def.input_schema["properties"]["device"]["type"], "string");
+        assert!(def.input_schema.get("required").is_none(), "device is optional");
+
+        let stats = json!({
+            "os": { "name": "Darwin", "arch": "arm64" },
+            "memory": { "totalBytes": 34359738368u64, "availableBytes": null },
+            "zeron": { "engineVersion": "0.2.139" }
+        });
+        let world = Arc::new(World { stats: Some(stats.clone()), ..Default::default() });
+        let tools = tools(world.clone(), Origin::default());
+        assert!(tools.has(DEVICE_STATS));
+
+        // Local: no target, the engine answers for itself.
+        let local = tools.call(DEVICE_STATS, json!({})).await.unwrap();
+        assert_eq!(local["device"], json!({ "id": "dev-local", "name": "Laptop", "local": true }));
+        assert_eq!(local["stats"], stats, "the report passes through as is, nulls kept");
+        // By name: routed to that device.
+        let remote = tools.call(DEVICE_STATS, json!({ "device": "worker" })).await.unwrap();
+        assert_eq!(remote["device"], json!({ "id": "dev-remote", "name": "Worker", "local": false }));
+        let reads = world.reads.lock().unwrap().clone();
+        let targets: Vec<&Value> = reads
+            .iter()
+            .filter(|(m, _)| m == methods::DEVICE_STATS)
+            .map(|(_, p)| &p["targetDeviceId"])
+            .collect();
+        assert_eq!(targets, [&Value::Null, &json!("dev-remote")]);
+
+        // Not one of this account's devices: refused before anything is asked.
+        let error = tools.call(DEVICE_STATS, json!({ "device": "someone-elses" })).await.unwrap_err();
+        assert!(error.contains("no device matches"), "{error}");
+        assert_eq!(world.reads.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn device_stats_says_when_a_device_is_away_or_this_engine_is_old() {
+        let dark = Arc::new(World { stats: Some(json!({})), remote_dark: true, ..Default::default() });
+        let error = tools(dark, Origin::default())
+            .call(DEVICE_STATS, json!({ "device": "dev-remote" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("offline"), "{error}");
+
+        let old = Arc::new(World::default());
+        let error = tools(old, Origin::default()).call(DEVICE_STATS, json!({})).await.unwrap_err();
+        assert!(error.contains("too old to report stats"), "{error}");
     }
 
     #[test]
@@ -3289,6 +3405,37 @@ mod tests {
                 _ => self.world.handle(method, params).await,
             }
         }
+    }
+
+    /// A sleeping host can't be read, and only a send wakes it: the send must go
+    /// out through this engine's doc regardless, and reading the chat falls back
+    /// to the local replica.
+    #[tokio::test]
+    async fn a_send_to_a_sleeping_host_still_goes_out() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            remote_dark: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let result = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .unwrap();
+        assert_eq!(result["sent"]["delivery"], "run");
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::QUEUE_COMMAND);
+            assert!(params.get("targetDeviceId").is_none(), "a local doc write, which wakes the host");
+        }
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(read["total"].as_u64().unwrap() > 0);
+        let info = tools.call("get_chat", json!({"chat":"Beta"})).await.unwrap();
+        assert!(info["messageCount"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

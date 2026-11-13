@@ -7,8 +7,9 @@
 //! in-memory buffers), and `commit` assembles them into
 //! `{uploads_root}/{id8}-{name}` and returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
-//! Attachments live only on the host device — every read proxies through the
-//! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
+//! Attachments live on the host device — every read proxies through the owning
+//! device via `ReadAttachmentChunk`. The edge only ever holds bytes in transit
+//! to a Cloud machine, until it has them (docs/design/cloud-attachments.md).
 //!
 //! `read_chunk` serves attachments back in 45KB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
@@ -71,6 +72,34 @@ pub struct AttachmentTransfer {
     pub file_name: String,
 }
 
+/// Rewrite a landed ref to its absolute path everywhere a prompt names it. An
+/// app capture names its image in an XML attribute, where both the ref and the
+/// path are escaped; everywhere else they're plain text.
+pub fn rewrite_pending_ref(prompt: &str, reference: &str, absolute: &str) -> String {
+    let attribute = |path: &str| format!("image=\"{}\"", xml_attribute_escape(path));
+    prompt
+        .replace(&attribute(reference), &attribute(absolute))
+        .replace(reference, absolute)
+}
+
+/// The escaping the composer gives an app capture's attributes.
+fn xml_attribute_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\r' => escaped.push_str("&#13;"),
+            '\n' => escaped.push_str("&#10;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 /// Pending refs listed on a text's attachment-ref lines (`- pending://…`).
 /// Line-wise so file names with spaces survive intact.
 pub fn pending_refs_in(text: &str) -> Vec<String> {
@@ -81,6 +110,38 @@ pub fn pending_refs_in(text: &str) -> Vec<String> {
         })
         .collect()
 }
+/// Every path listed on a text's attachment-ref lines (`- …`), refs or not.
+pub fn attachment_lines_in(text: &str) -> Vec<String> {
+    let Some(at) = text.find("Attached images (local files") else {
+        return Vec::new();
+    };
+    text[at..]
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let path = line.trim_start().strip_prefix("- ")?.trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// The last component of `path` in either separator: a path made on another
+/// device keeps its own (`C:\Users\…\x.png` read on macOS, or the reverse).
+fn foreign_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Whether `name` is a committed upload's (`{id8}-{sanitized name}`).
+fn is_upload_name(name: &str) -> bool {
+    let Some((id8, rest)) = name.split_once('-') else {
+        return false;
+    };
+    id8.len() == 8
+        && id8.chars().all(|c| c.is_ascii_alphanumeric())
+        && !rest.is_empty()
+        && sanitize(name) == name
+}
+
 /// Hard cap on an assembled file.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Multiple of 3 so independent base64 chunks concatenate losslessly.
@@ -222,6 +283,28 @@ impl Uploads {
         Ok(path.to_string_lossy().to_string())
     }
 
+    /// Save whole bytes fetched from the edge's attachment store, at the path
+    /// their `pending://` ref resolves to. Written aside and renamed: a landed
+    /// ref must only ever name a complete file (the drain trusts `is_file`).
+    pub fn commit_fetched(
+        &self,
+        upload_id: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<String, EngineError> {
+        self.staging_dir(upload_id)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(EngineError::Other("Upload too large".into()));
+        }
+        std::fs::create_dir_all(&self.inner.dir)?;
+        std::fs::create_dir_all(&self.inner.tmp)?;
+        let target = self.pending_target(upload_id, file_name);
+        let part = self.inner.tmp.join(format!("{upload_id}.fetched"));
+        std::fs::write(&part, bytes)?;
+        std::fs::rename(&part, &target)?;
+        Ok(target.to_string_lossy().to_string())
+    }
+
     /// The committed absolute path a pending ref resolves to on THIS device
     /// (`{uploads_dir}/{id8}-{sanitize(name)}`), whether or not it exists yet.
     pub fn pending_target(&self, upload_id: &str, file_name: &str) -> PathBuf {
@@ -232,6 +315,42 @@ impl Uploads {
         self.inner
             .dir
             .join(format!("{id8}-{}", sanitize(file_name)))
+    }
+
+    /// This device's own copy of an upload named by a path made elsewhere:
+    /// another device's or another OS user's uploads dir (its absolute path
+    /// means nothing here), whose bytes were also committed here under the
+    /// same deterministic `{id8}-{name}`. `None` when `path` is readable as it
+    /// is, isn't an upload's, or this device has no such file.
+    pub fn local_copy(&self, path: &str) -> Option<String> {
+        if is_pending_ref(path) || Path::new(path).is_file() {
+            return None;
+        }
+        let name = foreign_file_name(path);
+        if !is_upload_name(name) {
+            return None;
+        }
+        let read_roots = self
+            .inner
+            .read_only_roots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        std::iter::once(self.inner.dir.clone())
+            .chain(read_roots)
+            .map(|root| root.join(name))
+            .find(|candidate| candidate.is_file())
+            .map(|found| found.to_string_lossy().to_string())
+    }
+
+    /// A path the agent can open on THIS device: a landed `pending://` ref's
+    /// file, this device's copy of an upload named by another's path, else
+    /// the path as given.
+    pub fn localize(&self, path: &str) -> Option<String> {
+        if is_pending_ref(path) {
+            return self.resolve_pending(path);
+        }
+        self.local_copy(path)
     }
 
     /// Resolve a `pending://` ref against this device's uploads dir.
@@ -329,8 +448,13 @@ impl Uploads {
         // Queued-attachment refs resolve against this device's uploads dir
         // (present only once the transfer landed) — then jail as usual.
         let resolved_ref;
+        // (So does an upload named by another device's or user's path, by
+        // this device's copy of it.)
         let path = if is_pending_ref(path) {
             resolved_ref = self.resolve_pending(path).ok_or_else(outside)?;
+            resolved_ref.as_str()
+        } else if let Some(local) = self.local_copy(path) {
+            resolved_ref = local;
             resolved_ref.as_str()
         } else {
             path
@@ -660,12 +784,17 @@ mod tests {
             ("sky.hdr".to_owned(), b"hdr".to_vec()),
         ];
         uploads.store_visual_assets("v:abc", &assets).unwrap();
-        let script = uploads.store_visual("v:abc", "return ui.text 'hi'").unwrap();
+        let script = uploads
+            .store_visual("v:abc", "return ui.text 'hi'")
+            .unwrap();
         let stem = script.strip_suffix("-visual.luau").unwrap();
         let names: Vec<String> =
             serde_json::from_slice(&std::fs::read(format!("{stem}-assets.json")).unwrap()).unwrap();
         assert_eq!(names, ["prism.glb", "sky.hdr"]);
-        assert_eq!(std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(), b"hdr");
+        assert_eq!(
+            std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(),
+            b"hdr"
+        );
         uploads.remove_visual("v:abc");
         assert_eq!(std::fs::read_dir(uploads.dir()).unwrap().count(), 0);
     }
@@ -794,6 +923,111 @@ mod tests {
             .unwrap();
         let committed = uploads.commit("abcd1234-rest", "my photo (1).png").unwrap();
         assert_eq!(uploads.resolve_pending(&r), Some(committed));
+    }
+
+    /// One upload committed here, as `{id8}-image.png`.
+    fn committed_here(uploads: &Uploads) -> String {
+        uploads
+            .append(
+                "2fbd2b3b-9c1e",
+                &BASE64.encode(b"\x89PNG\r\n\x1a\n"),
+                Some(0),
+            )
+            .unwrap();
+        uploads.commit("2fbd2b3b-9c1e", "image.png").unwrap()
+    }
+
+    #[test]
+    fn another_users_windows_path_finds_this_devices_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let here = committed_here(&uploads);
+        let theirs = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+        assert_eq!(uploads.local_copy(theirs), Some(here.clone()));
+        assert_eq!(uploads.localize(theirs), Some(here.clone()));
+        // Forward slashes too (another Mac's, or a Windows path written so).
+        let other = "/Users/someone/.zeron/uploads/2fbd2b3b-image.png";
+        assert_eq!(uploads.local_copy(other), Some(here.clone()));
+        let mixed = "C:/Users/ADMIN/AppData/Local/Zeron/uploads/2fbd2b3b-image.png";
+        assert_eq!(uploads.local_copy(mixed), Some(here));
+    }
+
+    #[test]
+    fn a_path_that_reads_here_or_isnt_an_upload_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let here = committed_here(&uploads);
+        assert_eq!(uploads.local_copy(&here), None, "already this device's");
+        assert_eq!(
+            uploads.local_copy(r"C:\Users\ADMIN\Pictures\image.png"),
+            None
+        );
+        assert_eq!(
+            uploads.local_copy(r"C:\Users\ADMIN\uploads\0badf00d-image.png"),
+            None
+        );
+        assert_eq!(
+            uploads.local_copy(r"C:\Users\ADMIN\uploads\2fbd2b3b-image (1).png"),
+            None
+        );
+        assert_eq!(uploads.local_copy(r"C:\x\..\2fbd2b3b-image.png\.."), None);
+    }
+
+    #[test]
+    fn another_users_path_reads_back_from_this_devices_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        committed_here(&uploads);
+        let theirs = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+        let chunk = uploads.read_chunk(theirs, 0, &[]).unwrap();
+        assert_eq!(chunk.name, "2fbd2b3b-image.png");
+        assert_eq!(BASE64.decode(chunk.data).unwrap(), b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn attachment_lines_are_every_listed_path() {
+        let text = "Look\n\nAttached images (local files — open them to view):\n- C:\\Users\\ADMIN\\uploads\\2fbd2b3b-image.png\n- pending://u2/c.png";
+        assert_eq!(
+            attachment_lines_in(text),
+            vec![
+                "C:\\Users\\ADMIN\\uploads\\2fbd2b3b-image.png".to_string(),
+                "pending://u2/c.png".to_string()
+            ]
+        );
+        assert!(attachment_lines_in("- a list item with no trailer").is_empty());
+    }
+
+    #[test]
+    fn a_capture_attribute_and_the_trailer_each_get_their_own_spelling() {
+        let reference = "pending://u1/a&b.png";
+        let prompt = "look\n\n<appshot app=\"Notes\" image=\"pending://u1/a&amp;b.png\">\nbody\n</appshot>\n\n- pending://u1/a&b.png";
+        assert_eq!(
+            rewrite_pending_ref(prompt, reference, "/home/o'neil/u1-a_b.png"),
+            "look\n\n<appshot app=\"Notes\" image=\"/home/o&apos;neil/u1-a_b.png\">\nbody\n</appshot>\n\n- /home/o'neil/u1-a_b.png"
+        );
+        // A name with nothing to escape still gets an escaped path in the attribute.
+        let plain = "<appshot image=\"pending://u1/a.png\">\n- pending://u1/a.png";
+        assert_eq!(
+            rewrite_pending_ref(plain, "pending://u1/a.png", "/a&b/a.png"),
+            "<appshot image=\"/a&amp;b/a.png\">\n- /a&b/a.png"
+        );
+    }
+
+    #[test]
+    fn fetched_bytes_land_where_the_ref_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::new(dir.path());
+        let reference = pending_ref("abcd1234-rest", "my photo (1).png");
+        assert_eq!(uploads.resolve_pending(&reference), None);
+
+        let path = uploads
+            .commit_fetched("abcd1234-rest", "my photo (1).png", b"png")
+            .unwrap();
+        assert_eq!(uploads.resolve_pending(&reference).as_deref(), Some(path.as_str()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        // Nothing half-written stays behind, and a bad id can't name a path.
+        assert_eq!(std::fs::read_dir(dir.path().join("uploads/tmp")).unwrap().count(), 0);
+        assert!(uploads.commit_fetched("../evil", "a.png", b"png").is_err());
     }
 
     #[test]
@@ -1003,15 +1237,22 @@ mod tests {
             assert!(error.contains(why), "{path:?}: {error}");
         }
 
-        // A folder reached through a link of its own (`/tmp` on macOS)
-        // serves its images by either name.
+        // A folder behind links (its own, or an ancestor's: `/tmp` and
+        // `/var` on macOS) serves its images by the name the chat knows it
+        // by and by its real one, the links resolved.
         #[cfg(unix)]
         {
+            let real = std::fs::canonicalize(&inside).unwrap();
             let via = elsewhere.path().join("chat-folder");
             std::os::unix::fs::symlink(folder.path(), &via).unwrap();
-            for path in [via.join("shots").join("before.png"), inside.clone()] {
-                let chunk = read_chat_image_chunk(path.to_str().unwrap(), 0, &via)
-                    .unwrap_or_else(|e| panic!("{path:?}: {e}"));
+            for (root, path) in [
+                (folder.path(), inside.clone()),
+                (folder.path(), real.clone()),
+                (via.as_path(), via.join("shots").join("before.png")),
+                (via.as_path(), real.clone()),
+            ] {
+                let chunk = read_chat_image_chunk(path.to_str().unwrap(), 0, root)
+                    .unwrap_or_else(|e| panic!("{path:?} in {root:?}: {e}"));
                 assert_eq!(BASE64.decode(&chunk.data).unwrap(), png);
             }
         }
@@ -1232,7 +1473,11 @@ impl Uploads {
     /// Store the files a visual's script uses, beside it: each as
     /// `{id}-asset-{name}`, and `{id}-assets.json` listing their names
     /// (clients find it from the script's path).
-    pub fn store_visual_assets(&self, id: &str, assets: &[(String, Vec<u8>)]) -> Result<(), EngineError> {
+    pub fn store_visual_assets(
+        &self,
+        id: &str,
+        assets: &[(String, Vec<u8>)],
+    ) -> Result<(), EngineError> {
         use std::io::Write;
         if assets.is_empty() {
             return Ok(());
@@ -1258,7 +1503,8 @@ impl Uploads {
                 written.push(file);
                 names.push(name);
             }
-            let manifest = serde_json::to_vec(&names).map_err(|err| EngineError::Other(err.to_string()))?;
+            let manifest =
+                serde_json::to_vec(&names).map_err(|err| EngineError::Other(err.to_string()))?;
             write(&format!("{id}-assets.json"), &manifest)
         })();
         if stored.is_err() {
@@ -1279,7 +1525,9 @@ impl Uploads {
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
         {
             for name in names {
-                let _ = std::fs::remove_file(self.dir().join(format!("{id}-asset-{}", sanitize(&name))));
+                let _ = std::fs::remove_file(
+                    self.dir().join(format!("{id}-asset-{}", sanitize(&name))),
+                );
             }
         }
         let _ = std::fs::remove_file(manifest);

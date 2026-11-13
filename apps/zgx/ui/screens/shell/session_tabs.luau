@@ -9,8 +9,10 @@
 
 local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
+local control = require("@ds/control")
 local SessionRow = require("@ds/session_row")
 local motion = require("@ds/motion")
+local TabStrip = require("@ds/tab_strip")
 local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
 local sessions = require("@account/sessions")
@@ -28,6 +30,14 @@ local FAN = { { x = 0, turn = -3 }, { x = 6, turn = 3 }, { x = 10, turn = 7 } }
 
 -- Each tab's node, for its width (`Strip` keeps the one showing in view).
 local tab_refs: { [string]: any } = {}
+-- One more each time a tab's node mounts. `tab_refs` is a plain table, so what
+-- looked a tab up before its node was there (the tab for a chat alone replaced
+-- by one as wide) would never look again: `tab_ref` follows this.
+local tabs_mounted = ui.state("shell_session_tabs_mounted", 0)
+local function tab_ref(id: string): any
+	tabs_mounted:get()
+	return tab_refs[id]
+end
 
 local function chat_of(id: string): any
 	for _, c in sessions.now:get().chats do
@@ -41,7 +51,7 @@ local function project_of(c: any): any
 	if not c or not c.project then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == c.project then
 			return p
 		end
@@ -224,6 +234,10 @@ local function pane_tile(id: string, place: number): Node
 				local p = now()
 				return if p then look.of(p).emoji else nil
 			end,
+			project = function(): string?
+				local p = now()
+				return if p then p.id else nil
+			end,
 		}
 	end, { w = TILE, h = TILE, shrink = 0, enter = tile_enter, exit = tile_exit })
 end
@@ -285,8 +299,43 @@ local function title(id: string): string
 	return if c then c.title else ""
 end
 
-local Tab = ui.component(function(props: { chat: string }): Node
+-- What a tab shows, still (the tab lifted by a drag, and the drag's
+-- preview): its tiles as they stand, its title, and room for its end.
+-- (Nothing here eases: a drag's preview has no clock for it.)
+local function still_face(key: string): Node
+	local count = #stack_of(key)
+	local places: { any } = { relative = true, shrink = 0, h = TILE, w = TILE + FAN[math.clamp(count, 1, STACK)].x }
+	for at = math.min(count, STACK), 1, -1 do
+		local fan = FAN[at]
+		table.insert(places, ui.div {
+			absolute = true,
+			top = 0,
+			left = fan.x,
+			w = TILE,
+			h = TILE,
+			rounded = "$radius.sm",
+			rotate = if count >= 2 then fan.turn else 0,
+			bg = if count >= 2 then "$zeron.menu.solid" else "#00000000",
+			shadow = if count >= 2 and at == 1 then "$shadow.sm" else false,
+			pane_tile(key, at),
+		})
+	end
+	return ui.row {
+		grow = 1,
+		min_w = 0,
+		h_full = true,
+		pl = ui.raw(4, "as far in as the tile is from its top"),
+		pr = ui.raw(4, "the tab's inset"),
+		gap = "$zeron.space.tight",
+		items = "center",
+		ui.div(places),
+		ds.FadeText { title(key), max_w = LABEL_MAX, min_w = 0, grow = 1, text_size = "$font.size.sm", weight = "$font.weight.medium" },
+	}
+end
+
+local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 	local id = props.chat
+	local strip = props.strip
 	local hovered = ui.use_state(false)
 	-- A chat held over it, that dropping would bring in.
 	local held = ui.use_state(false)
@@ -324,6 +373,9 @@ local Tab = ui.component(function(props: { chat: string }): Node
 		ui.row {
 			id = `session-tab-{id}`,
 			ref = own,
+			on_mount = function()
+				tabs_mounted:set(tabs_mounted:peek() + 1)
+			end,
 			role = "tab",
 			label = function(): string
 				return title(id)
@@ -337,12 +389,10 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			items = "center",
 			rounded = "$radius.lg",
 			cursor = "pointer",
-			bg = function(): string
-				if active() then
-					return "$zeron.selected.flat.bg"
-				end
-				return if hovered:get() or held:get() then "$hover" else "#00000000"
-			end,
+			relative = true,
+			-- (Chosen, it stands on the strip's wash, which glides to it; the
+			-- others take the hover wash, `TabStrip.Wash`. Pressed, any darkens.)
+			active = { bg = "$pressed" },
 			color = function(): string
 				return if active() or hovered:get() then "$text.primary" else "$text.secondary"
 			end,
@@ -355,84 +405,60 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			on_aux_click = function(e: any)
 				if e.button == "middle" then
 					close(id)
+				else
+					route.aux_click(e)
 				end
 			end,
-			-- (`session`, as a sidebar row's: dropped on a pane, it joins the split.)
+			focus = control.ring,
+			on_key = TabStrip.keys(id, function(): { string }
+				return shown:peek()
+			end, function(other: string)
+				-- (The keys stay on the strip, on the tab chosen.)
+				route.keep_keys()
+				route.open_session(face(other))
+			end, function(other: string): any
+				return tab_refs[other]
+			end),
+			-- Dragged, it lifts and follows the pointer along the strip, the others
+			-- making room (`ds/tab_strip`); let go, it stays where it lands.
+			-- (`session`, as a sidebar row's: carried off the strip onto a pane, it
+			-- joins the split, whose panes show where it can land.)
+			on_press = function(e: any)
+				strip.press(e)
+			end,
 			on_drag = function(): any
+				strip.begin(id)
 				return { session_tab = id, session = face(id) }
 			end,
-			-- The tab as it stands, on the window's colour. (Nothing here eases: a drag's
-			-- preview has no clock for it.)
-			drag_preview = function(): Node
-				local box = own:peek()
-				local count = #stack_of(id)
-				local places: { any } = { relative = true, shrink = 0, h = TILE, w = TILE + FAN[math.clamp(count, 1, STACK)].x }
-				for at = math.min(count, STACK), 1, -1 do
-					local fan = FAN[at]
-					table.insert(places, ui.div {
-						absolute = true,
-						top = 0,
-						left = fan.x,
-						w = TILE,
-						h = TILE,
-						rounded = "$radius.sm",
-						rotate = if count >= 2 then fan.turn else 0,
-						bg = if count >= 2 then "$zeron.menu.solid" else "#00000000",
-						shadow = if count >= 2 and at == 1 then "$shadow.sm" else false,
-						pane_tile(id, at),
-					})
-				end
-				return ui.div {
-					rounded = "$radius.lg",
-					bg = "$background",
-					shadow = "$shadow.sm",
-					ui.row {
-						w = if box then box.width else nil,
-						h = TAB_H,
-						pl = ui.raw(4, "as far in as the tile is from its top"),
-						pr = ui.raw(4, "the tab's inset"),
-						gap = "$zeron.space.tight",
-						items = "center",
-						rounded = "$radius.lg",
-						bg = if active() then "$zeron.selected.flat.bg" else "#00000000",
-						color = if active() then "$text.primary" else "$text.secondary",
-						ui.div(places),
-						ds.FadeText { title(id), max_w = LABEL_MAX, min_w = 0, grow = 1, text_size = "$font.size.sm", weight = "$font.weight.medium" },
-					},
-				}
+			on_drag_end = function(payload: any, accepted: boolean)
+				splits.dragging:set(false)
+				strip.ended(payload, accepted)
 			end,
-			on_drag_over = function(payload: any, e: any)
-				local other = if type(payload) == "table" then payload.session_tab else nil
-				if not other then
-					local chat = carried(payload)
-					if not chat then
-						return
-					end
-					-- Dropped on it, the chat joins it.
-					local can = splits.can_join(chat, id)
-					if held:peek() ~= can then
-						held:set(can)
-					end
+			drag_preview = function(): Node
+				return strip.preview(id)
+			end,
+			opacity = function(): number
+				return strip.opacity(id)
+			end,
+			-- (A tab of these goes to the strip's own drop: a chat, a sidebar's
+			-- row or a pane's head, comes here.)
+			drop_when = function(payload: any): boolean
+				return carried(payload) ~= nil
+			end,
+			on_drag_over = function(payload: any)
+				local chat = carried(payload)
+				if not chat then
 					return
 				end
-				if other == id then
-					return
-				end
-				local list = shown:peek()
-				local from, here = table.find(list, other), table.find(list, id)
-				if not from or not here then
-					return
-				end
-				local past_middle = e.local_x > e.w / 2
-				if (from < here and past_middle) or (from > here and not past_middle) then
-					splits.move_tab(other, id)
+				-- Dropped on it, the chat joins it.
+				local can = splits.can_join(chat, id)
+				if held:peek() ~= can then
+					held:set(can)
 				end
 			end,
 			on_drag_leave = function()
 				held:set(false)
 			end,
-			-- (A tab dropped on a tab has moved already. A chat, a sidebar's row or
-			-- a pane's head, joins it.)
 			on_drop = function(payload: any)
 				held:set(false)
 				local chat = carried(payload)
@@ -451,6 +477,9 @@ local Tab = ui.component(function(props: { chat: string }): Node
 				route.open_session(face(id))
 				return true
 			end,
+			TabStrip.Wash(function(): boolean
+				return (hovered:get() or held:get()) and not active()
+			end),
 			tile(id),
 			ds.FadeText {
 				function(): string
@@ -505,6 +534,36 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	-- few points. Over the last few, as the end comes to rest, it goes.
 	local offset = ui.state("shell_session_tabs_offset", 0)
 	local view, content = ui.ref(), ui.ref()
+	local strip = TabStrip.new {
+		key = "session_tab",
+		items = function(): { string }
+			return shown:get()
+		end,
+		width = function(id: string): number
+			local r = tab_ref(id)
+			return if r then r.width or 0 else 0
+		end,
+		content = content,
+		offset = offset,
+		selected = function(): string?
+			return if route.session:get() then splits.current_key() else nil
+		end,
+		face = still_face,
+		-- (To the place of the one standing at `index` before it moved.)
+		commit = function(id: string, index: number)
+			local onto = shown:peek()[index]
+			if onto and onto ~= id then
+				splits.move_tab(id, onto)
+			end
+		end,
+		-- (Off the strip, the split's panes show where it can land; over
+		-- it, they stay as they are.)
+		on_away = function(away: boolean)
+			splits.dragging:set(away)
+		end,
+		h = TAB_H,
+		rounded = "$radius.lg",
+	}
 	local function bands(): { number }
 		local at = offset:get()
 		local past = (content.width or 0) - (view.width or 0) - at
@@ -518,11 +577,18 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local list = shown:get()
 		local total = content.width or 0
 		local room = view.width or 0
+		-- (Read so it runs again once a carried tab has landed.)
+		strip.order:get()
 		if not s or room <= 0 then
 			return
 		end
+		-- (Not while a tab's carried or settling: it lands on its slot as the
+		-- strip stands, and the strip scrolls under it near an end.)
+		if strip.busy() then
+			return
+		end
 		for _, id in list do
-			local r = tab_refs[id]
+			local r = tab_ref(id)
 			if not r or (r.width or 0) <= 0 then
 				return
 			end
@@ -569,7 +635,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		end,
 		h = 34,
 		pointer_events = "none",
-		ui.row {
+		ui.row(strip.zone {
 			id = "session-tabs",
 			role = "tablist",
 			label = "Open chats",
@@ -584,7 +650,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			pr = function(): any
 				return ui.raw(props.right(), "clear of the title bar's controls at the right")
 			end,
-			ui.scroll_x {
+			strip.Frame(ui.scroll_x {
 				id = "session-tabs-scroll",
 				ref = view,
 				offset = offset,
@@ -594,21 +660,23 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 				fade_x = bands,
 				ui.row {
 					ref = content,
+					relative = true,
 					gap = "$zeron.space.hair",
 					items = "center",
-					ui.each(shown, function(id: string): Node
-						return Tab { chat = id }
+					strip.Highlight(),
+					ui.each(strip.order, function(id: string): Node
+						return Tab { chat = id, strip = strip }
 					end, {
 						key = function(id: string): string
 							return id
 						end,
 						direction = "row",
 						gap = "$zeron.space.hair",
-						animate = motion.layout(SLIDE),
+						animate = motion.tab_slide(),
 					}),
 				},
-			},
-		},
+			}),
+		}),
 	}
 end
 
