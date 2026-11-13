@@ -53,7 +53,7 @@ export type Graph = {
 M.R = { device = 16, orchestrator = 10, brain = 9, thread = 5 }
 -- An island (a machine's room) reaches PAD past its farthest member;
 -- islands keep GAP apart, rim to rim.
-M.ISLAND_PAD, M.ISLAND_GAP = 28, 72
+M.ISLAND_PAD, M.ISLAND_GAP = 36, 72
 M.ALPHA_MIN = 0.004
 local DECAY = 0.028
 local FRICTION = 0.58
