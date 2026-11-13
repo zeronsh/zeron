@@ -23,6 +23,14 @@ local items = ui.state("orch_board_items", sample.now.items :: { any })
 local filter = ui.state("filter", nil :: string?)
 local compact = ui.state("compact", false)
 
+-- (The theme, for pictures: `theme_dark`, `theme_light`.)
+for _, t in { "dark", "light" } do
+	ui.command { id = `theme_{t}`, title = `{t} theme`, run = function()
+		ui.theme.follow_system(false)
+		ui.theme.current:set(`zeron-{t}`)
+	end }
+end
+
 local chats: { [string]: any } = {}
 -- (A thread's todo from the sample as written: `at` shifts every `done`
 -- key as a time, its todo's count among them.)

@@ -78,7 +78,7 @@ end
 return {
 	id = "orch-board",
 	title = "Board",
-	about = "Where every piece of an orchestrator's work stands: Now, Next, Blocked, Review and Done today, each card in its orchestrator's hue with its progress, threads, pull request and, once there is one, its outcome. Wide, every orchestrator with a filter; narrow, one orchestrator's, stacked.",
+	about = "Where every piece of an orchestrator's work stands: Inbox, Now, Next, Blocked, Review and Done today, the columns sharing its width evenly. Each card shows its status, progress, threads, pull request and, once there is one, its outcome in two lines; whose it is, where the board holds several orchestrators' work. Cards drag between columns and within one. Wide, every orchestrator with a filter; narrow, one orchestrator's, stacked.",
 	demo = function(): Node
 		return ui.column {
 			w_full = true,
