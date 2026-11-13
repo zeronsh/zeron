@@ -315,10 +315,13 @@ impl EngineRpc {
         let busy = session.as_ref().filter(|_| route.state != RouteState::Done).map(|s| {
             s.status == zeron_proto::SessionStatus::Working || super::watchers::task_state(s) == RouteState::Answered
         });
+        let entries = chat
+            .as_deref()
+            .and_then(|c| self.doc_host_ref().open(c).ok()?.doc().read_entries().ok())
+            .unwrap_or_default();
+        let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
         let latest = chat.as_deref().and_then(|c| {
-            let entries = self.doc_host_ref().open(c).ok()?.doc().read_entries().ok()?;
             let others: Vec<String> = dump_messages_to(&self.orchestration().state().dumps, c);
-            let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
             super::watchers::latest_reply_until(&entries, sent, &others)
         });
         let marked = card
@@ -356,11 +359,42 @@ impl EngineRpc {
         });
         let Some(route) = updated else { return false };
         // Waiting on a decision: its ask (one per question; none raised
-        // twice), on this card.
+        // twice), on this card. Not one the person already answered (a
+        // message reached the thread after the one that asked: their reply,
+        // a relayed answer, an answered ask's delivery), which closes any
+        // open ask for it; nor for a card approved or moved by hand.
         if let (Some(found), Some(chat)) = (&decision, chat.as_deref())
             && busy != Some(true)
+            && card.approved_at.is_none()
+            && card.moved_at.is_none()
         {
-            self.ask_for(chat, found, Some((&dump.id, &route.id)));
+            match super::turn_asks::answered_after_asking(&entries, Some(sent)) {
+                Some(reply) => {
+                    let open: Vec<String> = self
+                        .orchestration()
+                        .state()
+                        .asks
+                        .iter()
+                        .filter(|a| a.from_chat == chat && a.state == zeron_proto::orchestration::AskState::Open)
+                        .filter(|a| {
+                            a.item_id.as_deref() == Some(card.id.as_str())
+                                || zeron_proto::turn_question::same_question(
+                                    &a.question,
+                                    &a.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>(),
+                                    &found.question,
+                                    &found.options,
+                                )
+                        })
+                        .map(|a| a.id.clone())
+                        .collect();
+                    for id in open {
+                        super::turn_asks::close(self.orchestration(), &id, zeron_proto::orchestration::AnswerVia::Thread, &reply, chrono::Utc::now());
+                    }
+                }
+                None => {
+                    self.ask_for(chat, found, Some((&dump.id, &route.id)));
+                }
+            }
         }
         self.sync_card(&card.id, &route);
         self.orchestration().item(&card.id).is_some_and(|c| c.state != WorkState::Review || c.outcome != card.outcome)

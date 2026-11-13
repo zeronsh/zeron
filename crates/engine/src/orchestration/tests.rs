@@ -2176,3 +2176,55 @@ async fn a_device_reference_is_context_and_the_place_a_new_card_goes() {
     assert_ne!(route_row(&core, &dump, &id).device_id.as_deref(), Some("dev-gone"));
     core.sessions.shutdown().await;
 }
+
+/// The live "Topology lines: pick a variant" card: its thread asked, and the
+/// person picked later (a relayed message at 19:40). The start's backfill
+/// raises no ask for it, and closes the one that was open; a card whose
+/// thread asked and heard nothing since gets its ask.
+#[tokio::test]
+async fn the_start_raises_no_ask_the_person_already_answered() {
+    let (_temp, core) = core().await;
+    let rpc = core.rpc_service();
+    let asked = "The four Topology variations are built and scored.\n\n| Version | Score |\n|---|---|\n| (a) inline tag | 8 |\n| (d) coloured edge | 8.5 |\n\nI recommend (a) with all three. Tell me which version you want and I'll polish it and merge it.\n\nThe graph label decision (accept round 9, or keep iterating) is also still yours to make.";
+    let mut cards = Vec::new();
+    for (chat, title) in [("9ad131f1-map", "Topology lines: pick a variant"), ("other-map", "Map machine headings: decide R9")] {
+        let (dump, _, r) = routed_thread(&core, chat, &[title]).await;
+        push(&core, chat, "u1", zeron_doc::MessageRole::User, title);
+        push(&core, chat, "a1", zeron_doc::MessageRole::Assistant, asked);
+        // As the old rule left it: in Review, its route done with no review.
+        outcome(&core, chat, &dump, &r[0].0, asked, RouteState::Done).await;
+        core.orchestration.workspace().write_orchestration(|doc| {
+            let mut d = doc.dump(&dump).unwrap();
+            d.routes[0].state = RouteState::Done;
+            d.routes[0].review = None;
+            doc.upsert_dump(&d);
+        });
+        // The first's ask (from its outcome) stays open; the second's is
+        // dismissed, as if it was never raised.
+        if chat == "other-map" {
+            for a in asks_from(&core, chat) {
+                op(&core, Caller::Local, json!({"op":"dismissAsk","id":a.id})).await.unwrap();
+            }
+        }
+        core.orchestration
+            .patch_item(WorkItemPatch { id: Some(r[0].1.clone()), state: Some(WorkState::Review), ..Default::default() })
+            .unwrap();
+        cards.push((chat, r[0].1.clone()));
+    }
+    let open_first = asks_from(&core, "9ad131f1-map").into_iter().filter(|a| a.state == AskState::Open).count();
+    assert_eq!(open_first, 1);
+    // The person's pick reaches the first thread, relayed by the Brain dump.
+    push(&core, "9ad131f1-map", "u2", zeron_doc::MessageRole::User, "[Message from Zeron chat Brain dump (brain-du).]\n\nThe person picked for the Topology variants. They want TWO options, switchable by the user.");
+    rpc.settle_card_states();
+    // Answered: no open ask, the old one closed by the thread's reply.
+    let first = asks_from(&core, "9ad131f1-map");
+    assert!(first.iter().all(|a| a.state != AskState::Open), "{first:#?}");
+    assert!(first.iter().any(|a| a.answered_via == Some(AnswerVia::Thread) && a.answer.as_deref().is_some_and(|t| t.contains("The person picked"))));
+    // Unanswered: its ask, on its card.
+    let second: Vec<_> = asks_from(&core, "other-map").into_iter().filter(|a| a.state == AskState::Open).collect();
+    assert_eq!(second.len(), 1, "{second:#?}");
+    assert_eq!(second[0].item_id.as_deref(), Some(cards[1].1.as_str()));
+    // Both wait in Now, not Review.
+    assert_eq!([card(&core, &cards[0].1), card(&core, &cards[1].1)], [WorkState::Active, WorkState::Active]);
+    core.sessions.shutdown().await;
+}

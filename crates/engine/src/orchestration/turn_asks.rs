@@ -271,6 +271,26 @@ pub(crate) fn plan(
     })
 }
 
+/// What answered a decision `chat`'s transcript asks after the message
+/// carrying `sent` (a route's delivery; the whole transcript without it):
+/// the message that reached the thread after the last message there that
+/// waits on the person ([`turn_question::detect`]), its words. `None`: no
+/// such message (or no message asking) yet. The same rule as a turn-end
+/// ask's close by a reply ([`replied`]).
+pub(crate) fn answered_after_asking(entries: &[SessionMessageEntry], sent: Option<&str>) -> Option<String> {
+    let from = sent
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| entries.iter().rposition(|e| e.role == MessageRole::User && texts(e).contains(s)))
+        .map_or(0, |i| i + 1);
+    let asked = entries[from..]
+        .iter()
+        .rposition(|e| e.role == MessageRole::Assistant && matches!(turn_question::detect(&texts(e)), Verdict::Ask(_)))
+        .map(|i| from + i)?;
+    let reply = entries[asked + 1..].iter().find(|e| e.role == MessageRole::User)?;
+    Some(zeron_proto::orchestration::prompt_text::one_line(&texts(reply), ANSWER_MAX))
+}
+
 /// `chat`'s open turn-end asks that a message after their turn answers:
 /// each with that message's words.
 pub(crate) fn replied(asks: &[Ask], chat: &str, entries: &[SessionMessageEntry]) -> Vec<(String, String)> {
