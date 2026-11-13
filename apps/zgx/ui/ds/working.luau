@@ -7,13 +7,14 @@
 -- (a chat's own). `sending`: the message is on its way, its turn not yet
 -- begun: "Sending…" and no clock, as Zeron's trailer bridges that gap
 -- (transcript.rs `sending_bridge`); the word and the clock start with the
--- turn.
+-- turn. `size = "sm"`: smaller, for a row in a list (a crew thread's, a
+-- machine's).
 
 local RollText = require("@self/roll_text")
 local status = require("@self/status")
 local locale = require("@self/locale")
 
-export type Props = { since: number | () -> number, seed: number?, sending: (() -> boolean)? }
+export type Props = { since: number | () -> number, seed: number?, sending: (() -> boolean)?, size: ("md" | "sm")? }
 
 -- Zeron's words (transcript.rs, `FLAVOUR_WORDS`, their keys), each held
 -- this long.
@@ -64,13 +65,17 @@ return ui.component(function(props: Props): Node
 	local function seconds(): number
 		return math.max(0, math.floor(now:get() - since()))
 	end
+	local small = props.size == "sm"
+	local text_size = if small then "$font.size.sm" else "$font.size.md"
 	return ui.row {
-		h = 26,
-		gap = "$space.2",
+		class = "ds-working",
+		h = if small then 20 else 26,
+		gap = if small then "$zeron.space.tight" else "$space.2",
+		min_w = 0,
 		items = "center",
 		selectable = false,
 		label = locale.t("ds.working.label"),
-		status.StatusIcon { kind = "working", size = 16 },
+		status.StatusIcon { kind = "working", size = if small then 14 else 16 },
 		RollText {
 			function(): string
 				if sending() then
@@ -79,15 +84,17 @@ return ui.component(function(props: Props): Node
 				local word = WORDS[(seed + seconds() // ROTATE) % #WORDS + 1]
 				return locale.s("ds.working.word", { word = locale.s(word) })
 			end,
-			text_size = "$font.size.md",
+			text_size = text_size,
 			color = "$text.secondary",
+			shrink = 0,
 		},
 		ui.text {
 			function(): string
 				return if sending() then "" else status.elapsed(seconds())
 			end,
 			tabular = true,
-			text_size = "$font.size.md",
+			shrink = 0,
+			text_size = text_size,
 			color = "$text.tertiary",
 		},
 	}

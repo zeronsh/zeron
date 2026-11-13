@@ -152,6 +152,7 @@ return ui.component(function(props: Props): Node
 	return ui.overlay {
 		id = props.id,
 		class = props.class or "orch-cells",
+		relative = true,
 		w = if props.fill then props.w else nil,
 		w_full = props.fill and props.w == nil,
 		grow = props.grow,

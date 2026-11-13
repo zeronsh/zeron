@@ -1145,7 +1145,8 @@
         "move_to": "Move to",
         "chip": "{target}, {intent}, {state}",
         "answer": "Answer",
-        "routing": "Routing"
+        "routing": "Routing",
+        "open_short": "Open"
       },
       "intent": {
         "task": "Task",
@@ -1189,7 +1190,9 @@
       },
       "machines": {
         "running": "{n} running",
-        "memory": "{used} / {total} GB"
+        "memory": "{used} / {total} GB",
+        "cpu": "CPU",
+        "memory_label": "Memory"
       },
       "comms": {
         "you": "You",
@@ -4001,7 +4004,8 @@
       "open_thread_named": "Open “{title}”",
       "outcome": "Outcome",
       "card_actions": "Card actions",
-      "threads": "{n, plural, one {# thread} other {# threads}}"
+      "threads": "{n, plural, one {# thread} other {# threads}}",
+      "empty": "Nothing on the board"
     },
     "reports": {
       "title": "Crew updates",
@@ -4121,6 +4125,15 @@
     },
     "map": {
       "working": "{n} working"
+    },
+    "figures": {
+      "urgent": "{n} urgent",
+      "now": "{n} now",
+      "blocked": "{n} blocked",
+      "review": "{n} in review",
+      "done": "{n} done today",
+      "online": "{n, plural, one {# machine} other {# machines}}",
+      "running": "{n} running"
     }
   }
 }

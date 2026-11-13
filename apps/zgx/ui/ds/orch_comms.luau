@@ -1,7 +1,10 @@
 -- Comms: what passes between agents, and between them and the person, as
 -- it happens: reports, messages, asks, answers, routes and spawns, newest
--- on top, each a compact row (who to whom, in their hues; what kind; how
--- long ago) with its one line under it. A new one slides in at the top.
+-- on top. Each a row: what kind (its glyph), who to whom in their hues, its
+-- one line under it. Those that came close together are one burst: their
+-- time said once, at its head, a thread down their side holding them
+-- together; a quiet gap between one burst and the next. A new one slides
+-- in at the top.
 --
 --   Comms {
 --     comms = function() return orchestration.comms:get() end,
@@ -24,6 +27,9 @@ export type Props = {
 	limit: number?,
 }
 
+-- Two events this close (seconds) are one burst.
+local BURST = 90
+
 local KIND_ICON: { [string]: Icon.Name } = {
 	report = "checklist",
 	message = "chat-round-line",
@@ -32,14 +38,31 @@ local KIND_ICON: { [string]: Icon.Name } = {
 	route = "map-arrow-right",
 	spawn = "plus",
 }
+-- A kind's glyph ink: an ask is the one that wants the person.
+local KIND_INK: { [string]: string } = {
+	ask = "$zeron.status.input",
+	answer = "$zeron.status.done",
+}
+
+-- A row as drawn: the event, and where it stands in its burst.
+type Row = { id: string, e: any, first: boolean, last: boolean, top: boolean }
 
 return ui.component(function(props: Props): Node
 	local limit = props.limit or 8
-	local rows = ui.computed(function(): { any }
+	local rows = ui.computed(function(): { Row }
 		local list = props.comms() or {}
-		local out = {}
+		local out: { Row } = {}
 		for i = #list, math.max(1, #list - limit + 1), -1 do
-			table.insert(out, list[i])
+			local e = list[i]
+			local prev = out[#out]
+			local first = prev == nil or ((prev.e.at or 0) - (e.at or 0)) > BURST
+			if prev and first then
+				prev.last = true
+			end
+			table.insert(out, { id = e.id, e = e, first = first, last = false, top = prev == nil })
+		end
+		if #out > 0 then
+			out[#out].last = true
 		end
 		return out
 	end)
@@ -49,6 +72,7 @@ return ui.component(function(props: Props): Node
 			gap = "$zeron.space.tight",
 			items = "center",
 			min_w = 0,
+			shrink = 1,
 			ui.show(function(): boolean
 				return id() ~= "you"
 			end, hue.Dot { hue = function(): number?
@@ -66,74 +90,106 @@ return ui.component(function(props: Props): Node
 				min_w = 0,
 				text_size = "$font.size.sm",
 				weight = "$font.weight.medium",
-				color = "$text.primary",
+				color = function(): string
+					return if id() == "you" then "$text.secondary" else "$text.primary"
+				end,
 			},
 		}
 	end
 
-	local function row(_e: any, _i: number, item: State<any>): Node
+	local function row(_r: Row, _i: number, item: State<Row>): Node
+		local function e(): any
+			return item:get().e
+		end
 		return ui.button {
 			class = "orch-comm",
 			label = function(): string
-				local e = item:get()
-				return e.summary or ""
+				return e().summary or ""
 			end,
 			w_full = true,
-			py = "$space.2",
-			gap = "$zeron.space.hair",
-			direction = "column",
-			items = "start",
+			pt = function(): any
+				local r = item:get()
+				return if r.first and not r.top then "$space.3" else 0
+			end,
+			gap = "$space.2",
+			items = "stretch",
 			bg = "#00000000",
 			layout = "position",
 			layout_duration = 220,
 			on_click = function()
-				local e = item:peek()
-				local target = if e.from ~= "you" then e.from else e.to
+				local ev = item:peek().e
+				local target = if ev.from ~= "you" then ev.from else ev.to
 				if target ~= "you" then
 					props.on_open(target)
 				end
 			end,
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
+			-- Its kind, and the thread down a burst.
+			ui.column {
+				w = 16,
+				shrink = 0,
 				items = "center",
-				party(function(): string
-					return item:get().from
-				end),
-				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "arrow-right", size = 12 } },
-				party(function(): string
-					return item:get().to
-				end),
-				ui.div { grow = 1 },
 				ui.div {
-					color = "$text.tertiary",
-					shrink = 0,
+					h = 20,
+					items = "center",
+					justify = "center",
+					color = function(): string
+						return KIND_INK[e().kind] or "$text.tertiary"
+					end,
 					Icon {
 						name = function(): Icon.Name
-							return KIND_ICON[item:get().kind] or "chat-round-line"
+							return KIND_ICON[e().kind] or "chat-round-line"
 						end,
-						size = 12,
+						size = 13,
+					},
+				},
+				ui.div {
+					class = "orch-comm-thread",
+					w = 1,
+					grow = 1,
+					bg = function(): string
+						return if item:get().last then "#00000000" else "$border"
+					end,
+				},
+			},
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				pb = "$space.2",
+				gap = "$zeron.space.hair",
+				ui.row {
+					w_full = true,
+					h = 20,
+					gap = "$zeron.space.tight",
+					items = "center",
+					party(function(): string
+						return e().from
+					end),
+					ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "arrow-right", size = 11 } },
+					party(function(): string
+						return e().to
+					end),
+					ui.div { grow = 1 },
+					ui.text {
+						function(): string
+							return if item:get().first then status.ago(status.since(e().at or 0)) else ""
+						end,
+						class = "orch-comm-time",
+						tabular = true,
+						shrink = 0,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
 					},
 				},
 				ui.text {
 					function(): string
-						return status.ago(status.since(item:get().at or 0))
+						return e().summary or ""
 					end,
-					tabular = true,
-					shrink = 0,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
+					literal = true,
+					w_full = true,
+					truncate = true,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
 				},
-			},
-			ui.text {
-				function(): string
-					return item:get().summary or ""
-				end,
-				literal = true,
-				w_full = true,
-				truncate = true,
-				text_size = "$font.size.sm",
-				color = "$text.secondary",
 			},
 		}
 	end
@@ -143,9 +199,9 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		ui.show(function(): boolean
 			return #rows:get() == 0
-		end, ui.text { locale.t("ds.orch.comms.none"), py = "$space.3", text_size = "$font.size.sm", color = "$text.tertiary" }),
-		ui.each(rows, row, { key = function(e: any): string
-			return e.id
+		end, ui.text { locale.t("ds.orch.comms.none"), py = "$space.2", text_size = "$font.size.sm", color = "$text.tertiary" }),
+		ui.each(rows, row, { key = function(r: Row): string
+			return r.id
 		end, w_full = true }),
 	}
 end)

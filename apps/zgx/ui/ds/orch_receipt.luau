@@ -1,7 +1,9 @@
 -- A dump's receipt: what the person said, each part the Brain dump routed
 -- underlined in its destination's hue, and a chip per part saying where it
--- went, what it is (a task, a question…) and how it stands. A question's
--- answer opens under its chip; a part the Brain dump wasn't sure about
+-- went, what it is (a task, a question…) and how it stands (Zeron's own
+-- status glyphs). A question's answer comes back as a quiet reply line
+-- under the chips, tied to its part (the pointer on one lights the other),
+-- with a way into the thread; a part the Brain dump wasn't sure about
 -- offers its likely places as buttons; any chip moves its part elsewhere
 -- from its menu. The one orchestrated moment: as a dump's parts are
 -- placed, their excerpts tint one after another, 60 ms apart, and their
@@ -17,13 +19,13 @@
 --   }
 
 local Icon = require("@self/icon")
-local IconButton = require("@self/icon_button").IconButton
 local ContextMenu = require("@self/context_menu")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
+local hold = require("@self/orch_hold")
 
 export type Props = {
 	dump: () -> any,
@@ -75,8 +77,6 @@ return ui.component(function(props: Props): Node
 	local lit = ui.use_state(0)
 	-- The route whose chip the pointer is on (its excerpt deepens).
 	local hovered = ui.use_state(nil :: string?)
-	-- The answers opened, by route id.
-	local open_answers = ui.use_state({} :: { [string]: boolean })
 	local first = not opened
 	opened = true
 
@@ -159,18 +159,20 @@ return ui.component(function(props: Props): Node
 					underline = function(): boolean
 						return lit:get() >= index
 					end,
-					underline_color = if unsure then hue.canvas(nil, 0.7) else hue.canvas(h, 0.9),
-					underline_thickness = 1.5,
-					underline_offset = 3,
+					underline_color = if unsure then hue.canvas(nil, 0.55) else hue.canvas(h, 0.75),
+					underline_thickness = 1,
+					underline_offset = 4,
 					underline_style = if unsure then "dashed" else "solid",
 					radius = 3,
 					bg = function(): any
 						if lit:get() < index then
 							return "#00000000"
 						end
-						local a = hue.wash_alpha()
+						-- (A faint tint at rest; the pointer on its chip or its
+						-- reply deepens it.)
+						local a = hue.wash_alpha() * 0.55
 						if hovered:get() == rid then
-							a *= 2
+							a = hue.wash_alpha() * 1.6
 						end
 						return hue.canvas(if unsure then nil else h, if unsure then a * 0.6 else a)
 					end,
@@ -241,19 +243,23 @@ return ui.component(function(props: Props): Node
 		return entries
 	end
 
+	-- How a part stands, as Zeron says it: on its way (the ring, quiet),
+	-- delivered or answered (done), failed; moved, the refresh glyph. Held
+	-- 300 ms at least (ds/orch_hold).
 	local function state_mark(row: State<any>): Node
-		return ui.switch(function(): string
-			local st = row:get().state
-			if st == "pending" and row:get().target and row:get().target.kind == "unsure" then
+		local kind = hold.value(function(): string
+			local r = row:get()
+			if r.target and r.target.kind == "unsure" then
 				return "unsure"
 			end
-			return st or "pending"
-		end, {
-			pending = ui.div { color = "$text.tertiary", Icon { name = "clock-circle", size = 12 } },
-			delivered = ui.div { color = "$text.tertiary", Icon { name = "check", size = 12 } },
-			answered = ui.div { color = "$zeron.status.done", Icon { name = "chat-round-line", size = 12 } },
-			undone = ui.div { color = "$text.tertiary", Icon { name = "refresh", size = 12 } },
-			failed = ui.div { color = "$danger", Icon { name = "danger-triangle", size = 12 } },
+			return r.state or "pending"
+		end)
+		return ui.switch(kind, {
+			pending = ui.div { class = "orch-chip-state", status.Spinner { size = 12, ink = "$text.tertiary" } },
+			delivered = ui.div { class = "orch-chip-state", status.StatusIcon { kind = "done", size = 13 } },
+			answered = ui.div { class = "orch-chip-state", status.StatusIcon { kind = "done", size = 13 } },
+			undone = ui.div { class = "orch-chip-state", color = "$text.tertiary", Icon { name = "refresh", size = 12 } },
+			failed = ui.div { class = "orch-chip-state", status.StatusIcon { kind = "failed", size = 13 } },
 			unsure = ui.div {},
 		}, ui.div {})
 	end
@@ -321,17 +327,18 @@ return ui.component(function(props: Props): Node
 				})
 			end,
 			h = 26,
-			pl = "$space.2",
-			pr = "$zeron.space.snug",
+			pl = "$zeron.space.snug",
+			pr = "$space.2",
 			gap = "$zeron.space.tight",
 			items = "center",
 			rounded = "$radius.full",
 			border = 1,
 			border_color = function(): any
-				return if unsure() then "$border" else hue.paint(t().hue, 0.38)
+				return if unsure() then "$border" else hue.paint(t().hue, 0.3)
 			end,
 			bg = function(): any
-				return if hovered:get() == row:get().id then hue.wash(t().hue) else "#00000000"
+				local h = if unsure() then nil else t().hue
+				return if hovered:get() == row:get().id then hue.wash(h) else hue.paint(h, hue.wash_alpha() * 0.35)
 			end,
 			hover = {},
 			on_hover = function(inside: boolean)
@@ -356,7 +363,7 @@ return ui.component(function(props: Props): Node
 				placed = hue.Dot { hue = function(): number?
 					return t().hue
 				end, size = 7 },
-				unsure = ui.div { color = "$text.tertiary", Icon { name = "map-arrow-right", size = 12 } },
+				unsure = ui.div { color = "$zeron.status.input", Icon { name = "status-input", size = 13 } },
 			}),
 			ui.text {
 				function(): string
@@ -377,6 +384,7 @@ return ui.component(function(props: Props): Node
 					size = 12,
 				},
 			},
+			ui.div { w = 1, h = 12, bg = "$border", shrink = 0 },
 			state_mark(row),
 		}
 		local function dump_id(): string
@@ -416,39 +424,100 @@ return ui.component(function(props: Props): Node
 						return candidate(dump_id, row, c)
 					end, { direction = "row", gap = "$space.1", items = "center" }),
 				}),
-				-- A question answered: its answer, opened.
-				ui.show(function(): boolean
-					return row:get().answer ~= nil
-				end, IconButton {
-					icon = "alt-arrow-down",
-					label = locale.t("ds.orch.receipt.answer"),
-					size = "sm",
-					tone = "quiet",
-					lit = function(): boolean
-						return open_answers:get()[row:get().id] == true
-					end,
-					on_click = function()
-						local o = table.clone(open_answers:peek())
-						local id = row:peek().id
-						o[id] = not o[id]
-						open_answers:set(o)
-					end,
-				}),
 			},
-			ui.show(function(): boolean
-				return row:get().answer ~= nil and open_answers:get()[row:get().id] == true
-			end, ui.row {
-				class = "orch-answer",
-				gap = "$space.2",
-				pl = "$space.1",
-				max_w = 560,
-				ui.div {
-					w = 2,
-					self = "stretch",
-					rounded = "$radius.full",
-					bg = function(): any
-						return hue.paint(t().hue, 0.6)
-					end,
+		}
+	end
+
+	-- A question's answer, come back: a quiet line under the chips, its
+	-- place's dot and name, the answer, and the way into it. The pointer on
+	-- it lights its part in the text, as its chip does.
+	local answered = ui.computed(function(): { any }
+		local out = {}
+		local n = lit:get()
+		for i, r in routes:get() do
+			if i <= n and type(r.answer) == "string" and r.answer ~= "" then
+				table.insert(out, r)
+			end
+		end
+		return out
+	end)
+	local function reply(_r: any, _i: number, row: State<any>): Node
+		local function t(): data.Target
+			return target_of(row:get())
+		end
+		return ui.row {
+			class = "orch-answer",
+			w_full = true,
+			gap = "$space.2",
+			items = "start",
+			on_hover = function(inside: boolean)
+				if inside then
+					hovered:set(row:peek().id)
+				elseif hovered:peek() == row:peek().id then
+					hovered:set(nil)
+				end
+			end,
+			ui.div {
+				w = 2,
+				self = "stretch",
+				shrink = 0,
+				rounded = "$radius.full",
+				bg = function(): any
+					return hue.paint(t().hue, if hovered:get() == row:get().id then 0.9 else 0.45)
+				end,
+			},
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				gap = "$zeron.space.hair",
+				ui.row {
+					w_full = true,
+					gap = "$space.2",
+					items = "center",
+					ui.text {
+						function(): string
+							return t().label
+						end,
+						truncate = true,
+						min_w = 0,
+						text_size = "$font.size.xs",
+						weight = "$font.weight.medium",
+						color = "$text.secondary",
+					},
+					ui.text {
+						function(): string
+							return row:get().excerpt or ""
+						end,
+						literal = true,
+						truncate = true,
+						min_w = 0,
+						grow = 1,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					},
+					ui.show(function(): boolean
+						local tg = t()
+						return tg.id ~= nil and tg.kind ~= "unsure"
+					end, ui.button {
+						class = "orch-answer-open",
+						label = function(): string
+							return locale.s("ds.orch.receipt.open", { name = t().label })
+						end,
+						h = 20,
+						px = "$space.1",
+						gap = "$zeron.space.hair",
+						items = "center",
+						rounded = "$radius.sm",
+						shrink = 0,
+						bg = "#00000000",
+						hover = { bg = "$hover" },
+						on_click = function()
+							local tg = t()
+							props.on_open({ kind = tg.kind, id = tg.id })
+						end,
+						ui.text { locale.t("ds.orch.receipt.open_short"), text_size = "$font.size.xs", color = "$text.secondary" },
+						ui.div { color = "$text.tertiary", Icon { name = "arrow-up-right", size = 11 } },
+					}),
 				},
 				ui.text {
 					function(): string
@@ -456,13 +525,12 @@ return ui.component(function(props: Props): Node
 					end,
 					literal = true,
 					wrap = true,
-					grow = 1,
-					min_w = 0,
+					w_full = true,
 					text_size = "$font.size.sm",
 					line_height = "$font.line.sm",
-					color = "$text.secondary",
+					color = "$text.primary",
 				},
-			}),
+			},
 		}
 	end
 
@@ -483,5 +551,14 @@ return ui.component(function(props: Props): Node
 			ui.text { locale.t("ds.orch.receipt.routing"), text_size = "$font.size.sm", color = "$text.tertiary" },
 		}),
 		ui.each(routes, chip, { key = by_id, direction = "row", flex_wrap = true, gap_x = "$space.2", gap_y = "$space.2", items = "start", w_full = true }),
+		ui.show(function(): boolean
+			return #answered:get() > 0
+		end, ui.column {
+			class = "orch-answers",
+			w_full = true,
+			max_w = 720,
+			pt = "$space.1",
+			ui.each(answered, reply, { key = by_id, w_full = true, gap = "$space.3" }),
+		}),
 	}
 end)

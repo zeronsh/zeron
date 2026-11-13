@@ -5,13 +5,17 @@
 -- orchestrator's page (filtered to it, `compact`) and the Control room
 -- (all of them, its filter on top).
 --
--- A card: its orchestrator's hue as a stripe at its leading edge, its
--- title, how far along it is (its own progress, else its threads' todo
--- summed), its threads as dots in their state, its pull request, and its
--- priority when that is high or urgent. A card in Review or Done carries
--- its outcome, two lines of it until it's opened: the answer or result,
--- where it is read. Each card is a plugin slot (`orchestration.item`,
--- `provide = { item = id }`).
+-- Each column is a lane of its own, its name, glyph and count at its head;
+-- an empty one stands slim, its head alone, so the columns with work in
+-- them take the room (and a board with nothing on it says so). A card:
+-- its orchestrator's hue as a stripe at its leading edge, how its lead
+-- thread stands (Zeron's status glyph, held 300 ms at least), its title,
+-- how far along it is (its threads' todo as segmented cells, else its own
+-- progress), its threads as dots when it has several, its pull request,
+-- and its priority when that is high or urgent. A card in Review or Done
+-- carries its outcome, two lines of it until it's opened: the answer or
+-- result, where it is read. Each card is a plugin slot
+-- (`orchestration.item`, `provide = { item = id }`).
 --
 -- Cards are dragged between columns and within one (`on_move(id, state,
 -- order)`, the order between its new neighbours'); a secondary click sets
@@ -39,9 +43,10 @@ local badge = require("@self/badge")
 local status = require("@self/status")
 local control = require("@self/control")
 local locale = require("@self/locale")
-local motion = require("@self/motion")
 local material = require("@self/material")
 local hue = require("@self/orch_hue")
+local Cells = require("@self/orch_cells")
+local hold = require("@self/orch_hold")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -94,8 +99,25 @@ local COLUMNS: { Column } = {
 local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
 
--- The least a column takes side by side; under that for them all, they stack.
+-- The least a column takes side by side; under that for them all, they
+-- stack. An empty one stands this wide.
 local COLUMN_MIN = 168
+local SLIM = 112
+-- Each column's glyph at its head: how its cards stand.
+local COLUMN_GLYPH: { [string]: Icon.Name } = {
+	inbox = "inbox",
+	now = "status-working",
+	next = "clock-circle",
+	blocked = "status-failed",
+	review = "status-input",
+	done = "status-done",
+}
+local COLUMN_INK: { [string]: string } = {
+	now = "$zeron.status.working",
+	blocked = "$zeron.status.failed",
+	review = "$zeron.status.input",
+	done = "$zeron.status.done",
+}
 -- A card's corner, and the stripe's room inside it.
 local CARD_RADIUS = "$radius.lg"
 local DRAG_TAG = "orch-item"
@@ -151,6 +173,49 @@ local function progress_of(item: Item, todo_of: ((string) -> Todo?)?): number?
 		end
 	end
 	return if total > 0 then math.clamp(done / total, 0, 1) else nil
+end
+
+-- Its threads' todo summed: done and total (nil when none says).
+local function todo_of_item(item: Item, todo_of: ((string) -> Todo?)?): (number?, number?)
+	if not todo_of then
+		return nil, nil
+	end
+	local done, total = 0, 0
+	for _, chat in item.threads or {} do
+		local t = todo_of(chat)
+		if t and t.total and t.total > 0 then
+			done += t.done or 0
+			total += t.total
+		end
+	end
+	if total == 0 then
+		return nil, nil
+	end
+	return done, total
+end
+
+-- How its lead thread stands (the one that needs you first, then one that
+-- failed, then one working), else how the card's column says it does.
+local LEAD: { [string]: number } = { input = 0, approval = 0, failed = 1, limited = 1, working = 2, connecting = 2, waiting = 2, done = 3 }
+local function lead_status(item: Item, thread_of: ((string) -> Thread?)?): string
+	local best, rank = nil :: string?, math.huge
+	for _, chat in item.threads or {} do
+		local t = if thread_of then thread_of(chat) else nil
+		local st = t and t.status
+		if st and LEAD[st] and LEAD[st] < rank then
+			best, rank = st, LEAD[st]
+		end
+	end
+	if item.state == "done" then
+		return "done"
+	elseif best then
+		return best
+	elseif item.state == "review" then
+		return "input"
+	elseif item.state == "blocked" then
+		return "approval"
+	end
+	return "none"
 end
 
 -- An outcome's words as one quiet line (its two lines, folded): the
@@ -225,36 +290,6 @@ local function priority_mark(p: () -> string): Node
 		low = mark("low", "arrow-down", "$text.tertiary"),
 		normal = ui.div {},
 	})
-end
-
--- A thin bar of how far along, in the hue, easing as it moves (still,
--- with motion reduced: ds/motion's tween).
-local function bar(value: () -> number?, ink: () -> string): Node
-	local track_w = ui.use_state(0)
-	return ui.div {
-		w_full = true,
-		h = 3,
-		relative = true,
-		rounded = "$radius.full",
-		bg = "$zeron.slider.track",
-		overflow = "hidden",
-		on_resize = function(size: { w: number, h: number })
-			if math.abs(size.w - track_w:peek()) >= 0.5 then
-				track_w:set(size.w)
-			end
-		end,
-		ui.div {
-			absolute = true,
-			left = 0,
-			top = 0,
-			h = 3,
-			rounded = "$radius.full",
-			bg = ink,
-			w = motion.tween(ui.computed(function(): number
-				return math.clamp(value() or 0, 0, 1) * track_w:get()
-			end), { duration = 320, ease = "out(3)" }),
-		},
-	}
 end
 
 local OrchBoard = ui.component(function(props: Props): Node
@@ -433,6 +468,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local function progress(): number?
 			return progress_of(item(), props.todo_of)
 		end
+		local lead = hold.value(function(): string
+			return lead_status(item(), props.thread_of)
+		end)
 		local function has_outcome(): boolean
 			local o = item().outcome
 			return (item().state == "done" or item().state == "review") and o ~= nil and o ~= ""
@@ -447,8 +485,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 			return out
 		end
 		local line = (ui.theme.get("font.line.sm") :: number?) or 16
-		-- Its title: two lines at most.
-		local title = ui.text {
+		-- Its title: two lines at most, how its lead thread stands before it.
+		local title_text = ui.text {
 				function(): string
 					return item().title
 				end,
@@ -465,6 +503,29 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return if item().state == "done" then "$text.secondary" else "$text.primary"
 				end,
 			}
+		local title = ui.row {
+			w_full = not compact,
+			grow = if compact then 1 else nil,
+			min_w = 0,
+			gap = "$zeron.space.tight",
+			items = "start",
+			ui.show(function(): boolean
+				return lead() ~= "none"
+			end, ui.div {
+				class = "orch-card-status",
+				h = line,
+				items = "center",
+				shrink = 0,
+				status.StatusIcon {
+					kind = function(): any
+						local k = lead()
+						return if k == "none" then "done" else k
+					end,
+					size = 14,
+				},
+			}),
+			title_text,
+		}
 		-- Its marks: priority, threads, pull request.
 		local marks = ui.row {
 				w_full = not compact,
@@ -476,7 +537,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return item().priority
 				end),
 				ui.each(ui.computed(function(): { string }
-					return item().threads or {}
+					-- (One thread: its status leads the title already.)
+					local threads = item().threads or {}
+					return if #threads > 1 then threads else {}
 				end), function(chat: string): Node
 					return thread_dot(chat, props.thread_of, props.on_open_thread)
 				end, { key = function(chat: string): string
@@ -505,20 +568,58 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end, { key = function(l: Link): string
 					return l.target
 				end }),
+			}
+		-- How far along: its threads' steps as cells, else its own share in
+		-- ten; and the figure.
+		local function steps(): (number?, number?)
+			local d, t = todo_of_item(item(), props.todo_of)
+			if d then
+				return d, t
+			end
+			local p = item().progress
+			if p then
+				return math.floor(math.clamp(p, 0, 1) * 10 + 0.5), 10
+			end
+			return nil, nil
+		end
+		local progress_bar = ui.show(function(): boolean
+				return steps() ~= nil and item().state ~= "done"
+			end, ui.row {
+				class = "orch-card-progress",
+				w_full = true,
+				gap = "$space.2",
+				items = "center",
+				Cells {
+					done = function(): number
+						local d = steps()
+						return d or 0
+					end,
+					total = function(): number
+						local _, t = steps()
+						return t or 0
+					end,
+					current = function(): boolean
+						return lead() == "working"
+					end,
+					cell = 4,
+					h = 8,
+					max = 24,
+				},
 				ui.text {
 					function(): string
+						local d, t = todo_of_item(item(), props.todo_of)
+						if d and t then
+							return `{d}/{t}`
+						end
 						local p = progress()
-						return if p and item().state ~= "done" then `{math.floor(p * 100 + 0.5)}%` else ""
+						return if p then `{math.floor(p * 100 + 0.5)}%` else ""
 					end,
 					shrink = 0,
 					tabular = true,
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 				},
-			}
-		local progress_bar = ui.show(function(): boolean
-				return progress() ~= nil and item().state ~= "done"
-			end, bar(progress, ink))
+			})
 		-- (Compact, its marks stand at its title's end, the bar under both.)
 		local body = ui.column {
 			w_full = true,
@@ -547,7 +648,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 						w_full = true,
 						gap = "$space.2",
 						items = "start",
-						ui.div { w = 2, shrink = 0, h_full = true, rounded = "$radius.full", bg = "$border.strong" },
+						p = "$space.2",
+						rounded = "$radius.md",
+						bg = "$zeron.settings.comment",
 						ui.presence(function(): string
 							return if open:get() then "open" else "folded"
 						end, function(k: string): Node
@@ -712,10 +815,25 @@ local OrchBoard = ui.component(function(props: Props): Node
 			label = locale.t(col.name),
 			role = "group",
 			w_full = stacked,
-			grow = if stacked then nil else 1,
+			-- (Side by side, an empty one stands slim: the room is for work.)
+			grow = if stacked then nil else function(): number
+				return if #list() > 0 then 1 else 0
+			end,
 			basis = if stacked then nil else 0,
-			min_w = if stacked then nil else COLUMN_MIN,
-			min_h = if stacked then nil else 64,
+			min_w = if stacked then nil else function(): number
+				return if #list() > 0 then COLUMN_MIN else SLIM
+			end,
+			w = if stacked then nil else function(): number | string
+				return if #list() > 0 then "auto" else SLIM
+			end,
+			min_h = if stacked then nil else 96,
+			p = "$space.1",
+			rounded = "$radius.lg",
+			bg = function(): string
+				return if #list() > 0 then material.pick("$zeron.settings.note", "$surface.sunken")() else "#00000000"
+			end,
+			border = 1,
+			border_color = "$zeron.settings.edge",
 			-- (Stacked in a page's side pane, an empty column stands aside
 			-- until a card is dragged: then it's somewhere to put one.)
 			hidden = if stacked and compact
@@ -748,11 +866,27 @@ local OrchBoard = ui.component(function(props: Props): Node
 			-- Its name and how many.
 			ui.row {
 				w_full = true,
-				h = 24,
-				px = "$space.1",
-				gap = "$space.2",
+				h = 28,
+				px = "$space.2",
+				gap = "$zeron.space.tight",
 				items = "center",
-				ui.text { locale.t(col.name), text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$text.secondary" },
+				ui.div {
+					shrink = 0,
+					color = function(): string
+						return if #list() > 0 then COLUMN_INK[col.key] or "$text.tertiary" else "$text.tertiary"
+					end,
+					Icon { name = COLUMN_GLYPH[col.key] or "checklist", size = 12 },
+				},
+				ui.text {
+					locale.t(col.name),
+					truncate = true,
+					min_w = 0,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+					color = function(): string
+						return if #list() > 0 then "$text.primary" else "$text.tertiary"
+					end,
+				},
 				ui.text {
 					function(): string
 						local n = #list()
@@ -778,7 +912,6 @@ local OrchBoard = ui.component(function(props: Props): Node
 				local d = drop:get()
 				return d ~= nil and d.col == col.key and d.at_end == true
 			end, ui.div { w_full = true, h = 2, rounded = "$radius.full", bg = "$accent", pointer_events = "none" }),
-			ui.div { w_full = true, h = if stacked then 0 else 24 },
 		}
 	end
 
@@ -850,20 +983,39 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local width = ui.use_state(0)
 	local stacked = ui.computed(function(): boolean
 		local w = width:get()
-		return w > 0 and w < #columns * COLUMN_MIN + (#columns - 1) * 8
+		local need = 0
+		for _, c in columns do
+			need += if #(shown:get()[c.key] or {}) > 0 then COLUMN_MIN else SLIM
+		end
+		return w > 0 and w < need + (#columns - 1) * 8
 	end)
 	return ui.column {
 		id = props.id or "orch-board",
 		class = "orch-board",
 		label = locale.t("orch.board.label"),
 		w_full = true,
-		gap = "$space.2",
+		gap = "$space.3",
 		on_resize = function(size: { w: number, h: number })
 			if math.abs(size.w - width:peek()) >= 1 then
 				width:set(size.w)
 			end
 		end,
 		if props.show_filter then chips() else nil,
+		ui.show(function(): boolean
+			for _, l in shown:get() do
+				if #l > 0 then
+					return false
+				end
+			end
+			return true
+		end, ui.row {
+			class = "orch-board-empty",
+			w_full = true,
+			gap = "$space.2",
+			items = "center",
+			ui.div { color = "$text.tertiary", Icon { name = "checklist", size = 14 } },
+			ui.text { locale.t("orch.board.empty"), text_size = "$font.size.sm", color = "$text.tertiary" },
+		}),
 		ui.presence(function(): string
 			return if stacked:get() then "stacked" else "side"
 		end, function(k: string): Node

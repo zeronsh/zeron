@@ -16,7 +16,6 @@
 --     limit = 6,                                  -- rows before "n more"
 --   }
 
-local Icon = require("@self/icon")
 local Button = require("@self/button")
 local IconButton = require("@self/icon_button").IconButton
 local TextField = require("@self/text_field")
@@ -24,6 +23,8 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
+local Badge = require("@self/badge")
+local hold = require("@self/orch_hold")
 
 export type Props = {
 	needs: () -> { any },
@@ -50,12 +51,14 @@ local function runs_of(text: string): { any }
 	return out
 end
 
-local KIND_ICON: { [string]: Icon.Name } = {
-	question = "chat-round-line",
-	decision = "map-arrow-right",
-	approval = "shield-check",
-	blocker = "danger-triangle",
-	input = "status-input",
+-- Each kind of ask as Zeron's status says it: a question or a decision
+-- waits on input, an approval on approval, a blocker has failed.
+local KIND_STATUS: { [string]: status.Kind } = {
+	question = "input",
+	decision = "input",
+	approval = "approval",
+	blocker = "failed",
+	input = "input",
 }
 
 return ui.component(function(props: Props): Node
@@ -136,6 +139,9 @@ return ui.component(function(props: Props): Node
 			return if n.kind == "input" then "input" else ((n.ask and n.ask.kind) or "question")
 		end
 		local gone = ui.computed(is_leaving)
+		local state = hold.value(function(): status.Kind
+			return KIND_STATUS[kind()] or "input"
+		end)
 		return ui.column {
 			class = "orch-need",
 			w_full = true,
@@ -154,26 +160,30 @@ return ui.component(function(props: Props): Node
 				w_full = true,
 				gap = "$space.2",
 				items = "center",
-				hue.Dot { hue = function(): number?
-					return item:get().hue
-				end, size = 7 },
-				ui.text { from_name, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary", truncate = true, min_w = 0 },
-				ui.div {
-					color = "$text.tertiary",
-					Icon { name = function(): Icon.Name
-						return KIND_ICON[kind()] or "chat-round-line"
-					end, size = 12 },
-				},
+				status.StatusIcon { kind = state, size = 14 },
 				ui.text {
 					function(): string
 						return locale.s(`ds.orch.ask.{kind()}`)
 					end,
+					shrink = 0,
 					text_size = "$font.size.xs",
-					color = "$text.tertiary",
+					weight = "$font.weight.medium",
+					color = function(): string
+						return `$zeron.status.{state()}`
+					end,
 				},
 				ui.show(function(): boolean
 					return item:get().urgent == true
-				end, ui.text { locale.t("ds.orch.ask.urgent"), text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$danger" }),
+				end, Badge.Badge { locale.s("ds.orch.ask.urgent"), tone = "danger", size = "sm" }),
+				ui.row {
+					gap = "$zeron.space.tight",
+					items = "center",
+					min_w = 0,
+					hue.Dot { hue = function(): number?
+						return item:get().hue
+					end, size = 6 },
+					ui.text { from_name, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, min_w = 0 },
+				},
 				ui.div { grow = 1 },
 				ui.text {
 					function(): string
@@ -294,7 +304,7 @@ return ui.component(function(props: Props): Node
 			py = "$space.3",
 			gap = "$space.2",
 			items = "center",
-			ui.div { color = "$text.tertiary", Icon { name = "check-circle", size = 14 } },
+			status.StatusIcon { kind = "done", size = 14 },
 			ui.text { locale.t("ds.orch.ask.none"), text_size = "$font.size.sm", color = "$text.tertiary" },
 		}),
 		ui.each(rows, function(n: any, i: number, item: State<any>): Node
