@@ -140,11 +140,54 @@ impl EngineRpc {
         }
     }
 
+    /// The route a card came from, if it came from one.
+    fn route_of_card(&self, card: &zeron_proto::orchestration::WorkItem) -> Option<Route> {
+        let source = card.source.as_ref()?;
+        self.orchestration()
+            .workspace()
+            .read_orchestration_with(|doc| doc.dump(&source.dump_id))
+            .and_then(|d| d.routes.into_iter().find(|r| r.id == source.route_id))
+    }
+
+    /// Card `id`'s column was set by hand at `at`: kept while its route's
+    /// state stays what it is now.
+    pub(crate) fn mark_moved(&self, id: &str, at: chrono::DateTime<chrono::Utc>) {
+        let orch = self.orchestration();
+        let Some(card) = orch.item(id) else { return };
+        let route_state = self.route_of_card(&card).map(|r| r.state);
+        orch.workspace().write_orchestration(|doc| {
+            if let Some(mut card) = doc.work_item(id) {
+                card.moved_at = Some(at);
+                card.moved_route_state = route_state;
+                doc.upsert_work_item(&card);
+            }
+        });
+    }
+
+    fn clear_moved(&self, id: &str) {
+        self.orchestration().workspace().write_orchestration(|doc| {
+            if let Some(mut card) = doc.work_item(id)
+                && card.moved_at.is_some()
+            {
+                card.moved_at = None;
+                card.moved_route_state = None;
+                doc.upsert_work_item(&card);
+            }
+        });
+    }
+
     /// Bring the card `item` up to date with `route`: its state and outcome.
+    /// A card moved by hand keeps its column while its route's state is the
+    /// one it had then; once the route moves on (it failed, was rerouted,
+    /// finished since), the route's state is the card's again.
     pub(crate) fn sync_card(&self, item: &str, route: &Route) {
         let orch = self.orchestration();
         let Some(card) = orch.item(item) else { return };
-        let state = card_state(route);
+        let kept = card.moved_at.is_some() && card.moved_route_state == Some(route.state);
+        if card.moved_at.is_some() && !kept {
+            self.clear_moved(item);
+        }
+        let state = if kept { card.state } else { card_state(route) };
         let outcome = route.answer.clone();
         if card.state == state && (outcome.is_none() || card.outcome == outcome) {
             return;
@@ -174,24 +217,36 @@ impl EngineRpc {
         }
     }
 
-    /// Cards an ask once made Blocked (before an ask stopped meaning
-    /// Blocked) whose route didn't fail, re-derived from their route: Done,
-    /// Review or Now. Only those, so a person's own move of a card stands;
-    /// run again, it finds none. The cards it re-stated.
-    pub(crate) fn restate_ask_blocked_cards(&self) -> Vec<String> {
+    /// Routed cards set straight once at start: one Blocked though its
+    /// route didn't fail (an open ask made it Blocked before an ask stopped
+    /// meaning Blocked) is re-derived from its route; one in another column
+    /// than its route says, never marked, was moved by hand before the mark
+    /// existed: marked now, so it stays. Cards already marked are left
+    /// alone; run again, it does nothing. `(re-stated, kept)`.
+    pub(crate) fn settle_card_states(&self) -> (Vec<String>, Vec<String>) {
         let state = self.orchestration().state();
-        let mut restated = Vec::new();
+        let (mut restated, mut kept) = (Vec::new(), Vec::new());
         for dump in &state.dumps {
             for route in &dump.routes {
                 let Some(item) = route.item_id.as_deref() else { continue };
-                let blocked = state.items.iter().any(|i| i.id == item && !i.removed && i.state == WorkState::Blocked);
-                if blocked && route.state != RouteState::Failed && card_state(route) != WorkState::Blocked {
+                let Some(card) = state.items.iter().find(|i| i.id == item && !i.removed) else { continue };
+                if card.moved_at.is_some() {
+                    continue;
+                }
+                let derived = card_state(route);
+                if card.state == derived {
+                    continue;
+                }
+                if card.state == WorkState::Blocked {
                     self.sync_card(item, route);
                     restated.push(item.to_owned());
+                } else {
+                    self.mark_moved(item, card.updated_at);
+                    kept.push(item.to_owned());
                 }
             }
         }
-        restated
+        (restated, kept)
     }
 
     /// The routed cards `chat` works on, brought up to date (it raised or

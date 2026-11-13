@@ -1651,8 +1651,9 @@ async fn cards_an_ask_once_blocked_are_restated_from_their_routes_once() {
             .patch_item(WorkItemPatch { id: Some(item.clone()), state: Some(WorkState::Blocked), ..Default::default() })
             .unwrap();
     }
-    let mut restated = rpc.restate_ask_blocked_cards();
+    let (mut restated, kept) = rpc.settle_card_states();
     restated.sort();
+    assert!(kept.is_empty());
     let mut want = vec![routes[0].1.clone(), routes[1].1.clone()];
     want.sort();
     assert_eq!(restated, want);
@@ -1661,6 +1662,59 @@ async fn cards_an_ask_once_blocked_are_restated_from_their_routes_once() {
         [WorkState::Done, WorkState::Active, WorkState::Blocked],
         "the failed one stays Blocked"
     );
-    assert!(rpc.restate_ask_blocked_cards().is_empty(), "idempotent");
+    assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "idempotent");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_card_the_person_moves_stays_until_its_work_changes() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, routes) = routed_thread(&core, map, &["Fix the Timeline legend", "Rebuild the map"]).await;
+    let rpc = core.rpc_service();
+    let (legend, rebuild) = (&routes[0], &routes[1]);
+    // A loose card (no orchestrator) whose work failed: Blocked.
+    assert_eq!(core.orchestration.item(&legend.1).unwrap().orchestrator_id, None, "loose");
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &legend.0, "x", "It broke.".into(), Some(RouteState::Failed)).await;
+    assert_eq!(card(&core, &legend.1), WorkState::Blocked);
+    // The person moves it to Done (the board's Move to, or a drag).
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":legend.1,"state":"done"}})).await.unwrap();
+    assert_eq!(card(&core, &legend.1), WorkState::Done);
+    let moved = core.orchestration.item(&legend.1).unwrap();
+    assert!(moved.moved_at.is_some() && moved.moved_route_state == Some(RouteState::Failed));
+    // Re-synced, and the start's pass: it stays Done.
+    rpc.sync_route_card(&dump, &legend.0);
+    rpc.sync_cards_of(map);
+    assert_eq!(rpc.settle_card_states(), (vec![], vec![]));
+    assert_eq!(card(&core, &legend.1), WorkState::Done);
+
+    // Another card, in Review, moved to Done; then its work really fails.
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &rebuild.0, "x", "Rebuilt; check it.".into(), Some(RouteState::Answered)).await;
+    assert_eq!(card(&core, &rebuild.1), WorkState::Review);
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":rebuild.1,"state":"done"}})).await.unwrap();
+    rpc.sync_cards_of(map);
+    assert_eq!(card(&core, &rebuild.1), WorkState::Done, "kept while nothing new happens");
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &rebuild.0, "x", "The rebuild failed.".into(), Some(RouteState::Failed)).await;
+    assert_eq!(card(&core, &rebuild.1), WorkState::Blocked, "a new failure still shows");
+    assert_eq!(core.orchestration.item(&rebuild.1).unwrap().moved_at, None, "the move is spent");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_card_set_by_hand_before_the_mark_existed_is_kept_at_start() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, routes) = routed_thread(&core, map, &["Feedback on the Timeline legend"]).await;
+    let rpc = core.rpc_service();
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Fixed.".into(), Some(RouteState::Done)).await;
+    // As the Brain dump left the live card: Review by hand, no mark (an
+    // older engine).
+    core.orchestration
+        .patch_item(WorkItemPatch { id: Some(routes[0].1.clone()), state: Some(WorkState::Review), ..Default::default() })
+        .unwrap();
+    assert_eq!(rpc.settle_card_states(), (vec![], vec![routes[0].1.clone()]));
+    rpc.sync_cards_of(map);
+    assert_eq!(card(&core, &routes[0].1), WorkState::Review, "a later sync keeps it");
+    assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "once");
     core.sessions.shutdown().await;
 }

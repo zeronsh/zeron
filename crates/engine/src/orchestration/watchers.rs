@@ -49,9 +49,9 @@ pub(crate) fn start(orchestration: Orchestration) {
                 tracing::info!(dumps = settled.len(), "brain dump: dumps left routing now need the person");
             }
             // Cards an open ask made Blocked under the old rule: from their route.
-            let restated = rpc.restate_ask_blocked_cards();
-            if !restated.is_empty() {
-                tracing::info!(cards = ?restated, "board: cards an ask had blocked re-stated from their routes");
+            let (restated, kept) = rpc.settle_card_states();
+            if !restated.is_empty() || !kept.is_empty() {
+                tracing::info!(?restated, ?kept, "board: cards an ask had blocked re-stated; cards moved by hand kept");
             }
         }
     });

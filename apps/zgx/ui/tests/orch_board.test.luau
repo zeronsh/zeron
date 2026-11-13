@@ -659,3 +659,34 @@ test("orch board cards: a thread's question waits on one card; its finished card
 	expect(app:count('"Waiting on you"')).to_be(0)
 	expect(app:error()).to_be_nil()
 end)
+
+-- Any card is the person's to move, a loose Brain dump card (no
+-- orchestrator) or an orchestrator's, out of Blocked too: Move to, or drag.
+test("orch board cards: a loose card and an orchestrator's leave Blocked by Move to and by drag", function()
+	local app = cards()
+	local T = 1_800_040_000
+	local list: { any } = table.clone((app:state("cards_items") :: any) or {})
+	table.insert(list, {
+		id = "it-loose", state = "blocked", priority = "normal", order = 9, threads = { "th-map" },
+		title = "Feedback on the Map's Timeline view legend", created = T - 3000, updated = T - 600,
+	})
+	app:set_state("cards_items", list)
+	app:frames(10)
+	local loose = 'role:button "Feedback on the Map\'s Timeline view legend"'
+	expect(app:has(`#cards-blocked >> {loose}`)).to_be(true)
+	app:right_click(`#cards-blocked >> {loose}`)
+	app:frames(10)
+	app:click('role:menuitem "Move to"')
+	app:frames(10)
+	app:click('role:menuitem "Done today"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("move:it-loose:done:")
+	expect(app:has(`#cards-done >> {loose}`)).to_be(true)
+	expect(app:has(`#cards-blocked >> {loose}`)).to_be(false)
+	-- An orchestrator's Blocked card, dragged to Now.
+	app:drag('#cards-blocked >> role:button "Approve engine migration"', "#cards-now")
+	app:frames(20)
+	expect(app:state("calls")).to_contain("move:it-mig:active:")
+	expect(app:has('#cards-now >> role:button "Approve engine migration"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)

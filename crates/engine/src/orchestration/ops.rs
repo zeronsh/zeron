@@ -266,7 +266,13 @@ impl EngineRpc {
                     && was.is_none_or(|s| {
                         matches!(s, zeron_proto::orchestration::WorkState::Inbox | zeron_proto::orchestration::WorkState::Planned)
                     });
+                let by_hand = item.state.is_some();
                 let id = orch.patch_item(item).map_err(RpcError::Failed)?;
+                // Its column set by hand: what its route says no longer moves
+                // it, until that route's state changes (board_cards::sync_card).
+                if by_hand {
+                    self.mark_moved(&id, now);
+                }
                 // The person moving a card with no thread to Now starts it.
                 if to_now
                     && *who == Who::Person

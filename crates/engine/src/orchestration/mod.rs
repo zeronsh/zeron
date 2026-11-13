@@ -327,6 +327,8 @@ pub(crate) fn apply_item_patch(
                 space_id: None,
                 device_id: None,
                 waiting: None,
+                moved_at: None,
+                moved_route_state: None,
             }
         }
     };
