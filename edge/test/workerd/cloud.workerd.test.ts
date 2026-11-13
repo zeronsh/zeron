@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { authenticate } from "../../src/auth";
 import { handleAuthRoute } from "../../src/auth-routes";
 import { QUIESCE_ENGINE_COMMAND, START_ENGINE_COMMAND, STOP_ENGINE_COMMAND } from "../../src/cloud/install-script";
-import { listLedger, listSandboxes, listUsage } from "../../src/cloud/metering";
+import { dayKey, dayStart, listLedger, listSandboxes, listUsage, upsertUsage } from "../../src/cloud/metering";
 import { cloudAccountName } from "../../src/cloud/policy";
 import type { Env } from "../../src/env";
 import {
@@ -281,6 +281,76 @@ describe("credits", () => {
     expect(["stopping", "sleeping"]).toContain((await session(u, "chat-spend"))?.state);
     const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
     expect(ledger.some((e) => e.event === "sleep" && e.detail === "out of credits")).toBe(true);
+  });
+
+  it("runs out at the new rate, but not before the cutover day", async () => {
+    const u = newUser();
+    const project = await enableCloud(u); // 1000 starting credits
+    const today = dayKey(Date.now());
+    await readySession(u, "chat-rate", project);
+    // Earlier today: 600 credits at 60 seconds a credit, 1200 at 30.
+    await runInDurableObject(accountStub(u), (_instance, state) =>
+      upsertUsage(state.storage.sql, {
+        day: today,
+        provider: "boat",
+        sandboxId: "bx_earlier",
+        sandboxType: "default",
+        seconds: 36_000,
+        dollars: 0,
+        running: false,
+        reconciledAt: Date.now(),
+        closed: true
+      })
+    );
+    const reconcileAt = (from: string) =>
+      runInDurableObject(accountStub(u), async (instance) => {
+        const self = instance as unknown as { env: Env; reconcile(now?: number, full?: boolean): Promise<boolean> };
+        self.env = { ...self.env, CLOUD_CREDIT_SECONDS: "30", CLOUD_CREDIT_RATE_FROM: from };
+        await self.reconcile(Date.now(), true);
+      });
+
+    await reconcileAt("SET-AT-DEPLOY");
+    expect((await session(u, "chat-rate"))?.state).toBe("ready");
+    await reconcileAt(dayKey(dayStart(today) + 86_400_000));
+    expect((await session(u, "chat-rate"))?.state).toBe("ready");
+    expect((await status(u)).credits).toBeGreaterThan(0);
+
+    await reconcileAt(today);
+    expect(["stopping", "sleeping"]).toContain((await session(u, "chat-rate"))?.state);
+    const ledger = await runInDurableObject(accountStub(u), (_instance, state) => listLedger(state.storage.sql));
+    expect(ledger.some((e) => e.event === "sleep" && e.detail === "out of credits")).toBe(true);
+    expect((await status(u)).credits).toBeLessThanOrEqual(0);
+    const refused = await createSession(u, "chat-rate-2", project.spaceId);
+    expect(refused.status).toBe(402);
+    expect(await refused.json()).toMatchObject({ error: "no_credits" });
+  });
+
+  it("estimates a running machine at each day's rate across the cutover", async () => {
+    const u = newUser();
+    await readySession(u, "chat-live", await enableCloud(u));
+    const midnight = dayStart(dayKey(Date.now()));
+    const half = 30 * 60_000;
+    const spent = (from: string) =>
+      runInDurableObject(accountStub(u), (instance) => {
+        const self = instance as unknown as {
+          env: Env;
+          sessions: Map<string, SessionInternals>;
+          acct: { lastReconcileAt?: number };
+          balance(now?: number): number;
+        };
+        self.env = { ...self.env, CLOUD_CREDIT_SECONDS: "30", CLOUD_CREDIT_RATE_FROM: from };
+        self.acct.lastReconcileAt = 0;
+        const s = self.sessions.get("chat-live")!;
+        s.awakeSince = midnight - half;
+        const after = self.balance(midnight + half);
+        s.awakeSince = midnight + half;
+        return self.balance(midnight + half) - after;
+      });
+    // A default machine: half an hour at 60 seconds a credit, then at 30.
+    expect(await spent(dayKey(midnight))).toBeCloseTo(90);
+    // Unchanged with the cutover ahead or unset.
+    expect(await spent(dayKey(midnight + 86_400_000))).toBeCloseTo(60);
+    expect(await spent("SET-AT-DEPLOY")).toBeCloseTo(60);
   });
 
   it("caps how many Cloud chats one account keeps", async () => {
