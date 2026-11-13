@@ -13,11 +13,13 @@
 //!                    icon? = { emoji?, image?, hue? } } },
 //!     chats = { { id, title, project?, device, branch?, cwd?, status?,
 //!                 updated, created, harness?, agent?, model?,
-//!                 running_subagents, side_chats, working_side_chats } },
+//!                 running_subagents, side_chats, working_side_chats,
+//!                 parent?, child_kind?, activity?, todo? } },
 //!     children = { [parent id] = { { id, parent, title, device, status?,
-//!                 updated, created, harness?, agent?, child_kind? } } } (its
-//!                 side chats, newest first; `child_kind` "subagent" or
-//!                 "side" for one a Zeron chat started, none for the person's),
+//!                 updated, created, harness?, agent?, child_kind?,
+//!                 activity?, todo? } } } (its side chats, newest first;
+//!                 `child_kind` "subagent", "side" or "crew" for one a Zeron
+//!                 chat started, none for the person's),
 //!     places = { pinned = { id }, sections = { { id, name, sessions = { id },
 //!                collapsed } } },
 //!     archived = { chat, … } (as `chats`, the most recently moved first),
@@ -28,6 +30,10 @@
 //! "failed", "done": finished but not yet seen), nil when idle; `updated`
 //! and `created` are Unix seconds; `agent` is ds.Mark's name for the
 //! chat's harness. Chats are the top-level ones that aren't archived.
+//! `activity` is what its agent is doing while it works, `{ kind, label,
+//! since }` (`kind` "testing", "merging"…, `since` Unix seconds); `todo` how
+//! far through its todo list it is, `{ done, total, current? }`, whenever its
+//! host says.
 //!
 //! and call, each rejecting with an outcome word (offline, failed):
 //!   sessions.create({ project?, device?, config?, branch?, cwd?, title?, parent?, id?, no_project? })
@@ -191,6 +197,9 @@ struct RowWith {
     working_side_chats: u32,
     known_project: bool,
     agent_icon: Option<String>,
+    /// What its agent is doing (while it works), and its todo progress.
+    activity: Option<zeron_proto::orchestration::ChatActivity>,
+    todo: Option<zeron_proto::orchestration::TodoProgress>,
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -621,6 +630,8 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         working_side_chats: 0,
         known_project: false,
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        activity: activity_of(status, session),
+        todo: session.and_then(|s| s.todo.clone()),
     };
     if rows.get(id).is_some_and(|row| row.with == with) {
         return;
@@ -646,9 +657,12 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
         // An agent from the ACP registry: its icon, as listed.
         ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
-        // Started by a Zeron chat through Zeron's tools ("subagent" or
-        // "side"); none for a side chat the person started.
+        // Started by a Zeron chat through Zeron's tools ("subagent",
+        // "side", or "crew": a thread of an orchestrator's); none for a side
+        // chat the person started.
         ("child_kind", opt(c["childKind"].as_str())),
+        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
+        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
 }
@@ -681,6 +695,8 @@ fn top_row(
         working_side_chats,
         known_project: project.is_some(),
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        activity: activity_of(status, session),
+        todo: session.and_then(|s| s.todo.clone()),
     };
     if let Some(row) = rows.get(id).filter(|row| row.with == with) {
         return row.value.clone();
@@ -721,6 +737,13 @@ fn top_row(
         // it woke (Unix seconds).
         ("sleep_until", with.sleep.filter(|s| s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
         ("woke", with.sleep.filter(|s| !s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
+        // Whose child it is, and how, when it's one (as a side chat's row
+        // says).
+        ("parent", opt(c["parentChatId"].as_str())),
+        ("child_kind", opt(c["childKind"].as_str())),
+        // What its agent is doing while it works, and its todo progress.
+        ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
+        ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value
@@ -1772,6 +1795,9 @@ struct Live {
     /// them (whether a finish is new, or was interrupted).
     outcome: Option<String>,
     last_completed_turn: Option<String>,
+    /// What its agent is doing, and its todo progress, as its row shows them.
+    activity: Option<zeron_proto::orchestration::ChatActivity>,
+    todo: Option<zeron_proto::orchestration::TodoProgress>,
 }
 
 /// Each chat's `Live`, judged at `now` (Unix seconds).
@@ -1789,6 +1815,8 @@ fn live_of(s: &Session, at: chrono::DateTime<chrono::Utc>) -> Live {
         subagents: zeron_proto::view::running_subagents(Some(s), at),
         outcome: s.last_turn_outcome.as_ref().and_then(|o| serde_json::to_string(o).ok()),
         last_completed_turn: s.last_completed_turn.clone(),
+        activity: s.activity.clone(),
+        todo: s.todo.clone(),
     }
 }
 
@@ -1878,6 +1906,11 @@ fn status_of(
         ChatIndicator::Completed => Some("done"),
         ChatIndicator::Idle => None,
     }
+}
+
+/// What a chat's agent is doing, while its row says it works.
+fn activity_of(status: Option<&str>, session: Option<&Session>) -> Option<zeron_proto::orchestration::ChatActivity> {
+    session.filter(|_| status == Some("working")).and_then(|s| s.activity.clone())
 }
 
 /// A chat's sleep at `now`: asleep until (`true`, its time), or woke and not
@@ -2480,6 +2513,69 @@ mod tests {
         assert_eq!(p.field("side_chats").and_then(|n| n.as_f64()), Some(2.));
         assert_eq!(p.field("working_side_chats").and_then(|n| n.as_f64()), Some(1.));
         assert_eq!(p.field("running_subagents").and_then(|n| n.as_f64()), Some(2.));
+    }
+
+    /// What a live chat's agent is doing, and how far through its todo list
+    /// it is, on its row (top-level or a crew thread's): the activity only
+    /// while it works, the todo whenever its host says; a change to either
+    /// alone is published and builds its row again.
+    #[test]
+    fn a_live_chat_shows_its_activity_and_todo() {
+        let now = now_seconds();
+        let s = Sessions::default();
+        s.heard.set(true);
+        s.set_chats(json!([
+            { "id": "orc", "title": "Orchestrators", "deviceId": "d", "createdAt": iso(now - 7200) },
+            { "id": "th", "title": "Engine state", "parentChatId": "orc", "childKind": "crew", "deviceId": "d", "createdAt": iso(now - 5400) },
+            { "id": "idle", "title": "Idle", "deviceId": "d", "createdAt": iso(now - 600) },
+        ]));
+        let live = |label: &str| {
+            json!([
+                { "chatId": "orc", "deviceId": "d", "status": "working", "updatedAt": iso(now - 1),
+                  "activity": { "kind": "delegating", "label": "send_message", "since": iso(now - 20) } },
+                { "chatId": "th", "deviceId": "d", "status": "working", "updatedAt": iso(now - 1),
+                  "activity": { "kind": "testing", "label": label, "since": iso(now - 48) },
+                  "todo": { "done": 5, "total": 8, "current": "WatchOrchestration stream" } },
+                // Not working: its last activity isn't shown, its todo is.
+                { "chatId": "idle", "deviceId": "d", "status": "idle", "updatedAt": iso(now - 1),
+                  "activity": { "kind": "editing", "label": "Edit x.rs", "since": iso(now - 300) },
+                  "todo": { "done": 3, "total": 3 } },
+            ])
+        };
+        s.set_live(live("cargo test -p zeron-engine"));
+        s.publish();
+        let v = s.value();
+        let text = |v: Option<&zgx_script::Value>| v.map(crate::auth::text);
+        let none = |v: Option<&zgx_script::Value>| v.is_none_or(|v| matches!(v, zgx_script::Value::Nil));
+        let orc = chat(&v, "orc");
+        assert_eq!(text(orc.field("activity").and_then(|a| a.field("kind"))).as_deref(), Some("delegating"));
+        assert!(none(orc.field("todo")));
+        assert!(none(orc.field("parent")));
+        // The crew thread, under its orchestrator.
+        let th = v.field("children").unwrap().field("orc").unwrap().list()[0].clone();
+        assert_eq!(text(th.field("child_kind")).as_deref(), Some("crew"));
+        let activity = th.field("activity").unwrap();
+        assert_eq!(text(activity.field("kind")).as_deref(), Some("testing"));
+        assert_eq!(text(activity.field("label")).as_deref(), Some("cargo test -p zeron-engine"));
+        assert_eq!(activity.field("since").and_then(|n| n.as_f64()), Some((now - 48) as f64));
+        let todo = th.field("todo").unwrap();
+        assert_eq!(todo.field("done").and_then(|n| n.as_f64()), Some(5.));
+        assert_eq!(todo.field("total").and_then(|n| n.as_f64()), Some(8.));
+        assert_eq!(text(todo.field("current")).as_deref(), Some("WatchOrchestration stream"));
+        let idle = chat(&v, "idle");
+        assert!(none(idle.field("activity")));
+        assert_eq!(idle.field("todo").and_then(|t| t.field("total")).and_then(|n| n.as_f64()), Some(3.));
+        assert!(none(idle.field("todo").unwrap().field("current")));
+        // Its activity moves on, nothing else does: published, its row new.
+        let before = s.published.get();
+        s.heard(Slot::Live, live("cargo test -p zeron-engine --lib orchestration"));
+        assert_eq!(s.published.get(), before + 1);
+        let v = s.value();
+        let th = v.field("children").unwrap().field("orc").unwrap().list()[0].clone();
+        assert_eq!(
+            text(th.field("activity").unwrap().field("label")).as_deref(),
+            Some("cargo test -p zeron-engine --lib orchestration")
+        );
     }
 
     #[test]
