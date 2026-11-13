@@ -144,7 +144,7 @@ end }
 -- The live one's shape: three machines; the Brain dump and an orchestrator
 -- on this one; threads the Brain dump started on the others (one with a
 -- long name), and one it handed a part to.
-ui.command { id = "map_live", title = "Map: the live shape", run = function()
+local function map_live()
 	local t = os.time()
 	local here = { id = "dev-hp1", name = "honeypot-1", platform = "linux", here = true, online = true }
 	local hp = { id = "dev-hp", name = "honeypot", platform = "linux", online = true }
@@ -191,6 +191,29 @@ ui.command { id = "map_live", title = "Map: the live shape", run = function()
 		["dev-hp"] = { cpu = 0.1, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
 		["dev-win"] = { cpu = 0.05, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
 	})
+end
+ui.command { id = "map_live", title = "Map: the live shape", run = map_live }
+-- The live shape, and Zeron fixes leading crew on M2A and honeypot: its
+-- rail and the Brain dump's both run down past the other machines.
+ui.command { id = "map_cross", title = "Map: two rails down", run = function()
+	map_live()
+	local t = os.time()
+	local n: any = table.clone(sessions.now:peek())
+	n.children = {
+		["orc-fixes"] = {
+			{ id = "th-diff", parent = "orc-fixes", title = "Diff view horizontal scroll", device = "dev-m2a", child_kind = "crew", status = "working",
+				updated = t - 5, created = t - 900, agent = "claude", activity = { kind = "thinking", label = "", since = t - 20 } },
+			{ id = "th-scroll", parent = "orc-fixes", title = "Scroll position reset", device = "dev-hp", child_kind = "crew", status = "working",
+				updated = t - 8, created = t - 800, agent = "claude", activity = { kind = "thinking", label = "", since = t - 20 } },
+		},
+	}
+	sessions.now:set(n)
+	local o: any = table.clone(orchestration.now:peek())
+	o.crew = {
+		{ chat_id = "th-diff", orchestrator_id = "orc-fixes", role = "", released = false, joined = t - 900 },
+		{ chat_id = "th-scroll", orchestrator_id = "orc-fixes", role = "", released = false, joined = t - 800 },
+	}
+	orchestration.now:set(o)
 end }
 -- A secondary click's menu for the id in `map_menu_id`, as on the Map.
 local menu_id = ui.state("map_menu_id", "")

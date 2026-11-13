@@ -80,8 +80,13 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 		expect(#l.rails).to_be(5)
 		for _, rail in l.rails do
 			local n = node[rail.orchestrator]
-			-- Its dot: on the rail, the rail's start.
-			expect(rail.x).to_be(n.x + Layout.DOT)
+			-- Its dot: on the rail, the rail's start; or, a rail across
+			-- machines, in a column of its own left of every row, a hop from
+			-- its dot into it.
+			local column = rail.x ~= n.x + Layout.DOT
+			if column then
+				expect(rail.x < l.content_x).to_be(true)
+			end
 			expect(rail.dot).to_be(n.mid)
 			-- One elbow a crew row, none into the orchestrator's own.
 			expect(#rail.branches).to_be(#crew[rail.orchestrator])
@@ -101,7 +106,7 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 			local ends = 0
 			for _, pts in Layout.lines(rail) do
 				-- (Or in its channel, after going under a machine's head.)
-				expect(pts[1] == rail.x or pts[1] < l.content_x).to_be(true)
+				expect(pts[1] == rail.x or pts[1] < l.content_x or (column and pts[1] == n.x + Layout.DOT)).to_be(true)
 				if pts[#pts - 1] > rail.x then
 					ends += 1
 				else
@@ -115,7 +120,7 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 					end
 					-- (Into its channel and back: left of every row.)
 					expect(not jogs or min_x < l.content_x).to_be(true)
-					for i = 1, #pts - 3, 2 do
+					for i = 1, if column then 0 else #pts - 3, 2 do
 						if pts[i] == rail.x and pts[i + 2] == rail.x then
 							local lo, hi = math.min(pts[i + 1], pts[i + 3]), math.max(pts[i + 1], pts[i + 3])
 							for _, r in l.rows do
@@ -292,7 +297,7 @@ test("topology: rows are drawn where their branches end, at several widths", fun
 			if rail.orchestrator == "orc-orch" or rail.orchestrator == "orc-reins" then
 				local name = if rail.orchestrator == "orc-orch" then "Orchestrators" else "Reins release"
 				local x, y, _bw, bh = box_of(app, "#orch-map-field", `button "{name}"`)
-				expect(math.abs((x - fx) + Layout.DOT - rail.x) < 0.5).to_be(true)
+				expect(math.abs((x - fx) - l.content_x) < 0.5).to_be(true)
 				expect(math.abs((y - fy) + bh / 2 - rail.dot) < 0.5).to_be(true)
 			end
 		end
@@ -743,4 +748,32 @@ test("topology: a rail running past a machine with nothing at work never crosses
 		end
 	end
 	expect(empty).to_be(2)
+end)
+
+test("topology: rails across machines keep a column each; where an elbow passes another's, that one breaks", function()
+	local l = Layout.layout(world(), 1200)
+	local cols = {}
+	for _, rail in l.rails do
+		if rail.x < l.content_x then
+			table.insert(cols, rail)
+		end
+	end
+	expect(#cols >= 2).to_be(true)
+	for _, a in cols do
+		for _, b in a.branches do
+			for _, other in cols do
+				if other ~= a and other.x > a.x and other.x < b.to then
+					-- (No upright of `other` runs through the elbow's height.)
+					for _, run in other.runs do
+						for i = 1, #run - 3, 2 do
+							if run[i] == other.x and run[i + 2] == other.x then
+								local lo, hi = math.min(run[i + 1], run[i + 3]), math.max(run[i + 1], run[i + 3])
+								expect(b.y > lo and b.y < hi).to_be(false)
+							end
+						end
+					end
+				end
+			end
+		end
+	end
 end)
