@@ -2406,7 +2406,7 @@ async fn a_decision_keeps_its_pictures_and_pick_and_an_option_answers_it() {
         json!({"op":"ask","kind":"decision","question":"Which variant?",
                "options":[
                    {"label":"(a) Tag","detail":"No lines","images":["shots/tag.png"],"scores":{"Claude":8,"GPT":8.5}},
-                   {"label":"(b) Edge","images":[elsewhere.path().join("edge.png").to_str().unwrap(), "https://x.dev/edge.png"]}
+                   {"label":"(b) Edge","images":[elsewhere.path().join("edge.png").to_str().unwrap(), "https://x.dev/edge.png", "http://x.dev/plain.png", "https://127.0.0.1/edge.png"]}
                ],
                "images":["shots/now.png", "notes.txt"],
                "recommendation":{"option":0,"why":"Two of three picked it."},
@@ -2423,6 +2423,7 @@ async fn a_decision_keeps_its_pictures_and_pick_and_an_option_answers_it() {
     assert_eq!(tag.len(), 1, "{tag:?}");
     assert!(std::path::Path::new(&tag[0]).starts_with(&store) && tag[0].ends_with("-tag.png"), "{tag:?}");
     assert_eq!(std::fs::read(&tag[0]).unwrap(), PNG);
+    // (Only https to a public name: plain http and loopback are left out.)
     assert_eq!(ask.options[1].images, ["https://x.dev/edge.png"]);
     assert_eq!(ask.images.len(), 1);
     assert!(ask.images[0].ends_with("-now.png"));
@@ -2492,10 +2493,10 @@ async fn a_tool_ask_gets_the_message_that_asked_when_its_turn_ends() {
     chat(&core, "asker", "Asker", None).await;
     push(&core, "asker", "u1", zeron_doc::MessageRole::User, "Pick a bucket and go.");
     push(&core, "asker", "a1", zeron_doc::MessageRole::Assistant, "Two buckets fit; asking.");
-    // (Times are in milliseconds: a moment apart, as a real turn's are.)
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let id = op(&core, agent("asker"), json!({"op":"ask","kind":"question","question":"Which bucket?"})).await.unwrap();
     assert!(ask_of(&core, &id).turn_id.is_none());
+    // (Written after it: a later millisecond.)
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     push(&core, "asker", "a2", zeron_doc::MessageRole::Assistant, "Waiting on the bucket.");
     turn_ended(&core, "asker").await;

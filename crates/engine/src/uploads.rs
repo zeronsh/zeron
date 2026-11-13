@@ -808,6 +808,31 @@ mod tests {
         assert!(uploads.store_ask_image("notes.txt", cwd).is_err());
         assert!(uploads.store_ask_image("fake.png", cwd).is_err());
         assert!(uploads.store_ask_image("missing.png", cwd).is_err());
+        // Named by its bytes: another picture of the same name is another
+        // file, and neither overwrites the other.
+        let png2 = b"\x89PNG\r\n\x1a\nother".to_vec();
+        std::fs::create_dir_all(work.path().join("b")).unwrap();
+        std::fs::write(work.path().join("b/tag.png"), &png2).unwrap();
+        let other = uploads.store_ask_image("b/tag.png", cwd).unwrap();
+        assert_ne!(other, stored);
+        assert_eq!(std::fs::read(&other).unwrap(), png2);
+        assert_eq!(std::fs::read(&stored).unwrap(), png);
+        let name = Path::new(&stored).file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(is_upload_name(&name), "{name}");
+        // Over the cap: refused, read no further than it.
+        let big = work.path().join("big.png");
+        let mut bytes = png.clone();
+        bytes.resize(ASK_IMAGE_MAX_BYTES as usize + 1, 0);
+        std::fs::write(&big, &bytes).unwrap();
+        assert!(uploads.store_ask_image("big.png", cwd).is_err());
+        // A link inside the folder to a picture outside it: not followed.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(elsewhere.path().join("out.png"), work.path().join("link.png")).unwrap();
+            assert!(uploads.store_ask_image("link.png", cwd).is_err());
+            std::os::unix::fs::symlink(elsewhere.path(), work.path().join("dir")).unwrap();
+            assert!(uploads.store_ask_image("dir/out.png", cwd).is_err());
+        }
     }
 
     #[test]
@@ -1589,38 +1614,56 @@ impl Uploads {
             return Err(refuse("not a picture"));
         }
         let store: &Path = self.dir();
-        if let Some(stored) = jail(&path, &[store]) {
+        if let Some(stored) = jail_without_links(&path, store) {
             return Ok(stored.to_string_lossy().to_string());
         }
-        let roots: Vec<&Path> = cwd.into_iter().collect();
-        let resolved = jail(&path, &roots).ok_or_else(|| refuse("outside the thread's folder"))?;
-        let meta = std::fs::metadata(&resolved)?;
+        let root = cwd.ok_or_else(|| refuse("outside the thread's folder"))?;
+        // No link followed below the folder, then opened once through a
+        // pinned descriptor (no link followed either): what is read is what
+        // was checked, and only as much as the cap allows.
+        let resolved = jail_without_links(&path, root).ok_or_else(|| refuse("outside the thread's folder"))?;
+        let canonical_root = std::fs::canonicalize(root)?;
+        let relative = resolved.strip_prefix(&canonical_root).map_err(|_| refuse("outside the thread's folder"))?;
+        let (file, _held) = open_generated_file(&canonical_root, relative).map_err(|e| refuse(&format!("can't open it: {e}")))?;
+        let meta = file.metadata()?;
         if !meta.is_file() {
             return Err(refuse("not a file"));
         }
         if meta.len() > ASK_IMAGE_MAX_BYTES {
             return Err(refuse("too large"));
         }
-        let bytes = std::fs::read(&resolved)?;
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        {
+            use std::io::Read;
+            (&file).take(ASK_IMAGE_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+        }
+        if bytes.len() as u64 > ASK_IMAGE_MAX_BYTES {
+            return Err(refuse("too large"));
+        }
         if raster_signature(&bytes).is_none() {
             return Err(refuse("not a PNG, JPEG, WebP or GIF"));
         }
-        // Named by what it is: its path and bytes (FNV-1a), so storing it
-        // again finds it.
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for b in resolved.to_string_lossy().as_bytes().iter().chain(bytes.iter()) {
-            hash ^= u64::from(*b);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        let id8 = format!("{:08x}", hash as u32);
+        // Named by its bytes (SHA-256, 128 bits of it, as `{id8}-{24 hex}-`
+        // so it reads as an upload's name): the same picture stored again is
+        // the same file, and two pictures never share one.
+        use sha2::{Digest, Sha256};
+        let hash = format!("{:x}", Sha256::digest(&bytes));
         let name = resolved.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = sanitize(&name);
+        let name: String = name.chars().rev().take(55).collect::<Vec<_>>().into_iter().rev().collect();
         std::fs::create_dir_all(store)?;
-        let destination = store.join(format!("{id8}-{}", sanitize(&name)));
-        if !destination.is_file() || std::fs::metadata(&destination)?.len() != bytes.len() as u64 {
+        let destination = store.join(format!("{}-{}-{name}", &hash[..8], &hash[8..32]));
+        if !destination.is_file() {
             use std::io::Write;
             let mut temporary = tempfile::NamedTempFile::new_in(store)?;
             temporary.write_all(&bytes)?;
-            temporary.persist(&destination).map_err(|e| EngineError::Io(e.error))?;
+            temporary.as_file().sync_all()?;
+            match temporary.persist_noclobber(&destination) {
+                Ok(_) => {}
+                // Stored meanwhile by another raise: the same bytes.
+                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(EngineError::Io(e.error)),
+            }
         }
         Ok(destination.to_string_lossy().to_string())
     }
