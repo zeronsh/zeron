@@ -272,12 +272,13 @@ fn windows_shell(
 }
 
 /// Whether `shell` is PowerShell (7's `pwsh` or Windows PowerShell), which
-/// prints a banner as it starts unless told `-NoLogo`.
+/// prints a banner as it starts unless told `-NoLogo`. Its last part, split
+/// at either slash: a Windows path reads the same wherever it's asked
+/// (`std::path` splits at `\` only on Windows, and the tests run on all).
 fn is_powershell(shell: &str) -> bool {
-    let name = std::path::Path::new(shell)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_ascii_lowercase());
-    matches!(name.as_deref(), Some("pwsh" | "powershell"))
+    let file = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    matches!(stem.to_ascii_lowercase().as_str(), "pwsh" | "powershell")
 }
 
 impl Terminals {
