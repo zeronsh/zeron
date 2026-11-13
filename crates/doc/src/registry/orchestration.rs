@@ -613,6 +613,11 @@ mod tests {
             dump_id: None,
             route_id: None,
             quiet: Default::default(),
+            origin: Default::default(),
+            turn_id: None,
+            updated_at: None,
+            escalated_at: None,
+            answered_via: None,
         };
         doc.upsert_ask(&ask);
         let mut d = dump("d1");

@@ -34,6 +34,7 @@ pub(crate) mod board_cards;
 pub(crate) mod placement;
 pub(crate) mod scope;
 pub(crate) mod stale_dumps;
+pub(crate) mod turn_asks;
 pub(crate) mod watchers;
 pub(crate) mod wake;
 

@@ -67,6 +67,7 @@ pub(crate) fn start(orchestration: Orchestration) {
             }
         }
     });
+    super::turn_asks::start(orchestration.clone());
     tokio::spawn(async move { route_answers(orchestration).await });
 }
 
@@ -284,6 +285,11 @@ fn ended(before: Option<&Session>, now: &Session) -> bool {
         })
 }
 
+/// A local chat's turn started since `before` (a message reached it).
+fn started(before: Option<&Session>, now: &Session) -> bool {
+    now.status == SessionStatus::Working && before.is_some_and(|b| b.status != SessionStatus::Working)
+}
+
 /// `full`, `chat`'s reply to a question route, recorded as its answer: at
 /// once the reply's first real sentence ([`plain_answer`]), then the cheap
 /// one-shot model's one-line answer to `question` from it (the title path
@@ -361,8 +367,8 @@ pub(crate) async fn record_outcome(
     }
     // An outcome that ends on a question for the person: an ask from the
     // thread, answered back to it.
-    if let Some(asks) = super::incoming::ends_on_question(&full) {
-        rpc.ask_for(chat, &asks, Some((dump_id, route_id)));
+    if let Some(found) = super::incoming::ends_on_question(&full) {
+        rpc.ask_for(chat, &found, Some((dump_id, route_id)));
     }
     if task.is_none() || state == RouteState::Failed {
         let title = rpc
@@ -477,6 +483,14 @@ async fn route_answers(orchestration: Orchestration) {
                     .filter(|s| ended(seen.get(&s.chat_id), s))
                     .map(|s| (s.chat_id.clone(), s.clone()))
                     .collect();
+                // A message reached a thread: the turn-end asks it answers close.
+                let replied: Vec<String> =
+                    now.iter().filter(|s| started(seen.get(&s.chat_id), s)).map(|s| s.chat_id.clone()).collect();
+                if let Some(rpc) = orchestration.rpc() {
+                    for chat in replied {
+                        super::turn_asks::on_reply(&orchestration, &rpc, &chat);
+                    }
+                }
                 seen = now.into_iter().map(|s| (s.chat_id.clone(), s)).collect();
                 (finished, Hosted::Here)
             }
@@ -518,6 +532,11 @@ fn turns_ended(
         if hosted == Hosted::Here && just_now {
             // A Brain dump's turn that left a dump routing.
             super::stale_dumps::after_turn(orchestration, rpc, &chat);
+            // A launched thread's turn that ended on a question for the person.
+            let (o, r, c, s) = (orchestration.clone(), rpc.clone(), chat.clone(), session.clone());
+            tokio::spawn(async move {
+                super::turn_asks::after_turn(&o, &r, &c, &s).await;
+            });
         }
         if hosted == Hosted::Older && files_own_routes(orchestration, &session.device_id) {
             continue;
@@ -701,6 +720,11 @@ mod tests {
             dump_id: None,
             route_id: None,
             quiet: Default::default(),
+            origin: Default::default(),
+            turn_id: None,
+            updated_at: None,
+            escalated_at: None,
+            answered_via: None,
         }
     }
 
