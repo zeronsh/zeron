@@ -4,7 +4,8 @@
 //! first: the command ends, the runtime and its background work stay, and
 //! the steer starts the next turn in that same runtime. Steers sent before
 //! it, which the stop cancels, go again first. Agents that haven't opted
-//! in (`Harness::steer_stops_tool`) keep the step-boundary wait.
+//! in (`Harness::steer_stops_tool`) keep the step-boundary wait, and so does
+//! a message from another chat.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -435,5 +436,53 @@ async fn a_steer_with_no_command_running_stops_nothing() {
     wait_for(|| read(&rig).iter().any(|p| p == "and then"), "the steer").await;
     assert_eq!(rig.ledger.stops.load(Ordering::SeqCst), 0);
     assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
+    rig.core.sessions.shutdown().await;
+}
+
+/// Claude Code tells the agent the person rejected the call and to stop and
+/// wait whenever a turn is interrupted, so a message from another chat that
+/// stopped the command would read as an order to stop. It waits for the
+/// command instead, as `send_message` promises.
+#[tokio::test]
+async fn a_message_from_another_chat_never_stops_the_command() {
+    let rig = rig(true);
+    let turn = running_a_command(&rig).await;
+    wait_for(
+        || rig.core.sessions.steer_stops_tool(CHAT),
+        "the command to be open",
+    )
+    .await;
+    let message =
+        zeron_proto::agent_messages::agent_message("Coordinator (139d8682)", "139d8682", "status?");
+    steer(&rig, &message, "m-agent");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(read(&rig).len(), 1, "it waits for the command");
+    assert_eq!(
+        rig.ledger.stops.load(Ordering::SeqCst),
+        0,
+        "nothing stopped"
+    );
+    rig.ledger.release.notify_one();
+    wait_for(
+        || read(&rig).iter().any(|p| p.ends_with("status?")),
+        "the message at the step boundary",
+    )
+    .await;
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "the turn to end",
+    )
+    .await;
+    assert_eq!(rig.ledger.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
+    assert!(turn.background_live(), "its background work still runs");
+    let doc = rig.core.doc_host.open(CHAT).unwrap();
+    let entries = doc.doc().read_entries().unwrap();
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.status == Some(MessageStatus::Aborted)),
+        "the command's turn was not stopped"
+    );
     rig.core.sessions.shutdown().await;
 }
