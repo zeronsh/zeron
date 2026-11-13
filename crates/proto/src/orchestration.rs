@@ -780,6 +780,66 @@ pub fn classify_command(command: &str) -> ActivityKind {
 /// What a running tool call says the agent is doing, and a short label for
 /// it. Pure: shell commands go through [`classify_command`].
 pub fn activity_of(call: &crate::ToolCall) -> (ActivityKind, String) {
+    let (kind, label) = activity_of_raw(call);
+    (kind, live_label(&label))
+}
+
+/// The most a synced activity or todo label keeps.
+pub const LIVE_LABEL_MAX: usize = 80;
+
+/// A label as it may sync on a session row: secrets redacted, one line, at
+/// most [`LIVE_LABEL_MAX`] chars.
+pub fn live_label(text: &str) -> String {
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    prompt_text::one_line(&crate::redact::redact_command_output(first), LIVE_LABEL_MAX)
+}
+
+/// A command's label: program, subcommand and short arguments. Leading env
+/// assignments go, and everything from `--`, a quoted argument, or a flag
+/// that carries credentials or headers on.
+fn command_label(command: &str) -> String {
+    const STOP_FLAGS: &[&str] = &[
+        "-H", "--header", "-u", "--user", "--password", "--pass", "--token", "--auth",
+        "-d", "--data", "--data-raw", "--data-binary", "-b", "--cookie", "-e", "--env",
+    ];
+    let line = command.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut words = Vec::new();
+    for word in line.split_whitespace() {
+        let is_env = words.is_empty()
+            && word.split_once('=').is_some_and(|(k, _)| {
+                !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+        if is_env || (words.is_empty() && matches!(word, "env" | "sudo")) {
+            continue;
+        }
+        if word == "--"
+            || word.starts_with(['"', '\'', '`', '$', '<', '|', '>', ';', '&'])
+            || STOP_FLAGS.contains(&word)
+            || STOP_FLAGS.iter().any(|f| f.starts_with("--") && word.starts_with(&format!("{f}=")))
+            || word.contains('=')
+            || words.len() >= 6
+        {
+            break;
+        }
+        words.push(word);
+    }
+    words.join(" ")
+}
+
+/// A URL's label: scheme, host and path, no query, fragment or userinfo.
+fn url_label(url: &str) -> String {
+    let url = url.trim();
+    let cut = url.find(['?', '#']).map_or(url, |at| &url[..at]);
+    match cut.split_once("://") {
+        Some((scheme, rest)) => {
+            let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+            format!("{scheme}://{rest}")
+        }
+        None => cut.to_owned(),
+    }
+}
+
+fn activity_of_raw(call: &crate::ToolCall) -> (ActivityKind, String) {
     use crate::ToolCall;
     fn clip(s: &str, max: usize) -> String {
         let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
@@ -802,7 +862,7 @@ pub fn activity_of(call: &crate::ToolCall) -> (ActivityKind, String) {
         "wait_for_turn",
     ];
     match call {
-        ToolCall::Exec { command } => (classify_command(command), clip(command, 80)),
+        ToolCall::Exec { command } => (classify_command(command), command_label(command)),
         ToolCall::ReadFile { path } => (ActivityKind::Reading, format!("Read {}", file(path))),
         ToolCall::Search { pattern, .. } => (ActivityKind::Reading, format!("Search {}", clip(pattern, 60))),
         ToolCall::Glob { pattern } => (ActivityKind::Reading, format!("Glob {}", clip(pattern, 60))),
@@ -815,7 +875,7 @@ pub fn activity_of(call: &crate::ToolCall) -> (ActivityKind, String) {
                 None => "Patch".into(),
             },
         ),
-        ToolCall::WebFetch { url, .. } => (ActivityKind::Browsing, clip(url, 80)),
+        ToolCall::WebFetch { url, .. } => (ActivityKind::Browsing, url_label(url)),
         ToolCall::WebSearch { query } => (ActivityKind::Browsing, format!("Search {}", clip(query, 60))),
         ToolCall::Todo { .. } => (ActivityKind::Thinking, "Planning".into()),
         _ if call.is_subagent_spawn() => (ActivityKind::Delegating, "Subagent".into()),
@@ -847,7 +907,7 @@ pub fn todo_progress(items: &[crate::TodoItem]) -> Option<TodoProgress> {
     let current = items
         .iter()
         .find(|i| i.status() == crate::TodoStatus::InProgress)
-        .map(|i| i.text.trim().to_owned())
+        .map(|i| live_label(&i.text))
         .filter(|t| !t.is_empty());
     Some(TodoProgress {
         done: done as u32,
@@ -1155,6 +1215,36 @@ mod tests {
         assert_eq!(activity_of(&ToolCall::Unknown { name: "Agent: review".into(), input: None }).0, ActivityKind::Delegating);
         let long = "x".repeat(200);
         assert_eq!(exec(&long).1.chars().count(), 80);
+    }
+
+    #[test]
+    fn live_labels_are_redacted_and_short() {
+        use crate::ToolCall;
+        let exec = |c: &str| activity_of(&ToolCall::Exec { command: c.into() }).1;
+        let curl = exec("curl -s -H \"Authorization: Bearer sk-ant-abcdefghijklmnopqrstuvwxyz0123\" https://api.example.com/v1");
+        assert!(!curl.contains("sk-ant") && !curl.contains("Bearer"), "{curl}");
+        assert_eq!(curl, "curl -s");
+        assert_eq!(exec("cargo test -p zeron-engine -- --nocapture secret"), "cargo test -p zeron-engine");
+        assert_eq!(exec("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 gh pr merge 12"), "gh pr merge 12");
+        let quoted = exec("git commit -m 'token=hunter2'");
+        assert!(!quoted.contains("hunter2"), "{quoted}");
+        assert!(!exec("mytool sk-ant-abcdefghijklmnopqrstuvwxyz0123456789").contains("sk-ant-abcdefghij"));
+        let fetch = activity_of(&ToolCall::WebFetch {
+            url: "https://user:pw@example.com/a/b?token=abc123secret#frag".into(),
+            prompt: None,
+        })
+        .1;
+        assert_eq!(fetch, "https://example.com/a/b");
+        let multi = exec("echo one\necho two");
+        assert_eq!(multi, "echo one");
+        // Todo text too.
+        let items = vec![crate::TodoItem::new(
+            format!("call with key sk-ant-abcdefghijklmnopqrstuvwxyz0123456789 {}", "z".repeat(200)),
+            crate::TodoStatus::InProgress,
+        )];
+        let current = todo_progress(&items).unwrap().current.unwrap();
+        assert!(!current.contains("sk-ant-abcdefghij"), "{current}");
+        assert!(current.chars().count() <= LIVE_LABEL_MAX);
     }
 
     #[test]
