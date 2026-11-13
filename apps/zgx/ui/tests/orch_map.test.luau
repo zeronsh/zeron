@@ -76,7 +76,8 @@ test("topology: each rail drops from its orchestrator's dot; each elbow ends whe
 				table.insert(crew[o], r)
 			end
 		end
-		expect(#l.rails).to_be(4)
+		-- (The four orchestrators with crew, and the Brain dump.)
+		expect(#l.rails).to_be(5)
 		for _, rail in l.rails do
 			local n = node[rail.orchestrator]
 			-- Its dot: on the rail, the rail's start.
@@ -236,6 +237,27 @@ test("topology: crew sit indented right of their orchestrator", function()
 	expect(rail.bottom).to_be(l.rows[3].mid)
 end)
 
+test("topology: what the Brain dump started hangs under it, dashed, across machines", function()
+	local l = Layout.layout(world(), 1200)
+	local brain: any = nil
+	for _, r in l.rails do
+		if r.orchestrator == "orc-brain" then
+			brain = r
+		end
+	end
+	expect(brain ~= nil).to_be(true)
+	expect(brain.dashed).to_be(true)
+	-- Its three threads: on the macbook, this desk and the Cloud machine.
+	expect(#brain.branches).to_be(3)
+	local lane_of: { [string]: string } = {}
+	for _, r in l.rows do
+		lane_of[r.id] = r.lane
+	end
+	expect(lane_of["th-dev-names"]).to_be("dev-mac")
+	expect(lane_of["th-wg-audit"]).to_be("dev-cloud")
+	expect(lane_of["th-omarchy"]).to_be("dev-desk")
+end)
+
 test("topology: crew on another machine are wired across to it", function()
 	local l = Layout.layout(world(), 1200)
 	local lane_of: { [string]: any } = {}
@@ -289,9 +311,10 @@ end)
 test("topology: each machine a lane, every thread at work a row", function()
 	local app = open()
 	expect(app:count("#control-widget-map >> .orch-lane")).to_be(4)
-	-- Five orchestrators, twelve crew, one of the person's own at work.
+	-- Five orchestrators; twelve crew and three threads the Brain dump
+	-- started, under it; one of the person's own at work.
 	expect(app:count("#control-widget-map >> .orch-node")).to_be(5)
-	expect(app:count("#control-widget-map >> .orch-pill")).to_be(12)
+	expect(app:count("#control-widget-map >> .orch-pill")).to_be(15)
 	expect(app:count("#control-widget-map >> .orch-thread")).to_be(1)
 end)
 
@@ -327,7 +350,7 @@ test("timeline: a lane a thread, under its machine and project", function()
 	local app = open()
 	view(app, "timeline")
 	expect(app:count("#control-widget-map >> .orch-tl-machine")).to_be(4)
-	expect(app:count("#control-widget-map >> .orch-tl-lane")).to_be(18)
+	expect(app:count("#control-widget-map >> .orch-tl-lane")).to_be(21)
 	expect(app:count("#control-widget-map >> .orch-tl-project")).to_be(7)
 	-- What it does now, at its end.
 	expect(app:has('#control-widget-map >> "Awaiting Input"')).to_be(true)
@@ -462,4 +485,36 @@ test("the model puts each thread on its machine, by project", function()
 	expect(f.threads["th-zgx-mem"].kind).to_be("thread")
 	-- Done and idle threads of the person's own aren't shown.
 	expect(f.threads["th-titlebar"]).to_be(nil)
+end)
+
+test("a remote thread's turn ending shows in every view at once, no activity ever written", function()
+	local thread = "Verify unique device names"
+	local function state_in(app: any, within: string): string
+		for line in app:tree(within):gmatch("[^\n]+") do
+			local label = line:match('^%s*@%d+ "([^"]*)"')
+			if label then
+				return label
+			end
+		end
+		return ""
+	end
+	local app = open()
+	app:command("fixture.remote_working")
+	app:wait("#never-there", { timeout_ms = 400 })
+	expect(state_in(app, `#control-widget-map >> .orch-pill "{thread}" >> .orch-state`)).to_be("Working")
+	expect(app:has('#control-widget-map >> .orch-node "Brain dump" >> .orch-state')).to_be(true)
+	expect(app:has(`#control-widget-machines >> .orch-machine-job "{thread}"`)).to_be(true)
+	-- Its turn ends (its rows flickering as they come): idle for good.
+	app:command("fixture.remote_flicker")
+	app:wait("#never-there", { timeout_ms = 700 })
+	for _, v in { "topology", "timeline", "machines" } do
+		view(app, v)
+		local row = if v == "timeline" then `.orch-tl-lane "{thread}"` else `.orch-pill "{thread}"`
+		expect(app:has(`#control-widget-map >> {row}`)).to_be(true)
+		expect(state_in(app, `#control-widget-map >> {row} >> .orch-state`)).to_be("")
+	end
+	view(app, "topology")
+	expect(app:has('#control-widget-map >> .orch-node "Brain dump" >> .orch-state')).to_be(false)
+	-- The Control room's Machines: no longer among what runs.
+	expect(app:has(`#control-widget-machines >> .orch-machine-job "{thread}"`)).to_be(false)
 end)

@@ -342,6 +342,12 @@ M.View = ui.component(function(props: {
 					shrink = 0,
 					items = "center",
 					justify = "center",
+					class = "orch-state",
+					-- (Its state in words, as the sidebar's dot says it.)
+					label = function(): string
+						local k = st()
+						return if k == "idle" then "" else status.KINDS[k :: any].long
+					end,
 					ui.show(function(): boolean
 						return st() ~= "idle"
 					end, status.StatusIcon { kind = function(): any

@@ -2520,6 +2520,47 @@ mod tests {
     /// it is, on its row (top-level or a crew thread's): the activity only
     /// while it works, the todo whenever its host says; a change to either
     /// alone is published and builds its row again.
+    /// A thread on another machine whose host writes no activity (an older
+    /// release): working, then its turn over, told as a change to its row
+    /// alone (`startedAt` null, the outcome completed). Its row says so at
+    /// once, every list the scripts read (the map's, the sidebar's).
+    #[test]
+    fn a_remote_thread_s_turn_ending_shows_at_once() {
+        use crate::engine::lists::{Changes, Frame};
+        let now = now_seconds();
+        let s = Sessions::default();
+        *s.here.borrow_mut() = Some("here".into());
+        let chats = json!([
+            { "id": "brain", "title": "Brain dump", "deviceId": "here", "createdAt": iso(now - 7200),
+              "lastMessageAt": iso(now - 30), "lastSeenAt": iso(now - 600) },
+            { "id": "th", "title": "Verify Unique Device Names", "deviceId": "remote", "createdAt": iso(now - 900),
+              "lastMessageAt": iso(now - 30), "lastSeenAt": iso(now - 600) },
+        ]);
+        s.heard_list(Slot::Chats, &Frame::for_tests(&chats, None, "id"));
+        let devices = json!([
+            { "id": "here", "name": "desk", "lastSeenAt": iso(now - 1) },
+            { "id": "remote", "name": "honeypot", "lastSeenAt": iso(now - 1) },
+        ]);
+        s.heard_list(Slot::Devices, &Frame::for_tests(&devices, None, "id"));
+        let working = json!([
+            { "chatId": "brain", "deviceId": "here", "status": "working", "startedAt": iso(now - 60), "updatedAt": iso(now - 2), "runningSubagents": 0 },
+            { "chatId": "th", "deviceId": "remote", "status": "working", "startedAt": iso(now - 60), "updatedAt": iso(now - 2), "runningSubagents": 0 },
+        ]);
+        s.heard_list(Slot::Live, &Frame::for_tests(&working, None, "chatId"));
+        let status = |v: &zgx_script::Value, id: &str| chat(v, id).field("status").map(crate::auth::text);
+        let v = s.value();
+        assert_eq!(status(&v, "th").as_deref(), Some("working"));
+        // Its turn ends: one row changes.
+        let done = |id: &str, dev: &str| json!({ "chatId": id, "deviceId": dev, "status": "idle", "startedAt": null, "updatedAt": iso(now - 1),
+            "lastTurnOutcome": { "status": "completed", "finishedAt": iso(now - 1) }, "lastCompletedTurn": "t1", "runningSubagents": 0 });
+        let after = json!([done("brain", "here"), done("th", "remote")]);
+        let changes = Changes { changed: vec![done("th", "remote"), done("brain", "here")], removed: vec![], reordered: false };
+        s.heard_list(Slot::Live, &Frame::for_tests(&after, Some(&changes), "chatId"));
+        let v = s.value();
+        assert_ne!(status(&v, "th").as_deref(), Some("working"));
+        assert_ne!(status(&v, "brain").as_deref(), Some("working"));
+    }
+
     #[test]
     fn a_live_chat_shows_its_activity_and_todo() {
         let now = now_seconds();

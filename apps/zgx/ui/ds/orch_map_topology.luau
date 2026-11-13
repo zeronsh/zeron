@@ -154,7 +154,12 @@ return ui.component(function(props: Props): Node
 			for _, pts in Layout.lines(rail) do
 				path = polyline(path, pts)
 			end
-			c:stroke(path, ink, 1.5, { join = "round", cap = "round" })
+			if rail.dashed then
+				-- (What the Brain dump started: lighter, dashed.)
+				c:stroke(path, hue.canvas(rail.hue, alpha * 0.8), 1.25, { join = "round", cap = "round", dash = { 3, 4 } })
+			else
+				c:stroke(path, ink, 1.5, { join = "round", cap = "round" })
+			end
 		end
 	end
 
@@ -331,7 +336,7 @@ return ui.component(function(props: Props): Node
 			-- What it's doing itself, when it works.
 			ui.show(function(): boolean
 				return ost() == "working"
-			end, status.StatusIcon { kind = "working", size = 12 }),
+			end, ui.div { class = "orch-state", label = status.KINDS.working.long, status.StatusIcon { kind = "working", size = 12 } }),
 		}
 	end
 
@@ -379,6 +384,12 @@ return ui.component(function(props: Props): Node
 				shrink = 0,
 				items = "center",
 				justify = "center",
+				class = "orch-state",
+				-- (Its state in words, as the sidebar's dot says it.)
+				label = function(): string
+					local k = st()
+					return if k == "idle" then "" else status.KINDS[k :: any].long
+				end,
 				ui.switch(function(): string
 					local s = st()
 					return if s == "idle" then "idle" else "state"

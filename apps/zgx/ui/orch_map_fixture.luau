@@ -121,6 +121,53 @@ ui.command { id = "fixture.report", title = "Fixture: a crew report", run = func
 	orchestration.comms:push({ id = `cf-x{n}`, kind = "report", from = "th-ui-control", to = "orc-orch", summary = "Map tests pass", at = os.time() })
 end }
 -- A thread's activity moving twice within 300 ms: the first is held.
+-- A thread on another machine (an older host: no activity, no todo ever)
+-- working, and later its turn over: `status` alone says so.
+local function set_status(id: string, st: string?)
+	local n: any = table.clone(sessions.now:peek())
+	local function fix(list: { any }): { any }
+		local out = {}
+		for _, c in list do
+			if c.id == id then
+				c = table.clone(c)
+				c.status = st
+				c.activity = nil
+				c.todo = nil
+			end
+			table.insert(out, c)
+		end
+		return out
+	end
+	n.chats = fix(n.chats or {})
+	local kids = {}
+	for k, list in n.children or {} do
+		kids[k] = fix(list)
+	end
+	n.children = kids
+	sessions.now:set(n)
+end
+ui.command { id = "fixture.remote_working", title = "Fixture: a remote thread works", run = function()
+	set_status("th-dev-names", "working")
+	set_status("orc-brain", "working")
+end }
+ui.command { id = "fixture.remote_idle", title = "Fixture: a remote thread's turn ends", run = function()
+	set_status("th-dev-names", nil)
+	set_status("orc-brain", nil)
+end }
+-- Its row flickering as its turn ends (the host's last frames out of
+-- order): idle, working again for a blink, idle for good.
+ui.command { id = "fixture.remote_flicker", title = "Fixture: a remote thread's turn ends, flickering", run = function()
+	set_status("th-dev-names", nil)
+	set_status("orc-brain", nil)
+	ui.after(40, function()
+		set_status("th-dev-names", "working")
+		set_status("orc-brain", "working")
+	end)
+	ui.after(80, function()
+		set_status("th-dev-names", nil)
+		set_status("orc-brain", nil)
+	end)
+end }
 ui.command { id = "fixture.flicker", title = "Fixture: a thread flickers", run = function()
 	local function set(kind: string)
 		local n = sessions.now:peek()
