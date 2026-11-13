@@ -40,6 +40,27 @@ local DropOverlay = require("@ds/drop_overlay")
 -- What its tab says, and its icon, as the shipping app's.
 local M = {}
 
+-- Whether two picks are the same (a model's options compared by value).
+local function same(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
 function M.title(tab: any): string
 	-- (Its chat's name as it's named or renamed; before that, as it was opened.)
 	if tab.kind == "side_chat" then
@@ -78,12 +99,15 @@ end
 -- `take`: what a send does instead of messaging the chat (the Control
 -- room's Capture: a dump): told the words as they'd be sent and what they
 -- carry (Carried.pack's `attachments`), it returns a promise; the draft
--- clears as it goes and comes back, with its chips, if it fails.
+-- clears as it goes and comes back, with its chips, if it fails. It's
+-- told the pickers' picks too (`picks()`: model, its agent, effort…), and a
+-- pick made there is the chat's at once (`store.configure`), as on the chat
+-- page.
 -- `placeholder`: the words in it while it's empty. `footer`: which of its
 -- footer's pickers it shows (each by default): `access = false` leaves out
 -- the access mode, `place = false` where it works (project, device,
 -- checkout, branch); the model and agent always show.
-export type Take = (text: string, attachments: { any }) -> any
+export type Take = (text: string, attachments: { any }, picks: { [string]: any }) -> any
 export type Footer = { access: boolean?, place: boolean? }
 local function composer(chat: string, view: any, name: string, focus: State<number>, take: Take?, placeholder: string?, footer: Footer?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
@@ -206,6 +230,35 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- model's picker value, the effort, the access.
 	local function as_made(): (string?, string?, string?, string?)
 		local s = session:get()
+		if s and s.harness and s.model then
+			return s.harness, s.model, s.effort, s.access
+		end
+		-- (Its session not saying its model yet, as before its chat's row
+		-- comes: the row's, the chat's own config, never a new chat's
+		-- default.)
+		local own: any = nil
+		local now = sessions.now:get()
+		for _, list in { now.chats or {}, now.archived or {} } do
+			for _, c in list do
+				if c.id == chat then
+					own = c
+				end
+			end
+		end
+		for _, kids in now.children or {} do
+			for _, c in kids do
+				if c.id == chat then
+					own = c
+				end
+			end
+		end
+		if own and own.model and own.harness then
+			local m = own.model
+			if not string.find(m, "/", 1, true) then
+				m = `{own.harness}/{m}`
+			end
+			return own.harness, m, if s then s.effort else nil, if s then s.access else nil
+		end
 		if s and s.harness then
 			return s.harness, s.model, s.effort, s.access
 		end
@@ -377,6 +430,45 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 		end
 		return out
+	end
+	-- A page's own composer (`take`): a pick is the chat's at once, as on
+	-- the chat page (screens/chat/composer), never only with the next send.
+	-- (What the chat runs with already, or was seeded from it, isn't a pick.)
+	if take then
+		ui.effect(function()
+			local m, e, f, o = model:get(), effort:get(), fast:get(), options:get()
+			local s = session:get()
+			if not s or s.state ~= "ready" then
+				return
+			end
+			local was = seeded:peek()
+			local patch: { [string]: any } = {}
+			local changed = false
+			if m and m ~= was.model and m ~= s.model then
+				patch.model, changed = m, true
+				for _, c in store.catalog:peek().models do
+					if c.value == m then
+						patch.harness = c.harness
+					end
+				end
+			end
+			if e and e ~= was.effort and e ~= s.effort then
+				patch.effort, changed = e, true
+			end
+			-- (Off and none are one, as an empty set of options and none.)
+			if (f == true) ~= (was.fast == true) and (f == true) ~= (s.fast == true) then
+				patch.fast, changed = f == true, true
+			end
+			local function some(v: any): any
+				return if type(v) == "table" and next(v) == nil then nil else v
+			end
+			if not same(some(o), some(was.options)) and not same(some(o), some(s.options)) then
+				patch.options, changed = o, true
+			end
+			if changed then
+				store.configure(chat, patch)
+			end
+		end)
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
 	-- else where the person moved it (`where.plan()`).
@@ -609,7 +701,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- Taken by its page (a dump): the words and what they carry, never
 			-- a message of the chat's.
 			if take then
-				take(prompt, pack.attachments):after(function() end, function(err: any)
+				take(prompt, pack.attachments, picks()):after(function() end, function(err: any)
 					ui.batch(function()
 						draft:set(text)
 						quotes:set(said_quotes)
@@ -738,14 +830,28 @@ local function forking(chat: string): Node
 	end, { grow = 1, w_full = true })
 end
 
+-- Each page composer's focus, by its slot (`LaneTab.Composer`, its
+-- `DropZone`): bumped, it takes the keys.
+local focuses: { [string]: State<number> } = {}
+local function focus_of(slot: string): State<number>
+	local f = focuses[slot]
+	if not f then
+		f = ui.state(`lane_focus_{slot}`, 0)
+		focuses[slot] = f
+	end
+	return f
+end
+
 -- A chat's composer on a page of its own, outside the panel's tabs (the
 -- default layout's `LaneTab.Composer`, as v2 draws a side chat's): bound to
 -- chat `chat` in `slot`, its session watched while it shows, its sends
 -- taken by `take` where given (the Control room's Capture: each a dump).
-M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, id: string? }): Node
+M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, drop: boolean?, id: string? }): Node
 	local slot = props.slot
 	local view = lanes.view(slot)
-	local focus = ui.use_state(0)
+	-- (Its focus, by its slot: a drop zone of its, around it or anywhere on
+	-- its page, gives it the keys as something lands.)
+	local focus = focus_of(slot)
 	ui.effect(function()
 		lanes.watch(slot, props.chat())
 	end)
@@ -758,12 +864,48 @@ M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, t
 		if id == "" then
 			return ui.div {}
 		end
+		-- (Its `id` is the component's node's: zgx gives it there.)
 		return ui.column {
-			id = props.id,
 			w_full = true,
-			composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer),
+			if props.drop then M.DropZone { slot = slot, chat = props.chat, composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer) } else composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer),
 		}
 	end, { w_full = true })
+end)
+
+-- A drop zone for `LaneTab.Composer`'s draft (bound to `chat`, in
+-- `slot`), round whatever it's given: a chat dragged from the sidebar
+-- lands as an @-mention of it, files (and the files pane's) as chips to
+-- send with it, the chat page's own overlays saying so while they're over
+-- it; its composer takes the keys as one lands. A page puts it round as
+-- much as it likes (the Control room: all of Capture); `LaneTab.Composer`'s
+-- `drop = true`, round the composer alone.
+--
+--   LaneTab.DropZone { slot = "control-capture", chat = function() return id end, node }
+M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, [number]: Node }): Node
+	local slot = props.slot
+	local focus = focus_of(slot)
+	local body = ui.presence(function(): string
+		return props.chat() or ""
+	end, function(id: string): Node
+		local zone_name = `lane.{slot}`
+		local node: { [any]: any } = { w_full = true, relative = true }
+		for _, child in ipairs(props :: any) do
+			table.insert(node, child)
+		end
+		if id == "" then
+			return ui.column(node :: any)
+		end
+		local zone, carrying, carrying_session = Shared.own_drop_zone(zone_name, id, function()
+			focus:add(1)
+		end)
+		for k, v in zone do
+			node[k] = v
+		end
+		table.insert(node, DropOverlay { shown = carrying, id = `lane-drop-{slot}` })
+		table.insert(node, DropOverlay { shown = carrying_session, id = `lane-drop-mention-{slot}`, label = ui.t("chat.composer.drop_to_mention") :: any })
+		return ui.column(node :: any)
+	end, { w_full = true })
+	return body
 end)
 
 M.Tab = ui.component(function(props: { tab: any }): Node

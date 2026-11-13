@@ -61,6 +61,23 @@ return function()
 	-- its session as the host would give it, noted by slot in `watched`.
 	local lanes = require("@app/screens/chat/lanes") :: any
 	local watched = ui.state("watched", {} :: { [string]: string })
+	-- The models a composer offers (the host's catalog), and a pick made the
+	-- chat's (`chat.configure`), noted `configure:<id>:<model>`.
+	local store = require("@app/screens/chat/store") :: any
+	store.catalog_on = function() end
+	store.load_catalog = function() end
+	store.catalog:set({
+		state = "ready",
+		complete = true,
+		harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
+		models = {
+			{ value = "claude-code/claude-opus-5-5", label = "Opus 5.5", harness = "claude-code" },
+			{ value = "claude-code/claude-haiku-5-5", label = "Haiku 5.5", harness = "claude-code" },
+		},
+	})
+	store.configure = function(id: string, patch: any)
+		note(`configure:{id}:{patch.model or ""}`)
+	end
 	lanes.watch = function(slot: string, id: string?)
 		if not id then
 			return
@@ -69,7 +86,7 @@ return function()
 		local view = lanes.view(slot)
 		for _, c in sample.chats do
 			if c.id == id then
-				view.session:set({ id = id, state = "ready", device = c.device, harness = c.agent, model = c.model, running = false })
+				view.session:set({ id = id, state = "ready", device = c.device, harness = "claude-code", model = `claude-code/{c.model}`, running = false })
 			end
 		end
 	end
@@ -116,6 +133,9 @@ return function()
 		local kind = op.op
 		if kind == "dump" then
 			note(`dump:{op.text}`)
+			if op.picks then
+				note(`dump-model:{op.picks.model}`)
+			end
 			for _, f in op.attachments or {} do
 				note(`dump-file:{f.kind}:{f.name or f.path}`)
 			end
