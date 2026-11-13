@@ -241,6 +241,13 @@ return function()
 			n.dumps = dumps
 		end)
 	end }
+	-- Two files carried on the Brain dump's draft (Capture's chips).
+	ui.command { id = "fixture.carry", title = "Fixture: files on Capture's draft", run = function()
+		require("@app/screens/chat/shared").attach_files({
+			{ name = "notes.md", path = "/Users/dev/notes.md" },
+			{ name = "plan.txt", path = "/Users/dev/plan.txt" },
+		}, "orc-brain")
+	end }
 	-- A report coming in (the Map's pulse, a Comms row).
 	ui.command { id = "fixture.report", title = "Fixture: a crew report", run = function()
 		local n = #orchestration.comms:peek()

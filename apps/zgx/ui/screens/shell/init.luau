@@ -310,6 +310,16 @@ return function(): Node
 	runs["shell.reload_interface"] = function()
 		host.invoke("app.reload_interface")
 	end
+	-- ⌘⇧K on the Control room: its composer, wherever it shows (⌘K is
+	-- Search's).
+	runs["control.focus_capture"] = function()
+		if route.current:peek().name == "control" then
+			local control: any = boundary.load("@app/screens/control/page")
+			if control and control.focus_composer then
+				(control.focus_composer :: any)()
+			end
+		end
+	end
 	runs["shell.pin"] = function()
 		local s = route.current:peek().session
 		local sidebar = boundary.load("@app/screens/shell/sidebar")
@@ -504,6 +514,16 @@ return function(): Node
 					if shared and shared.focus then
 						shared.focus:add(1)
 						return true
+					end
+				end
+			end
+			-- A bare / nothing took, with no text field holding the keyboard,
+			-- on the Control room: into its composer, wherever it shows.
+			if e.key == "/" and not (e.editing or e.cmd or e.alt or e.ctrl or e.meta or e["repeat"]) then
+				if route.current:peek().name == "control" then
+					local control: any = boundary.load("@app/screens/control/page")
+					if control and control.focus_composer then
+						return (control.focus_composer :: any)() == true
 					end
 				end
 			end

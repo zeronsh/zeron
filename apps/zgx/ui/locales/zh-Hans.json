@@ -2766,7 +2766,8 @@
         "shell_close": "关闭",
         "shell_reload": "重新启动 Zeron",
         "shell_reload_interface": "重新加载界面",
-        "shell_dictate": "按住听写"
+        "shell_dictate": "按住听写",
+        "control_focus_capture": "聚焦捕获"
       },
       "group": {
         "sessions": "会话",
@@ -4275,7 +4276,9 @@
       "move_failed": "Couldn't move it",
       "newest": "Newest",
       "earlier": "{n, plural, one {# earlier} other {# earlier}}",
-      "history": "更早"
+      "history": "更早",
+      "expand": "展开",
+      "collapse": "收起"
     },
     "needs": {
       "failed": "Couldn't send that"

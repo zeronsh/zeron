@@ -976,6 +976,8 @@ return {
 	["ds.orch.map.span_15"] = "15m",
 	["ds.orch.map.span_60"] = "1h",
 	["ds.orch.map.crew_working"] = "{working}/{total} working",
+	["ds.orch.map.topo_lines"] = "Lines",
+	["ds.orch.map.topo_tags"] = "Tags",
 	["ds.orch.map.tick.report"] = "Report",
 	["ds.orch.map.tick.ask"] = "Ask",
 	["ds.orch.map.tick.done"] = "Done",

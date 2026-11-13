@@ -2766,7 +2766,8 @@
         "shell_close": "Close",
         "shell_reload": "Reload Zeron",
         "shell_reload_interface": "Reload interface",
-        "shell_dictate": "Hold to dictate"
+        "shell_dictate": "Hold to dictate",
+        "control_focus_capture": "Focus Capture"
       },
       "group": {
         "sessions": "Sessions",
@@ -4275,7 +4276,9 @@
       "move_failed": "Couldn't move it",
       "newest": "Newest",
       "earlier": "{n, plural, one {# earlier} other {# earlier}}",
-      "history": "Earlier"
+      "history": "Earlier",
+      "expand": "Expand",
+      "collapse": "Collapse"
     },
     "needs": {
       "failed": "Couldn't send that"
