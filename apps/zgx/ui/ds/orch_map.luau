@@ -1,8 +1,9 @@
 -- The Map: every machine as a lane, and on it the orchestrators it hosts
 -- and the crew threads it runs. An orchestrator is a station in its hue;
--- its crew are pills on its track, a hue line running through them. A
--- thread running on another machine sits on that machine's lane, its
--- orchestrator's line dropping to it there. A pill says how its thread
+-- its crew are pills fanned out under it, each on an arm off its hue
+-- trunk (parallel work, not a sequence). A thread running on another
+-- machine sits on that machine's lane, its orchestrator's line dropping to
+-- it there. A pill says how its thread
 -- stands (its dot), what it's doing (a glyph: testing, building, merging…)
 -- and how far through its todo it is (a thin bar). When agents talk, a
 -- pulse runs along the line between them. Click a pill or a station to
@@ -39,6 +40,8 @@ export type Props = {
 
 local Layout = require("@self/orch_map_layout")
 local ORCH_W, NODE_H, PILL_H, LANE_HEAD = Layout.ORCH_W, Layout.NODE_H, Layout.PILL_H, Layout.LANE_HEAD
+-- How round a line's corners are.
+local CORNER = 8
 -- A pulse's run along its line.
 local PULSE_MS = 900
 
@@ -133,68 +136,39 @@ M.Map = ui.component(function(props: Props): Node
 		return x.id
 	end
 
-	-- The lines, drawn once a layout (or a theme).
+	-- The lines, drawn once a layout (or a theme): each orchestrator's as
+	-- one shape (its trunk, arms and spine stroked together, so where they
+	-- meet doesn't darken), corners rounded.
 	local function draw(c: any, _w: number, _h: number)
 		local l = layout:get()
 		for _, e in l.edges do
 			local ink = hue.canvas(e.hue, if e.paused then 0.28 else (if hue.dark() then 0.55 else 0.62))
-			-- The polyline, cut where pills stand (on a horizontal run).
-			local pts = e.points
 			local path = ui.path()
-			local pen = false
-			for i = 1, #pts - 3, 2 do
-				local x1, y1, x2, y2 = pts[i], pts[i + 1], pts[i + 2], pts[i + 3]
-				if y1 == y2 and x2 > x1 then
-					-- Horizontal: around the gaps.
-					local x = x1
-					local cuts: { { number } } = {}
-					for _, g in e.gaps do
-						if g[2] > x1 and g[1] < x2 and math.abs(y1 - (pts[#pts])) < 0.5 then
-							table.insert(cuts, g)
+			for _, pts in e.lines do
+				path = path:move(pts[1], pts[2])
+				local n = #pts // 2
+				for i = 2, n do
+					local x, y = pts[2 * i - 1], pts[2 * i]
+					if i < n then
+						-- A corner: in along this segment, round, out along the next.
+						local px, py = pts[2 * i - 3], pts[2 * i - 2]
+						local nx, ny = pts[2 * i + 1], pts[2 * i + 2]
+						local d_in = math.max(math.abs(x - px), math.abs(y - py))
+						local d_out = math.max(math.abs(nx - x), math.abs(ny - y))
+						local r = math.min(CORNER, d_in / 2, d_out / 2)
+						if r > 0.5 then
+							local ix, iy = x - math.sign(x - px) * r, y - math.sign(y - py) * r
+							local ox, oy = x + math.sign(nx - x) * r, y + math.sign(ny - y) * r
+							path = path:line(ix, iy):quad(x, y, ox, oy)
+						else
+							path = path:line(x, y)
 						end
+					else
+						path = path:line(x, y)
 					end
-					table.sort(cuts, function(a: any, b: any): boolean
-						return a[1] < b[1]
-					end)
-					for _, g in cuts do
-						if g[1] > x then
-							if not pen then
-								path = path:move(x, y1)
-							end
-							path = path:line(g[1], y1)
-						end
-						pen = false
-						x = math.max(x, g[2])
-					end
-					if x < x2 then
-						if not pen then
-							path = path:move(x, y1)
-						end
-						path = path:line(x2, y2)
-						pen = true
-					end
-				elseif x1 ~= x2 and y1 ~= y2 then
-					-- A corner: a quarter round.
-					if not pen then
-						path = path:move(x1, y1)
-					end
-					path = path:quad(x2, y1, x2, y2)
-					pen = true
-				else
-					if not pen then
-						path = path:move(x1, y1)
-					end
-					path = path:line(x2, y2)
-					pen = true
 				end
 			end
 			c:stroke(path, ink, 1.5, { join = "round", cap = "round" })
-		end
-		-- A junction where a line leaves for another lane.
-		for _, e in l.edges do
-			if #e.points > 4 then
-				c:circle(e.points[5], e.points[6], 2.5, hue.canvas(e.hue, if e.paused then 0.3 else 0.9))
-			end
 		end
 	end
 
@@ -466,13 +440,29 @@ M.Map = ui.component(function(props: Props): Node
 				function(): string
 					return c().title or ""
 				end,
-				grow = 1,
-				min_w = 0,
+				shrink = 0,
+				max_w = function(): number
+					return row:get().w * 0.6
+				end,
 				truncate = true,
 				text_size = "$font.size.sm",
 				color = function(): string
 					return if st() == "done" or st() == "idle" then "$text.secondary" else "$text.primary"
 				end,
+			},
+			-- What it's running, where there's room.
+			ui.text {
+				function(): string
+					local a = c().activity
+					return if a and st() == "working" then a.label or "" else ""
+				end,
+				literal = true,
+				grow = 1,
+				min_w = 0,
+				truncate = true,
+				font = "$font.mono",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
 			},
 			-- How far through its todo.
 			ui.show(function(): boolean

@@ -58,7 +58,7 @@ test("a widget hidden from its menu goes, and comes back from the page's", funct
 end)
 
 test("a widget moved up stays in its column, and the order is kept", function()
-	local app = open()
+	local app = open(1440, 2400)
 	app:click('#control-widget-board >> role:button "Widget menu"')
 	app:frames(10)
 	app:click('"Move up"')
