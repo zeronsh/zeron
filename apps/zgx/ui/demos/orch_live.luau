@@ -9,6 +9,7 @@ local Cells = require("@ds/orch_cells")
 local Spark = require("@ds/orch_spark")
 local Counter = require("@ds/orch_counter")
 local hold = require("@ds/orch_hold")
+local Block = require("@ds/orch_block")
 
 local function caption(s: string): Node
 	return ds.Text { s, style = "label", tone = "tertiary" }
@@ -28,7 +29,7 @@ end
 return {
 	id = "orch-live",
 	title = "Live pieces",
-	about = "Segmented cells (done, failed, the current one breathing), a live sparkline with event marks, a rolling counter, and the 300 ms minimum presence a status gets.",
+	about = "A block (a widget's own unit: title, live figures, menu), segmented cells (done, failed, the current one breathing), a live sparkline with event marks, a rolling counter, and the 300 ms minimum presence a status gets.",
 	demo = function(): Node
 		local t = ui.use_state(0)
 		ui.every(1200, function()
@@ -51,6 +52,19 @@ return {
 			w_full = true,
 			max_w = 560,
 			gap = "$space.6",
+			Block.Block {
+				title = "Block",
+				figures = ui.row {
+					gap = "$space.2",
+					items = "center",
+					Counter { value = function(): number
+						return 3 + t:get() % 4
+					end, text_size = "$font.size.xs", color = "$text.secondary" },
+					Block.figure("1 blocked", "failed"),
+				},
+				menu = ds.IconButton { icon = "more-horizontal", label = "Menu", size = "sm", tone = "quiet" },
+				ds.Text { "Its body.", style = "body", tone = "secondary" },
+			},
 			ui.column {
 				w_full = true,
 				gap = "$space.2",

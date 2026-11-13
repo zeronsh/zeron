@@ -1146,7 +1146,7 @@
         "chip": "{target}, {intent}, {state}",
         "answer": "Answer",
         "routing": "Routing",
-        "open_short": "Open"
+        "open_short": "打开"
       },
       "intent": {
         "task": "Task",
@@ -1192,7 +1192,7 @@
         "running": "{n} running",
         "memory": "{used} / {total} GB",
         "cpu": "CPU",
-        "memory_label": "Memory"
+        "memory_label": "内存"
       },
       "comms": {
         "you": "You",
@@ -4005,7 +4005,7 @@
       "outcome": "Outcome",
       "card_actions": "Card actions",
       "threads": "{n, plural, one {# thread} other {# threads}}",
-      "empty": "Nothing on the board"
+      "empty": "看板上没有内容"
     },
     "reports": {
       "title": "Crew updates",
@@ -4127,13 +4127,13 @@
       "working": "{n} working"
     },
     "figures": {
-      "urgent": "{n} urgent",
-      "now": "{n} now",
-      "blocked": "{n} blocked",
-      "review": "{n} in review",
-      "done": "{n} done today",
-      "online": "{n, plural, one {# machine} other {# machines}}",
-      "running": "{n} running"
+      "urgent": "{n} 项紧急",
+      "now": "{n} 项进行中",
+      "blocked": "{n} 项受阻",
+      "review": "{n} 项待审",
+      "done": "今天完成 {n} 项",
+      "online": "{n} 台设备",
+      "running": "{n} 个在运行"
     }
   }
 }
