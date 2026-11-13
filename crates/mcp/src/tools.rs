@@ -137,7 +137,7 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. Omitted: subagent with a parent/origin, chat otherwise." },
+                    "kind": { "type": "string", "enum": ["subagent", "side", "chat", "crew"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. crew (the default from an orchestrator): a thread in your crew. Omitted: crew from an orchestrator, subagent with another parent/origin, chat otherwise." },
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
@@ -616,6 +616,8 @@ enum ChatKind {
     Chat,
     Side,
     Subagent,
+    /// A thread in the calling orchestrator's crew.
+    Crew,
 }
 
 #[derive(Deserialize, Default)]
@@ -1132,6 +1134,19 @@ impl Tools {
         Ok(summary)
     }
 
+    /// Whether `chat_id` is a standard orchestrator (its children are its
+    /// crew). `false` on an engine that predates orchestration.
+    async fn orchestrates(&self, chat_id: &str) -> bool {
+        let Ok(state) = self.zeron.snapshot(zeron_rpc::methods::WATCH_ORCHESTRATION, json!({})).await else {
+            return false;
+        };
+        serde_json::from_value::<zeron_proto::orchestration::OrchestrationState>(state).is_ok_and(|state| {
+            state.orchestrators.iter().any(|o| {
+                o.id == chat_id && o.kind == zeron_proto::orchestration::OrchestratorKind::Standard
+            })
+        })
+    }
+
     async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
@@ -1151,24 +1166,45 @@ impl Tools {
                 Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
                 None => self.zeron.origin().chat_id.clone(),
             }
-            // A hidden voice orchestrator creates top-level sessions.
-            .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent))
+            // A hidden voice orchestrator, and the Brain dump, create
+            // top-level sessions.
+            .filter(|parent| {
+                !zeron_proto::voice::is_orchestrator_chat(parent)
+                    && !zeron_proto::orchestration::is_brain_dump_chat(parent)
+            })
         };
         anyhow::ensure!(
-            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent)) || parent_chat_id.is_some(),
+            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent | ChatKind::Crew))
+                || parent_chat_id.is_some(),
             "kind {} requires a parent or origin chat",
-            if args.kind == Some(ChatKind::Side) { "side" } else { "subagent" }
+            match args.kind {
+                Some(ChatKind::Side) => "side",
+                Some(ChatKind::Crew) => "crew",
+                _ => "subagent",
+            }
         );
-        // A child is a subagent unless asked for as a side chat: delegated
-        // work lists under its parent's Subagents, not its side chats.
+        // An orchestrator's children are its crew; any other child is a
+        // subagent unless asked for as a side chat: delegated work lists
+        // under its parent's Subagents, not its side chats.
+        let parent_orchestrates = match parent_chat_id.as_deref() {
+            Some(parent) => self.orchestrates(parent).await,
+            None => false,
+        };
         let kind = match (args.kind, parent_chat_id.is_some()) {
             (_, false) => ChatKind::Chat,
             (Some(ChatKind::Side), true) => ChatKind::Side,
+            (Some(ChatKind::Subagent), true) => ChatKind::Subagent,
+            (Some(ChatKind::Crew) | None, true) if parent_orchestrates => ChatKind::Crew,
+            (Some(ChatKind::Crew), true) => {
+                anyhow::bail!("kind crew is for an orchestrator's own threads")
+            }
             (_, true) => ChatKind::Subagent,
         };
 
-        // Delegation is one level deep: a chat that has a parent never
-        // creates chats, and a new chat's parent is a top-level chat.
+        // Delegation depth: a top-level chat (an orchestrator too) creates
+        // chats, and so does a crew thread (its own subagents); any other
+        // chat with a parent creates none. A new chat's parent is a
+        // top-level chat or a crew thread.
         // The calling chat's sandbox and access cap the new one's: a
         // supervised or sandboxed agent must not hand its work to one that
         // asks nothing (the engine caps it again: rpc/agent_gate.rs).
@@ -1176,10 +1212,12 @@ impl Tools {
         let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
+            && !zeron_proto::orchestration::is_brain_dump_chat(origin)
         {
             let origin = self.zeron.resolve_chat(origin).await?;
             anyhow::ensure!(
-                origin.parent_chat_id.is_none(),
+                origin.parent_chat_id.is_none()
+                    || origin.child_kind == Some(zeron_proto::ChildKind::Crew),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
             if let Some(config) = origin.config {
@@ -1190,8 +1228,9 @@ impl Tools {
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
             anyhow::ensure!(
-                parent.parent_chat_id.is_none(),
-                "{} is itself a delegated chat: only top-level chats have side chats.",
+                parent.parent_chat_id.is_none()
+                    || parent.child_kind == Some(zeron_proto::ChildKind::Crew),
+                "{} is itself a delegated chat: only top-level chats and crew threads have children.",
                 parent.title.as_deref().unwrap_or(&parent.id)
             );
         }
@@ -1299,6 +1338,7 @@ impl Tools {
             mutate["parentChatId"] = json!(parent);
             mutate["childKind"] = json!(match kind {
                 ChatKind::Side => zeron_proto::ChildKind::Side,
+                ChatKind::Crew => zeron_proto::ChildKind::Crew,
                 _ => zeron_proto::ChildKind::Subagent,
             });
         }
@@ -1410,6 +1450,7 @@ impl Tools {
                 child_kind: match kind {
                     ChatKind::Side => Some(zeron_proto::ChildKind::Side),
                     ChatKind::Subagent => Some(zeron_proto::ChildKind::Subagent),
+                    ChatKind::Crew => Some(zeron_proto::ChildKind::Crew),
                     ChatKind::Chat => None,
                 },
                 space_id: space.as_ref().map(|s| s.id.clone()),
