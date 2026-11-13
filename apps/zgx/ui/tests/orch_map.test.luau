@@ -541,3 +541,72 @@ test("a chat of no project shows under its machine in every view; comms name eve
 		expect(line:find('text ""', 1, true) == nil).to_be(true)
 	end
 end)
+
+local Sim = require("@ds/orch_map_sim")
+
+test("graph: the web settles sound, its lines join the right nodes", function()
+	local g = Sim.build(world())
+	Sim.settle(g, 800)
+	for _, n in g.nodes do
+		expect(n.x == n.x and n.y == n.y).to_be(true)
+		expect(math.abs(n.x) < 3000 and math.abs(n.y) < 3000).to_be(true)
+	end
+	local has: { [string]: boolean } = {}
+	for _, e in g.edges do
+		expect(g.index[e.a] ~= nil and g.index[e.b] ~= nil).to_be(true)
+		has[`{e.kind}:{e.a}>{e.b}`] = true
+	end
+	-- What runs where, what leads what, what the Brain dump started and
+	-- handed parts to.
+	expect(has["host:dev:dev-mac>th-ui-control"]).to_be(true)
+	expect(has["control:orc-orch>th-ui-control"]).to_be(true)
+	expect(has["started:orc-brain>th-dev-names"]).to_be(true)
+	expect(has["started:orc-brain>th-wg-audit"]).to_be(true)
+	expect(has["started:orc-brain>th-omarchy"]).to_be(true)
+	expect(has["routed:orc-brain>orc-reins"]).to_be(true)
+	expect(has["routed:orc-brain>th-ui-orch"]).to_be(true)
+	-- Still once settled: a step moves nothing.
+	expect(Sim.step(g)).to_be(false)
+end)
+
+test("graph: every node shown in the field, lit with its neighbors under the pointer, a click opens it", function()
+	local app = open(1440, 2400)
+	view(app, "graph")
+	app:frames(90)
+	local g = Sim.build(world())
+	expect(app:count("#control-widget-map >> .orch-graph-node")).to_be(#g.nodes)
+	local fx, fy, fw, fh = box(app, "#orch-graph-field")
+	for line in app:tree("#control-widget-map"):gmatch("[^\n]+") do
+		local x, y, w, h = line:match(" (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+		if line:find("Control room UI", 1, true) and x then
+			local cx = (tonumber(x) :: number) + (tonumber(w) :: number) / 2
+			local cy = (tonumber(y) :: number) + (tonumber(h) :: number) / 2
+			expect(cx > fx and cx < fx + fw and cy > fy and cy < fy + fh).to_be(true)
+		end
+	end
+	app:hover('#control-widget-map >> .orch-graph-thread ~"Control room UI"')
+	app:frames(5)
+	expect(app:state("control_map_graph_hover")).to_be("th-ui-control")
+	expect(app:has("#control-widget-map >> .orch-graph-card")).to_be(true)
+	local near = Sim.neighbors(g, "th-ui-control")
+	expect(near["orc-orch"]).to_be(true)
+	expect(near["dev:dev-mac"]).to_be(true)
+	expect(near["th-engine-state"]).to_be(nil)
+	app:click('#control-widget-map >> .orch-graph-thread ~"Control room UI"')
+	app:frames(10)
+	expect(app:state("shell_route_path")).to_be("/session/th-ui-control")
+end)
+
+test("graph: a node dropped stays where it was dropped", function()
+	local app = open(1440, 2400)
+	view(app, "graph")
+	app:frames(90)
+	app:drag('#control-widget-map >> .orch-graph-thread ~"Exporter image"', '#control-widget-map >> .orch-graph-device "winbox"')
+	app:frames(30)
+	local pins = app:state("control_map_graph_pins")
+	expect(pins["th-vpn-exporter"] ~= nil).to_be(true)
+	-- Reset: back to the web.
+	app:click("#orch-graph-reset")
+	app:frames(5)
+	expect(app:state("control_map_graph_pins")["th-vpn-exporter"]).to_be(nil)
+end)

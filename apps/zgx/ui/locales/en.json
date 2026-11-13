@@ -1194,8 +1194,11 @@
         "variant": {
           "topology": "Topology",
           "timeline": "Timeline",
-          "machines": "Machines"
+          "machines": "Machines",
+          "graph": "Graph"
         },
+        "fit": "Fit to view",
+        "reset": "Reset layout",
         "window_15": "Last 15 minutes",
         "window_60": "Last hour",
         "span_15": "15m",

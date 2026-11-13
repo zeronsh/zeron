@@ -10,6 +10,9 @@
 --              (ds/orch_map_timeline)
 --   Machines   a block a machine: its load, and the threads it runs, by
 --              project and orchestrator (ds/orch_map_machines)
+--   Graph      all of it as a web: machines, orchestrators, the Brain dump
+--              and threads as nodes, what runs where, leads what, started
+--              what as lines (ds/orch_map_graph)
 --
 -- A thread's state and activity show for 300 ms at least (ds/orch_hold):
 -- one that changes sooner is held, then the latest wins.
@@ -32,6 +35,7 @@ local locale = require("@self/locale")
 local Topology = require("@self/orch_map_topology")
 local Timeline = require("@self/orch_map_timeline")
 local Machines = require("@self/orch_map_machines")
+local Graph = require("@self/orch_map_graph")
 local Layout = require("@self/orch_map_layout")
 
 export type View = { variant: string, window: number }
@@ -47,7 +51,7 @@ export type Props = {
 
 local M = {}
 
-M.VARIANTS = { "topology", "timeline", "machines" }
+M.VARIANTS = { "topology", "timeline", "machines", "graph" }
 M.WINDOWS = { 15, 60 }
 M.DEFAULT = { variant = "topology", window = 15 } :: View
 
@@ -72,7 +76,7 @@ function M.menu(view: State<View>): { any }
 	for _, id in M.VARIANTS do
 		table.insert(out, {
 			label = locale.s(`ds.orch.map.variant.{id}`),
-			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" else "widget",
+			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" then "global" else "widget",
 			checked = function(): boolean
 				return valid(view:get()).variant == id
 			end,
@@ -125,6 +129,14 @@ M.Map = ui.component(function(props: Props): Node
 					on_window = function(mins: number)
 						M.set(view, { window = mins })
 					end,
+					on_open_chat = props.on_open_chat,
+					on_open_orchestrator = props.on_open_orchestrator,
+				}
+			elseif variant == "graph" then
+				return Graph.View {
+					world = props.world,
+					chat = chat,
+					comms = props.comms,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
 				}
