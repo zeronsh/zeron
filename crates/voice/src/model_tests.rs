@@ -27,18 +27,23 @@ fn model_each_transcribes_english_and_french() {
         if !m.installed(&dir) {
             m.download(&dir, &AtomicBool::new(false), |_| {}).unwrap();
         }
-        let started = Instant::now();
+        // Loaded twice: the first load in a process (Metal compiles its
+        // shaders) against one after the worker's idle unload.
+        for load in ["first load", "reload"] {
+            let started = Instant::now();
+            drop(Recognizer::load(&dir).unwrap());
+            println!("{}: {load} {:?}", m.name, started.elapsed());
+        }
         let mut model = Recognizer::load(&dir).unwrap();
-        println!("{}: load {:?}", m.name, started.elapsed());
         // Someone whose system speaks English, then French: a model that
         // can't tell the language hears which, each time.
         model.speaks(&["en", "fr"]);
         for (wav, says) in [
             (
-                &include_bytes!("../testdata/en-librispeech-1272-128104-0000.wav")[..],
+                &include_bytes!("../testdata/en-fleurs-1548.wav")[..],
                 [
-                    "quilter is the apostle of the middle classes",
-                    "glad to welcome his gospel",
+                    "when you call someone who is thousands of miles away",
+                    "you are using a satellite",
                 ],
             ),
             (
@@ -53,6 +58,13 @@ fn model_each_transcribes_english_and_french() {
             let started = Instant::now();
             let text = model.transcribe(samples, rate).unwrap();
             println!("{}: {:?}: {text}", m.name, started.elapsed());
+            // Written as a sentence, in every language. (Not LibriSpeech:
+            // Cohere answers it in that corpus's own style, bare lowercase.)
+            assert!(
+                text.starts_with(char::is_uppercase) && text.ends_with('.'),
+                "{}: {text:?}",
+                m.name
+            );
             let heard = text.to_lowercase().replace(',', "");
             for words in says {
                 assert!(

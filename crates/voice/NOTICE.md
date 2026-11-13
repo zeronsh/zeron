@@ -46,4 +46,4 @@ optional download, never bundled. No cloud provider, Apple Speech or engine-host
 
 ## Test clips
 
-`testdata/` holds one LibriSpeech clip and one FLEURS clip, both CC BY 4.0; see `testdata/README.md`.
+`testdata/` holds two FLEURS clips (English, French), CC BY 4.0; see `testdata/README.md`.
