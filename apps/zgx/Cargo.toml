@@ -34,7 +34,7 @@ lz4_flex = { version = "0.11", default-features = false, features = ["safe-encod
 # Every zgx crate below, and the engine's, at the combined zgx pull request
 # the plugin APIs need (zeronsh/zgx#2110: `Capability::Fonts`, zgx-text, ...),
 # on the author's fork until it merges; then back to zeronsh/zgx.
-zgx = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
+zgx = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
 # `mimalloc`: the program's allocator, in place of the system's. It hands
 # freed memory back to the system (the system's keeps the most it ever
 # held), and zgx measures 1-10% less CPU for script, text and layout work.
@@ -45,7 +45,7 @@ zgx = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bf
 # none of it, and without it pages are placeholders ("Web view · <url>").
 # zgx-run turns it on by default, but this app takes zgx-run without its
 # defaults (below). Nothing on macOS or Windows.
-zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576", features = ["mimalloc", "terminal", "webkitgtk"] }
+zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b", features = ["mimalloc", "terminal", "webkitgtk"] }
 # `inspect`: devtools for `zgx inspect` (and its MCP server), asked for
 # with `--inspect`. `i18n`: `ui.t`'s plurals and numbers by each locale's
 # own rules (ICU4X's data, about 90 KB), for ui/locales' translations.
@@ -53,18 +53,18 @@ zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c36
 # wgpu this app already links), for plugins that show 3D: the CAD plugin
 # hands it its own triangles (`geometry = { positions, indices, … }`). It
 # asks no grant; a scene draws a frame only when something in it changes.
-zgx-script = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576", features = ["inspect", "i18n", "scene3d"] }
+zgx-script = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b", features = ["inspect", "i18n", "scene3d"] }
 # A picture's pixels for the clipboard (src/images.rs): zgx's own decoder,
 # the formats `ui.image` shows (no features of its own: the ones zgx-desktop
 # turns on).
-zgx-gpu = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576", default-features = false }
+zgx-gpu = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b", default-features = false }
 # Each plugin's own database (`zeron.db`, src/plugins/db.rs): SQLite,
 # the one file its service (the engine) opens too.
 zeron-plugin-db = { path = "../../crates/plugin-db" }
 # `fetch`: zgx's own transport for `ui.fetch` and remote images (HTTP and
 # HTTPS, rustls), given to every window (src/main.rs): the app's scripts,
 # and plugins granted "network". Nothing else of the runner.
-zgx-run = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576", default-features = false, features = ["fetch"] }
+zgx-run = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b", default-features = false, features = ["fetch"] }
 # `webp`: `ui.image` decodes through this crate, by what its features
 # allow, so turning WebP on here is all it takes (the member cards' art).
 # `ico`: sites' favicons (the browser tab's: src/favicons.rs), most of
@@ -164,7 +164,7 @@ foreign-types = "0.5"
 # elements, box drawing and Powerline glyphs to the cell; zgx's own renderer
 # draws them from the font at its text line height, gapped. Builds Ghostty
 # with Zig 0.16 (cached in ~/Library/Caches/zgx-ghostty).
-zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576", features = ["ghostty"] }
+zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b", features = ["ghostty"] }
 
 # Windows' Transparency effects (src/transparency.rs), read and watched in
 # the registry, until zgx reports them (zgx-asks/windows-transparency); a
@@ -175,7 +175,7 @@ zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c36
 # 11 (and with Edge on Windows 10); without it, pages are placeholders.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
-zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576", features = ["webview2"] }
+zgx-desktop = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b", features = ["webview2"] }
 
 # zgx's D-Bus (menus, portals) linked in rather than loaded: `zeron` is also
 # what a headless Linux server and every Cloud machine runs (`zeron
@@ -187,13 +187,13 @@ libdbus-sys = { version = "0.2.7", features = ["vendored"] }
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
 [patch.crates-io]
-wgpu-hal = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
-winit = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
-accesskit_macos = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
-accesskit_consumer = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
-accesskit_atspi_common = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
-accesskit_unix = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
-accesskit_windows = { git = "https://github.com/hoangvu12/zgx", rev = "c4c28f65f366c364a08c0bfe1c068ccc3112e576" }
+wgpu-hal = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
+winit = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
+accesskit_macos = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
+accesskit_consumer = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
+accesskit_atspi_common = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
+accesskit_unix = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
+accesskit_windows = { git = "https://github.com/hoangvu12/zgx", rev = "41ffcef37d3ef0bee4d7c683037615acbe4d3d1b" }
 
 # zgx is slow unoptimized (its own setting): optimize dependencies, keep
 # this crate quick to build.
