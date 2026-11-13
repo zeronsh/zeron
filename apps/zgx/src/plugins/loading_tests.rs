@@ -16,7 +16,7 @@ use std::{
 use serde_json::json;
 use zgx_script::{ScriptHost, Value, testing::TestApp};
 
-use super::{Item, expose_own, expose_surface, json_value, live, problem_words, records, recovery, vlist};
+use super::{Item, expose_own, expose_surface, give_memory, json_value, live, problem_words, records, recovery, vlist};
 
 const APP: &str = r#"
 local who = ui.shared("zeron.route", { name = "home" })
@@ -105,6 +105,7 @@ fn app_of(root: &Path, source: &str, items: &[Item], extra: Vec<zgx_script::Plug
         }
         plugins.extend(extra);
         host.set_plugins(plugins);
+        give_memory(&host, &items);
         host
     });
     (app, heard)
@@ -1167,4 +1168,34 @@ n:set(n:peek() + 1)
     a.frames(2);
     a.host.save();
     assert_eq!(saved().as_deref().map(str::trim), Some("1"), "starts from its initial");
+}
+
+#[test]
+fn a_window_has_the_memory_its_manifest_asks() {
+    let root = dir("memory");
+    // 48 strings of 1 MB, held: past zgx's default 32 MB for a plugin.
+    let hold = |id: &str| {
+        format!(
+            r#"
+local held, made = table.create(48), 0
+for i = 1, 48 do
+    if not pcall(function() held[i] = string.rep("x", 1048576) .. i end) then break end
+    made = i
+end
+ui.invoke("plugin.{id}.result", made)
+"#
+        )
+    };
+    let mut asks = plugin(&root, "asks", &hold("asks"), &[], &[], &[]);
+    asks.json["service_memory_mb"] = json!(64);
+    let plain = plugin(&root, "plain", &hold("plain"), &[], &[], &[]);
+    let (a, heard) = app(&root, &[asks, plain], vec![]);
+    a.frames(2);
+    let made = |id: &str| -> usize {
+        let key = format!("plugin.{id}.result");
+        let heard = heard.borrow();
+        heard.iter().find(|(k, _)| *k == key).unwrap_or_else(|| panic!("{id}: {heard:?}")).1.parse().unwrap()
+    };
+    assert_eq!(made("asks"), 48, "64 MB asked: it holds all 48");
+    assert!(made("plain") < 32, "the default: under 32 MB");
 }
