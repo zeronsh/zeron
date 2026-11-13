@@ -19,6 +19,7 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
 local Block = require("@self/orch_block")
+local Ref = require("@self/orch_ref")
 
 export type Props = {
 	comms: () -> { any },
@@ -109,8 +110,20 @@ return ui.component(function(props: Props): Node
 		local function e(): any
 			return item:get().e
 		end
+		-- Dragged: a reference to it (ds/orch_ref), named by its first words.
+		local drag = Ref.source(function(): any
+			local ev = item:peek().e
+			local text = ev.summary or ev.text or ""
+			local words = string.match(string.gsub(text, "%s+", " "), "^%s*(.-)%s*$") or ""
+			local first = Ref.cut(words, 40)
+			return Ref.make("comm", ev.id, first, { from = ev.from, to = ev.to, text = text })
+		end)
 		return ui.button {
 			class = "orch-comm",
+			on_drag = drag.on_drag,
+			drag_preview = drag.drag_preview,
+			drag_preview_anchor = drag.drag_preview_anchor,
+			drag_preview_offset = drag.drag_preview_offset,
 			label = function(): string
 				return e().summary or ""
 			end,

@@ -288,6 +288,9 @@ return ui.component(function(props: Props): Node
 			end
 			return working, total
 		end
+		local drag = kit.ref_drag(props.world, function(): string
+			return row:peek().id
+		end)
 		return ui.button {
 			class = "orch-node",
 			label = function(): string
@@ -313,6 +316,10 @@ return ui.component(function(props: Props): Node
 			rounded = "$radius.md",
 			bg = "#00000000",
 			hover = { bg = "$hover" },
+			on_drag = drag.on_drag,
+			drag_preview = drag.drag_preview,
+			drag_preview_anchor = drag.drag_preview_anchor,
+			drag_preview_offset = drag.drag_preview_offset,
 			on_click = function()
 				props.on_open_orchestrator(row:peek().id)
 			end,
@@ -370,6 +377,11 @@ return ui.component(function(props: Props): Node
 		end
 		-- (Its state and activity held 300 ms at least.)
 		local st, activity = kit.held(c)
+		local drag = kit.ref_drag(props.world, function(): string
+			return row:peek().id
+		end, function(): string?
+			return name_of(row:peek().id)
+		end)
 		return ui.button {
 			class = if row:peek().kind == "crew" then "orch-pill" else "orch-thread",
 			label = function(): string
@@ -397,6 +409,10 @@ return ui.component(function(props: Props): Node
 			rounded = "$radius.md",
 			bg = "#00000000",
 			hover = { bg = "$hover" },
+			on_drag = drag.on_drag,
+			drag_preview = drag.drag_preview,
+			drag_preview_anchor = drag.drag_preview_anchor,
+			drag_preview_offset = drag.drag_preview_offset,
 			on_click = function()
 				props.on_open_chat(row:peek().id)
 			end,

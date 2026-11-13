@@ -214,9 +214,19 @@ local function brain_dump(): string?
 end
 
 -- A send from Capture: the words, the files they carry, and the Brain
--- dump's model as the composer has it picked, a dump.
+-- dump's model as the composer has it picked, a dump; what it references
+-- (the composer's `{ kind = "ref", ref }`, dragged from the room's widgets)
+-- goes as the dump's `refs`, never as files.
 function M.take(text: string, attachments: { any }, picks: { [string]: any }?): any
-	return orchestration.dump(text, attachments, brain_dump(), picks)
+	local files, refs = {}, {}
+	for _, a in attachments or {} do
+		if a.kind == "ref" and type(a.ref) == "table" then
+			table.insert(refs, a.ref)
+		else
+			table.insert(files, a)
+		end
+	end
+	return orchestration.dump(text, files, brain_dump(), picks, refs)
 end
 
 -- A dump's receipt (ds/orch_receipt): the newest one's, or an earlier
@@ -472,7 +482,9 @@ local function capture(): Node
 	end)
 	-- (All of it a drop zone for the composer's draft: a sidebar chat
 	-- dropped is an @-mention, files are carried with the dump.)
-	return LaneTab.DropZone { slot = "control-capture", chat = brain_dump, ui.column {
+	-- (And a card, thread, machine, ask… dragged from the room's widgets: a
+	-- reference, ds/orch_ref.)
+	return LaneTab.DropZone { slot = "control-capture", chat = brain_dump, refs = true, ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
@@ -1385,6 +1397,8 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 				chat = brain_dump,
 				focus = focus,
 				place = "float",
+				-- (References dragged from the room too, as Capture's own.)
+				refs = true,
 				ui.row {
 					w_full = true,
 					gap = "$space.2",

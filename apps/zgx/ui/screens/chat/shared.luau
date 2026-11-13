@@ -16,6 +16,7 @@ local agents = require("@account/agents")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local Ref = require("@ds/orch_ref")
 
 local M = {}
 
@@ -529,9 +530,15 @@ function M.over(zone: string, inside: boolean, what: string?)
 	over_in(M.dropping, zone, inside, what)
 end
 
+-- (What the window's own drags carry: a sidebar session, a Control room
+-- reference. Their end is always heard.)
+local function own_drag(what: any): boolean
+	return what == "session" or what == "ref"
+end
+
 local function any_files(map: any): boolean
 	for _, what in map:get() do
-		if what ~= "session" then
+		if not own_drag(what) then
 			return true
 		end
 	end
@@ -564,7 +571,7 @@ end
 local function let_go_in(map: any): boolean
 	local next, any = {}, false
 	for zone, what in map:peek() do
-		if what == "session" then
+		if own_drag(what) then
 			next[zone] = what
 		else
 			any = true
@@ -642,6 +649,22 @@ function M.mention_chat(id: string, key: string?)
 	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
+-- Something in the Control room referenced (dragged onto Capture's
+-- composer: ds/orch_ref): a chip named by its token, sent with the dump as
+-- one of its `refs` (never as an attachment). Once each (its kind and id).
+function M.mention_ref(ref: any, key: string?)
+	local r = Ref.of({ ref = ref })
+	if not r then
+		return
+	end
+	for _, item in M.peek_cargo(key) do
+		if item.kind == "ref" and item.ref and item.ref.kind == r.kind and item.ref.id == r.id then
+			return
+		end
+	end
+	M.push_cargo(key, { id = chip_id("ref"), kind = "ref", name = Ref.token(r), ref = table.clone(r) })
+end
+
 -- A chat as it's listed now, for what says who sent a message: its title (its
 -- short id, untitled) and its agent's mark. Nil for one that isn't listed.
 function M.chat_of(id: string): { title: string, mark: string? }?
@@ -697,9 +720,12 @@ end
 
 -- The props that make a node a drop zone, named `zone` in `map`: files from
 -- outside, and the files pane's, attach as chips on chat `key`'s draft (nil:
--- the chat shown's); a sidebar session is mentioned there. `landed` runs as
--- anything does.
-local function zone_props(map: any, zone: string, key: string?, landed: (() -> ())?): { [string]: any }
+-- the chat shown's); a sidebar session is mentioned there; with `refs`, a
+-- Control room reference (ds/orch_ref) too. `landed` runs as anything does.
+local function zone_props(map: any, zone: string, key: string?, landed: (() -> ())?, refs: boolean?): { [string]: any }
+	local function ref_in(payload: any): any
+		return if refs then Ref.of(payload) else nil
+	end
 	local function land()
 		map:set({})
 		if landed then
@@ -715,11 +741,12 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 			land()
 		end,
 		drop_when = function(payload: any): boolean
-			-- (Files, and a sidebar session: a mention.)
-			return workspace_paths(payload) ~= nil or (type(payload) == "table" and type(payload.session) == "string")
+			-- (Files, and a sidebar session: a mention; a reference.)
+			return workspace_paths(payload) ~= nil or (type(payload) == "table" and type(payload.session) == "string") or ref_in(payload) ~= nil
 		end,
 		on_drag_over = function(payload: any)
-			over_in(map, zone, true, if type(payload) == "table" and type(payload.session) == "string" then "session" else nil)
+			local what = if type(payload) == "table" and type(payload.session) == "string" then "session" elseif ref_in(payload) then "ref" else nil
+			over_in(map, zone, true, what)
 		end,
 		on_drag_leave = function()
 			over_in(map, zone, false)
@@ -735,6 +762,8 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 				M.add_to_chat(paths, payload.root, key)
 			elseif type(payload) == "table" and type(payload.session) == "string" then
 				M.mention_chat(payload.session, key)
+			elseif ref_in(payload) then
+				M.mention_ref(ref_in(payload), key)
 			end
 			land()
 		end,
@@ -750,15 +779,19 @@ end
 -- A drop zone of chat `key`, whose composer is its own (a side chat's tab):
 -- its props, and whether files, and a sidebar session, are over it now, for
 -- its own overlays. `landed` runs as anything lands (its composer takes the
--- keys).
-function M.own_drop_zone(zone: string, key: string, landed: () -> ()): ({ [string]: any }, () -> boolean, () -> boolean)
-	return zone_props(M.dropping_own, zone, key, landed),
+-- keys). `refs`: it takes Control room references too (Capture's), and the
+-- fourth says whether one is over it.
+function M.own_drop_zone(zone: string, key: string, landed: () -> (), refs: boolean?): ({ [string]: any }, () -> boolean, () -> boolean, () -> boolean)
+	return zone_props(M.dropping_own, zone, key, landed, refs),
 		function(): boolean
 			local what = M.dropping_own:get()[zone]
-			return what ~= nil and what ~= "session"
+			return what ~= nil and not own_drag(what)
 		end,
 		function(): boolean
 			return M.dropping_own:get()[zone] == "session"
+		end,
+		function(): boolean
+			return M.dropping_own:get()[zone] == "ref"
 		end
 end
 

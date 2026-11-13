@@ -3198,7 +3198,8 @@
         "appshot": "Appshot",
         "image": "Image",
         "file": "File"
-      }
+      },
+      "drop_to_reference": "Drop to reference"
     },
     "dictation": {
       "failed": "Dictation stopped",

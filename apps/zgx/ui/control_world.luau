@@ -139,6 +139,11 @@ return function()
 			for _, f in op.attachments or {} do
 				note(`dump-file:{f.kind}:{f.name or f.path}`)
 			end
+			-- (What it references, ds/orch_ref; the op as sent in `last_dump`.)
+			for _, r in op.refs or {} do
+				note(`dump-ref:{r.kind}:{r.id}`)
+			end
+			ui.state("last_dump", nil :: any):set(op)
 			local id = `dp-new-{#calls:peek()}`
 			republish(function(n)
 				local dumps = table.clone(n.dumps)
@@ -425,6 +430,23 @@ return function()
 	end }
 	ui.command { id = "fixture.scratchpad_empty", title = "Fixture: an empty Scratchpad", run = function()
 		scratchpad.now:set({ loaded = true, text = "", rev = "", updated_by = "person", shapes = {}, history = {} })
+	end }
+	-- References dragged onto Capture (ds/orch_ref): a card, a thread and a
+	-- machine as chips on the Brain dump's draft (`fixture.refs_chips`), and
+	-- another on its way, over the composer: "Drop to reference"
+	-- (`fixture.drag_refs`).
+	local function ref_chips()
+		local Shared = require("@app/screens/chat/shared") :: any
+		local Ref = require("@ds/orch_ref")
+		Shared.mention_ref(Ref.make("card", "it-moscow", "Reboot Moscow node", { state = "review", orchestrator = "orc-vpn" }), "orc-brain")
+		Shared.mention_ref(Ref.make("chat", "th-vpn-merge", "Merge phase-1 fixes", { orchestrator = "orc-vpn", device = "dev-desk" }), "orc-brain")
+		Shared.mention_ref(Ref.make("device", "dev-mac", "macbook", { os = "macos" }), "orc-brain")
+	end
+	ui.command { id = "fixture.refs_chips", title = "Fixture: references on Capture", run = ref_chips }
+	ui.command { id = "fixture.drag_refs", title = "Fixture: a reference dragged over Capture", run = function()
+		ref_chips()
+		local Shared = require("@app/screens/chat/shared") :: any
+		Shared.dropping_own:set_key({ "lane.control-capture" }, "ref")
 	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)

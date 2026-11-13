@@ -23,6 +23,7 @@ local ds = require("@ds")
 local Unit = require("@ds/orch_progress")
 local Block = require("@ds/orch_block")
 local data = require("@ds/orch_data")
+local Ref = require("@ds/orch_ref")
 local locale = require("@ds/locale")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
@@ -405,8 +406,18 @@ function M.Widget(): Node
 			color = "$text.tertiary",
 		}),
 		ui.each(shown, function(e: { id: string }): Node
+			-- Dragged: a reference to its chat (ds/orch_ref), for Capture.
+			local drag = Ref.source(function(): any
+				local r = row_of(e.id) or {}
+				local c = chats_now:get()[e.id] or {}
+				return Ref.make("chat", e.id, c.title, { note = r.note, state = r.state })
+			end)
 			return ui.column {
 				class = "control-progress-row",
+				on_drag = drag.on_drag,
+				drag_preview = drag.drag_preview,
+				drag_preview_anchor = drag.drag_preview_anchor,
+				drag_preview_offset = drag.drag_preview_offset,
 				w_full = true,
 				gap = "$space.3",
 				-- (A hairline over each but the first.)

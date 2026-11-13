@@ -3198,7 +3198,8 @@
         "appshot": "应用截图",
         "image": "图片",
         "file": "文件"
-      }
+      },
+      "drop_to_reference": "Drop to reference"
     },
     "dictation": {
       "failed": "听写已停止",

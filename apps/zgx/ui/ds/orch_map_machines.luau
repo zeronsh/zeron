@@ -147,6 +147,11 @@ M.View = ui.component(function(props: {
 		-- (Its state and activity held 300 ms at least.)
 		local st, activity = kit.held(c)
 		local is_orch = line:peek().kind == "orchestrator"
+		local drag = kit.ref_drag(props.world, function(): string
+			return line:peek().id
+		end, function(): string?
+			return (line:peek().thread or {}).title
+		end)
 		return ui.button {
 			class = if line:peek().kind == "crew" then "orch-mc-row orch-pill" elseif is_orch then "orch-mc-row orch-node" else "orch-mc-row orch-thread",
 			label = function(): string
@@ -166,6 +171,10 @@ M.View = ui.component(function(props: {
 			relative = true,
 			bg = "#00000000",
 			hover = { bg = "$hover" },
+			on_drag = drag.on_drag,
+			drag_preview = drag.drag_preview,
+			drag_preview_anchor = drag.drag_preview_anchor,
+			drag_preview_offset = drag.drag_preview_offset,
 			on_click = function()
 				if is_orch then
 					props.on_open_orchestrator(line:peek().id)

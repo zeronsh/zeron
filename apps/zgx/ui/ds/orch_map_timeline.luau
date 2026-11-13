@@ -312,6 +312,11 @@ M.View = ui.component(function(props: {
 		end
 		-- (Its state and activity held 300 ms at least.)
 		local st, activity = kit.held(c)
+		local drag = kit.ref_drag(props.world, function(): string
+			return row:peek().id
+		end, function(): string?
+			return (row:peek().thread or {}).title
+		end)
 		return ui.button {
 			class = if (row:peek().thread or {}).kind == "crew" then "orch-tl-lane orch-pill" else "orch-tl-lane",
 			label = function(): string
@@ -329,6 +334,10 @@ M.View = ui.component(function(props: {
 			rounded = "$radius.sm",
 			bg = "#00000000",
 			hover = { bg = "$hover" },
+			on_drag = drag.on_drag,
+			drag_preview = drag.drag_preview,
+			drag_preview_anchor = drag.drag_preview_anchor,
+			drag_preview_offset = drag.drag_preview_offset,
 			on_click = function()
 				local th = row:peek().thread
 				if th and th.kind == "orchestrator" then
