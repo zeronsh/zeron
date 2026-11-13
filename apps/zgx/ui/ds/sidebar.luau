@@ -57,6 +57,8 @@ local locale = require("@self/locale")
 local SessionRow = require("@self/session_row")
 local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
+local OrchHue = require("@self/orch_hue")
+local badge = require("@self/badge")
 
 -- The page's split chats (screens/shell/split, which keeps these):
 -- the chats side by side now, each row of theirs selected; and whether a
@@ -147,6 +149,20 @@ export type Section = { id: string, name: string, sessions: { string } }
 export type Places = { pinned: { string }, sections: { Section } }
 -- What may change: a list as it is, or read through a state or a function.
 export type Live<T> = T | State<T> | () -> T
+-- An orchestrator as its sidebar row says it: its hue, its crew working
+-- of all of it, and how many of its things need you.
+export type OrchRow = { id: string, name: string, hue: number?, working: number, total: number, needs: number, paused: boolean? }
+-- The Control room's row (its count: what needs you) and the Orchestrators
+-- section under the top, each orchestrator a row.
+export type Orchestration = {
+	control: { count: () -> number, selected: (() -> boolean)?, on_click: (() -> ())? }?,
+	list: Live<{ OrchRow }>?,
+	selected: ((id: string) -> boolean)?,
+	on_open: ((id: string) -> ())?,
+	on_new: (() -> ())?,
+	-- A row's context menu (ds/context_menu's entries), nil for none.
+	menu: ((id: string) -> { ContextMenu.Entry }?)?,
+}
 export type Props = {
 	-- Compact (a line a session) or regular (two).
 	compact: State<boolean>,
@@ -211,6 +227,9 @@ export type Props = {
 	-- title, icon? }` as a state of a list, and what choosing one does.
 	pages: State<{ any }>?,
 	on_page: ((page: any) -> ())?,
+	-- Orchestration's place in it, under Search (and the pages): the
+	-- Control room and the Orchestrators section.
+	orchestration: Orchestration?,
 	on_archive: ((id: string) -> ())?,
 	-- The Activity view: on, one list of what needs you (each session by its
 	-- `rank`, those on a `shelf` left out), pinned above it, and at its foot
@@ -2065,6 +2084,198 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		}, tall
 	end
 
+	-- Orchestration's rows: the Control room (what needs you, counted at its
+	-- end), then the Orchestrators section, its title's "+" a new one, a row
+	-- each (its hue's dot, breathing while its crew works; its crew working
+	-- of all of it; what of it needs you). Folds as a section does. On the
+	-- rail, the Control room's icon and each orchestrator's dot.
+	local function orchestration_rows(o: Orchestration): Node
+		local list: any = o.list
+		if type(list) == "function" then
+			list = ui.computed(list)
+		elseif type(list) ~= "table" or (list :: any).get == nil then
+			local plain = list or {}
+			list = ui.computed(function(): { OrchRow }
+				return plain
+			end)
+		end
+		local orch_open = opened["::orchestrators"]
+		local function any_listed(): boolean
+			return #((list :: any):get() :: { OrchRow }) > 0
+		end
+		-- A count in a pill, gone at none.
+		local function count_pill(n: () -> number, class: string): Node
+			return ui.show(function(): boolean
+				return n() > 0
+			end, ui.div { class = class, shrink = 0, badge.Count { n = n, tone = "accent" } })
+		end
+		local control_row: Node? = nil
+		local c = o.control
+		if c then
+			local cn = c.count
+			-- (The rail's tile: a dot over its corner while something needs you.)
+			local lead: Node = if railed()
+				then ui.div {
+					relative = true,
+					Icon { name = "monitor", size = 16 },
+					ui.show(function(): boolean
+						return cn() > 0
+					end, ui.div { absolute = true, right = -3, top = -3, badge.Dot { tone = "accent", size = 7 } }),
+				}
+				else Icon { name = "monitor", size = 16 }
+			control_row = row {
+				name = function(): string
+					return locale.s("ds.sidebar.control_room")
+				end,
+				class = "control-room-row",
+				lead = lead,
+				words = line(label(function(): string
+					return locale.s("ds.sidebar.control_room")
+				end), count_pill(cn, "control-room-count")),
+				selected = c.selected,
+				on_click = c.on_click,
+			}
+		end
+		local function orch_row(now: State<OrchRow>): Node
+			local function cur(): OrchRow
+				return now:get()
+			end
+			local function paused(): boolean
+				return cur().paused == true
+			end
+			local function counts(): string
+				local r = cur()
+				return if r.total > 0 then `{r.working}/{r.total}` else ""
+			end
+			-- Paused: two short bars where its counts stood.
+			local pause_mark = ui.row {
+				class = "orchestrator-paused",
+				shrink = 0,
+				gap = "$zeron.space.hair",
+				items = "center",
+				label = locale.t("ds.sidebar.paused"),
+				role = "img",
+				ui.div { w = 2, h = 8, rounded = "$radius.full", bg = "$text.tertiary" },
+				ui.div { w = 2, h = 8, rounded = "$radius.full", bg = "$text.tertiary" },
+			}
+			local body = row {
+				name = function(): string
+					return cur().name
+				end,
+				class = "orchestrator-row",
+				provide = { orchestrator = now:peek().id },
+				lead = OrchHue.Dot {
+					hue = function(): number?
+						return cur().hue
+					end,
+					size = 8,
+					pulse = function(): boolean
+						return cur().working > 0 and not paused()
+					end,
+				},
+				words = line(
+					label(function(): string
+						return cur().name
+					end, function(): boolean
+						return not paused()
+					end, nil, "orchestrator-name", "$text.tertiary"),
+					ui.show(paused, pause_mark),
+					ui.show(function(): boolean
+						return not paused() and counts() ~= ""
+					end, ui.div { class = "orchestrator-crew", shrink = 0, hint(counts) }),
+					count_pill(function(): number
+						return cur().needs
+					end, "orchestrator-needs")
+				),
+				selected = function(): boolean
+					return o.selected ~= nil and o.selected(cur().id)
+				end,
+				on_click = function()
+					if o.on_open then
+						o.on_open(now:peek().id)
+					end
+				end,
+			}
+			local menu = o.menu
+			if menu then
+				body = ContextMenu {
+					label = locale.t("ds.sidebar.orchestrator_actions"),
+					ring = "$radius.md",
+					w_full = true,
+					shrink = 0,
+					items = function()
+						return menu(now:peek().id)
+					end,
+					body,
+				}
+			end
+			return body
+		end
+		local rows = ui.each(list, function(_: any, _i: number, now: State<OrchRow>): Node
+			return orch_row(now)
+		end, {
+			key = function(r: OrchRow): string
+				return r.id
+			end,
+		})
+		local hovered = ui.use_state(false)
+		-- Its title, as a section's: a click folds it; its "+" a new one.
+		local title = if railed()
+			then nil
+			else ui.row {
+				class = "orchestrators-header",
+				w = function(): number
+					return room() - PAD * 2
+				end,
+				h = TITLE,
+				shrink = 0,
+				mt = "$space.2",
+				pl = "$space.2",
+				pr = "$space.1",
+				gap = "$space.1",
+				items = "center",
+				color = "$text.tertiary",
+				cursor = "pointer",
+				hover = { color = "$text.secondary" },
+				label = locale.t("ds.sidebar.orchestrators"),
+				on_hover = function(inside: boolean)
+					hovered:set(inside)
+				end,
+				on_click = function()
+					orch_open:set(not orch_open:peek())
+				end,
+				ui.text {
+					locale.t("ds.sidebar.orchestrators"),
+					grow = 1,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+				if o.on_new then ui.div { class = "orchestrators-new", corner("ds.sidebar.new_orchestrator", "plus", o.on_new) } else nil,
+			}
+		return ui.column {
+			id = if is_island then nil else "sidebar-orchestration",
+			w_full = true,
+			gap = "$zeron.list.gap",
+			shrink = 0,
+			control_row,
+			ui.show(
+				any_listed,
+				ui.column {
+					class = "orchestrators-section",
+					w_full = true,
+					gap = "$zeron.list.gap",
+					shrink = 0,
+					title,
+					if railed()
+						then rows
+						else ui.show(function(): boolean
+							return orch_open:get()
+						end, ui.column { w_full = true, gap = "$zeron.list.gap", shrink = 0, rows }),
+				}
+			),
+		}
+	end
+
 	-- The top: a new chat and search, each a row (collapsed, its icon).
 	local top = ui.column {
 		-- Where plugins add beside New chat and Search.
@@ -2125,6 +2336,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end,
 			})
 			else nil,
+		if props.orchestration then orchestration_rows(props.orchestration) else nil,
 	}
 
 	-- The middle: pinned, your sections, then the groups, as one virtualized

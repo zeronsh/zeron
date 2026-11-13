@@ -503,7 +503,12 @@
       "empty_projects": "{n, plural, other {# 个空项目}}",
       "activity": "动态",
       "working": "进行中",
-      "asleep": "已休眠"
+      "asleep": "已休眠",
+      "control_room": "Control room",
+      "orchestrators": "Orchestrators",
+      "new_orchestrator": "New orchestrator",
+      "orchestrator_actions": "Orchestrator actions",
+      "paused": "Paused"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -1092,6 +1097,37 @@
         "attachments": "没有与“{q}”匹配的附件"
       },
       "placeholder": "搜索文件、对话和附件"
+    },
+    "orch": {
+      "activity": {
+        "thinking": "Thinking",
+        "reading": "Reading",
+        "editing": "Editing",
+        "running": "Running",
+        "testing": "Testing",
+        "building": "Building",
+        "installing": "Installing",
+        "merging": "Merging",
+        "pushing": "Pushing",
+        "reviewing": "Reviewing",
+        "browsing": "Browsing",
+        "delegating": "Delegating"
+      },
+      "crew": {
+        "label": "Crew",
+        "empty": "No crew yet",
+        "thread": "Thread",
+        "open": "Open {title}",
+        "idle": "Idle",
+        "todo": "{done}/{total}",
+        "report": {
+          "done": "Done",
+          "blocked": "Blocked",
+          "failed": "Failed",
+          "progress": "Update",
+          "message": "Message"
+        }
+      }
     }
   },
   "settings": {
@@ -3913,6 +3949,78 @@
         "progress": "Update",
         "message": "Message"
       }
+    },
+    "sidebar": {
+      "open": "Open",
+      "pause": "Pause",
+      "resume": "Resume",
+      "settings": "Settings…",
+      "archive": "Archive",
+      "make_orchestrator": "Make orchestrator"
+    },
+    "palette": {
+      "new_orchestrator": "New orchestrator",
+      "control_room": "Open control room",
+      "orchestrators": "Orchestrators",
+      "go": "Open"
+    },
+    "actions": {
+      "update_failed": "Couldn't change the orchestrator",
+      "promote_failed": "Couldn't make it an orchestrator",
+      "create_failed": "Couldn't create the orchestrator",
+      "untitled": "Orchestrator"
+    },
+    "page": {
+      "needs_you": "Needs you",
+      "nothing_needs_you": "Nothing needs you",
+      "board": "Board",
+      "crew": "Crew",
+      "chat": "Chat",
+      "live": "Live",
+      "paused": "Paused",
+      "pause": "Pause",
+      "resume": "Resume",
+      "settings": "Settings",
+      "urgent": "Urgent",
+      "waiting_on_you": "Waiting for your answer",
+      "open_thread": "Open thread",
+      "answer": "Answer",
+      "answer_failed": "Couldn't send the answer",
+      "working_of": "{working}/{total}",
+      "missing": "This orchestrator isn't here",
+      "to_control": "Control room"
+    },
+    "dialog": {
+      "new_title": "New orchestrator",
+      "create": "Create",
+      "name": "Name",
+      "name_placeholder": "Release train",
+      "goal": "Goal",
+      "goal_placeholder": "What it's for",
+      "project": "Project",
+      "project_none": "No project",
+      "device": "Device",
+      "device_here": "This device",
+      "model": "Model",
+      "model_default": "Default",
+      "settings_title": "Orchestrator",
+      "save": "Save",
+      "rules": "Rules",
+      "crew_rules": "Crew rules",
+      "notes": "Notes",
+      "crew": "Crew",
+      "devices": "Runs on",
+      "max_running": "At once",
+      "max_running_none": "0 for no limit",
+      "crew_model": "Crew model",
+      "wake": "Wake",
+      "wake_on": "Wake on a schedule",
+      "wake_at": "At",
+      "wake_at_error": "Times as HH:MM, comma separated",
+      "wake_every": "Every",
+      "minutes": "min",
+      "weekdays": "Weekdays only",
+      "wake_prompt": "Prompt"
     }
   }
 }
