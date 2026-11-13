@@ -380,6 +380,12 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					on_move = function(id: string, state: string, order: number)
 						orchestration.move_item(id, state, order)
 					end,
+					on_approve = function(id: string)
+						orchestration.approve_item(id)
+					end,
+					on_request_changes = function(id: string, text: string)
+						orchestration.request_changes(id, text)
+					end,
 					on_priority = function(id: string, p: string)
 						orchestration.set_priority(id, p)
 					end,

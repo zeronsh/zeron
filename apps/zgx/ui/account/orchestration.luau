@@ -24,6 +24,8 @@
 --                                one placed): `target` as a route's
 --                                (`{ kind = "orchestrator", id }`)
 --   orchestration.move_item(id, state, order?)  a card moved on the board
+--   orchestration.approve_item(id)              a card in Review approved
+--   orchestration.request_changes(id, text)     changes asked for on one
 --   orchestration.set_priority(id, priority)
 --   orchestration.settings:get()  the profile's settings, synced and read by
 --                                every engine: { crew_auto_archive,
@@ -199,6 +201,17 @@ end
 
 function M.move_item(id: string, state: string, order: number?): any
 	return M.op({ op = "upsertItem", item = { id = id, state = state, order = order } })
+end
+
+-- A card in Review approved: Done, its approval recorded. A promise.
+function M.approve_item(id: string): any
+	return M.op({ op = "approveItem", id = id })
+end
+
+-- Changes asked for on a card in Review: `text` to its thread, the card
+-- back in Now. A promise.
+function M.request_changes(id: string, text: string): any
+	return M.op({ op = "requestChanges", id = id, text = text })
 end
 
 function M.set_priority(id: string, priority: string): any

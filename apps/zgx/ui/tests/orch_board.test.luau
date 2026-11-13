@@ -700,3 +700,68 @@ test("orch board cards: a loose card and an orchestrator's leave Blocked by Move
 	expect(app:has('#cards-now >> role:button "Approve engine migration"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+-- Review holds finished work the person evaluates, and has an end:
+-- Approve (Done) or Request changes (its thread told, back to Now).
+test("orch board cards: a Review card is approved, or sent back with what to change", function()
+	local app = cards()
+	local T = 1_800_040_000
+	local list: { any } = table.clone((app:state("cards_items") :: any) or {})
+	local function review(id: string, title: string): any
+		return {
+			id = id, state = "review", priority = "normal", order = 1, threads = { "th-map" }, title = title,
+			outcome = "Review: PR https://github.com/zeronsh/zeron/pull/1403\n\nOpened the PR.", created = T - 3000, updated = T - 60,
+		}
+	end
+	table.insert(list, review("it-pr", "Open a PR for the slash fix"))
+	table.insert(list, review("it-packed", "Graph map: area scales with content"))
+	app:set_state("cards_items", list)
+	app:frames(10)
+	local pr = '#cards-review >> role:button "Open a PR for the slash fix"'
+	local packed = '#cards-review >> role:button "Graph map: area scales with content"'
+	-- Inline, on the card.
+	expect(app:has(`{pr} >> .orch-card-review >> role:button "Approve"`)).to_be(true)
+	expect(app:has(`{pr} >> .orch-card-review >> role:button "Request changes…"`)).to_be(true)
+	-- Not on a card at work.
+	expect(app:has('#cards-now >> role:button "Fix slash menu in Codex chats" >> .orch-card-review')).to_be(false)
+	app:click(`{pr} >> role:button "Approve"`)
+	app:frames(20)
+	expect(app:state("calls")).to_contain("approve:it-pr")
+	expect(app:has('#cards-done >> role:button "Open a PR for the slash fix"')).to_be(true)
+	-- Request changes: a box for what to change, sent to its thread.
+	app:click(`{packed} >> role:button "Request changes…"`)
+	app:frames(10)
+	expect(app:has(`{packed} >> .orch-card-changes`)).to_be(true)
+	app:type(`{packed} >> role:textbox "Request changes…"`, "  Islands still overlap at 900px  ")
+	app:key("Enter")
+	app:frames(20)
+	expect(app:state("calls")).to_contain("changes:it-packed:Islands still overlap at 900px")
+	expect(app:has('#cards-now >> role:button "Graph map: area scales with content"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board cards: a Review card's menu has Approve and Request changes", function()
+	local app = cards()
+	local list: { any } = table.clone((app:state("cards_items") :: any) or {})
+	table.insert(list, {
+		id = "it-look", state = "review", priority = "normal", order = 1, threads = { "th-map" },
+		title = "Packed layout landed", outcome = "Review: Screenshots: ~/x/shots/", created = 1, updated = 1,
+	})
+	app:set_state("cards_items", list)
+	app:frames(10)
+	-- A card at work has neither.
+	app:right_click('#cards-now >> role:button "Fix slash menu in Codex chats"')
+	app:frames(10)
+	expect(app:has('role:menuitem "Move to"')).to_be(true)
+	expect(app:has('role:menuitem "Approve"')).to_be(false)
+	app:key("Escape")
+	app:frames(10)
+	app:right_click('#cards-review >> role:button "Packed layout landed"')
+	app:frames(10)
+	expect(app:has('role:menuitem "Approve"')).to_be(true)
+	expect(app:has('role:menuitem "Request changes…"')).to_be(true)
+	app:click('role:menuitem "Request changes…"')
+	app:frames(10)
+	expect(app:has('#cards-review >> role:button "Packed layout landed" >> .orch-card-changes')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)

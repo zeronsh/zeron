@@ -4161,7 +4161,10 @@
       "show_less": "Show less",
       "clear_done": "Clear all done",
       "clear": "Clear",
-      "cleared": "{n, plural, one {Cleared # done card} other {Cleared # done cards}}"
+      "cleared": "{n, plural, one {Cleared # done card} other {Cleared # done cards}}",
+      "approve": "Approve",
+      "request_changes": "Request changes…",
+      "changes_placeholder": "What to change"
     },
     "reports": {
       "title": "Crew updates",
