@@ -55,7 +55,7 @@ export type Lane = { id: string, name: string, y: number, h: number, online: boo
 export type Label = { id: string, lane: string, name: string, y: number, x: number }
 -- A row: an orchestrator's (`kind` "orchestrator"), a crew thread's or a
 -- thread of the person's own. `mid` its middle's y.
-export type Row = { id: string, lane: string, kind: string, x: number, y: number, w: number, h: number, mid: number, orchestrator: string?, hue: number?, paused: boolean }
+export type Row = { id: string, lane: string, kind: string, x: number, y: number, w: number, h: number, mid: number, orchestrator: string?, hue: number?, paused: boolean, origin: string? }
 -- An elbow into a crew row: the row's middle, and where it ends.
 export type Branch = { y: number, to: number }
 -- An orchestrator's rail: down (or up) from its dot at (`x`, `dot`), from
@@ -74,6 +74,8 @@ export type Rail = {
 	-- The Brain dump's: what it started, not crew it leads (drawn lighter,
 	-- dashed).
 	dashed: boolean,
+	-- ("tags") an edge grouping an orchestrator's rows on another machine.
+	edge: boolean?,
 }
 export type Layout = {
 	h: number,
@@ -129,7 +131,13 @@ local function cut(lines: { { number } }, bands: { { number } }, only_x: number?
 	return out
 end
 
-function M.layout(world: any, width: number): Layout
+-- How an orchestrator's work on other machines is shown (ds/orch_map_
+-- topo_style):
+--   "lines"  its rail runs down a column of its own to them (the default)
+--   "tags"   no line across machines: its rows there grouped by an edge in
+--            its hue, each naming it
+function M.layout(world: any, width: number, style: string?): Layout
+	style = if style == "tags" then "edge" else "columns"
 	local fleet = model.fleet(world)
 	local out: Layout = { h = 0, width = width, content_x = 0, lanes = {}, labels = {}, rows = {}, rails = {}, anchors = {}, routes = {} }
 
@@ -171,6 +179,7 @@ function M.layout(world: any, width: number): Layout
 
 	local y = 0
 	local by_orch: { [string]: { Row } } = {}
+	local away: { [string]: { Row } } = {}
 	for li, m in fleet.machines do
 		local lane: Lane = { id = m.id, name = m.name, y = y, h = 0, online = m.online, here = m.here, platform = m.platform, cloud = m.cloud, device = m.device, count = m.count, idle_x = 0 }
 		local top = y
@@ -217,8 +226,17 @@ function M.layout(world: any, width: number): Layout
 				local row: Row = { id = t.id, lane = m.id, kind = t.kind, x = 0, y = y, w = 0, h = h, mid = y + h / 2, orchestrator = t.orchestrator, hue = t.hue, paused = t.paused }
 				table.insert(out.rows, row)
 				if t.orchestrator then
-					by_orch[t.orchestrator] = by_orch[t.orchestrator] or {}
-					table.insert(by_orch[t.orchestrator], row)
+					-- (Kept apart, in "tag" and "edge", when on a machine other
+					-- than its orchestrator's: no line reaches it there.)
+					local hl = home[t.orchestrator]
+					if style == "edge" and t.kind ~= "orchestrator" and hl and hl ~= li then
+						row.origin = t.orchestrator
+						away[t.orchestrator] = away[t.orchestrator] or {}
+						table.insert(away[t.orchestrator], row)
+					else
+						by_orch[t.orchestrator] = by_orch[t.orchestrator] or {}
+						table.insert(by_orch[t.orchestrator], row)
+					end
 				end
 				y += h
 			end
@@ -339,7 +357,9 @@ function M.layout(world: any, width: number): Layout
 	local base = INSET + channels * CHANNEL
 	out.content_x = base
 	for _, r in out.rows do
-		r.x = if r.kind == "crew" and r.orchestrator and span_of[r.orchestrator] then base + DOT + INDENT else base
+		r.x = if r.origin then base + DOT + INDENT
+			elseif r.kind == "crew" and r.orchestrator and span_of[r.orchestrator] then base + DOT + INDENT
+			else base
 		r.w = math.max(0, width - r.x)
 		out.anchors[r.id] = if r.kind == "orchestrator" then { r.x + DOT, r.mid } else { r.x - GAP, r.mid }
 	end
@@ -434,6 +454,38 @@ function M.layout(world: any, width: number): Layout
 			dashed = o.kind == "brain_dump",
 		})
 	end
+	-- "edge": each orchestrator's rows on another machine grouped by an edge
+	-- in its hue, left of them, no branches.
+	if style == "edge" then
+		for o, rows in away do
+			local by_lane: { [string]: { Row } } = {}
+			for _, r in rows do
+				by_lane[r.lane] = by_lane[r.lane] or {}
+				table.insert(by_lane[r.lane], r)
+			end
+			local oo = fleet.orchestrators[o] or {}
+			for _, list in by_lane do
+				table.sort(list, function(a: Row, b: Row): boolean
+					return a.y < b.y
+				end)
+				local x = base + DOT + 6
+				local y0, y1 = list[1].y + 5, list[#list].y + list[#list].h - 5
+				table.insert(out.rails, {
+					orchestrator = o,
+					hue = oo.hue,
+					paused = oo.paused == true,
+					x = x,
+					dot = y0,
+					top = y0,
+					bottom = y1,
+					branches = {},
+					runs = { { x, y0, x, y1 } },
+					dashed = oo.kind == "brain_dump",
+					edge = true,
+				})
+			end
+		end
+	end
 
 	-- Where an elbow (or a rail's hop from its dot) passes over another
 	-- rail's column, that rail breaks round it: a hop, never a crossing.
@@ -479,6 +531,9 @@ function M.layout(world: any, width: number): Layout
 	-- Each crew row's way back to its orchestrator's dot, for a pulse: up
 	-- its rail as drawn.
 	for _, rail in out.rails do
+		if rail.edge or not span_of[rail.orchestrator] then
+			continue
+		end
 		for _, r in span_of[rail.orchestrator].crew do
 			local way = { r.x - GAP, r.mid, rail.x, r.mid }
 			-- (The runs between it and the dot, walked toward the dot.)

@@ -889,3 +889,70 @@ test("a machine renamed shows its new name at once, in every view", function()
 		expect(string.find(tree, "DESKTOP-3NFV6JC", 1, true)).to_be(nil)
 	end
 end)
+
+test("topology, Lines (the default): an orchestrator's rail runs down to its work on other machines", function()
+	local app = open(1440, 1400)
+	app:command("map_cross")
+	view(app, "topology")
+	app:frames(10)
+	expect(app:state("control_map_topo_style")).to_be("lines")
+	-- (No row names its origin; rails cross machines.)
+	expect(app:has("#control-widget-map >> .orch-origin")).to_be(false)
+	local function spans(mode: string): (boolean, boolean)
+		local l = Layout.layout(world(), 1200, mode)
+		local across, edges = false, false
+		for _, rail in l.rails do
+			if (rail :: any).edge then
+				edges = true
+			else
+				local lanes = {}
+				for _, lane in l.lanes do
+					if rail.top < lane.y + lane.h and rail.bottom > lane.y then
+						lanes[lane.id] = true
+					end
+				end
+				local n = 0
+				for _ in lanes do
+					n += 1
+				end
+				across = across or n > 1
+			end
+		end
+		return across, edges
+	end
+	local across, edges = spans("lines")
+	expect(across).to_be(true)
+	expect(edges).to_be(false)
+	across, edges = spans("tags")
+	expect(across).to_be(false)
+	expect(edges).to_be(true)
+end)
+
+test("topology, Tags: no line across machines; a row there carries an edge and names who started or leads it", function()
+	local app = open(1440, 1400)
+	app:command("map_cross")
+	view(app, "topology")
+	app:command("map_topo_tags")
+	app:frames(10)
+	expect(app:state("control_map_topo_style")).to_be("tags")
+	expect(app:has('#control-widget-map >> .orch-origin >> ~"Brain dump"')).to_be(true)
+	expect(app:has('#control-widget-map >> .orch-origin >> ~"Zeron fixes"')).to_be(true)
+end)
+
+test("topology: Lines or Tags chosen from the Map's menu, kept", function()
+	local app = open(1440, 1400)
+	app:command("map_cross")
+	view(app, "topology")
+	app:click('#control-widget-map >> role:button "Widget menu"')
+	app:frames(10)
+	app:click('role:menuitemcheckbox "Tags"')
+	app:frames(10)
+	expect(app:state("control_map_topo_style")).to_be("tags")
+	expect(app:has("#control-widget-map >> .orch-origin")).to_be(true)
+	app:click('#control-widget-map >> role:button "Widget menu"')
+	app:frames(10)
+	app:click('role:menuitemcheckbox "Lines"')
+	app:frames(10)
+	expect(app:state("control_map_topo_style")).to_be("lines")
+	expect(app:has("#control-widget-map >> .orch-origin")).to_be(false)
+end)

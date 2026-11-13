@@ -1211,6 +1211,8 @@
         "span_15": "15m",
         "span_60": "1h",
         "crew_working": "{working}/{total} working",
+        "topo_lines": "Lines",
+        "topo_tags": "Tags",
         "tick": {
           "report": "Report",
           "ask": "Ask",

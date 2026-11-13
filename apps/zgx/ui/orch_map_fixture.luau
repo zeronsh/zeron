@@ -288,6 +288,13 @@ end }
 ui.command { id = "map_graph_zoom_in", title = "Map: zoom the graph in", run = function()
 	require("@ds/orch_map_graph").zoom_by(1.25)
 end }
+-- The Topology's two ways to show work across machines (its … menu's
+-- "Lines" and "Tags").
+for _, mode in { "lines", "tags" } do
+	ui.command { id = `map_topo_{mode}`, title = `Map: topology {mode}`, run = function()
+		require("@ds/orch_map_topo_style").style:set(mode)
+	end }
+end
 -- A secondary click's menu for the id in `map_menu_id`, as on the Map.
 local menu_id = ui.state("map_menu_id", "")
 ui.command { id = "map_menu", title = "Map: open a menu", run = function()

@@ -39,6 +39,9 @@ export type Props = {
 
 local PULSE_MS = 900
 
+-- How work on other machines is shown: "lines" or "tags" (kept per device).
+local TopoStyle = require("@self/orch_map_topo_style")
+
 -- What the layout is made from, as a string: worked out again only when
 -- it moves (a thread's state changing reaches its row alone).
 local function signature(world: any, width: number): string
@@ -121,12 +124,12 @@ return ui.component(function(props: Props): Node
 	local layout = ui.computed(function(): Layout.Layout
 		local w = width:get()
 		local world = props.world()
-		local sig = signature(world, w)
+		local sig = signature(world, w) .. "|" .. TopoStyle.mode()
 		if last_layout and sig == last_sig then
 			return last_layout :: Layout.Layout
 		end
 		last_sig = sig
-		last_layout = Layout.layout(world, w)
+		last_layout = Layout.layout(world, w, TopoStyle.mode())
 		return last_layout :: Layout.Layout
 	end)
 	local lanes = ui.computed(function(): { Layout.Lane }
@@ -160,6 +163,13 @@ return ui.component(function(props: Props): Node
 	local function draw(c: any, _w: number, _h: number)
 		local l = layout:get()
 		for _, rail in l.rails do
+			if rail.edge then
+				-- (An edge grouping its rows here: no line from elsewhere.)
+				local ink = hue.canvas(rail.hue, if hue.dark() then 0.7 else 0.8)
+				local p = ui.path():move(rail.x, rail.top):line(rail.x, rail.bottom)
+				c:stroke(p, ink, 2, { cap = "round", dash = if rail.dashed then { 3, 3 } else nil })
+				continue
+			end
 			local alpha = if rail.paused then 0.3 else (if hue.dark() then 0.62 else 0.7)
 			local ink = hue.canvas(rail.hue, alpha)
 			local path = ui.path()
@@ -430,6 +440,32 @@ return ui.component(function(props: Props): Node
 					return if s == "done" or s == "idle" then "$text.secondary" else "$text.primary"
 				end,
 			},
+			-- ("tags": a row away from its orchestrator's machine names
+			-- where it came from, in that orchestrator's hue.)
+			ui.show(function(): boolean
+				return row:get().origin ~= nil
+			end, ui.row {
+				class = "orch-origin",
+				gap = 4,
+				shrink = 0,
+				items = "center",
+				hue.Dot { hue = function(): number?
+					return row:get().hue
+				end, size = 6 },
+				ui.text {
+					function(): string
+						local id = row:get().origin
+						for _, o in (props.world().now or {}).orchestrators or {} do
+							if o.id == id then
+								return `↳ {o.name or ""}`
+							end
+						end
+						return ""
+					end,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			}),
 			-- What it's doing: its word, then what it's running.
 			ui.text {
 				function(): string

@@ -119,6 +119,21 @@ function M.menu(view: State<View>): { any }
 		})
 	end
 	table.insert(out, { separator = true })
+	-- How the Topology shows work on other machines (kept on this device).
+	local TopoStyle = require("@self/orch_map_topo_style")
+	for _, mode in TopoStyle.MODES do
+		table.insert(out, {
+			label = locale.s(`ds.orch.map.topo_{mode}`),
+			checked = function(): boolean
+				return TopoStyle.mode() == mode
+			end,
+			on_select = function()
+				TopoStyle.style:set(mode)
+				M.set(view, { variant = "topology" })
+			end,
+		})
+	end
+	table.insert(out, { separator = true })
 	return out
 end
 
