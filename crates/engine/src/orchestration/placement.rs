@@ -346,7 +346,7 @@ impl EngineRpc {
             item_id: None,
             kind: AskKind::Decision,
             question: format!("Where should this go?\n\n> {}", one_line(&route.excerpt, 400)),
-            options: labels.into_iter().map(|label| AskOption { label, detail: String::new() }).collect(),
+            options: labels.into_iter().map(AskOption::new).collect(),
             urgent: false,
             state: AskState::Open,
             answer: None,
@@ -360,6 +360,11 @@ impl EngineRpc {
             updated_at: None,
             escalated_at: None,
             answered_via: None,
+            images: Vec::new(),
+            recommendation: None,
+            links: Vec::new(),
+            context: None,
+            deferred_until: None,
         };
         self.orchestration().workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
         self.orchestration().comms().say(

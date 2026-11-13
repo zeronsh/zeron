@@ -301,8 +301,8 @@ pub(crate) fn chase_unanswered(orchestration: &Orchestration, rpc: &EngineRpc, n
                 kind: AskKind::Decision,
                 question: format!("{} hasn't answered: {}", one_line(&title, 60), one_line(&route.excerpt, 200)),
                 options: vec![
-                    AskOption { label: ASK_AGAIN.into(), detail: String::new() },
-                    AskOption { label: DISMISS.into(), detail: String::new() },
+                    AskOption::new(ASK_AGAIN),
+                    AskOption::new(DISMISS),
                 ],
                 urgent: false,
                 state: AskState::Open,
@@ -317,6 +317,11 @@ pub(crate) fn chase_unanswered(orchestration: &Orchestration, rpc: &EngineRpc, n
                 updated_at: None,
                 escalated_at: None,
                 answered_via: None,
+                images: Vec::new(),
+                recommendation: None,
+                links: Vec::new(),
+                context: None,
+                deferred_until: None,
             };
             orchestration.workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
             raised.push(ask.id);
