@@ -345,16 +345,16 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					name_of = function(id: string?): string?
 						return data.name_of(orchestration.now:get(), chats:get(), id)
 					end,
-					on_answer = function(ask: any, text: string)
-						orchestration.answer(ask.id, text):after(function() end, function()
+					on_answer = function(ask: any, choice: any)
+						orchestration.answer(ask.id, choice):after(function() end, function()
 							ds.toast.show { title = locale.s("orch.page.answer_failed"), tone = "danger" }
 						end)
 					end,
 					on_dismiss = function(ask: any)
 						orchestration.dismiss(ask.id)
 					end,
-					on_open = function(chat: string)
-						route.open_session(chat)
+					on_open = function(chat: string, message: string?)
+						route.open_session(chat, if message then { message = message } else nil)
 					end,
 				}, "orch-section-needs"),
 				Section(ui.t("orch.page.board"), nil, OrchBoard {

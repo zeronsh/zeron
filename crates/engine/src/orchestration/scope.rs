@@ -266,6 +266,11 @@ mod tests {
             updated_at: None,
             escalated_at: None,
             answered_via: None,
+            images: Vec::new(),
+            recommendation: None,
+            links: Vec::new(),
+            context: None,
+            deferred_until: None,
         }
     }
 

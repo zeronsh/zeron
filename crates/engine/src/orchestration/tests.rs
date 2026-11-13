@@ -1608,10 +1608,11 @@ async fn a_thread_with_finished_cards_that_asks_waits_on_its_newest_card_and_non
     let chase = Ask {
         id: "chase".into(), from_chat: map.into(), orchestrator_id: None, item_id: None, kind: AskKind::Decision,
         question: "Redesign Map Graph Mode hasn't answered: …".into(),
-        options: vec![AskOption { label: "Ask again".into(), detail: String::new() }, AskOption { label: "Dismiss".into(), detail: String::new() }],
+        options: vec![AskOption::new("Ask again"), AskOption::new("Dismiss")],
         urgent: false, state: AskState::Open, answer: None, created_at: chrono::Utc::now(), answered_at: None,
         dump_id: Some(dump.clone()), route_id: None, quiet: true, origin: AskOrigin::Tool, turn_id: None,
         updated_at: None, escalated_at: None, answered_via: None,
+        images: Vec::new(), recommendation: None, links: Vec::new(), context: None, deferred_until: None,
     };
     // Its newest work ends on a question for the person; the chase opened
     // during that turn (an engine's, not the thread's own `ask`).
@@ -2027,11 +2028,11 @@ async fn a_reply_on_an_ask_reference_answers_the_ask() {
     let id = op(&core, agent(&brain), route(&ask)).await.unwrap();
     let answered = core.workspace.read_orchestration_with(|d| d.ask(&ask)).unwrap();
     assert_eq!(answered.state, AskState::Answered);
-    assert_eq!(answered.answer.as_deref(), Some("Merge"), "the reply picks the option it names");
+    assert_eq!(answered.answer.as_deref(), Some("Option 1: Merge"), "the reply picks the option it names, as a chip does");
     assert_eq!(answered.answered_via, Some(AnswerVia::Person));
     let to_asker = sent(&core, "asker");
     assert!(
-        to_asker.last().unwrap().starts_with("[Answer from you] Merge now or wait? \u{2192} Merge"),
+        to_asker.last().unwrap().starts_with("[Answer from you] Merge now or wait? \u{2192} Option 1: Merge"),
         "{to_asker:?}"
     );
     let r = route_row(&core, &dump, &id);
@@ -2365,5 +2366,181 @@ async fn an_answered_asks_delivery_answers_without_the_model() {
     core.rpc_service().settle_card_states().await;
     assert!(open_asks(&core, "t-at-ask").is_empty());
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    core.sessions.shutdown().await;
+}
+
+// ── Decisions: pictures, a pick, putting off ────────────────────────────────
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-a-picture";
+
+/// A chat of the person's whose folder is `cwd`.
+async fn chat_in(core: &crate::EngineCore, id: &str, cwd: &std::path::Path) {
+    call(
+        core,
+        Caller::Local,
+        methods::MUTATE,
+        json!({"op":"createChat", "chatId":id, "deviceId":REMOTE, "cwd": cwd.to_str().unwrap(),
+               "config":{"harness":"codex","sandbox":"workspace-write"}}),
+    )
+    .await
+    .unwrap();
+}
+
+fn ask_of(core: &crate::EngineCore, id: &str) -> Ask {
+    core.workspace.read_orchestration_with(|doc| doc.ask(id)).unwrap()
+}
+
+#[tokio::test]
+async fn a_decision_keeps_its_pictures_and_pick_and_an_option_answers_it() {
+    let (_temp, core) = core().await;
+    let work = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(work.path().join("shots")).unwrap();
+    std::fs::write(work.path().join("shots/tag.png"), PNG).unwrap();
+    std::fs::write(work.path().join("shots/now.png"), PNG).unwrap();
+    std::fs::write(elsewhere.path().join("edge.png"), PNG).unwrap();
+    chat_in(&core, "asker", work.path()).await;
+    let id = op(
+        &core,
+        agent("asker"),
+        json!({"op":"ask","kind":"decision","question":"Which variant?",
+               "options":[
+                   {"label":"(a) Tag","detail":"No lines","images":["shots/tag.png"],"scores":{"Claude":8,"GPT":8.5}},
+                   {"label":"(b) Edge","images":[elsewhere.path().join("edge.png").to_str().unwrap(), "https://x.dev/edge.png", "http://x.dev/plain.png", "https://127.0.0.1/edge.png"]}
+               ],
+               "images":["shots/now.png", "notes.txt"],
+               "recommendation":{"option":0,"why":"Two of three picked it."},
+               "links":[{"kind":"branch","label":"orch/topo-variants","target":"orch/topo-variants"}],
+               "context":"Built on `c1e090c7e`."}),
+    )
+    .await
+    .unwrap();
+    let ask = ask_of(&core, &id);
+    // Its own folder's pictures are kept in the uploads store; the one
+    // outside it and the non-picture are left out; a URL stays.
+    let store = std::fs::canonicalize(core.uploads.dir()).unwrap();
+    let tag = &ask.options[0].images;
+    assert_eq!(tag.len(), 1, "{tag:?}");
+    assert!(std::path::Path::new(&tag[0]).starts_with(&store) && tag[0].ends_with("-tag.png"), "{tag:?}");
+    assert_eq!(std::fs::read(&tag[0]).unwrap(), PNG);
+    // (Only https to a public name: plain http and loopback are left out.)
+    assert_eq!(ask.options[1].images, ["https://x.dev/edge.png"]);
+    assert_eq!(ask.images.len(), 1);
+    assert!(ask.images[0].ends_with("-now.png"));
+    assert_eq!(ask.options[0].scores.0[1], ("GPT".to_owned(), Score::Number(8.5)));
+    assert_eq!(ask.recommendation.as_ref().and_then(|r| r.option), Some(0));
+    assert_eq!(ask.links[0].target, "orch/topo-variants");
+    assert_eq!(ask.context.as_deref(), Some("Built on `c1e090c7e`."));
+    // A pick out of range, or nothing at all, is refused.
+    assert!(op(&core, agent("asker"), json!({"op":"ask","kind":"decision","question":"Q?","options":[{"label":"a"}],"recommendation":{"option":2}})).await.is_err());
+    assert!(op(&core, Caller::Local, json!({"op":"answerAsk","id":id,"answer":""})).await.is_err());
+    assert!(op(&core, Caller::Local, json!({"op":"answerAsk","id":id,"option":5})).await.is_err());
+    assert_eq!(ask_of(&core, &id).state, AskState::Open);
+    // The person picks (a) and adds a word.
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":id,"option":0,"answer":"and polish it"})).await.unwrap();
+    let ask = ask_of(&core, &id);
+    assert_eq!((ask.state, ask.answered_via), (AskState::Answered, Some(AnswerVia::Person)));
+    assert_eq!(ask.answer.as_deref(), Some("Option 1: (a) Tag \u{2014} and polish it"));
+    assert_eq!(sent(&core, "asker"), vec!["[Answer from you] Which variant? \u{2192} Option 1: (a) Tag \u{2014} and polish it"]);
+    // An option alone does too.
+    let id = op(&core, agent("asker"), json!({"op":"ask","kind":"decision","question":"Ship?","options":[{"label":"Now"},{"label":"Later"}]})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":id,"option":1})).await.unwrap();
+    assert_eq!(ask_of(&core, &id).answer.as_deref(), Some("Option 2: Later"));
+    assert!(sent(&core, "asker").last().unwrap().ends_with("\u{2192} Option 2: Later"));
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_deferred_ask_is_hidden_until_its_time_then_back_once() {
+    let (_temp, core) = core().await;
+    chat(&core, "asker", "Asker", None).await;
+    let id = op(&core, agent("asker"), json!({"op":"ask","kind":"question","question":"Which bucket?"})).await.unwrap();
+    let now = chrono::Utc::now();
+    let until = now + chrono::Duration::hours(1);
+    // Only the person puts it off.
+    assert!(op(&core, agent("asker"), json!({"op":"deferAsk","id":id,"until":until})).await.is_err());
+    op(&core, Caller::Local, json!({"op":"deferAsk","id":id,"until":until})).await.unwrap();
+    let ask = ask_of(&core, &id);
+    assert!(ask.deferred(now) && ask.state == AskState::Open);
+    let rpc = core.rpc_service();
+    let here = |_: &str| true;
+    // Not back yet, and not raised as stale meanwhile.
+    assert!(super::turn_asks::bring_back_with(&core.orchestration, &rpc, now, &here).is_empty());
+    let stale = now + super::turn_asks::STALE_AFTER + chrono::Duration::minutes(1);
+    assert!(super::turn_asks::escalate_with(&core.orchestration, &rpc, stale, &here).is_empty(), "put off, not stale");
+    // Its time: back, once, its wait started over.
+    let later = until + chrono::Duration::minutes(1);
+    assert_eq!(super::turn_asks::bring_back_with(&core.orchestration, &rpc, later, &|_| false), Vec::<String>::new(), "its host brings it back");
+    assert_eq!(super::turn_asks::bring_back_with(&core.orchestration, &rpc, later, &here), vec![id.clone()]);
+    let ask = ask_of(&core, &id);
+    assert!(ask.deferred_until.is_none() && !ask.deferred(later) && ask.updated_at == Some(later));
+    assert!(super::turn_asks::bring_back_with(&core.orchestration, &rpc, later + chrono::Duration::hours(1), &here).is_empty(), "once");
+    assert!(super::turn_asks::escalate_with(&core.orchestration, &rpc, later + chrono::Duration::minutes(5), &here).is_empty(), "fresh again");
+    // Put off and brought back by hand: `until` absent.
+    op(&core, Caller::Local, json!({"op":"deferAsk","id":id,"until":until + chrono::Duration::days(1)})).await.unwrap();
+    assert!(ask_of(&core, &id).deferred_until.is_some());
+    op(&core, Caller::Local, json!({"op":"deferAsk","id":id})).await.unwrap();
+    assert!(ask_of(&core, &id).deferred_until.is_none());
+    // Answered: no more putting off.
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":id,"answer":"us-east"})).await.unwrap();
+    assert!(op(&core, Caller::Local, json!({"op":"deferAsk","id":id,"until":until})).await.is_err());
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_tool_ask_gets_the_message_that_asked_when_its_turn_ends() {
+    let (_temp, core) = core().await;
+    chat(&core, "asker", "Asker", None).await;
+    push(&core, "asker", "u1", zeron_doc::MessageRole::User, "Pick a bucket and go.");
+    push(&core, "asker", "a1", zeron_doc::MessageRole::Assistant, "Two buckets fit; asking.");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let id = op(&core, agent("asker"), json!({"op":"ask","kind":"question","question":"Which bucket?"})).await.unwrap();
+    assert!(ask_of(&core, &id).turn_id.is_none());
+    // (Written after it: a later millisecond.)
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    push(&core, "asker", "a2", zeron_doc::MessageRole::Assistant, "Waiting on the bucket.");
+    turn_ended(&core, "asker").await;
+    assert_eq!(ask_of(&core, &id).turn_id.as_deref(), Some("a1"));
+    core.sessions.shutdown().await;
+}
+
+/// Thread 9ad131f1's Topology turn (its final message, shortened).
+const TOPOLOGY_FINAL: &str = "The four Topology variations are built and scored, and they're waiting for your pick. Nothing is merged. They sit behind a fixture switch on `orch/topo-variants` (commit `c1e090c7e`).\n\n| Version | Claude | GPT | Grok |\n|---|---:|---:|---:|\n| Current: a gutter column per rail | 5 | 6 | 5 |\n| (a) inline tag \"↳ Brain dump\", no cross-machine lines | **8** | **8.5** | 8 |\n| (b) line in its dot's column, stepping aside | 5 | 5.5 | 4 |\n\nI recommend (a) with all three. Tell me which version you want and I'll polish it and merge it.\n\nScreenshots are in `shots/`:\n- topo-{columns,tag,dotcol}-dark-v2.png\n\nThe graph label decision (accept round 9, or keep iterating) is also still yours to make.";
+
+#[tokio::test]
+async fn the_topology_turn_becomes_a_decision_with_its_variants_pictures_and_pick() {
+    let (_temp, core) = core().await;
+    let work = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(work.path().join("shots")).unwrap();
+    for name in ["columns", "tag", "dotcol"] {
+        std::fs::write(work.path().join(format!("shots/topo-{name}-dark-v2.png")), PNG).unwrap();
+    }
+    let fixes = orchestrator(&core, "Zeron fixes").await;
+    let map = "9ad131f1-cd18-43de-9ef8-47ba98880783";
+    chat_in(&core, map, work.path()).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":fixes,"chatId":map})).await.unwrap();
+    push(&core, map, "u1", zeron_doc::MessageRole::User, "New Topology variants");
+    push(&core, map, "a1", zeron_doc::MessageRole::Assistant, TOPOLOGY_FINAL);
+    turn_ended(&core, map).await;
+    let asks = asks_from(&core, map);
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    let ask = &asks[0];
+    assert_eq!((ask.kind, ask.turn_id.as_deref()), (AskKind::Decision, Some("a1")));
+    assert!(ask.question.starts_with("Tell me which version you want"), "{}", ask.question);
+    let labels: Vec<&str> = ask.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["(a) Inline tag \"↳ Brain dump\"", "(b) Line in its dot's column"]);
+    assert_eq!(ask.options[0].scores.0.len(), 3);
+    let r = ask.recommendation.as_ref().unwrap();
+    assert_eq!((r.option, r.why.as_deref()), (Some(0), Some("With all three")));
+    // (a)'s screenshot by its name, stored; the rest the ask's own.
+    assert_eq!(ask.options[0].images.len(), 1, "{:?}", ask.options);
+    assert!(ask.options[0].images[0].ends_with("-topo-tag-dark-v2.png"), "{:?}", ask.options[0].images);
+    assert!(std::path::Path::new(&ask.options[0].images[0]).starts_with(std::fs::canonicalize(core.uploads.dir()).unwrap()));
+    assert_eq!(ask.images.len(), 2, "{:?}", ask.images);
+    assert_eq!(ask.links[0].target, "orch/topo-variants");
+    assert!(ask.context.as_deref().unwrap().contains("Also waiting on you: The graph label decision"));
+    // The person picks (a): the thread hears which.
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":ask.id,"option":0})).await.unwrap();
+    assert!(sent(&core, map).iter().any(|m| m.ends_with("Option 1: (a) Inline tag \"↳ Brain dump\"")), "{:?}", sent(&core, map));
     core.sessions.shutdown().await;
 }

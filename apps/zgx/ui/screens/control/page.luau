@@ -21,6 +21,8 @@ local hue = require("@ds/orch_hue")
 local data = require("@ds/orch_data")
 local Receipt = require("@ds/orch_receipt")
 local Asks = require("@ds/orch_asks")
+local Decision = require("@ds/orch_decision")
+local decide = require("@ds/orch_decide")
 local OrchMap = require("@ds/orch_map")
 local MapMenu = require("@app/screens/control/map_menu")
 local Machines = require("@ds/orch_machines")
@@ -174,15 +176,25 @@ local function hue_of(id: string?): number?
 	return data.hue_of(orchestration.now:get(), chats_now:get(), id)
 end
 
--- A chat opened: an orchestrator's on its own page, any other as a session.
-function M.open_chat(id: string)
+-- A chat opened: an orchestrator's on its own page, any other as a session;
+-- at `message` (an entry's id: the message an ask came from) when given.
+function M.open_chat(id: string, message: string?)
 	for _, o in orchestration.now:peek().orchestrators or {} do
 		if o.id == id then
 			route.orchestrator(id)
 			return
 		end
 	end
-	route.open_session(id)
+	if message and message ~= "" then
+		route.open_session(id, { message = message })
+	else
+		route.open_session(id)
+	end
+end
+
+-- (Where only a chat's id is given.)
+local function open_chat(id: string)
+	M.open_chat(id)
 end
 
 local function open_target(t: { kind: string, id: string? })
@@ -617,6 +629,21 @@ function M.show_dump(id: string?)
 	end)
 end
 
+-- An ask answered (its option 1-based, or words, or both): from Needs you,
+-- a card, or the overlay, past its Undo.
+local function answer(ask: any, choice: any)
+	orchestration.answer(ask.id, choice):after(function() end, said("control.needs.failed"))
+end
+
+-- A link of a card's or an ask's: a chat opened here, a web one outside.
+local function open_link(link: any)
+	if link.kind == "chat" then
+		M.open_chat(link.target)
+	elseif string.match(link.target or "", "^https?://") then
+		Links.open(link.target)
+	end
+end
+
 -- The board: every orchestrator's work, its filter over it, loose items in
 -- an Inbox first.
 local function board(): Node
@@ -692,12 +719,12 @@ local function board(): Node
 		end,
 		-- (Its clocks, from its lead thread's progress row.)
 		progress_of = Progress.row,
-		on_link = function(link: any)
-			if link.kind == "chat" then
-				M.open_chat(link.target)
-			elseif string.match(link.target or "", "^https?://") then
-				Links.open(link.target)
-			end
+		on_link = open_link,
+		-- A card waiting on a decision: its options as chips, and the
+		-- whole of it in the overlay.
+		on_answer = answer,
+		on_expand_ask = function(ask: any)
+			decide.show(ask.id)
 		end,
 	}
 end
@@ -708,13 +735,41 @@ local function needs(): Node
 			return data.needs(orchestration.now:get(), sessions.now:get())
 		end,
 		name_of = name_of,
-		on_answer = function(ask: any, text: string)
-			orchestration.answer(ask.id, text):after(function() end, said("control.needs.failed"))
-		end,
+		on_answer = answer,
 		on_dismiss = function(ask: any)
 			orchestration.dismiss(ask.id):after(function() end, said("control.needs.failed"))
 		end,
 		on_open = M.open_chat,
+		on_expand = function(ask: any)
+			decide.show(ask.id)
+		end,
+	}
+end
+
+-- The decision overlay (ds/orch_decision): the ask Needs you or a card
+-- opened, whole.
+local function decision(): Node
+	return Decision {
+		ask = function(): any
+			local id = decide.shown:get()
+			if not id then
+				return nil
+			end
+			for _, a in orchestration.now:get().asks or {} do
+				if a.id == id then
+					return a
+				end
+			end
+			return nil
+		end,
+		name_of = name_of,
+		hue_of = hue_of,
+		on_answer = answer,
+		on_defer = function(ask: any, until_ms: number)
+			orchestration.defer(ask.id, until_ms):after(function() end, said("control.needs.failed"))
+		end,
+		on_open = M.open_chat,
+		on_link = open_link,
 	}
 end
 
@@ -741,7 +796,7 @@ local function map(): Node
 			comms = function(): { any }
 				return orchestration.comms:get()
 			end,
-			on_open_chat = M.open_chat,
+			on_open_chat = open_chat,
 			on_open_orchestrator = function(id: string)
 				route.orchestrator(id)
 			end,
@@ -770,7 +825,7 @@ local function machines(): Node
 			return hue_of(id)
 		end,
 		name_of = thread_name,
-		on_open_chat = M.open_chat,
+		on_open_chat = open_chat,
 	}
 end
 
@@ -785,7 +840,7 @@ local function comms(): Node
 		hue_of = function(id: string): number?
 			return hue_of(id)
 		end,
-		on_open = M.open_chat,
+		on_open = open_chat,
 	}
 end
 
@@ -819,7 +874,7 @@ local function qa(): Node
 		marks = QA.marks,
 		open = QA.opened,
 		all = QA.all,
-		on_open_thread = M.open_chat,
+		on_open_thread = open_chat,
 	}
 end
 
@@ -1500,6 +1555,7 @@ M.Page = ui.component(function(): Node
 	orchestration.loads_wanted(true)
 	ui.on_cleanup(function()
 		orchestration.loads_wanted(false)
+		decide.hide()
 	end)
 	local kept = KeptScroll.use(M.place)
 	ui.on_cleanup(function()
@@ -1585,6 +1641,7 @@ M.Page = ui.component(function(): Node
 			enter = motion.transition({ opacity = { 0, 1 }, y = { 12, 0 }, duration = 220, ease = "out(3)" }),
 			exit = motion.transition({ opacity = { 1, 0 }, y = { 0, 8 }, duration = 140, ease = "in(2)" }),
 		}),
+		decision(),
 	}
 end)
 

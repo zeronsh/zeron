@@ -590,8 +590,10 @@ test("orch board: a card whose thread asked the person says Waiting on you, unti
 	expect(app:has(`{card} >> .orch-card-clock >> "2m"`)).to_be(true)
 	-- Answered: its thread is at it again, or at rest; no word for the person.
 	app:click('#control-widget-needs >> role:button "Merge into zeron/orchestrators"')
+	-- (Sent once its Undo has passed: the option 1-based.)
+	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(5)
-	expect(app:state("calls")).to_contain("answer:ak-turn:Merge into zeron/orchestrators")
+	expect(app:state("calls")).to_contain("answer:ak-turn:2:")
 	expect(app:wait(`{card} >> .orch-card-word`, { gone = true, timeout_ms = 3000 })).to_be(true)
 	expect(app:has(`{card} >> "Waiting on you"`)).to_be(false)
 	expect(app:error()).to_be_nil()

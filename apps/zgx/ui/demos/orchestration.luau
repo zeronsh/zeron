@@ -154,8 +154,8 @@ local function asks(): Node
 			name_of = function(id: string?): string?
 				return data.name_of(now:get(), chats, id)
 			end,
-			on_answer = function(a: any, text: string)
-				said:set(`Answered {a.id}: {text}`)
+			on_answer = function(a: any, choice: any)
+				said:set(`Answered {a.id}: {choice.text or (a.options[choice.option or 0] or {}).label or ""}`)
 				local n = table.clone(now:peek())
 				local list = {}
 				for _, x in n.asks do

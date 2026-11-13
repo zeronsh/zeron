@@ -22,9 +22,14 @@
 //!                   source? = { dump_id, route_id }, order, created, updated, done?,
 //!                   space_id?, device_id?, waiting? } },
 //!       asks = { { id, from_chat, orchestrator_id?, item_id?, kind, question,
-//!                  options = { { label, detail? } }, urgent, state, answer?,
+//!                  options = { { label, detail?, images = { path_or_url },
+//!                                scores = { { name, value } } } },
+//!                  urgent, state, answer?,
 //!                  created, answered?, origin = "tool" | "turn_end", turn_id?,
-//!                  updated?, escalated?, answered_via?, quiet } },
+//!                  updated?, escalated?, answered_via?, quiet,
+//!                  images = { path_or_url }, recommendation? = { option? (1-based),
+//!                  label?, why? }, links = { { kind, label, target } }, context?,
+//!                  deferred_until? } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
 //!                   candidates = { target }, answer?, answer_full?, answered?, delivered?,
@@ -45,6 +50,13 @@
 //!                                  (camelCase: `{ op = "answerAsk", id, answer }`):
 //!                                  its reply (`{ id }` for what it made), or
 //!                                  rejected with the engine's words
+//!   orchestration.answer_ask({ id, option?, text? })
+//!                                  the person's answer: `option` 1-based (the
+//!                                  engine's 0-based), `text` their words (either
+//!                                  or both); `{ id }`, or rejected
+//!   orchestration.defer_ask({ id, until? })
+//!                                  put an ask off until `until` (Unix seconds),
+//!                                  nil: back now; `{ id }`, or rejected
 //!   orchestration.loads_wanted(on) (an action) a screen showing loads mounts
 //!                                  (true) or goes (false): they're sampled only
 //!                                  while one wants them
@@ -60,7 +72,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use zeron_proto::orchestration::{
     Ask, ChatActivity, CommEvent, CrewMember, DeviceLoad, Dump, OrchestrationState, Orchestrator, Route, RouteTarget,
-    TodoProgress, WorkItem, WorkLink,
+    Score, TodoProgress, WorkItem, WorkLink,
 };
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
@@ -164,6 +176,24 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
         }
     });
+    host.async_action("orchestration.answer_ask", move |args| {
+        let params = answer_params(&args);
+        async move {
+            crate::plugins::preview::refuse("orchestration.answer_ask")?;
+            let params = params?;
+            let reply = engine::get().call("Orchestrate", params).await?;
+            Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
+        }
+    });
+    host.async_action("orchestration.defer_ask", move |args| {
+        let params = defer_params(&args);
+        async move {
+            crate::plugins::preview::refuse("orchestration.defer_ask")?;
+            let params = params?;
+            let reply = engine::get().call("Orchestrate", params).await?;
+            Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
+        }
+    });
     let a = o.clone();
     host.action("orchestration.loads_wanted", move |on| {
         if crate::plugins::preview::refuse("orchestration.loads_wanted").is_err() {
@@ -204,6 +234,45 @@ async fn carry_dump(op: &Value, params: &mut Json) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// `answer_ask`'s table as the `answerAsk` op: its 1-based `option` made
+/// 0-based, `text` the answer's words.
+fn answer_params(args: &Value) -> Result<Json, String> {
+    let id = args.field("id").map(crate::auth::text).filter(|id| !id.is_empty()).ok_or("an ask id")?;
+    let text = args.field("text").map(crate::auth::text).unwrap_or_default();
+    let option = match args.field("option") {
+        Some(Value::Num(n)) if n.fract() == 0.0 && *n >= 1.0 => Some((*n as u64) - 1),
+        None | Some(Value::Nil) => None,
+        Some(_) => return Err("option is a whole number from 1".into()),
+    };
+    if option.is_none() && text.trim().is_empty() {
+        return Err("an option or words".into());
+    }
+    let mut params = json!({ "op": "answerAsk", "id": id, "answer": text.trim() });
+    if let Some(option) = option {
+        params["option"] = json!(option);
+    }
+    Ok(params)
+}
+
+/// `defer_ask`'s table as the `deferAsk` op: `until` (Unix seconds) as the
+/// engine's time; none, back now.
+fn defer_params(args: &Value) -> Result<Json, String> {
+    let id = args.field("id").map(crate::auth::text).filter(|id| !id.is_empty()).ok_or("an ask id")?;
+    let until = match args.field("until") {
+        Some(Value::Num(secs)) => {
+            let at = DateTime::<Utc>::from_timestamp_millis((*secs * 1000.0) as i64).ok_or("until is out of range")?;
+            Some(at.to_rfc3339())
+        }
+        None | Some(Value::Nil) => None,
+        Some(_) => return Err("until is Unix seconds".into()),
+    };
+    let mut params = json!({ "op": "deferAsk", "id": id });
+    if let Some(until) = until {
+        params["until"] = json!(until);
+    }
+    Ok(params)
+}
+
 /// The ops the person sends from the window. The rest (`report`, `ask`,
 /// `route`, `dumpDone`) are an agent's, through Zeron's tools, and never come
 /// from here.
@@ -226,6 +295,8 @@ const PERSON_OPS: &[&str] = &[
     "upsertItem",
     "answerAsk",
     "dismissAsk",
+    // (An ask put off until a time, or brought back.)
+    "deferAsk",
     "dump",
     "reroute",
     // (The chat's note made fresh; never sent to the chat itself.)
@@ -554,12 +625,35 @@ fn item_value(i: &WorkItem) -> Value {
     ])
 }
 
+fn score_value(s: &Score) -> Value {
+    match s {
+        Score::Number(n) => Value::from(*n),
+        Score::Text(t) => Value::from(t.as_str()),
+    }
+}
+
 fn ask_value(a: &Ask) -> Value {
     let options = list(&a.options, |o| {
         Value::record([
             ("label", Value::from(o.label.as_str())),
             // (None when it has none, as the sample's.)
             ("detail", opt_str(Some(o.detail.as_str()).filter(|d| !d.is_empty()))),
+            ("images", strings(&o.images)),
+            // (In the order written: a list, not a table keyed by name.)
+            (
+                "scores",
+                list(&o.scores.0, |(name, score)| {
+                    Value::record([("name", Value::from(name.as_str())), ("value", score_value(score))])
+                }),
+            ),
+        ])
+    });
+    let recommendation = a.recommendation.as_ref().map(|r| {
+        Value::record([
+            // (1-based, as Luau counts.)
+            ("option", opt(r.option, |i| Value::from((i + 1) as f64))),
+            ("label", opt_str(r.label.as_deref())),
+            ("why", opt_str(r.why.as_deref())),
         ])
     });
     Value::record([
@@ -583,6 +677,12 @@ fn ask_value(a: &Ask) -> Value {
         ("answered_via", opt(a.answered_via.as_ref(), word)),
         // Shown without a banner, and on no card ("hasn't answered").
         ("quiet", Value::Bool(a.quiet)),
+        ("images", strings(&a.images)),
+        ("recommendation", recommendation.unwrap_or(Value::Nil)),
+        ("links", list(&a.links, link_value)),
+        ("context", opt_str(a.context.as_deref())),
+        // Put off until then: out of Needs you meanwhile.
+        ("deferred_until", opt(a.deferred_until.as_ref(), secs)),
     ])
 }
 
@@ -1035,6 +1135,70 @@ mod tests {
         assert_eq!(text(v.field("origin")).as_deref(), Some("tool"));
         assert!(nil(v.field("escalated")) && nil(v.field("answered_via")));
         assert!(matches!(v.field("quiet"), Some(Value::Bool(false))));
+    }
+
+    #[test]
+    fn a_decision_reads_with_its_pictures_scores_pick_and_deferral() {
+        let ask: Ask = serde_json::from_value(json!({
+            "id": "a", "fromChat": "c", "kind": "decision", "question": "Which?", "state": "open", "createdAt": iso(NOW),
+            "options": [
+                { "label": "(a) Tag", "detail": "No lines", "images": ["/u/1-tag.png"], "scores": { "Claude": 8, "risk": "low" } },
+                { "label": "(b) Edge" }
+            ],
+            "images": ["https://x/now.png"],
+            "recommendation": { "option": 0, "label": "(a) Tag", "why": "Cleaner." },
+            "links": [{ "kind": "branch", "label": "orch/x", "target": "orch/x" }],
+            "context": "Built on `c1e`.", "deferredUntil": iso(NOW + 3600),
+        }))
+        .unwrap();
+        let v = ask_value(&ask);
+        let options = v.field("options").unwrap().list();
+        let a = &options[0];
+        assert_eq!(text(a.field("images").unwrap().list().first()).as_deref(), Some("/u/1-tag.png"));
+        let scores = a.field("scores").unwrap().list();
+        assert_eq!(text(scores[0].field("name")).as_deref(), Some("Claude"));
+        assert_eq!(num(scores[0].field("value")), Some(8.0));
+        assert_eq!(text(scores[1].field("value")).as_deref(), Some("low"));
+        assert!(options[1].field("images").unwrap().list().is_empty() && nil(options[1].field("detail")));
+        assert_eq!(text(v.field("images").unwrap().list().first()).as_deref(), Some("https://x/now.png"));
+        let pick = v.field("recommendation").unwrap();
+        assert_eq!(num(pick.field("option")), Some(1.0), "1-based");
+        assert_eq!(text(pick.field("why")).as_deref(), Some("Cleaner."));
+        assert_eq!(text(v.field("links").unwrap().list()[0].field("target")).as_deref(), Some("orch/x"));
+        assert_eq!(text(v.field("context")).as_deref(), Some("Built on `c1e`."));
+        assert_eq!(num(v.field("deferred_until")), Some((NOW + 3600) as f64));
+        // An old ask: empty lists, nils.
+        let old: Ask = serde_json::from_value(json!({
+            "id": "b", "fromChat": "c", "kind": "question", "question": "?", "state": "open", "createdAt": iso(NOW),
+        }))
+        .unwrap();
+        let v = ask_value(&old);
+        assert!(v.field("images").unwrap().list().is_empty() && v.field("links").unwrap().list().is_empty());
+        assert!(nil(v.field("recommendation")) && nil(v.field("context")) && nil(v.field("deferred_until")));
+    }
+
+    #[test]
+    fn answering_with_an_option_and_deferring_make_the_engines_ops() {
+        let args = Value::record([("id", Value::from("a")), ("option", Value::from(2.0))]);
+        assert_eq!(answer_params(&args).unwrap(), json!({ "op": "answerAsk", "id": "a", "answer": "", "option": 1 }));
+        let args = Value::record([("id", Value::from("a")), ("option", Value::from(1.0)), ("text", Value::from(" and polish "))]);
+        assert_eq!(answer_params(&args).unwrap(), json!({ "op": "answerAsk", "id": "a", "answer": "and polish", "option": 0 }));
+        let args = Value::record([("id", Value::from("a")), ("text", Value::from("go"))]);
+        assert_eq!(answer_params(&args).unwrap(), json!({ "op": "answerAsk", "id": "a", "answer": "go" }));
+        assert!(answer_params(&Value::record([("id", Value::from("a"))])).is_err(), "an option or words");
+        assert!(answer_params(&Value::record([("id", Value::from("a")), ("option", Value::from(0.0))])).is_err(), "1-based");
+        assert!(answer_params(&Value::record([("option", Value::from(1.0))])).is_err(), "an id");
+        let args = Value::record([("id", Value::from("a")), ("until", Value::from(NOW as f64))]);
+        let op = defer_params(&args).unwrap();
+        assert_eq!(op["op"], "deferAsk");
+        let until: DateTime<Utc> = op["until"].as_str().unwrap().parse().unwrap();
+        assert_eq!(until.timestamp(), NOW);
+        assert_eq!(defer_params(&Value::record([("id", Value::from("a"))])).unwrap(), json!({ "op": "deferAsk", "id": "a" }));
+        // What they make, the engine reads.
+        for op in [answer_params(&Value::record([("id", Value::from("a")), ("option", Value::from(1.0))])).unwrap(), op] {
+            assert!(serde_json::from_value::<zeron_proto::orchestration::OrchestrateOp>(op.clone()).is_ok(), "{op}");
+            assert!(person_op(&op).is_ok());
+        }
     }
 
     #[test]

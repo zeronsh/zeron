@@ -194,6 +194,15 @@ end
 	return settled({ id = "orc-orch" })
 end
 
+-- An ask answered (account/orchestration's `answer`: its host call,
+-- `orchestration.answer_ask`), noted as an op is: `answer_ask:id=…,option=…`.
+;(orchestration :: any).answer = function(id: string, opts: any): any
+	local o = if type(opts) == "string" then { text = opts } else opts
+	local line = said({ op = "answer_ask", id = id, option = o.option, text = o.text })
+	calls:set(if calls:peek() == "" then line else `{calls:peek()}\n{line}`)
+	return settled({ id = id })
+end
+
 -- Where the route stands, for the tests to read.
 local where = ui.state("orch_route", "")
 ui.effect(function()

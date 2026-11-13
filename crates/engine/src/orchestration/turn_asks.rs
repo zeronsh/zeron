@@ -175,7 +175,7 @@ pub(crate) enum Plan {
 }
 
 fn options(found: &Found) -> Vec<AskOption> {
-    found.options.iter().map(|o| AskOption { label: o.clone(), detail: String::new() }).collect()
+    found.ask_options()
 }
 
 fn labels(ask: &Ask) -> Vec<String> {
@@ -223,6 +223,19 @@ pub(crate) fn plan(
         if !found.options.is_empty() {
             ask.options = options(found);
         }
+        // What it carries, as asked this time.
+        if !found.images.is_empty() || !found.options.is_empty() {
+            ask.images = found.images.clone();
+        }
+        if found.recommendation.is_some() {
+            ask.recommendation = found.recommendation.clone();
+        }
+        if !found.links.is_empty() {
+            ask.links = found.links.clone();
+        }
+        if found.context.is_some() {
+            ask.context = found.context.clone();
+        }
         if turn.is_none() && ask.state == AskState::Open && ask.question == found.question {
             // The same words again from a message: nothing new.
             return Plan::Nothing;
@@ -268,6 +281,11 @@ pub(crate) fn plan(
         updated_at: None,
         escalated_at: None,
         answered_via: None,
+        images: found.images.clone(),
+        recommendation: found.recommendation.clone(),
+        links: found.links.clone(),
+        context: found.context.clone(),
+        deferred_until: None,
     })
 }
 
@@ -419,10 +437,11 @@ fn open_turn_asks<'a>(asks: &'a [Ask], chat: &'a str) -> impl Iterator<Item = &'
     asks.iter().filter(move |a| a.from_chat == chat && a.origin == AskOrigin::TurnEnd && a.state == AskState::Open)
 }
 
-/// The open asks gone stale and not raised yet, from chats `hosted` here.
+/// The open asks gone stale and not raised yet, from chats `hosted` here
+/// (one put off isn't: it comes back first, [`returning`]).
 pub(crate) fn stale(asks: &[Ask], now: DateTime<Utc>, hosted: &dyn Fn(&str) -> bool) -> Vec<String> {
     asks.iter()
-        .filter(|a| a.state == AskState::Open && a.escalated_at.is_none())
+        .filter(|a| a.state == AskState::Open && a.escalated_at.is_none() && a.deferred_until.is_none())
         .filter(|a| now - a.updated_at.unwrap_or(a.created_at) >= STALE_AFTER)
         .filter(|a| hosted(&a.from_chat))
         .map(|a| a.id.clone())
@@ -470,9 +489,33 @@ pub(crate) async fn settle(orch: &Orchestration, rpc: &EngineRpc, chat: &str, en
     closed
 }
 
+/// The open asks put off until a time now past, from chats `hosted` here.
+pub(crate) fn returning(asks: &[Ask], now: DateTime<Utc>, hosted: &dyn Fn(&str) -> bool) -> Vec<String> {
+    asks.iter()
+        .filter(|a| a.state == AskState::Open && a.deferred_until.is_some_and(|until| until <= now))
+        .filter(|a| hosted(&a.from_chat))
+        .map(|a| a.id.clone())
+        .collect()
+}
+
+/// `found` with its pictures stored for `chat` ([`super::ask_images`]).
+fn stored(rpc: &EngineRpc, chat: &str, found: &Found) -> Found {
+    let mut found = found.clone();
+    if found.images.is_empty() && found.extras.iter().all(|e| e.images.is_empty()) {
+        return found;
+    }
+    let cwd = super::ask_images::cwd_of(rpc, chat);
+    let uploads = rpc.uploads_ref();
+    found.images = super::ask_images::store_all(uploads, cwd.as_deref(), &found.images);
+    for extra in &mut found.extras {
+        extra.images = super::ask_images::store_all(uploads, cwd.as_deref(), &extra.images);
+    }
+    found
+}
+
 /// Raise `found` for `chat`'s turn `turn`: create, update or nothing (see
 /// [`plan`]), atomically against what's stored. A new crew ask also goes
-/// to its orchestrator.
+/// to its orchestrator. Its pictures are stored first.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn raise(
     orch: &Orchestration,
@@ -484,6 +527,7 @@ pub(crate) fn raise(
     route: Option<(&str, &str)>,
     now: DateTime<Utc>,
 ) -> Plan {
+    let found = &stored(rpc, chat, found);
     let plan = orch.workspace().write_orchestration(|doc| {
         let mut plan = plan(&doc.read_asks(), chat, turn, found, launch, now);
         if let Plan::Create(ask) | Plan::Update(ask) = &mut plan {
@@ -558,6 +602,7 @@ pub(crate) fn launch_of_chat(orch: &Orchestration, rpc: &EngineRpc, chat: &str) 
 /// `chat`'s turn ended (`session` now): close what it settled, then raise
 /// what it asks.
 pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat: &str, session: &Session) {
+    mark_tool_asks(orch, rpc, chat);
     if matches!(session.status, SessionStatus::AwaitingInput | SessionStatus::Errored) {
         return;
     }
@@ -589,8 +634,85 @@ pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat:
         .and_then(|c| c.config.as_ref().map(|c| c.harness))
         .unwrap_or_else(|| rpc.doc_host_ref().default_harness());
     let one_shot = orch.progress().one_shot(rpc);
-    let Some(found) = settle_verdict(&text, |prompt| one_shot(harness, prompt)).await else { return };
+    let Some(mut found) = settle_verdict(&text, |prompt| one_shot(harness, prompt)).await else { return };
+    // Pictures the turn showed (`show_image`, attachments): the ask's too.
+    for image in turn_images(&entries) {
+        let named = found.images.contains(&image) || found.extras.iter().any(|e| e.images.contains(&image));
+        if !named {
+            found.images.push(image);
+        }
+    }
     raise(orch, rpc, chat, Some(&turn), &found, &launch, None, Utc::now());
+}
+
+/// The pictures the turn's assistant messages carry (image parts).
+fn turn_images(entries: &[SessionMessageEntry]) -> Vec<String> {
+    let start = entries.iter().rposition(|e| e.role == MessageRole::User).map_or(0, |i| i + 1);
+    entries[start..]
+        .iter()
+        .filter(|e| e.role == MessageRole::Assistant)
+        .flat_map(|e| e.parts.iter())
+        .filter_map(|p| match p {
+            MessagePart::Image { path, .. } if !path.is_empty() => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The message that asked each of `chat`'s open `ask`-tool asks with no
+/// turn yet: the last assistant message written by the time it was raised,
+/// in the turn that raised it (else that turn's last). An ask from before
+/// the transcript's last turn gets none.
+pub(crate) fn tool_turns(asks: &[Ask], chat: &str, entries: &[SessionMessageEntry]) -> Vec<(String, String)> {
+    let start = entries.iter().rposition(|e| e.role == MessageRole::User).map_or(0, |i| i + 1);
+    let since = turn_started(entries);
+    let turn = &entries[start..];
+    asks.iter()
+        .filter(|a| own_tool_ask(a, chat))
+        .filter(|a| a.created_at.timestamp_millis() >= since)
+        .filter_map(|a| {
+            let at = a.created_at.timestamp_millis();
+            let mut assistant = turn.iter().filter(|e| e.role == MessageRole::Assistant);
+            let by = assistant.clone().filter(|e| e.created_at <= at).last().or_else(|| assistant.next_back());
+            by.map(|e| (a.id.clone(), e.id.clone()))
+        })
+        .collect()
+}
+
+/// An open ask `chat` raised itself with `ask`, with no turn yet (not a
+/// chase or a "where should this go?" Zeron raised for it: quiet, or tied
+/// to a dump).
+fn own_tool_ask(a: &Ask, chat: &str) -> bool {
+    a.from_chat == chat
+        && a.origin == AskOrigin::Tool
+        && !a.quiet
+        && a.dump_id.is_none()
+        && a.turn_id.is_none()
+        && a.state == AskState::Open
+}
+
+/// Give `chat`'s `ask`-tool asks of the turn that just ended their asking
+/// message ([`tool_turns`]).
+fn mark_tool_asks(orch: &Orchestration, rpc: &EngineRpc, chat: &str) {
+    if !orch.state().asks.iter().any(|a| own_tool_ask(a, chat)) {
+        return;
+    }
+    let Ok(handle) = rpc.doc_host_ref().open(chat) else { return };
+    let Ok(entries) = handle.doc().read_entries() else { return };
+    let marks = tool_turns(&orch.state().asks, chat, &entries);
+    if marks.is_empty() {
+        return;
+    }
+    orch.workspace().write_orchestration(|doc| {
+        for (id, turn) in &marks {
+            if let Some(mut ask) = doc.ask(id)
+                && ask.turn_id.is_none()
+            {
+                ask.turn_id = Some(turn.clone());
+                doc.upsert_ask(&ask);
+            }
+        }
+    });
 }
 
 /// A message reached `chat` (its turn started): the turn-end asks it
@@ -604,11 +726,50 @@ pub(crate) async fn on_reply(orch: &Orchestration, rpc: &EngineRpc, chat: &str) 
     settle(orch, rpc, chat, &entries).await;
 }
 
-/// Raise the stale asks of chats hosted here: urgent, a banner again.
+/// Raise the stale asks of chats hosted here: urgent, a banner again. And
+/// bring back the ones put off until now.
 pub(crate) fn escalate(orch: &Orchestration, rpc: &EngineRpc, now: DateTime<Utc>) -> Vec<String> {
     let hosted: std::collections::HashSet<String> =
         rpc.sessions_ref().watch_sessions().borrow().iter().map(|s| s.chat_id.clone()).collect();
+    bring_back_with(orch, rpc, now, &|c| hosted.contains(c));
     escalate_with(orch, rpc, now, &|c| hosted.contains(c))
+}
+
+/// Bring back the asks put off until a time now past, of chats `hosted`
+/// here: no longer deferred, shown again with one banner. Their ids.
+pub(crate) fn bring_back_with(
+    orch: &Orchestration,
+    rpc: &EngineRpc,
+    now: DateTime<Utc>,
+    hosted: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let due = returning(&orch.state().asks, now, hosted);
+    let mut back = Vec::new();
+    for id in due {
+        let ask = orch.workspace().write_orchestration(|doc| {
+            let mut ask = doc.ask(&id)?;
+            if ask.state != AskState::Open || !ask.deferred_until.is_some_and(|until| until <= now) {
+                return None;
+            }
+            ask.deferred_until = None;
+            // (Its wait starts over: it isn't stale the moment it's back.)
+            ask.updated_at = Some(now);
+            doc.upsert_ask(&ask);
+            Some(ask)
+        });
+        let Some(ask) = ask else { continue };
+        let title = rpc
+            .workspace_host()
+            .chat(&ask.from_chat)
+            .ok()
+            .flatten()
+            .and_then(|c| c.title)
+            .unwrap_or_else(|| "A thread".into());
+        rpc.notify_person(&format!("Back for you: {title}"), &super::excerpt(&ask.question, 200), Some(&ask.from_chat));
+        rpc.sync_cards_of(&ask.from_chat);
+        back.push(ask.id);
+    }
+    back
 }
 
 /// [`escalate`] for the chats `hosted` says are here.

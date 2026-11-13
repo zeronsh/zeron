@@ -50,20 +50,37 @@ test("a waiting chat with no ask of its own has a row to open it", function()
 	end
 end)
 
-test("an option answers its ask, and the row slides out", function()
+test("an option answers its ask after its Undo, and the row slides out", function()
 	local app = open()
 	app:click('#control-widget-needs >> role:button "Approve"')
-	app:frames(2)
-	expect(calls(app)).to_contain("answer:ak-2:Approve")
-	-- Answered once, however fast the second click.
-	app:frames(60)
-	expect(app:wait('#control-widget-needs >> role:button "Approve"', { gone = true, timeout_ms = 3000 })).to_be(true)
+	app:frames(4)
+	-- Answered at once, Undo for a moment; nothing sent yet.
+	expect(app:has('#control-widget-needs >> .orch-answered >> "Approve"')).to_be(true)
+	expect(app:has('#control-widget-needs >> role:button "Undo"')).to_be(true)
+	expect(calls(app)).never.to_contain("answer:")
+	-- Past it: sent once, its option 1-based, and the row goes.
+	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
+	app:frames(4)
+	expect(calls(app)).to_contain("answer:ak-2:1:")
+	expect(app:wait('#control-widget-needs >> "Approve"', { gone = true, timeout_ms = 4000 })).to_be(true)
 	expect(app:count("#control-widget-needs >> .orch-need")).to_be(1)
 	local n = 0
 	for _ in calls(app):gmatch("answer:") do
 		n += 1
 	end
 	expect(n).to_be(1)
+end)
+
+test("Undo takes a pick back: nothing is sent and the chips come back", function()
+	local app = open()
+	app:click('#control-widget-needs >> role:button "Not tonight"')
+	app:frames(4)
+	app:click('#control-widget-needs >> role:button "Undo"')
+	app:frames(4)
+	expect(app:has('#control-widget-needs >> role:button "Approve"')).to_be(true)
+	app:frames(30)
+	app:wait('#control-widget-needs >> "never there"', { timeout_ms = 6000 })
+	expect(calls(app)).never.to_contain("answer:")
 end)
 
 test("an ask is dismissed from its row", function()
@@ -85,7 +102,7 @@ local function asked(): any
 	return app
 end
 
-test("a thread's question from its turn's end: the question, both options, a reply, whose and how long", function()
+test("a thread's question from its turn's end: the question, both options, whose and how long", function()
 	local app = asked()
 	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
 	-- (Its code spans drawn as code, their ticks gone.)
@@ -93,33 +110,38 @@ test("a thread's question from its turn's end: the question, both options, a rep
 	expect(app:has('#control-widget-needs >> ~"`zeron/zgx`"')).to_be(false)
 	expect(app:has(`#control-widget-needs >> role:button "{PR}"`)).to_be(true)
 	expect(app:has(`#control-widget-needs >> role:button "{MERGE}"`)).to_be(true)
-	expect(app:has('#control-widget-needs >> role:textbox "Reply"')).to_be(true)
-	-- Which thread asked, how long it has waited, and a way into it.
-	expect(app:has('#control-widget-needs >> "Codex Slash Commands Missing"')).to_be(true)
+	-- Which thread asked (a way into it, at the question), how long it has waited.
+	expect(app:has('#control-widget-needs >> role:button "Open Codex Slash Commands Missing at its question"')).to_be(true)
 	expect(app:has('#control-widget-needs >> "2m"')).to_be(true)
-	expect(app:count('#control-widget-needs >> role:button "Open"')).to_be(2)
-	-- (An ask by the tool, with options: no reply line of its own.)
-	expect(app:count('#control-widget-needs >> role:textbox "Reply"')).to_be(1)
+	-- (Only the chat awaiting input has an Open of its own.)
+	expect(app:count('#control-widget-needs >> role:button "Open"')).to_be(1)
+	-- Compact: no reply line where there are options (the overlay has one).
+	expect(app:has('#control-widget-needs >> role:textbox "Reply"')).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
-test("a thread's turn-end ask: an option answers it with its words", function()
+test("a thread's turn-end ask: an option answers it", function()
 	local app = asked()
 	app:click(`#control-widget-needs >> role:button "{MERGE}"`)
-	app:frames(2)
-	expect(calls(app)).to_contain(`answer:ak-turn:{MERGE}`)
-	expect(app:wait(`#control-widget-needs >> role:button "{MERGE}"`, { gone = true, timeout_ms = 3000 })).to_be(true)
-	expect(app:has('#control-widget-needs >> role:textbox "Reply"')).to_be(false)
+	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
+	app:frames(4)
+	expect(calls(app)).to_contain("answer:ak-turn:2:")
+	expect(app:wait(`#control-widget-needs >> "{MERGE}"`, { gone = true, timeout_ms = 4000 })).to_be(true)
 end)
 
-test("a thread's turn-end ask: a quick reply answers it", function()
+test("a thread's turn-end ask: its name opens the thread at the message that asked", function()
 	local app = asked()
-	app:type('#control-widget-needs >> role:textbox "Reply"', "  Neither yet, run the tests first  ")
-	app:key("Enter")
-	app:frames(2)
-	expect(calls(app)).to_contain("answer:ak-turn:Neither yet, run the tests first")
-	expect(calls(app)).never.to_contain(`answer:ak-turn:{PR}`)
-	expect(app:wait('#control-widget-needs >> role:textbox "Reply"', { gone = true, timeout_ms = 3000 })).to_be(true)
+	app:click('#control-widget-needs >> role:button "Open Codex Slash Commands Missing at its question"')
+	app:frames(10)
+	expect(calls(app)).to_contain("open:th-codex-slash:msg-turn-1")
+end)
+
+test("a chat awaiting input opens at its end", function()
+	local app = open()
+	app:click('#control-widget-needs >> role:button "Open"')
+	app:frames(10)
+	expect(calls(app)).to_contain("open:th-ui-orch:")
+	expect(calls(app)).never.to_contain("open:th-ui-orch:m")
 end)
 
 test("a thread's turn-end ask gone stale comes first, urgent", function()

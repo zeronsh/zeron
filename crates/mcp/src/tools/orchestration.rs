@@ -168,17 +168,30 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ASK,
-            description: "Ask the person something only they can decide: a question, a decision between options, an approval (merge, deploy, spend) or a blocker. It joins the one queue the person answers from, with a notification; the answer comes back to your chat as a message ([Answer from you] …). Ask only when it's a real decision; keep working on anything that doesn't depend on it.",
+            description: "Ask the person something only they can decide: a question, a decision between options, an approval (merge, deploy, spend) or a blocker. It joins the one queue the person answers from, with a notification; the answer comes back to your chat as a message ([Answer from you] …, naming the option picked). Ask only when it's a real decision; keep working on anything that doesn't depend on it.\n\nMake it decidable at a glance, without your transcript: give 2 to 4 options, each a short label plus a detail (what it does, its cost or risk); for a visual choice give each option its screenshots (`images`: file paths in your working folder, or URLs) and the ask its own shared ones (the current state); add `scores` per option when you measured or had them rated (\"Claude\": 8, \"risk\": \"low\"); say what you'd pick and why (`recommendation`); link the branch, PR or chat it is about (`links`); and put what they need to know in `context` (markdown, a few lines).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "question": s("Markdown, self-contained: the person reads it without your transcript."),
+                    "question": s("Markdown, self-contained, one or two sentences: the decision itself (\"Which Topology variant should I polish and merge?\")."),
                     "kind": { "type": "string", "enum": ["question", "decision", "approval", "blocker"], "default": "question" },
                     "options": {
                         "type": "array",
-                        "description": "Choices, best first. Strings, or {label, detail}. Omit for a free answer.",
-                        "items": { "anyOf": [{ "type": "string" }, { "type": "object", "properties": { "label": { "type": "string" }, "detail": { "type": "string" } }, "required": ["label"] }] }
+                        "description": "Choices, best first: 2 to 4. Strings, or {label, detail, images, scores}. Omit for a free answer.",
+                        "items": { "anyOf": [{ "type": "string" }, { "type": "object", "properties": {
+                            "label": s("A few words (\"(a) Inline tag\")."),
+                            "detail": s("A line on what it does and what it costs."),
+                            "images": { "type": "array", "items": { "type": "string" }, "description": "Its screenshots: paths (inside your working folder; PNG, JPEG, WebP or GIF, at most 15 MB) or http(s) URLs." },
+                            "scores": { "type": "object", "additionalProperties": { "type": ["number", "string"] }, "description": "Its scores by name, in order: {\"Claude\": 8, \"GPT\": 8.5, \"risk\": \"low\"}." }
+                        }, "required": ["label"] }] }
                     },
+                    "images": { "type": "array", "items": { "type": "string" }, "description": "Screenshots that aren't one option's (the current state, an overview): paths or URLs." },
+                    "recommendation": {
+                        "type": "object",
+                        "description": "What you'd pick, and why. `option` is the 0-based index into options.",
+                        "properties": { "option": { "type": "integer", "minimum": 0 }, "why": s("One or two sentences.") }
+                    },
+                    "links": links_schema(),
+                    "context": s("Markdown the person reads to decide: what was built, what's at stake, what happens after."),
                     "urgent": { "type": "boolean", "default": false },
                     "item": s("The board item it is about.")
                 },
@@ -192,9 +205,10 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "id": s("The ask's id."),
-                    "answer": s("The answer: an option's words, or a short reply.")
+                    "option": { "type": "integer", "minimum": 0, "description": "The option you pick, 0-based (as listed in the [Crew ask])." },
+                    "answer": s("The answer: a short reply, or words to add to the option picked.")
                 },
-                "required": ["id", "answer"]
+                "required": ["id"]
             }),
         },
         ToolDef {
@@ -365,6 +379,10 @@ enum OptionArg {
         label: String,
         #[serde(default)]
         detail: String,
+        #[serde(default)]
+        images: Vec<String>,
+        #[serde(default)]
+        scores: zeron_proto::orchestration::Scores,
     },
 }
 
@@ -377,6 +395,19 @@ struct AskArgs {
     #[serde(default)]
     urgent: bool,
     item: Option<String>,
+    #[serde(default)]
+    images: Vec<String>,
+    recommendation: Option<RecommendationArg>,
+    #[serde(default)]
+    links: Vec<WorkLink>,
+    context: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RecommendationArg {
+    option: Option<usize>,
+    #[serde(default)]
+    why: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -417,7 +448,9 @@ struct ChatOnly {
 #[derive(Deserialize)]
 struct AnswerArgs {
     id: String,
+    #[serde(default)]
     answer: String,
+    option: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -524,19 +557,51 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 .options
                 .into_iter()
                 .map(|o| match o {
-                    OptionArg::Label(label) => AskOption { label, detail: String::new() },
-                    OptionArg::Full { label, detail } => AskOption { label, detail },
+                    OptionArg::Label(label) => AskOption::new(label),
+                    OptionArg::Full { label, detail, images, scores } => AskOption { label, detail, images, scores },
                 })
                 .filter(|o| !o.label.trim().is_empty())
                 .collect();
-            Ok(json!({
+            let recommendation = match a.recommendation {
+                Some(r) => {
+                    if let Some(i) = r.option
+                        && i >= options.len()
+                    {
+                        return Err(format!("recommendation.option is {i}, but there are {} options (0-based)", options.len()));
+                    }
+                    let why = r.why.trim().to_owned();
+                    let label = r.option.map(|i| options[i].label.clone());
+                    (r.option.is_some() || !why.is_empty()).then(|| {
+                        json!({ "option": r.option, "label": label, "why": (!why.is_empty()).then_some(why) })
+                    })
+                }
+                None => None,
+            };
+            let mut op = json!({
                 "op": "ask", "kind": kind, "question": nonempty("question", &a.question)?,
                 "options": options, "urgent": a.urgent, "itemId": a.item,
-            }))
+            });
+            if !a.images.is_empty() {
+                op["images"] = json!(a.images);
+            }
+            if let Some(r) = recommendation {
+                op["recommendation"] = r;
+            }
+            if !a.links.is_empty() {
+                op["links"] = json!(a.links);
+            }
+            if let Some(c) = a.context.filter(|c| !c.trim().is_empty()) {
+                op["context"] = json!(c);
+            }
+            Ok(op)
         }
         ANSWER_ASK => {
             let a: AnswerArgs = parse(args)?;
-            Ok(json!({ "op": "answerAsk", "id": nonempty("id", &a.id)?, "answer": nonempty("answer", &a.answer)? }))
+            let id = nonempty("id", &a.id)?;
+            match a.option {
+                Some(option) => Ok(json!({ "op": "answerAsk", "id": id, "answer": a.answer.trim(), "option": option })),
+                None => Ok(json!({ "op": "answerAsk", "id": id, "answer": nonempty("answer", &a.answer)? })),
+            }
         }
         ITEM_UPSERT => {
             let a: ItemArgs = parse(args)?;
@@ -1460,6 +1525,43 @@ mod tests {
         assert_eq!(ask["kind"], "question");
         assert_eq!(ask["options"][1]["detail"], "wait");
         assert!(op_for(ASK, json!({ "question": "Ship?", "kind": "vibe" }), &crew).is_err());
+        // A decision with pictures, scores, a pick, links and context: on to
+        // the engine as the wire has it.
+        let rich = op_for(
+            ASK,
+            json!({
+                "question": "Which variant?", "kind": "decision",
+                "options": [
+                    { "label": "(a) Tag", "detail": "No lines", "images": ["shots/tag.png"], "scores": { "Claude": 8, "GPT": 8.5 } },
+                    { "label": "(b) Edge", "images": ["https://x/edge.png"] }
+                ],
+                "images": ["shots/current.png"],
+                "recommendation": { "option": 0, "why": "Two of three picked it." },
+                "links": [{ "kind": "branch", "label": "orch/topo-variants", "target": "orch/topo-variants" }],
+                "context": "Built on `c1e090c7e`."
+            }),
+            &crew,
+        )
+        .unwrap();
+        let op: zeron_proto::orchestration::OrchestrateOp = serde_json::from_value(rich.clone()).unwrap();
+        let zeron_proto::orchestration::OrchestrateOp::Ask { options, images, recommendation, links, context, .. } = op else { panic!("{rich}") };
+        assert_eq!(options[0].images, ["shots/tag.png"]);
+        assert_eq!(options[0].scores.0[1], ("GPT".to_owned(), zeron_proto::orchestration::Score::Number(8.5)));
+        assert_eq!(images, ["shots/current.png"]);
+        let r = recommendation.unwrap();
+        assert_eq!((r.option, r.label.as_deref(), r.why.as_deref()), (Some(0), Some("(a) Tag"), Some("Two of three picked it.")));
+        assert_eq!(links[0].target, "orch/topo-variants");
+        assert_eq!(context.as_deref(), Some("Built on `c1e090c7e`."));
+        assert!(op_for(ASK, json!({ "question": "Q?", "options": ["a"], "recommendation": { "option": 3 } }), &crew).is_err());
+        // An old-style ask writes nothing new.
+        let plain = op_for(ASK, json!({ "question": "Ship?" }), &crew).unwrap();
+        assert!(plain.get("images").is_none() && plain.get("recommendation").is_none() && plain.get("context").is_none());
+
+        let orch = Role::Orchestrator { id: "o".into() };
+        let picked = op_for(ANSWER_ASK, json!({ "id": "a", "option": 1 }), &orch).unwrap();
+        assert_eq!((picked["option"].as_u64(), picked["answer"].as_str()), (Some(1), Some("")));
+        assert!(op_for(ANSWER_ASK, json!({ "id": "a" }), &orch).is_err(), "an option or words");
+        assert_eq!(op_for(ANSWER_ASK, json!({ "id": "a", "answer": "go" }), &orch).unwrap()["answer"], "go");
 
         let orch = Role::Orchestrator { id: "o".into() };
         let created = op_for(ITEM_UPSERT, json!({ "title": "Auth", "state": "active", "outcome": null }), &orch).unwrap();

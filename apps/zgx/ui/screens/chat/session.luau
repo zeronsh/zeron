@@ -194,6 +194,16 @@ local function Session(id: Id?): Node
 	local session = ui.computed(function(): string?
 		return which()
 	end)
+	-- A message asked of the session shown (route.open_session's `message`:
+	-- an ask's turn), for its transcript to go to and light.
+	local focus = ui.computed(function(): T.Focus?
+		local f = route.focus:get()
+		local s = which()
+		if not f or not s or f.session ~= s then
+			return nil
+		end
+		return { id = f.message, seq = f.seq }
+	end)
 	-- Files carried over the page (the transcript, under the composer)
 	-- attach to the composer, as a drop on it does.
 	local zone = shared.drop_zone("session")
@@ -341,6 +351,8 @@ local function Session(id: Id?): Node
 							end),
 							-- ⌘F's find (screens/chat/find): its matches marked.
 							find = Find.marks(),
+							-- A message asked for (an ask's turn), gone to and lit.
+							focus = focus,
 						}
 					end),
 					Find.Bar(),

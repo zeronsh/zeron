@@ -18,7 +18,9 @@
 --                           project's, else this Mac's (an id)
 --   route.projects:get()    the projects a new chat can work in, as
 --                           ds.Composer takes them ({ value, label, hue? })
---   route.open_session(id)  to that session
+--   route.open_session(id, { message? })  to that session; with `message`
+--                           (a message's id: an ask's turn), scrolled to it
+--                           and lit a moment (`route.focus`)
 --   route.keep_keys()       the next arrival leaves the keys where they are
 --                           (a tab strip's arrows; `take_keys_kept()`)
 --   route.new_chat(project?, device?) to a new chat (in that project, a
@@ -447,12 +449,29 @@ M.projects = steady(function(): { Choice }
 	return out
 end)
 
-function M.open_session(id: string)
-	local r = at()
-	if r.name == "session" and r.params.id == id then
-		return
-	end
-	go("session", { id = id })
+-- A message asked of the session opened (`open_session`'s `message`): the
+-- chat page's transcript goes to it and lights it (ds/transcript `focus`),
+-- taking each once by `seq`. The last asked, kept across a reload (its
+-- transcript, made again, knows it has taken it).
+export type Focus = { session: string, message: string, seq: number }
+M.focus = ui.state("shell_route_focus", nil :: Focus?)
+
+-- To session `id`; with `message` (a message's id: an ask's turn, the
+-- message that asked), at that message, lit a moment. The session already
+-- open, it only goes there.
+function M.open_session(id: string, opts: { message: string? }?)
+	local message = if opts then opts.message else nil
+	ui.batch(function()
+		if message and message ~= "" then
+			local was = M.focus:peek()
+			M.focus:set({ session = id, message = message, seq = (if was then was.seq else 0) + 1 })
+		end
+		local r = at()
+		if r.name == "session" and r.params.id == id then
+			return
+		end
+		go("session", { id = id })
+	end)
 end
 
 -- Launched (not the scripts reloaded), it starts where it was left (see

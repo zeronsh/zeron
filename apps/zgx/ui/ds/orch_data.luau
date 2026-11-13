@@ -26,6 +26,9 @@
 --   data.open_asks(now)               the open asks by the chat that asked
 --                                     (its latest one)
 --   data.turn_end(ask)                whether a turn's end raised it
+--   data.deferred(ask, now?)          deferred past now (Unix seconds):
+--                                     out of Needs you, "Deferred" on its
+--                                     card; data.deferred_until(ask) when
 --   data.ACTIVITY                     each activity's glyph and word key
 --   data.day_start(t)                 local midnight of `t` (Unix seconds)
 --   data.shown_today(item, now)       whether an item stands on the board
@@ -235,8 +238,11 @@ function M.needs(now: any, sessions_now: any): { Need }
 		end
 	end
 	local asking: { [string]: boolean } = {}
+	local at = os.time()
 	for _, a in (now and now.asks) or {} do
-		if a.state == "open" then
+		-- (Deferred: out of the list until its time; the engine clears it
+		-- then and says so again.)
+		if a.state == "open" and not M.deferred(a, at) then
 			asking[a.from_chat] = true
 			table.insert(out, {
 				id = `ask:{a.id}`,
@@ -294,6 +300,50 @@ function M.waiting_for_you(now: any, sessions_now: any, qa: { unread: number, wa
 	end
 	local unread = if qa then qa.unread else 0
 	return { count = #needs + unread, urgent = urgent, needs = needs, qa_unread = unread }
+end
+
+-- An RFC3339 time (`2026-11-13T09:00:00Z`, `…+03:00`, fractions) in Unix
+-- seconds.
+local function rfc3339(s: string): number?
+	local y, mo, d, h, mi, sec, rest = string.match(s, "^(%d+)-(%d+)-(%d+)[Tt ](%d+):(%d+):(%d+)(.*)$")
+	if not y then
+		return nil
+	end
+	local tz = 0
+	local sign, oh, om = string.match(rest or "", "([%+%-])(%d+):?(%d*)$")
+	if sign then
+		tz = (tonumber(oh) or 0) * 3600 + (tonumber(om) or 0) * 60
+		if sign == "-" then
+			tz = -tz
+		end
+	end
+	-- Days from the civil date (Howard Hinnant's), no time zone involved.
+	local yy, mm, dd = tonumber(y) :: number, tonumber(mo) :: number, tonumber(d) :: number
+	yy -= if mm <= 2 then 1 else 0
+	local era = (if yy >= 0 then yy else yy - 399) // 400
+	local yoe = yy - era * 400
+	local doy = (153 * (mm + (if mm > 2 then -3 else 9)) + 2) // 5 + dd - 1
+	local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+	local days = era * 146097 + doe - 719468
+	return days * 86400 + (tonumber(h) :: number) * 3600 + (tonumber(mi) :: number) * 60 + (tonumber(sec) :: number) - tz
+end
+M.rfc3339 = rfc3339
+
+-- Until when it's deferred (seconds), if it is.
+function M.deferred_until(ask: any): number?
+	local u = ask and (ask.deferred_until or ask.deferredUntil)
+	if type(u) == "number" then
+		-- (Milliseconds, from a host that keeps them.)
+		return if u > 1e11 then u / 1000 else u
+	elseif type(u) == "string" and u ~= "" then
+		return rfc3339(u)
+	end
+	return nil
+end
+
+function M.deferred(ask: any, now: number?): boolean
+	local u = M.deferred_until(ask)
+	return u ~= nil and u > (now or os.time())
 end
 
 -- An ask raised from a turn's end (the thread's plain question), not by

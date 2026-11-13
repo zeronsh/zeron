@@ -102,6 +102,52 @@ return function()
 	end
 
 	local stub = orchestration :: any
+	-- An ask answered (account/orchestration's `answer`, its option
+	-- 1-based), noted `answer:<id>:<option>:<text>`; answered a beat later.
+	stub.answer = function(id: string, opts: any): any
+		local o = if type(opts) == "string" then { text = opts } else opts
+		note(`answer:{id}:{o.option or ""}:{o.text or ""}`)
+		local label = o.text
+		ui.after(400, function()
+			republish(function(n)
+				local asks = {}
+				for _, a in n.asks do
+					if a.id == id then
+						a = table.clone(a)
+						a.state = "answered"
+						a.answer = label or ((a.options or {})[o.option or 0] or {}).label
+					end
+					table.insert(asks, a)
+				end
+				n.asks = asks
+			end)
+		end)
+		return settled({ id = id })
+	end
+	-- An ask put off, noted `defer:<id>:<until in seconds>`.
+	stub.defer = function(id: string, until_ms: number?): any
+		local secs = if until_ms then math.floor(until_ms / 1000) else nil
+		note(`defer:{id}:{secs or ""}`)
+		republish(function(n)
+			local asks = {}
+			for _, a in n.asks do
+				if a.id == id then
+					a = table.clone(a)
+					a.deferred_until = secs
+				end
+				table.insert(asks, a)
+			end
+			n.asks = asks
+		end)
+		return settled({ id = id })
+	end
+	-- A thread opened, noted `open:<chat>:<message>` (then opened).
+	local route = require("@app/screens/shell/route") :: any
+	local open_session = route.open_session
+	route.open_session = function(id: string, opts: any?)
+		note(`open:{id}:{if opts and opts.message then opts.message else ""}`)
+		return open_session(id, opts)
+	end
 	stub.loads_wanted = function(on: boolean)
 		note(`loads_wanted:{if on then "on" else "off"}`)
 	end
@@ -447,6 +493,54 @@ return function()
 		ref_chips()
 		local Shared = require("@app/screens/chat/shared") :: any
 		Shared.dropping_own:set_key({ "lane.control-capture" }, "ref")
+	end }
+	-- A thread asking the person to pick between two variants, with
+	-- pictures, scores, a recommendation, context and links; its card on
+	-- the board (the decision UI's whole case).
+	ui.command { id = "fixture.decision", title = "Fixture: a decision with pictures", run = function()
+		for _, a in orchestration.now:peek().asks or {} do
+			if a.id == "ak-topo" then
+				return
+			end
+		end
+		local t = os.time()
+		local n: any = table.clone(sessions.now:peek())
+		local kids: any = table.clone(n.children or {})
+		local list = table.clone(kids["orc-orch"] or {})
+		table.insert(list, {
+			id = "th-topo", title = "Topology lines", device = "dev-desk", parent = "orc-orch",
+			child_kind = "crew", updated = t - 29000, created = t - 40000, agent = "claude", model = "claude-opus-5-5",
+		})
+		kids["orc-orch"] = list
+		n.children = kids
+		sessions.now:set(n)
+		republish(function(o)
+			local crew = table.clone(o.crew)
+			table.insert(crew, { chat_id = "th-topo", orchestrator_id = "orc-orch", item_id = "it-topo", role = "topology", released = false, joined = t - 40000 })
+			o.crew = crew
+			local items = table.clone(o.items)
+			table.insert(items, {
+				id = "it-topo", orchestrator_id = "orc-orch", title = "Topology lines: pick a variant", detail = "", state = "active",
+				priority = "normal", threads = { "th-topo" }, links = {}, order = 0, created = t - 40000, updated = t - 29000,
+			})
+			o.items = items
+			local asks = table.clone(o.asks)
+			table.insert(asks, {
+				id = "ak-topo", from_chat = "th-topo", orchestrator_id = "orc-orch", item_id = "it-topo", kind = "decision",
+				question = "Topology lines: which variant ships, **solid lead lines** or **dashed crew lines**?",
+				context = "Both are built on `orch/topo-variants` (c1e090c7e). Each draws the same honeypot, Windows and M2A machines.\n\n- **Solid** keeps one ink per orchestrator and reads at a glance.\n- **Dashed** separates crew from leads, but gets busy past five threads.",
+				options = {
+					{ label = "Solid lead lines", detail = "One stroke per orchestrator; crew threads hang off it.", images = { "assets/decision/topology-a.png" }, scores = { { name = "Clarity", value = 9 }, { name = "Density", value = 7 }, { name = "Effort", value = "S" } } },
+					{ label = "Dashed crew lines", detail = "Crew threads dashed, leads solid; the Brain dump's own lane.", images = { "assets/decision/topology-b.png" }, scores = { { name = "Clarity", value = 7 }, { name = "Density", value = 9 }, { name = "Effort", value = "M" } } },
+					{ label = "Keep both behind a switch", detail = "Ship solid, keep dashed under Map → View." },
+				},
+				recommendation = { option = 1, why = "Reads at a glance at every crew size, and it's the smaller change." },
+				links = { { kind = "pr", label = "#1312", target = "https://github.com/zeronsh/zeron/pull/1312" }, { kind = "branch", label = "orch/topo-variants", target = "orch/topo-variants" } },
+				images = {},
+				urgent = false, state = "open", created = t - 29000, origin = "tool", turn_id = "msg-topo-ask",
+			})
+			o.asks = asks
+		end)
 	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)

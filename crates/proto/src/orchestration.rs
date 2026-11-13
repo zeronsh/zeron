@@ -418,6 +418,15 @@ a reply to an @ask answers it, a comment on an @card goes to its thread):\n",
         )
     }
 
+    /// The answer's words when the person picked an option: "Option 1:
+    /// Inline tag — polish it", its number and label, then any words they
+    /// added.
+    pub fn picked_answer(index: usize, label: &str, text: &str) -> String {
+        let pick = format!("Option {}: {}", index + 1, one_line(label, LABEL_MAX));
+        let text = text.trim();
+        if text.is_empty() { pick } else { format!("{pick} \u{2014} {text}") }
+    }
+
     /// What an orchestrator is sent when a thread of its crew ended its
     /// turn on a question for the person (a turn-end ask): the question as
     /// data, and that it may answer it with `answer_ask` or leave it.
@@ -681,6 +690,48 @@ pub struct Ask {
     /// How it closed, once answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_via: Option<AnswerVia>,
+    /// The ask's own images (screenshots that aren't one option's): local
+    /// paths (in the engine's uploads store once raised) or http(s) URLs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    /// What the asker would pick, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<AskRecommendation>,
+    /// Where the work is: its branch, PR, chat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<WorkLink>,
+    /// What the person needs to decide (markdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Put off by the person until then: out of Needs you meanwhile; the
+    /// engine clears it when it passes and says so once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_until: Option<DateTime<Utc>>,
+}
+
+impl Ask {
+    /// Put off now (`deferred_until` still ahead).
+    pub fn deferred(&self, now: DateTime<Utc>) -> bool {
+        self.deferred_until.is_some_and(|until| now < until)
+    }
+}
+
+/// What an asker recommends: an option (0-based) and/or its words, and why.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskRecommendation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl AskRecommendation {
+    pub fn is_empty(&self) -> bool {
+        self.option.is_none() && self.label.is_none() && self.why.is_none()
+    }
 }
 
 /// Where an ask came from.
@@ -732,12 +783,91 @@ pub enum AskKind {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AskOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
+    /// What it looks like: local paths (in the uploads store once raised)
+    /// or http(s) URLs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    /// How it scored, by name ("Claude": 8, "risk": "low"), in order.
+    #[serde(default, skip_serializing_if = "Scores::is_empty")]
+    pub scores: Scores,
+}
+
+impl AskOption {
+    pub fn new(label: impl Into<String>) -> Self {
+        AskOption { label: label.into(), ..Default::default() }
+    }
+}
+
+/// An option's scores: a JSON object on the wire (`{"Claude": 8}`), kept in
+/// the order written.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scores(pub Vec<(String, Score)>);
+
+impl Scores {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// One score: a number or a word.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Score {
+    Number(f64),
+    Text(String),
+}
+
+impl std::fmt::Display for Score {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Score::Number(n) => write!(f, "{n}"),
+            Score::Text(t) => f.write_str(t),
+        }
+    }
+}
+
+impl Serialize for Scores {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (name, score) in &self.0 {
+            map.serialize_entry(name, score)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Scores {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Scores;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of scores")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Scores, A::Error> {
+                let mut out = Vec::new();
+                while let Some((name, score)) = map.next_entry::<String, Score>()? {
+                    if let Some(at) = out.iter().position(|(n, _): &(String, Score)| *n == name) {
+                        out[at].1 = score;
+                    } else {
+                        out.push((name, score));
+                    }
+                }
+                Ok(Scores(out))
+            }
+            fn visit_unit<E>(self) -> Result<Scores, E> {
+                Ok(Scores::default())
+            }
+        }
+        deserializer.deserialize_any(Visit)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2020,11 +2150,34 @@ pub enum OrchestrateOp {
         urgent: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_id: Option<String>,
+        /// The ask's own images (paths or URLs); an option's go on it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recommendation: Option<AskRecommendation>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        links: Vec<WorkLink>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
     },
-    /// The person answers; the answer goes to the asker as a message.
+    /// The person answers; the answer goes to the asker as a message. With
+    /// `option` (0-based) the delivery names it; `answer` may then be "".
     #[serde(rename_all = "camelCase")]
-    AnswerAsk { id: String, answer: String },
+    AnswerAsk {
+        id: String,
+        #[serde(default)]
+        answer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<usize>,
+    },
     DismissAsk { id: String },
+    /// The person puts an ask off until `until` (absent: back now). Replies
+    /// `{ id }`.
+    DeferAsk {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<DateTime<Utc>>,
+    },
     /// The person dumps text (and files). Replies `{ id }`; routing runs in
     /// the Brain dump's chat, which sees the files. `attachments` and
     /// `transfers` as a chat send carries them (`QueueCommand` run).
@@ -2658,5 +2811,55 @@ mod tests {
         assert!(message.trim_end().ends_with(prompt_text::CLOSE));
         assert_eq!(prompt_text::dump_message_with_refs("d1", "x", &[]), prompt_text::dump_message("d1", "x"));
         assert!(role_prompts::BRAIN_DUMP.contains("`reference`"));
+    }
+
+    #[test]
+    fn a_decision_ask_round_trips_with_its_pictures_scores_and_pick() {
+        use super::*;
+        let json = serde_json::json!({
+            "id": "a1", "fromChat": "c", "kind": "decision", "question": "Which variant?", "state": "open",
+            "createdAt": "2026-11-13T10:00:00Z",
+            "options": [
+                { "label": "(a) Inline tag", "detail": "No cross-machine lines.", "images": ["/u/tag.png"],
+                  "scores": { "Claude": 8, "GPT": 8.5, "risk": "low" } },
+                { "label": "(b) Dot column", "images": ["https://x/dot.png"] }
+            ],
+            "images": ["/u/columns.png"],
+            "recommendation": { "option": 0, "why": "Two reviewers picked it." },
+            "links": [{ "kind": "branch", "label": "orch/topo-variants", "target": "orch/topo-variants" }],
+            "context": "Built on `c1e090c7e`.",
+            "deferredUntil": "2026-11-13T12:00:00Z"
+        });
+        let ask: Ask = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(ask.options[0].scores.0[0], ("Claude".to_owned(), Score::Number(8.0)));
+        assert_eq!(ask.options[0].scores.0[2].1, Score::Text("low".into()));
+        assert_eq!(ask.recommendation.as_ref().unwrap().option, Some(0));
+        let now: DateTime<Utc> = "2026-11-13T11:00:00Z".parse().unwrap();
+        assert!(ask.deferred(now) && !ask.deferred(now + chrono::Duration::hours(2)));
+        // Out and back: the same, the scores in their order.
+        let out = serde_json::to_value(&ask).unwrap();
+        assert_eq!(serde_json::to_string(&out["options"][0]["scores"]).unwrap(), r#"{"Claude":8.0,"GPT":8.5,"risk":"low"}"#);
+        assert_eq!(serde_json::from_value::<Ask>(out).unwrap(), ask);
+        // An old ask reads, and writes nothing new.
+        let old = serde_json::json!({ "id": "a2", "fromChat": "c", "kind": "question", "question": "Q?", "state": "open",
+            "createdAt": "2026-11-13T10:00:00Z", "options": [{ "label": "Yes" }], "urgent": false });
+        let ask: Ask = serde_json::from_value(old.clone()).unwrap();
+        assert!(ask.images.is_empty() && ask.recommendation.is_none() && ask.deferred_until.is_none());
+        assert_eq!(serde_json::to_value(&ask).unwrap(), old);
+    }
+
+    #[test]
+    fn answers_with_an_option_and_deferrals_round_trip() {
+        use super::*;
+        let op: OrchestrateOp = serde_json::from_str(r#"{"op":"answerAsk","id":"a","option":1}"#).unwrap();
+        assert_eq!(op, OrchestrateOp::AnswerAsk { id: "a".into(), answer: String::new(), option: Some(1) });
+        let op: OrchestrateOp = serde_json::from_str(r#"{"op":"answerAsk","id":"a","answer":"go"}"#).unwrap();
+        assert_eq!(op, OrchestrateOp::AnswerAsk { id: "a".into(), answer: "go".into(), option: None });
+        let op: OrchestrateOp = serde_json::from_str(r#"{"op":"deferAsk","id":"a","until":"2026-11-13T12:00:00Z"}"#).unwrap();
+        assert!(matches!(op, OrchestrateOp::DeferAsk { until: Some(_), .. }));
+        let op: OrchestrateOp = serde_json::from_str(r#"{"op":"deferAsk","id":"a","until":null}"#).unwrap();
+        assert_eq!(op, OrchestrateOp::DeferAsk { id: "a".into(), until: None });
+        assert_eq!(prompt_text::picked_answer(0, "(a) Inline tag", ""), "Option 1: (a) Inline tag");
+        assert_eq!(prompt_text::picked_answer(1, "B", " and polish it "), "Option 2: B \u{2014} and polish it");
     }
 }

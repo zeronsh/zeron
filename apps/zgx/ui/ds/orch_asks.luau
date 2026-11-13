@@ -2,39 +2,45 @@
 -- orchestrator: the asks they and their crews raised (a question, a
 -- decision, an approval, a blocker), and chats whose agent stopped to ask
 -- (awaiting input), one row a chat. Urgent (or gone stale unanswered)
--- first, then the one waiting longest. An ask is answered where it
--- stands: its options as buttons, or a line to write in; a thread's
--- question from its turn's end has both, and opens its thread. A chat
--- awaiting input opens. An answered one slides out, the rows under it
--- closing up.
+-- first, then the one waiting longest; a deferred ask stays out of it
+-- until its time (data.needs). An ask is compact here: its question in a
+-- line and its options as chips (ds/orch_choices), the recommended one
+-- ringed; a chip answers at once, with Undo for a moment before it is
+-- sent. The question, or the expand at the chips' end, opens the whole of
+-- it (ds/orch_decision); the thread's name opens the thread at the message
+-- that asked. A chat awaiting input opens. An answered one slides out, the
+-- rows under it closing up.
 --
 --   Asks {
 --     needs = function() return data.needs(now, sessions_now) end,
 --     name_of = function(chat_id) return "Orchestrators" end,
---     on_answer = function(ask, text) end,
+--     on_answer = function(ask, { option?, text? }) end,   -- option 1-based
 --     on_dismiss = function(ask) end,
---     on_open = function(chat_id) end,
+--     on_open = function(chat_id, message_id?) end,
+--     on_expand = function(ask) end,               -- the overlay
 --     limit = 6,                                  -- rows before "n more"
 --   }
 
 local Button = require("@self/button")
 local IconButton = require("@self/icon_button").IconButton
-local TextField = require("@self/text_field")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
+local control = require("@self/control")
 local hue = require("@self/orch_hue")
 local Badge = require("@self/badge")
 local hold = require("@self/orch_hold")
-local data = require("@self/orch_data")
 local Ref = require("@self/orch_ref")
+local decide = require("@self/orch_decide")
+local Choices = require("@self/orch_choices")
 
 export type Props = {
 	needs: () -> { any },
 	name_of: (id: string?) -> string?,
-	on_answer: (ask: any, text: string) -> (),
+	on_answer: (ask: any, choice: decide.Choice) -> (),
 	on_dismiss: (ask: any) -> (),
-	on_open: (chat_id: string) -> (),
+	on_open: (chat_id: string, message: string?) -> (),
+	on_expand: ((ask: any) -> ())?,
 	limit: number?,
 }
 
@@ -73,6 +79,11 @@ local function runs_of(text: string): { any }
 		at = stop + 1
 	end
 	return out
+end
+
+-- The question's words alone, its marks gone (what it's called).
+local function plain(text: string): string
+	return (string.gsub(string.gsub(text, "%*%*", ""), "`", ""))
 end
 
 -- Each kind of ask as Zeron's status says it: a question or a decision
@@ -135,25 +146,30 @@ return ui.component(function(props: Props): Node
 	end
 
 	local function row(_n: any, _i: number, item: State<any>): Node
-		local draft = ui.use_state("")
-		local reply = ui.use_state("")
 		local function is_leaving(): boolean
 			return leaving:get()[item:get().id] ~= nil
 		end
 		local function ask(): any
 			return item:get().ask
 		end
-		local function answer(text: string)
-			local a = ask()
-			if not a or is_leaving() then
-				return
-			end
-			local t = string.match(text, "^%s*(.-)%s*$") or ""
-			if t == "" then
-				return
-			end
-			props.on_answer(a, t)
+		-- Sent past its Undo: the row slides out.
+		local function commit(a: any, choice: decide.Choice)
+			props.on_answer(a, choice)
 			leave(item:peek())
+		end
+		local function expand()
+			local a = ask()
+			if a and props.on_expand then
+				props.on_expand(a)
+			end
+		end
+		-- Into the thread, at the message that asked (an ask's), else its end.
+		local function open_thread()
+			local n = item:peek()
+			if n.from then
+				local a = n.ask
+				props.on_open(n.from, a and a.turn_id or nil)
+			end
 		end
 		local function from_name(): string
 			local n = item:get()
@@ -162,10 +178,6 @@ return ui.component(function(props: Props): Node
 		local function kind(): string
 			local n = item:get()
 			return if n.kind == "input" then "input" else ((n.ask and n.ask.kind) or "question")
-		end
-		-- A thread's question from its turn's end: answered here or in it.
-		local function turn_end(): boolean
-			return data.turn_end(ask())
 		end
 		-- Dragged by its head or its question: a reference to the ask (a chat
 		-- awaiting input, to the chat), for Capture (ds/orch_ref).
@@ -232,10 +244,25 @@ return ui.component(function(props: Props): Node
 				ui.show(function(): boolean
 					return item:get().urgent == true
 				end, Badge.Badge { locale.s("ds.orch.ask.urgent"), tone = "danger", size = "sm" }),
-				ui.row {
+				-- Whose: the thread, opened at the message that asked.
+				ui.button {
+					class = "orch-need-from",
+					label = function(): string
+						return locale.s("ds.orch.decide.open_thread_named", { name = from_name() })
+					end,
+					tooltip = locale.s("ds.orch.decide.open_at"),
+					tooltip_delay = 500,
 					gap = "$zeron.space.tight",
 					items = "center",
 					min_w = 0,
+					shrink = 1,
+					px = "$zeron.space.hair",
+					rounded = "$radius.sm",
+					bg = "#00000000",
+					hover = { bg = "$hover" },
+					active = { bg = "$pressed" },
+					focus = control.ring,
+					on_click = open_thread,
 					hue.Dot { hue = function(): number?
 						return item:get().hue
 					end, size = 6 },
@@ -250,20 +277,13 @@ return ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 				},
-				-- (A chat awaiting input, or a thread that asked at its turn's
-				-- end: into it. Its ask, if it has one, shows here too,
-				-- answered in place.)
+				-- (A chat awaiting input with no ask of its own: into it.)
 				ui.show(function(): boolean
-					return ask() == nil or item:get().input == true or turn_end()
+					return ask() == nil or item:get().input == true
 				end, Button {
 					tone = "secondary",
 					size = "xs",
-					on_click = function()
-						local n = item:peek()
-						if n.from then
-							props.on_open(n.from)
-						end
-					end,
+					on_click = open_thread,
 					locale.t("ds.orch.ask.open"),
 				}),
 				ui.show(function(): boolean
@@ -276,6 +296,7 @@ return ui.component(function(props: Props): Node
 					on_click = function()
 						local a = ask()
 						if a and not is_leaving() then
+							decide.undo(a.id)
 							props.on_dismiss(a)
 							leave(item:peek())
 						end
@@ -287,81 +308,52 @@ return ui.component(function(props: Props): Node
 			end, ui.column {
 				w_full = true,
 				gap = "$space.2",
-				-- The question (an ask's), or the chat's title (awaiting input).
+				-- The question, a line of it: all of it in the overlay.
 				ui.presence(function(): string
 					local n = item:get()
 					return if n.ask then `ask:{n.ask.id}` else "input"
 				end, function(key: string): Node
 					local n = item:peek()
-					if n.ask then
-						local runs: any = runs_of(n.ask.question or "")
-						runs.wrap = true
-						runs.w_full = true
-						runs.text_size = "$font.size.md"
-						runs.line_height = "$font.line.md"
-						runs.color = "$text.primary"
-						return ui.div {
-							class = "orch-need-question",
-							w_full = true,
-							on_drag = drag.on_drag,
-							drag_preview = drag.drag_preview,
-							drag_preview_anchor = drag.drag_preview_anchor,
-							drag_preview_offset = drag.drag_preview_offset,
-							ui.rich(runs),
-						}
+					if not n.ask then
+						return ui.div {}
 					end
-					-- (Awaiting input: its question is in the chat; the head says whose.)
-					return ui.div {}
+					local runs: any = runs_of(n.ask.question or "")
+					runs.truncate = true
+					runs.lines = 1
+					runs.w_full = true
+					runs.min_w = 0
+					runs.text_size = "$font.size.md"
+					runs.line_height = "$font.line.md"
+					runs.color = "$text.primary"
+					return ui.button {
+						class = "orch-need-question",
+						label = plain(n.ask.question or ""),
+						w_full = true,
+						min_w = 0,
+						p = 0,
+						items = "center",
+						bg = "#00000000",
+						hover = { bg = "#00000000" },
+						active = { bg = "#00000000" },
+						focus = control.ring,
+						cursor = "pointer",
+						on_click = expand,
+						on_drag = drag.on_drag,
+						drag_preview = drag.drag_preview,
+						drag_preview_anchor = drag.drag_preview_anchor,
+						drag_preview_offset = drag.drag_preview_offset,
+						ui.rich(runs),
+					}
 				end, { w_full = true }),
-				-- How to answer: the options, a line to write, or the chat.
-				ui.switch(function(): string
-					local n = item:get()
-					if n.kind == "input" then
-						return "open"
-					end
-					return if n.ask and #(n.ask.options or {}) > 0 then "options" else "line"
-				end, {
-					options = ui.column {
-						w_full = true,
-						gap = "$space.2",
-						ui.each(ui.computed(function(): { any }
-							local a = ask()
-							return (a and a.options) or {}
-						end), function(o: any, oi: number): Node
-							return Button {
-								tone = if oi == 1 then "secondary" else "ghost",
-								size = "sm",
-								tooltip = if o.detail and o.detail ~= "" then o.detail else nil,
-								on_click = function()
-									answer(o.label)
-								end,
-								o.label,
-							}
-						end, { direction = "row", flex_wrap = true, gap = "$space.2", items = "center" }),
-						-- (From a turn's end: a word of the person's own, too.)
-						ui.show(turn_end, TextField {
-							value = reply,
-							size = "sm",
-							w_full = true,
-							name = locale.t("ds.orch.ask.reply"),
-							placeholder = locale.t("ds.orch.ask.reply"),
-							on_commit = function(text: string)
-								answer(text)
-							end,
-						}),
-					},
-					line = TextField {
-						value = draft,
-						size = "sm",
-						w_full = true,
-						name = locale.t("ds.orch.ask.answer"),
-						placeholder = locale.t("ds.orch.ask.answer"),
-						on_commit = function(text: string)
-							answer(text)
-						end,
-					},
-					open = ui.div {},
-				}),
+				-- How to answer: its options as chips, else a line to write.
+				Choices {
+					ask = ask,
+					on_answer = commit,
+					on_expand = if props.on_expand then function(_a: any)
+						expand()
+					end else nil,
+					line = true,
+				},
 			}),
 		}
 	end

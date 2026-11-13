@@ -423,14 +423,14 @@ impl EngineRpc {
                     if dump.state != DumpState::Routing {
                         return Err(RpcError::BadParams("This dump is already routed".into()));
                     }
-                    // LATER(decision-ui): use the decision op with {option?, text?}: pass
-                    // the option `answer_text` matched as AnswerAsk's `option`, else the text.
-                    let answer = self.answer_text(ask_id, &route).ok_or_else(|| {
+                    // An option named is answered as that option (as a chip
+                    // picks it); other words go as they are.
+                    let (option, answer) = self.answer_text(ask_id, &route).ok_or_else(|| {
                         RpcError::BadParams(
                             "A reply to an @ask is the person's words: quote it verbatim from the dump as `excerpt`".into(),
                         )
                     })?;
-                    self.answer_ask(&Who::Person, ask_id.clone(), answer).await?;
+                    self.answer_ask(&Who::Person, ask_id.clone(), answer, option).await?;
                     route.state = RouteState::Delivered;
                 }
                 Aim::OnCard { item_id } => {
@@ -531,14 +531,15 @@ impl EngineRpc {
         }
     }
 
-    /// What a route answers ask `ask_id` with: one of its options when the
-    /// reply is just that option, else the reply.
+    /// What a route answers ask `ask_id` with: the index of one of its
+    /// options when the reply is just that option (no words; answered as a
+    /// chip answers it), else the reply.
     ///
     /// Always the person's own words: the fragment quoted verbatim from the
     /// dump (never the Brain dump's rewording, which would answer as the
     /// person in words they didn't write). `None` when the excerpt isn't
     /// found in the dump's text.
-    fn answer_text(&self, ask_id: &str, route: &Route) -> Option<String> {
+    fn answer_text(&self, ask_id: &str, route: &Route) -> Option<(Option<usize>, String)> {
         route.span?;
         let reply = route.excerpt.trim();
         if reply.is_empty() {
@@ -546,9 +547,11 @@ impl EngineRpc {
         }
         let bare = reply.trim_end_matches(['.', '!']).trim().to_lowercase();
         let ask = self.orchestration().workspace().read_orchestration_with(|doc| doc.ask(ask_id));
-        ask.and_then(|a| a.options.into_iter().find(|o| o.label.trim().to_lowercase() == bare))
-            .map_or_else(|| reply.to_owned(), |o| o.label)
-            .into()
+        let picked = ask.and_then(|a| a.options.iter().position(|o| o.label.trim().to_lowercase() == bare));
+        Some(match picked {
+            Some(i) => (Some(i), String::new()),
+            None => (None, reply.to_owned()),
+        })
     }
 
     /// A comment kept on card `item_id` (no thread or owner to tell yet):

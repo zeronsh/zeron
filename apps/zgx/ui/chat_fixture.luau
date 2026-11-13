@@ -2046,6 +2046,17 @@ for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do
 		end,
 	}
 end
+-- A session opened at one of its messages (an ask's turn: the Control
+-- room's cards, Needs you): `go_s1_at_u3` opens s1 at its third question.
+for _, at in { { "s1", "u3" }, { "s1", "a3" }, { "s1", "u20" }, { "s1", "nope" } } do
+	ui.command {
+		id = `go_{at[1]}_at_{at[2]}`,
+		title = `Open {at[1]} at {at[2]}`,
+		run = function()
+			route.open_session(at[1], { message = at[2] })
+		end,
+	}
+end
 -- A new chat with no project asked of it (⌘N, the sidebar's New chat).
 ui.command {
 	id = "go_new",

@@ -618,6 +618,38 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_ask_keeps_its_pictures_pick_and_deferral_and_lets_them_go() {
+        let mut doc = RegistryDoc::new("dev-a");
+        let mut ask: Ask = serde_json::from_value(serde_json::json!({
+            "id": "a1", "fromChat": "c1", "kind": "decision", "question": "Which?", "state": "open",
+            "createdAt": "2026-11-13T10:00:00Z", "turnId": "m1"
+        }))
+        .unwrap();
+        ask.options = vec![
+            AskOption {
+                label: "(a) Tag".into(),
+                detail: "No lines".into(),
+                images: vec!["/u/1-tag.png".into()],
+                scores: Scores(vec![("Claude".into(), Score::Number(8.0)), ("GPT".into(), Score::Number(8.5))]),
+            },
+            AskOption::new("(b) Edge"),
+        ];
+        ask.images = vec!["https://x/all.png".into()];
+        ask.recommendation = Some(AskRecommendation { option: Some(0), label: Some("(a) Tag".into()), why: Some("Cleaner".into()) });
+        ask.links = vec![WorkLink { kind: LinkKind::Branch, label: "orch/x".into(), target: "orch/x".into() }];
+        ask.context = Some("Built on `c1e`.".into());
+        ask.deferred_until = Some(ts(9_000));
+        doc.upsert_ask(&ask);
+        assert_eq!(doc.ask("a1").unwrap(), ask);
+        // Back from deferral, its pictures dropped: gone from the row too.
+        ask.deferred_until = None;
+        ask.images.clear();
+        doc.upsert_ask(&ask);
+        assert_eq!(doc.ask("a1").unwrap(), ask);
+        assert_eq!(doc.read_asks(), vec![ask]);
+    }
+
+    #[test]
     fn every_kind_round_trips() {
         let mut doc = RegistryDoc::new("dev-a");
         let o = orchestrator("o1");
@@ -642,10 +674,7 @@ mod tests {
             item_id: None,
             kind: AskKind::Decision,
             question: "Merge?".into(),
-            options: vec![AskOption {
-                label: "Yes".into(),
-                detail: String::new(),
-            }],
+            options: vec![AskOption::new("Yes")],
             urgent: true,
             state: AskState::Open,
             answer: None,
@@ -659,6 +688,11 @@ mod tests {
             updated_at: None,
             escalated_at: None,
             answered_via: None,
+            images: Vec::new(),
+            recommendation: None,
+            links: Vec::new(),
+            context: None,
+            deferred_until: None,
         };
         doc.upsert_ask(&ask);
         let mut d = dump("d1");

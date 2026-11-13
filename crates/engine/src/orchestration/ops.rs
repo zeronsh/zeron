@@ -348,6 +348,10 @@ impl EngineRpc {
                 options,
                 urgent,
                 item_id,
+                images,
+                recommendation,
+                links,
+                context,
             } => {
                 let Who::Agent { chat, role } = who else {
                     return Err(failed("An ask comes from an agent's chat"));
@@ -359,7 +363,12 @@ impl EngineRpc {
                     ChatRole::Crew { item_id, .. } => item_id.clone(),
                     _ => None,
                 });
-                let ask = Ask {
+                if let Some(i) = recommendation.as_ref().and_then(|r| r.option)
+                    && i >= options.len()
+                {
+                    return Err(RpcError::BadParams(format!("The recommendation names option {i}; there are {}", options.len())));
+                }
+                let mut ask = Ask {
                     id: uuid::Uuid::new_v4().simple().to_string(),
                     from_chat: chat.clone(),
                     orchestrator_id: role.orchestrator_id().map(str::to_owned),
@@ -380,7 +389,24 @@ impl EngineRpc {
                     updated_at: None,
                     escalated_at: None,
                     answered_via: None,
+                    images,
+                    recommendation: recommendation.filter(|r| !r.is_empty()),
+                    links,
+                    context: context.filter(|c| !c.trim().is_empty()),
+                    deferred_until: None,
                 };
+                // Its pictures, kept in the uploads store (off the runtime:
+                // up to a few files of 15 MB).
+                if super::ask_images::any(&ask) {
+                    let cwd = super::ask_images::cwd_of(self, chat);
+                    let uploads = self.uploads_ref().clone();
+                    ask = tokio::task::spawn_blocking(move || {
+                        super::ask_images::store_in(&uploads, cwd.as_deref(), &mut ask);
+                        ask
+                    })
+                    .await
+                    .map_err(|e| failed(e.to_string()))?;
+                }
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
                 // Its thread's card waits on the person.
@@ -390,7 +416,24 @@ impl EngineRpc {
                 orch.comms().say(CommKind::Ask, chat, YOU, &ask.question);
                 Ok(json!({ "id": ask.id }))
             }
-            OrchestrateOp::AnswerAsk { id, answer } => self.answer_ask(who, id, answer).await,
+            OrchestrateOp::AnswerAsk { id, answer, option } => self.answer_ask(who, id, answer, option).await,
+            OrchestrateOp::DeferAsk { id, until } => {
+                if !matches!(who, Who::Person) {
+                    return Err(failed("Only the person puts an ask off"));
+                }
+                let asker = orch.workspace().write_orchestration(|doc| {
+                    let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
+                    if ask.state != AskState::Open {
+                        return Err(failed("That ask was already answered or dismissed"));
+                    }
+                    // A time already past is "back now".
+                    ask.deferred_until = until.filter(|u| *u > now);
+                    doc.upsert_ask(&ask);
+                    Ok::<_, RpcError>(ask.from_chat)
+                })?;
+                self.sync_cards_of(&asker);
+                Ok(json!({ "id": id }))
+            }
             OrchestrateOp::DismissAsk { id } => {
                 let asker = orch.workspace().write_orchestration(|doc| {
                     let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
@@ -464,17 +507,36 @@ impl EngineRpc {
     /// the asker (a Brain dump's "where does this go?" moves its route
     /// instead). The person's `answerAsk` op, and a dump's reply on an
     /// `@ask` reference (brain.rs `route`).
-    pub(crate) async fn answer_ask(&self, who: &Who, id: String, answer: String) -> Result<Value, RpcError> {
+    pub(crate) async fn answer_ask(
+        &self,
+        who: &Who,
+        id: String,
+        answer: String,
+        option: Option<usize>,
+    ) -> Result<Value, RpcError> {
         let orch = self.orchestration().clone();
         let now = Utc::now();
-        let answer = answer.trim().to_owned();
-        if answer.is_empty() {
+        let text = answer.trim().to_owned();
+        if text.is_empty() && option.is_none() {
             return Err(RpcError::BadParams("An answer can't be empty".into()));
         }
+        // With an option: its label, for a route's ask; the full answer
+        // names it and any words.
+        let mut picked: Option<String> = None;
+        let mut answer = text.clone();
         let ask = orch.workspace().write_orchestration(|doc| {
             let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
             if ask.state != AskState::Open {
                 return Err(failed("That ask was already answered or dismissed"));
+            }
+            if let Some(i) = option {
+                let label = ask
+                    .options
+                    .get(i)
+                    .map(|o| o.label.clone())
+                    .ok_or_else(|| RpcError::BadParams(format!("That ask has no option {i}")))?;
+                answer = zeron_proto::orchestration::prompt_text::picked_answer(i, &label, &text);
+                picked = Some(label);
             }
             if let Who::Agent { role: ChatRole::Orchestrator { id: mine }, .. } = who
                 && !orchestrator_may_answer(&ask, mine, doc.crew_member(&ask.from_chat).as_ref())
@@ -499,7 +561,8 @@ impl EngineRpc {
         // "Where should this go?" moves its route to the pick; "hasn't
         // answered" asks again or lets it be. A thread's own question
         // on a route goes back to it, below.
-        if self.answer_route_ask(&ask, &answer).await? {
+        let route_answer = picked.unwrap_or_else(|| answer.clone());
+        if self.answer_route_ask(&ask, &route_answer).await? {
             orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
             return Ok(json!({ "id": id }));
         }
@@ -828,6 +891,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             }
         }
         OrchestrateOp::DismissAsk { .. } => refuse("Only the person dismisses an ask"),
+        OrchestrateOp::DeferAsk { .. } => refuse("Only the person puts an ask off"),
         OrchestrateOp::Dump { .. } => refuse("Only the person dumps"),
         OrchestrateOp::Route { .. } | OrchestrateOp::DumpDone { .. } => match role {
             ChatRole::BrainDump { .. } => Ok(()),

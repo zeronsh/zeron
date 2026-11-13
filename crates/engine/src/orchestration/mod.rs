@@ -22,6 +22,7 @@ use zeron_proto::orchestration::{
 
 use crate::workspace_host::WorkspaceHost;
 
+pub(crate) mod ask_images;
 pub(crate) mod brain;
 pub(crate) mod crew_archive;
 pub(crate) mod incoming;
