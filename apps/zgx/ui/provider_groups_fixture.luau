@@ -237,7 +237,7 @@ stub.switch = function(id: string, account_id: string): any
 	return { after = function(_: any, done: (any) -> ()) done(nil) end }
 end
 -- A key's name: an empty one its default; one holding "sk-" refused (as the
--- engine refuses a name with part of the key in it).
+-- engine refuses a name that looks like a key).
 stub.rename = function(id: string, account_id: string, name: string): any
 	note(`rename:{id}:{account_id}:{name}`)
 	local refused = string.find(name, "sk-", 1, true) ~= nil
@@ -258,7 +258,7 @@ stub.rename = function(id: string, account_id: string, name: string): any
 	return {
 		after = function(_: any, done: (any) -> (), failed: (any) -> ())
 			if refused then
-				failed({ message = "That name holds part of the key — name it something else." })
+				failed({ message = "That looks like a key — give it a name instead." })
 			else
 				done(nil)
 			end

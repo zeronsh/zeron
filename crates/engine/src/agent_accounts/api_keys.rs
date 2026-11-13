@@ -161,9 +161,10 @@ pub(super) fn name_key_profile(
 }
 
 /// A name for a key as given, or why not: one line of at most 48
-/// characters, and never any of the key beyond its last four — a name is
-/// shown everywhere the key's row is, other devices included.
-pub(super) fn key_name(name: &str, key: Option<&str>) -> Result<Option<String>, EngineError> {
+/// characters that doesn't look like a key itself. The check never looks at
+/// the key: a name is renamed from other devices too, and a refusal that
+/// depended on the key's contents would let a peer probe it.
+pub(super) fn key_name(name: &str) -> Result<Option<String>, EngineError> {
     let name = name.trim();
     if name.is_empty() {
         return Ok(None);
@@ -173,18 +174,38 @@ pub(super) fn key_name(name: &str, key: Option<&str>) -> Result<Option<String>, 
             "A name is one short line — 48 characters at most.".into(),
         ));
     }
-    if let Some(key) = key {
-        let key: Vec<char> = key.chars().collect();
-        let leaks = key
-            .windows(5)
-            .any(|w| name.contains(&w.iter().collect::<String>()));
-        if leaks {
-            return Err(EngineError::Other(
-                "That name holds part of the key — name it something else.".into(),
-            ));
-        }
+    if looks_like_a_key(name) {
+        return Err(EngineError::Other(
+            "That looks like a key — give it a name instead.".into(),
+        ));
     }
     Ok(Some(name.to_string()))
+}
+
+/// Whether any word of `text` reads as a secret: a key's own prefix
+/// (`sk-`, `sk-ant-`, `sk-or-`, `xai-`, `AIza`, GitHub's `gh?_`), or a run of
+/// 16 or more key characters with no space in it.
+fn looks_like_a_key(text: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "sk_",
+        "xai-",
+        "AIza",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "github_pat_",
+    ];
+    text.split_whitespace().any(|word| {
+        let lower = word.to_ascii_lowercase();
+        PREFIXES
+            .iter()
+            .any(|p| word.starts_with(p) || lower.starts_with(&p.to_ascii_lowercase()))
+            || word
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .any(|run| run.chars().count() >= 16)
+    })
 }
 
 /// The entry's key, if it's an API-key entry in `harness`'s own shape (Pi
@@ -299,7 +320,7 @@ impl AgentAccounts {
                 option.label
             )));
         }
-        let name = key_name(name.unwrap_or_default(), Some(key))?;
+        let name = key_name(name.unwrap_or_default())?;
         if harness == HarnessId::Opencode && self.opencode_keeps_its_own_store() {
             return Err(EngineError::Other(
                 "This OpenCode keeps its keys in its own database — add it with \
@@ -396,11 +417,17 @@ impl AgentAccounts {
     ) -> Result<(), EngineError> {
         // (Its name is no secret — checked to hold none of the key — so it
         // may ride on the command line, as Hermes takes it.)
+        // (`--label=…` in one argument: a name starting with `-` is never
+        // read as a flag.)
+        let label = name.map(|name| format!("--label={name}"));
         let mut args = vec!["auth", "add", provider, "--type", "api-key"];
-        if let Some(name) = name {
-            args.extend(["--label", name]);
+        if let Some(label) = &label {
+            args.push(label);
         }
         let mut command = self.cli_command(HarnessId::Hermes, &args).await?;
+        // A sign-in abandoned (the engine stopping, the wait timing out)
+        // takes Hermes with it.
+        command.kill_on_drop(true);
         command
             .env("HERMES_HOME", &self.inner.config.hermes_home)
             .stdin(zeron_harness::process::Stdio::piped())
@@ -515,7 +542,7 @@ impl AgentAccounts {
             harness,
             slot.store_key.as_deref().unwrap_or_default(),
         );
-        let name = key_name(name, key.as_deref())?;
+        let name = key_name(name)?;
         let plain = key.as_deref().filter(|k| valid_key(k));
         name_key_profile(&mut slot.profile, &provider, plain, name.as_deref());
         self.write_slot(&slot)?;

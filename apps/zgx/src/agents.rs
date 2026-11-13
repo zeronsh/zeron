@@ -1168,6 +1168,11 @@ impl Agents {
         let params = addressed_to(target, json!({ "harness": id, "accountId": account }));
         match engine::get().call("ActivateAgentAccount", params).await {
             Ok(snapshot) => {
+                // (Told against the list from before the row moved, so the
+                // switch counts as a change: the model list follows it.)
+                if let (Some(before), Some(device)) = (before, self.device_accounts.borrow_mut().get_mut(&key)) {
+                    device.accounts = before;
+                }
                 self.keep_device(key.clone(), &snapshot);
                 if self.target.borrow().as_deref().unwrap_or_default() == key {
                     self.take_accounts(&snapshot);
@@ -1815,14 +1820,14 @@ fn changed_logins(before: &[Json], after: &[Json]) -> Vec<String> {
         by
     }
     let (before, after) = (logins(before), logins(after));
-    let mut changed: Vec<String> = before
+    // (Each agent once, however many of its rows moved.)
+    let changed: std::collections::BTreeSet<String> = before
         .keys()
         .chain(after.keys())
         .filter(|h| before.get(*h) != after.get(*h))
         .cloned()
         .collect();
-    changed.dedup();
-    changed
+    changed.into_iter().collect()
 }
 
 /// Forced usage asks the provider: not more often than this.
@@ -1970,6 +1975,16 @@ mod tests {
         assert_eq!(changed_logins(&before, &switched), ["codex"]);
         // Signed out of everything: that agent too.
         assert_eq!(changed_logins(&before, &[row("codex", "c1", true, 0.2)]), ["pi"]);
+        // Two agents changed at once: each named once, whatever the order.
+        let both = vec![row("pi", "chatgpt-b", true, 0.1), row("codex", "c2", true, 0.2)];
+        assert_eq!(changed_logins(&before, &both), ["codex", "pi"]);
+        // A switch from the composer, told against the list before its row
+        // moved (as switch_on does): a change, so the models follow.
+        let mut optimistic = before.clone();
+        optimistic.push(row("pi", "chatgpt-c", false, 0.0));
+        let mut engine_said = optimistic.clone();
+        mark_switched(&mut engine_said, "pi", "chatgpt-c");
+        assert_eq!(changed_logins(&optimistic, &engine_said), ["pi"]);
     }
 
     #[test]

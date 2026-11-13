@@ -89,6 +89,9 @@ pub(super) fn name_models(models: &mut [Model]) {
     name_models_from(models, &home.join("models_dev_cache.json"));
 }
 
+/// The most of Hermes's catalog read (it's a few MB).
+const MAX_CATALOG_BYTES: u64 = 64 << 20;
+
 /// Catalog key → name, for the models asked about, by catalog provider.
 type Names = HashMap<String, HashMap<String, String>>;
 
@@ -110,6 +113,17 @@ fn name_models_from(models: &mut [Model], catalog: &Path) {
     // Streamed through a small buffer and kept only where asked for: the
     // file is several MB of every provider's models, and holding it (or a
     // map of it) would cost far more than the few names wanted.
+    // Only a regular file of a sane size: a FIFO (or a device) there would
+    // block the read forever, a runaway file would be parsed for minutes.
+    let Ok(meta) = std::fs::metadata(catalog) else {
+        return;
+    };
+    if !meta.is_file() || meta.len() > MAX_CATALOG_BYTES {
+        tracing::debug!(
+            "Hermes's model catalog isn't a file of a usable size; models keep their ids"
+        );
+        return;
+    }
     let Ok(file) = std::fs::File::open(catalog) else {
         return;
     };
@@ -361,6 +375,35 @@ mod tests {
                 .as_deref(),
             Some("openai-codex:gpt-6-luna-900k")
         );
+    }
+
+    /// A catalog that isn't a regular file of a usable size is passed over
+    /// at once: a FIFO would block a read forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_catalog_that_isnt_a_plain_file_of_a_usable_size_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("models_dev_cache.json");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut models = vec![model(
+            "anthropic:claude-opus-5-5",
+            "claude-opus-5-5",
+            "anthropic",
+        )];
+        let started = std::time::Instant::now();
+        name_models_from(&mut models, &fifo);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(models[0].label, "claude-opus-5-5");
+        // Past the size cap (sparse: no disk spent): skipped unread.
+        let big = dir.path().join("big.json");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(MAX_CATALOG_BYTES + 1).unwrap();
+        name_models_from(&mut models, &big);
+        assert_eq!(models[0].label, "claude-opus-5-5");
     }
 
     /// Hermes's own catalog names its models; one it doesn't list keeps

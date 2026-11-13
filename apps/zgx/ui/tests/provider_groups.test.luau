@@ -152,6 +152,12 @@ test("while a key is checked, Save spins and the inputs hold still", function()
 	expect(key_dialog_open(app)).to_be(true)
 	-- (The provider holds still while its key is checked.)
 	expect((line_of(app, "#key-dialog-pi", "button", "Provider") or ""):find("disabled", 1, true) ~= nil).to_be(true)
+	-- Nothing closes it meanwhile: the key it's checking is kept if it
+	-- passes. Cancel waits; Escape too.
+	expect((line_of(app, 'role:dialog "Add API key"', "button", "Cancel") or ""):find("disabled", 1, true) ~= nil).to_be(true)
+	app:key("Escape")
+	settle(app)
+	expect(key_dialog_open(app)).to_be(true)
 end)
 
 test("a key that's taken closes the dialog and lists by its default name, the key itself nowhere", function()
@@ -226,7 +232,7 @@ test("a key named as it's added, a second of one provider its own row, and a ren
 	app:type(field, "my sk-good key")
 	app:click('role:button "Save"')
 	settle(app)
-	expect(shows(app, "#rename-dialog-pi", "part of the key")).to_be(true)
+	expect(shows(app, "#rename-dialog-pi", "looks like a key")).to_be(true)
 	app:key("cmd+a")
 	app:type(field, "Personal")
 	app:click('role:button "Save"')

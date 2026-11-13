@@ -79,6 +79,9 @@ pub const BLOCKED: &[&str] = &[
     "chat.configure",
     "agents.install",
     "agents.set_key",
+    // (An API key, and what an agent's keys are called.)
+    "agents.add_key",
+    "agents.rename",
     "agents.sign_in",
     "agents.sign_out",
     "agents.remove",
@@ -92,6 +95,7 @@ pub const BLOCKED: &[&str] = &[
     "projects.clone",
     "projects.delete",
     "github.disconnect",
+    "github.forget",
     "engine.restart",
     "billing.checkout",
     // (Each runs a machine, or says which one new chats run on: credits.)
@@ -536,12 +540,48 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// Every action the app's code refuses to a preview (`refuse("…")`,
+    /// `refuse_aloud("…")`) is in `BLOCKED`: else its refusal never fires.
+    #[test]
+    fn every_action_the_code_refuses_is_blocked() {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push((path.clone(), std::fs::read_to_string(&path).unwrap()));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut named = Vec::new();
+        for (path, text) in &files {
+            for marker in ["refuse(\"", "refuse_aloud(\""] {
+                let mut rest = text.as_str();
+                while let Some(at) = rest.find(marker) {
+                    rest = &rest[at + marker.len()..];
+                    let Some(end) = rest.find('"') else { break };
+                    let action = &rest[..end];
+                    // (Action names only: this test's own doc says `refuse("…")`.)
+                    if action.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == '.') {
+                        named.push((path.display().to_string(), action.to_string()));
+                    }
+                }
+            }
+        }
+        assert!(named.iter().any(|(_, a)| a == "agents.add_key"), "the scan finds the calls");
+        let missing: Vec<_> = named.iter().filter(|(_, action)| !blocked(action)).collect();
+        assert!(missing.is_empty(), "refused but not in BLOCKED: {missing:?}");
+    }
+
     #[test]
     fn preview_refuses_the_dangerous_actions_only() {
         set(None);
         assert!(refuse("terminal.start").is_ok(), "nothing in preview: all allowed");
         set(Some(Preview { id: "agent".into(), name: "Agent's".into() }));
-        for action in ["terminal.start", "terminal.write", "account.sign_out", "account.delete", "plugins.install", "templates.use", "files.write", "chat.send", "chat.respond", "chat.retry", "chat.queue_edit", "chat.queue_finish", "chat.configure", "files.open_external"] {
+        for action in ["terminal.start", "terminal.write", "account.sign_out", "account.delete", "plugins.install", "templates.use", "files.write", "chat.send", "chat.respond", "chat.retry", "chat.queue_edit", "chat.queue_finish", "chat.configure", "files.open_external", "github.forget", "github.disconnect"] {
             assert!(refuse(action).is_err(), "{action}");
         }
         for action in ["files.read", "files.list", "chat.open", "appearance", "templates.review", "sessions.seen"] {

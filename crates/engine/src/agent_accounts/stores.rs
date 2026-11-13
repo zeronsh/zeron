@@ -25,18 +25,23 @@
 //!   key}`), re-read on every request. zeron manages the OAuth entries of
 //!   `openai` (ChatGPT) and `github-copilot`; a swap rewrites that one entry
 //!   and leaves every other provider byte-for-byte. OpenCode has no lock of
-//!   its own. API-key entries aren't accounts and are left alone.
+//!   its own. API keys are `{type: "api", key}` entries ([`super::api_keys`]),
+//!   listed and switched like any login (OpenCode 2.x keeps its logins in
+//!   its own database instead: zeron says so and adds none there).
 //!   Anthropic OAuth was removed from OpenCode upstream and is not offered.
 //! - **Pi** — `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent`,
 //!   0600, guarded by proper-lockfile's `auth.json.lock` DIRECTORY): the
 //!   same per-provider shape (`openai-codex`, `anthropic`, `github-copilot`),
 //!   hot-reloaded by running agents. Swap = rewrite one entry under that
-//!   lock. Add account = ChatGPT (zeron's own loopback) and GitHub Copilot
-//!   (device code, then pi's own Copilot exchange — see [`super::oauth`]);
-//!   Claude logins stay with pi's `/login` — minting Claude Code OAuth for a
-//!   third-party agent is not something zeron should do. Pi's other OAuth
-//!   logins (xAI, Kimi, Meta, OpenRouter, ChatGPT-direct `openai`) aren't
-//!   listed: zeron can't tell their accounts apart yet.
+//!   lock (Pi refreshes under the same lock; a switch saves the login it
+//!   replaces with the tokens it has then, and refuses over one it can't
+//!   identify). Add account = ChatGPT and Claude (zeron's own loopback,
+//!   Claude being Pi's own Claude Pro/Max sign-in, a grant of its own) and
+//!   GitHub Copilot (device code, then pi's own Copilot exchange) — see
+//!   [`super::oauth`]; API keys as `{type: "api_key", key}` entries (see
+//!   [`super::api_keys`]). Pi's other OAuth logins (xAI, Kimi, Meta,
+//!   OpenRouter, ChatGPT-direct `openai`) aren't listed: zeron can't tell
+//!   their accounts apart yet.
 //! - **Hermes** — `$HERMES_HOME/auth.json` (default `~/.hermes`): Hermes
 //!   keeps EVERY account itself, in `credential_pool[provider]`, and picks
 //!   (fill-first by `priority`, or round-robin) and refreshes them on its
@@ -44,8 +49,11 @@
 //!   a zeron reorder would be silently undone — zeron lists the pool (each
 //!   provider's first entry by priority is that provider's "in use": a run
 //!   on one of its models fills from it first), probes usage, and adds
-//!   accounts through `hermes auth add` (device code; Hermes appends to its
-//!   own pool under its own lock). It never rewrites the pool.
+//!   accounts through `hermes auth add` (device code, or an API key on its
+//!   stdin; Hermes appends to its own pool under its own lock). It never
+//!   rewrites the pool. Only entries Hermes itself would use are listed
+//!   (its `_pool_entry_is_explicit`): one it borrowed — the GitHub CLI's
+//!   token, Claude Code's login — Hermes never picks, so neither is shown.
 //!
 //! Opaque tokens (Pi's Claude login, Copilot tokens) carry no identity: a
 //! live entry is matched to its slot by token, else identified ONCE per token
@@ -591,17 +599,18 @@ pub(super) fn merge_json_entry(
     entry: Option<&serde_json::Value>,
     lock: StoreLock,
 ) -> Result<(), EngineError> {
-    merge_json_entry_with(file, key, entry, lock, &mut |_| {})
+    merge_json_entry_with(file, key, entry, lock, &mut |_| Ok(()))
 }
 
 /// [`merge_json_entry`], showing `before_write` the entry being replaced
-/// (under the lock, on the read the write is compared against).
+/// (under the lock, on the read the write is compared against); its error
+/// stops the write, the store untouched.
 pub(super) fn merge_json_entry_with(
     file: &Path,
     key: &str,
     entry: Option<&serde_json::Value>,
     lock: StoreLock,
-    before_write: &mut dyn FnMut(Option<&serde_json::Value>),
+    before_write: &mut dyn FnMut(Option<&serde_json::Value>) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     // Held for its Drop (the unlock) only.
     #[allow(dead_code)]
@@ -635,7 +644,7 @@ pub(super) fn merge_json_entry_with(
                 })?,
             None => serde_json::json!({}),
         };
-        before_write(store.get(key));
+        before_write(store.get(key))?;
         if let Some(map) = store.as_object_mut() {
             match entry {
                 Some(entry) => {
@@ -867,15 +876,13 @@ impl AgentAccounts {
 
     /// [`Self::write_keyed_entry`] for a switch: `before_write` sees the
     /// entry being replaced, under the agent's own lock, right before the
-    /// write — where a refresh the agent made since the last list (a
-    /// rotated, single-use refresh token) is saved into its slot instead of
-    /// being lost.
+    /// write — and refuses it if that isn't the login the switch saved.
     pub(super) fn swap_keyed_entry(
         &self,
         harness: HarnessId,
         store_key: &str,
         entry: &serde_json::Value,
-        before_write: &mut dyn FnMut(Option<&serde_json::Value>),
+        before_write: &mut dyn FnMut(Option<&serde_json::Value>) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         let file = self.keyed_file(harness);
         merge_json_entry_with(
@@ -1498,7 +1505,11 @@ fn hermes_env_secret(var: &str, hermes_home: &Path) -> bool {
         let value = value.trim().trim_matches(['"', '\'']).trim();
         !value.is_empty()
     };
-    if let Ok(text) = std::fs::read_to_string(hermes_home.join(".env")) {
+    // (Only a regular file of a sane size: no FIFO or runaway file is read
+    // while the accounts are listed.)
+    let env_file = hermes_home.join(".env");
+    let readable = std::fs::metadata(&env_file).is_ok_and(|m| m.is_file() && m.len() <= 1 << 20);
+    if readable && let Ok(text) = std::fs::read_to_string(&env_file) {
         for line in text.lines() {
             let line = line.trim();
             let line = line.strip_prefix("export ").unwrap_or(line);

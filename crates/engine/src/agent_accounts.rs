@@ -1281,34 +1281,38 @@ impl AgentAccounts {
     }
 
     /// Point OpenCode's / Pi's entry for `key` at `slot`'s login, under the
-    /// agent's own lock (Pi's is the one it refreshes under). The entry it
-    /// replaces is the live login the list just saved into its slot — but
-    /// the agent may have refreshed it since, and Claude's and ChatGPT's
-    /// refresh tokens are single-use: the replaced entry, read under the
-    /// lock, goes into its slot, so switching back never installs a spent
-    /// grant.
+    /// agent's own lock (Pi's is the one it refreshes under). The login in
+    /// use is identified first and saved into its slot with the tokens it
+    /// has NOW — the agent may have refreshed it since the last list, and
+    /// Claude's and ChatGPT's refresh tokens are single-use. If it can't be
+    /// identified (its profile call rate limited), or it changes between
+    /// that and the lock, the switch is refused rather than overwrite a
+    /// login no slot holds.
     async fn swap_keyed(&self, harness: HarnessId, key: &str, slot: &Slot) -> Result<(), EngineError> {
-        let live = self.live_account_key(harness, Some(key)).await;
-        let live_slot = live
-            .filter(|account| *account != slot.account_key)
-            .and_then(|account| self.read_slot(harness, &slot_id_for(harness, &account)));
-        let mut rotated: Option<serde_json::Value> = None;
-        self.swap_keyed_entry(harness, key, &slot.credentials, &mut |old| {
-            rotated = match (old, &live_slot) {
-                (Some(old), Some(live))
-                    if old != &live.credentials && same_login(old, &live.credentials) =>
-                {
-                    Some(old.clone())
-                }
-                _ => None,
-            };
-        })?;
-        if let (Some(credentials), Some(mut live)) = (rotated, live_slot) {
-            live.credentials = credentials;
-            live.saved_at = now_ms();
-            self.write_slot(&live)?;
+        let live = match self.detect_keyed_entry(harness, key).await {
+            None => None,
+            Some(Some(detected)) => Some(detected),
+            Some(None) => {
+                return Err(EngineError::Other(
+                    "Couldn't confirm the login in use — try again in a moment.".into(),
+                ));
+            }
+        };
+        if let Some(detected) = &live
+            && detected.account_key != slot.account_key
+        {
+            self.snapshot_detected(harness, detected)?;
         }
-        Ok(())
+        let saved = live.as_ref().and_then(|d| d.credentials.clone());
+        self.swap_keyed_entry(harness, key, &slot.credentials, &mut |old| {
+            if old.cloned() == saved {
+                Ok(())
+            } else {
+                Err(EngineError::Other(
+                    "The login in use just changed — try again in a moment.".into(),
+                ))
+            }
+        })
     }
 
     /// Claude Code's own refresh lock (see
@@ -3935,14 +3939,6 @@ fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String>
     )
     .then(|| store_key.map(str::to_string))
     .flatten()
-}
-
-/// Whether two per-provider entries are one login at two moments (its
-/// tokens refreshed between): both OAuth, and naming the same ChatGPT
-/// account where they name one. Two keys are never one login.
-fn same_login(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    let oauth = |e: &serde_json::Value| e.get("type").and_then(|t| t.as_str()) == Some("oauth");
-    oauth(a) && oauth(b) && str_field(a, "accountId") == str_field(b, "accountId")
 }
 
 fn harness_slug(harness: HarnessId) -> &'static str {

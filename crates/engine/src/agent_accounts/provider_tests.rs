@@ -2838,12 +2838,18 @@ async fn keys_are_named_by_default_or_as_asked_renamed_and_two_keys_stay_two_row
     assert!(rows(&renamed, HarnessId::Pi).iter().any(|a| a.id == first.id && a.email.as_deref() == Some("Personal")));
     let again = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
     assert!(again.iter().any(|a| a.id == first.id && a.email.as_deref() == Some("Personal")));
-    // A name never holds the key beyond its last four.
-    for leaky in ["my sk-or-v1-0123 key", "ZEROTESTkey", OR_KEY] {
-        let err = accounts.rename_account(HarnessId::Pi, &first.id, leaky).await.unwrap_err();
-        assert!(err.to_string().contains("part of the key"), "{leaky}: {err}");
+    // A name never looks like a key — whichever key (the check never reads
+    // this one: a refusal must say nothing about it).
+    for keylike in ["my sk-or-v1-0123 key", "ZEROTESTkeyWXYZ0123456", OR_KEY, "AIzaSyB", "work xai-123"] {
+        let err = accounts.rename_account(HarnessId::Pi, &first.id, keylike).await.unwrap_err();
+        assert!(err.to_string().contains("looks like a key"), "{keylike}: {err}");
     }
-    assert!(accounts.add_api_key(HarnessId::Pi, "openrouter", OR_KEY, Some("v1-0123456789")).await.is_err());
+    assert!(accounts.add_api_key(HarnessId::Pi, "openrouter", OR_KEY, Some("sk-or-test")).await.is_err());
+    // A short run that happens to be in the key is just a name: no answer
+    // depends on the key's contents.
+    for short in ["0123", "v1-0123", "WXYZ team"] {
+        accounts.rename_account(HarnessId::Pi, &first.id, short).await.unwrap();
+    }
     // Emptied: its default name again.
     let reset = accounts.rename_account(HarnessId::Pi, &first.id, "  ").await.unwrap();
     assert!(rows(&reset, HarnessId::Pi).iter().any(|a| a.id == first.id
@@ -2874,7 +2880,7 @@ async fn a_hermes_key_is_named_by_hermes_own_label() {
         tmp.path(),
         "hermes",
         r#"#!/bin/sh
-[ "$*" = "auth add openrouter --type api-key --label Work" ] || { echo "bad args: $*" >&2; exit 3; }
+[ "$*" = "auth add openrouter --type api-key --label=Work" ] || { echo "bad args: $*" >&2; exit 3; }
 IFS= read -r key
 mkdir -p "$HERMES_HOME"
 printf '{"credential_pool":{"openrouter":[{"id":"k9","label":"Work","auth_type":"api_key","priority":0,"source":"manual","access_token":"%s"}]}}' "$key" > "$HERMES_HOME/auth.json"
@@ -2964,4 +2970,47 @@ async fn a_hermes_key_from_the_environment_never_shows_its_variable() {
     let hermes = rows(&accounts.list(false).await.unwrap(), HarnessId::Hermes);
     assert_eq!(hermes[0].email.as_deref(), Some("API key ···ab12"));
     assert_eq!(hermes[0].plan_label.as_deref(), Some("OpenRouter · from environment"));
+}
+
+#[test]
+fn a_keys_name_is_judged_without_the_key() {
+    use super::api_keys::key_name;
+    assert_eq!(key_name("  Work ").unwrap().as_deref(), Some("Work"));
+    assert_eq!(key_name("").unwrap(), None);
+    for keylike in ["sk-ant-api03", "Personal SK-OR-xyz", "abcdefghijklmnop", "ghp_abc", "a_b-c_d-e_f-g_h-i"] {
+        assert!(key_name(keylike).is_err(), "{keylike}");
+    }
+    for fine in ["Work", "Personal 2", "OpenRouter team", "my-org/prod key"] {
+        assert!(key_name(fine).is_ok(), "{fine}");
+    }
+}
+
+#[tokio::test]
+async fn a_switch_over_a_login_it_cant_identify_is_refused_and_the_login_kept() {
+    // Claude's profile call rate limited: the live login goes unidentified.
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("GET", "/v1/models") => (200, r#"{"data":[]}"#.into()),
+        ("GET", "/api/oauth/profile") => (429, r#"{"error":"rate_limited"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let file = config.pi_agent_dir.join("auth.json");
+    let claude = serde_json::json!({ "type": "oauth", "refresh": "rt-only-here", "access": "at-1", "expires": 1 });
+    write(&file, &serde_json::json!({ "anthropic": claude }).to_string());
+    let snapshot = accounts
+        .add_api_key(HarnessId::Pi, "anthropic", "sk-ant-api03-ZEROTESTkeyLOCK0000", None)
+        .await
+        .unwrap();
+    let key_row = rows(&snapshot, HarnessId::Pi)
+        .into_iter()
+        .find(|a| a.auth_kind == Some(AgentAuthKind::ApiKey))
+        .unwrap();
+    let err = accounts.activate(HarnessId::Pi, &key_row.id).await.unwrap_err();
+    assert!(err.to_string().contains("Couldn't confirm the login in use"), "{err}");
+    // The login no slot holds is still Pi's, untouched.
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(live["anthropic"], claude);
 }

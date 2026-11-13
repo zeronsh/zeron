@@ -35,6 +35,9 @@
 mod antigravity_paths;
 mod devin_models;
 mod hermes_names;
+/// How long Hermes's model names may take to read before the list goes
+/// out with ids.
+const HERMES_NAMING_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 mod normalize;
 mod permission;
 mod subagent;
@@ -2862,17 +2865,24 @@ impl AcpHarness {
         // worker is held by file reads.
         let result = match result {
             Ok(Ok(models)) if self.spec.id == HarnessId::Hermes => {
+                // (Named within a few seconds, or kept as they are: a slow
+                // disk never holds up the model list.)
+                let unnamed = models.clone();
                 let naming = tokio::task::spawn_blocking(move || {
                     let mut models = models;
                     hermes_names::name_models(&mut models);
                     models
                 });
                 child.shutdown(self.kill_grace).await;
-                match naming.await {
-                    Ok(models) => Ok(Ok(models)),
-                    Err(error) => Ok(Err(HarnessError::Protocol(format!(
+                match tokio::time::timeout(HERMES_NAMING_WAIT, naming).await {
+                    Ok(Ok(models)) => Ok(Ok(models)),
+                    Ok(Err(error)) => Ok(Err(HarnessError::Protocol(format!(
                         "naming Hermes models failed: {error}"
                     )))),
+                    Err(_) => {
+                        tracing::debug!("naming Hermes models took too long; models keep their ids");
+                        Ok(Ok(unnamed))
+                    }
                 }
             }
             result => {

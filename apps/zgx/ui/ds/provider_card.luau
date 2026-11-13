@@ -1128,6 +1128,10 @@ local function key_dialog(c: CardProps, open: State<boolean>, choice: State<stri
 		return Dialog {
 			open = open,
 			title = locale.t("ds.provider_card.key_title"),
+			-- (A key being checked is kept once it passes: the dialog waits.)
+			hold = function(): boolean
+				return busy:get()
+			end,
 			body = function(): string
 				return locale.s("ds.provider_card.key_body", { agent = c.provider.name, name = named() })
 			end,
