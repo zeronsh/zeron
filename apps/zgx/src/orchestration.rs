@@ -25,7 +25,8 @@
 //!                  created, answered? } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
-//!                   candidates = { target }, answer?, answer_full?, item_id?,
+//!                   candidates = { target }, answer?, answer_full?, answered?,
+//!                   direct, item_id?,
 //!                   attachments = { path } } },
 //!                   summary?, device, created, updated,
 //!                   attachments = { { path, name } } } } (newest first) }
@@ -573,6 +574,12 @@ fn target_value(t: &RouteTarget) -> Value {
     Value::record([("kind", Value::from(kind)), ("id", opt_str(id.map(String::as_str).filter(|id| !id.is_empty())))])
 }
 
+fn direct(r: &Route) -> bool {
+    use zeron_proto::orchestration::RouteIntent;
+    r.intent == RouteIntent::Question
+        && zeron_proto::direct_question::settle_intent(RouteIntent::Question, &r.excerpt) == RouteIntent::Question
+}
+
 fn route_value(r: &Route) -> Value {
     let span = r.span.map_or(Value::Nil, |(from, to)| {
         Value::record([("from", Value::from(f64::from(from))), ("to", Value::from(f64::from(to)))])
@@ -588,6 +595,11 @@ fn route_value(r: &Route) -> Value {
         ("candidates", list(&r.candidates, target_value)),
         ("answer", opt_str(r.answer.as_deref())),
         ("answer_full", opt_str(r.answer_full.as_deref())),
+        ("answered", opt(r.answered_at.as_ref(), secs)),
+        // A question the person wants answered (the Control room's Q&A):
+        // tagged so, and not work or rhetoric in their words (checked here
+        // too, for routes from before the engine checked).
+        ("direct", Value::from(direct(r))),
         ("item_id", opt_str(r.item_id.as_deref())),
         // The files it went with (paths where its target reads them).
         ("attachments", Value::List(r.attachments.iter().map(|p| Value::from(p.as_str())).collect())),

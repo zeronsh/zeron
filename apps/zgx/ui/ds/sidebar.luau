@@ -92,7 +92,11 @@ export type Session = {
 	-- the top).
 	shelf: string?,
 	rank: number?,
+	-- A crew thread: the orchestrator that started it (its name, and its hue
+	-- for the dot after the title, as its row in Orchestrators wears).
+	crew: Crew?,
 }
+export type Crew = { name: string, hue: number? }
 export type PullRequest = { number: number, state: ("open" | "merged" | "closed" | "draft")?, title: string? }
 -- (`src`: its own artwork, a picture chosen for it or its favicon, in place
 -- of its initial and hue; `emoji`: a chosen emoji, on a wash of its hue.)
@@ -1366,12 +1370,27 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 		-- `.session-title`: the row's title, what plugins place beside (a
 		-- badge after it stays in the row, outside the title's fade).
+		-- A crew thread: its orchestrator's dot after the title (named on
+		-- hover), so who started it shows without a word more.
+		local crew = s.crew
 		title = ui.row {
 			class = "session-title",
 			grow = 1,
 			min_w = 0,
 			items = "center",
+			gap = if crew then "$zeron.space.tight" else nil,
 			title,
+			if crew
+				then ui.div {
+					class = "session-crew",
+					shrink = 0,
+					p = 3,
+					role = "img",
+					label = locale.s("ds.sidebar.crew_of", { name = crew.name }),
+					tooltip = locale.s("ds.sidebar.crew_of", { name = crew.name }),
+					OrchHue.Dot { hue = crew.hue, size = 6 },
+				}
+				else nil,
 		}
 		local body = row {
 			class = "session-row",

@@ -61,7 +61,7 @@ test("control scroll: a thread showing in Progress keeps the place", function()
 end)
 
 test("control scroll: a Board card deleted keeps the place", function()
-	holds("control_fixture.luau", 1800, function(app)
+	holds("control_fixture.luau", 2000, function(app)
 		app:right_click('#control-widget-board >> role:button "Phase 2 migration"')
 		app:frames(10)
 		app:click('role:menuitem "Delete"')

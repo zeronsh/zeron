@@ -370,6 +370,86 @@ local orch_ids = ui.computed(function(): { [string]: boolean }
 	return set
 end)
 
+-- Each orchestrator's mark for its crew threads' rows: its name and hue,
+-- by its chat's id. (The same table while what it says is: a row keeps its
+-- mark's table, and stays asleep.)
+type CrewMark = { name: string, hue: number? }
+local crew_marks_last: { [string]: CrewMark } = {}
+local crew_marks_key = ""
+local crew_marks = ui.computed(function(): { [string]: CrewMark }
+	local parts: { string } = {}
+	for _, o in orchestration.now:get().orchestrators or {} do
+		table.insert(parts, `{o.id}={o.name or ""}={o.hue or ""}`)
+	end
+	table.sort(parts)
+	local key = table.concat(parts, "\n")
+	if key == crew_marks_key then
+		return crew_marks_last
+	end
+	local set: { [string]: CrewMark } = {}
+	for _, o in orchestration.now:peek().orchestrators or {} do
+		set[o.id] = { name = o.name or "", hue = o.hue }
+	end
+	crew_marks_key, crew_marks_last = key, set
+	return set
+end)
+-- A crew thread's name where it has no title of its own yet: its role in
+-- the crew, else its board item's title (by its chat's id). (The same table
+-- while what it says is.)
+local crew_names_last: { [string]: string } = {}
+local crew_names_key = ""
+local crew_names = ui.computed(function(): { [string]: string }
+	local now = orchestration.now:get()
+	local items: { [string]: string } = {}
+	for _, it in now.items or {} do
+		if type(it.title) == "string" and it.title ~= "" then
+			items[it.id] = it.title
+		end
+	end
+	local set: { [string]: string } = {}
+	local parts: { string } = {}
+	for _, m in now.crew or {} do
+		local name = if type(m.role) == "string" and m.role ~= "" then m.role else (m.item_id and items[m.item_id])
+		if name and m.chat_id then
+			set[m.chat_id] = name
+			table.insert(parts, `{m.chat_id}={name}`)
+		end
+	end
+	table.sort(parts)
+	local key = table.concat(parts, "\n")
+	if key == crew_names_key then
+		return crew_names_last
+	end
+	crew_names_key, crew_names_last = key, set
+	return set
+end)
+
+-- (An orchestrator not (yet) known: a neutral dot, no name.)
+local NO_MARK: CrewMark = { name = "", hue = nil }
+
+-- What the list shows of `now`: its chats, and the crew threads an
+-- orchestrator started. Those are under the orchestrator's chat (`children`),
+-- which is listed in Orchestrators and never as a session, so here they are
+-- listed as their own, in their project like any chat, each marked with its
+-- orchestrator. Its name: its own title, else its role in the crew, else
+-- its board item's title, else what the host says of it (what it last said).
+-- (An archived one isn't among `children`: it shows nowhere, as an archived
+-- side chat.)
+local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [string]: string }): { any }
+	local out: { any } = table.clone(now.chats)
+	for parent, kids in now.children or {} do
+		for _, c in kids do
+			if c.child_kind == "crew" then
+				local row = table.clone(c)
+				row.crew = marks[parent] or NO_MARK
+				row.title = c.name or names[c.id] or c.title
+				table.insert(out, row)
+			end
+		end
+	end
+	return out
+end
+
 -- The Archived shelf's sessions (the most recently moved first), as the
 -- list's rows read them.
 local shelf = ui.computed(function(): { any }
@@ -530,8 +610,9 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
 	local hidden = orch_ids:get()
+	local all = listed_chats(now, crew_marks:get(), crew_names:get())
 	local listed: { [any]: boolean } = {}
-	for _, c in now.chats do
+	for _, c in all do
 		if hidden[c.id] then
 			continue
 		end
@@ -556,7 +637,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			group.unused = true
 		end
 	end
-	for _, c in now.chats do
+	for _, c in all do
 		if hidden[c.id] then
 			continue
 		end
@@ -593,6 +674,8 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- (Its side chats working count as its subagents do, as its
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+			-- (A crew thread: its orchestrator's dot after its title.)
+			crew = c.crew,
 		}) :: any)
 	end
 	if #loose.sessions > 0 then

@@ -337,6 +337,9 @@ pub(crate) async fn record_outcome(
             return false;
         }
         route.state = state;
+        if route.answered_at.is_none() {
+            route.answered_at = Some(Utc::now());
+        }
         if !(keeps_outcome && route.answer.is_some()) {
             route.answer = Some(quick.clone());
             route.answer_full = Some(full.clone());

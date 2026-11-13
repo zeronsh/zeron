@@ -208,6 +208,9 @@ impl EngineRpc {
         if target == RouteTarget::Other {
             return Err(RpcError::BadParams("Unknown route target".into()));
         }
+        // A "question" that asks for work is a task; a rhetorical one, info
+        // (the person's words, checked: zeron_proto::direct_question).
+        let intent = zeron_proto::direct_question::settle_intent(intent, &excerpt_text);
         // Work for a crew thread goes through its orchestrator, so its board
         // sees it; info and questions may go to the thread itself.
         let (target, message) = self.through_owner(target, intent, message);
@@ -239,6 +242,7 @@ impl EngineRpc {
             candidates,
             answer: None,
             answer_full: None,
+            answered_at: None,
             item_id: None,
             space_id,
             device_id,
@@ -255,6 +259,7 @@ impl EngineRpc {
             Some(answer) => {
                 route.state = RouteState::Answered;
                 route.answer = Some(answer.clone());
+                route.answered_at = Some(Utc::now());
                 orch.comms().say(CommKind::Answer, &to, super::comms::YOU, &answer);
             }
             None => self.deliver_route(&dump, &mut route, brain.as_deref()).await?,
