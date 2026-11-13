@@ -598,7 +598,11 @@ M.View = ui.component(function(props: {
 		-- only when nothing else is free. Never on another name or a mark.
 		local function place(n: sim.Node, forms: { { string } }, opts: any, must: boolean, force: boolean)
 			local x, y = at(n)
-			local base = (if n.kind == "thread" then 9 else reach(n)) + 8
+			-- (Its mark's own radius: a name sits 7px off it, or a clear step
+			-- out with a leader.)
+			local st_m = if n.kind == "thread" then state_of(n.id) else ""
+			local own_r = if st_m == "working" or st_m == "waiting" then 9 elseif n.kind == "thread" then n.r * zs else reach(n)
+			local base = own_r + 7
 			-- (The full name's forms, then a shortened one as a last resort.)
 			local full = forms[#forms]
 			local all_forms = table.clone(forms)
@@ -630,7 +634,7 @@ M.View = ui.component(function(props: {
 			local cands: { any } = {}
 			for fi, text in all_forms do
 				local short = fi > #forms
-				for _, far in (if n.kind == "thread" then { 0, 10, 24 } else { 0, 6 }) do
+				for _, far in (if n.kind == "thread" then { 0, 16, 24 } else { 0 }) do
 					local r = base + far
 					local tw, lh = 0, 0
 					for _, t in text do
@@ -664,6 +668,36 @@ M.View = ui.component(function(props: {
 						if hard(x0 - 4, y0 - 2, x1 + 4, y1 + 2, n.id) then
 							continue
 						end
+						-- (Its own mark the nearest to it, and a leader, if any,
+						-- clear of every other mark by 8px.)
+						local qx, qy = math.clamp(x, x0, x1), math.clamp(y, y0, y1)
+						local own_gap = math.sqrt((qx - x) ^ 2 + (qy - y) ^ 2) - own_r
+						local wrong = false
+						for _, m in graph.nodes do
+							if m.id ~= n.id and m.kind ~= "device" then
+								local mx, my = at(m)
+								local mq_x, mq_y = math.clamp(mx, x0, x1), math.clamp(my, y0, y1)
+								local mg = math.sqrt((mq_x - mx) ^ 2 + (mq_y - my) ^ 2) - reach(m)
+								if mg < own_gap then
+									wrong = true
+									break
+								end
+								if far > 0 then
+									-- (Distance from the mark to the leader's segment.)
+									local dx, dy = qx - x, qy - y
+									local l2 = math.max(1, dx * dx + dy * dy)
+									local tt = math.clamp(((mx - x) * dx + (my - y) * dy) / l2, 0, 1)
+									local px, py = x + dx * tt, y + dy * tt
+									if math.sqrt((mx - px) ^ 2 + (my - py) ^ 2) < reach(m) + 8 then
+										wrong = true
+										break
+									end
+								end
+							end
+						end
+						if wrong then
+							continue
+						end
 						local k = crowd(x0 - 4, y0 - 4, x1 + 4, y1 + 4, n.id, if must and n.kind == "thread" then 0.35 else nil)
 						local rank = k + side_cost + far * 0.03 + (if short then 3 * (fi - #forms) else 0) + on_own(x0 - 2, y0 - 2, x1 + 2, y1 + 2, n.id) + outside(n, x0, y0, x1, y1) + on_rim(x0 - 4, y0 - 4, x1 + 4, y1 + 4)
 						table.insert(cands, { rank = rank, k = k, spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 } })
@@ -694,7 +728,7 @@ M.View = ui.component(function(props: {
 			local gd = math.sqrt(gx * gx + gy * gy)
 			-- (Always for a name hung aside or stepped out; else past 13px.)
 			-- (A clear one or none: under 20px it reads as debris.)
-			if gd - mr >= 20 then
+			if gd - mr >= 16 then
 				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
 			end
 			for i, t in best.text do
@@ -1210,7 +1244,8 @@ M.View = ui.component(function(props: {
 
 		-- 5. The names, and the leaders of those set off.
 		for _, l in leaders do
-			c:line(l[1], l[2], l[3], l[4], ink(if dark then 0.48 else 0.4, l[5]), 1, { cap = "round" })
+			-- (Faint and short: never to be read as a link between agents.)
+			c:line(l[1], l[2], l[3], l[4], ink(if dark then 0.26 else 0.3, l[5]), 1, { cap = "round" })
 		end
 		for _, rim in rims do
 			local lit = lit_of(rim.n.id)
