@@ -198,3 +198,12 @@ test("Q&A: after the screen is left and come back to, an answer arriving still s
 	app:frames(10)
 	expect(app:has(`{QA} >> .orch-qa-preview >> ~"signed this morning"`)).to_be(true)
 end)
+
+test("Progress: after the Control room is left and come back to, a thread that starts working shows", function()
+	local app = screen()
+	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(false)
+	app:command("fixture.new_worker")
+	app:frames(20)
+	expect(app:error()).to_be_nil()
+	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(true)
+end)

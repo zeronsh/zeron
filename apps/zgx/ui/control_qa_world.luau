@@ -114,6 +114,15 @@ The simpler alternative is to hide Inbox and Next until they have cards. Which d
 	ui.command { id = "fixture.qa_reset", title = "Fixture: Q&A marks as they started", run = function()
 		QA.marks:set({ read = { ["dp-qa/rq-3"] = true }, dismissed = { ["dp-qa2/rq-6"] = true } })
 	end }
+	-- A thread starts working that wasn't there before (`fixture.new_worker`).
+	ui.command { id = "fixture.new_worker", title = "Fixture: a new thread starts working", run = function()
+		local n = table.clone(sessions.now:peek())
+		local list = table.clone(n.chats or {})
+		table.insert(list, { id = "th-new-worker", title = "Brand new worker", device = "dev-desk", status = "working",
+			updated = os.time(), created = os.time(), agent = "claude", model = "claude-opus-5-5" })
+		n.chats = list
+		sessions.now:set(n)
+	end }
 	-- A thread answers (`fixture.qa_answer`): the waiting MSI question.
 	ui.command { id = "fixture.qa_answer", title = "Fixture: answer the MSI question", run = function()
 		local n = table.clone(orchestration.now:peek())
