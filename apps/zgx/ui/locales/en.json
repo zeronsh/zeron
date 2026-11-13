@@ -1092,6 +1092,89 @@
         "attachments": "No attachments match “{q}”"
       },
       "placeholder": "Search files, chats, attachments"
+    },
+    "orch": {
+      "target": {
+        "orchestrator": "Orchestrator",
+        "chat": "Thread",
+        "new_orchestrator": "New orchestrator",
+        "new_thread": "New thread",
+        "item": "Inbox",
+        "inbox": "Inbox",
+        "note": "Notes",
+        "unsure": "Unsure",
+        "other": "Elsewhere"
+      },
+      "receipt": {
+        "open": "Open {name}",
+        "move_to": "Move to",
+        "chip": "{target}, {intent}, {state}",
+        "answer": "Answer",
+        "routing": "Routing"
+      },
+      "intent": {
+        "task": "Task",
+        "info": "Context",
+        "question": "Question",
+        "priority": "Priority",
+        "cancel": "Cancel",
+        "note": "Note",
+        "other": "Other"
+      },
+      "route_state": {
+        "pending": "Pending",
+        "delivered": "Delivered",
+        "answered": "Answered",
+        "undone": "Moved",
+        "failed": "Failed",
+        "unsure": "Unsure",
+        "other": "Other"
+      },
+      "ask": {
+        "question": "Question",
+        "decision": "Decision",
+        "approval": "Approval",
+        "blocker": "Blocker",
+        "input": "Awaiting input",
+        "other": "Ask",
+        "urgent": "Urgent",
+        "dismiss": "Dismiss",
+        "answer": "Answer",
+        "open": "Open",
+        "none": "Nothing needs you"
+      },
+      "more": "{n} more",
+      "less": "Fewer",
+      "map": {
+        "here": "this one",
+        "cpu": "CPU {percent}%",
+        "offline": "Offline",
+        "paused": "Paused",
+        "empty": "No machines online"
+      },
+      "activity": {
+        "thinking": "Thinking",
+        "reading": "Reading",
+        "editing": "Editing",
+        "running": "Running",
+        "testing": "Testing",
+        "building": "Building",
+        "installing": "Installing",
+        "merging": "Merging",
+        "pushing": "Pushing",
+        "reviewing": "Reviewing",
+        "browsing": "Browsing",
+        "delegating": "Delegating",
+        "other": "Working"
+      },
+      "machines": {
+        "running": "{n} running",
+        "memory": "{used} / {total} GB"
+      },
+      "comms": {
+        "you": "You",
+        "none": "Quiet"
+      }
     }
   },
   "settings": {
@@ -3873,6 +3956,48 @@
       "skipped": "Some of its themes didn't import: {names}",
       "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
       "imported_body": "It's under Yours."
+    }
+  },
+  "control": {
+    "title": "Control room",
+    "summary": "{orchestrators, plural, one {# orchestrator} other {# orchestrators}} · {working} working · {needs} need you",
+    "capture": {
+      "name": "Dump",
+      "placeholder": "Dump anything",
+      "send": "Send",
+      "failed": "That didn't go through",
+      "move_failed": "Couldn't move it",
+      "newest": "Newest",
+      "earlier": "{n, plural, one {# earlier} other {# earlier}}"
+    },
+    "needs": {
+      "failed": "Couldn't send that"
+    },
+    "board": {
+      "active": "Now",
+      "planned": "Next",
+      "blocked": "Blocked",
+      "review": "Review",
+      "done": "Done"
+    },
+    "widget": {
+      "capture": "Capture",
+      "needs": "Needs you",
+      "map": "Map",
+      "board": "Board",
+      "machines": "Machines",
+      "comms": "Comms"
+    },
+    "widgets": {
+      "title": "Widgets",
+      "menu": "Widget menu",
+      "up": "Move up",
+      "down": "Move down",
+      "hide": "Hide",
+      "reset": "Reset"
+    },
+    "map": {
+      "working": "{n} working"
     }
   }
 }
