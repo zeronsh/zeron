@@ -6740,6 +6740,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sys-locale",
  "tokio",
  "transcribe-cpp",
 ]

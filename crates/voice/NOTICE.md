@@ -1,4 +1,4 @@
-# Dictation model attribution and runtime
+# Dictation models: attribution and runtime
 
 ## Parakeet Ultra
 
@@ -17,6 +17,22 @@ Languages: Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish
 Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish,
 Ukrainian.
 
+## Cohere Transcribe
+
+Cohere Transcribe 03-2026 weights © Cohere, licensed under the Apache License 2.0:
+https://www.apache.org/licenses/LICENSE-2.0
+
+Original model: https://huggingface.co/CohereLabs/cohere-transcribe-03-2026 at commit `76b8b23` (gated; Zeron never
+downloads from it).
+
+GGUF conversion by handy-computer for transcribe.cpp: https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/tree/7353b6040bdc1be9e5a3823d99d5fe12afe88264
+Changes, as its NOTICE states: the conversion repackages the weights (renamed and re-laid-out tensors) and the Q5_K_M file
+Zeron downloads stores them at reduced numeric precision. The weights were not retrained or fine-tuned. Pinned in
+`models.json` like Parakeet Ultra.
+
+Languages: Arabic, Chinese, Dutch, English, French, German, Greek, Italian, Japanese, Korean, Polish, Portuguese,
+Spanish, Vietnamese.
+
 ## Runtime
 
 transcribe.cpp 0.4.2 (MIT, © The transcribe.cpp authors, https://github.com/handy-computer/transcribe.cpp) through
@@ -25,7 +41,7 @@ the `transcribe-cpp` / `transcribe-cpp-sys` crates, built from source and linked
 Metal on macOS; the CPU (x86-64 with AVX2, or arm64) on Linux and Windows. Capture: cpal 0.17.3 (Apache-2.0).
 Sample-rate conversion: rubato 0.16.2 (MIT), its anti-aliasing FFT resampler, from the device's rate to 16 kHz.
 
-Parakeet Ultra is an offline model: Zeron records at most 60 seconds and decodes once on Stop. Model weights are an
+Both are offline models: Zeron records at most 60 seconds and decodes once on Stop. Model weights are an
 optional download, never bundled. No cloud provider, Apple Speech or engine-host audio transport is used.
 
 ## Test clips
