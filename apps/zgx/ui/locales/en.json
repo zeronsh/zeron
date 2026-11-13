@@ -4115,8 +4115,8 @@
       "view": {
         "orchestrators": "Orchestrators",
         "new": "New orchestrator…",
-        "section": "Show Orchestrators section",
-        "archived": "Show archived orchestrators",
+        "section": "Show section",
+        "archived": "Show archived",
         "control": "Control room",
         "open_control": "Open Control room",
         "widgets": "Widgets…",

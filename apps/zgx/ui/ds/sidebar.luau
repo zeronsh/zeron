@@ -4964,6 +4964,12 @@ fn layer(input:LayerInput)->vec4<f32> {
 		end)
 	end
 	local view_more: { Node } = {}
+	-- How much of the window it leaves clear (its top past the title bar's
+	-- line, its foot off the window's), and its least before it scrolls.
+	local VIEW_MENU_CLEAR, VIEW_MENU_MIN = 56, 240
+	-- Its rows' height, as last laid out (kept between openings, so it
+	-- opens at its size).
+	local rows_h = ui.use_state(0)
 	local view_menu = ui.popover(Glass.style({
 		open = view_open,
 		anchor = view_trigger,
@@ -5297,7 +5303,34 @@ fn layer(input:LayerInput)->vec4<f32> {
 					end,
 				},
 			})
-			return ui.column(parts :: any)
+			-- (Taller than the window has room for, it scrolls: as tall as
+			-- its rows, at most the window's room.)
+			parts.on_resize = function(size: { w: number, h: number })
+				if math.abs(size.h - rows_h:peek()) >= 0.5 then
+					rows_h:set(size.h)
+				end
+			end
+			local function room_h(): number
+				local window = (ui :: any).window
+				local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+				local ok, v = pcall(function(): any
+					return if state ~= nil then state:get() else nil
+				end)
+				local h = if ok and type(v) == "table" and type(v.height) == "number" then v.height else 0
+				-- (A window too short to say, a headless host's: no bound.)
+				return if h > VIEW_MENU_MIN + VIEW_MENU_CLEAR then h - VIEW_MENU_CLEAR else math.huge
+			end
+			return ui.scroll {
+				w_full = true,
+				-- (Not laid out yet, the first time: as tall as it needs.)
+				h = function(): any
+					local h = rows_h:get()
+					return if h <= 0 then "auto" else math.min(h, room_h())
+				end,
+				fade = { 8, 8 },
+				fade_overflow = true,
+				ui.column(parts :: any),
+			}
 		end,
 	}, "menu"))
 
