@@ -156,6 +156,23 @@ ui.command { id = "fixture.remote_idle", title = "Fixture: a remote thread's tur
 end }
 -- Its row flickering as its turn ends (the host's last frames out of
 -- order): idle, working again for a blink, idle for good.
+-- A chat of no project on another machine, made after the page showed,
+-- finished a minute ago; it writes to the Brain dump, and the Brain dump
+-- routes a part to a thread not made yet and to one this window doesn't
+-- know.
+ui.command { id = "fixture.projectless", title = "Fixture: a chat of no project", run = function()
+	local t = os.time()
+	local n: any = table.clone(sessions.now:peek())
+	local chats = table.clone(n.chats or {})
+	table.insert(chats, { id = "th-hello", title = "Hello World Agent", device = "dev-forge", updated = t - 60, created = t - 300, agent = "claude", model = "claude-sonnet-5-5" })
+	n.chats = chats
+	sessions.now:set(n)
+	local list = table.clone(orchestration.comms:peek())
+	table.insert(list, { id = "cf-h1", kind = "message", from = "th-hello", to = "orc-brain", summary = "Hello World, started on winbox", at = t - 50 })
+	table.insert(list, { id = "cf-h2", kind = "route", from = "orc-brain", to = "", summary = "Make device names unique", at = t - 40 })
+	table.insert(list, { id = "cf-h3", kind = "route", from = "you", to = "th-not-here", summary = "123 hello world", at = t - 30 })
+	orchestration.comms:set(list)
+end }
 ui.command { id = "fixture.remote_flicker", title = "Fixture: a remote thread's turn ends, flickering", run = function()
 	set_status("th-dev-names", nil)
 	set_status("orc-brain", nil)

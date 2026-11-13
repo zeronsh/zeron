@@ -39,8 +39,10 @@ export type Machine = {
 }
 export type Fleet = { machines: { Machine }, threads: { [string]: Thread }, orchestrators: { [string]: any } }
 
--- The person's own threads shown: those at work or waiting on them.
+-- The person's own threads shown: those at work or waiting on them, and
+-- those that finished lately (in the last half hour).
 local SHOWN: { [string]: boolean } = { working = true, waiting = true, input = true, approval = true }
+local RECENT = 30 * 60
 
 -- Machines in their order: this one first, a Cloud machine last, the rest
 -- by name.
@@ -58,6 +60,15 @@ function M.device_order(devices: { any }, here: string?): { any }
 		return tostring(a.name or "") < tostring(b.name or "")
 	end)
 	return list
+end
+
+-- Whether a thread of the person's own shows: at work or waiting on them,
+-- or finished lately; never one archived, nor a chat's subagent.
+function M.shown(c: any): boolean
+	if not c or c.archived or c.child_kind == "subagent" then
+		return false
+	end
+	return SHOWN[c.status or ""] == true or (c.updated or 0) >= os.time() - RECENT
 end
 
 function M.fleet(world: any): Fleet
@@ -147,8 +158,9 @@ function M.fleet(world: any): Fleet
 			} :: any)
 		end
 	end
+	-- The person's own (in a project or none): at work, or finished lately.
 	for id, c in chats do
-		if not threads[id] and SHOWN[c.status or ""] and not c.archived and c.child_kind ~= "subagent" then
+		if not threads[id] and M.shown(c) and not orchestrators[id] then
 			local name, pid = project_of(c, nil)
 			threads[id] = ({
 				id = id,

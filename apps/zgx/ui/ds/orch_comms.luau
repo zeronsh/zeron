@@ -68,7 +68,9 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 
-	local function party(id: () -> string): Node
+	-- Who, by name always: a chat not (yet) known by its id, or none yet
+	-- (a route to a thread still being made), by what it is.
+	local function party(id: () -> string, kind: () -> string?): Node
 		return ui.row {
 			gap = "$zeron.space.tight",
 			items = "center",
@@ -85,7 +87,12 @@ return ui.component(function(props: Props): Node
 					if i == "you" then
 						return locale.s("ds.orch.comms.you")
 					end
-					return props.name_of(i) or ""
+					local name = props.name_of(i)
+					if name and name ~= "" then
+						return name
+					end
+					local k = kind()
+					return locale.s(if k == "route" or k == "spawn" then "ds.orch.target.new_thread" else "ds.orch.target.chat")
 				end,
 				truncate = true,
 				min_w = 0,
@@ -163,11 +170,15 @@ return ui.component(function(props: Props): Node
 					gap = "$zeron.space.tight",
 					items = "center",
 					party(function(): string
-						return e().from
+						return e().from or ""
+					end, function(): string?
+						return nil
 					end),
 					ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "arrow-right", size = 11 } },
 					party(function(): string
-						return e().to
+						return e().to or ""
+					end, function(): string?
+						return e().kind
 					end),
 					ui.div { grow = 1 },
 					ui.text {

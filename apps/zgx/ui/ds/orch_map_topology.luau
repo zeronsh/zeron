@@ -22,6 +22,7 @@ local data = require("@self/orch_data")
 local kit = require("@self/orch_map_kit")
 local Cells = require("@self/orch_cells")
 local MachineHead = require("@self/orch_machine_head")
+local model = require("@self/orch_map_model")
 local Layout = require("@self/orch_map_layout")
 
 export type Props = {
@@ -60,7 +61,7 @@ local function signature(world: any, width: number): string
 	end
 	-- (The person's own threads come and go with their state.)
 	for id, c in chats do
-		if c.status == "working" or c.status == "waiting" or c.status == "input" or c.status == "approval" then
+		if model.shown(c) then
 			table.insert(parts_, `t{id}{c.device or ""}{c.project or ""}`)
 		end
 	end

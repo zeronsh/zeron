@@ -518,3 +518,26 @@ test("a remote thread's turn ending shows in every view at once, no activity eve
 	-- The Control room's Machines: no longer among what runs.
 	expect(app:has(`#control-widget-machines >> .orch-machine-job "{thread}"`)).to_be(false)
 end)
+
+test("a chat of no project shows under its machine in every view; comms name every party", function()
+	local app = open()
+	app:command("fixture.projectless")
+	app:frames(20)
+	for _, v in { "topology", "timeline", "machines" } do
+		view(app, v)
+		local row = if v == "timeline" then '.orch-tl-lane "Hello World Agent"' else '.orch-thread "Hello World Agent"'
+		expect(app:has(`#control-widget-map >> {row}`)).to_be(true)
+	end
+	-- Under its machine: in the Topology, in winbox's lane.
+	view(app, "topology")
+	local _, lane_y = box(app, '#control-widget-map >> .orch-machine-head "winbox"')
+	local _, row_y = box(app, '#control-widget-map >> .orch-thread "Hello World Agent"')
+	local _, next_y = box(app, '#control-widget-map >> .orch-machine-head "Cloud"')
+	expect(row_y > lane_y and row_y < next_y).to_be(true)
+	-- Comms: each party by name, a thread not yet made or unknown by what it is.
+	expect(app:has('#control-widget-comms >> "Hello World Agent"')).to_be(true)
+	expect(app:has('#control-widget-comms >> "New thread"')).to_be(true)
+	for line in app:tree("#control-widget-comms"):gmatch("[^\n]+") do
+		expect(line:find('text ""', 1, true) == nil).to_be(true)
+	end
+end)

@@ -128,7 +128,7 @@ M.View = ui.component(function(props: {
 		local st, activity = kit.held(c)
 		local is_orch = line:peek().kind == "orchestrator"
 		return ui.button {
-			class = if line:peek().kind == "crew" then "orch-mc-row orch-pill" elseif is_orch then "orch-mc-row orch-node" else "orch-mc-row",
+			class = if line:peek().kind == "crew" then "orch-mc-row orch-pill" elseif is_orch then "orch-mc-row orch-node" else "orch-mc-row orch-thread",
 			label = function(): string
 				local a = activity()
 				local title = t().title or ""
