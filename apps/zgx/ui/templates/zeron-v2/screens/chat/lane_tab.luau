@@ -79,9 +79,13 @@ end
 -- room's Capture: a dump): told the words as they'd be sent and what they
 -- carry (Carried.pack's `attachments`), it returns a promise; the draft
 -- clears as it goes and comes back, with its chips, if it fails.
--- `placeholder`: the words in it while it's empty.
+-- `placeholder`: the words in it while it's empty. `footer`: which of its
+-- footer's pickers it shows (each by default): `access = false` leaves out
+-- the access mode, `place = false` where it works (project, device,
+-- checkout, branch); the model and agent always show.
 export type Take = (text: string, attachments: { any }) -> any
-local function composer(chat: string, view: any, name: string, focus: State<number>, take: Take?, placeholder: string?): Node
+export type Footer = { access: boolean?, place: boolean? }
+local function composer(chat: string, view: any, name: string, focus: State<number>, take: Take?, placeholder: string?, footer: Footer?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -457,7 +461,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		return asks.question:get() ~= nil or asks.approval:get() ~= nil
 			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
 	end, name)
-	return ds.Composer {
+	local p: { [string]: any } = {
 		dictation = dictation,
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
@@ -692,6 +696,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		tray = tray,
 	}
+	-- (A footer without some of its pickers: a page's own composer, as the
+	-- Control room's Capture keeps only the model.)
+	if footer and footer.access == false then
+		p.access = nil
+	end
+	if footer and footer.place == false then
+		for _, k in { "project", "projects", "device", "devices", "checkout", "branch", "branches", "branches_empty", "branch_fixed", "on_new_project" } do
+			p[k] = nil
+		end
+	end
+	return ds.Composer(p :: any)
 end
 
 -- A fork's tab while the engine copies it, or once it couldn't: the
@@ -727,7 +742,7 @@ end
 -- default layout's `LaneTab.Composer`, as v2 draws a side chat's): bound to
 -- chat `chat` in `slot`, its session watched while it shows, its sends
 -- taken by `take` where given (the Control room's Capture: each a dump).
-M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, id: string? }): Node
+M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, id: string? }): Node
 	local slot = props.slot
 	local view = lanes.view(slot)
 	local focus = ui.use_state(0)
@@ -746,7 +761,7 @@ M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, t
 		return ui.column {
 			id = props.id,
 			w_full = true,
-			composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder),
+			composer(id, view, `lane.{slot}`, focus, props.take, props.placeholder, props.footer),
 		}
 	end, { w_full = true })
 end)

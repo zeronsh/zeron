@@ -334,6 +334,9 @@ test("capture is the chat composer: the Brain dump's, its model there", function
 	-- Its model picker, as a chat's (the Brain dump's own model).
 	expect(app:has(`{COMPOSER} >> role:button "Model"`) or app:has(`{COMPOSER} >> ~"Haiku"`)).to_be(true)
 	expect(app:has(`{COMPOSER} >> role:button "Attach"`)).to_be(true)
+	-- No access mode, no place: the Brain dump routes, it works nowhere.
+	expect(app:has(`{COMPOSER} >> role:button "Access"`)).to_be(false)
+	expect(app:has(`{COMPOSER} >> ~"No ref"`)).to_be(false)
 end)
 
 test("capture: Shift+Enter breaks the line, Enter sends it as a dump", function()

@@ -342,6 +342,9 @@ local function capture(): Node
 			chat = brain_dump,
 			take = M.take,
 			placeholder = locale.s("control.capture.placeholder"),
+			-- (The Brain dump's model and agent; no access mode, no place:
+			-- it routes, it works nowhere.)
+			footer = { access = false, place = false },
 		},
 		ui.show(function(): boolean
 			return newest:get() ~= nil

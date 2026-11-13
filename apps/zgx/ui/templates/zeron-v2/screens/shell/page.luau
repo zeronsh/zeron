@@ -22,6 +22,8 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+-- How a working session's work is going, a line in its head.
+local Progress = require("@app/screens/control/progress")
 
 export type Props = {
 	files: State<boolean>,
@@ -286,6 +288,10 @@ return function(props: Props): Node
 						color = "$zeron.title",
 					},
 				},
+				Progress.Header(function(): string?
+					local s = route.session:get()
+					return if s then s.id else nil
+				end),
 			}
 		)
 	)
