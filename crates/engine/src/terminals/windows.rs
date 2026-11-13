@@ -12,6 +12,7 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, Pt
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+    SetConsoleCtrlHandler,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -453,6 +454,15 @@ pub(super) fn open(
     startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
     startup.lpAttributeList = attrs.ptr();
     let mut info = PROCESS_INFORMATION::default();
+    // The app starts the engine in a process group of its own (crates/launch
+    // `spawn_detached`, CREATE_NEW_PROCESS_GROUP), which ignores Ctrl+C, and
+    // a process inherits that from the one creating it: the shell, and what
+    // it runs, ignored it too, so Ctrl+C in a terminal tab reached the shell as
+    // a key and never interrupted `ping -t`. Normal handling is put back first,
+    // as any process started otherwise has it; the engine has no console of
+    // its own for a Ctrl+C to come from.
+    // SAFETY: a null handler with FALSE only clears this process's flag.
+    unsafe { SetConsoleCtrlHandler(None, 0) };
     // SAFETY: all buffers and the initialized attribute list remain alive through
     // CreateProcessW. Job membership is established as part of creation, even
     // if the owner exits before this call returns. Suspension is only for the
