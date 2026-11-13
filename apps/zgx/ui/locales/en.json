@@ -1164,7 +1164,8 @@
         "undone": "Moved",
         "failed": "Failed",
         "unsure": "Unsure",
-        "other": "Other"
+        "other": "Other",
+        "done": "Done"
       },
       "ask": {
         "question": "Question",

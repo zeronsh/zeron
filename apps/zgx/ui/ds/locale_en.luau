@@ -935,6 +935,7 @@ return {
 	["ds.orch.route_state.failed"] = "Failed",
 	["ds.orch.route_state.unsure"] = "Unsure",
 	["ds.orch.route_state.other"] = "Other",
+	["ds.orch.route_state.done"] = "Done",
 	["ds.orch.ask.question"] = "Question",
 	["ds.orch.ask.decision"] = "Decision",
 	["ds.orch.ask.approval"] = "Approval",

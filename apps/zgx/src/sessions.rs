@@ -661,6 +661,9 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         // "side", or "crew": a thread of an orchestrator's); none for a side
         // chat the person started.
         ("child_kind", opt(c["childKind"].as_str())),
+        // Who started it, when an orchestrator or the Brain dump did (and for
+        // which dump and part): `{ chat_id, dump_id?, route_id? }`.
+        ("started_by", started_by_value(&c["startedBy"])),
         ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
         ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
     ]);
@@ -741,12 +744,24 @@ fn top_row(
         // says).
         ("parent", opt(c["parentChatId"].as_str())),
         ("child_kind", opt(c["childKind"].as_str())),
+        ("started_by", started_by_value(&c["startedBy"])),
         // What its agent is doing while it works, and its todo progress.
         ("activity", with.activity.as_ref().map_or(Value::Nil, crate::orchestration::activity_value)),
         ("todo", with.todo.as_ref().map_or(Value::Nil, crate::orchestration::todo_value)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value
+}
+
+/// A chat's `startedBy`, as scripts read it (nil: none, or none readable).
+fn started_by_value(v: &Json) -> Value {
+    let opt = |v: Option<&str>| v.filter(|s| !s.is_empty()).map_or(Value::Nil, Value::from);
+    let Some(chat) = v["chatId"].as_str().filter(|s| !s.is_empty()) else { return Value::Nil };
+    Value::record([
+        ("chat_id", Value::from(chat)),
+        ("dump_id", opt(v["dumpId"].as_str())),
+        ("route_id", opt(v["routeId"].as_str())),
+    ])
 }
 
 thread_local! {
@@ -3227,5 +3242,19 @@ mod bench {
             let cm = t.elapsed().as_nanos() as f64 / k as f64;
             println!("n={n:5}  heartbeat {:8.1} µs   chat row moves {:8.1} µs", hb / 1000., cm / 1000.);
         }
+    }
+}
+
+#[cfg(test)]
+mod started_by_tests {
+    use super::*;
+
+    #[test]
+    fn who_started_a_chat_reads_snake_case() {
+        let v = started_by_value(&json!({ "chatId": "orc-brain", "dumpId": "dp", "routeId": "rt" }));
+        assert_eq!(v.field("chat_id").map(crate::auth::text).as_deref(), Some("orc-brain"));
+        assert_eq!(v.field("route_id").map(crate::auth::text).as_deref(), Some("rt"));
+        assert!(matches!(started_by_value(&json!({ "chatId": "x" })).field("dump_id"), None | Some(Value::Nil)));
+        assert_eq!(started_by_value(&Json::Null), Value::Nil);
     }
 }

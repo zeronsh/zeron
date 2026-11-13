@@ -11,11 +11,11 @@
 --   }
 
 local Icon = require("@self/icon")
-local status = require("@self/status")
 local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
 local HoverCard = require("@self/hover_card")
+local RouteMark = require("@self/orch_route_mark")
 local Markdown = require("@self/markdown")
 
 export type Props = {
@@ -49,8 +49,6 @@ local INTENT_ICON: { [string]: Icon.Name } = {
 local WIDTH = 480
 local REPLY_MAX = 280
 
--- How a route's state reads as Zeron's status.
-local STATUS: { [string]: string } = { pending = "waiting", delivered = "done", answered = "done", failed = "failed", unsure = "input", undone = "waiting" }
 
 return ui.component(function(props: Props): Node
 	local r = props.route
@@ -130,12 +128,7 @@ return ui.component(function(props: Props): Node
 			ui.row {
 				gap = "$space.1",
 				items = "center",
-				status.StatusIcon {
-				kind = function(): any
-					return STATUS[state()] or "waiting"
-				end,
-					size = 12,
-				},
+				RouteMark.Mark { state = state, size = 12 },
 				ui.text {
 					function(): string
 						return locale.s(`ds.orch.route_state.{state()}`)
@@ -162,6 +155,22 @@ return ui.component(function(props: Props): Node
 			text_size = "$font.size.sm",
 			line_height = "$font.line.sm",
 			color = "$text.secondary",
+		}),
+		-- What came of it, in a line (the engine's, kept up as it goes),
+		-- over the whole reply where there's more of it.
+		ui.show(function(): boolean
+			local rr = r()
+			return type(rr.answer) == "string" and rr.answer ~= "" and type(rr.answer_full) == "string" and rr.answer_full ~= ""
+		end, ui.column {
+			class = "orch-part-outcome",
+			w_full = true,
+			Markdown {
+				text = function(): string
+					return r().answer or ""
+				end,
+				inline = true,
+				small = true,
+			},
 		}),
 		-- The reply, whole, as the thread has it (rendered), scrolling past
 		-- its room.
