@@ -418,12 +418,15 @@ impl AgentAccounts {
             "access": access,
             "expires": now_ms() + expires_in * 1000 - 5 * 60 * 1000,
         });
-        let (account_key, profile) = self
-            .anthropic_identity("anthropic", &access)
-            .await
-            .ok_or_else(|| {
+        // The profile names the plan; the token response already names the
+        // account (as Claude Code's own sign-in reads it), so a profile call
+        // that fails (rate limited, say) still signs in, plan unnamed.
+        let (account_key, profile) = match self.anthropic_identity("anthropic", &access).await {
+            Some(identity) => identity,
+            None => token_identity(&tokens).ok_or_else(|| {
                 EngineError::Other("Could not identify the signed-in Claude account.".into())
-            })?;
+            })?,
+        };
         let detected = Detected::known(account_key, profile, entry).keyed("anthropic");
         self.save_new_login(HarnessId::Pi, &detected).await
     }
@@ -692,6 +695,29 @@ impl AgentAccounts {
         }
         Some(available)
     }
+}
+
+/// The account a Claude token response names (`account.uuid`,
+/// `account.email_address`, `organization.name`), keyed as
+/// `anthropic_identity` keys it: the identity when the profile call fails.
+/// The plan isn't in it.
+fn token_identity(tokens: &serde_json::Value) -> Option<(String, SlotProfile)> {
+    let account = tokens.get("account")?;
+    let email = str_field(account, "email_address")?;
+    let uuid = str_field(account, "uuid").unwrap_or_else(|| email.clone());
+    let organization = tokens
+        .get("organization")
+        .and_then(|org| str_field(org, "name"));
+    Some((
+        format!("anthropic:{uuid}"),
+        SlotProfile {
+            email,
+            display_name: None,
+            organization,
+            plan: Some("Claude".to_string()),
+            auth_kind: AgentAuthKind::Oauth,
+        },
+    ))
 }
 
 fn copilot_client_id(harness: HarnessId) -> &'static str {

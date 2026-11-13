@@ -2762,6 +2762,47 @@ async fn claude_for_pi_signs_in_as_pis_own_login_on_this_device_or_for_another()
     assert!(!routes.is_registered(&start.login_id) || accounts.relay_callback(&start.login_id, "device-b", "/callback").await.is_err());
 }
 
+/// Anthropic's profile endpoint rate limited (a 429, as it answered on a
+/// real sign-in): the token response names the account, so Pi's Claude
+/// sign-in still finishes, and is still that account on the next list.
+#[tokio::test]
+async fn claude_for_pi_signs_in_when_the_profile_is_rate_limited() {
+    let server = MockServer::start(|method, path, _body| match (method, path) {
+        ("POST", "/v1/oauth/token") => (
+            200,
+            r#"{"access_token":"at-pi","refresh_token":"rt-pi","expires_in":28800,"account":{"uuid":"u-9","email_address":"ada@claude.test"},"organization":{"uuid":"o-1","name":"Ada's Org"}}"#.into(),
+        ),
+        ("GET", "/api/oauth/profile") => (429, r#"{"error":"rate_limited"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let routes = zeron_preview::login::CallbackRoutes::default();
+    let config = AgentAccountsConfig::isolated(tmp.path());
+    let accounts = AgentAccounts::with_endpoints(config.clone(), mocked(&server.base), routes.clone());
+    let start = accounts
+        .start_login_with(HarnessId::Pi, Some("anthropic"), Some("device-a"))
+        .await
+        .unwrap();
+    let state = query_param(&start.url, "state");
+    accounts
+        .relay_callback(&start.login_id, "device-a", &format!("/callback?code=c-1&state={state}"))
+        .await
+        .unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(polls.last().unwrap().status, AgentLoginStatus::Done, "{polls:?}");
+    let live: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config.pi_agent_dir.join("auth.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(live["anthropic"]["refresh"], "rt-pi");
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    let claude: Vec<_> = pi.iter().filter(|a| a.provider.as_deref() == Some("anthropic")).collect();
+    assert_eq!(claude.len(), 1, "{claude:?}");
+    assert_eq!(claude[0].email.as_deref(), Some("ada@claude.test"));
+    assert!(claude[0].active);
+}
+
 #[tokio::test]
 async fn keys_are_named_by_default_or_as_asked_renamed_and_two_keys_stay_two_rows() {
     let server = key_server().await;

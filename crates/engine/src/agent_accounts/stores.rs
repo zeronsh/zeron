@@ -1040,19 +1040,27 @@ impl AgentAccounts {
         store_key: &str,
         access_token: &str,
     ) -> Option<(String, SlotProfile)> {
-        let profile: serde_json::Value = self
+        let response = self
             .inner
             .http
             .get(&self.inner.endpoints.claude_profile)
             .bearer_auth(access_token)
             .header("anthropic-beta", "oauth-2025-04-20")
             .send()
-            .await
-            .ok()
-            .filter(|res| res.status().is_success())?
-            .json()
-            .await
-            .ok()?;
+            .await;
+        // (The status only: never the body or the token.)
+        let response = match response {
+            Ok(res) if res.status().is_success() => res,
+            Ok(res) => {
+                tracing::warn!(status = %res.status(), "Claude profile lookup refused");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error.without_url(), "Claude profile lookup failed");
+                return None;
+            }
+        };
+        let profile: serde_json::Value = response.json().await.ok()?;
         let account = profile.get("account")?;
         let org = profile.get("organization").cloned().unwrap_or_default();
         let email = str_field(account, "email_address")?;
