@@ -1475,7 +1475,7 @@
     },
     "providers": {
       "title": "提供方",
-      "terms": "提供方 智能体 命令行 安装 启用 停用 账户 登录 harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "terms": "提供方 智能体 命令行 安装 启用 停用 账户 登录 harnesses agents cli claude code codex cursor devin grok hermes pi omp opencode antigravity muse install enable disable accounts sign in login",
       "agent_settings": "智能体设置",
       "agents": {
         "label": "你的智能体",
