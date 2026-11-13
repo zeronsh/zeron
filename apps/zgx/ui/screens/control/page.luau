@@ -43,6 +43,7 @@ local scratchpad = require("@account/scratchpad")
 local Shared = require("@app/screens/chat/shared")
 local motion = require("@ds/motion")
 local material = require("@ds/material")
+local glass = require("@ds/glass")
 
 local M = {}
 
@@ -1306,12 +1307,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 	end)
 	local knob = ui.button {
 		id = "control-float-knob",
-		label = function(): string
-			return locale.s(if open:get() then "control.capture.collapse" else "control.capture.expand")
-		end,
-		expanded = function(): boolean
-			return open:get()
-		end,
+		label = locale.t("control.capture.expand"),
 		w = ui.raw(FLOAT_KNOB, "the pill's one line, as round"),
 		h = ui.raw(FLOAT_KNOB, "the pill's one line"),
 		shrink = 0,
@@ -1334,12 +1330,9 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 		color = "$text.secondary",
 		focus_on_press = false,
 		on_click = function()
-			set_open(not open:peek())
+			set_open(true)
 		end,
 		ui.presence(function(): string
-			if open:get() then
-				return "fold"
-			end
 			return if count:get() > 0 then "count" else "open"
 		end, function(kind: string): Node
 			if kind == "count" then
@@ -1359,7 +1352,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 					},
 				}
 			end
-			return Icon { name = if kind == "fold" then "collapse-arrows" else "expand-arrows", size = 16 }
+			return Icon { name = "expand-arrows", size = 16 }
 		end, {
 			enter = motion.transition({ opacity = { 0, 1 }, scale = { 0.8, 1 }, duration = 160, ease = "out(3)" }),
 			exit = motion.transition({ opacity = 0, duration = 100 }),
@@ -1396,9 +1389,46 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 					w_full = true,
 					gap = "$space.2",
 					items = "end",
-					ui.div {
+					ui.column {
+						id = "control-float-panel",
 						grow = 1,
 						min_w = 0,
+						relative = true,
+						-- Opened out, on a panel of the menus' glass (the page under
+						-- it never reads through), the model's footer inside it.
+						p = function(): any
+							return if open:get() then "$space.3" else 0
+						end,
+						ui.show(function(): boolean
+							return open:get()
+						end, ui.div(glass.style({
+							class = "control-float-surface",
+							absolute = true,
+							left = 0,
+							right = 0,
+							top = 0,
+							bottom = 0,
+							pointer_events = "none",
+							rounded = "$radius.xl",
+						}, "menu") :: any)),
+						-- Its head: folding it back, at the right.
+						ui.show(function(): boolean
+							return open:get()
+						end, ui.row {
+							w_full = true,
+							justify = "end",
+							pb = "$space.2",
+							IconButton {
+								id = "control-float-collapse",
+								icon = "collapse-arrows",
+								label = locale.t("control.capture.collapse"),
+								size = "md",
+								tone = "quiet",
+								on_click = function()
+									set_open(false)
+								end,
+							},
+						}),
 						LaneTab.Composer {
 							id = "control-float-composer",
 							slot = SLOT,
@@ -1426,14 +1456,13 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, take
 							end,
 						},
 					},
-					-- (Opened out, at the pill's top: its foot is the footer's.)
-					ui.div {
+					-- (Beside it, bare: opened out, its panel's head folds it.)
+					ui.show(function(): boolean
+						return not open:get()
+					end, ui.div {
 						shrink = 0,
-						self = function(): "start" | "end"
-							return if open:get() then "start" else "end"
-						end,
 						knob,
-					},
+					}),
 				},
 			},
 		},

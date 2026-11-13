@@ -99,10 +99,11 @@ test("floating composer: the knob opens it out, Escape folds it back, the draft 
 	expect(app:text("#control-float >> role:textbox")).to_be("a longer note")
 	-- (Bare again: no model under it.)
 	expect(app:has('#control-float >> role:button "Model"')).to_be(false)
-	-- And once more, the knob folding it.
+	-- And once more, its panel's head folding it.
 	app:click("#control-float-knob")
 	app:frames(30)
-	app:click("#control-float-knob")
+	expect(app:has("#control-float-knob")).to_be(false)
+	app:click("#control-float-collapse")
 	app:frames(30)
 	expect(app:state("control_capture_float_open")).to_be(false)
 	expect(app:error()).to_be_nil()
