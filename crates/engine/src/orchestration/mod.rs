@@ -16,7 +16,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 use zeron_proto::orchestration::{
     CrewMember, LinkKind, OrchestrationState, Orchestrator, OrchestratorKind, Priority,
-    ReportHead, WorkItem, WorkItemPatch, WorkState, is_brain_dump_chat,
+    ReportHead, WorkItem, WorkItemPatch, WorkState,
 };
 
 use crate::workspace_host::WorkspaceHost;
@@ -137,12 +137,29 @@ impl Orchestration {
         self.inner.state_rx.clone()
     }
 
+    /// `WatchOrchestration`: the state as it is now (a write just made is
+    /// in it), then every change, at most [`PUBLISH_EVERY`].
+    pub(crate) fn stream(&self) -> futures::stream::BoxStream<'static, serde_json::Value> {
+        use futures::StreamExt;
+        let mut rx = self.subscribe();
+        rx.mark_unchanged();
+        let first = serde_json::to_value(self.state()).ok();
+        futures::stream::iter(first)
+            .chain(futures::stream::unfold(rx, |mut rx| async move {
+                rx.changed().await.ok()?;
+                let value = serde_json::to_value(&*rx.borrow_and_update()).ok()?;
+                Some((value, rx))
+            }))
+            .boxed()
+    }
+
     pub fn comms(&self) -> &CommBus {
         &self.inner.comms
     }
 
     /// What `chat_id` is: an orchestrator or Brain dump (its row has the
-    /// chat's id), a thread in a crew (not released), or plain.
+    /// chat's id), a thread in a crew (not released), or plain. From the
+    /// rows alone, never from an id's shape: a role is a privilege.
     pub fn role_of(&self, chat_id: &str) -> ChatRole {
         self.inner.workspace.read_orchestration_with(|doc| {
             if let Some(o) = doc.orchestrator(chat_id) {
@@ -150,9 +167,6 @@ impl Orchestration {
                     OrchestratorKind::BrainDump => ChatRole::BrainDump { id: o.id },
                     _ => ChatRole::Orchestrator { id: o.id },
                 };
-            }
-            if is_brain_dump_chat(chat_id) {
-                return ChatRole::BrainDump { id: chat_id.to_owned() };
             }
             match doc.crew_member(chat_id) {
                 Some(member) if !member.released => ChatRole::Crew {

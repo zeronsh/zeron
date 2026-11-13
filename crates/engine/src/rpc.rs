@@ -2026,7 +2026,10 @@ impl EngineRpc {
                 // than their side chats.
                 let parent_chat_id = parent_chat_id.filter(|parent| {
                     !zeron_proto::voice::is_orchestrator_chat(parent)
-                        && !zeron_proto::orchestration::is_brain_dump_chat(parent)
+                        && !matches!(
+                            self.orchestration.role_of(parent),
+                            crate::orchestration::ChatRole::BrainDump { .. }
+                        )
                 });
                 // A crew thread's parent is its orchestrator.
                 let child_kind = child_kind.filter(|kind| {
@@ -2041,6 +2044,21 @@ impl EngineRpc {
                 let crew_of = parent_chat_id
                     .clone()
                     .filter(|_| child_kind == Some(zeron_proto::ChildKind::Crew));
+                // Joining the crew is an `addToCrew`, held to its rules (an
+                // agent: its own crew only), before anything is written.
+                if let Some(orchestrator) = &crew_of {
+                    let who = self.current_who()?;
+                    crate::orchestration::ops::permitted(
+                        &who,
+                        &zeron_proto::orchestration::OrchestrateOp::AddToCrew {
+                            orchestrator_id: orchestrator.clone(),
+                            chat_id: chat_id.clone(),
+                            role: String::new(),
+                            item_id: None,
+                        },
+                        self,
+                    )?;
+                }
                 self.workspace
                     .create_chat_hosted(
                         &chat_id,
@@ -4167,9 +4185,7 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
-            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(watch_stream(
-                self.orchestration.subscribe(),
-            ))),
+            methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(self.orchestration.stream())),
             methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
             methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
                 std::sync::Arc::new(self.clone()),

@@ -42,11 +42,18 @@ pub async fn file_report(
     if summary.is_empty() {
         return Err(RpcError::BadParams("A report needs a summary".into()));
     }
+    // An item it names counts only when it's on its own orchestrator's
+    // board; otherwise its own item.
+    let named = params.item_id.clone().filter(|id| {
+        orchestration
+            .item(id)
+            .is_some_and(|item| item.orchestrator_id.as_deref() == Some(member.orchestrator_id.as_str()))
+    });
     let report = Report {
         id: uuid::Uuid::new_v4().simple().to_string(),
         orchestrator_id: member.orchestrator_id.clone(),
         from_chat: caller_chat.to_owned(),
-        item_id: params.item_id.clone().or_else(|| member.item_id.clone()),
+        item_id: named.or_else(|| member.item_id.clone()),
         state: params.state,
         summary,
         detail: params.detail,

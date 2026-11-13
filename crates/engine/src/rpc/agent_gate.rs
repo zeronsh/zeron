@@ -64,9 +64,13 @@ fn refused(message: impl Into<String>) -> RpcError {
 impl EngineRpc {
     fn calling(&self, chat_id: &str, chats: &[Chat]) -> Calling {
         let chat = chats.iter().find(|c| c.id == chat_id);
-        let ceiling = if zeron_proto::voice::is_orchestrator_chat(chat_id)
-            || zeron_proto::orchestration::is_brain_dump_chat(chat_id)
-        {
+        // (The Brain dump by its row, which only the engine writes; an id
+        // that merely looks like one is no Brain dump.)
+        let brain_dump = matches!(
+            self.orchestration().role_of(chat_id),
+            crate::orchestration::ChatRole::BrainDump { .. }
+        );
+        let ceiling = if zeron_proto::voice::is_orchestrator_chat(chat_id) || brain_dump {
             None
         } else {
             // Unknown here, or with no config: the least, never the most.
@@ -113,6 +117,13 @@ impl EngineRpc {
         match method {
             methods::MUTATE => match params["op"].as_str().unwrap_or_default() {
                 "createChat" => {
+                    // Hidden chats are the engine's to make.
+                    let new_id = params["chatId"].as_str().unwrap_or_default();
+                    if zeron_proto::voice::is_orchestrator_chat(new_id)
+                        || zeron_proto::orchestration::is_brain_dump_chat(new_id)
+                    {
+                        return Err(refused("That chat id is reserved for Zeron"));
+                    }
                     if let Some(calling) = calling.as_ref() {
                         if calling.delegated {
                             return Err(refused(
@@ -139,6 +150,19 @@ impl EngineRpc {
                         {
                             params["childKind"] = json!(zeron_proto::ChildKind::Crew.as_str());
                         }
+                        // A crew thread is only ever its creator's: the
+                        // calling chat is an orchestrator, and the parent.
+                        if params["childKind"].as_str() == Some(zeron_proto::ChildKind::Crew.as_str()) {
+                            let orchestrates = matches!(
+                                self.orchestration().role_of(&calling.id),
+                                crate::orchestration::ChatRole::Orchestrator { .. }
+                            );
+                            if parent != calling.id || !orchestrates {
+                                return Err(refused("Only an orchestrator creates crew threads, in its own crew"));
+                            }
+                        }
+                    } else if params["childKind"].as_str() == Some(zeron_proto::ChildKind::Crew.as_str()) {
+                        return Err(refused("Only an orchestrator creates crew threads, in its own crew"));
                     }
                     let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
                         return Err(refused("An agent's new chat names its config (harness, sandbox, access)"));
