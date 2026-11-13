@@ -65,7 +65,7 @@ pub(crate) fn owner_decides(intent: RouteIntent) -> bool {
 
 /// A dump whose every fragment has a place is routed; one with an `unsure`
 /// fragment still waiting needs the person.
-fn settled_state(dump: &Dump) -> DumpState {
+pub(crate) fn settled_state(dump: &Dump) -> DumpState {
     if dump
         .routes
         .iter()

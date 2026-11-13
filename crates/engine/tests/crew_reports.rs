@@ -464,3 +464,23 @@ async fn a_task_for_a_crew_thread_goes_through_its_orchestrator() {
     let _ = finish.send(());
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_the_brain_dump_leaves_unrouted_needs_the_person() {
+    use zeron_proto::orchestration::{DumpState, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "add a -l alias" })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let read = || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap();
+    assert_eq!(read().state, DumpState::Routing);
+    // Its turn ends without a route.
+    let _ = finish.send(());
+    wait_for(|| read().state == DumpState::NeedsYou, "the dump to need the person").await;
+    let routes = read().routes;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].target, RouteTarget::Unsure);
+    assert_eq!(routes[0].excerpt, "add a -l alias");
+    assert_eq!(routes[0].candidates, vec![RouteTarget::Orchestrator { id: ORCH.into() }]);
+    core.shutdown().await;
+}

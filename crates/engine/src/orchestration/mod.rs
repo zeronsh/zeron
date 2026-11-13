@@ -27,6 +27,7 @@ pub(crate) mod loads;
 pub(crate) mod ops;
 pub mod report;
 pub(crate) mod scope;
+pub(crate) mod stale_dumps;
 pub(crate) mod watchers;
 pub(crate) mod wake;
 

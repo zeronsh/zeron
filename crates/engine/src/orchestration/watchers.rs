@@ -25,9 +25,23 @@ const SHOWN_KEPT: usize = 1000;
 /// The most an answer keeps.
 const ANSWER_MAX: usize = 8000;
 
+/// How long after a start dumps left routing are swept (queued sends
+/// drain first).
+const SWEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub(crate) fn start(orchestration: Orchestration) {
     let asks = orchestration.clone();
     tokio::spawn(async move { ask_banners(asks).await });
+    let sweep = orchestration.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(SWEEP_AFTER).await;
+        if let Some(rpc) = sweep.rpc() {
+            let settled = super::stale_dumps::sweep(&sweep, &rpc);
+            if !settled.is_empty() {
+                tracing::info!(dumps = settled.len(), "brain dump: dumps left routing now need the person");
+            }
+        }
+    });
     tokio::spawn(async move { route_answers(orchestration).await });
 }
 
@@ -213,6 +227,8 @@ async fn route_answers(orchestration: Orchestration) {
         let Some(rpc) = orchestration.rpc() else { continue };
         let dumps = orchestration.state().dumps;
         for chat in finished {
+            // A Brain dump's turn that left a dump routing.
+            super::stale_dumps::after_turn(&orchestration, &rpc, &chat);
             let waiting = waiting_on(&dumps, &chat);
             if waiting.is_empty() {
                 continue;
