@@ -56,21 +56,14 @@ local function needs_of(id: string?): { any }
 	local now = orchestration.now:get()
 	local crew = data.crew_by_chat(now)
 	local out = {}
-	local all = data.needs(now, sessions.now:get())
-	-- (A chat waiting on its own ask is that ask: once.)
-	local asking: { [string]: boolean } = {}
-	for _, n in all do
-		if n.ask and n.from then
-			asking[n.from] = true
-		end
-	end
-	for _, n in all do
+	-- (A chat waiting on its own ask is that ask, once: data.needs.)
+	for _, n in data.needs(now, sessions.now:get()) do
 		local ask = n.ask
 		if ask then
 			if ask.orchestrator_id == id then
 				table.insert(out, n)
 			end
-		elseif not asking[n.from or ""] and (n.from == id or (crew[n.from or ""] and crew[n.from or ""].orchestrator_id == id)) then
+		elseif (n.from == id or (crew[n.from or ""] and crew[n.from or ""].orchestrator_id == id)) then
 			table.insert(out, n)
 		end
 	end

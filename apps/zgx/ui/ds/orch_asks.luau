@@ -1,7 +1,8 @@
 -- Needs you: everything waiting on the person, one list across every
 -- orchestrator: the asks they and their crews raised (a question, a
 -- decision, an approval, a blocker), and chats whose agent stopped to ask
--- (awaiting input). Urgent first, then the one waiting longest. An ask is
+-- (awaiting input), one row a chat. Urgent first, then the one waiting
+-- longest. An ask is
 -- answered where it stands: its options as buttons, or a line to write
 -- in; a chat awaiting input opens. An answered one slides out, the rows
 -- under it closing up.
@@ -182,8 +183,10 @@ return ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 				},
+				-- (A chat awaiting input: into it. Its ask, if it has one, shows
+				-- here too, answered in place.)
 				ui.show(function(): boolean
-					return ask() == nil
+					return ask() == nil or item:get().input == true
 				end, Button {
 					tone = "secondary",
 					size = "xs",

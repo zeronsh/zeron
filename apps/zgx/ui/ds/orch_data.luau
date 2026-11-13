@@ -16,8 +16,10 @@
 --   data.segments(text, routes)       a dump's text cut at its routes'
 --                                     spans: { { text, route? } }, in order
 --   data.needs(now, sessions_now)     what needs the person: open asks and
---                                     chats awaiting input, urgent first,
---                                     then the longest waiting
+--                                     chats awaiting input (one row a chat:
+--                                     its ask, `input` set, when it has
+--                                     one), urgent first, then the longest
+--                                     waiting
 --   data.ACTIVITY                     each activity's glyph and word key
 
 local M = {}
@@ -191,6 +193,8 @@ export type Need = {
 	urgent: boolean,
 	at: number,
 	ask: any?,
+	-- An ask whose chat awaits input too: the row opens the chat as well.
+	input: boolean?,
 	chat: Chat?,
 	from: string?,
 	hue: number?,
@@ -201,14 +205,25 @@ export type Need = {
 function M.needs(now: any, sessions_now: any): { Need }
 	local chats = M.chats(sessions_now)
 	local out: { Need } = {}
+	-- A chat awaiting input with an ask open too is one row: the ask's, with
+	-- a way into the chat (`input`).
+	local waiting: { [string]: boolean } = {}
+	for id, c in chats do
+		if (c.status == "input" or c.status == "approval") and not c.archived then
+			waiting[id] = true
+		end
+	end
+	local asking: { [string]: boolean } = {}
 	for _, a in (now and now.asks) or {} do
 		if a.state == "open" then
+			asking[a.from_chat] = true
 			table.insert(out, {
 				id = `ask:{a.id}`,
 				kind = "ask",
 				urgent = a.urgent == true,
 				at = a.created or 0,
 				ask = a,
+				input = waiting[a.from_chat] == true,
 				chat = chats[a.from_chat],
 				from = a.from_chat,
 				hue = M.hue_of(now, chats, a.from_chat) or (if a.orchestrator_id then M.hue_of(now, chats, a.orchestrator_id) else nil),
@@ -216,7 +231,7 @@ function M.needs(now: any, sessions_now: any): { Need }
 		end
 	end
 	for id, c in chats do
-		if (c.status == "input" or c.status == "approval") and not c.archived then
+		if waiting[id] and not asking[id] then
 			table.insert(out, {
 				id = `chat:{id}`,
 				kind = "input",

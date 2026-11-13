@@ -22,13 +22,32 @@ local function top(app: any, what: string): number?
 	return nil
 end
 
-test("what needs you lists asks and waiting chats, urgent first", function()
+test("what needs you lists asks and waiting chats, urgent first, one row a chat", function()
 	local app = open()
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
+	-- The orchestrator screen thread awaits input and has an ask open: one
+	-- row, the ask's, with its options and a way into the chat.
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
 	local urgent, decision = top(app, '"Approve"'), top(app, '"Side by side"')
 	expect(urgent ~= nil and decision ~= nil and urgent < decision).to_be(true)
-	-- A chat awaiting input opens; its question is in the chat.
 	expect(app:has('#control-widget-needs >> role:button "Open"')).to_be(true)
+	expect(app:has('#control-widget-needs >> "Awaiting input"')).to_be(false)
+end)
+
+test("a waiting chat with no ask of its own has a row to open it", function()
+	local data = require("@ds/orch_data")
+	local sample = require("@account/orchestration_sample")
+	local now = table.clone(sample.now)
+	now.asks = {}
+	local needs = data.needs(now, { chats = sample.chats })
+	expect(#needs).to_be(1)
+	expect(needs[1].kind).to_be("input")
+	local with_ask = data.needs(sample.now, { chats = sample.chats })
+	for _, n in with_ask do
+		expect(n.kind).to_be("ask")
+		if n.from == "th-ui-orch" then
+			expect(n.input).to_be(true)
+		end
+	end
 end)
 
 test("an option answers its ask, and the row slides out", function()
@@ -39,7 +58,7 @@ test("an option answers its ask, and the row slides out", function()
 	-- Answered once, however fast the second click.
 	app:frames(60)
 	expect(app:wait('#control-widget-needs >> role:button "Approve"', { gone = true, timeout_ms = 3000 })).to_be(true)
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(1)
 	local n = 0
 	for _ in calls(app):gmatch("answer:") do
 		n += 1
