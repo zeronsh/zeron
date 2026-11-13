@@ -1409,8 +1409,9 @@ pub enum OrchestrateOp {
     },
     /// (agent: chats it can see) a chat's [`Progress`], its note made
     /// fresh now (at most every 15 s; the latest note otherwise). Replies
-    /// the `Progress` plus `refreshing: true` while its host (another
-    /// device) writes the fresh note. Never touches the chat itself.
+    /// the `Progress` plus `refreshing: true` while the fresh note is still
+    /// on its way (written by its host, another device, or a model slower
+    /// than 20 s). Never touches the chat itself.
     #[serde(rename_all = "camelCase")]
     ProgressCheck { chat_id: String },
     /// (agent: Brain dump) the dump is fully routed.

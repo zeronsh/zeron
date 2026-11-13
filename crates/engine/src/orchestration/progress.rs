@@ -57,6 +57,9 @@ pub(crate) const TAIL_MAX_CHARS: usize = 4000;
 const KEPT: usize = 32;
 /// A non-crew chat's request, as a note's input keeps it.
 const GOAL_MAX_CHARS: usize = 600;
+/// The longest `progressCheck` waits for a fresh note before it replies
+/// with the latest (`refreshing`).
+const ON_DEMAND_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// Turns off automatic notes when `0`, `off` or `false`.
 pub const NOTES_ENV: &str = "ZERON_PROGRESS_NOTES";
 
@@ -977,8 +980,18 @@ pub(crate) async fn check(rpc: &EngineRpc, chat_id: &str) -> Result<(Progress, b
         if orch.progress().current(orch, chat_id, Utc::now()).is_none() {
             return Err(nothing());
         }
-        let progress = orch.progress().note(orch, chat_id, Why::OnDemand).await.ok_or_else(nothing)?;
-        return Ok((progress, false));
+        // The note runs on its own: a slow model never holds the caller past
+        // ON_DEMAND_WAIT (the note lands on the row when it's done).
+        let (task_orch, chat) = (orch.clone(), chat_id.to_owned());
+        let task = tokio::spawn(async move { task_orch.progress().note(&task_orch, &chat, Why::OnDemand).await });
+        return match tokio::time::timeout(ON_DEMAND_WAIT, task).await {
+            Ok(Ok(Some(progress))) => Ok((progress, false)),
+            Ok(_) => Err(nothing()),
+            Err(_) => {
+                let progress = orch.progress().current(orch, chat_id, Utc::now()).ok_or_else(nothing)?;
+                Ok((progress, true))
+            }
+        };
     }
     let row = orch
         .workspace()
