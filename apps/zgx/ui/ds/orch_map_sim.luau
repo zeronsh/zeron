@@ -50,7 +50,7 @@ export type Graph = {
 	alpha: number,
 }
 
-M.R = { device = 20, orchestrator = 10, brain = 11, thread = 6 }
+M.R = { device = 16, orchestrator = 10, brain = 12, thread = 7 }
 M.ALPHA_MIN = 0.004
 local DECAY = 0.028
 local FRICTION = 0.58
@@ -102,16 +102,19 @@ function M.build(world: any): Graph
 	-- What runs where.
 	for _, t in fleet.threads do
 		local big = t.kind == "orchestrator"
-		link(`dev:{t.device or ""}`, t.id, "host", nil, if big then 86 else 74, if big then 0.3 else 0.4)
+		link(`dev:{t.device or ""}`, t.id, "host", nil, if big then 78 else 64, if big then 0.45 else 0.55)
 	end
 	-- What leads what; what the Brain dump started; what it handed parts.
 	local prov = model.provenance(world)
 	for _, t in fleet.threads do
 		if t.kind == "crew" and t.orchestrator then
+			-- (Across machines, a looser pull: each stays on its island.)
+			local lead = fleet.threads[t.orchestrator :: string]
+			local away = if lead and lead.device ~= t.device then 0.35 else 1
 			if t.started then
-				link(t.orchestrator :: string, t.id, "started", t.hue, 110, 0.22)
+				link(t.orchestrator :: string, t.id, "started", t.hue, 110, 0.22 * away)
 			else
-				link(t.orchestrator :: string, t.id, "control", t.hue, 78, 0.45)
+				link(t.orchestrator :: string, t.id, "control", t.hue, 78, 0.45 * away)
 			end
 		end
 	end
@@ -189,10 +192,10 @@ function M.step(g: Graph): boolean
 	-- Each pushes each off, and none overlap.
 	for i = 1, n do
 		local a = nodes[i]
-		local qa = if a.kind == "device" then 3200 elseif a.kind == "thread" then 300 else 1100
+		local qa = if a.kind == "device" then 7000 elseif a.kind == "thread" then 300 else 1100
 		for j = i + 1, n do
 			local b = nodes[j]
-			local qb = if b.kind == "device" then 3200 elseif b.kind == "thread" then 300 else 1100
+			local qb = if b.kind == "device" then 7000 elseif b.kind == "thread" then 300 else 1100
 			local dx, dy = b.x - a.x, b.y - a.y
 			local d2 = dx * dx + dy * dy
 			if d2 < 1e-4 then
@@ -207,7 +210,14 @@ function M.step(g: Graph): boolean
 				b.vx += fx
 				b.vy += fy
 				-- (Room for a name beside a node that always shows one.)
-				local room = a.r + b.r + 14 + (if a.kind ~= "thread" then 22 else 0) + (if b.kind ~= "thread" then 22 else 0)
+				-- (Machines apart by two islands' width; what runs on one
+				-- kept off another's.)
+				local foreign = (a.kind == "device") ~= (b.kind == "device")
+					and (if a.kind == "device" then b.device else a.device) ~= (if a.kind == "device" then a.device else b.device)
+				local room = if a.kind == "device" and b.kind == "device"
+					then 340
+					elseif foreign then 150
+					else a.r + b.r + 14 + (if a.kind ~= "thread" then 22 else 0) + (if b.kind ~= "thread" then 22 else 0)
 				if d < room then
 					local push = (room - d) / d * 0.5
 					a.vx -= dx * push * 0.5
