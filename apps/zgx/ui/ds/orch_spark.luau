@@ -90,6 +90,26 @@ local function small(t: Text?, color: string, tabular: boolean?): Node?
 	return ui.text { t :: any, tabular = tabular, text_size = "$font.size.xs", color = color, truncate = true, min_w = 0 }
 end
 
+-- Where along the plot (0 to `w`) each moment falls: the window is `span`
+-- seconds across. While the samples cover less than that, the line starts
+-- at the left edge with the first of them and grows rightwards, its head
+-- at the newest; once they fill it, the right edge is `now` (the newest,
+-- unless given) and the oldest scroll off the left. Returns the function
+-- placing a time, and whether the window is full.
+function M.place(samples: { Sample }, span: number, w: number, now: number?): ((at: number) -> number, boolean)
+	local first, last = samples[1], samples[#samples]
+	local right = now or (if last then last.at else os.time())
+	if first and right - first.at < span then
+		local start = first.at
+		return function(at: number): number
+			return w * (at - start) / span
+		end, false
+	end
+	return function(at: number): number
+		return w * (1 - (right - at) / span)
+	end, true
+end
+
 M.Spark = ui.component(function(props: Props): Node
 	local h = props.height or 44
 	local span = props.span or 300
@@ -101,12 +121,8 @@ M.Spark = ui.component(function(props: Props): Node
 	local function draw(c: Canvas, w: number, hh: number)
 		local samples = props.samples() or {}
 		local events = if props.events then props.events() or {} else {}
-		local last = samples[#samples]
-		local now = if props.now then props.now() else (if last then last.at else os.time())
 		local top, bottom = 7, hh - 1.5
-		local function x_of(at: number): number
-			return w * (1 - (now - at) / span)
-		end
+		local x_of = M.place(samples, span, w, if props.now then props.now() else nil)
 		local function y_of(v: number): number
 			local f = math.clamp((v - lo) / math.max(1e-9, hi - lo), 0, 1)
 			return bottom - (bottom - top) * f
@@ -138,11 +154,10 @@ M.Spark = ui.component(function(props: Props): Node
 			return
 		end
 		if #pts == 1 then
-			-- (One sample yet: where it stands, level.)
-			local y = pts[1][2]
-			c:rect(0, y - 0.5, w, 1, M.fade(ink, 0.35))
-			c:circle(pts[1][1], y, 5.5, M.fade(ink, 0.14))
-			c:circle(pts[1][1], y, 2.25, ink)
+			-- (One sample yet: its head alone, at the left edge.)
+			local x, y = math.max(pts[1][1], 2.5), pts[1][2]
+			c:circle(x, y, 5.5, M.fade(ink, 0.14))
+			c:circle(x, y, 2.25, ink)
 			return
 		end
 		-- Smoothed through the midpoints.

@@ -26,6 +26,29 @@ local Held = ui.component(function(): Node
 	}
 end)
 
+-- Where ds/orch_spark places a short line and a full one (300 wide, a
+-- six-minute window), for the test to read: `spark_place`.
+local function line(n: number): { Spark.Sample }
+	local out = {}
+	for i = 1, n do
+		table.insert(out, { at = 1000 + (i - 1) * 5, v = 0.5 })
+	end
+	return out
+end
+local short, long = line(5), line(100)
+local xs, short_full = Spark.place(short, 360, 300, short[#short].at)
+local xl, long_full = Spark.place(long, 360, 300, long[#long].at)
+local _, none_full = Spark.place({}, 360, 300, nil)
+ui.state("spark_place", {
+	short_first = xs(short[1].at),
+	short_head = xs(short[#short].at),
+	short_full = short_full,
+	long_first = xl(long[1].at),
+	long_head = xl(long[#long].at),
+	long_full = long_full,
+	none_full = none_full,
+})
+
 return ui.column {
 	w_full = true,
 	h_full = true,

@@ -72,3 +72,21 @@ test("orch live: the current step's light sits on its cell, at every width and m
 		end
 	end
 end)
+
+test("orch live: a short line starts at the left and grows; a full one scrolls", function()
+	local app = mount("orch_live_fixture.luau")
+	app:frames(1)
+	local p = app:state("spark_place")
+	-- Twenty seconds of a six-minute window, 300 wide: from the left edge,
+	-- its head well short of the right.
+	expect(p.short_full).to_be(false)
+	expect(p.short_first).to_be(0)
+	expect(math.abs(p.short_head - 300 * 20 / 360) < 0.01).to_be(true)
+	-- The window full: the head at the right edge, the oldest past the left.
+	expect(p.long_full).to_be(true)
+	expect(math.abs(p.long_head - 300) < 0.01).to_be(true)
+	expect(p.long_first < 0).to_be(true)
+	-- No samples yet: nothing to place.
+	expect(p.none_full).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
