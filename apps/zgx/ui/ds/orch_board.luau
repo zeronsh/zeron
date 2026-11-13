@@ -48,6 +48,8 @@
 --                                -- orchestrator's own page, where it's
 --                                -- implied: the default when `filter` is
 --                                -- given without `show_filter`)
+--     progress = fn(chat) -> Node?,  -- a line of its lead thread's progress
+--                                -- (the app's ds/orch_progress strip)
 --   }
 
 local Icon = require("@self/icon")
@@ -89,6 +91,7 @@ export type Props = {
 	orchestrators: control.Live<{ Orchestrator }>?,
 	todo_of: ((chat: string) -> Todo?)?,
 	thread_of: ((chat: string) -> Thread?)?,
+	progress: ((chat: string) -> Node?)?,
 	filter: control.Live<string?>?,
 	show_filter: boolean?,
 	inbox: boolean?,
@@ -1028,6 +1031,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 				gap = if compact then "$space.1" else "$zeron.space.snug",
 				title,
 				progress_bar,
+				-- How its lead thread's work is going, while it's under way.
+				if props.progress
+					then ui.presence(function(): string
+						local it = item()
+						return if it.state ~= "done" then (it.threads or {})[1] or "" else ""
+					end, function(chat: string): Node
+						return if chat == "" then ui.div {} else (props.progress :: any)(chat) or ui.div {}
+					end, { w_full = true, min_w = 0 })
+					else nil,
 				outcome_text,
 				ui.show(has_meta, meta),
 			},

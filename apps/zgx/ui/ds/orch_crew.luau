@@ -18,6 +18,8 @@
 --     on_open = function(chat_id) end,
 --     now = function() return os.time() end,
 --     columns = 2,             -- side by side (one by default)
+--     progress = fn(chat_id) -> Node?,  -- a line of its progress under the
+--                              -- rest (the app's ds/orch_progress strip)
 --   }
 --
 -- A unit is made once a thread and follows it: its activity, todo, status
@@ -42,6 +44,7 @@ export type Props = {
 	on_open: ((chat_id: string) -> ())?,
 	now: (() -> number)?,
 	columns: number?,
+	progress: ((chat_id: string) -> Node?)?,
 }
 
 -- The gap between units side by side.
@@ -433,6 +436,7 @@ return ui.component(function(props: Props): Node
 				doing,
 				progress,
 				said,
+				if props.progress then props.progress(id) else nil,
 			},
 		}
 	end

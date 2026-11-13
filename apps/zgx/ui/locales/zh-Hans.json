@@ -1216,6 +1216,21 @@
       "comms": {
         "you": "You",
         "none": "Quiet"
+      },
+      "progress": {
+        "of": "Progress of {title}",
+        "last_step": "last step {ago} ago",
+        "steps": "{done}/{total}",
+        "left": "~{t} left",
+        "stalled": "Stalled",
+        "elapsed": "Time at it",
+        "whats_up": "What's up?",
+        "open": "Open",
+        "pin": "Pin to Progress",
+        "unpin": "Unpin from Progress",
+        "menu": "Progress actions",
+        "refreshing": "Writing a fresh note",
+        "pinned": "Pinned"
       }
     }
   },
@@ -4133,7 +4148,8 @@
       "map": "Map",
       "board": "Board",
       "machines": "Machines",
-      "comms": "Comms"
+      "comms": "Comms",
+      "progress": "Progress"
     },
     "widgets": {
       "title": "Widgets",
@@ -4153,7 +4169,13 @@
       "review": "{n} 项待审",
       "done": "今天完成 {n} 项",
       "online": "{n} 台设备",
-      "running": "{n} 个在运行"
+      "running": "{n} 个在运行",
+      "stalled": "{n} stalled",
+      "pinned": "{n} pinned"
+    },
+    "progress": {
+      "empty": "Nothing working",
+      "failed": "Couldn't check on it"
     }
   }
 }

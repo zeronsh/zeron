@@ -27,6 +27,7 @@ local Links = require("@ds/links")
 local Block = require("@ds/orch_block")
 local HoverCard = require("@ds/hover_card")
 local Counter = require("@ds/orch_counter")
+local Progress = require("@app/screens/control/progress")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
@@ -41,9 +42,9 @@ local SIDE_W = 420
 local GAP = "$space.4"
 
 -- The widgets: each one's column when wide.
-M.WIDGETS = { "capture", "needs", "map", "board", "machines", "comms" }
+M.WIDGETS = { "capture", "needs", "progress", "map", "board", "machines", "comms" }
 -- (The Board spans both, under them: its columns want the room.)
-local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "full", needs = "right", machines = "right", comms = "right" }
+local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "full", needs = "right", progress = "right", machines = "right", comms = "right" }
 
 -- Shown and in what order, on this device.
 export type Widgets = { order: { string }, hidden: { [string]: boolean } }
@@ -493,6 +494,9 @@ local function board(): Node
 			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
 		end,
 		on_open_thread = M.open_chat,
+		progress = function(chat: string): Node
+			return Progress.strip(chat, { lean = true })
+		end,
 		on_link = function(link: any)
 			if link.kind == "chat" then
 				M.open_chat(link.target)
@@ -578,7 +582,7 @@ local function comms(): Node
 	}
 end
 
-local BUILD: { [string]: () -> Node } = { capture = capture, needs = needs, map = map, board = board, machines = machines, comms = comms }
+local BUILD: { [string]: () -> Node } = { capture = capture, needs = needs, progress = Progress.Widget, map = map, board = board, machines = machines, comms = comms }
 
 -- How many of the crew work now.
 local function working_now(): number
@@ -679,6 +683,8 @@ local function figures_of(id: string): Node?
 				return if n > 0 then locale.s("control.figures.running", { n = n }) else ""
 			end),
 		}
+	elseif id == "progress" then
+		return Progress.figures()
 	elseif id == "comms" then
 		return figure_if(function(): string
 			local list = orchestration.comms:get()

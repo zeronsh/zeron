@@ -58,6 +58,7 @@ return function()
 	orchestration.now:set(now)
 	orchestration.loads:set(sample.loads)
 	orchestration.comms:set(sample.comms)
+	orchestration.progress:set(sample.progress)
 
 	local function republish(f: (any) -> ())
 		local n = orchestration.now:peek()
@@ -69,6 +70,30 @@ return function()
 	local stub = orchestration :: any
 	stub.loads_wanted = function(on: boolean)
 		note(`loads_wanted:{if on then "on" else "off"}`)
+	end
+	-- "What's up?": the row back at once, its fresh note on its way.
+	stub.check = function(chat: string): any
+		note(`check:{chat}`)
+		local rows = table.clone(orchestration.progress:peek())
+		if rows[chat] then
+			local r = table.clone(rows[chat])
+			r.refreshing = true
+			rows[chat] = r
+			orchestration.progress:set(rows)
+		end
+		-- (The host's fresh note, a moment later.)
+		ui.after(1500, function()
+			local now = table.clone(orchestration.progress:peek())
+			if now[chat] then
+				local r = table.clone(now[chat])
+				r.refreshing = false
+				r.note = `Fresh: {r.note or ""}`
+				r.note_at = os.time()
+				now[chat] = r
+				orchestration.progress:set(now)
+			end
+		end)
+		return settled(rows[chat])
 	end
 	stub.op = function(op: any): any
 		local kind = op.op
@@ -168,6 +193,10 @@ return function()
 		kids["orc-orch"] = list
 		copy.children = kids
 		sessions.now:set(copy)
+	end }
+	-- Nothing working anywhere (the Progress widget's quiet line).
+	ui.command { id = "fixture.progress_none", title = "Fixture: nothing working", run = function()
+		orchestration.progress:set({})
 	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)

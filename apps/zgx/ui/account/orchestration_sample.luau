@@ -297,6 +297,8 @@ local sample = {
 
 local TIME_KEYS = {
 	created = true, updated = true, done = true, joined = true, at = true, since = true, answered = true,
+	-- (A progress row's clocks.)
+	started = true, last_step = true, note_at = true, tool_since = true,
 }
 
 local function shifted(v, by)
@@ -305,8 +307,9 @@ local function shifted(v, by)
 	end
 	local out = {}
 	for k, x in v do
-		-- (A todo's `done` is a count, not a time.)
-		if k == "todo" then
+		-- (A todo's `done` is a count, not a time; so are a progress row's
+		-- steps.)
+		if k == "todo" or k == "steps" then
 			out[k] = x
 		elseif TIME_KEYS[k] and type(x) == "number" then
 			out[k] = x + by
@@ -566,6 +569,110 @@ function sample.fleet_at(t: number)
 	local copy = shifted((sample :: any).fleet, t - NOW)
 	copy.NOW = t
 	return copy
+end
+
+-- How far each chat's work has got, as orchestration.progress:get() gives
+-- it (src/orchestration_progress.rs): one row of each kind.
+--
+--   sample.progress          by chat id, for sample.chats
+--   sample.fleet.progress    by chat id, for sample.fleet.chats
+do
+	local function row(chat: string, device: string, state: string, extra: any): any
+		local r: any = { chat_id = chat, device_id = device, state = state, stalled = false, refreshing = false, updated = ago(30) }
+		for k, v in extra do
+			r[k] = v
+		end
+		return r
+	end
+	local progress = {
+		-- An orchestrator at work, no todo list of its own.
+		["orc-orch"] = row("orc-orch", "dev-desk", "working", {
+			started = ago(1500), last_step = ago(25), step = "Message Engine: reports + MCP tools",
+			note = "Sequencing the merges: engine-state lands first, then flow.", note_at = ago(140), updated = ago(25),
+		}),
+		-- Working through steps, a long tool running, an ETA.
+		["th-engine-state"] = row("th-engine-state", "dev-desk", "working", {
+			started = ago(2460), last_step = ago(130), step = "cargo test -p zeron-engine --lib orchestration",
+			steps = { done = 5, total = 8 }, tool = "cargo test -p zeron-engine --lib orchestration", tool_since = ago(540),
+			eta_secs = 1260, note = "Registry kinds and the watch are in; running the engine tests before the ops.",
+			note_at = ago(200), updated = ago(30),
+		}),
+		-- A fresh note on its way.
+		["th-engine-flow"] = row("th-engine-flow", "dev-desk", "working", {
+			started = ago(3300), last_step = ago(40), step = "report tool", steps = { done = 3, total = 9 }, eta_secs = 2700,
+			note = "CrewReports part renders; wiring the report tool next.", note_at = ago(420), refreshing = true, updated = ago(12),
+		}),
+		-- Stalled: one command running far longer than a step takes.
+		["th-ui-control"] = row("th-ui-control", "dev-mac", "working", {
+			started = ago(4200), last_step = ago(1140), step = "Map widget", steps = { done = 2, total = 7 }, stalled = true,
+			tool = "cargo build --release", tool_since = ago(2880),
+			note = "Release build after the layout change; no new output for a while.", note_at = ago(1100), updated = ago(60),
+		}),
+		-- Asked the person something.
+		["th-ui-orch"] = row("th-ui-orch", "dev-mac", "awaiting_input", {
+			started = ago(3000), last_step = ago(200), step = "Crew updates card", steps = { done = 4, total = 6 },
+			note = "Asked whether the orchestrator page is side by side or tabs.", note_at = ago(190), updated = ago(200),
+		}),
+		-- Waiting on background work that wakes it.
+		["th-vpn-merge"] = row("th-vpn-merge", "dev-desk", "waiting", {
+			started = ago(1700), last_step = ago(60), step = "Merge #412", steps = { done = 6, total = 7 },
+			note = "Merge queued; waiting on CI for #412.", note_at = ago(55), updated = ago(55),
+		}),
+		["th-vpn-moscow"] = row("th-vpn-moscow", "dev-desk", "done", {
+			started = ago(7000), last_step = ago(3500), steps = { done = 3, total = 3 },
+			note = "Reboot plan ready for 02:00 MSK; needs your OK.", note_at = ago(3480), updated = ago(3480),
+		}),
+		["th-ci-cache"] = row("th-ci-cache", "dev-cloud", "failed", {
+			started = ago(100000), last_step = ago(90100), step = "sccache on macOS runners",
+			note = "sccache can't reach the bucket from the macOS runners.", note_at = ago(90000), updated = ago(90000),
+		}),
+	}
+	sample.progress = progress
+
+	-- The fleet's, from its chats: their todo lists, what they run, a few
+	-- set apart.
+	local f = (sample :: any).fleet
+	local STATE = { working = "working", input = "awaiting_input", failed = "failed", done = "done" }
+	local NOTES: { [string]: string } = {
+		["th-engine-state"] = "Watch is in; running the engine tests before the ops.",
+		["th-engine-flow"] = "Merging engine-state so the report tool builds on it.",
+		["th-ui-control"] = "Map widget renders; two tests fail at 900 wide.",
+		["th-ui-orch"] = "Asked whether the page is side by side or tabs.",
+		["th-vpn-exporter"] = "Image builds; pushing to the registry next.",
+		["th-reins-win"] = "MSVC link error fixed; rebuilding the MSI.",
+		["th-reins-notes"] = "Draft up; tightening the 2.4 highlights.",
+		["th-tally-ci"] = "pytest 3.13: empty input still fails.",
+		["th-tally-lines"] = "Adding the -l alias and its test.",
+		["th-zgx-mem"] = "Comparing heap snapshots before and after tabs.",
+	}
+	local out = {}
+	for _, c in f.chats do
+		local state = STATE[c.status or ""]
+		if state and c.id ~= "orc-brain" then
+			local r = row(c.id, c.device, state, {
+				started = c.created + 600, last_step = if c.activity then c.activity.since else c.updated, note = NOTES[c.id],
+				note_at = if NOTES[c.id] then ago(90) else nil,
+			})
+			if c.todo then
+				r.steps = { done = c.todo.done, total = c.todo.total }
+				r.step = c.todo.current
+			end
+			local a = c.activity
+			if a and (a.kind == "testing" or a.kind == "building") and NOW - a.since >= 15 then
+				r.tool, r.tool_since = a.label, a.since
+			end
+			if state == "working" and c.todo and c.todo.done >= 3 then
+				r.eta_secs = (c.todo.total - c.todo.done) * 420
+			end
+			out[c.id] = r
+		end
+	end
+	-- Stalled, and waiting on background work.
+	out["th-zgx-mem"].stalled = true
+	out["th-zgx-mem"].last_step = ago(980)
+	out["th-vpn-exporter"].state = "waiting"
+	out["th-reins-notes"].refreshing = true
+	f.progress = out
 end
 
 return sample

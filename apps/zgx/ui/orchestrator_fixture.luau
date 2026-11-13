@@ -68,6 +68,7 @@ sessions.now:set({
 orchestration.now:set(sample.now)
 orchestration.comms:set(sample.comms)
 orchestration.loads:set(sample.loads)
+orchestration.progress:set(sample.progress)
 
 -- Its conversation: the person's ask, its plan, the crew's reports filed
 -- as one Crew updates card, and its answer to them.
