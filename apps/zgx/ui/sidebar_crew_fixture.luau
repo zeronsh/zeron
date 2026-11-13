@@ -112,6 +112,7 @@ ui.command {
 -- project and device, as the person's).
 ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
+ui.command { id = "crew_off", title = "Orchestrator chats off", run = function() Sidebar.show_orchestrator_chats:set(false) end }
 ui.command { id = "activity_off", title = "Activity view off", run = function() require("@app/screens/shell/activity").on:set(false) end }
 
 -- Where the route stands, for the tests to read.

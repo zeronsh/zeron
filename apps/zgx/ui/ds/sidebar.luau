@@ -140,6 +140,9 @@ export type Details = {
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
 	keep_active: State<boolean>?,
+	-- The chats an orchestrator started (crew threads), listed among the
+	-- rest, where the caller has them. On unless the caller says.
+	orchestrator_chats: State<boolean>?,
 }
 -- How grouped sessions are ordered (Zeron's Sort): the most recently
 -- updated first, or the most recently made. (Pinned and sections keep the
@@ -4872,6 +4875,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 	end
 	if (details :: any).empty_projects then
 		table.insert(SHOW, { key = "empty_projects", label = "ds.sidebar.view.empty_projects", icon = "inbox" })
+	end
+	if (details :: any).orchestrator_chats then
+		table.insert(SHOW, { key = "orchestrator_chats", label = "ds.sidebar.view.orchestrator_chats", icon = "users-group-rounded" })
 	end
 	-- Opens it. (A press anywhere outside it closes it, this one too, as
 	-- zgx closes any popover: toggling here would open it again.)

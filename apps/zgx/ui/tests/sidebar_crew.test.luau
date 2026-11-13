@@ -137,3 +137,78 @@ test("sidebar crew: archived, a thread is gone from the list", function()
 	expect(app:tree(SIDE)).never.to_contain("Board card declutter")
 	expect(app:tree(LIST)).to_contain('button "Control Room Q&A section"')
 end)
+
+-- Show → Orchestrator chats: on by default; off, the threads leave the
+-- project and device groups (Orchestrators as it was); kept for the next
+-- launch; its row says which.
+local SHOW_CREW = "screens/shell/sidebar.luau::shell_sidebar_show_orchestrator_chats"
+local CREW_ROW = 'role:checkbox "Orchestrator chats"'
+
+local function menu(app: any)
+	app:click(`{SIDE} >> role:button "Sidebar view options"`)
+	app:frames(20)
+end
+
+local function checked(app: any): boolean
+	return not string.find(app:tree(CREW_ROW) :: string, "unchecked", 1, true)
+end
+
+test("sidebar crew: Show → Orchestrator chats is on by default, its row checked", function()
+	local app = open()
+	expect(app:state(SHOW_CREW)).to_be(true)
+	expect(app:tree(LIST)).to_contain('button "Control Room Q&A section"')
+	menu(app)
+	expect(app:has(CREW_ROW)).to_be(true)
+	expect(checked(app)).to_be(true)
+end)
+
+test("sidebar crew: Orchestrator chats off leaves them out of projects and devices, Orchestrators as it was", function()
+	local app = open()
+	local orch_before = app:tree(ORCH) :: string
+	menu(app)
+	app:click(CREW_ROW)
+	app:frames(20)
+	expect(app:state(SHOW_CREW)).to_be(false)
+	expect(checked(app)).to_be(false)
+	app:key("Escape")
+	app:frames(30)
+	for _, organize in { "project", "device" } do
+		app:set_state(ORGANIZE, organize)
+		app:frames(30)
+		local list = app:tree(LIST) :: string
+		for _, title in CREW do
+			expect(list).never.to_contain(title)
+		end
+		expect(list).never.to_contain("Relay health check")
+		expect(list).never.to_contain("Started by")
+		expect(list).to_contain('button "Linux titlebar toggle"')
+	end
+	-- The Orchestrators section: the same rows, counts and all.
+	local orch = app:tree(ORCH) :: string
+	for _, row in { 'button "Zeron fixes"', 'button "Exnomic VPN"', 'text "3/4"' } do
+		expect(orch_before).to_contain(row)
+		expect(orch).to_contain(row)
+	end
+	-- On again: back where they were.
+	menu(app)
+	app:click(CREW_ROW)
+	app:frames(30)
+	expect(checked(app)).to_be(true)
+	app:key("Escape")
+	app:frames(30)
+	expect(app:tree(LIST)).to_contain('button "Control Room Q&A section"')
+end)
+
+test("sidebar crew: Orchestrator chats off is kept for the next launch", function()
+	local first = open()
+	menu(first)
+	first:click(CREW_ROW)
+	first:frames(20)
+	expect(first:state(SHOW_CREW)).to_be(false)
+	-- (A second mount is the next launch: what the first kept, it finds.)
+	local app = open()
+	expect(app:state(SHOW_CREW)).to_be(false)
+	expect(app:tree(LIST)).never.to_contain("Control Room Q&A section")
+	menu(app)
+	expect(checked(app)).to_be(false)
+end)

@@ -381,6 +381,7 @@ return {
 	["ds.sidebar.view.empty_projects"] = "Empty projects",
 	["ds.sidebar.view.activity"] = "Activity",
 	["ds.sidebar.view.activity_settings"] = "Activity settings…",
+	["ds.sidebar.view.orchestrator_chats"] = "Orchestrator chats",
 	["ds.sidebar.empty"] = "No sessions yet",
 	["ds.sidebar.resize"] = "Resize sidebar",
 	["ds.sidebar.show_less"] = "Show less",

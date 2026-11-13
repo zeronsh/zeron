@@ -494,7 +494,8 @@
         "projects_first": "项目优先",
         "empty_projects": "空项目",
         "activity": "动态",
-        "activity_settings": "动态设置…"
+        "activity_settings": "动态设置…",
+        "orchestrator_chats": "Orchestrator chats"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
