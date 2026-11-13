@@ -974,6 +974,10 @@ impl EngineRpc {
         &self.doc_host
     }
 
+    pub(crate) fn registry_ref(&self) -> &std::sync::Arc<HarnessRegistry> {
+        &self.registry
+    }
+
     pub(crate) fn sessions_ref(&self) -> &SessionsEngine {
         &self.sessions
     }
@@ -4216,6 +4220,14 @@ impl RpcService for EngineRpc {
             methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
                 std::sync::Arc::new(self.clone()),
             ))),
+            // An agent sees the chats it may check (orchestration/progress.rs).
+            methods::WATCH_PROGRESS => {
+                let viewer = match zeron_rpc::caller() {
+                    zeron_rpc::Caller::Agent { .. } => Some(self.current_who()?),
+                    _ => None,
+                };
+                Ok(RpcReply::Stream(crate::orchestration::progress::stream(self.clone(), viewer)))
+            }
             methods::WATCH_COMMS => Ok(RpcReply::Stream(match zeron_rpc::caller() {
                 zeron_rpc::Caller::Agent { chat } => self.orchestration.scoped_comms(chat),
                 _ => crate::orchestration::comms::stream(self.orchestration.comms()),
