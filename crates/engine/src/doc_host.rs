@@ -525,6 +525,7 @@ enum QueueSend {
 }
 
 const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
+const FILE_ATTACHMENT_ONLY_PROMPT: &str = "See the attached file(s).";
 const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
 
 /// Queue rows keep the user's editable text separate from attachment paths.
@@ -545,7 +546,14 @@ fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     let trailer = format!("\n\n{ATTACHMENT_PROMPT_HEADER}\n{refs}");
     let body = text.strip_suffix(&trailer).unwrap_or(text);
     let body = if body.trim().is_empty() {
-        ATTACHMENT_ONLY_PROMPT
+        if attachments
+            .iter()
+            .all(|path| crate::uploads::names_an_image(path))
+        {
+            ATTACHMENT_ONLY_PROMPT
+        } else {
+            FILE_ATTACHMENT_ONLY_PROMPT
+        }
     } else {
         body
     };
@@ -7606,7 +7614,10 @@ mod part_segment_tests {
 
 #[cfg(test)]
 mod queued_message_prompt_tests {
-    use super::{ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER, queued_message_prompt};
+    use super::{
+        ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER, FILE_ATTACHMENT_ONLY_PROMPT,
+        queued_message_prompt,
+    };
 
     #[test]
     fn dispatch_adds_the_attachment_transport_to_visible_queue_text() {
@@ -7631,6 +7642,23 @@ mod queued_message_prompt_tests {
             queued_message_prompt("", &paths),
             format!("{ATTACHMENT_ONLY_PROMPT}\n\n{ATTACHMENT_PROMPT_HEADER}\n- /tmp/image.png")
         );
+    }
+
+    #[test]
+    fn attachment_only_rows_with_a_file_say_files() {
+        let pdf = vec!["/tmp/report.pdf".to_string()];
+        assert_eq!(
+            queued_message_prompt("", &pdf),
+            format!(
+                "{FILE_ATTACHMENT_ONLY_PROMPT}\n\n{ATTACHMENT_PROMPT_HEADER}\n- /tmp/report.pdf"
+            )
+        );
+        let mixed = vec![
+            "/tmp/image.png".to_string(),
+            "pending://u1/clip.ogg".to_string(),
+        ];
+        assert!(queued_message_prompt("", &mixed).starts_with(FILE_ATTACHMENT_ONLY_PROMPT));
+        assert!(queued_message_prompt("read it", &pdf).starts_with("read it\n\n"));
     }
 }
 

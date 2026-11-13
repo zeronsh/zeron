@@ -580,7 +580,18 @@ impl DemoHost {
                 );
                 let _ = core.write(|doc| doc.push_message(&entry));
             }
-            let preview = crate::attachments::parse_user_message(prompt).text;
+            let parsed = crate::attachments::parse_user_message(prompt);
+            let preview = parsed.text;
+            // A message of only attachments is titled for what it carries.
+            let fallback_title = if parsed
+                .images
+                .iter()
+                .all(|a| crate::attachments::is_image_path(&a.name))
+            {
+                "Image"
+            } else {
+                "Files"
+            };
             let untitled = client
                 .workspace
                 .chat(chat_id)
@@ -596,7 +607,11 @@ impl DemoHost {
                         .chars()
                         .take(48)
                         .collect();
-                    doc.rename_chat(chat_id, if title.is_empty() { "Image" } else { &title })?;
+                    let title = match title.as_str() {
+                        "" => fallback_title,
+                        named => named,
+                    };
+                    doc.rename_chat(chat_id, title)?;
                 }
                 Ok(())
             });

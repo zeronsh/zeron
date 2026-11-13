@@ -1453,7 +1453,7 @@ impl SessionHandle {
         {
             let text = if refs.is_empty() || caps.clean_attachment_text {
                 if prompt_text.is_empty() {
-                    attachments::ATTACHMENT_ONLY_TEXT.to_owned()
+                    attachments::attachment_only_text(&refs).to_owned()
                 } else {
                     prompt_text.clone()
                 }
