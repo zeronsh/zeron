@@ -288,6 +288,7 @@ local function capture(): Node
 					return history_open:get()
 				end,
 				h = 26,
+				px = 0,
 				gap = "$space.1",
 				items = "center",
 				bg = "#00000000",
