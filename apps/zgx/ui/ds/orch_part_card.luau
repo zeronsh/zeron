@@ -45,10 +45,14 @@ local INTENT_ICON: { [string]: Icon.Name } = {
 	note = "document",
 }
 
+-- The card's width, and the most its reply shows before it scrolls.
+local WIDTH = 480
+local REPLY_MAX = 280
+
 -- How a route's state reads as Zeron's status.
 local STATUS: { [string]: string } = { pending = "waiting", delivered = "done", answered = "done", failed = "failed", unsure = "input", undone = "waiting" }
 
-return function(props: Props): Node
+return ui.component(function(props: Props): Node
 	local r = props.route
 	local t = props.target
 	local function state(): string
@@ -58,9 +62,15 @@ return function(props: Props): Node
 		end
 		return rr.state or "pending"
 	end
+	-- The reply's height as drawn: its scroll stands that tall, up to its
+	-- room, so the card (and the popup round it) is exactly as tall as what
+	-- it holds. (A scroll told only a most-height is measured at its whole
+	-- content's: the popup was sized to that, its panel and shadow running
+	-- on past the card's end.)
+	local reply_h = ui.use_state(0)
 	return HoverCard.Card {
 		class = "orch-part-card",
-		w = 300,
+		w = WIDTH,
 		p = "$space.3",
 		gap = "$space.2",
 		ui.row {
@@ -92,38 +102,47 @@ return function(props: Props): Node
 				},
 			},
 		},
+		-- What it is and how it stands, quiet.
 		ui.row {
-			gap = "$space.2",
+			class = "orch-part-meta",
+			gap = "$space.3",
 			items = "center",
-			ui.div {
-				color = "$text.tertiary",
-				Icon {
-					name = function(): Icon.Name
-						return INTENT_ICON[r().intent or "task"] or "checklist"
+			ui.row {
+				gap = "$space.1",
+				items = "center",
+				ui.div {
+					color = "$text.tertiary",
+					Icon {
+						name = function(): Icon.Name
+							return INTENT_ICON[r().intent or "task"] or "checklist"
+						end,
+						size = 12,
+					},
+				},
+				ui.text {
+					function(): string
+						return locale.s(`ds.orch.intent.{r().intent or "task"}`)
 					end,
-					size = 12,
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
 				},
 			},
-			ui.text {
-				function(): string
-					return locale.s(`ds.orch.intent.{r().intent or "task"}`)
-				end,
-				text_size = "$font.size.xs",
-				color = "$text.secondary",
-			},
-			ui.div { w = 1, h = 12, bg = "$border" },
-			status.StatusIcon {
+			ui.row {
+				gap = "$space.1",
+				items = "center",
+				status.StatusIcon {
 				kind = function(): any
 					return STATUS[state()] or "waiting"
 				end,
-				size = 13,
-			},
-			ui.text {
-				function(): string
-					return locale.s(`ds.orch.route_state.{state()}`)
-				end,
-				text_size = "$font.size.xs",
-				color = "$text.secondary",
+					size = 12,
+				},
+				ui.text {
+					function(): string
+						return locale.s(`ds.orch.route_state.{state()}`)
+					end,
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
+				},
 			},
 		},
 		ui.show(function(): boolean
@@ -136,9 +155,10 @@ return function(props: Props): Node
 			class = "orch-part-message",
 			literal = true,
 			wrap = true,
+			-- (Two lines, cut short: the whole of it is in the thread.)
+			lines = 2,
+			truncate = true,
 			w_full = true,
-			max_h = ui.raw(3 * 18, "three of the small text's lines"),
-			overflow = "hidden",
 			text_size = "$font.size.sm",
 			line_height = "$font.line.sm",
 			color = "$text.secondary",
@@ -148,22 +168,32 @@ return function(props: Props): Node
 		ui.show(function(): boolean
 			local a = r().answer_full or r().answer
 			return type(a) == "string" and a ~= ""
-		end, ui.scroll {
-			class = "orch-part-answer",
+		end, ui.column {
 			w_full = true,
-			max_h = ui.raw(220, "a hover card's room for a reply"),
-			fade = { 8, 8 },
-			fade_overflow = true,
-			ui.column {
+			gap = "$space.2",
+			ui.div { w_full = true, h = 1, bg = "$border.subtle" },
+			ui.scroll {
+				class = "orch-part-answer",
 				w_full = true,
-				gap = "$space.2",
-				ui.div { w_full = true, h = 1, bg = "$border.subtle" },
-				Markdown {
-					text = function(): string
-						local rr = r()
-						return rr.answer_full or rr.answer or ""
+				h = function(): number
+					return math.min(reply_h:get(), REPLY_MAX)
+				end,
+				fade = { 8, 8 },
+				fade_overflow = true,
+				ui.column {
+					w_full = true,
+					on_resize = function(size: { w: number, h: number })
+						if math.abs(size.h - reply_h:peek()) >= 0.5 then
+							reply_h:set(size.h)
+						end
 					end,
-					small = true,
+					-- (A reply's own markdown, as the transcript sets it.)
+					Markdown {
+						text = function(): string
+							local rr = r()
+							return rr.answer_full or rr.answer or ""
+						end,
+					},
 				},
 			},
 		}),
@@ -194,4 +224,4 @@ return function(props: Props): Node
 			},
 		}),
 	}
-end
+end)

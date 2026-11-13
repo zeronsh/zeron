@@ -13,6 +13,15 @@ local locale = require("@ds/locale")
 local sample = require("@account/orchestration_sample")
 
 local opened = ui.state("opened", "")
+-- Either theme, for its pictures.
+ui.command { id = "theme_dark", title = "Dark theme", run = function()
+	ui.theme.follow_system(false)
+	ui.theme.current:set("zeron-dark")
+end }
+ui.command { id = "theme_light", title = "Light theme", run = function()
+	ui.theme.follow_system(false)
+	ui.theme.current:set("zeron-light")
+end }
 local chats: { [string]: any } = {}
 for _, c in sample.chats do
 	chats[c.id] = c
@@ -40,10 +49,11 @@ end
 return ui.row {
 	w_full = true,
 	h_full = true,
+	-- (The window's glass, as a popup's card sits over it.)
+	bg = "$zeron.window",
 	p = "$space.6",
 	gap = "$space.6",
 	items = "start",
-	bg = "$background",
 	card(1, 3, "card-answered"),
 	card(2, 2, "card-unsure"),
 }

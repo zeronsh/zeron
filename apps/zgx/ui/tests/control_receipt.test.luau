@@ -258,7 +258,7 @@ end)
 
 test("a part's hover card: where it went, how it stands, what was sent, the answer, the way in", function()
 	local app = mount("orch_part_card_fixture.luau")
-	app:resize(900, 500)
+	app:resize(1200, 600)
 	app:frames(10)
 	expect(app:has('#card-answered >> "Exnomic VPN"')).to_be(true)
 	expect(app:has('#card-answered >> "Question"')).to_be(true)
@@ -294,4 +294,24 @@ test("the history: a row an earlier dump, opened in place", function()
 	expect(app:has('.control-history-receipt >> role:button "Unsure, Task, Unsure"')).to_be(true)
 	-- The newest stays where it was, above.
 	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
+end)
+
+test("a part's hover card is as tall as what it holds, its reply scrolling only past its room", function()
+	local app = mount("orch_part_card_fixture.luau")
+	app:resize(1200, 700)
+	app:frames(20)
+	local _, cy, cw, ch = box(app, "#card-answered")
+	-- Wide enough to read.
+	expect(cw).to_be(480)
+	-- Its last row's end, its inset and edge, and nothing more.
+	local _, oy, _, oh = box(app, "#card-answered >> .orch-part-open")
+	expect(math.abs((cy + ch) - (oy + oh + 12 + 1)) <= 1).to_be(true)
+	-- The reply's scroll as tall as the reply (it fits), never past 280.
+	local _, sy, _, sh = box(app, "#card-answered >> .orch-part-answer")
+	expect(sh <= 280).to_be(true)
+	local _, ly, _, lh = box(app, '#card-answered >> .orch-part-answer >> ~"report either way"')
+	expect(math.abs((sy + sh) - (ly + lh)) <= 1).to_be(true)
+	-- The message sent: one clamped run, cut with an ellipsis, not under the reply.
+	local _, my, _, mh = box(app, "#card-answered >> .orch-part-message")
+	expect(my + mh <= sy).to_be(true)
 end)
