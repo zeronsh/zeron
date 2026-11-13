@@ -1138,8 +1138,9 @@
         "chat": "Thread",
         "new_orchestrator": "New orchestrator",
         "new_thread": "New thread",
-        "item": "Inbox",
-        "inbox": "Inbox",
+        "item": "Later",
+        "inbox": "Later",
+        "up_next": "Up next",
         "note": "Notes",
         "unsure": "Unsure",
         "other": "Elsewhere"
@@ -4072,9 +4073,10 @@
     "board": {
       "label": "Board",
       "column": {
-        "inbox": "Inbox",
+        "queued": "Queued",
+        "up_next": "Up next",
+        "later": "Later",
         "now": "Now",
-        "next": "Next",
         "blocked": "Blocked",
         "review": "Review",
         "done": "Done today"
@@ -4102,7 +4104,8 @@
       "undo_failed": "Couldn't put it back",
       "start_now": "Start now",
       "starting": "Starting…",
-      "queued": "Queued",
+      "queued": "Waiting for a slot",
+      "later_count": "Later · {n}",
       "start_failed": "Couldn't start it",
       "needs_you": "Needs you",
       "waiting_on_you": "Waiting on you",

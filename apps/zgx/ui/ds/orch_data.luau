@@ -136,8 +136,9 @@ end
 export type Target = { label: string, hue: number?, kind: string, id: string? }
 
 -- Where a route goes, as a chip names it. `words` gives the plain words for
--- the places that have no name of their own (`words(kind)`: "inbox",
--- "new_thread", "new_orchestrator", "note", "unsure").
+-- the places that have no name of their own (`words(kind)`: "inbox" (a
+-- card for Later), "up_next", "new_thread", "new_orchestrator", "note",
+-- "unsure").
 function M.target(now: any, chats: { [string]: Chat }?, target: any, words: (string) -> string): Target
 	local kind = (target and target.kind) or "unsure"
 	local id = target and target.id
@@ -158,7 +159,9 @@ function M.target(now: any, chats: { [string]: Chat }?, target: any, words: (str
 		if owner then
 			hue = M.hue_of(now, chats, owner)
 		end
-		return { label = if owner then (M.name_of(now, chats, owner) or words("inbox")) else words("inbox"), hue = hue, kind = kind, id = id }
+		-- (Not started: Later, else Up next where it was queued.)
+		local word = words(if it and it.state == "planned" then "up_next" else "inbox")
+		return { label = if owner then (M.name_of(now, chats, owner) or word) else word, hue = hue, kind = kind, id = id }
 	end
 	return { label = words(kind), kind = kind, id = id }
 end
