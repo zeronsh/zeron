@@ -338,9 +338,13 @@ function M.bounds(g: Graph): (number, number, number, number)
 		x0, y0 = math.min(x0, n.x - n.r), math.min(y0, n.y - n.r)
 		x1, y1 = math.max(x1, n.x + n.r), math.max(y1, n.y + n.r)
 	end
-	for _, isl in M.islands(g) do
-		x0, y0 = math.min(x0, isl.x - isl.r), math.min(y0, isl.y - isl.r)
-		x1, y1 = math.max(x1, isl.x + isl.r), math.max(y1, isl.y + isl.r)
+	for _, island in M.islands(g) do
+		local isl: any = island
+		local r: number = isl.r
+		x0 = math.min(x0 :: number, (isl.x :: number) - r)
+		y0 = math.min(y0 :: number, (isl.y :: number) - r)
+		x1 = math.max(x1 :: number, (isl.x :: number) + r)
+		y1 = math.max(y1 :: number, (isl.y :: number) + r)
 	end
 	if x0 > x1 then
 		return -100, -100, 100, 100

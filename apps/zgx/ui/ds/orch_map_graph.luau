@@ -452,7 +452,8 @@ M.View = ui.component(function(props: {
 			}
 			local best: { any }, least = spots[1], math.huge
 			for _, sp in spots do
-				local k = crowd(sp[1] - 3, sp[2] - 1, sp[1] + tw + 3, sp[2] + th + 1, n.id)
+				local sx, sy = sp[1] :: number, sp[2] :: number
+				local k = crowd(sx - 3, sy - 1, sx + tw + 3, sy + th + 1, n.id)
 				if k < least then
 					best, least = sp, k
 				end

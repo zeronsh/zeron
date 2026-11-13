@@ -114,6 +114,8 @@ M.View = ui.component(function(props: {
 	on_window: (minutes: number) -> (),
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
+	menu: ((id: string) -> { any }?)?,
+	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 }): Node
 	local width = ui.use_state(720)
 	-- (The lanes slide on as time passes: a look every few seconds, a
@@ -541,7 +543,33 @@ M.View = ui.component(function(props: {
 			ui.div { grow = 1 },
 			ui.row { gap = 2, items = "center", shrink = 0, span_button(15), span_button(60) },
 		},
-		ui.column {
+		-- A secondary click on a lane (a machine's head): its menu.
+		kit.MenuField {
+			menu = props.menu,
+			register = props.register,
+			key = "timeline",
+			hit = function(_x: number, y: number): string?
+				for _, r in built:peek().rows do
+					if y >= r.y and y < r.y + r.h then
+						if r.kind == "lane" then
+							return r.id
+						elseif r.kind == "machine" then
+							return `dev:{r.machine}`
+						end
+						return nil
+					end
+				end
+				return nil
+			end,
+			center = function(id: string): (number?, number?)
+				for _, r in built:peek().rows do
+					if r.id == id or (r.kind == "machine" and `dev:{r.machine}` == id) then
+						return 40, r.y + r.h / 2
+					end
+				end
+				return nil, nil
+			end,
+			child = ui.column {
 			class = "orch-tl-field",
 			relative = true,
 			w_full = true,
@@ -561,6 +589,7 @@ M.View = ui.component(function(props: {
 				pointer_events = "none",
 				draw = draw,
 			},
+		},
 		},
 	}
 end)

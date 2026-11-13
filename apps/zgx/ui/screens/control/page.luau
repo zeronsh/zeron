@@ -20,6 +20,7 @@ local data = require("@ds/orch_data")
 local Receipt = require("@ds/orch_receipt")
 local Asks = require("@ds/orch_asks")
 local OrchMap = require("@ds/orch_map")
+local MapMenu = require("@app/screens/control/map_menu")
 local Machines = require("@ds/orch_machines")
 local Comms = require("@ds/orch_comms")
 local OrchBoard = require("@ds/orch_board")
@@ -503,19 +504,25 @@ M.map_view = ui.persist("control_map", OrchMap.DEFAULT)
 local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
 
 local function map(): Node
-	return OrchMap.Map {
-		world = world,
-		view = M.map_view,
-		timeline = function(): { [string]: { any } }
-			return timeline:get()
-		end,
-		comms = function(): { any }
-			return orchestration.comms:get()
-		end,
-		on_open_chat = M.open_chat,
-		on_open_orchestrator = function(id: string)
-			route.orchestrator(id)
-		end,
+	return ui.column {
+		w_full = true,
+		OrchMap.Map {
+			world = world,
+			view = M.map_view,
+			timeline = function(): { [string]: { any } }
+				return timeline:get()
+			end,
+			comms = function(): { any }
+				return orchestration.comms:get()
+			end,
+			on_open_chat = M.open_chat,
+			on_open_orchestrator = function(id: string)
+				route.orchestrator(id)
+			end,
+			-- A secondary click on anything on it (screens/control/map_menu).
+			menu = MapMenu.entries,
+		},
+		MapMenu.Dialogs(),
 	}
 end
 

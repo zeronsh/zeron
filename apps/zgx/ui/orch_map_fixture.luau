@@ -41,14 +41,31 @@ orchestration.now:set(sample.now)
 orchestration.loads:set(sample.loads)
 orchestration.comms:set(sample.comms)
 ui.shared("orchestration.timeline", {}):set(sample.timeline)
-local stub = orchestration :: any
-stub.loads_wanted = function(_on: boolean) end
-stub.op = function(_op: any): any
+-- The host's calls, noted in `calls` and answered at once.
+local calls = ui.state("calls", "")
+local function note(what: string)
+	calls:set(if calls:peek() == "" then what else `{calls:peek()},{what}`)
+end
+local function settled(): any
 	return { after = function(_self: any, done: any)
 		if done then
 			(done :: any)(nil)
 		end
 	end }
+end
+local stub = orchestration :: any
+stub.loads_wanted = function(_on: boolean) end
+stub.op = function(op: any): any
+	note(`op:{op.op}:{op.chatId or op.id or ""}`)
+	return settled()
+end
+local s_stub = sessions :: any
+s_stub.archive = function(id: string)
+	note(`archive:{id}`)
+end
+s_stub.stop = function(id: string): any
+	note(`stop:{id}`)
+	return settled()
 end
 
 -- A chat watched in a page's own composer (Capture's, the Brain dump's):
@@ -123,6 +140,22 @@ ui.command { id = "map_small", title = "Map: a small world", run = function()
 		dumps = {},
 	})
 	orchestration.loads:set({ ["dev-desk"] = { cpu = 0.07, mem_used = 17e9, mem_total = 67e9, online = true, at = t } })
+end }
+-- A secondary click's menu for the id in `map_menu_id`, as on the Map.
+local menu_id = ui.state("map_menu_id", "")
+ui.command { id = "map_menu", title = "Map: open a menu", run = function()
+	OrchMap.open_menu(menu_id:peek())
+end }
+-- Choose `map_menu_pick` (a label, a submenu's after "/") from the menu
+-- for `map_menu_id`, as a click there would.
+local menu_pick = ui.state("map_menu_pick", "")
+ui.command { id = "map_menu_choose", title = "Map: choose from a menu", run = function()
+	local entries = require("@app/screens/control/map_menu").entries(menu_id:peek()) or {}
+	for _, e in entries do
+		if e and e.label == menu_pick:peek() and e.on_select then
+			e.on_select()
+		end
+	end
 end }
 -- A report coming in (a pulse along a rail).
 ui.command { id = "fixture.report", title = "Fixture: a crew report", run = function()

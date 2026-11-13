@@ -1,8 +1,10 @@
 -- What a secondary click on something on the Map offers (each of its
--- views): a chat's actions as the sidebar has them, an orchestrator's with
--- its own (Pause or Resume, Settings, Archive), a machine's Rename. Never
--- Delete here. (The sidebar's own menu is to be shared, screens/shell; till
--- then these entries say the same and do the same.)
+-- views): the chat's own menu, as the sidebar has it (screens/shell/
+-- chat_menu, never its Delete here), after the Map's few (Open, Stop while
+-- it works, What's up?, Pin to Progress); a crew thread's Release from crew
+-- in place of Make orchestrator; an orchestrator's own Pause or Resume,
+-- Settings and Archive in place of the chat's Archive; a machine's Rename.
+-- (Where the sidebar hasn't loaded, a fixture's, the same items made here.)
 --
 --   map_menu.entries(id)   the entries for `id` (a chat's or an
 --                          orchestrator's id, a machine's as "dev:<id>")
@@ -16,6 +18,7 @@ local orchestration = require("@account/orchestration")
 local route = require("@app/screens/shell/route")
 local orch_actions = require("@app/screens/orchestrator/actions")
 local progress = require("@app/screens/control/progress")
+local ChatMenu = require("@app/screens/shell/chat_menu")
 
 local M = {}
 
@@ -120,7 +123,7 @@ local function chat_entries(id: string, orch: any?): { any }
 	})
 	-- Into one of the sidebar's sections, or none.
 	local into: { any } = {}
-	for _, s in (sessions.places:peek() or {}).sections or {} do
+	for _, s in ((sessions.places:peek() or {}) :: any).sections or {} do
 		table.insert(into, {
 			label = s.name or "",
 			on_select = function()
@@ -235,6 +238,105 @@ local function chat_entries(id: string, orch: any?): { any }
 	return out
 end
 
+-- The Map's own first items for a chat: Open, Stop (while it works),
+-- What's up?, Pin to Progress.
+local function lead(id: string, orch: any?): { any }
+	local c = chats()[id] or {}
+	local out: { any } = {
+		{
+			label = locale.s("common.open"),
+			icon = "arrow-up-right",
+			on_select = function()
+				if orch then
+					route.orchestrator(id)
+				else
+					route.open_session(id)
+				end
+			end,
+		},
+	}
+	if c.status == "working" or c.status == "waiting" then
+		table.insert(out, {
+			label = locale.s("control.map_menu.stop"),
+			icon = "stop",
+			on_select = function()
+				sessions.stop(id):after(function() end, said("control.map_menu.failed"))
+			end,
+		})
+	end
+	table.insert(out, {
+		label = locale.s("ds.orch.progress.whats_up"),
+		icon = "info-square",
+		on_select = function()
+			progress.check(id)
+		end,
+	})
+	local pinned = progress.pinned(id)
+	table.insert(out, {
+		label = locale.s(if pinned then "control.map_menu.unpin" else "ds.orch.progress.pin"),
+		icon = "pin",
+		on_select = function()
+			progress.pin(id, not pinned)
+		end,
+	})
+	table.insert(out, { separator = true })
+	return out
+end
+
+-- The shared menu, the Map's way: its lead first; a crew thread released
+-- rather than made an orchestrator; an orchestrator's own last items.
+local function shared(id: string, orch: any?): { any }?
+	local base = ChatMenu.entries(id, { delete = false })
+	if not base then
+		return nil
+	end
+	local crew = data.crew_by_chat(orchestration.now:peek())[id] ~= nil
+	local make = locale.s("orch.sidebar.make_orchestrator")
+	local archive = locale.s("common.archive")
+	local out = lead(id, orch)
+	for _, e in base do
+		if e and e.label == make and (crew or orch) then
+			if crew and not orch then
+				table.insert(out, {
+					label = locale.s("control.map_menu.release"),
+					icon = "close-circle",
+					on_select = function()
+						orchestration.op({ op = "releaseFromCrew", chatId = id }):after(function() end, said("control.map_menu.failed"))
+					end,
+				})
+			end
+		elseif e and e.label == archive and orch then
+			-- (Its own, below.)
+		elseif e then
+			table.insert(out, e)
+		end
+	end
+	if orch then
+		table.insert(out, {
+			label = locale.s(if orch.paused then "orch.sidebar.resume" else "orch.sidebar.pause"),
+			icon = if orch.paused then "action-play" else "action-pause",
+			on_select = function()
+				orch_actions.set_paused(id, not orch.paused)
+			end,
+		})
+		table.insert(out, {
+			label = locale.s("orch.sidebar.settings"),
+			icon = "settings-minimalistic",
+			on_select = function()
+				orch_actions.settings(id)
+			end,
+		})
+		table.insert(out, {
+			label = locale.s("orch.sidebar.archive"),
+			icon = "archive-minimalistic",
+			on_select = function()
+				orch_actions.archive(id)
+			end,
+		})
+	end
+	return out
+end
+
 function M.entries(id: string): { any }?
 	local device = string.match(id, "^dev:(.+)$")
 	if device then
@@ -256,10 +358,10 @@ function M.entries(id: string): { any }?
 	end
 	for _, o in orchestration.now:peek().orchestrators or {} do
 		if o.id == id then
-			return chat_entries(id, o)
+			return shared(id, o) or chat_entries(id, o)
 		end
 	end
-	return chat_entries(id, nil)
+	return shared(id, nil) or chat_entries(id, nil)
 end
 
 -- The rename it opens: a chat's (an orchestrator's) or a machine's name.

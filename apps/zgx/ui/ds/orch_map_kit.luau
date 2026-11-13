@@ -128,12 +128,16 @@ function M.MenuField(p: MenuProps): Node
 		hook = function(open: any)
 			opener = open
 		end,
-		on_visible = function(_v: boolean, el: Element)
-			origin = el
-		end,
 		label = locale.t("ds.orch.map.menu"),
 		w_full = true,
-		p.child,
+		-- (Where it is in the window: a menu opened for an id hangs there.)
+		ui.column {
+			w_full = true,
+			on_visible = function(_v: boolean, el: Element)
+				origin = el
+			end,
+			p.child,
+		},
 	}
 end
 

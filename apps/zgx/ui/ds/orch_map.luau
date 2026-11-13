@@ -47,9 +47,30 @@ export type Props = {
 	view: State<View>?,
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
+	-- A secondary click's menu for an id (a chat's, an orchestrator's, a
+	-- machine's as "dev:<id>"): its entries, or nil for none.
+	menu: ((id: string) -> { any }?)?,
 }
 
 local M = {}
+
+-- Ways the view showing opens its menu for an id (as a secondary click
+-- there would), by where they hang: `Map.open_menu(id)` tries them.
+-- (Keyed by the view's name, or its name and the thing's: only the view
+-- showing is asked, not one on its way out.)
+local openers: { [string]: (id: string) -> boolean } = {}
+local showing = ""
+local function register(key: string, open: ((id: string) -> boolean)?)
+	openers[key] = open :: any
+end
+function M.open_menu(id: string): boolean
+	for key, open in openers do
+		if (key == showing or string.sub(key, 1, #showing + 1) == `{showing}:`) and open(id) then
+			return true
+		end
+	end
+	return false
+end
 
 M.VARIANTS = { "topology", "timeline", "machines", "graph" }
 M.WINDOWS = { 15, 60 }
@@ -117,6 +138,7 @@ M.Map = ui.component(function(props: Props): Node
 		ui.presence(function(): string
 			return valid(view:get()).variant
 		end, function(variant: string): Node
+			showing = variant
 			if variant == "timeline" then
 				return Timeline.View {
 					world = props.world,
@@ -131,6 +153,8 @@ M.Map = ui.component(function(props: Props): Node
 					end,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
+					menu = props.menu,
+					register = register,
 				}
 			elseif variant == "graph" then
 				return Graph.View {
@@ -139,6 +163,8 @@ M.Map = ui.component(function(props: Props): Node
 					comms = props.comms,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
+					menu = props.menu,
+					register = register,
 				}
 			elseif variant == "machines" then
 				return Machines.View {
@@ -146,6 +172,8 @@ M.Map = ui.component(function(props: Props): Node
 					chat = chat,
 					on_open_chat = props.on_open_chat,
 					on_open_orchestrator = props.on_open_orchestrator,
+					menu = props.menu,
+					register = register,
 				}
 			end
 			return Topology {
@@ -154,6 +182,8 @@ M.Map = ui.component(function(props: Props): Node
 				comms = props.comms,
 				on_open_chat = props.on_open_chat,
 				on_open_orchestrator = props.on_open_orchestrator,
+				menu = props.menu,
+				register = register,
 			}
 		end, { w_full = true }),
 	}
