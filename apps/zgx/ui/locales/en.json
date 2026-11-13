@@ -3872,5 +3872,45 @@
       "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
       "imported_body": "It's under Yours."
     }
+  },
+  "orch": {
+    "board": {
+      "label": "Board",
+      "column": {
+        "inbox": "Inbox",
+        "now": "Now",
+        "next": "Next",
+        "blocked": "Blocked",
+        "review": "Review",
+        "done": "Done today"
+      },
+      "priority": {
+        "title": "Priority",
+        "urgent": "Urgent",
+        "high": "High",
+        "normal": "Normal",
+        "low": "Low"
+      },
+      "all": "All",
+      "open_thread": "Open thread",
+      "open_thread_named": "Open “{title}”",
+      "outcome": "Outcome",
+      "card_actions": "Card actions",
+      "threads": "{n, plural, one {# thread} other {# threads}}"
+    },
+    "reports": {
+      "title": "Crew updates",
+      "thread": "Thread",
+      "open": "Open {title}: {summary}",
+      "show_more": "Show {n} more",
+      "show_less": "Show less",
+      "state": {
+        "done": "Done",
+        "blocked": "Blocked",
+        "failed": "Failed",
+        "progress": "Update",
+        "message": "Message"
+      }
+    }
   }
 }

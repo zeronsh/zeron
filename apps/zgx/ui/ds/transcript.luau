@@ -55,6 +55,7 @@ local Mark = require("@self/mark")
 local glass = require("@self/glass")
 local control = require("@self/control")
 local Quote = require("@self/quote")
+local OrchReports = require("@self/orch_reports")
 local SelectionMenu = require("@self/selection_menu")
 local Rail = require("@self/rail")
 local motion = require("@self/motion")
@@ -63,9 +64,10 @@ local locale = require("@self/locale")
 export type Tool = Activity.Tool
 export type Message = {
 	id: string,
-	-- A person's, a reply, or the seam where the chat moved to another
-	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	-- A person's, a reply, the seam where the chat moved to another
+	-- agent (`[mark] From → [mark] To` over the prompt that moved it), or
+	-- an orchestrator's crew updates (the engine's, never the person's).
+	role: "user" | "assistant" | "switch" | "crew_reports",
 	text: string,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
@@ -103,6 +105,8 @@ export type Message = {
 	to_mark: Mark.Name?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
+	-- Crew updates': each report (ds/orch_reports), in the order filed.
+	reports: { OrchReports.Report }?,
 }
 
 export type Props = {
@@ -360,6 +364,31 @@ local function switch_side(name: string?, mark: Mark.Name?): Node
 		min_w = 0,
 		if mark then ui.div { aria_hidden = true, Mark { name = mark, size = 14, bare = true } } else nil,
 		ui.text { name or "", literal = true, truncate = true, weight = "$font.weight.medium" },
+	}
+end
+
+-- An orchestrator's crew updates (the engine's `crewReports` message, its
+-- wake turn): a card of their reports, each opening its thread; never a
+-- bubble of the person's.
+local function crew_reports(state: State<Message>, props: Props): Node
+	return ui.column {
+		class = "message message-crew-reports",
+		provide = { message = state:peek().id },
+		w_full = true,
+		OrchReports {
+			reports = function(): { OrchReports.Report }
+				return state:get().reports or {}
+			end,
+			title_of = function(chat: string): string?
+				local c = if props.chat_of then props.chat_of(chat) else nil
+				return if c then c.title else nil
+			end,
+			on_open = function(chat: string)
+				if props.open_link then
+					props.open_link(`zeron-chat:{chat}`)
+				end
+			end,
+		},
 	}
 end
 
@@ -1755,6 +1784,10 @@ local function Transcript(props: Props): Node
 		-- prompt's own height (pinned below), so the two take the same room
 		-- and nothing moves as the reply arrives.
 		local function need(): number
+			-- (Crew updates are the engine's: they hold no prompt's runway.)
+			if m.role == "crew_reports" then
+				return 0
+			end
 			local h = held:get()
 			if h.id == m.id then
 				return h.h
@@ -1864,7 +1897,7 @@ local function Transcript(props: Props): Node
 				max_w = measure,
 				min_w = 0,
 				-- Anywhere on a message shows its lane (Zeron's entry hover).
-				on_hover = if m.role == "switch"
+				on_hover = if m.role == "switch" or m.role == "crew_reports"
 					then nil
 					else function(inside: boolean)
 						if inside then
@@ -1874,6 +1907,7 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "crew_reports" then crew_reports(state, props)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the

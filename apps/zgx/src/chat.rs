@@ -365,6 +365,9 @@ fn plainly_has_row(entry: &Json) -> bool {
     if entry["id"].as_str().is_none() {
         return false;
     }
+    if is_crew_reports(entry) {
+        return true;
+    }
     match entry["role"].as_str() {
         Some("user") => true,
         // As `blocks_of`: a tool that isn't its output alone, or a thought with words.
@@ -2309,8 +2312,11 @@ impl View {
             // then working, as the shipping app's working trailer says
             // (transcript.rs `sending_bridge`): sending while the send is
             // newer than the session's turn, working once the turn starts.
+            // (A crew updates card is the engine's, not a prompt: no
+            // sending or working line under it.)
             if let Some(last) = open.entries.last()
                 && last["role"].as_str() == Some("user")
+                && !last.json.as_ref().is_some_and(is_crew_reports)
                 && let Some(Value::Map(_)) = list.last()
             {
                 let sent = last["createdAt"].as_f64().unwrap_or(0.) / 1000.;
@@ -4503,9 +4509,69 @@ impl Subagents {
     }
 }
 
+/// Whether `entry` carries crew reports (an orchestrator's "Crew updates").
+fn is_crew_reports(entry: &Json) -> bool {
+    entry["parts"].as_array().into_iter().flatten().any(|p| p["kind"].as_str() == Some("crewReports"))
+}
+
+/// The crew reports `entry` carries, as ds/orch_reports reads them: each
+/// `{ id, from_chat, item_id?, state, summary, detail?, progress?, at }`,
+/// its state in snake_case and its time in Unix seconds, in the order filed
+/// (every `crewReports` part of it, one after another). None: it has none.
+fn crew_reports_of(entry: &Json) -> Option<Value> {
+    if !is_crew_reports(entry) {
+        return None;
+    }
+    let reports: Vec<Value> = entry["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"].as_str() == Some("crewReports"))
+        .flat_map(|p| p["reports"].as_array().into_iter().flatten())
+        .filter_map(|r| {
+            let id = r["id"].as_str()?;
+            let from = r["fromChat"].as_str()?;
+            let state = match r["state"].as_str().unwrap_or_default() {
+                s @ ("progress" | "done" | "blocked" | "failed" | "message") => s,
+                _ => "other",
+            };
+            let at = r["at"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.timestamp())
+                .or_else(|| seconds(&r["at"]));
+            let text = |key: &str| r[key].as_str().filter(|s| !s.trim().is_empty()).map_or(Value::Nil, Value::from);
+            Some(Value::record([
+                ("id", Value::from(id)),
+                ("from_chat", Value::from(from)),
+                ("item_id", text("itemId")),
+                ("state", Value::from(state)),
+                ("summary", Value::from(single_line(r["summary"].as_str().unwrap_or_default()).as_str())),
+                ("detail", text("detail")),
+                ("progress", r["progress"].as_f64().map_or(Value::Nil, Value::Num)),
+                ("at", at.map_or(Value::Nil, |t| Value::Num(t as f64))),
+            ]))
+        })
+        .collect();
+    Some(Value::List(reports.into()))
+}
+
 /// An entry as ds/transcript's message; nil for one it doesn't show.
 pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
     let id = entry["id"].as_str()?;
+    // Crew reports filed in an orchestrator's transcript (the engine's
+    // `crewReports` part, the wake turn's own message): a "Crew updates"
+    // card, never the person's bubble, whatever role carries it.
+    if let Some(reports) = crew_reports_of(entry) {
+        let created = entry["createdAt"].as_f64().unwrap_or(0.) / 1000.;
+        return Some(Value::record([
+            ("id", Value::from(id)),
+            ("role", Value::from("crew_reports")),
+            ("text", Value::from("")),
+            ("reports", reports),
+            ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+        ]));
+    }
     match entry["role"].as_str()? {
         "user" => {
             let text = entry["parts"]
@@ -7016,6 +7082,52 @@ mod tests {
         assert_eq!(refs, ["a", "b"]);
         assert_eq!(found[0].field("title").map(text).as_deref(), Some("first"));
         assert_eq!(found[1].field("at").and_then(Value::as_f64), Some(2.));
+    }
+
+    /// Crew reports in an orchestrator's transcript (the engine's
+    /// `crewReports` part, on the wake turn's user entry) are a "Crew
+    /// updates" card, never the person's bubble: each report's thread,
+    /// state, summary and time, in the order filed.
+    #[test]
+    fn crew_reports_are_a_card_not_a_prompt() {
+        let entry = json!({
+            "id": "w1", "role": "user", "createdAt": 1_794_470_000_000_i64,
+            "parts": [
+                { "kind": "text", "id": "t", "text": "[Crew updates]\n- th-a done: shipped" },
+                { "kind": "crewReports", "reports": [
+                    { "id": "rp-1", "orchestratorId": "orc", "fromChat": "th-a", "itemId": "it-1", "state": "done",
+                      "summary": "Shipped the\nregistry", "detail": "All green.", "progress": 1.0, "at": "2026-11-12T18:30:00Z" },
+                    { "id": "rp-2", "orchestratorId": "orc", "fromChat": "th-b", "state": "blocked",
+                      "summary": "Needs a decision", "at": "2026-11-12T18:35:00+00:00" },
+                    { "id": "rp-3", "orchestratorId": "orc", "fromChat": "th-c", "state": "someday",
+                      "summary": "?", "at": "2026-11-12T18:36:00Z" },
+                ] },
+            ],
+        });
+        assert!(super::plainly_has_row(&entry));
+        let m = message(&entry, None).expect("a card shows");
+        let is = |v: Option<&Value>, want: &str| matches!(v, Some(Value::Str(s)) if s.as_ref() == want);
+        assert!(is(m.field("role"), "crew_reports"));
+        assert!(is(m.field("text"), ""), "the wake's generated prompt is the agent's, not shown");
+        assert!(m.field("sender").is_none_or(|s| matches!(s, Value::Nil)));
+        assert!(m.field("copy").is_none_or(|s| matches!(s, Value::Nil)));
+        let Some(Value::List(reports)) = m.field("reports") else { panic!("reports") };
+        assert_eq!(reports.len(), 3);
+        assert!(is(reports[0].field("id"), "rp-1"));
+        assert!(is(reports[0].field("from_chat"), "th-a"));
+        assert!(is(reports[0].field("item_id"), "it-1"));
+        assert!(is(reports[0].field("state"), "done"));
+        assert!(is(reports[0].field("summary"), "Shipped the registry"));
+        assert!(is(reports[0].field("detail"), "All green."));
+        assert_eq!(reports[0].field("progress").and_then(Value::as_f64), Some(1.));
+        assert_eq!(reports[0].field("at").and_then(Value::as_f64), Some(1_794_508_200.));
+        assert!(is(reports[1].field("state"), "blocked"));
+        assert!(reports[1].field("item_id").is_none_or(|v| matches!(v, Value::Nil)));
+        assert_eq!(reports[1].field("at").and_then(Value::as_f64), Some(1_794_508_500.));
+        assert!(is(reports[2].field("state"), "other"), "a newer peer's state");
+        // A plain prompt is still the person's.
+        let plain = json!({ "id": "u", "role": "user", "parts": [{ "kind": "text", "id": "t", "text": "hi" }] });
+        assert!(is(message(&plain, None).unwrap().field("role"), "user"));
     }
 
     #[test]
