@@ -4046,7 +4046,13 @@
       "card_actions": "Card actions",
       "threads": "{n, plural, one {# thread} other {# threads}}",
       "empty": "看板上没有内容",
-      "from_dump": "From a dump"
+      "from_dump": "From a dump",
+      "move_to": "Move to",
+      "show_dump": "Show dump",
+      "deleted": "Deleted from the board",
+      "undo": "Undo",
+      "delete_failed": "Couldn't delete it",
+      "undo_failed": "Couldn't put it back"
     },
     "reports": {
       "title": "Crew updates",

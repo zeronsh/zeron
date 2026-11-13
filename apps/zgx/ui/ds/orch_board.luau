@@ -29,8 +29,10 @@
 -- pressed and moved a few points, from anywhere on it and however fast, it
 -- lifts and follows the pointer, the cards where it would land making room;
 -- let go over the board it lands there, elsewhere (or Escape) it goes back.
--- A click opens its thread; a secondary click sets the priority or opens a
--- thread.
+-- A click opens its thread. A secondary click opens its menu: its thread,
+-- Move to a column, its priority, the dump it came from, and Delete, which
+-- takes it off the board at once (never its chat), an Undo beside it for a
+-- while.
 --
 --   OrchBoard {
 --     items = function() return state.items end,
@@ -44,6 +46,9 @@
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
 --     on_open_thread = fn(chat), on_link = fn(link),
 --     on_source = fn({ dump_id, route_id }),  -- a card's dump, shown
+--     on_remove = fn(id) -> promise?,  -- a card taken off the board (its
+--                                      -- chat untouched); Undo puts it
+--     on_restore = fn(item) -> promise?,  -- back as it was
 --     compact = true,            -- denser cards (a page's side pane)
 --     project_of = fn(chat) -> string?,  -- the name of the project a chat works in
 --     context = false,           -- cards say nothing of whose they are (an
@@ -68,6 +73,7 @@ local hue = require("@self/orch_hue")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
 local data = require("@self/orch_data")
+local toast = require("@self/toast")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -87,6 +93,8 @@ export type Item = {
 	done: number?,
 	-- The dump it came from, where a dump's part made it.
 	source: { dump_id: string?, route_id: string? }?,
+	-- Taken off the board by the person (kept, never shown).
+	removed: boolean?,
 }
 export type Orchestrator = { id: string, kind: string?, name: string, hue: number, archived: boolean? }
 export type Todo = { done: number, total: number, current: string? }
@@ -106,6 +114,8 @@ export type Props = {
 	on_open_thread: ((chat: string) -> ())?,
 	on_link: ((link: Link) -> ())?,
 	on_source: ((source: { dump_id: string?, route_id: string? }) -> ())?,
+	on_remove: ((id: string) -> any)?,
+	on_restore: ((item: Item) -> any)?,
 	compact: boolean?,
 	project_of: ((chat: string) -> string?)?,
 	context: boolean?,
@@ -342,6 +352,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- engine answers a beat later): it stays where it was let go.
 	type Pending = { id: string, state: string, order: number }
 	local pending = ui.use_state(nil :: Pending?)
+	-- Cards deleted here, gone at once (the engine's word follows).
+	local gone = ui.use_state({} :: { [string]: boolean })
 
 	-- The items shown, by column, each sorted (filtered first).
 	local shown = ui.computed(function(): { [string]: { Item } }
@@ -354,7 +366,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 		for _, c in columns do
 			out[c.key] = {}
 		end
+		local hidden = gone:get()
 		for _, it in list do
+			if it.removed or hidden[it.id] then
+				continue
+			end
 			if moved and it.id == moved.id and (it.state ~= moved.state or it.order ~= moved.order) then
 				local copy = table.clone(it)
 				copy.state, copy.order = moved.state, moved.order
@@ -602,10 +618,100 @@ local OrchBoard = ui.component(function(props: Props): Node
 		return c ~= nil and type(payload) == "table" and payload.tag == DRAG_TAG and payload.id == c.id
 	end
 
-	-- A card's menu: its priority, its threads.
+	-- A card taken off the board: gone at once, an Undo beside it for a
+	-- while (it comes back as it was); back, with a word, if that failed.
+	local function set_gone(id: string, on: boolean)
+		local now = table.clone(gone:peek())
+		now[id] = if on then true else nil
+		gone:set(now)
+	end
+	local function remove(it: Item)
+		local on_remove = props.on_remove
+		if not on_remove then
+			return
+		end
+		local id = it.id
+		set_gone(id, true)
+		local function failed()
+			set_gone(id, false)
+			toast.show { title = locale.s("orch.board.delete_failed"), tone = "danger" }
+		end
+		local sent = on_remove(id)
+		if sent and (sent :: any).after then
+			(sent :: any):after(function() end, failed)
+		end
+		toast.show {
+			key = `orch-board-removed-{id}`,
+			title = locale.s("orch.board.deleted"),
+			body = it.title,
+			duration = 6000,
+			action = if props.on_restore
+				then {
+					label = locale.s("orch.board.undo"),
+					run = function()
+						local back: any = (props.on_restore :: any)(it)
+						set_gone(id, false)
+						local function undo_failed()
+							toast.show { title = locale.s("orch.board.undo_failed"), tone = "danger" }
+						end
+						if back ~= nil and (back :: any).after ~= nil then
+							(back :: any):after(function() end, undo_failed)
+						end
+					end,
+				}
+				else nil,
+		}
+	end
+
+	-- Moved to the end of `col`.
+	local function move_to(it: Item, col: Column)
+		local last = 0
+		for _, x in shown:peek()[col.key] or {} do
+			if x.id ~= it.id then
+				last = math.max(last, x.order or 0)
+			end
+		end
+		local order = last + 1
+		pending:set({ id = it.id, state = col.state, order = order })
+		;(props.on_move :: any)(it.id, col.state, order)
+	end
+
+	-- A card's menu: its thread, Move to, its priority, its dump; Delete.
 	local function menu(item: () -> Item): { any }?
 		local it = item()
 		local entries: { any } = {}
+		local threads = it.threads or {}
+		if props.on_open_thread and #threads > 0 then
+			for _, chat in threads do
+				local t = if props.thread_of then props.thread_of(chat) else nil
+				table.insert(entries, {
+					label = if #threads == 1 or not t
+						then locale.s("orch.board.open_thread")
+						else locale.s("orch.board.open_thread_named", { title = t.title }),
+					icon = "chat-round-line",
+					on_select = function()
+						(props.on_open_thread :: any)(chat)
+					end,
+				})
+			end
+		end
+		if props.on_move then
+			local sub: { any } = {}
+			for _, c in columns do
+				table.insert(sub, {
+					label = locale.s(c.name),
+					checked = function(): boolean
+						return item().state == c.state
+					end,
+					on_select = function()
+						if item().state ~= c.state then
+							move_to(item(), c)
+						end
+					end,
+				})
+			end
+			table.insert(entries, { label = locale.s("orch.board.move_to"), icon = "arrow-right", submenu = sub })
+		end
 		if props.on_priority then
 			local sub: { any } = {}
 			for _, p in PRIORITIES do
@@ -621,23 +727,28 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 			table.insert(entries, { label = locale.s("orch.board.priority.title"), icon = "flag", submenu = sub })
 		end
-		local threads = it.threads or {}
-		if props.on_open_thread and #threads > 0 then
+		local src = it.source
+		if props.on_source and src and src.dump_id and src.dump_id ~= "" then
+			table.insert(entries, {
+				label = locale.s("orch.board.show_dump"),
+				icon = "pen-new-square",
+				on_select = function()
+					(props.on_source :: any)(src)
+				end,
+			})
+		end
+		if props.on_remove then
 			if #entries > 0 then
 				table.insert(entries, { separator = true })
 			end
-			for _, chat in threads do
-				local t = if props.thread_of then props.thread_of(chat) else nil
-				table.insert(entries, {
-					label = if #threads == 1 or not t
-						then locale.s("orch.board.open_thread")
-						else locale.s("orch.board.open_thread_named", { title = t.title }),
-					icon = "chat-round-line",
-					on_select = function()
-						(props.on_open_thread :: any)(chat)
-					end,
-				})
-			end
+			table.insert(entries, {
+				label = locale.s("common.delete"),
+				icon = "trash-bin-minimalistic",
+				danger = true,
+				on_select = function()
+					remove(item())
+				end,
+			})
 		end
 		return if #entries > 0 then entries else nil
 	end

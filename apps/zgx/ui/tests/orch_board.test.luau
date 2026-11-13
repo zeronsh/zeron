@@ -359,3 +359,47 @@ test("orch board: done today is since midnight, on the board and in the Control 
 	expect(app:has('#control-widget-board >> "1 done today"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+test("orch board: a card's menu, its thread, Move to, priority, its dump, Delete", function()
+	local app = board()
+	app:set_state("orch_board_items", {
+		{ id = "it-d", orchestrator_id = "orc-orch", title = "From what was said", state = "planned", priority = "normal", order = 1, threads = { "th-ui-control" }, source = { dump_id = "dp-2", route_id = "rt-5" } },
+	})
+	app:frames(10)
+	app:right_click('#orch-col-next >> role:button "From what was said"')
+	app:frames(10)
+	for _, name in { "Open thread", "Move to", "Priority", "Show dump", "Delete" } do
+		expect(app:has(`role:menuitem "{name}"`)).to_be(true)
+	end
+	-- Show dump.
+	app:click('role:menuitem "Show dump"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("source:dp-2")
+	-- Move to.
+	app:right_click('#orch-col-next >> role:button "From what was said"')
+	app:frames(10)
+	app:click('role:menuitem "Move to"')
+	app:frames(10)
+	app:click('role:menuitem "Review"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("move:it-d:review:")
+	expect(app:has('#orch-col-review >> role:button "From what was said"')).to_be(true)
+end)
+
+test("orch board: Delete takes a card off the board at once, Undo puts it back", function()
+	local app = board()
+	app:right_click('#orch-col-next >> role:button "Phase 2 migration"')
+	app:frames(10)
+	app:click('role:menuitem "Delete"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("remove:it-phase2")
+	expect(app:has('#orch-col-next >> role:button "Phase 2 migration"')).to_be(false)
+	-- Never its chat: no other call.
+	expect(app:state("calls")).never.to_contain("open:")
+	expect(app:has('"Deleted from the board"')).to_be(true)
+	app:click('role:button "Undo"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("restore:it-phase2:Phase 2 migration")
+	expect(app:has('#orch-col-next >> role:button "Phase 2 migration"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
