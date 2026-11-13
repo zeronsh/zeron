@@ -58,6 +58,7 @@ mod math;
 mod menu_bar;
 mod mermaid;
 mod orchestration;
+mod orchestration_timeline;
 mod plugins;
 mod previews;
 mod projects;
@@ -790,6 +791,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         // Orchestrators, their crews, board, asks and Brain dump
         // (src/orchestration.rs).
         orchestration::install(cx, &host);
+        // What each chat has been doing lately (src/orchestration_timeline.rs).
+        orchestration_timeline::install(cx, &host);
         // What there is to update, on every device (src/updates.rs).
         updates::install(&host);
         // Adding a project, removing one (src/projects.rs).
