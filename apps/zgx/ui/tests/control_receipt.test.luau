@@ -136,6 +136,9 @@ test("each chip's menu opens under it, from a box of its own, with places to mov
 		app:frames(5)
 	end
 	-- An unsure part's chip too.
+	app = open()
+	app:resize(2023, 1102)
+	app:frames(30)
 	app:click("#control-history-toggle")
 	app:frames(10)
 	app:click(".control-history-row")
