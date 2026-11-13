@@ -26,6 +26,20 @@ local function listed(app: any): { string }
 	return out
 end
 
+-- What a stopwatch shows: its figures at rest on its line.
+local function face(app: any, target: string): string
+	local tree = app:tree(target)
+	local top = tree:match(" %-?%d+,(%-?%d+) ")
+	local out = {}
+	for line in tree:gmatch("[^\n]+") do
+		local t, y = line:match('text "(.-)" %-?%d+,(%-?%d+) ')
+		if t and y == top and not line:find(" hidden") then
+			table.insert(out, t)
+		end
+	end
+	return table.concat(out)
+end
+
 test("control progress: a widget of its own, in the right column", function()
 	local app = open()
 	expect(app:has("#control-right >> #control-widget-progress")).to_be(true)
@@ -104,10 +118,50 @@ end)
 test("control progress: nothing working, one quiet line", function()
 	local app = open()
 	app:command("fixture.progress_none")
+	app:command("fixture.all_idle")
 	app:frames(10)
 	expect(#listed(app)).to_be(0)
 	expect(app:has(`{W} >> .control-progress-empty >> ~"Nothing working"`)).to_be(true)
 	expect(app:has(`{W} >> .orch-block-head >> ~"working"`)).to_be(false)
+end)
+
+test("control progress: a host that writes no progress still shows what works", function()
+	local app = open()
+	app:command("fixture.progress_none")
+	app:set_state("progress_all", true)
+	app:frames(10)
+	-- Every chat working, waiting or waiting on you, from its session.
+	local ids = listed(app)
+	for _, id in { "orc-orch", "th-engine-state", "th-engine-flow", "th-ui-control", "th-ui-orch", "th-vpn-merge" } do
+		expect(table.find(ids, id) ~= nil).to_be(true)
+	end
+	-- Failed and done aren't working.
+	expect(table.find(ids, "th-ci-cache")).to_be(nil)
+	local UNIT = "#progress-full-th-engine-state"
+	-- Its state, what it's doing, its clock, where; no steps, no note.
+	expect(app:has(`{UNIT} >> .orch-progress-doing >> ~"cargo test -p zeron-engine"`)).to_be(true)
+	-- (Made an hour and a half ago for this task: at it since.)
+	expect(string.find(face(app, `{UNIT}-elapsed`), ":30:", 1, true) ~= nil).to_be(true)
+	expect(app:has(`{UNIT} >> ~"Orchestrators · desk"`)).to_be(true)
+	expect(app:has(`{UNIT} >> .orch-progress-cells`)).to_be(false)
+	expect(app:has(`{UNIT} >> .orch-progress-note`)).to_be(false)
+	expect(app:has(`{W} >> ~"6 working"`) or app:has(`{W} >> ~"5 working"`)).to_be(true)
+	-- What's up?: asked; nothing to say yet, quietly.
+	app:click(`{UNIT} >> .orch-progress-check`)
+	app:frames(10)
+	expect(app:state("calls")).to_be("loads_wanted:on,check:th-engine-state")
+	expect(app:has(`{UNIT} >> .orch-progress-note >> ~"No details yet"`)).to_be(true)
+	-- Waiting on you, from its session too.
+	expect(app:has(`#progress-full-th-ui-orch >> ~"Awaiting"`)).to_be(true)
+end)
+
+test("control progress: a proxy row draws as any other", function()
+	local app = open()
+	app:command("fixture.progress_proxy")
+	app:frames(10)
+	local UNIT = "#progress-full-th-engine-state"
+	expect(app:has(`{UNIT} >> ~"Proxy: running the engine tests."`)).to_be(true)
+	expect(app:has(`{UNIT} >> ~"last step 1m ago"`)).to_be(true)
 end)
 
 test("control progress: drawn wide and narrow, resized", function()

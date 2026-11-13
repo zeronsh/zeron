@@ -25,6 +25,19 @@ test("progress embed: crew rows and board cards on an orchestrator's page", func
 	end
 end)
 
+test("progress embed: crew rows' and board cards' lines without the host's rows", function()
+	local app = mount("control_page_fixture.luau")
+	app:resize(1440, 3200)
+	app:frames(30)
+	app:command("fixture.progress_none")
+	app:frames(10)
+	-- A card whose thread works: its line, from the session (its clock and menu).
+	expect(app:has("#control-board >> #progress-strip-th-engine-state")).to_be(true)
+	expect(app:has("#control-board >> #progress-strip-th-engine-state >> .orch-progress-menu")).to_be(true)
+	-- One whose thread failed: none.
+	expect(app:has("#control-board >> #progress-strip-th-ci-cache")).to_be(false)
+end)
+
 test("progress embed: a board card's line, pinned to the widget from its menu", function()
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 3200)
@@ -53,8 +66,14 @@ test("progress embed: a working session's line in its head", function()
 	expect(app:has("#session-header >> #chat-progress >> #progress-strip-th-engine-state")).to_be(true)
 	expect(app:has("#chat-progress >> ~\"5/8\"")).to_be(true)
 	expect(app:has("#chat-progress >> ~\"last step 2m ago\"")).to_be(true)
-	-- Done: no line.
+	-- No row from its host: still a line, from its session.
 	app:command("fixture.progress_none")
+	app:frames(20)
+	expect(app:has("#chat-progress >> #progress-strip-th-engine-state")).to_be(true)
+	expect(app:has("#chat-progress >> ~\"cargo test -p zeron-engine\"")).to_be(true)
+	expect(app:has("#chat-progress >> .orch-progress-cells")).to_be(false)
+	-- At rest: no line.
+	app:command("fixture.all_idle")
 	app:frames(20)
 	expect(app:has("#chat-progress")).to_be(false)
 	for _, size in { { 900, 900 }, { 1440, 900 } } do
