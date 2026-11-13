@@ -162,7 +162,11 @@ impl EngineRpc {
         Ok(dump.id)
     }
 
-    /// Record one fragment's route and deliver it. The route's id.
+    /// Record one fragment's route and deliver it. The route's id. A
+    /// question about a working thread's progress (`progress`) is answered
+    /// from its [`Progress`](zeron_proto::orchestration::Progress) instead:
+    /// asking it would interrupt its work.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn route(
         &self,
         dump_id: &str,
@@ -171,6 +175,7 @@ impl EngineRpc {
         intent: RouteIntent,
         message: String,
         candidates: Vec<RouteTarget>,
+        progress: bool,
     ) -> Result<String, RpcError> {
         let orch = self.orchestration().clone();
         let dump = orch
@@ -196,9 +201,19 @@ impl EngineRpc {
             item_id: None,
         };
         let brain = self.brain_of(&dump);
-        self.deliver_route(&dump, &mut route, brain.as_deref())
-            .await?;
+        let answered = match (&route.target, intent == RouteIntent::Question && progress) {
+            (RouteTarget::Chat { id } | RouteTarget::Orchestrator { id }, true) => self.progress_answer(id).await,
+            _ => None,
+        };
         let to = target_chat(&route.target).unwrap_or("").to_owned();
+        match answered {
+            Some(answer) => {
+                route.state = RouteState::Answered;
+                route.answer = Some(answer.clone());
+                orch.comms().say(CommKind::Answer, &to, super::comms::YOU, &answer);
+            }
+            None => self.deliver_route(&dump, &mut route, brain.as_deref()).await?,
+        }
         orch.workspace().write_orchestration(|doc| {
             let Some(mut current) = doc.dump(dump_id) else {
                 return;
@@ -217,6 +232,15 @@ impl EngineRpc {
             &route.excerpt,
         );
         Ok(route.id)
+    }
+
+    /// The answer to "how's it going?" for `chat`, from its progress, when
+    /// it is working (or waiting to go on); `None` when it isn't, so the
+    /// question goes to it as any would.
+    async fn progress_answer(&self, chat: &str) -> Option<String> {
+        let working = super::ops::chat_status(self, chat) == zeron_proto::SessionStatus::Working;
+        let (progress, _) = super::progress::check(self, chat).await.ok()?;
+        (working || progress.state.active()).then(|| progress.answer(Utc::now()))
     }
 
     /// `target` and `message` as a route delivers them: a task, priority or
