@@ -936,3 +936,132 @@ async fn a_capable_hosts_chat_is_never_proxied() {
     assert!(none.unwrap_err().contains("no progress"), "no row from its host yet");
     core.sessions.shutdown().await;
 }
+
+// ── Routes to chats on older hosts ──────────────────────────────────────────
+
+/// `chat`'s turn on `device` answered `message` with `reply`: its synced
+/// transcript, then its session row going working → idle.
+async fn answered_elsewhere(core: &crate::EngineCore, chat_id: &str, device: &str, message: &str, reply: &str) {
+    let row = |status, turn: Option<&str>| Session {
+        chat_id: chat_id.into(),
+        device_id: device.into(),
+        updated_at: Utc::now(),
+        last_completed_turn: turn.map(str::to_owned),
+        ..session(status)
+    };
+    core.workspace.record_session(&row(SessionStatus::Working, None));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let doc = core.doc_host.open(chat_id).unwrap();
+    let at = Utc::now().timestamp_millis();
+    let header = zeron_proto::agent_messages::agent_message("Brain dump", "brain", message);
+    doc.doc().push_message(&entry("u-route", MessageRole::User, vec![text(&header)], at)).unwrap();
+    doc.doc().push_message(&entry("a-route", MessageRole::Assistant, vec![text(reply)], at + 1000)).unwrap();
+    core.workspace.record_session(&row(SessionStatus::Idle, Some("turn-1")));
+}
+
+async fn wait_until<F: FnMut() -> bool>(mut done: F, what: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_question_to_a_chat_on_an_older_host_is_answered_when_its_turn_ends_there() {
+    use zeron_proto::orchestration::RouteState;
+    let (_temp, core, rpc) = core().await;
+    host(&core, "dev-remote", true); // writes progress, but files no routes
+    let (dump, route) = question_to(&core, &rpc, "old").await;
+    assert_eq!(route_of(&core, &dump, &route).state, RouteState::Delivered);
+    answered_elsewhere(&core, "old", "dev-remote", "When does the auth fix land?", REPLY).await;
+    wait_until(|| route_of(&core, &dump, &route).state == RouteState::Answered, "the answer from the older host").await;
+    assert_eq!(route_of(&core, &dump, &route).answer_full.as_deref(), Some(REPLY));
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_that_files_its_own_routes_is_left_to_it() {
+    use zeron_proto::orchestration::RouteState;
+    let (_temp, core, rpc) = core().await;
+    let mut device = zeron_proto::Device {
+        id: "dev-remote".into(),
+        name: "dev-remote".into(),
+        platform: "linux".into(),
+        last_seen_at: Some(Utc::now()),
+        created_at: None,
+        version: Some("0.3.3".into()),
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    };
+    device.capabilities.push(zeron_proto::capabilities::ORCHESTRATION_ROUTES_V1.to_owned());
+    core.workspace.upsert_device_row(&device);
+    let (dump, route) = question_to(&core, &rpc, "new").await;
+    answered_elsewhere(&core, "new", "dev-remote", "When does the auth fix land?", REPLY).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(route_of(&core, &dump, &route).state, RouteState::Delivered, "its host files it");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_that_syncs_in_after_the_row_is_still_found() {
+    use zeron_proto::orchestration::RouteState;
+    let (_temp, core, rpc) = core().await;
+    let (dump, route) = question_to(&core, &rpc, "slow").await;
+    // The row says the turn ended before its transcript arrived.
+    core.workspace.record_session(&Session {
+        chat_id: "slow".into(),
+        device_id: "dev-remote".into(),
+        updated_at: Utc::now(),
+        last_completed_turn: Some("turn-1".into()),
+        ..session(SessionStatus::Idle)
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(route_of(&core, &dump, &route).state, RouteState::Delivered);
+    let doc = core.doc_host.open("slow").unwrap();
+    let at = Utc::now().timestamp_millis();
+    doc.doc().push_message(&entry("u", MessageRole::User, vec![text("When does the auth fix land?")], at)).unwrap();
+    doc.doc().push_message(&entry("a", MessageRole::Assistant, vec![text(REPLY)], at + 1)).unwrap();
+    // The first retry (3 s) finds it.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while route_of(&core, &dump, &route).state != RouteState::Answered {
+        assert!(tokio::time::Instant::now() < deadline, "the reply, looked for again");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_question_nobody_answers_for_twenty_minutes_is_chased_quietly() {
+    use super::super::incoming::{ASK_AGAIN, DISMISS, chase_unanswered};
+    use zeron_proto::orchestration::AskState;
+    let (_temp, core, rpc) = core().await;
+    let orch = &core.orchestration;
+    let (dump, route) = question_to(&core, &rpc, "auth").await;
+    rpc.workspace_host().rename_chat("auth", "Auth thread").unwrap();
+    let delivered = route_of(&core, &dump, &route).delivered_at.expect("delivered at");
+    assert!(chase_unanswered(orch, &rpc, delivered + TimeDelta::minutes(19)).is_empty(), "not yet");
+    let raised = chase_unanswered(orch, &rpc, delivered + TimeDelta::minutes(21));
+    assert_eq!(raised.len(), 1);
+    assert!(chase_unanswered(orch, &rpc, delivered + TimeDelta::minutes(22)).is_empty(), "once");
+    let ask = orch.state().asks.into_iter().find(|a| a.id == raised[0]).unwrap();
+    assert!(ask.quiet);
+    assert_eq!(ask.question, "Auth thread hasn't answered: when does the auth fix land?");
+    assert_eq!(ask.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), [ASK_AGAIN, DISMISS]);
+    assert_eq!(ask.route_id.as_deref(), Some(route.as_str()));
+    // "Ask again": delivered again, its clock restarted.
+    let before = sent(&core, "auth").len();
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({"op":"answerAsk","id":ask.id,"answer":ASK_AGAIN})).await.unwrap();
+    assert_eq!(sent(&core, "auth").len(), before + 1);
+    assert!(sent(&core, "auth").last().unwrap().contains("When does the auth fix land?"));
+    assert!(route_of(&core, &dump, &route).delivered_at.unwrap() > delivered);
+    // Answered at last: a chase still open is moot.
+    let (dump2, route2) = question_to(&core, &rpc, "auth2").await;
+    let delivered2 = route_of(&core, &dump2, &route2).delivered_at.unwrap();
+    let open = chase_unanswered(orch, &rpc, delivered2 + TimeDelta::minutes(21));
+    assert_eq!(open.len(), 1);
+    super::super::watchers::record_answer(orch, &rpc, "auth2", &dump2, &route2, "when?", "Friday.".into()).await;
+    let chase = orch.state().asks.into_iter().find(|a| a.id == open[0]).unwrap();
+    assert_eq!(chase.state, AskState::Dismissed);
+    core.sessions.shutdown().await;
+}

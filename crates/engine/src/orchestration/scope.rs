@@ -250,6 +250,7 @@ mod tests {
             answered_at: None,
             dump_id: None,
             route_id: None,
+            quiet: Default::default(),
         }
     }
 

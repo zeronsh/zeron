@@ -5,11 +5,10 @@
 //! that `send_message` their orchestrator working without the spam.
 
 use serde_json::{Value, json};
-use zeron_proto::orchestration::ReportState;
 use zeron_rpc::{Caller, RpcError, RpcReply, methods};
 
 use super::EngineRpc;
-use crate::orchestration::report::{ReportParams, file_report};
+use crate::orchestration::report::{file_report, message_report};
 
 /// The text an agent's send carries to `chatId`, when `method` sends one.
 fn sent_text(method: &str, params: &Value) -> Option<String> {
@@ -28,20 +27,6 @@ fn sent_text(method: &str, params: &Value) -> Option<String> {
         None => text,
     };
     Some(body.to_owned())
-}
-
-/// A report's summary and detail from a message's text.
-pub(crate) fn as_report(text: &str) -> ReportParams {
-    let text = text.trim();
-    let summary = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Message").to_owned();
-    ReportParams {
-        state: ReportState::Message,
-        summary,
-        detail: text.to_owned(),
-        item_id: None,
-        links: Vec::new(),
-        progress: None,
-    }
 }
 
 /// The crew rules each thread was last sent, by thread: a thread is sent
@@ -70,28 +55,6 @@ fn text_slot<'a>(method: &str, params: &'a mut Value) -> Option<&'a mut Value> {
         },
         _ => None,
     }
-}
-
-/// The open route of the newest dump that `chat` is the target of: what a
-/// message from it to the Brain dump answers. `(dump, route, intent, what it
-/// was sent)`.
-fn open_route_of(
-    dumps: &[zeron_proto::orchestration::Dump],
-    chat: &str,
-) -> Option<(String, String, zeron_proto::orchestration::RouteIntent, String)> {
-    use zeron_proto::orchestration::RouteState;
-    let mut dumps: Vec<_> = dumps.iter().collect();
-    dumps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    dumps.into_iter().find_map(|d| {
-        d.routes
-            .iter()
-            .filter(|r| matches!(r.state, RouteState::Delivered | RouteState::Answered))
-            .find(|r| crate::orchestration::watchers::target_chat(&r.target) == Some(chat))
-            .map(|r| {
-                let sent = if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() };
-                (d.id.clone(), r.id.clone(), r.intent, sent)
-            })
-    })
 }
 
 impl EngineRpc {
@@ -169,38 +132,18 @@ impl EngineRpc {
         let Some(text) = sent_text(method, params) else {
             return Ok(None);
         };
-        // A routed chat writing back to the Brain dump: that's what came of
-        // its route. Filed on the route, never a turn of the Brain dump's.
+        // Any agent's message to the Brain dump: the outcome of the route
+        // that went to it, else an update for the person; never a turn of
+        // the Brain dump's (orchestration/incoming.rs, which also catches it
+        // on the Brain dump's host when an older engine sent it).
         if matches!(self.orchestration().role_of(target), crate::orchestration::ChatRole::BrainDump { .. })
-            && let Some((dump, route, intent, sent)) = open_route_of(&self.orchestration().state().dumps, &caller)
+            && target != caller
             && !text.trim().is_empty()
         {
-            use zeron_proto::orchestration::{RouteIntent, RouteState};
-            let task = (intent != RouteIntent::Question).then_some(RouteState::Answered);
-            let asked = sent;
-            let orchestration = self.orchestration().clone();
-            let full: String = text.trim().to_owned();
-            // Filed now; its one-line condensing goes on without the sender.
-            match orchestration.rpc() {
-                Some(rpc) => {
-                    let (route, caller) = (route.clone(), caller.clone());
-                    tokio::spawn(async move {
-                        crate::orchestration::watchers::record_outcome(
-                            &orchestration, &rpc, &caller, &dump, &route, &asked, full, task,
-                        )
-                        .await;
-                    });
-                }
-                None => {
-                    crate::orchestration::watchers::record_outcome(
-                        &orchestration, self, &caller, &dump, &route, &asked, full, task,
-                    )
-                    .await;
-                }
-            }
+            let filed = self.file_with_brain(&caller, &text);
             let reply = match method {
-                methods::QUEUE_MESSAGE => json!({ "id": route, "outcome": route }),
-                _ => json!({ "commandId": route, "outcome": route }),
+                methods::QUEUE_MESSAGE => json!({ "id": filed, "outcome": filed }),
+                _ => json!({ "commandId": filed, "outcome": filed }),
             };
             return Ok(Some(RpcReply::value(&reply)?));
         }
@@ -211,7 +154,7 @@ impl EngineRpc {
         if member.orchestrator_id != target || text.trim().is_empty() {
             return Ok(None);
         }
-        let filed = file_report(self, &caller, as_report(&text)).await?;
+        let filed = file_report(self, &caller, message_report(&text)).await?;
         let id = filed["id"].as_str().unwrap_or_default().to_owned();
         let reply = match method {
             methods::QUEUE_MESSAGE => json!({ "id": id, "report": id }),
@@ -227,7 +170,8 @@ mod tests {
 
     #[test]
     fn a_message_reads_as_a_report() {
-        let r = as_report("\n  Tests pass on main\nDetails: 412 passed\n");
+        use zeron_proto::orchestration::ReportState;
+        let r = message_report("\n  Tests pass on main\nDetails: 412 passed\n");
         assert_eq!(r.state, ReportState::Message);
         assert_eq!(r.summary, "Tests pass on main");
         assert_eq!(r.detail, "Tests pass on main\nDetails: 412 passed");

@@ -320,6 +320,7 @@ impl EngineRpc {
                     answered_at: None,
                     dump_id: None,
                     route_id: None,
+                    quiet: Default::default(),
                 };
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
@@ -346,9 +347,10 @@ impl EngineRpc {
                     doc.upsert_ask(&ask);
                     Ok(ask)
                 })?;
-                if ask.dump_id.is_some() {
-                    // "Where should this go?": the route moves to the pick.
-                    self.answer_where(&ask, &answer).await?;
+                // "Where should this go?" moves its route to the pick; "hasn't
+                // answered" asks again or lets it be. A thread's own question
+                // on a route goes back to it, below.
+                if self.answer_route_ask(&ask, &answer).await? {
                     orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
                     return Ok(json!({ "id": id }));
                 }

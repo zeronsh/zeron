@@ -198,6 +198,21 @@ change, never deleted (`crates/engine/src/orchestration/progress.rs`).
   may watch, and none is the host). They ride `WatchProgress` with `proxy: true`. `progressCheck`
   on such a chat makes the note here from the synced transcript, with the same instructions, limits
   and redaction; there are no automatic notes.
+- **Agent messages to a Brain dump or an orchestrator** (`orchestration/incoming.rs`): caught by
+  the sender's engine (its RPC path) and, for senders on older engines, by the receiver's host
+  just before it would run the queued Run/Steer/row (only a header Zeron wrote at the top of the
+  prompt counts). To the Brain dump: the outcome of the newest open route to the sender (or to its
+  crew's orchestrator), else an update in Comms (sender → you); never a Brain dump turn. Crew →
+  own orchestrator: a report. An outcome or update that ends on a question for the person raises
+  an ask from that thread (linked to the route), answered back to it.
+- **Route outcomes from older hosts**: a host advertises `orchestration-routes-v1` when it files
+  its chats' turn-end route outcomes itself. For a target on a host without it, the dump's own
+  engine watches the synced session row and reads the outcome from the synced transcript when the
+  turn ends (looked for again for ~2 min while it syncs in), and once at start for turns that
+  ended while it was down.
+- **Unanswered questions**: a `question` route still `delivered` 20 min after delivery
+  (`deliveredAt`) raises a quiet ask "<thread> hasn't answered: <excerpt>" with "Ask again"
+  (re-delivers, restarts the clock) and "Dismiss"; an answer arriving dismisses it.
 - **`progress(chat)`** MCP tool for every role: the clocks as numbers and the note fenced. The
   orchestrator prompt says to check crew with it, never by messaging them.
 - **Brain dump**: a question about how a thread is going is checked with `progress` and routed as a

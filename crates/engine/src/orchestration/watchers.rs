@@ -47,8 +47,31 @@ pub(crate) fn start(orchestration: Orchestration) {
             }
         }
     });
+    // An agent's message about to run in a Brain dump or an orchestrator
+    // hosted here, whatever engine sent it: filed instead.
+    if let Some(rpc) = orchestration.rpc() {
+        let incoming = orchestration.clone();
+        rpc.doc_host_ref().set_incoming_messages(std::sync::Arc::new(move |chat: &str, prompt: &str| {
+            super::incoming::consume(&incoming, chat, prompt)
+        }));
+    }
+    // Question routes nobody answered.
+    let chase = orchestration.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(CHASE_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            if let Some(rpc) = chase.rpc() {
+                super::incoming::chase_unanswered(&chase, &rpc, Utc::now());
+            }
+        }
+    });
     tokio::spawn(async move { route_answers(orchestration).await });
 }
+
+/// How often question routes are checked for going unanswered.
+const CHASE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ── Ask banners ─────────────────────────────────────────────────────────────
 
@@ -325,10 +348,19 @@ pub(crate) async fn record_outcome(
     if !recorded {
         return false;
     }
-    // Its card on the board follows.
-    rpc.sync_route_card(dump_id, route_id);
     let kind = if task.is_some() { CommKind::Report } else { CommKind::Answer };
     orchestration.comms().say(kind, chat, super::comms::YOU, &quick);
+    // Its card on the board follows.
+    rpc.sync_route_card(dump_id, route_id);
+    // A chase of this route ("hasn't answered") is moot now.
+    if task.is_none() {
+        super::incoming::settle_chases(orchestration, route_id);
+    }
+    // An outcome that ends on a question for the person: an ask from the
+    // thread, answered back to it.
+    if let Some(asks) = super::incoming::ends_on_question(&full) {
+        rpc.ask_for(chat, &asks, Some((dump_id, route_id)));
+    }
     if task.is_none() || state == RouteState::Failed {
         let title = rpc
             .workspace_host()
@@ -377,6 +409,35 @@ pub(crate) async fn record_outcome(
     true
 }
 
+/// Whether the engine hosting a chat on `device_id` files what comes of
+/// the routes to it itself: this one, or one that says so. For a chat on an
+/// older host, the dump's own engine does it from the synced session row
+/// and transcript.
+pub(crate) fn files_own_routes(orchestration: &Orchestration, device_id: &str) -> bool {
+    device_id == orchestration.device_id()
+        || orchestration.workspace().read_devices().unwrap_or_default().iter().any(|d| {
+            d.id == device_id && d.supports(zeron_proto::capabilities::ORCHESTRATION_ROUTES_V1)
+        })
+}
+
+/// Which turns' ends a watch is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hosted {
+    /// A chat this engine runs: every route to it, any dump's.
+    Here,
+    /// A chat on an older host: the routes of this engine's own dumps.
+    Older,
+}
+
+/// How long after an older host's turn ended its transcript may still be
+/// syncing in: the reply is looked for again after each of these.
+const SYNC_RETRIES: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(3),
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(90),
+];
+
 async fn route_answers(orchestration: Orchestration) {
     let mut sessions_rx = loop {
         match orchestration.rpc() {
@@ -384,45 +445,133 @@ async fn route_answers(orchestration: Orchestration) {
             None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
         }
     };
+    let mut rows_rx = orchestration.workspace().watch_session_rows();
     let mut seen: HashMap<String, Session> =
         sessions_rx.borrow_and_update().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
-    while sessions_rx.changed().await.is_ok() {
-        let now: Vec<Session> = sessions_rx.borrow_and_update().clone();
-        let finished: Vec<(String, Session)> = now
-            .iter()
-            .filter(|s| ended(seen.get(&s.chat_id), s))
+    let mut seen_rows: HashMap<String, Session> =
+        rows_rx.borrow_and_update().iter().map(|s| (s.chat_id.clone(), s.clone())).collect();
+    // What ended while this engine wasn't running (or before this fix).
+    if let Some(rpc) = orchestration.rpc() {
+        let idle: Vec<(String, Session)> = seen_rows
+            .values()
+            .filter(|s| !matches!(s.status, SessionStatus::Working | SessionStatus::AwaitingInput))
             .map(|s| (s.chat_id.clone(), s.clone()))
             .collect();
-        seen = now.into_iter().map(|s| (s.chat_id.clone(), s)).collect();
+        let (here, older): (Vec<_>, Vec<_>) =
+            idle.into_iter().partition(|(_, s)| s.device_id == orchestration.device_id());
+        turns_ended(&orchestration, &rpc, here, Hosted::Here, false);
+        turns_ended(&orchestration, &rpc, older, Hosted::Older, false);
+    }
+    loop {
+        let (finished, hosted) = tokio::select! {
+            changed = sessions_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let now: Vec<Session> = sessions_rx.borrow_and_update().clone();
+                let finished: Vec<(String, Session)> = now
+                    .iter()
+                    .filter(|s| ended(seen.get(&s.chat_id), s))
+                    .map(|s| (s.chat_id.clone(), s.clone()))
+                    .collect();
+                seen = now.into_iter().map(|s| (s.chat_id.clone(), s)).collect();
+                (finished, Hosted::Here)
+            }
+            changed = rows_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let now: Vec<Session> = rows_rx.borrow_and_update().clone();
+                let here = orchestration.device_id().to_owned();
+                let finished: Vec<(String, Session)> = now
+                    .iter()
+                    .filter(|s| s.device_id != here && ended(seen_rows.get(&s.chat_id), s))
+                    .map(|s| (s.chat_id.clone(), s.clone()))
+                    .collect();
+                seen_rows = now.into_iter().map(|s| (s.chat_id.clone(), s)).collect();
+                (finished, Hosted::Older)
+            }
+        };
         if finished.is_empty() {
             continue;
         }
         // (No services right now: nothing to read the transcripts with.)
         let Some(rpc) = orchestration.rpc() else { continue };
-        let dumps = orchestration.state().dumps;
-        for (chat, session) in finished {
-            // A Brain dump's turn that left a dump routing.
-            super::stale_dumps::after_turn(&orchestration, &rpc, &chat);
-            let waiting = waiting_on(&dumps, &chat);
-            if waiting.is_empty() {
-                continue;
-            }
-            let Ok(handle) = rpc.doc_host_ref().open(&chat) else { continue };
-            let Ok(entries) = handle.doc().read_entries() else { continue };
-            for w in waiting {
-                let question = w.intent == RouteIntent::Question;
-                let full = if question { reply_to(&entries, &w.message) } else { latest_reply(&entries, &w.message) };
-                let Some(full) = full else { continue };
-                let task = (!question).then(|| task_state(&session));
-                let asked = if question { w.excerpt.to_owned() } else { w.message.clone() };
-                let (orchestration, rpc) = (orchestration.clone(), rpc.clone());
-                let (chat, dump_id, route_id) = (chat.clone(), w.dump_id.to_owned(), w.route_id.to_owned());
-                tokio::spawn(async move {
-                    record_outcome(&orchestration, &rpc, &chat, &dump_id, &route_id, &asked, full, task).await;
-                });
-            }
-        }
+        turns_ended(&orchestration, &rpc, finished, hosted, true);
     }
+}
+
+/// Take in what came of the routes to chats whose turn ended.
+fn turns_ended(
+    orchestration: &Orchestration,
+    rpc: &std::sync::Arc<crate::rpc::EngineRpc>,
+    finished: Vec<(String, Session)>,
+    hosted: Hosted,
+    just_now: bool,
+) {
+    let dumps = orchestration.state().dumps;
+    let here = orchestration.device_id().to_owned();
+    for (chat, session) in finished {
+        if hosted == Hosted::Here && just_now {
+            // A Brain dump's turn that left a dump routing.
+            super::stale_dumps::after_turn(orchestration, rpc, &chat);
+        }
+        if hosted == Hosted::Older && files_own_routes(orchestration, &session.device_id) {
+            continue;
+        }
+        let waiting: Vec<_> = waiting_on(&dumps, &chat)
+            .into_iter()
+            .filter(|w| hosted == Hosted::Here || dumps.iter().any(|d| d.id == w.dump_id && d.device_id == here))
+            .map(|w| (w.dump_id.to_owned(), w.route_id.to_owned(), w.message, w.excerpt.to_owned(), w.intent))
+            .collect();
+        if waiting.is_empty() {
+            continue;
+        }
+        let (orchestration, rpc) = (orchestration.clone(), rpc.clone());
+        tokio::spawn(async move {
+            // An older host's transcript may still be on its way.
+            let retries: &[std::time::Duration] = if hosted == Hosted::Older && just_now { &SYNC_RETRIES } else { &[] };
+            let mut left = waiting;
+            for wait in std::iter::once(None).chain(retries.iter().copied().map(Some)) {
+                if let Some(wait) = wait {
+                    tokio::time::sleep(wait).await;
+                }
+                left = take_outcomes(&orchestration, &rpc, &chat, &session, left).await;
+                if left.is_empty() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+type WaitingRoute = (String, String, String, String, RouteIntent);
+
+/// Record what `chat`'s transcript says came of each route; the routes it
+/// says nothing about yet.
+async fn take_outcomes(
+    orchestration: &Orchestration,
+    rpc: &crate::rpc::EngineRpc,
+    chat: &str,
+    session: &Session,
+    waiting: Vec<WaitingRoute>,
+) -> Vec<WaitingRoute> {
+    let Ok(handle) = rpc.doc_host_ref().open(chat) else { return waiting };
+    let Ok(entries) = handle.doc().read_entries() else { return waiting };
+    let mut left = Vec::new();
+    for w in waiting {
+        let (dump_id, route_id, message, excerpt, intent) = &w;
+        let question = *intent == RouteIntent::Question;
+        let full = if question { reply_to(&entries, message) } else { latest_reply(&entries, message) };
+        let Some(full) = full else {
+            left.push(w);
+            continue;
+        };
+        let task = (!question).then(|| task_state(session));
+        let asked = if question { excerpt.clone() } else { message.clone() };
+        record_outcome(orchestration, rpc, chat, dump_id, route_id, &asked, full, task).await;
+    }
+    left
 }
 
 #[cfg(test)]
@@ -548,6 +697,7 @@ mod tests {
             answered_at: None,
             dump_id: None,
             route_id: None,
+            quiet: Default::default(),
         }
     }
 

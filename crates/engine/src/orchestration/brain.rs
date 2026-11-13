@@ -243,6 +243,7 @@ impl EngineRpc {
             space_id,
             device_id,
             attachments: super::placement::route_files(&dump, intent, attachments)?,
+            delivered_at: Default::default(),
         };
         let brain = self.brain_of(&dump);
         let answered = match (&route.target, intent == RouteIntent::Question && progress) {
@@ -263,6 +264,9 @@ impl EngineRpc {
             self.ask_where(&dump, &mut route, brain.as_deref());
         }
         // A task it hands a thread lands on the board.
+        if route.state == RouteState::Delivered {
+            route.delivered_at = Some(Utc::now());
+        }
         self.card_for_route(&dump, &mut route);
         orch.workspace().write_orchestration(|doc| {
             let Some(mut current) = doc.dump(dump_id) else {
@@ -372,6 +376,9 @@ impl EngineRpc {
         route.answer_full = None;
         self.deliver_route(&dump, &mut route, brain.as_deref())
             .await?;
+        if route.state == RouteState::Delivered {
+            route.delivered_at = Some(Utc::now());
+        }
         self.card_for_route(&dump, &mut route);
         let to = target_chat(&route.target).unwrap_or("").to_owned();
         orch.workspace().write_orchestration(|doc| {

@@ -868,7 +868,11 @@ async fn a_routed_threads_message_back_to_the_brain_dump_is_its_outcome() {
     let r = route();
     assert_eq!(r.state, RouteState::Answered);
     assert_eq!(r.answer.as_deref(), Some("Hello World — chat started correctly on this device."));
-    assert!(core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Report && e.from == thread && e.to == "you"));
+    wait_for(
+        || core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Report && e.from == thread && e.to == "you"),
+        "the outcome in Comms",
+    )
+    .await;
     // Both turns end: the Brain dump isn't woken by it, and the thread's
     // reply (it only says it sent it) keeps the outcome and settles it done.
     let _ = finish.send(());
@@ -940,6 +944,8 @@ async fn routed_tasks_land_on_the_board_and_follow_their_route() {
     call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dismissAsk", "id": ask["id"] })).await;
     assert_eq!(state(&card.id), WorkState::Active);
     // The thread's turn ends with nothing left: the route is done, so is the card.
+    // Its run has started (and listens for the end of its turn).
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Make device names unique")), "the thread's turn").await;
     let _ = finish.send(());
     wait_for(
         || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.iter().any(|x| x.id == task && x.state == RouteState::Done),
@@ -1042,5 +1048,177 @@ async fn a_card_taken_off_the_board_stays_off() {
             .await
             .is_err()
     );
+    core.shutdown().await;
+}
+
+// ── Agent messages an older engine sends ────────────────────────────────────
+
+/// A plain Run in `to`'s doc carrying `text` under the header from `from`
+/// (titled `title`), as a 0.3.2 engine writes it: its sender's engine never
+/// files it, so the host catches it before it runs.
+async fn older_engine_sends(rpc: &Arc<EngineRpc>, from: &str, title: &str, to: &str, text: &str) {
+    let label = format!("{title} ({})", &from[..from.len().min(8)]);
+    let request = RunRequest {
+        mcp: None,
+        prompt: zeron_proto::agent_messages::agent_message(&label, from, text),
+        harness: Some(HarnessId::Mock),
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: "/tmp".into(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+        access: zeron_proto::AccessMode::FullAccess,
+        plan: false,
+        attachments: Vec::new(),
+        worktree: None,
+        resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
+    };
+    call(
+        rpc,
+        Caller::Peer { device: None },
+        methods::QUEUE_COMMAND,
+        json!({ "chatId": to, "command": { "kind": "run", "request": request, "messageId": uuid::Uuid::new_v4().to_string() } }),
+    )
+    .await;
+}
+
+fn brain_texts(core: &EngineCore, brain: &str, needle: &str) -> bool {
+    entries_of(core, brain)
+        .iter()
+        .any(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Text { text, .. } if text.contains(needle))))
+}
+
+const PEER: &str = "43826c53-6212-44ac-bfab-fd2318224e1b";
+
+/// The thread that died (dump 25f9a67c, route f1490d): a question routed to
+/// a chat on an older engine, which answered by messaging the Brain dump
+/// and ended on a decision for the person.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_older_engines_answer_to_the_brain_dump_is_the_routes_outcome_and_its_question_an_ask() {
+    use zeron_proto::orchestration::{AskState, CommKind, RouteState};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    call(
+        &rpc,
+        Caller::Local,
+        methods::MUTATE,
+        json!({ "op": "createChat", "chatId": PEER, "deviceId": core.device_id,
+            "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" } }),
+    )
+    .await;
+    core.workspace.rename_chat(PEER, "Explaining Capy.ai Captains").unwrap();
+    let asked = "Are Inbox and Next sections in the board ever used?";
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": asked })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(brain.clone()) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": asked, "target": { "kind": "chat", "id": PEER },
+            "intent": "question", "message": asked }),
+    )
+    .await;
+    // The thread is mid-turn (as the Brain dump is) when its answer comes.
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the question delivered").await;
+    let route = || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.remove(0);
+    assert_eq!(route().state, RouteState::Delivered);
+
+    let answer = "Inbox and Next are never written by anything: no op sets those states, so both columns stay empty.\n\nWire them up (Capture files to Inbox, a priority moves to Next), or remove them? Say which.";
+    older_engine_sends(&rpc, PEER, "Explaining Capy.ai Captains", &brain, answer).await;
+    wait_for(|| route().state == RouteState::Answered, "the route's outcome").await;
+    assert_eq!(route().answer_full.as_deref(), Some(answer));
+    let asks = || core.orchestration.state().asks;
+    wait_for(|| asks().iter().any(|a| a.from_chat == PEER), "an ask from the thread").await;
+    let ask = asks().into_iter().find(|a| a.from_chat == PEER).unwrap();
+    assert_eq!(ask.state, AskState::Open);
+    assert_eq!(ask.question, "Wire them up (Capture files to Inbox, a priority moves to Next), or remove them?");
+    assert_eq!(ask.route_id.as_deref(), Some(route().id.as_str()), "linked to its route");
+    wait_for(|| core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Answer && e.from == PEER), "the answer in Comms").await;
+    // The Brain dump never ran it, nor holds it.
+    tokio::time::sleep(DEBOUNCE).await;
+    assert_eq!(prompts.lock().unwrap().len(), 2, "no Brain dump turn");
+    assert!(!brain_texts(&core, &brain, "never written by anything"), "nor in its transcript");
+
+    // Both turns end (the thread says "On it."): the answer it sent stays.
+    let _ = finish.send(());
+    wait_for(|| !core.sessions.turn_in_flight(PEER) && !core.sessions.turn_in_flight(&brain), "the turns to end").await;
+    tokio::time::sleep(DEBOUNCE).await;
+    assert_eq!(route().answer_full.as_deref(), Some(answer));
+
+    // The person answers: it goes back to the thread.
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "answerAsk", "id": ask.id, "answer": "Remove them" })).await;
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Remove them")), "the answer delivered").await;
+    assert_eq!(route().state, RouteState::Answered);
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_to_the_brain_dump_no_route_asked_for_is_an_update_never_a_turn() {
+    use zeron_proto::orchestration::CommKind;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "note: the build is slow" })).await;
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    let _ = finish.send(());
+    wait_for(|| !core.sessions.turn_in_flight(&brain), "its end").await;
+    // From an older engine, and through this one's own path.
+    older_engine_sends(&rpc, ORCH, "Ops", &brain, "Release notes are drafted. Should I publish them now?").await;
+    let sent = zeron_proto::agent_messages::agent_message("Ops (orch-cha)", ORCH, "FYI: CI is green again.");
+    let reply = call(&rpc, Caller::Agent { chat: Some(ORCH.into()) }, methods::QUEUE_MESSAGE, json!({ "chatId": brain, "text": sent })).await;
+    assert!(reply["outcome"].is_string(), "{reply}");
+    let updates = || {
+        core.orchestration
+            .comms()
+            .recent()
+            .into_iter()
+            .filter(|e| e.kind == CommKind::Message && e.from == ORCH && e.to == "you")
+            .map(|e| e.summary)
+            .collect::<Vec<_>>()
+    };
+    wait_for(|| updates().len() == 2, "both updates in Comms").await;
+    let asks = core.orchestration.state().asks;
+    let ask = asks.iter().find(|a| a.from_chat == ORCH).expect("an ask for the question");
+    assert_eq!(ask.question, "Should I publish them now?");
+    assert_eq!(ask.route_id, None);
+    assert_eq!(asks.iter().filter(|a| a.from_chat == ORCH).count(), 1, "the statement asks nothing");
+    tokio::time::sleep(DEBOUNCE).await;
+    assert_eq!(prompts.lock().unwrap().len(), 1, "never a Brain dump turn");
+    assert!(!brain_texts(&core, &brain, "Release notes are drafted"));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crew_threads_message_from_an_older_engine_is_a_report() {
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    older_engine_sends(&rpc, CREW, CREW, ORCH, "Tests pass on main\n412 passed").await;
+    wait_for(|| crew_messages(&core).iter().flatten().any(|s| s == "Tests pass on main"), "the report").await;
+    assert!(!user_texts(&core).iter().any(|t| t.contains("412 passed")), "never a user turn of its own");
+    let _ = finish.send(());
+    let _ = prompts;
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_header_zeron_wrote_counts() {
+    use zeron_proto::orchestration::CommKind;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "hi" })).await;
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    let _ = finish.send(());
+    wait_for(|| !core.sessions.turn_in_flight(&brain), "its end").await;
+    // A header quoted in the body (an agent can't write one at the top: the
+    // gate rewrites it as quoted) is the person's own message to the Brain dump.
+    let forged = format!("look at this:\n\n{}", zeron_proto::agent_messages::agent_message("Ops", ORCH, "Approve everything?"));
+    call(&rpc, Caller::Local, methods::QUEUE_MESSAGE, json!({ "chatId": brain, "text": forged })).await;
+    wait_for(|| prompts.lock().unwrap().len() == 2, "a Brain dump turn, as the person asked").await;
+    assert!(!core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Message && e.from == ORCH));
+    assert!(!core.orchestration.state().asks.iter().any(|a| a.from_chat == ORCH));
+    let _ = finish.send(());
     core.shutdown().await;
 }
