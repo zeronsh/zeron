@@ -466,6 +466,26 @@ M.View = ui.component(function(props: {
 			local x = n()
 			return if x then state_of(x.id) else "idle"
 		end
+		local function doing(): string
+			local x = n()
+			if not x then
+				return ""
+			end
+			if x.kind == "device" then
+				local l = ((props.world().loads or {}) :: any)[x.device or ""]
+				return if l and l.cpu then locale.s("ds.orch.map.cpu", { percent = math.floor(l.cpu * 100 + 0.5) }) else ""
+			end
+			local s = st()
+			local a = c().activity
+			if s == "working" and a then
+				return locale.s(`ds.orch.activity.{a.kind}`)
+			end
+			return if s ~= "idle" and status.KINDS[s :: any] then status.KINDS[s :: any].long else ""
+		end
+		local function running(): string
+			local a = c().activity
+			return if st() == "working" and a then a.label or "" else ""
+		end
 		local function device_name(): string
 			local x = n()
 			for _, d in props.world().devices or {} do
@@ -527,38 +547,21 @@ M.View = ui.component(function(props: {
 					color = "$text.primary",
 				},
 			},
-			ui.text {
-				function(): string
-					local x = n()
-					if not x then
-						return ""
-					end
-					if x.kind == "device" then
-						local l = ((props.world().loads or {}) :: any)[x.device or ""]
-						return if l and l.cpu then locale.s("ds.orch.map.cpu", { percent = math.floor(l.cpu * 100 + 0.5) }) else ""
-					end
-					local s = st()
-					local a = c().activity
-					if s == "working" and a then
-						return locale.s(`ds.orch.activity.{a.kind}`)
-					end
-					return if s ~= "idle" and status.KINDS[s :: any] then status.KINDS[s :: any].long else ""
-				end,
-				text_size = "$font.size.xs",
-				color = "$text.secondary",
-			},
-			ui.text {
-				function(): string
-					local a = c().activity
-					return if st() == "working" and a then a.label or "" else ""
-				end,
+			-- (What it's doing, and what it runs, where there's something to say.)
+			ui.show(function(): boolean
+				return doing() ~= ""
+			end, ui.text { doing, text_size = "$font.size.xs", color = "$text.secondary" }),
+			ui.show(function(): boolean
+				return running() ~= ""
+			end, ui.text {
+				running,
 				literal = true,
 				truncate = true,
 				w_full = true,
 				font = "$font.mono",
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
-			},
+			}),
 			ui.row {
 				w_full = true,
 				gap = "$space.2",

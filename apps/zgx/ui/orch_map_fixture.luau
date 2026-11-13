@@ -51,6 +51,15 @@ stub.op = function(_op: any): any
 	end }
 end
 
+-- A chat watched in a page's own composer (Capture's, the Brain dump's):
+-- no host lanes here, its session as the host would give it.
+local lanes = require("@app/screens/chat/lanes") :: any
+lanes.watch = function(slot: string, id: string?)
+	if not id then
+		return
+	end
+	lanes.view(slot).session:set({ id = id, state = "ready", device = "dev-desk", running = false })
+end
 local page = require("@app/screens/control/page")
 local OrchMap = require("@ds/orch_map")
 for _, v in OrchMap.VARIANTS do
