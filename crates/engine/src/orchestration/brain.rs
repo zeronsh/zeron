@@ -128,6 +128,7 @@ impl EngineRpc {
         text: &str,
         attachments: Vec<String>,
         transfers: Vec<zeron_proto::orchestration::UploadTransfer>,
+        config: Option<zeron_proto::orchestration::DumpConfig>,
     ) -> Result<String, RpcError> {
         let text = cut(text.trim(), MAX_DUMP_BYTES);
         let files = super::placement::dump_files(attachments)?;
@@ -136,8 +137,12 @@ impl EngineRpc {
             return Err(RpcError::BadParams("Nothing to dump".into()));
         }
         let brain = self.ensure_brain_dump()?;
-        // A Brain dump that has never run starts on a fast model.
-        self.brain_dump_fast_model(&brain).await;
+        match &config {
+            // The person's pick wins, and is kept on the chat.
+            Some(pick) => self.brain_dump_pick(&brain, pick).await?,
+            // Otherwise a Brain dump that has never run starts on a fast model.
+            None => self.brain_dump_fast_model(&brain).await,
+        }
         let now = Utc::now();
         let dump = Dump {
             id: uuid::Uuid::new_v4().simple().to_string(),
@@ -255,6 +260,8 @@ impl EngineRpc {
         if route.target == RouteTarget::Unsure {
             self.ask_where(&dump, &mut route, brain.as_deref());
         }
+        // A task it hands a thread lands on the board.
+        self.card_for_route(&dump, &mut route);
         orch.workspace().write_orchestration(|doc| {
             let Some(mut current) = doc.dump(dump_id) else {
                 return;
@@ -363,6 +370,7 @@ impl EngineRpc {
         route.answer_full = None;
         self.deliver_route(&dump, &mut route, brain.as_deref())
             .await?;
+        self.card_for_route(&dump, &mut route);
         let to = target_chat(&route.target).unwrap_or("").to_owned();
         orch.workspace().write_orchestration(|doc| {
             let Some(mut current) = doc.dump(dump_id) else {

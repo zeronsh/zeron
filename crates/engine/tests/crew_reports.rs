@@ -46,7 +46,15 @@ impl Harness for HeldHarness {
         &[ReasoningLevel::Medium]
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
+        let model = |id: &str, label: &str| Model {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+            default: false,
+        };
+        Ok(vec![model("claude-opus-5-5", "Opus 5.5"), model("haiku", "Haiku")])
     }
     async fn run(
         &self,
@@ -872,5 +880,104 @@ async fn a_routed_threads_message_back_to_the_brain_dump_is_its_outcome() {
         !entries_of(&core, &brain).iter().any(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Text { text, .. } if text.contains("Hello World —")))),
         "nor does it land in its transcript"
     );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routed_tasks_land_on_the_board_and_follow_their_route() {
+    use zeron_proto::orchestration::{Priority, RouteRef, RouteState, RouteTarget, WorkState};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    let route = |target: Value, intent: &str, message: &str| {
+        let (rpc, brain, dump_id) = (&rpc, brain.clone(), dump_id.clone());
+        let (intent, message) = (intent.to_owned(), message.to_owned());
+        async move {
+            call(
+                rpc,
+                Caller::Agent { chat: Some(brain) },
+                methods::ORCHESTRATE,
+                json!({ "op": "route", "dumpId": dump_id, "excerpt": DEVICES_TEXT, "target": target, "intent": intent, "message": message }),
+            )
+            .await["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let task = route(json!({ "kind": "newThread" }), "task", "Make device names unique asap. A taken name gets -1, -2.").await;
+    let via_owner = route(json!({ "kind": "chat", "id": CREW }), "task", "Add a -l alias for --lines.").await;
+    route(json!({ "kind": "chat", "id": CREW }), "info", "FYI: lines counts blank ones too.").await;
+    let routes = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes;
+    let r = |id: &str| routes.iter().find(|r| r.id == id).unwrap().clone();
+    let RouteTarget::NewThread { id: thread } = r(&task).target else { panic!() };
+    let items = core.workspace.read_orchestration_with(|d| d.read_work_items());
+    assert_eq!(items.len(), 2, "one card per task route, none for info: {items:?}");
+    let card = items.iter().find(|i| Some(&i.id) == r(&task).item_id.as_ref()).expect("linked from the route");
+    assert_eq!(card.title, "Make device names unique asap");
+    assert_eq!(card.threads, vec![thread.clone()]);
+    assert_eq!(card.orchestrator_id, None, "loose: no orchestrator owns a new thread");
+    assert_eq!(card.priority, Priority::Urgent);
+    assert_eq!(card.state, WorkState::Active);
+    assert_eq!(card.source, Some(RouteRef { dump_id: dump_id.clone(), route_id: task.clone() }));
+    let owned = items.iter().find(|i| Some(&i.id) == r(&via_owner).item_id.as_ref()).unwrap();
+    assert_eq!(owned.orchestrator_id.as_deref(), Some(ORCH), "a crew thread's task goes on its orchestrator's board");
+    // Adding the thread to the board again is the same card.
+    let again = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "addToBoard", "chatId": thread })).await;
+    assert_eq!(again["id"].as_str(), Some(card.id.as_str()));
+    // An ask from the thread blocks the card; its answer frees it.
+    let ask = call(
+        &rpc,
+        Caller::Agent { chat: Some(thread.clone()) },
+        methods::ORCHESTRATE,
+        json!({ "op": "ask", "kind": "question", "question": "Rename existing duplicates too?" }),
+    )
+    .await;
+    let state = |id: &str| core.orchestration.item(id).unwrap().state;
+    assert_eq!(state(&card.id), WorkState::Blocked);
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dismissAsk", "id": ask["id"] })).await;
+    assert_eq!(state(&card.id), WorkState::Active);
+    // The thread's turn ends with nothing left: the route is done, so is the card.
+    let _ = finish.send(());
+    wait_for(
+        || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.iter().any(|x| x.id == task && x.state == RouteState::Done),
+        "the route done",
+    )
+    .await;
+    wait_for(|| state(&card.id) == WorkState::Done, "the card done").await;
+    assert_eq!(core.orchestration.item(&card.id).unwrap().outcome.as_deref(), Some("On it."));
+    assert_eq!(core.workspace.read_orchestration_with(|d| d.read_work_items()).len(), 2, "still one card per route");
+    // Any chat can be put on the board.
+    let fresh = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "addToBoard", "chatId": ORCH })).await;
+    let added = core.orchestration.item(fresh["id"].as_str().unwrap()).unwrap();
+    assert_eq!((added.title.as_str(), added.threads.clone()), (ORCH, vec![ORCH.to_owned()]));
+    assert!(try_call(&rpc, Caller::Agent { chat: Some(ORCH.into()) }, methods::ORCHESTRATE, json!({ "op": "addToBoard", "chatId": ORCH })).await.is_err());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_runs_the_brain_dump_on_the_persons_pick() {
+    let Setup { core, rpc, finish, prompts, requests } = setup().await;
+    // A model this host doesn't offer is refused.
+    assert!(
+        try_call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "x", "config": { "model": "gpt-nine" } }))
+            .await
+            .is_err()
+    );
+    call(
+        &rpc,
+        Caller::Local,
+        methods::ORCHESTRATE,
+        json!({ "op": "dump", "text": "fix the auth thing", "config": { "harness": "mock", "model": "claude-opus-5-5" } }),
+    )
+    .await;
+    wait_for(|| !prompts.lock().unwrap().is_empty(), "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    let row = core.workspace.chat(&brain).unwrap().unwrap();
+    assert_eq!(row.config.unwrap().model.as_deref(), Some("claude-opus-5-5"), "kept on the chat");
+    assert_eq!(requests.lock().unwrap().last().unwrap().model.as_deref(), Some("claude-opus-5-5"), "and the run uses it");
+    let _ = finish.send(());
     core.shutdown().await;
 }

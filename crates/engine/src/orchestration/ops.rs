@@ -224,6 +224,10 @@ impl EngineRpc {
                 self.add_to_crew(&orchestrator_id, &chat_id, &role, item_id)?;
                 Ok(json!({ "id": chat_id }))
             }
+            OrchestrateOp::AddToBoard { chat_id } => {
+                let id = self.add_to_board(&chat_id)?;
+                Ok(json!({ "id": id }))
+            }
             OrchestrateOp::ReleaseFromCrew { chat_id } => {
                 let released = orch.workspace().write_orchestration(|doc| {
                     let Some(mut member) = doc.crew_member(&chat_id).filter(|m| !m.released) else {
@@ -315,6 +319,8 @@ impl EngineRpc {
                 };
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
+                // Its thread's card waits on the person.
+                self.sync_cards_of(&ask.from_chat);
                 // Its banner shows on every device as the row arrives
                 // (orchestration/watchers.rs), this one too.
                 orch.comms().say(CommKind::Ask, chat, YOU, &ask.question);
@@ -348,22 +354,24 @@ impl EngineRpc {
                 deliver(self, &ask.from_chat, &text, None, When::Now)?;
                 orch.comms()
                     .say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+                self.sync_cards_of(&ask.from_chat);
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::DismissAsk { id } => {
-                orch.workspace().write_orchestration(|doc| {
+                let asker = orch.workspace().write_orchestration(|doc| {
                     let mut ask = doc.ask(&id).ok_or_else(|| failed(format!("No ask {id}")))?;
                     if ask.state == AskState::Open {
                         ask.state = AskState::Dismissed;
                         ask.answered_at = Some(now);
                         doc.upsert_ask(&ask);
                     }
-                    Ok::<_, RpcError>(())
+                    Ok::<_, RpcError>(ask.from_chat)
                 })?;
+                self.sync_cards_of(&asker);
                 Ok(json!({ "id": id }))
             }
-            OrchestrateOp::Dump { text, attachments, transfers } => {
-                let id = self.dump(&text, attachments, transfers).await?;
+            OrchestrateOp::Dump { text, attachments, transfers, config } => {
+                let id = self.dump(&text, attachments, transfers, config).await?;
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::Route {
@@ -628,6 +636,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             _ => refuse("Only the Brain dump creates orchestrators: ask the person"),
         },
         OrchestrateOp::PromoteChat { .. } => refuse("Only the person makes a chat an orchestrator"),
+        OrchestrateOp::AddToBoard { .. } => refuse("Only the person puts a chat on the board"),
         OrchestrateOp::UpdateOrchestrator {
             id,
             name,
