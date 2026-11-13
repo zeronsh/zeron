@@ -61,6 +61,7 @@ return function(zeron: any, Repo: any, words: any)
 		local chosen = ui.state(`git.{id}.chosen`, "")
 		local list_offset = ui.state(`git.{id}.list_scroll`, 0)
 		local diff_offset = ui.use_state(0)
+		local diff_hx = ui.use_state(0)
 		-- Discarding, asked first: which files, while the question stands.
 		local discard_open = ui.use_state(false)
 		local discard_paths = ui.use_state({} :: { string })
@@ -518,6 +519,7 @@ return function(zeron: any, Repo: any, words: any)
 				on_choose = function(f: Changes.File)
 					chosen:set(f.path)
 					diff_offset:set(0)
+					diff_hx:set(0)
 				end,
 				box = if working() then box else nil,
 				lines = lines_of,
@@ -557,6 +559,7 @@ return function(zeron: any, Repo: any, words: any)
 						foot = foot_of,
 						foot_when = foot_when,
 						offset = diff_offset,
+						hx = diff_hx,
 					},
 				}
 			end, { w_full = true, h_full = true, enter = { opacity = { 0, 1 }, duration = 100 } })

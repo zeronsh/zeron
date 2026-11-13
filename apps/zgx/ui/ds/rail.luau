@@ -24,6 +24,11 @@
 -- whole along its track. `track`: how long that is, where the rail stops
 -- short of the view's end (a transcript's, above the composer laid over
 -- its foot); the view's length by default.
+--
+-- `axis = "x"`: the same rail along the view's bottom edge, for a view
+-- that scrolls sideways (a diff's long lines). `start`: where along that
+-- edge the track begins (past a gutter that doesn't scroll); `track`, how
+-- long it runs from there.
 
 export type Length = (() -> number) | State<number>
 
@@ -34,6 +39,10 @@ export type Props = {
 	extent: Length,
 	view: Length,
 	track: Length?,
+	-- Along the bottom ("x") or the trailing edge ("y", the default), and
+	-- where along the bottom the track starts.
+	axis: ("x" | "y")?,
+	start: Length?,
 	-- An id for the strip, for tools that look for it.
 	id: string?,
 }
@@ -57,6 +66,7 @@ end
 
 return ui.component(function(props: Props): Node
 	local offset = props.offset
+	local across = props.axis == "x"
 	local hovered = ui.use_state(false)
 	local dragging = ui.use_state(false)
 	-- The view scrolled a moment ago.
@@ -129,11 +139,11 @@ return ui.component(function(props: Props): Node
 		return not span:get().fits and (recent:get() or active())
 	end
 
-	-- Where the pointer is along the track, from its top.
-	local function along(e: { local_y: number }): number
-		return e.local_y - END
+	-- Where the pointer is along the track, from its top (its left, across).
+	local function along(e: { local_x: number, local_y: number }): number
+		return (if across then e.local_x else e.local_y) - END
 	end
-	local function follow(e: { local_y: number })
+	local function follow(e: { local_x: number, local_y: number })
 		local top, _, travel, limit = geometry()
 		if top == nil or travel <= 0 then
 			return
@@ -142,18 +152,51 @@ return ui.component(function(props: Props): Node
 		offset:set(to / travel * limit)
 	end
 
+	local function track_length(): number
+		return read(props.track :: Length)
+	end
+	-- The strip: down the trailing edge, or across the bottom from `start`.
+	local strip: { [any]: any } = if across
+		then {
+			left = if props.start
+				then function(): number
+					return read(props.start :: Length)
+				end
+				else 0,
+			w = if props.track then track_length else nil,
+			right = if props.track then nil else 0,
+			bottom = 0,
+			h = HIT,
+		}
+		else {
+			top = 0,
+			h = if props.track then track_length else nil,
+			bottom = if props.track then nil else 0,
+			right = 0,
+			w = HIT,
+		}
+	local thumb_across = function(): number
+		return if active() then THUMB_ACTIVE else THUMB
+	end
+	local thumb_along = function(): number
+		return span:get().length
+	end
+	local thumb_at = function(): number
+		local top = geometry()
+		return top or END
+	end
+	local thumb: { [any]: any } = if across
+		then { bottom = SIDE, left = thumb_at, h = thumb_across, w = thumb_along }
+		else { right = SIDE, top = thumb_at, w = thumb_across, h = thumb_along }
 	return ui.div {
 		id = props.id,
 		absolute = true,
-		top = 0,
-		h = if props.track
-			then function(): number
-				return read(props.track :: Length)
-			end
-			else nil,
-		bottom = if props.track then nil else 0,
-		right = 0,
-		w = HIT,
+		top = strip.top,
+		bottom = strip.bottom,
+		left = strip.left,
+		right = strip.right,
+		w = strip.w,
+		h = strip.h,
 		aria_hidden = true,
 		opacity = ui.tween(
 			ui.computed(function(): number
@@ -190,17 +233,12 @@ return ui.component(function(props: Props): Node
 		end,
 		ui.div {
 			absolute = true,
-			right = SIDE,
-			top = function(): number
-				local top = geometry()
-				return top or END
-			end,
-			w = function(): number
-				return if active() then THUMB_ACTIVE else THUMB
-			end,
-			h = function(): number
-				return span:get().length
-			end,
+			right = thumb.right,
+			bottom = thumb.bottom,
+			top = thumb.top,
+			left = thumb.left,
+			w = thumb.w,
+			h = thumb.h,
 			rounded = "$radius.full",
 			bg = function(): string
 				return if active() then "$scrollbar.thumb.active" else "$scrollbar.thumb"
