@@ -113,6 +113,8 @@ mod picture_aspect_tests;
 #[cfg(test)]
 mod chip_copy_tests;
 #[cfg(test)]
+mod receipt_copy_tests;
+#[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
 mod picker_settle_tests;

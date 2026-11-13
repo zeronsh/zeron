@@ -50,9 +50,6 @@ export type Props = {
 
 -- How far apart the excerpts light.
 local STAGGER = 60
--- A part's underline: how thick, and how far up into the line's leading.
-local UNDERLINE, UNDERLINE_STRONG = 1.5, 2.5
-local UNDER_GAP = 3
 
 -- The chips' edges: a fade as wide as this once they run past it, reached
 -- this many times faster than they overflow (as the session tabs' strip).
@@ -190,9 +187,10 @@ return ui.component(function(props: Props): Node
 
 	-- A part's hover card (ds/orch_part_card), reading its route as it
 	-- stands now.
-	local function card(index: number): Node
+	local function card(index: number | () -> number): Node
 		local function r(): any
-			return routes_of(props.dump())[index] or {}
+			local i = if type(index) == "function" then (index :: any)() else index
+			return routes_of(props.dump())[i] or {}
 		end
 		return PartCard {
 			route = r,
@@ -228,10 +226,19 @@ return ui.component(function(props: Props): Node
 		end
 	end
 
-	-- The text, cut at its routes, a node a word so each part's words show
-	-- its hover card. Built again only as the dump, its routes' count or the
-	-- scheme changes: a span's underline colour is fixed as it's made
-	-- (zgx's), so the key carries what it's made of.
+	-- The part under the pointer in the text: its word's box (in the text's
+	-- own points), the route's index and id; nil off every part.
+	type At = { x: number, y: number, w: number, h: number, index: number, rid: string }
+	local at = ui.use_state(nil :: At?)
+
+	-- The text, cut at its routes: drawn as one paragraph (each part a span,
+	-- underlined in its hue, tinted under the pointer), so it reads, selects
+	-- and copies exactly as it was written. Under it, unseen, the same words
+	-- laid out a box each, to know which part the pointer is on; over the
+	-- word it's on, a box of the same size holds the part's hover card.
+	-- Built again only as the dump, its routes' count or the scheme changes:
+	-- a span's underline colour is fixed as it's made (zgx's), so the key
+	-- carries what it's made of.
 	local function paragraph_key(): string
 		local s = shape:get()
 		return `{s.id or ""}:{s.n}:{if hue.dark() then "d" else "l"}`
@@ -244,80 +251,185 @@ return ui.component(function(props: Props): Node
 		local routes = routes_of(d)
 		local text_size = props.text_size or "$font.size.md"
 		local line_height = props.line_height or "$font.line.md"
-		local nodes: { Node } = {}
-		-- A word: its text, and under it a line (a part's underline, drawn
-		-- here so it runs on through the space to the next word; a plain
-		-- word's the same room, clear, so every line of words is as tall).
-		local function word(text: string, line: (() -> any)?, strong: (() -> boolean)?): Node
-			return ui.column {
-				shrink = 0,
-				ui.text {
-					text,
-					literal = true,
-					text_size = text_size,
-					line_height = line_height,
-					color = "$text.primary",
-				},
-				ui.div {
-					w_full = true,
-					h = UNDERLINE_STRONG,
-					mt = ui.raw(-UNDER_GAP, "the underline up into the line's leading, under the descenders"),
-					ui.div {
-						w_full = true,
-						h = function(): number
-							return if strong and strong() then UNDERLINE_STRONG else UNDERLINE
-						end,
-						bg = line or "#00000000",
-					},
-				},
-			}
-		end
-		for _, tok in tokens_of(data.segments(d.text or "", routes)) do
-			local i = tok.route
+		local segments = data.segments(d.text or "", routes)
+
+		-- The drawn text.
+		local runs: any = {}
+		for _, seg in segments do
+			local i = seg.route
 			if not i then
-				table.insert(nodes, word(tok.text))
+				table.insert(runs, ui.span { seg.text, literal = true })
 			else
 				local r = routes[i]
 				local unsure = r.target and r.target.kind == "unsure"
 				local h = if unsure then nil else route_hue(r)
 				local rid = r.id
 				local index = i :: number
-				table.insert(nodes, ui.div {
-					class = "orch-part",
-					shrink = 0,
-					tooltip = card(index),
-					tooltip_placement = { side = "bottom", align = "start", offset = 6 },
-					tooltip_interactive = true,
-					on_hover = function(inside: boolean)
-						if inside then
-							hovered:set(rid)
-							reveal(rid)
-						elseif hovered:peek() == rid then
-							hovered:set(nil)
-						end
+				table.insert(runs, ui.span {
+					seg.text,
+					literal = true,
+					underline = function(): boolean
+						return lit:get() >= index
 					end,
-					-- (The pointer on the part, its chip or its reply: its line
-					-- full strength and thicker.)
-					word(tok.text, function(): any
-						if lit:get() < index then
+					underline_color = if unsure then hue.canvas(nil, 0.6) else hue.canvas(h, 0.85),
+					underline_thickness = 1.5,
+					underline_offset = 4,
+					underline_style = if unsure then "dashed" else "solid",
+					radius = 3,
+					-- (Under the pointer, on the part, its chip or its reply.)
+					bg = function(): any
+						if lit:get() < index or hovered:get() ~= rid then
 							return "#00000000"
 						end
-						return hue.paint(if unsure then nil else h, if hovered:get() == rid then 1 else (if unsure then 0.5 else 0.7))
-					end, function(): boolean
-						return hovered:get() == rid
-					end),
+						return hue.canvas(if unsure then nil else h, hue.wash_alpha() * (if unsure then 0.8 else 1.3))
+					end,
 				})
 			end
 		end
-		local p: any = nodes
-		p.class = "orch-receipt-text"
-		p.role = "group"
-		p.label = d.text or ""
-		p.w_full = true
-		p.flex_wrap = true
-		p.items = "start"
-		p.selectable = true
-		return ui.row(p)
+		runs.class = "orch-receipt-words"
+		runs.wrap = true
+		runs.w_full = true
+		runs.text_size = text_size
+		runs.line_height = line_height
+		runs.color = "$text.primary"
+
+		-- The same words, unseen, a box each: a run of words not parted by a
+		-- space (a part's last word and the comma after it) stays one box, so
+		-- they break where the paragraph does.
+		local boxes: { { ref: any, index: number, rid: string } } = {}
+		local chunks: { Node } = {}
+		local pieces: { Node } = {}
+		local function close()
+			if #pieces > 0 then
+				local row: any = pieces
+				row.shrink = 0
+				table.insert(chunks, ui.row(row))
+				pieces = {}
+			end
+		end
+		for _, tok in tokens_of(segments) do
+			local i = tok.route
+			local text = ui.text {
+				tok.text,
+				literal = true,
+				text_size = text_size,
+				line_height = line_height,
+				-- (Laid out, never seen: the paragraph over it draws the words.)
+				color = ui.raw("#00000000", "the hit layer's words, unseen"),
+			}
+			if i then
+				local ref = ui.ref()
+				local r = routes[i]
+				table.insert(boxes, { ref = ref, index = i, rid = r.id })
+				table.insert(pieces, ui.div { class = "orch-part", ref = ref, shrink = 0, text })
+			else
+				table.insert(pieces, text)
+			end
+			if string.match(tok.text, "%s$") then
+				close()
+			end
+		end
+		close()
+		local layout: any = chunks
+		layout.class = "orch-receipt-boxes"
+		layout.absolute = true
+		layout.left = 0
+		layout.top = 0
+		layout.right = 0
+		layout.flex_wrap = true
+		layout.items = "start"
+		layout.pointer_events = "none"
+		layout.aria_hidden = true
+		layout.selectable = false
+
+		local holder = ui.ref()
+		-- Which part the pointer is on, from the boxes.
+		local function find(x: number, y: number): At?
+			local o = holder:peek()
+			if not o or not o.x then
+				return nil
+			end
+			for _, b in boxes do
+				local el = b.ref:peek()
+				if el and el.x and x >= el.x and x < el.x + el.width and y >= el.y and y < el.y + el.height then
+					return { x = el.x - o.x, y = el.y - o.y, w = el.width, h = el.height, index = b.index, rid = b.rid }
+				end
+			end
+			return nil
+		end
+		local function point(x: number, y: number)
+			local found = find(x, y)
+			local was = at:peek()
+			if found and was and found.x == was.x and found.y == was.y then
+				return
+			end
+			at:set(found)
+			if found then
+				hovered:set(found.rid)
+				reveal(found.rid)
+			elseif was and hovered:peek() == was.rid then
+				hovered:set(nil)
+			end
+		end
+		local function leave()
+			local was = at:peek()
+			at:set(nil)
+			if was and hovered:peek() == was.rid then
+				hovered:set(nil)
+			end
+		end
+
+		return ui.overlay {
+			class = "orch-receipt-text",
+			ref = holder,
+			role = "group",
+			label = d.text or "",
+			w_full = true,
+			relative = true,
+			selectable = true,
+			on_pointer_move = function(e: PointerEvent)
+				point(e.x, e.y)
+			end,
+			on_hover = function(inside: boolean)
+				if not inside then
+					leave()
+				end
+			end,
+			ui.rich(runs),
+			ui.row(layout),
+			-- Over the word the pointer is on: the part's hover card.
+			ui.show(function(): boolean
+				return at:get() ~= nil
+			end, ui.div {
+				class = "orch-part-anchor",
+				absolute = true,
+				left = function(): number
+					local a = at:get()
+					return if a then a.x else 0
+				end,
+				top = function(): number
+					local a = at:get()
+					return if a then a.y else 0
+				end,
+				w = function(): number
+					local a = at:get()
+					return if a then a.w else 0
+				end,
+				h = function(): number
+					local a = at:get()
+					return if a then a.h else 0
+				end,
+				tooltip = card(function(): number
+					local a = at:get()
+					return if a then a.index else 0
+				end),
+				tooltip_placement = { side = "bottom", align = "start", offset = 6 },
+				tooltip_interactive = true,
+				on_pointer_move = function(e: PointerEvent)
+					point(e.x, e.y)
+				end,
+			}),
+		}
 	end
 
 	local routes = ui.computed(function(): { any }
