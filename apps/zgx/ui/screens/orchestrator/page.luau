@@ -15,6 +15,7 @@ local hue = require("@ds/orch_hue")
 local data = require("@ds/orch_data")
 local OrchBoard = require("@ds/orch_board")
 local OrchCrew = require("@ds/orch_crew")
+local Asks = require("@ds/orch_asks")
 local Links = require("@ds/links")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
@@ -24,6 +25,10 @@ local LaneTab = require("@app/screens/chat/lane_tab")
 local actions = require("@app/screens/orchestrator/actions")
 
 local M = {}
+
+-- Narrow: which half shows, the conversation or the live state (one for
+-- the window, kept across a reload).
+local half = ui.state("orch_page_half", "chat")
 
 -- Both side by side from this wide (the page's own width); narrower, one.
 local SPLIT_AT = 880
@@ -44,12 +49,6 @@ local function model_name(m: string?): string?
 	return (string.gsub(s, "^%l", string.upper))
 end
 M.model_name = model_name
-
--- An ask's question as one plain line (its markdown's marks dropped).
-local function plain(text: string): string
-	local s = string.gsub(text, "[%*_`]", "")
-	return (string.gsub(s, "%s+", " "))
-end
 
 -- What needs you from orchestrator `id` (tracked): its asks, and its own
 -- chat or a crew thread waiting on an answer.
@@ -77,140 +76,6 @@ local function needs_of(id: string?): { any }
 	end
 	return out
 end
-
--- Those, each answered right here.
-local NeedsYou = ui.component(function(props: { of: () -> string? }): Node
-	local list = ui.computed(function(): { any }
-		return needs_of(props.of())
-	end)
-	local function row(_: any, _i: number, now: State<any>): Node
-		local function need(): any
-			return now:get()
-		end
-		local answering = ui.use_state(false)
-		local reply = ui.use_state("")
-		local function answer(text: string)
-			local n = now:peek()
-			if not n.ask or text == "" then
-				return
-			end
-			answering:set(true)
-			orchestration.answer(n.ask.id, text):after(function()
-				answering:set(false)
-			end, function()
-				answering:set(false)
-				ds.toast.show { title = locale.s("orch.page.answer_failed"), tone = "danger" }
-			end)
-		end
-		return ui.column {
-			class = "orch-need",
-			w_full = true,
-			gap = "$space.2",
-			py = "$space.1",
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
-				items = "center",
-				hue.Dot { hue = function(): number?
-					return need().hue
-				end, size = 6 },
-				ds.FadeText {
-					function(): string
-						local c = need().chat
-						return if c then c.title else ""
-					end,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-					grow = 1,
-				},
-				ui.show(function(): boolean
-					return need().urgent == true
-				end, ds.Badge { ui.t("orch.page.urgent") :: any, tone = "danger", size = "sm" }),
-			},
-			ui.text {
-				function(): string
-					local n = need()
-					return if n.ask then plain(n.ask.question) else locale.s("orch.page.waiting_on_you")
-				end,
-				wrap = true,
-				text_size = "$font.size.sm",
-				color = "$text.primary",
-			},
-			-- Its choices, each an answer; with none, a line to answer in; a
-			-- chat waiting on its own question, the way to it.
-			ui.presence(function(): string
-				local n = need()
-				if not n.ask then
-					return "open"
-				end
-				return if #(n.ask.options or {}) > 0 then "options" else "text"
-			end, function(kind: string): Node
-				if kind == "open" then
-					return ui.row { ds.Button { ui.t("orch.page.open_thread") :: any, tone = "secondary", size = "sm", on_click = function()
-						local n = now:peek()
-						if n.from then
-							route.open_session(n.from)
-						end
-					end } }
-				elseif kind == "options" then
-					return ui.row {
-						w_full = true,
-						gap = "$space.2",
-						wrap = true,
-						ui.each(ui.computed(function(): { any }
-							local n = need()
-							return if n.ask then n.ask.options or {} else {}
-						end), function(o: any, i: number): Node
-							return ds.Button {
-								o.label,
-								tone = "secondary",
-								size = "sm",
-								tooltip = if o.detail and o.detail ~= "" then o.detail else nil,
-								busy = answering,
-								on_click = function()
-									answer(o.label)
-								end,
-							}
-						end, { key = function(o: any): string
-							return o.label
-						end }),
-					}
-				end
-				return ds.TextField {
-					value = reply,
-					size = "sm",
-					w_full = true,
-					placeholder = function(): string
-						return locale.s("orch.page.answer")
-					end,
-					on_commit = function(text: string)
-						answer(string.match(text, "^%s*(.-)%s*$") or "")
-						reply:set("")
-					end,
-				}
-			end, { w_full = true }),
-		}
-	end
-	return ui.column {
-		id = "orch-needs",
-		w_full = true,
-		gap = "$space.3",
-		ui.presence(function(): string
-			return if #list:get() == 0 then "none" else "some"
-		end, function(kind: string): Node
-			if kind == "none" then
-				return ui.text { ui.t("orch.page.nothing_needs_you"), text_size = "$font.size.sm", color = "$text.tertiary" }
-			end
-			return ui.column {
-				w_full = true,
-				gap = "$space.3",
-				ui.each(list, row, { key = function(n: any): string
-					return n.id
-				end }),
-			}
-		end, { w_full = true }),
-	}
-end)
 
 -- A section of the live state: its title and count over what it holds.
 local function Section(title: any, count: (() -> number)?, body: Node, id: string): Node
@@ -285,8 +150,6 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 	local function split(): boolean
 		return width:get() >= SPLIT_AT
 	end
-	-- Narrow: which half shows (kept across a reload).
-	local half = ui.state("orch_page_half", "chat")
 	-- The conversation's lane, let go as the page goes or moves on.
 	local function slot_of(id: string): string
 		return `orch-{id}`
@@ -476,7 +339,25 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				pb = "$space.6",
 				Section(ui.t("orch.page.needs_you"), function(): number
 					return needs:get()
-				end, NeedsYou { of = props.of }, "orch-section-needs"),
+				end, Asks {
+					needs = function(): { any }
+						return needs_of(props.of())
+					end,
+					name_of = function(id: string?): string?
+						return data.name_of(orchestration.now:get(), chats:get(), id)
+					end,
+					on_answer = function(ask: any, text: string)
+						orchestration.answer(ask.id, text):after(function() end, function()
+							ds.toast.show { title = locale.s("orch.page.answer_failed"), tone = "danger" }
+						end)
+					end,
+					on_dismiss = function(ask: any)
+						orchestration.dismiss(ask.id)
+					end,
+					on_open = function(chat: string)
+						route.open_session(chat)
+					end,
+				}, "orch-section-needs"),
 				Section(ui.t("orch.page.board"), nil, OrchBoard {
 					id = "orch-page-board",
 					items = function(): { any }
@@ -566,9 +447,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				grow = function(): number
 					return if split() then 0 else 1
 				end,
-				w = function(): number?
+				w = function(): number | string
 					if not split() then
-						return nil
+						return "auto"
 					end
 					return math.clamp(math.floor(width:get() * SIDE_SHARE), SIDE_MIN, SIDE_MAX)
 				end,

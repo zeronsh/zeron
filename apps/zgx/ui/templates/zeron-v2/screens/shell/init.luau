@@ -674,6 +674,10 @@ return function(): Node
 			boundary.screen(boundary.named("shell.boundary.screen.new_project"), "@app/screens/shell/add_project", function(AddProject): Node
 				return AddProject()
 			end),
+			-- New orchestrator, and an orchestrator's settings.
+			boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/screens/orchestrator/dialogs", function(dialogs): Node
+				return dialogs.Dialogs()
+			end),
 		},
 	}
 end

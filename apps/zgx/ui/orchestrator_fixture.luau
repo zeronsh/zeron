@@ -18,8 +18,8 @@ local orchestration = require("@account/orchestration")
 local sample = (function(): any
 	local base = require("@account/orchestration_sample")
 	local moved = base.at(os.time())
-	for i, c in moved.chats do
-		c.todo = base.chats[i].todo
+	for i, c in moved.chats :: { any } do
+		c.todo = (base.chats[i] :: any).todo
 	end
 	return moved
 end)()
@@ -33,7 +33,7 @@ end
 
 -- The chats as the host has them: crew threads under their orchestrator
 -- (`children`), the rest top-level; a few of the person's own beside them.
-local chats, children = {}, {}
+local chats: { any }, children: { [string]: { any } } = {}, {}
 for _, c in sample.chats do
 	if c.parent then
 		children[c.parent] = children[c.parent] or {}
