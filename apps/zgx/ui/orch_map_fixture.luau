@@ -71,6 +71,50 @@ ui.command { id = "map_only", title = "Only the Map", run = function()
 	end
 	page.widgets:set({ order = table.clone(page.WIDGETS), hidden = hidden :: any })
 end }
+-- The live one's small world: one machine, the Brain dump, and Tally with
+-- its two crew there.
+ui.command { id = "map_small", title = "Map: a small world", run = function()
+	local t = os.time()
+	local desk = { id = "dev-desk", name = "honeypot", platform = "linux", here = true, online = true }
+	sessions.now:set({
+		state = "ready",
+		here = "dev-desk",
+		devices = { desk },
+		projects = { { id = "p-tally", name = "tally", device = "dev-desk", path = "/home/you/tally", git = true } },
+		chats = {
+			{ id = "orc-brain", title = "Brain dump", device = "dev-desk", updated = t - 120, created = t - 9000, agent = "claude" },
+			{ id = "orc-tally", title = "Tally", device = "dev-desk", project = "p-tally", status = "working", updated = t - 20, created = t - 3000, agent = "claude",
+				activity = { kind = "delegating", label = "", since = t - 15 } },
+		},
+		archived = {},
+		children = {
+			["orc-tally"] = {
+				{ id = "th-lines", parent = "orc-tally", title = "tally --lines", device = "dev-desk", project = "p-tally", child_kind = "crew", status = "done",
+					updated = t - 400, created = t - 2400, agent = "claude", todo = { done = 3, total = 3 } },
+				{ id = "th-tests", parent = "orc-tally", title = "tally tests", device = "dev-desk", project = "p-tally", child_kind = "crew", status = "working",
+					updated = t - 5, created = t - 1200, agent = "claude", activity = { kind = "thinking", label = "", since = t - 40 }, todo = { done = 1, total = 4, current = "empty input" } },
+			},
+		},
+		places = { pinned = {}, sections = {} },
+		places_ready = true,
+	} :: any)
+	local function orch(id: string, name: string, hue: number, kind: string?): any
+		return { id = id, kind = kind or "standard", name = name, goal = "", rules = "", crew_rules = "", notes = "", hue = hue,
+			crew = { devices = {} }, paused = false, archived = false, created = t - 9000, updated = t - 60, project = if kind then nil else "p-tally" }
+	end
+	orchestration.now:set({
+		state = "ready",
+		orchestrators = { orch("orc-brain", "Brain dump", 172, "brain_dump"), orch("orc-tally", "Tally", 236) },
+		crew = {
+			{ chat_id = "th-lines", orchestrator_id = "orc-tally", role = "", released = false, joined = t - 2400 },
+			{ chat_id = "th-tests", orchestrator_id = "orc-tally", role = "", released = false, joined = t - 1200 },
+		},
+		items = {},
+		asks = {},
+		dumps = {},
+	})
+	orchestration.loads:set({ ["dev-desk"] = { cpu = 0.07, mem_used = 17e9, mem_total = 67e9, online = true, at = t } })
+end }
 -- A report coming in (a pulse along a rail).
 ui.command { id = "fixture.report", title = "Fixture: a crew report", run = function()
 	local n = #orchestration.comms:peek()

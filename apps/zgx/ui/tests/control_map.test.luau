@@ -69,10 +69,14 @@ test("the layout puts every line's end at a row, every row inside the width", fu
 			expect(l.routes[r.id] ~= nil).to_be(true)
 		end
 	end
+	local xs: { [number]: number } = {}
+	for _, r in l.rows do
+		xs[r.mid] = r.x
+	end
 	for _, rail in l.rails do
 		for _, b in rail.branches do
 			expect(mids[b.y]).to_be(true)
-			expect(b.to).to_be(l.content_x - map.GAP)
+			expect(b.to).to_be(xs[b.y] - map.GAP)
 		end
 	end
 end)

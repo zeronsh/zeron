@@ -61,52 +61,126 @@ local function view(app: any, variant: string)
 	app:frames(20)
 end
 
-test("topology: every branch ends where its row starts, at its middle, at any width", function()
+test("topology: each rail drops from its orchestrator's dot; each elbow ends where its row starts, at its middle, at any width", function()
 	for _, w in WIDTHS do
 		local l = Layout.layout(world(), w)
-		local mids: { [string]: { number } } = {}
+		local node: { [string]: any } = {}
+		local crew: { [string]: { any } } = {}
 		for _, r in l.rows do
-			expect(r.x).to_be(l.content_x)
 			expect(r.x + r.w <= w).to_be(true)
-			if r.orchestrator then
-				mids[r.orchestrator] = mids[r.orchestrator] or {}
-				table.insert(mids[r.orchestrator], r.mid)
+			if r.kind == "orchestrator" then
+				node[r.id] = r
+			elseif r.kind == "crew" then
+				local o = r.orchestrator :: string
+				crew[o] = crew[o] or {}
+				table.insert(crew[o], r)
 			end
 		end
-		expect(#l.rails >= 4).to_be(true)
+		expect(#l.rails).to_be(4)
 		for _, rail in l.rails do
-			-- One branch for each of its rows, each on a row's middle.
-			expect(#rail.branches).to_be(#mids[rail.orchestrator])
+			local n = node[rail.orchestrator]
+			-- Its dot: on the rail, the rail's start.
+			expect(rail.x).to_be(n.x + Layout.DOT)
+			expect(rail.dot).to_be(n.mid)
+			-- One elbow a crew row, none into the orchestrator's own.
+			expect(#rail.branches).to_be(#crew[rail.orchestrator])
 			for _, b in rail.branches do
-				expect(b.to).to_be(l.content_x - Layout.GAP)
-				expect(table.find(mids[rail.orchestrator], b.y) ~= nil).to_be(true)
+				local hit = false
+				for _, r in crew[rail.orchestrator] do
+					if r.mid == b.y and b.to == r.x - Layout.GAP then
+						hit = true
+					end
+				end
+				expect(hit).to_be(true)
+				expect(b.y ~= n.mid).to_be(true)
 			end
-			-- Its lines: each branch's last point is that branch's end; the
-			-- rail's own runs stay on its x, between its ends.
-			local solid = Layout.lines(rail)
+			-- Its lines start on the rail; the elbows end at their rows; its
+			-- runs stay clear of its dot, and no row not its own sits on a
+			-- stretch of it (it goes by a channel left of the rows there).
 			local ends = 0
-			for _, pts in solid do
-				local n = #pts
+			for _, pts in Layout.lines(rail) do
 				expect(pts[1]).to_be(rail.x)
-				if pts[n - 1] == l.content_x - Layout.GAP then
+				if pts[#pts - 1] ~= rail.x then
 					ends += 1
 				else
-					expect(pts[3]).to_be(rail.x)
-					expect(pts[2] >= rail.top and pts[4] <= rail.bottom).to_be(true)
+					for _, y in { pts[2], pts[#pts] } do
+						expect(math.abs(y - rail.dot) >= Layout.DOT_R).to_be(true)
+					end
+					local min_x, jogs = math.huge, false
+					for i = 1, #pts - 1, 2 do
+						min_x = math.min(min_x, pts[i])
+						jogs = jogs or pts[i] ~= rail.x
+					end
+					-- (Into its channel and back: left of every row.)
+					expect(not jogs or min_x < l.content_x).to_be(true)
+					for i = 1, #pts - 3, 2 do
+						if pts[i] == rail.x and pts[i + 2] == rail.x then
+							local lo, hi = math.min(pts[i + 1], pts[i + 3]), math.max(pts[i + 1], pts[i + 3])
+							for _, r in l.rows do
+								if r.orchestrator ~= rail.orchestrator then
+									expect(r.mid > lo and r.mid < hi).to_be(false)
+								end
+							end
+						end
+					end
 				end
 			end
 			expect(ends).to_be(#rail.branches)
-			expect(rail.x < l.content_x - Layout.GAP - Layout.CORNER).to_be(true)
+			-- Every orchestrator starts where its peers do.
+			expect(n.x).to_be(l.content_x)
 		end
-		-- Rails that overlap never share a column.
-		for _, a in l.rails do
-			for _, b in l.rails do
-				if a ~= b and a.x == b.x then
-					expect(a.bottom < b.top or b.bottom < a.top).to_be(true)
-				end
+	end
+end)
+
+test("topology: crew sit indented right of their orchestrator", function()
+	for _, w in WIDTHS do
+		local l = Layout.layout(world(), w)
+		local node: { [string]: any } = {}
+		for _, r in l.rows do
+			if r.kind == "orchestrator" then
+				node[r.id] = r
+			end
+		end
+		for _, r in l.rows do
+			if r.kind == "crew" then
+				local n = node[r.orchestrator :: string]
+				expect(r.x >= n.x + Layout.DOT + Layout.INDENT).to_be(true)
 			end
 		end
 	end
+	-- One orchestrator, its two crew on its machine: the live case.
+	local f = (sample :: any).fleet
+	local small = world()
+	small.devices = { f.devices[1] }
+	local now = table.clone(f.now)
+	now.orchestrators = { f.now.orchestrators[5] }
+	now.crew = {}
+	for _, m in f.now.crew do
+		if m.orchestrator_id == "orc-tally" and m.chat_id ~= "th-tally-docs" then
+			table.insert(now.crew, m)
+		end
+	end
+	small.now = now
+	local chats = {}
+	for id, c in small.chats do
+		if id == "orc-tally" or id == "th-tally-lines" or id == "th-tally-ci" then
+			c = table.clone(c)
+			c.device = "dev-desk"
+			c.project = "p-zeron-desk"
+			chats[id] = c
+		end
+	end
+	small.chats = chats
+	local l = Layout.layout(small, 900)
+	expect(#l.rows).to_be(3)
+	expect(l.rows[1].kind).to_be("orchestrator")
+	expect(#l.rails).to_be(1)
+	local rail = l.rails[1]
+	expect(rail.x).to_be(l.rows[1].x + Layout.DOT)
+	expect(l.rows[2].x).to_be(rail.x + Layout.INDENT)
+	expect(l.rows[3].x).to_be(rail.x + Layout.INDENT)
+	expect(rail.top).to_be(l.rows[1].mid)
+	expect(rail.bottom).to_be(l.rows[3].mid)
 end)
 
 test("topology: crew on another machine are wired across to it", function()
@@ -138,6 +212,15 @@ test("topology: rows are drawn where their branches end, at several widths", fun
 		local app = open(w, 2400)
 		local fx, fy, fw = box(app, "#orch-map-field")
 		local l = Layout.layout(world(), fw)
+		-- An orchestrator's row: its dot on its rail.
+		for _, rail in l.rails do
+			if rail.orchestrator == "orc-orch" or rail.orchestrator == "orc-reins" then
+				local name = if rail.orchestrator == "orc-orch" then "Orchestrators" else "Reins release"
+				local x, y, _bw, bh = box_of(app, "#orch-map-field", `button "{name}"`)
+				expect(math.abs((x - fx) + Layout.DOT - rail.x) < 0.5).to_be(true)
+				expect(math.abs((y - fy) + bh / 2 - rail.dot) < 0.5).to_be(true)
+			end
+		end
 		for _, id in { "th-ui-control", "th-engine-state", "th-tally-ci", "th-reins-win" } do
 			for _, r in l.rows do
 				if r.id == id then

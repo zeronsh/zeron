@@ -364,7 +364,7 @@ do
 	local f_devices = {
 		{ id = "dev-desk", name = "desk", platform = "linux", here = true, online = true },
 		{ id = "dev-mac", name = "macbook", platform = "macos", here = false, online = true },
-		{ id = "dev-forge", name = "forge", platform = "windows", here = false, online = true },
+		{ id = "dev-forge", name = "winbox", platform = "windows", here = false, online = true },
 		{ id = "dev-cloud", name = "Cloud", platform = "linux", here = false, online = true, cloud = true },
 	}
 	local f_projects = {

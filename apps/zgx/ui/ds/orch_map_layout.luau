@@ -4,18 +4,20 @@
 --
 -- Every machine is a lane across the width, its name and load in a column
 -- of their own at its left (`lane_w`); in the lane, its projects, and in
--- each the orchestrators and threads at work there, one row each, all
--- starting at one left edge (`content_x`). Between the two run the rails:
--- one for each orchestrator with crew, in its hue, from its own row to its
--- last crew row, wherever that is, across the lines between machines for
--- crew on another. From the rail a branch runs to each of its rows and
--- ends `GAP` short of the row, at its middle, whatever the width. Rails
--- that never overlap share a column; a branch that crosses another
--- orchestrator's rail leaves a gap in that rail. On a machine a rail
--- arrives at, its rows come first; on one it leaves, last.
+-- each the orchestrators and threads at work there, one row each. An
+-- orchestrator leads its crew: its rail drops from under its own dot, and
+-- its crew sit indented to the right of it, an elbow from the rail into
+-- each, ending `GAP` short of the row at its middle, whatever the width.
+-- Crew on another machine: the rail runs on down across the line between
+-- machines and elbows into them there, still indented from it. Where a
+-- rail would run past rows not its own (another orchestrator's, on its
+-- way to a machine further down), it steps left into a channel of its own
+-- beside the rows and back in after them: every orchestrator keeps the
+-- same left edge as its peers, and nothing sits on a rail. On a machine a
+-- rail arrives at, its rows come first; on one it leaves, last.
 --
 --   layout.layout(world, width)  Layout (below)
---   layout.lines(rail)           its solid and dashed polylines
+--   layout.lines(rail)           its polylines
 
 local model = require("@ds/orch_map_model")
 
@@ -28,35 +30,42 @@ M.PROJECT_H = 24
 M.ROW_H = 30
 M.NODE_H = 32
 M.LANE_PAD = 10
-M.RAIL_PAD = 10
-M.RAIL_STEP = 14
+-- Where the rows start, past the machines' column.
+M.PAD = 10
+-- An orchestrator's dot: its centre from its row's left edge, its radius.
+M.DOT = 9
+M.DOT_R = 5
+-- How far right of its rail a crew row starts.
+M.INDENT = 22
+-- A channel's width, left of the rows, for each rail running past rows
+-- not its own at once.
+M.CHANNEL = 10
 M.CORNER = 7
 M.GAP = 3
--- How far a branch runs past the rightmost rail, before its gap.
-M.REACH = 16
 
 local LANE_TOP, LANE_MIN, PROJECT_H, ROW_H, NODE_H, LANE_PAD = M.LANE_TOP, M.LANE_MIN, M.PROJECT_H, M.ROW_H, M.NODE_H, M.LANE_PAD
-local RAIL_PAD, RAIL_STEP, CORNER, GAP, REACH = M.RAIL_PAD, M.RAIL_STEP, M.CORNER, M.GAP, M.REACH
+local PAD, DOT, DOT_R, INDENT, CHANNEL, CORNER, GAP = M.PAD, M.DOT, M.DOT_R, M.INDENT, M.CHANNEL, M.CORNER, M.GAP
 
 export type Lane = { id: string, name: string, y: number, h: number, online: boolean, here: boolean, platform: string?, cloud: boolean, device: any, count: number }
-export type Label = { id: string, lane: string, name: string, y: number }
+export type Label = { id: string, lane: string, name: string, y: number, x: number }
 -- A row: an orchestrator's (`kind` "orchestrator"), a crew thread's or a
 -- thread of the person's own. `mid` its middle's y.
 export type Row = { id: string, lane: string, kind: string, x: number, y: number, w: number, h: number, mid: number, orchestrator: string?, hue: number?, paused: boolean }
-export type Branch = { y: number, to: number, node: boolean }
--- A rail's way: its column's x, from `top` to `bottom`, with `gaps` (y
--- ranges left out where another's branch crosses) and `dashed` (y ranges
--- across another machine's head).
+-- An elbow into a crew row: the row's middle, and where it ends.
+export type Branch = { y: number, to: number }
+-- An orchestrator's rail: down (or up) from its dot at (`x`, `dot`), from
+-- `top` to `bottom` (its rows' middles), drawn as `runs` (polylines, from
+-- row to row: straight, or by its channel past rows not its own).
 export type Rail = {
 	orchestrator: string,
 	hue: number?,
 	paused: boolean,
 	x: number,
+	dot: number,
 	top: number,
 	bottom: number,
 	branches: { Branch },
-	gaps: { { number } },
-	dashed: { { number } },
+	runs: { { number } },
 }
 export type Layout = {
 	h: number,
@@ -143,7 +152,7 @@ function M.layout(world: any, width: number): Layout
 		end)
 		for _, g in groups do
 			if g.project then
-				table.insert(out.labels, { id = `{m.id}/{g.key}`, lane = m.id, name = g.project :: string, y = y })
+				table.insert(out.labels, { id = `{m.id}/{g.key}`, lane = m.id, name = g.project :: string, y = y, x = 0 })
 				y += PROJECT_H
 			end
 			local list = table.clone(g.threads)
@@ -176,161 +185,213 @@ function M.layout(world: any, width: number): Layout
 	end
 	out.h = y
 
-	-- The rails: each orchestrator with crew shown, in the first free
-	-- column (rails that never overlap share one).
-	local spans = {}
+	-- Each orchestrator's rail: down (or up) from its dot through its crew
+	-- rows. Where rows not its own lie between two of its own (another
+	-- orchestrator's, on the way to another machine), it steps left into a
+	-- channel of its own beside the rows, runs past them there and steps
+	-- back in: every orchestrator keeps the same left edge as its peers.
+	local channels = 0
+	type Own = { mid: number, top: number, bottom: number, dot: boolean }
+	type Span = { o: string, x: number, dot: number, top: number, bottom: number, own: { Own }, crew: { Row }, passes: { { number } } }
+	local spans: { Span } = {}
+	local span_of: { [string]: Span } = {}
 	for o, rows in by_orch do
-		local has_crew = false
-		local top_, bottom = math.huge, -math.huge
+		local node: Row? = nil
+		local crew = {}
 		for _, r in rows do
-			has_crew = has_crew or r.kind ~= "orchestrator"
-			top_ = math.min(top_, r.mid)
-			bottom = math.max(bottom, r.mid)
+			if r.kind == "orchestrator" then
+				node = r
+			else
+				table.insert(crew, r)
+			end
 		end
-		if has_crew then
-			table.insert(spans, { o = o, top = top_, bottom = bottom, rows = rows, col = 0 })
+		if #crew > 0 then
+			local own: { Own } = {}
+			for _, r in rows do
+				table.insert(own, { mid = r.mid, top = r.y, bottom = r.y + r.h, dot = r == node })
+			end
+			table.sort(own, function(a: Own, b: Own): boolean
+				return a.mid < b.mid
+			end)
+			-- (No row of its own shown: the rail starts at its first crew row.)
+			local dot = if node then node.mid else crew[1].mid
+			local sp: Span = { o = o, x = 0, dot = dot, top = own[1].mid, bottom = own[#own].mid, own = own, crew = crew, passes = {} }
+			-- Between two of its rows with another's between them: a pass.
+			for i = 1, #own - 1 do
+				local a, b = own[i], own[i + 1]
+				for _, r in out.rows do
+					if r.orchestrator ~= o and r.mid > a.mid and r.mid < b.mid then
+						table.insert(sp.passes, { a.bottom, b.top, 0 })
+						break
+					end
+				end
+			end
+			table.insert(spans, sp)
+			span_of[o] = sp
 		end
 	end
-	table.sort(spans, function(a: any, b: any): boolean
-		if a.top ~= b.top then
-			return a.top < b.top
+	-- The channels: passes that overlap take different ones.
+	local all = {}
+	for _, sp in spans do
+		for _, p in sp.passes do
+			table.insert(all, p)
 		end
-		return a.o < b.o
+	end
+	table.sort(all, function(a: { number }, b: { number }): boolean
+		return a[1] < b[1]
 	end)
-	local columns: { number } = {}
-	for _, s in spans do
-		local col = 0
-		for c, bottom in columns do
-			if bottom < s.top - CORNER * 2 then
-				col = c
+	local ends: { number } = {}
+	for _, p in all do
+		local k = 0
+		for i, e in ends do
+			if e < p[1] - CORNER then
+				k = i
 				break
 			end
 		end
-		if col == 0 then
-			table.insert(columns, 0)
-			col = #columns
+		if k == 0 then
+			table.insert(ends, 0)
+			k = #ends
 		end
-		columns[col] = s.bottom
-		s.col = col
+		ends[k] = p[2]
+		p[3] = k
 	end
-	local ncols = #columns
-	local rails_x = lane_w + RAIL_PAD
-	local content_x = if ncols > 0 then rails_x + (ncols - 1) * RAIL_STEP + REACH + GAP else lane_w + RAIL_PAD
-	out.content_x = content_x
+	channels = #ends
+	-- (The channels, then a little room before the rows.)
+	local base = lane_w + PAD + channels * CHANNEL + (if channels > 0 then 6 else 0)
+	out.content_x = base
 	for _, r in out.rows do
-		r.x = content_x
-		r.w = math.max(0, width - content_x)
-		out.anchors[r.id] = { content_x - GAP, r.mid }
+		r.x = if r.kind == "crew" and r.orchestrator and span_of[r.orchestrator] then base + DOT + INDENT else base
+		r.w = math.max(0, width - r.x)
+		out.anchors[r.id] = if r.kind == "orchestrator" then { r.x + DOT, r.mid } else { r.x - GAP, r.mid }
 	end
 
-	for _, s in spans do
+	local clear = DOT_R + 3
+	for _, sp in spans do
+		local x = base + DOT
+		sp.x = x
+		-- Its runs: from each of its rows to the next, straight or by its
+		-- channel; clear of its dot.
+		local paths: { { number } } = {}
+		local pass_at: { [number]: { number } } = {}
+		for _, p in sp.passes do
+			pass_at[p[1]] = p
+		end
+		local head, tail = sp.own[1], sp.own[#sp.own]
+		for i = 1, #sp.own - 1 do
+			local a, b = sp.own[i], sp.own[i + 1]
+			local y1 = if a.dot then a.mid + clear else a.mid
+			local y2 = if b.dot then b.mid - clear else b.mid
+			-- (The rail's ends round off into their elbows.)
+			if a == head and not a.dot then
+				y1 = a.mid + CORNER
+			end
+			if b == tail and not b.dot then
+				y2 = b.mid - CORNER
+			end
+			local p = pass_at[a.bottom]
+			if p then
+				local ch = lane_w + PAD + (channels - p[3]) * CHANNEL + CHANNEL / 2
+				local ya, yb = p[1], p[2]
+				table.insert(paths, {
+					x, y1, x, ya - CORNER, x, ya, x - CORNER, ya,
+					ch + CORNER, ya, ch, ya, ch, ya + CORNER,
+					ch, yb - CORNER, ch, yb, ch + CORNER, yb,
+					x - CORNER, yb, x, yb, x, yb + CORNER, x, y2,
+				})
+			elseif y2 > y1 then
+				table.insert(paths, { x, y1, x, y2 })
+			end
+		end
 		local branches: { Branch } = {}
-		for _, r in s.rows do
-			table.insert(branches, { y = r.mid, to = content_x - GAP, node = r.kind == "orchestrator" })
+		for _, r in sp.crew do
+			table.insert(branches, { y = r.mid, to = r.x - GAP })
 		end
 		table.sort(branches, function(a: Branch, b: Branch): boolean
 			return a.y < b.y
 		end)
-		local o = fleet.orchestrators[s.o] or {}
+		local o = fleet.orchestrators[sp.o] or {}
 		table.insert(out.rails, {
-			orchestrator = s.o,
+			orchestrator = sp.o,
 			hue = o.hue,
 			paused = o.paused == true,
-			x = rails_x + (s.col - 1) * RAIL_STEP,
-			top = s.top,
-			bottom = s.bottom,
+			x = x,
+			dot = sp.dot,
+			top = sp.top,
+			bottom = sp.bottom,
 			branches = branches,
-			gaps = {},
-			dashed = {},
+			runs = paths,
 		})
 	end
 
-	-- Where another's branch crosses a rail, the rail breaks.
-	for _, rail in out.rails do
-		for _, other in out.rails do
-			if other ~= rail and other.x < rail.x then
-				for _, b in other.branches do
-					if b.y > rail.top and b.y < rail.bottom then
-						table.insert(rail.gaps, { b.y - 5, b.y + 5 })
+	-- A project's name: where its rows start, or with the crew where a
+	-- rail runs on past it.
+	for _, label in out.labels do
+		local mid = label.y + PROJECT_H / 2
+		label.x = base
+		for _, rail in out.rails do
+			for _, run in rail.runs do
+				for i = 1, #run - 3, 2 do
+					if run[i] == rail.x and run[i + 2] == rail.x and mid > math.min(run[i + 1], run[i + 3]) and mid < math.max(run[i + 1], run[i + 3]) then
+						label.x = base + DOT + INDENT - 4
 					end
 				end
 			end
 		end
 	end
 
-	-- Each crew row's way back to its orchestrator's row, for a pulse.
+	-- Each crew row's way back to its orchestrator's dot, for a pulse: up
+	-- its rail as drawn.
 	for _, rail in out.rails do
-		local node_y: number? = nil
-		for _, b in rail.branches do
-			if b.node then
-				node_y = b.y
-			end
-		end
-		for _, r in by_orch[rail.orchestrator] or {} do
-			if r.kind ~= "orchestrator" then
-				local way = { content_x - GAP, r.mid, rail.x, r.mid }
-				if node_y then
-					table.insert(way, rail.x)
-					table.insert(way, node_y :: number)
-					table.insert(way, content_x - GAP)
-					table.insert(way, node_y :: number)
+		for _, r in span_of[rail.orchestrator].crew do
+			local way = { r.x - GAP, r.mid, rail.x, r.mid }
+			-- (The runs between it and the dot, walked toward the dot.)
+			local up = r.mid > rail.dot
+			local list = table.clone(rail.runs)
+			table.sort(list, function(a: { number }, b: { number }): boolean
+				return if up then a[2] > b[2] else a[2] < b[2]
+			end)
+			for _, run in list do
+				local lo, hi = math.min(run[2], run[#run]), math.max(run[2], run[#run])
+				local between = if up then hi <= r.mid + 0.5 and lo >= rail.dot - 0.5 else lo >= r.mid - 0.5 and hi <= rail.dot + 0.5
+				if between then
+					local pts = if up then {} else run
+					if up then
+						for i = #run - 1, 1, -2 do
+							table.insert(pts, run[i])
+							table.insert(pts, run[i + 1])
+						end
+					end
+					for _, v in pts do
+						table.insert(way, v)
+					end
 				end
-				out.routes[r.id] = way
 			end
+			table.insert(way, rail.x)
+			table.insert(way, rail.dot)
+			out.routes[r.id] = way
 		end
 	end
 	return out
 end
 
--- A rail's lines as polylines (x, y, …): the rail in its solid runs (gaps
--- and dashed runs left out) and each branch from the rail to its end, the
--- first and last rounding off the rail's ends (their corner point in the
--- middle: drawn as a curve); and the dashed runs.
-function M.lines(rail: Rail): ({ { number } }, { { number } })
-	local solid: { { number } } = {}
-	local dashed: { { number } } = {}
-	local n = #rail.branches
-	if n == 1 then
-		local b = rail.branches[1]
-		table.insert(solid, { rail.x, b.y, b.to, b.y })
-		return solid, dashed
-	end
-	local cuts = {}
-	for _, g in rail.gaps do
-		table.insert(cuts, { g[1], g[2], false })
-	end
-	for _, d in rail.dashed do
-		table.insert(cuts, { d[1], d[2], true })
-	end
-	table.sort(cuts, function(a: any, b: any): boolean
-		return a[1] < b[1]
-	end)
-	local at = rail.top + CORNER
-	local stop = rail.bottom - CORNER
-	for _, c in cuts do
-		local a, b = math.max(c[1], at), math.min(c[2], stop)
-		if b > a then
-			if a > at then
-				table.insert(solid, { rail.x, at, rail.x, a })
-			end
-			if c[3] then
-				table.insert(dashed, { rail.x, a, rail.x, b })
-			end
-			at = b
-		end
-	end
-	if stop > at then
-		table.insert(solid, { rail.x, at, rail.x, stop })
-	end
-	for i, b in rail.branches do
-		if i == 1 or i == n then
-			local dy = if i == 1 then CORNER else -CORNER
-			table.insert(solid, { rail.x, b.y + dy, rail.x, b.y, rail.x + CORNER, b.y, b.to, b.y })
+-- A rail's lines as polylines (x, y, …): its runs (from row to row, clear
+-- of its dot, by its channel past rows not its own), and an elbow into
+-- each crew row: the first and last round off the rail's ends (a corner
+-- point between two close ones, drawn as a curve), the others leave it
+-- straight.
+function M.lines(rail: Rail): { { number } }
+	local out: { { number } } = table.clone(rail.runs)
+	for _, b in rail.branches do
+		if b.y == rail.bottom and b.y > rail.dot then
+			table.insert(out, { rail.x, b.y - CORNER, rail.x, b.y, rail.x + CORNER, b.y, b.to, b.y })
+		elseif b.y == rail.top and b.y < rail.dot then
+			table.insert(out, { rail.x, b.y + CORNER, rail.x, b.y, rail.x + CORNER, b.y, b.to, b.y })
 		else
-			table.insert(solid, { rail.x, b.y, b.to, b.y })
+			table.insert(out, { rail.x, b.y, b.to, b.y })
 		end
 	end
-	return solid, dashed
+	return out
 end
 
 return M
