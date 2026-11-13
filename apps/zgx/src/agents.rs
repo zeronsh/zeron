@@ -1097,8 +1097,22 @@ impl Agents {
 
     fn keep_device(&self, key: String, snapshot: &Json) {
         let Some(accounts) = snapshot["accounts"].as_array() else { return };
-        self.device_accounts.borrow_mut().entry(key).or_default().accounts = accounts.clone();
+        let changed = {
+            let mut devices = self.device_accounts.borrow_mut();
+            let device = devices.entry(key.clone()).or_default();
+            // (The first sight of a device's accounts changes nothing: its
+            // models were looked up with them.)
+            let changed = if device.seen { changed_logins(&device.accounts, accounts) } else { Vec::new() };
+            device.seen = true;
+            device.accounts = accounts.clone();
+            changed
+        };
         self.publish_devices();
+        // An agent signed in, switched, given a key or signed out lists other
+        // models (Pi signed in to Claude lists Claude's): its models again.
+        for harness in changed {
+            crate::chat::accounts_changed(&key, &harness);
+        }
     }
 
     /// A composer on `key`'s device: its accounts, on first sight of it.
@@ -1778,9 +1792,37 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
 #[derive(Default)]
 struct DeviceAccounts {
     accounts: Vec<Json>,
+    /// Its accounts have come at least once.
+    seen: bool,
     /// A composer has asked for them.
     asked: bool,
     last_forced: Option<Instant>,
+}
+
+/// The agents whose logins differ between two account lists: an account
+/// come or gone, or another in use. (Usage alone changes nothing.)
+fn changed_logins(before: &[Json], after: &[Json]) -> Vec<String> {
+    fn logins(accounts: &[Json]) -> BTreeMap<String, Vec<(String, bool)>> {
+        let mut by: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+        for a in accounts {
+            if let (Some(harness), Some(id)) = (a["harness"].as_str(), a["id"].as_str()) {
+                by.entry(harness.into()).or_default().push((id.into(), a["active"].as_bool() == Some(true)));
+            }
+        }
+        for list in by.values_mut() {
+            list.sort();
+        }
+        by
+    }
+    let (before, after) = (logins(before), logins(after));
+    let mut changed: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|h| before.get(*h) != after.get(*h))
+        .cloned()
+        .collect();
+    changed.dedup();
+    changed
 }
 
 /// Forced usage asks the provider: not more often than this.
@@ -1900,6 +1942,35 @@ fn epoch_secs(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pi signed in to Claude, or another login put in use: Pi's models are
+    /// looked up again. Usage moving, or another agent's, isn't Pi's change.
+    #[test]
+    fn only_an_agent_whose_logins_changed_has_its_models_looked_up_again() {
+        let row = |harness: &str, id: &str, active: bool, used: f64| {
+            json!({ "id": id, "harness": harness, "active": active, "usageWindows": [{ "used": used }] })
+        };
+        let before = vec![row("pi", "chatgpt-a", true, 0.1), row("codex", "c1", true, 0.2)];
+        // Usage alone: nothing.
+        let after = vec![row("pi", "chatgpt-a", true, 0.5), row("codex", "c1", true, 0.9)];
+        assert!(changed_logins(&before, &after).is_empty());
+        // A new Claude login for Pi: Pi.
+        let signed_in = vec![
+            row("pi", "chatgpt-a", true, 0.1),
+            row("pi", "claude-b", true, 0.0),
+            row("codex", "c1", true, 0.2),
+        ];
+        assert_eq!(changed_logins(&before, &signed_in), ["pi"]);
+        // Another in use: that agent.
+        let switched = vec![
+            row("pi", "chatgpt-a", true, 0.1),
+            row("codex", "c1", false, 0.2),
+            row("codex", "c2", true, 0.0),
+        ];
+        assert_eq!(changed_logins(&before, &switched), ["codex"]);
+        // Signed out of everything: that agent too.
+        assert_eq!(changed_logins(&before, &[row("codex", "c1", true, 0.2)]), ["pi"]);
+    }
 
     #[test]
     fn a_switch_moves_only_its_own_login_group() {

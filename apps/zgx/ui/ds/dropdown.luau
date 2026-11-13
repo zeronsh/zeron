@@ -1541,7 +1541,18 @@ return ui.component(function(props: Props): Node
 					table.insert(rows, gated(list))
 				end
 				if props.actions and #props.actions > 0 then
-					table.insert(rows, rule())
+					local all = props.actions
+					-- (The rule and the actions' inset only while an action
+					-- shows: a menu whose every action is hidden ends at its
+					-- last item, with no line or gap under it.)
+					local function any_shown(): boolean
+						for _, action in all do
+							if not action.shown or action.shown() then
+								return true
+							end
+						end
+						return false
+					end
 					local acts: { Node } = {}
 					for n, action in props.actions do
 						local key = `action:{n}`
@@ -1563,7 +1574,18 @@ return ui.component(function(props: Props): Node
 						}, false)
 						table.insert(acts, if action.shown then ui.show(action.shown, made) else made)
 					end
-					table.insert(rows, ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) })
+					table.insert(
+						rows,
+						ui.show(
+							any_shown,
+							ui.column {
+								w_full = true,
+								gap = 0,
+								rule(),
+								ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) },
+							}
+						)
+					)
 				end
 				if bottom_up then
 					place_top()

@@ -1351,6 +1351,36 @@ impl Chats {
         self.publish_views();
     }
 
+    /// `harness`'s logins on `device` ("" or this one: here) changed: its
+    /// models looked up again, as the agent now lists them (Pi signed in to
+    /// Claude lists Claude's models). Here, that agent's alone; another
+    /// device's, only while the composer runs on it.
+    fn accounts_changed(self: &Rc<Self>, device: &str, harness: &str) {
+        let here = self.here.borrow().clone();
+        if device.is_empty() || here.as_deref() == Some(device) {
+            if !self.models.borrow().contains_key(harness) {
+                return;
+            }
+            let (me, id) = (self.clone(), harness.to_owned());
+            engine::get().spawn(async move {
+                match engine::get()
+                    .call("ListModels", json!({ "harness": id, "force": true }))
+                    .await
+                {
+                    Ok(list) => {
+                        me.models
+                            .borrow_mut()
+                            .insert(id, list.as_array().cloned().unwrap_or_default());
+                        me.publish_catalog();
+                    }
+                    Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list again: {error}"),
+                }
+            });
+        } else if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
+            self.reload_remote();
+        }
+    }
+
     /// The composer now runs on `device` ("" or this one: here).
     fn catalog_on(self: &Rc<Self>, device: &str) {
         let here = self.here.borrow().clone();
@@ -1622,6 +1652,11 @@ impl Chats {
 /// A chat just made here (`sessions.create`), as the engine's list will
 /// have it: `params` is its `createChat` (`chatId`, `deviceId`, `spaceId`,
 /// `config`, `cwd`, `branch`, `parentChatId`).
+/// An agent's logins on a device changed (src/agents.rs): its models again.
+pub(crate) fn accounts_changed(device: &str, harness: &str) {
+    CHATS.with(|c| c.clone().accounts_changed(device, harness));
+}
+
 pub(crate) fn made(params: &Json) {
     let Some(id) = params["chatId"].as_str() else { return };
     let mut row = json!({ "id": id });
