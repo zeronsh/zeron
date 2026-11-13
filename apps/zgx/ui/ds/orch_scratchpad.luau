@@ -80,6 +80,37 @@ function M.Status(): Node
 	}
 end
 
+-- What the Scratchpad lacks to save, while it can't: "engine" (one without
+-- it) or "app" (an app without its host module); nil once a copy came, or
+-- while it's still coming.
+local function missing(props: Props): string?
+	local pad = props.pad()
+	if not pad or pad.loaded == true then
+		return nil
+	end
+	if pad.host ~= true then
+		return "app"
+	end
+	return if pad.missing == "engine" then "engine" else nil
+end
+
+-- Said plainly while nothing can be saved (typing still works: kept here,
+-- saved once the engine has the Scratchpad).
+local function Notice(props: Props): Node
+	return ui.show(function(): boolean
+		return missing(props) ~= nil
+	end, ui.text {
+		function(): string
+			return locale.s(if missing(props) == "app" then "ds.orch.scratchpad.needs_app" else "ds.orch.scratchpad.needs_engine")
+		end,
+		id = "scratchpad-notice",
+		class = "orch-scratchpad-notice",
+		w_full = true,
+		text_size = "$font.size.sm",
+		color = "$zeron.status.failed",
+	})
+end
+
 -- What every view does: the engine's copy followed, the saves wired, and
 -- everything saved as it goes.
 local function follow(props: Props)
@@ -92,6 +123,20 @@ local function follow(props: Props)
 		return props.pad().shapes or {}
 	end
 	ui.effect(function()
+		local gone = missing(props) ~= nil
+		local was = Sync.offline:peek()
+		if was ~= gone then
+			Sync.offline:set(gone)
+		end
+		-- Back: what was typed meanwhile goes now.
+		if was and not gone then
+			ui.after(0, function()
+				text.save_now()
+				shapes.save_now()
+			end)
+		end
+	end)
+	ui.effect(function()
 		local pad = props.pad()
 		if not pad or not pad.loaded then
 			return
@@ -103,13 +148,6 @@ local function follow(props: Props)
 		text.save_now()
 		shapes.save_now()
 	end)
-end
-
-local function loaded(props: Props): () -> boolean
-	return function(): boolean
-		local pad = props.pad()
-		return pad ~= nil and pad.loaded == true
-	end
 end
 
 -- Who made a version, as history says it.
@@ -242,10 +280,10 @@ end
 
 -- Notes: the Markdown as it's typed, or as it reads.
 local function Notes(props: Props, h: any, grow: number?): Node
-	local is_loaded = loaded(props)
 	local fill = plate()
 	local reading = ui.debounced(text.value, 150)
 	local editing = ui.use_state(false)
+	local editor_el: any = nil
 	local editor = ui.textarea {
 		id = "scratchpad-editor",
 		class = "orch-scratchpad-editor",
@@ -259,8 +297,20 @@ local function Notes(props: Props, h: any, grow: number?): Node
 			editing:set(false)
 			text.save_now()
 		end,
+		on_mount = function(el: any)
+			editor_el = el
+		end,
 		on_focus = function()
 			editing:set(true)
+		end,
+		-- Escape lets go of it (the wheel back to the page).
+		on_key = function(e: any): boolean?
+			if e.key == "Escape" and editor_el then
+				editing:set(false)
+				editor_el:blur()
+				return true
+			end
+			return nil
 		end,
 		-- Not being written in, a wheel over it is the page's (the notes
 		-- scroll themselves once focused, and keep the wheel then).
@@ -275,9 +325,6 @@ local function Notes(props: Props, h: any, grow: number?): Node
 		label = locale.s("ds.orch.scratchpad.editor"),
 		placeholder = locale.s("ds.orch.scratchpad.placeholder"),
 		placeholder_color = "$text.tertiary",
-		read_only = function(): boolean
-			return not is_loaded()
-		end,
 		wrap = true,
 		highlight = md_edit.highlight,
 		w_full = true,
@@ -396,6 +443,7 @@ M.Widget = ui.component(function(props: Props): Node
 				end,
 			},
 		},
+		Notice(props),
 		tabbed(props, WIDGET_H),
 	}
 end)
@@ -451,6 +499,7 @@ M.Page = ui.component(function(props: Props): Node
 				on_click = collapse,
 			},
 		},
+		Notice(props),
 		ui.switch(function(): string
 			return if width:get() >= M.SPLIT then "split" else "tabs"
 		end, {

@@ -445,13 +445,31 @@ return function()
 		return rev
 	end
 	local pad_stub = scratchpad :: any
+	-- (An engine without the Scratchpad: every op refused, as the host's
+	-- call to it is: `fixture.scratchpad_no_engine`.)
+	local no_engine = false
+	local function refused(): any
+		return {
+			after = function(_self: any, _done: any, failed: ((any) -> ())?)
+				if failed then
+					failed("unknown method: Scratchpad")
+				end
+			end,
+		}
+	end
 	pad_stub.set_text = function(text: string): any
 		note(`set_text:{text}`)
+		if no_engine then
+			return refused()
+		end
 		return settled(edited(text, nil, "person"))
 	end
 	local sent = ui.state("scratchpad_sent", {} :: { any })
 	pad_stub.set_shapes = function(shapes: { any }): any
 		note(`set_shapes:{#shapes}`)
+		if no_engine then
+			return refused()
+		end
 		sent:set(shapes)
 		return settled(edited(nil, shapes, "person"))
 	end
@@ -473,6 +491,23 @@ return function()
 		local list = table.clone(scratchpad.now:peek().shapes or {})
 		table.insert(list, { id = "sh-remote", kind = "ellipse", x = 20, y = 20, w = 60, h = 40, points = {}, text = "far", color = "blue", z = 99 })
 		edited(nil, list, "other")
+	end }
+	-- The engine without the Scratchpad (the host's watch refused), and an
+	-- app without its host module (only the scripts' default); then the
+	-- engine with it after all, its first copy coming.
+	ui.command { id = "fixture.scratchpad_no_engine", title = "Fixture: an engine without the Scratchpad", run = function()
+		no_engine = true
+		scratchpad.now:set({ host = true, missing = "engine", loaded = false, text = "", rev = "", updated_by = "person", shapes = {}, history = {} })
+	end }
+	ui.command { id = "fixture.scratchpad_no_host", title = "Fixture: an app without the Scratchpad", run = function()
+		no_engine = true
+		scratchpad.now:set({ host = false, loaded = false, text = "", rev = "", updated_by = "person", shapes = {}, history = {} })
+	end }
+	ui.command { id = "fixture.scratchpad_engine_back", title = "Fixture: the engine has the Scratchpad again", run = function()
+		no_engine = false
+		local p = table.clone(sample.scratchpad)
+		p.host = true
+		scratchpad.now:set(p)
 	end }
 	ui.command { id = "fixture.scratchpad_empty", title = "Fixture: an empty Scratchpad", run = function()
 		scratchpad.now:set({ loaded = true, text = "", rev = "", updated_by = "person", shapes = {}, history = {} })

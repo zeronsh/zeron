@@ -11,6 +11,10 @@
 --   c.saver          (v) -> promise of a rev: set by what shows it
 --   c.remote         () -> the engine's copy, for an ack that came late
 --   c.busy           () -> boolean: mid-gesture (no remote change adopted)
+--   c.early()        edited before the engine's first copy came (kept,
+--                    and saved over it once it does)
+--   Sync.offline     State: the engine (or the app) has no Scratchpad, so
+--                    nothing saves: an edit reads "failed" ("Not saved")
 --
 -- A remote change (another device, the Brain dump) shows at once while the
 -- person has nothing unsaved; with edits of their own, theirs stay and are
@@ -38,9 +42,12 @@ export type Channel = {
 	saver: ((v: any) -> any)?,
 	remote: (() -> any)?,
 	busy: () -> boolean,
+	early: () -> boolean,
 }
 
 local channels: { [string]: Channel } = {}
+
+M.offline = ui.state("ds_scratchpad_offline", false)
 
 function M.channel(key: string, empty: any, sig: (any) -> string): Channel
 	if channels[key] then
@@ -55,6 +62,8 @@ function M.channel(key: string, empty: any, sig: (any) -> string): Channel
 	local adopted = ui.state(`ds_scratchpad_{key}_adopted`, 0)
 	local flying = false
 	local again = false
+	-- (Edited before the engine's first copy: the person's, kept.)
+	local early = false
 	local timer: (() -> ())? = nil
 	local waiting: { () -> () } = {}
 	local c: Channel = nil :: any
@@ -130,7 +139,13 @@ function M.channel(key: string, empty: any, sig: (any) -> string): Channel
 		busy = function(): boolean
 			return false
 		end,
+		early = function(): boolean
+			return early
+		end,
 		edit = function(v: any)
+			if base:peek() == nil then
+				early = true
+			end
 			value:set(v)
 			cancel()
 			timer = ui.after(M.DEBOUNCE, save_now)
@@ -151,6 +166,14 @@ function M.channel(key: string, empty: any, sig: (any) -> string): Channel
 			local b = base:peek()
 			if b == nil then
 				base:set(rs)
+				if early then
+					-- Typed before the engine could answer: theirs, saved now.
+					early = false
+					if sig(value:peek()) ~= rs then
+						save_now()
+					end
+					return
+				end
 				value:set(remote)
 				adopted:set(adopted:peek() + 1)
 				return
@@ -180,13 +203,24 @@ end
 -- "syncing" or "saved" (the first that any of them is).
 function M.state(list: { Channel }): string
 	local out = "saved"
+	local offline = M.offline:get()
+	-- (Nothing saves: what shows is this app's alone.)
+	if offline then
+		for _, c in list do
+			c.value:get()
+		end
+		return "failed"
+	end
 	for _, c in list do
 		local s = c.status:get()
 		local b = c.base:get()
 		-- (Read for its changes: an edit not gone yet is "saving".)
 		local v = c.value:get()
-		if s == "failed" then
+		if s == "failed" or (offline and (c.early() or (b ~= nil and v ~= nil and c.dirty()))) then
 			return "failed"
+		end
+		if b == nil and c.early() then
+			out = "saving"
 		end
 		if s == "saving" or (b ~= nil and v ~= nil and c.dirty()) then
 			out = "saving"
