@@ -1001,7 +1001,7 @@ return {
 	["ds.orch.qa.asked"] = "asked {ago}",
 	["ds.orch.qa.answered"] = "answered {ago}",
 	["ds.orch.qa.answered_now"] = "answered",
-	["ds.orch.qa.open_in"] = "Open {name}",
+	["ds.orch.qa.open_in"] = "Go to {name}",
 	["ds.orch.qa.open_thread"] = "Open thread",
 	["ds.orch.qa.mark_read"] = "Mark read",
 	["ds.orch.qa.mark_unread"] = "Mark unread",

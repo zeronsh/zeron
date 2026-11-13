@@ -1247,7 +1247,7 @@
         "asked": "{ago}前提问",
         "answered": "{ago}前回答",
         "answered_now": "已回答",
-        "open_in": "打开 {name}",
+        "open_in": "前往 {name}",
         "open_thread": "打开对话",
         "mark_read": "标为已读",
         "mark_unread": "标为未读",

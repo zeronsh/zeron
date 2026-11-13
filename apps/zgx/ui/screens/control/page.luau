@@ -621,14 +621,10 @@ local function comms(): Node
 	}
 end
 
--- Q&A: what was read and put away, on this device (kept across restarts);
--- which entries are opened, kept as the page is made again.
-M.qa_marks = ui.persist("control_qa", { read = {}, dismissed = {} } :: QA.Marks)
-local qa_open = ui.state("control_qa_open", {} :: { [string]: boolean })
-local qa_all = ui.state("control_qa_all", false)
+-- Q&A (ds/orch_qa keeps its entries' model and what was read and put away).
 
 local qa_entries = ui.computed(function(): { QA.Entry }
-	return QA.entries(orchestration.dumps:get(), M.qa_marks:get(), chats_now:get())
+	return QA.entries(orchestration.dumps:get(), QA.marks:get(), chats_now:get())
 end)
 
 local function qa(): Node
@@ -641,9 +637,9 @@ local function qa(): Node
 				return locale.s(`ds.orch.target.{k}`)
 			end)
 		end,
-		marks = M.qa_marks,
-		open = qa_open,
-		all = qa_all,
+		marks = QA.marks,
+		open = QA.opened,
+		all = QA.all,
 		on_open_thread = M.open_chat,
 	}
 end

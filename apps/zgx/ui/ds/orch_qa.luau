@@ -15,15 +15,22 @@
 -- arrive.
 --
 --   local QA = require("@ds/orch_qa")
+--   QA.marks        what was read and put away, on this device, kept
+--                   across restarts (ui.persist `control_qa`):
+--                   { read = { [key] = true }, dismissed = { [key] = true } }
+--   QA.opened       the entries opened, kept as the page is made again
 --   QA.entries(dumps, marks, chats?) -> { Entry }      -- what it lists
 --   QA.counts(entries) -> { unread, waiting }
+--   QA.mark(marks, key, read), QA.dismiss(marks, key, away)
 --   QA.Section {
 --     entries = function() return QA.entries(...) end,
 --     target = function(route) return data.Target end,  -- where it went
---     marks = state,                -- { read = { [key] = true }, dismissed = … }
---     open = state,                 -- { [key] = true }: entries opened
+--     marks = QA.marks, open = QA.opened,
 --     on_open_thread = function(chat_id) end,
 --   }
+--
+-- The whole of an entry's model and its state is here: the page only
+-- feeds it the dumps and opens threads.
 
 local IconButton = require("@self/icon_button").IconButton
 local ContextMenu = require("@self/context_menu")
@@ -58,6 +65,10 @@ export type Entry = {
 }
 
 export type Marks = { read: { [string]: boolean }?, dismissed: { [string]: boolean }? }
+
+M.marks = ui.persist("control_qa", { read = {}, dismissed = {} } :: Marks)
+M.opened = ui.state("control_qa_open", {} :: { [string]: boolean })
+M.all = ui.state("control_qa_all", false)
 
 -- An entry's key: its dump's and route's ids.
 function M.key(dump_id: string, route_id: string): string
@@ -377,8 +388,9 @@ local function entry(props: Props, row: State<Entry>): Node
 	end
 	local line = Card.Line {
 		class = "orch-qa-status",
-		ui.div { w = 6, shrink = 0 },
-		ui.div { w = ui.raw(2, "the gutter's gap, less the dot's own"), shrink = 0 },
+		-- (Under the question's words: the gutter and its gap, less the
+		-- line's own gap.)
+		ui.div { w = ui.raw(10, "the unread gutter and its gap, less the line's gap"), shrink = 0 },
 		ui.show(function(): boolean
 			return row:get().chat ~= nil
 		end, ui.button {

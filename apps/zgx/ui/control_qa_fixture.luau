@@ -19,6 +19,7 @@ require("@app/control_world")()
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local page = require("@app/screens/control/page")
+local QA = require("@ds/orch_qa")
 
 local NOW = os.time()
 local function ago(s: number): number
@@ -119,10 +120,10 @@ s.chats = chats
 sessions.now:set(s)
 
 -- Read on this device: one; put away: one.
-page.qa_marks:set({ read = { ["dp-qa/rq-3"] = true }, dismissed = { ["dp-qa2/rq-6"] = true } })
+QA.marks:set({ read = { ["dp-qa/rq-3"] = true }, dismissed = { ["dp-qa2/rq-6"] = true } })
 -- Opened from the test (`fixture.qa_reset`): as it started.
 ui.command { id = "fixture.qa_reset", title = "Fixture: Q&A marks as they started", run = function()
-	page.qa_marks:set({ read = { ["dp-qa/rq-3"] = true }, dismissed = { ["dp-qa2/rq-6"] = true } })
+	QA.marks:set({ read = { ["dp-qa/rq-3"] = true }, dismissed = { ["dp-qa2/rq-6"] = true } })
 end }
 -- A thread answers (`fixture.qa_answer`): the waiting MSI question.
 ui.command { id = "fixture.qa_answer", title = "Fixture: answer the MSI question", run = function()

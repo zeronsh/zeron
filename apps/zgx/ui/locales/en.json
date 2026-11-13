@@ -1247,7 +1247,7 @@
         "asked": "asked {ago}",
         "answered": "answered {ago}",
         "answered_now": "answered",
-        "open_in": "Open {name}",
+        "open_in": "Go to {name}",
         "open_thread": "Open thread",
         "mark_read": "Mark read",
         "mark_unread": "Mark unread",

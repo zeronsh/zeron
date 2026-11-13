@@ -38,7 +38,7 @@ end)
 test("Q&A: an entry says where it was answered, when it was asked and answered, or that it waits", function()
 	local app = open()
 	-- Where: a way into that thread, by its name.
-	expect(app:has(`{QA} >> role:button "Open Explaining Capy.ai Captains"`)).to_be(true)
+	expect(app:has(`{QA} >> role:button "Go to Explaining Capy.ai Captains"`)).to_be(true)
 	expect(app:has(`{QA} >> ~"asked 8h"`)).to_be(true)
 	expect(app:has(`{QA} >> ~"answered 7h"`)).to_be(true)
 	-- Waiting: its thread at work on it, or not.
@@ -80,7 +80,7 @@ end)
 
 test("Q&A: the thread's link opens it and reads the answer", function()
 	local app = open()
-	app:click(`{QA} >> role:button "Open Explaining Capy.ai Captains"`)
+	app:click(`{QA} >> role:button "Go to Explaining Capy.ai Captains"`)
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/th-capy")
 	expect(marks(app).read["dp-qa/rq-1"]).to_be(true)
