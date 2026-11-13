@@ -1,7 +1,8 @@
 -- The Control room (`/control`): the Brain dump's home, and the one place
 -- that shows everything orchestration is doing. Its widgets, in order:
 -- Capture (dump anything; the newest dump's receipt under it, older ones
--- folded), Needs you, the Map, the Board, Machines and Comms. Two columns
+-- folded), Needs you, Q&A (the person's questions and their answers), the
+-- Map, the Board, Machines and Comms. Two columns
 -- from 1100 points (Capture and the Map on the left; Needs you, Machines and
 -- Comms on the right; the Board across both, under them), one below that. Each widget can be
 -- hidden and moved; that's this device's (`control_widgets`). Plugins add
@@ -24,6 +25,7 @@ local MapMenu = require("@app/screens/control/map_menu")
 local Machines = require("@ds/orch_machines")
 local Comms = require("@ds/orch_comms")
 local OrchBoard = require("@ds/orch_board")
+local QA = require("@ds/orch_qa")
 local Links = require("@ds/links")
 local Block = require("@ds/orch_block")
 local HoverCard = require("@ds/hover_card")
@@ -49,9 +51,9 @@ local SIDE_W = 420
 local GAP = "$space.4"
 
 -- The widgets: each one's column when wide.
-M.WIDGETS = { "capture", "needs", "progress", "map", "board", "machines", "comms" }
+M.WIDGETS = { "capture", "needs", "qa", "progress", "map", "board", "machines", "comms" }
 -- (The Board spans both, under them: its columns want the room.)
-local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "full", needs = "right", progress = "right", machines = "right", comms = "right" }
+local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "full", needs = "right", qa = "right", progress = "right", machines = "right", comms = "right" }
 
 -- Shown and in what order, on this device.
 export type Widgets = { order: { string }, hidden: { [string]: boolean } }
@@ -65,9 +67,13 @@ local function full_order(w: Widgets): { string }
 			table.insert(out, id)
 		end
 	end
-	for _, id in M.WIDGETS do
+	-- (One this device hasn't placed yet, new since: after the one before
+	-- it in the default order.)
+	for i, id in M.WIDGETS do
 		if not seen[id] then
-			table.insert(out, id)
+			seen[id] = true
+			local after = if i > 1 then table.find(out, M.WIDGETS[i - 1]) else 0
+			table.insert(out, (after or #out) + 1, id)
 		end
 	end
 	return out
@@ -615,7 +621,30 @@ local function comms(): Node
 	}
 end
 
-local BUILD: { [string]: () -> Node } = { capture = capture, needs = needs, progress = Progress.Widget, map = map, board = board, machines = machines, comms = comms }
+-- Q&A (ds/orch_qa keeps its entries' model and what was read and put away).
+
+local qa_entries = ui.computed(function(): { QA.Entry }
+	return QA.entries(orchestration.dumps:get(), QA.marks:get(), chats_now:get())
+end)
+
+local function qa(): Node
+	return QA.Section {
+		entries = function(): { QA.Entry }
+			return qa_entries:get()
+		end,
+		target = function(r: any): any
+			return data.target(orchestration.now:get(), chats_now:get(), r.target, function(k: string): string
+				return locale.s(`ds.orch.target.{k}`)
+			end)
+		end,
+		marks = QA.marks,
+		open = QA.opened,
+		all = QA.all,
+		on_open_thread = M.open_chat,
+	}
+end
+
+local BUILD: { [string]: () -> Node } = { capture = capture, needs = needs, qa = qa, progress = Progress.Widget, map = map, board = board, machines = machines, comms = comms }
 
 -- How many of the crew work now.
 local function working_now(): number
@@ -694,6 +723,32 @@ local function figures_of(id: string): Node?
 				local u = n(true)
 				return if u > 0 then locale.s("control.figures.urgent", { n = u }) else ""
 			end, "failed"),
+		}
+	elseif id == "qa" then
+		local function counts(): { unread: number, waiting: number }
+			return QA.counts(qa_entries:get())
+		end
+		return ui.row {
+			gap = "$space.3",
+			items = "center",
+			-- (New answers in the unread dot's ink.)
+			ui.show(function(): boolean
+				return counts().unread > 0
+			end, ui.text {
+				function(): string
+					return locale.s("control.figures.new", { n = counts().unread })
+				end,
+				class = "control-qa-new",
+				tabular = true,
+				shrink = 0,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = "$accent",
+			}),
+			figure_if(function(): string
+				local n = counts().waiting
+				return if n > 0 then locale.s("control.figures.waiting", { n = n }) else ""
+			end),
 		}
 	elseif id == "map" then
 		return figure_if(function(): string

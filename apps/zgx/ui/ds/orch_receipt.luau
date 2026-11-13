@@ -6,7 +6,9 @@
 -- drag), their edges fading where more waits. The pointer on a part of the
 -- text shows a hover card (where it went, what it is, how it stands, the
 -- message sent, the answer, a way in) and brings its chip into view, lit;
--- the pointer on a chip lights its part. A question's answer also comes
+-- the pointer on a chip lights its part. A question the person wants
+-- answered (`direct`) is also washed in its hue, a highlighter's mark: its
+-- answer waits in the Control room's Q&A. A question's answer also comes
 -- back as one quiet reply line under the chips; a part the Brain dump
 -- wasn't sure about offers its likely places as buttons; any chip moves
 -- its part elsewhere from its menu. The one orchestrated moment: as a dump's parts are
@@ -265,6 +267,10 @@ return ui.component(function(props: Props): Node
 				local h = if unsure then nil else route_hue(r)
 				local rid = r.id
 				local index = i :: number
+				-- A question the person wants answered (its answer waits in
+				-- the Q&A): its words held in a highlighter's wash of its
+				-- hue, not only underlined.
+				local asked = r.direct == true
 				table.insert(runs, ui.span {
 					seg.text,
 					literal = true,
@@ -278,8 +284,11 @@ return ui.component(function(props: Props): Node
 					radius = 3,
 					-- (Under the pointer, on the part, its chip or its reply.)
 					bg = function(): any
-						if lit:get() < index or hovered:get() ~= rid then
+						if lit:get() < index then
 							return "#00000000"
+						end
+						if hovered:get() ~= rid then
+							return if asked then hue.canvas(h, hue.wash_alpha() * 0.75) else "#00000000"
 						end
 						return hue.canvas(if unsure then nil else h, hue.wash_alpha() * (if unsure then 0.8 else 1.3))
 					end,
@@ -311,6 +320,8 @@ return ui.component(function(props: Props): Node
 			local i = tok.route
 			local text = ui.text {
 				tok.text,
+				-- (A question's words, for tests to find.)
+				class = if i and routes[i].direct == true then "orch-question-word" else nil,
 				literal = true,
 				text_size = text_size,
 				line_height = line_height,

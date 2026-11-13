@@ -555,6 +555,7 @@ mod tests {
             candidates: vec![],
             answer: None,
             answer_full: None,
+            answered_at: None,
             item_id: None,
             space_id: None,
             device_id: None,

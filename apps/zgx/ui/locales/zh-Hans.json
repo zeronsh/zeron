@@ -508,7 +508,8 @@
       "orchestrators": "Orchestrators",
       "new_orchestrator": "New orchestrator",
       "orchestrator_actions": "Orchestrator actions",
-      "paused": "Paused"
+      "paused": "Paused",
+      "crew_of": "Started by {name}"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -1238,6 +1239,25 @@
         "refreshing": "Writing a fresh note",
         "pinned": "Pinned",
         "under_minute": "<1m"
+      },
+      "qa": {
+        "empty": "还没有问题",
+        "unread": "未读",
+        "waiting": "等待中",
+        "answering": "回答中",
+        "asked": "{ago}前提问",
+        "answered": "{ago}前回答",
+        "answered_now": "已回答",
+        "open_in": "前往 {name}",
+        "open_thread": "打开对话",
+        "mark_read": "标为已读",
+        "mark_unread": "标为未读",
+        "dismiss": "移除",
+        "dismissed": "已移除问题",
+        "undo": "撤销",
+        "actions": "问题操作",
+        "more": "另外 {n} 个",
+        "fewer": "收起"
       }
     }
   },
@@ -4167,7 +4187,8 @@
       "board": "Board",
       "machines": "Machines",
       "comms": "Comms",
-      "progress": "Progress"
+      "progress": "Progress",
+      "qa": "问答"
     },
     "widgets": {
       "title": "Widgets",
@@ -4198,7 +4219,9 @@
       "online": "{n} 台设备",
       "running": "{n} 个在运行",
       "stalled": "{n} stalled",
-      "pinned": "{n} pinned"
+      "pinned": "{n} pinned",
+      "new": "{n} 个新回答",
+      "waiting": "{n} 个等待中"
     },
     "progress": {
       "empty": "Nothing working",

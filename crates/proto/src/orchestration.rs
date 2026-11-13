@@ -678,6 +678,9 @@ pub struct Route {
     /// The target's whole reply, as it came (markdown, capped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_full: Option<String>,
+    /// When its first answer came (the Control room's Q&A says it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
     /// For a new thread or orchestrator (and the "new thread" choice of an
@@ -1088,6 +1091,7 @@ pub mod role_prompts {
 - But don't start what the person says should wait. Something for later (\"later\", \"someday\", \"remind me\", \"next week\", \"when I get a chance\", \"at some point\", a reminder) is an Inbox card: target `item` with no id, `project` set. Something to do after something else (\"after X\", \"once Y is done\", \"then\", low priority) is a Next card: target `item` with no id, `card: next`, `project` set. Either way give it a `title`; the person starts it from the board.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
 - Give every task a `title`: 3 to 6 words naming the work, as a board card would (\"Delete cards from the Board\", \"Fix slash menu in Codex chats\"); never the message's opening words.\n\
+- Intent `question` is only for a question the person wants answered (\"are X ever used?\", \"when does 2.0 ship?\"): its answer waits for them in the Control room. A question that is part of work they hand over (\"fix X, and can you also check Y?\", \"why does X happen? find the root cause and fix it\", \"could you add Z?\") is a `task`; a rhetorical one (\"so much better, right?\") is `info`.\n\
 - A task, priority or cancel for a crew thread goes to its orchestrator (`world` lists each crew thread under it, with its item): route it to the orchestrator, naming the thread in `message`. Zeron delivers it there whichever you pick. Info and questions may go to the thread itself.\n\
 - A question about how a thread's work is going (\"how's X going?\", \"progress on Y?\") is never the thread's to answer: call `progress` on it, then `route` it as a question to that thread with `progress: true`. Zeron answers it from the thread's progress and doesn't interrupt the thread.\n\
 - Use `unsure` only when two or more existing owners fit, with them as candidates; never because nothing exists. The person is asked where it goes.\n\
