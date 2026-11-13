@@ -3161,6 +3161,9 @@
         "files_read": {
           "title": "See file names and paths in your projects"
         },
+        "files_write": {
+          "title": "Save files in its Documents folder and your projects"
+        },
         "panel_tabs": {
           "title": "Open tabs in your chats' panels"
         },

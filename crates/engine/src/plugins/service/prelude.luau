@@ -261,6 +261,17 @@ local function service(id: string): any
 		return op("folders", {})
 	end
 
+	-- A file written on this device ("files.write"): a promise of
+	-- { path, bytes }. A relative `path` goes in the plugin's own folder in
+	-- Documents (`~/Documents/<plugin name>/…`); a whole one must be inside
+	-- one of this device's chats' or projects' folders. Folders on the way
+	-- are made; `..` and links out are refused. `base64 = true`: `data` is
+	-- base64 (a picture), written as its bytes. 64 MB at most.
+	function M.write_file(path: string, data: string, opts: { base64: boolean? }?): any
+		assert(type(path) == "string" and type(data) == "string", "zeron.write_file(path, data, opts)")
+		return op("write_file", { path = path, data = data, base64 = opts ~= nil and opts.base64 == true })
+	end
+
 	-- A program its manifest names ("commands"), as you, on this device:
 	-- a promise of { status, stdout, stderr }.
 	function M.run(program: string, args: { string }?, opts: { cwd: string?, stdin: string?, timeout: number?, env: { [string]: string }? }?): any

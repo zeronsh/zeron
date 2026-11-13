@@ -20,6 +20,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "messages.read",
     "account.email",
     "files.read",
+    // A service writing files in its Documents folder or a chat's or
+    // project's (`zeron.write_file`, service/files.rs).
+    "files.write",
     "panel.tabs",
     "pages.add",
     "github",

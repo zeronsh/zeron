@@ -7,9 +7,13 @@ use serde_json::json;
 struct Recorder {
     emitted: Mutex<Vec<(String, String, Json)>>,
     notified: Mutex<Vec<String>>,
+    folders: Mutex<Vec<String>>,
 }
 
 impl Hooks for Recorder {
+    fn folders(&self) -> Vec<String> {
+        lock(&self.folders).clone()
+    }
     fn emit(&self, plugin: &str, event: &str, data: Json) {
         lock(&self.emitted).push((plugin.into(), event.into(), data));
     }
@@ -392,6 +396,42 @@ async fn a_watch_needs_files_read_and_a_folder() {
     let missing = folder.path().join("nope").display().to_string();
     let refused = r.ask(&plan, "watch", json!({ "folder": missing })).await.unwrap_err();
     assert!(refused.message.contains("no folder"), "{refused:?}");
+}
+
+const WRITER: &str = r#"
+local zeron = require("./zeron")("svc")
+zeron.serve("write", function(args)
+	return zeron.write_file(args.path, args.data, { base64 = args.base64 }):await()
+end)
+"#;
+
+#[tokio::test]
+async fn a_service_writes_files_only_in_a_chats_folder_with_files_write() {
+    let r = rig(Config::default());
+    let project = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    lock(&r.hooks.folders).push(project.path().display().to_string());
+    let plan = r.plan("1.0.0", WRITER, &["service", "files.write"]);
+    let png = project.path().join("design").join("01-home.png");
+    let wrote = r
+        .ask(&plan, "write", json!({ "path": png.display().to_string(), "data": "iVBORw==", "base64": true }))
+        .await
+        .unwrap();
+    assert_eq!(wrote["bytes"], 4, "{wrote}");
+    assert_eq!(std::fs::read(&png).unwrap(), [0x89, b'P', b'N', b'G']);
+    // Outside this device's chats' and projects' folders: refused.
+    let out = elsewhere.path().join("x.html");
+    let refused = r.ask(&plan, "write", json!({ "path": out.display().to_string(), "data": "x" })).await.unwrap_err();
+    assert!(refused.message.contains("isn't inside"), "{refused:?}");
+    assert!(!out.exists());
+    // Without "files.write": refused, nothing written.
+    let r = rig(Config::default());
+    lock(&r.hooks.folders).push(project.path().display().to_string());
+    let plan = r.plan("1.0.0", WRITER, &["service"]);
+    let html = project.path().join("index.html");
+    let refused = r.ask(&plan, "write", json!({ "path": html.display().to_string(), "data": "x" })).await.unwrap_err();
+    assert!(refused.message.contains("wasn't allowed to write files"), "{refused:?}");
+    assert!(!html.exists());
 }
 
 /// R5: a plugin file that is Luau bytecode (unvalidated by Luau, so it could

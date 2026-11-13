@@ -265,6 +265,8 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "eye", "plugins.words.permission.account_email.title")
 	elseif permission == "files.read" then
 		return line(false, "folder", "plugins.words.permission.files_read.title")
+	elseif permission == "files.write" then
+		return line(false, "folder", "plugins.words.permission.files_write.title")
 	elseif permission == "panel.tabs" then
 		return line(false, "split-columns", "plugins.words.permission.panel_tabs.title")
 	elseif permission == "pages.add" then
