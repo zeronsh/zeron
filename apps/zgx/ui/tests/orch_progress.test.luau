@@ -16,6 +16,20 @@ local function open(w: number?, h: number?): any
 end
 
 local ENGINE = "#fx-full-th-engine-state"
+
+-- What a rolling number shows: its cells' figures at rest on its line.
+local function face(app: any, target: string): string
+	local tree = app:tree(target)
+	local top = tree:match(" %-?%d+,(%-?%d+) ")
+	local out = {}
+	for line in tree:gmatch("[^\n]+") do
+		local t, y = line:match('text "(.-)" %-?%d+,(%-?%d+) ')
+		if t and y == top and not line:find(" hidden") then
+			table.insert(out, t)
+		end
+	end
+	return table.concat(out)
+end
 local NOW = 1794470400
 
 test("orch progress: the clocks, as the contract has them", function()
@@ -64,7 +78,7 @@ test("orch progress: a full unit's figures, and its clocks ticking", function()
 	local app = open()
 	-- Elapsed, steps, time left, the command and how long it has run, the
 	-- last step, the note.
-	expect(app:has(`{ENGINE} >> ~"41:00"`)).to_be(true)
+	expect(face(app, `{ENGINE}-elapsed`)).to_be("41:00")
 	expect(app:has(`{ENGINE} >> .orch-progress-steps >> ~"5/8"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"~20m left"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> .orch-progress-doing >> ~"cargo test -p zeron-engine --lib orchestration"`)).to_be(true)
@@ -74,7 +88,8 @@ test("orch progress: a full unit's figures, and its clocks ticking", function()
 	expect(app:has(`{ENGINE} >> ~"Orchestrators · desk"`)).to_be(true)
 	-- A minute and five seconds on.
 	app:set_state("now", NOW + 65)
-	expect(app:wait(`{ENGINE} >> ~"42:05"`)).to_be(true)
+	app:frames(60)
+	expect(face(app, `{ENGINE}-elapsed`)).to_be("42:05")
 	expect(app:has(`{ENGINE} >> ~"last step 3m ago"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"~19m left"`)).to_be(true)
 	expect(app:has(`{ENGINE} >> ~"· 10m"`)).to_be(true)
