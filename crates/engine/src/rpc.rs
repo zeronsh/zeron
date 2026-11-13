@@ -982,6 +982,10 @@ impl EngineRpc {
         &self.sessions
     }
 
+    pub(crate) fn uploads_ref(&self) -> &Uploads {
+        &self.uploads
+    }
+
     /// This engine's data folder.
     pub(crate) fn data_dir(&self) -> &std::path::Path {
         self.repos.data_dir()

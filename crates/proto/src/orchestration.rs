@@ -572,6 +572,29 @@ pub struct Dump {
     pub device_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Files dumped with the text (images pasted or dropped): as the Brain
+    /// dump's run got them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<DumpAttachment>,
+}
+
+/// A file dumped with the text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpAttachment {
+    /// The path on the Brain dump's device, or a `pending://` ref.
+    pub path: String,
+    /// Its file name.
+    pub name: String,
+}
+
+/// A staged upload a send carries: its bytes are committed on the sending
+/// device and pushed to the chat's host (`QueueCommand`'s `transfers`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadTransfer {
+    pub upload_id: String,
+    pub file_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +649,9 @@ pub struct Route {
     pub space_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// The dump's files it forwards (paths, as the dump has them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1588,9 +1614,16 @@ pub enum OrchestrateOp {
     #[serde(rename_all = "camelCase")]
     AnswerAsk { id: String, answer: String },
     DismissAsk { id: String },
-    /// The person dumps text. Replies `{ id }`; routing runs in the Brain
-    /// dump's chat.
-    Dump { text: String },
+    /// The person dumps text (and files). Replies `{ id }`; routing runs in
+    /// the Brain dump's chat, which sees the files. `attachments` and
+    /// `transfers` as a chat send carries them (`QueueCommand` run).
+    Dump {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        transfers: Vec<UploadTransfer>,
+    },
     /// (agent: Brain dump) record one route of a dump and deliver it.
     #[serde(rename_all = "camelCase")]
     Route {
@@ -1614,6 +1647,10 @@ pub enum OrchestrateOp {
         space_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_id: Option<String>,
+        /// The dump's files this route forwards (paths or names from the
+        /// dump). `None`: all of them for a task or info, none otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<String>>,
     },
     /// (agent: chats it can see) a chat's [`Progress`], its note made
     /// fresh now (at most every 15 s; the latest note otherwise). Replies
@@ -2021,7 +2058,7 @@ mod tests {
 
     #[test]
     fn ops_round_trip() {
-        let op = OrchestrateOp::Dump { text: "fix the auth thing".into() };
+        let op = OrchestrateOp::Dump { text: "fix the auth thing".into(), attachments: Default::default(), transfers: Default::default(), };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(json, r#"{"op":"dump","text":"fix the auth thing"}"#);
         assert_eq!(serde_json::from_str::<OrchestrateOp>(&json).unwrap(), op);

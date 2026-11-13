@@ -674,8 +674,74 @@ async fn a_crew_thread_an_orchestrator_spawns_records_who_started_it() {
     let started = chat.started_by.expect("started_by");
     assert_eq!((started.chat_id.as_str(), started.dump_id, started.route_id), (ORCH, None, None));
     // And the chats watch carries it.
-    let chats = core.workspace.watch_chats().borrow().clone();
-    assert!(chats.iter().any(|c| c.id == "spawned" && c.started_by.is_some()));
+    let chats = core.workspace.watch_chats();
+    wait_for(
+        || chats.borrow().iter().any(|c| c.id == "spawned" && c.started_by.is_some()),
+        "the chats watch to carry it",
+    )
+    .await;
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dumps_files_reach_the_brain_dump_and_the_work_it_starts() {
+    use zeron_proto::orchestration::RouteTarget;
+    let Setup { core, rpc, finish, prompts, requests } = setup().await;
+    let (_, _) = projects(&core);
+    let dir = tempfile::tempdir().unwrap().keep();
+    let shot = dir.join("devices.png");
+    std::fs::write(&shot, b"png").unwrap();
+    let shot = shot.to_string_lossy().into_owned();
+    // Not a file a send could carry: refused before anything is made.
+    assert!(
+        try_call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": "x", "attachments": ["relative.png"] }))
+            .await
+            .is_err()
+    );
+    let dump = call(
+        &rpc,
+        Caller::Local,
+        methods::ORCHESTRATE,
+        json!({ "op": "dump", "text": DEVICES_TEXT, "attachments": [shot] }),
+    )
+    .await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let first = requests.lock().unwrap()[0].clone();
+    assert_eq!(first.attachments, vec![shot.clone()], "the Brain dump sees the file");
+    assert!(first.prompt.contains(&format!("- {shot}")), "{}", first.prompt);
+    let row = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap();
+    assert_eq!(row.attachments.len(), 1);
+    assert_eq!(row.attachments[0].name, "devices.png");
+
+    let brain = brain_of(&core);
+    let route = |target: Value, intent: &str, files: Value| {
+        let (rpc, brain, dump_id) = (&rpc, brain.clone(), dump_id.clone());
+        let intent = intent.to_owned();
+        async move {
+            try_call(
+                rpc,
+                Caller::Agent { chat: Some(brain) },
+                methods::ORCHESTRATE,
+                json!({ "op": "route", "dumpId": dump_id, "excerpt": "device-1, device-2", "target": target,
+                    "intent": intent, "message": "Unique device names.", "attachments": files }),
+            )
+            .await
+        }
+    };
+    // Naming a file the dump doesn't have is refused.
+    assert!(route(json!({ "kind": "newThread" }), "task", json!(["other.png"])).await.is_err());
+    // A task forwards the dump's files by default.
+    route(json!({ "kind": "newThread" }), "task", Value::Null).await.unwrap();
+    // A question carries none unless it names them.
+    route(json!({ "kind": "chat", "id": CREW }), "question", Value::Null).await.unwrap();
+    let routes = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes;
+    assert_eq!(routes[0].attachments, vec![shot.clone()]);
+    assert!(routes[1].attachments.is_empty());
+    let RouteTarget::NewThread { id: thread } = routes[0].target.clone() else { panic!() };
+    wait_for(|| requests.lock().unwrap().iter().any(|r| r.prompt.contains("Unique device names.") && r.attachments == vec![shot.clone()]), "the thread's first prompt, with the file").await;
+    assert!(core.workspace.chat(&thread).unwrap().is_some());
     let _ = finish.send(());
     core.shutdown().await;
 }

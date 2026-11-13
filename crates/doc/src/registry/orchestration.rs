@@ -551,6 +551,7 @@ mod tests {
             item_id: None,
             space_id: None,
             device_id: None,
+            attachments: Default::default(),
         }
     }
 
@@ -564,6 +565,7 @@ mod tests {
             device_id: "dev-a".into(),
             created_at: ts(2_000),
             updated_at: ts(2_000),
+            attachments: Default::default(),
         }
     }
 
