@@ -15,8 +15,8 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::watch;
 use zeron_proto::orchestration::{
-    CrewMember, LinkKind, OrchestrationState, Orchestrator, OrchestratorKind, Priority,
-    ReportHead, WorkItem, WorkItemPatch, WorkState, is_brain_dump_chat,
+    CrewMember, LinkKind, OrchestrationState, Orchestrator, OrchestratorKind, Priority, ReportHead,
+    WorkItem, WorkItemPatch, WorkState,
 };
 
 use crate::workspace_host::WorkspaceHost;
@@ -41,9 +41,13 @@ pub const PUBLISH_EVERY: Duration = Duration::from_millis(250);
 pub enum ChatRole {
     Plain,
     /// The chat is a standard orchestrator (same id).
-    Orchestrator { id: String },
+    Orchestrator {
+        id: String,
+    },
     /// The chat is a Brain dump (same id).
-    BrainDump { id: String },
+    BrainDump {
+        id: String,
+    },
     /// A thread in an orchestrator's crew (not released).
     Crew {
         orchestrator_id: String,
@@ -57,7 +61,9 @@ impl ChatRole {
         match self {
             ChatRole::Plain => None,
             ChatRole::Orchestrator { id } | ChatRole::BrainDump { id } => Some(id),
-            ChatRole::Crew { orchestrator_id, .. } => Some(orchestrator_id),
+            ChatRole::Crew {
+                orchestrator_id, ..
+            } => Some(orchestrator_id),
         }
     }
 }
@@ -137,12 +143,29 @@ impl Orchestration {
         self.inner.state_rx.clone()
     }
 
+    /// `WatchOrchestration`: the state as it is now (a write just made is
+    /// in it), then every change, at most [`PUBLISH_EVERY`].
+    pub(crate) fn stream(&self) -> futures::stream::BoxStream<'static, serde_json::Value> {
+        use futures::StreamExt;
+        let mut rx = self.subscribe();
+        rx.mark_unchanged();
+        let first = serde_json::to_value(self.state()).ok();
+        futures::stream::iter(first)
+            .chain(futures::stream::unfold(rx, |mut rx| async move {
+                rx.changed().await.ok()?;
+                let value = serde_json::to_value(&*rx.borrow_and_update()).ok()?;
+                Some((value, rx))
+            }))
+            .boxed()
+    }
+
     pub fn comms(&self) -> &CommBus {
         &self.inner.comms
     }
 
     /// What `chat_id` is: an orchestrator or Brain dump (its row has the
-    /// chat's id), a thread in a crew (not released), or plain.
+    /// chat's id), a thread in a crew (not released), or plain. From the
+    /// rows alone, never from an id's shape: a role is a privilege.
     pub fn role_of(&self, chat_id: &str) -> ChatRole {
         self.inner.workspace.read_orchestration_with(|doc| {
             if let Some(o) = doc.orchestrator(chat_id) {
@@ -150,9 +173,6 @@ impl Orchestration {
                     OrchestratorKind::BrainDump => ChatRole::BrainDump { id: o.id },
                     _ => ChatRole::Orchestrator { id: o.id },
                 };
-            }
-            if is_brain_dump_chat(chat_id) {
-                return ChatRole::BrainDump { id: chat_id.to_owned() };
             }
             match doc.crew_member(chat_id) {
                 Some(member) if !member.released => ChatRole::Crew {
@@ -173,11 +193,15 @@ impl Orchestration {
     }
 
     pub fn orchestrator(&self, id: &str) -> Option<Orchestrator> {
-        self.inner.workspace.read_orchestration_with(|doc| doc.orchestrator(id))
+        self.inner
+            .workspace
+            .read_orchestration_with(|doc| doc.orchestrator(id))
     }
 
     pub fn item(&self, id: &str) -> Option<WorkItem> {
-        self.inner.workspace.read_orchestration_with(|doc| doc.work_item(id))
+        self.inner
+            .workspace
+            .read_orchestration_with(|doc| doc.work_item(id))
     }
 
     /// Record a crew thread's newest report on its crew row. `false` when
@@ -226,7 +250,10 @@ pub(crate) fn apply_item_patch(
 ) -> Result<String, String> {
     let now = Utc::now();
     let existing = match patch.id.as_deref().filter(|id| !id.trim().is_empty()) {
-        Some(id) => Some(doc.work_item(id).ok_or_else(|| format!("No board item {id}"))?),
+        Some(id) => Some(
+            doc.work_item(id)
+                .ok_or_else(|| format!("No board item {id}"))?,
+        ),
         None => None,
     };
     let created = existing.is_none();
@@ -275,7 +302,11 @@ pub(crate) fn apply_item_patch(
         }
         item.orchestrator_id = owner;
     }
-    if let Some(title) = patch.title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()) {
+    if let Some(title) = patch
+        .title
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+    {
         item.title = title;
     }
     if let Some(detail) = patch.detail {
@@ -295,7 +326,10 @@ pub(crate) fn apply_item_patch(
     }
     if let Some(threads) = patch.threads {
         let mut seen = std::collections::HashSet::new();
-        item.threads = threads.into_iter().filter(|t| seen.insert(t.clone())).collect();
+        item.threads = threads
+            .into_iter()
+            .filter(|t| seen.insert(t.clone()))
+            .collect();
     }
     if let Some(links) = patch.links {
         item.links = links;
@@ -333,7 +367,11 @@ pub(crate) fn merge_links(
 
 /// The first line of `text`, at most `max` characters (an ellipsis when cut).
 pub(crate) fn excerpt(text: &str, max: usize) -> String {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if line.chars().count() <= max {
         return line.to_owned();
     }

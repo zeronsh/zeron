@@ -1149,17 +1149,15 @@ impl Tools {
         Ok(summary)
     }
 
-    /// Whether `chat_id` is a standard orchestrator (its children are its
-    /// crew). `false` on an engine that predates orchestration.
-    async fn orchestrates(&self, chat_id: &str) -> bool {
+    /// The orchestrators, by chat id and kind, as the engine's rows say
+    /// (never an id's shape); none from an engine that predates them.
+    async fn orchestrator_kinds(&self) -> HashMap<String, zeron_proto::orchestration::OrchestratorKind> {
         let Ok(state) = self.zeron.snapshot(zeron_rpc::methods::WATCH_ORCHESTRATION, json!({})).await else {
-            return false;
+            return HashMap::new();
         };
-        serde_json::from_value::<zeron_proto::orchestration::OrchestrationState>(state).is_ok_and(|state| {
-            state.orchestrators.iter().any(|o| {
-                o.id == chat_id && o.kind == zeron_proto::orchestration::OrchestratorKind::Standard
-            })
-        })
+        serde_json::from_value::<zeron_proto::orchestration::OrchestrationState>(state)
+            .map(|state| state.orchestrators.into_iter().map(|o| (o.id, o.kind)).collect())
+            .unwrap_or_default()
     }
 
     async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
@@ -1174,6 +1172,13 @@ impl Tools {
             args.kind != Some(ChatKind::Chat) || explicit_parent.is_none(),
             "kind chat cannot have a parent"
         );
+        use zeron_proto::orchestration::OrchestratorKind;
+        let kinds = if explicit_parent.is_some() || self.zeron.origin().chat_id.is_some() {
+            self.orchestrator_kinds().await
+        } else {
+            HashMap::new()
+        };
+        let brain_dump = |chat: &str| kinds.get(chat) == Some(&OrchestratorKind::BrainDump);
         let parent_chat_id = if args.kind == Some(ChatKind::Chat) {
             None
         } else {
@@ -1183,10 +1188,7 @@ impl Tools {
             }
             // A hidden voice orchestrator, and the Brain dump, create
             // top-level sessions.
-            .filter(|parent| {
-                !zeron_proto::voice::is_orchestrator_chat(parent)
-                    && !zeron_proto::orchestration::is_brain_dump_chat(parent)
-            })
+            .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent) && !brain_dump(parent))
         };
         anyhow::ensure!(
             !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent | ChatKind::Crew))
@@ -1201,10 +1203,9 @@ impl Tools {
         // An orchestrator's children are its crew; any other child is a
         // subagent unless asked for as a side chat: delegated work lists
         // under its parent's Subagents, not its side chats.
-        let parent_orchestrates = match parent_chat_id.as_deref() {
-            Some(parent) => self.orchestrates(parent).await,
-            None => false,
-        };
+        let parent_orchestrates = parent_chat_id
+            .as_deref()
+            .is_some_and(|parent| kinds.get(parent) == Some(&OrchestratorKind::Standard));
         let kind = match (args.kind, parent_chat_id.is_some()) {
             (_, false) => ChatKind::Chat,
             (Some(ChatKind::Side), true) => ChatKind::Side,
@@ -1227,7 +1228,7 @@ impl Tools {
         let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
-            && !zeron_proto::orchestration::is_brain_dump_chat(origin)
+            && !brain_dump(origin)
         {
             let origin = self.zeron.resolve_chat(origin).await?;
             anyhow::ensure!(
@@ -2081,6 +2082,9 @@ mod tests {
         reads: Mutex<Vec<(String, Value)>>,
         /// `DeviceStats` reply; absent = an engine without the method.
         stats: Option<Value>,
+        /// `WatchOrchestration`'s orchestrators; absent = an engine that
+        /// predates them.
+        orchestrators: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2239,6 +2243,10 @@ mod tests {
                         .push((method.into(), params.clone()));
                     RpcReply::Value(self.stats.clone().unwrap_or_default())
                 }
+                methods::WATCH_ORCHESTRATION if self.orchestrators.is_some() => stream(json!({
+                    "orchestrators": self.orchestrators.clone(),
+                    "crew": [], "items": [], "asks": [], "dumps": []
+                })),
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -2902,6 +2910,66 @@ mod tests {
             .find(|(_, w)| w["op"] == "createChat")
             .unwrap();
         assert!(last.1["config"].get("access").is_none());
+    }
+
+    /// An orchestrator's children are its crew, and a crew thread creates
+    /// subagents of its own. Roles come from the engine's rows.
+    #[tokio::test]
+    async fn an_orchestrators_children_are_its_crew_and_crew_threads_delegate() {
+        let orchestrator = |id: &str, kind: &str| {
+            json!({"id": id, "kind": kind, "name": "O", "hue": 1,
+                "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"})
+        };
+        let world = Arc::new(World {
+            orchestrators: Some(json!([orchestrator("chat-alpha-1", "standard")])),
+            extra_chats: vec![json!({
+                "id": "chat-crew-9", "deviceId": "dev-local", "title": "Crew",
+                "parentChatId": "chat-alpha-1", "childKind": "crew", "archived": false,
+                "spaceId": "space-1", "createdAt": "2026-09-03T00:00:00Z"
+            })],
+            ..Default::default()
+        });
+        let last_kind = |world: &World| {
+            let writes = world.writes.lock().unwrap();
+            let last = writes.iter().rev().find(|(_, w)| w["op"] == "createChat").unwrap();
+            (last.1["parentChatId"].clone(), last.1["childKind"].clone())
+        };
+        tools(world.clone(), origin("chat-alpha-1"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world), (json!("chat-alpha-1"), json!("crew")));
+        tools(world.clone(), origin("chat-alpha-1"))
+            .call("create_chat", json!({"kind":"subagent"}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world).1, json!("subagent"));
+        tools(world.clone(), origin("chat-crew-9"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world), (json!("chat-crew-9"), json!("subagent")));
+        // Crew is only for an orchestrator's own children.
+        let refused = tools(world.clone(), origin("chat-crew-9"))
+            .call("create_chat", json!({"kind":"crew"}))
+            .await
+            .unwrap_err();
+        assert!(refused.contains("kind crew"), "{refused}");
+
+        // Without rows, an id shaped like a Brain dump's is a plain chat.
+        let world = Arc::new(World {
+            orchestrators: Some(json!([])),
+            extra_chats: vec![json!({
+                "id": "brain-dump-fake", "deviceId": "dev-local", "title": "Fake",
+                "archived": false, "spaceId": "space-1", "createdAt": "2026-09-03T00:00:00Z"
+            })],
+            ..Default::default()
+        });
+        tools(world.clone(), origin("brain-dump-fake"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(last_kind(&world), (json!("brain-dump-fake"), json!("subagent")));
     }
 
     #[tokio::test]

@@ -45,24 +45,18 @@ pub async fn file_report(
     if summary.is_empty() {
         return Err(RpcError::BadParams("A report needs a summary".into()));
     }
-    // An item is the report's only when it is on this orchestrator's board.
-    let item_id = params
-        .item_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .filter(|id| {
-            orchestration
-                .item(id)
-                .is_some_and(|item| item.orchestrator_id.as_deref() == Some(member.orchestrator_id.as_str()))
+    // An item it names counts only when it's on its own orchestrator's
+    // board; otherwise its own item.
+    let named = params.item_id.clone().filter(|id| {
+        orchestration.item(id).is_some_and(|item| {
+            item.orchestrator_id.as_deref() == Some(member.orchestrator_id.as_str())
         })
-        .map(str::to_owned)
-        .or_else(|| member.item_id.clone());
+    });
     let report = Report {
         id: uuid::Uuid::new_v4().simple().to_string(),
         orchestrator_id: member.orchestrator_id.clone(),
         from_chat: caller_chat.to_owned(),
-        item_id,
+        item_id: named.or_else(|| member.item_id.clone()),
         state: params.state,
         summary,
         detail: params.detail,
@@ -84,7 +78,9 @@ pub async fn file_report(
         let progress = report.progress;
         let chat = caller_chat.to_owned();
         orchestration.workspace().write_orchestration(|doc| {
-            let Some(mut item) = doc.work_item(item_id) else { return };
+            let Some(mut item) = doc.work_item(item_id) else {
+                return;
+            };
             if let Some(progress) = progress {
                 item.progress = Some(progress);
             }

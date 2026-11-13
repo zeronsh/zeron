@@ -20,13 +20,15 @@ pub const MIN_EVERY_MINUTES: u32 = 5;
 /// A time of day missed by more than this (the device was off) is skipped.
 const LATE_BY_AT_MOST: chrono::Duration = chrono::Duration::minutes(30);
 /// What a wake says when its schedule has no prompt.
-const DEFAULT_PROMPT: &str = "Scheduled check-in: look over your board and crew, and move what's stuck.";
+const DEFAULT_PROMPT: &str =
+    "Scheduled check-in: look over your board and crew, and move what's stuck.";
 
 /// `wake` as stored: an interval no shorter than [`MIN_EVERY_MINUTES`], only
 /// well-formed times.
 pub(crate) fn normalized(mut wake: WakeSchedule) -> WakeSchedule {
     wake.every_minutes = wake.every_minutes.map(|m| m.max(MIN_EVERY_MINUTES));
-    wake.at.retain(|t| NaiveTime::parse_from_str(t, "%H:%M").is_ok());
+    wake.at
+        .retain(|t| NaiveTime::parse_from_str(t, "%H:%M").is_ok());
     wake.at.sort();
     wake.at.dedup();
     wake
@@ -49,7 +51,12 @@ pub(crate) fn due<Tz: TimeZone>(wake: &WakeSchedule, now: DateTime<Utc>, tz: &Tz
         let Ok(time) = NaiveTime::parse_from_str(at, "%H:%M") else {
             return false;
         };
-        let Some(today) = local.date_naive().and_time(time).and_local_timezone(tz.clone()).earliest() else {
+        let Some(today) = local
+            .date_naive()
+            .and_time(time)
+            .and_local_timezone(tz.clone())
+            .earliest()
+        else {
             return false;
         };
         let today = today.with_timezone(&Utc);
@@ -89,7 +96,10 @@ pub(crate) fn wake_due(
         if o.paused || o.archived || o.kind != OrchestratorKind::Standard {
             continue;
         }
-        if !chats.iter().any(|c| c.id == o.id && c.device_id == device && !c.archived) {
+        if !chats
+            .iter()
+            .any(|c| c.id == o.id && c.device_id == device && !c.archived)
+        {
             continue;
         }
         if !due(&wake, now, &Local) {
@@ -106,7 +116,11 @@ pub(crate) fn wake_due(
         if chat_status(rpc, &o.id) != SessionStatus::Idle {
             continue;
         }
-        let prompt = if wake.prompt.trim().is_empty() { DEFAULT_PROMPT } else { wake.prompt.as_str() };
+        let prompt = if wake.prompt.trim().is_empty() {
+            DEFAULT_PROMPT
+        } else {
+            wake.prompt.as_str()
+        };
         match deliver(rpc, &o.id, prompt, None, When::Next) {
             Ok(_) => woken.push(o.id.clone()),
             Err(error) => tracing::warn!(orchestrator = %o.id, %error, "scheduled wake not sent"),
@@ -159,7 +173,10 @@ mod tests {
         wake.last_woke_at = Some(at("2026-11-11T07:05:00Z"));
         assert!(!due(&wake, at("2026-11-11T07:10:00Z"), &tz), "once");
         wake.last_woke_at = None;
-        assert!(!due(&wake, at("2026-11-11T11:00:00Z"), &tz), "missed by hours");
+        assert!(
+            !due(&wake, at("2026-11-11T11:00:00Z"), &tz),
+            "missed by hours"
+        );
         assert_eq!(normalized(wake).at, vec!["09:00"]);
     }
 
