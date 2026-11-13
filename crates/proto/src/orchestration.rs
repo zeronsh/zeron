@@ -1292,6 +1292,12 @@ pub struct Progress {
     /// `progressCheck` from another device).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub refreshing: bool,
+    /// Worked out by the engine you watch from, not the chat's host: the
+    /// host predates progress (no `orchestration-progress-v1`). Made from
+    /// the synced session row and transcript, so its steps and times are
+    /// what those show (coarser), and never written to the registry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proxy: bool,
     /// Seconds left as of `updatedAt`: the median time of a finished todo
     /// item × the items left. Only with ≥ 3 items done of a known total,
     /// while working; never a guess otherwise.
@@ -1981,6 +1987,7 @@ mod tests {
             tool: None,
             tool_since: None,
             refreshing: false,
+            proxy: false,
             eta_secs: Some(600),
             updated_at: now,
         }

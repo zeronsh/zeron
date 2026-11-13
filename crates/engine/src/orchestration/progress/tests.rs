@@ -377,6 +377,7 @@ fn watch_progress_keeps_live_recent_and_crew_chats() {
         tool: None,
         tool_since: None,
         refreshing: false,
+        proxy: false,
         eta_secs: None,
         updated_at: now - TimeDelta::hours(hours),
     };
@@ -546,6 +547,7 @@ async fn progress_check_makes_a_fresh_note_at_most_every_fifteen_seconds() {
 #[tokio::test]
 async fn another_devices_chat_is_asked_through_its_doc() {
     let (_temp, core, rpc) = core().await;
+    host(&core, "dev-remote", true);
     chat(&rpc, "far", "dev-remote", None).await;
     let row = Progress {
         chat_id: "far".into(),
@@ -561,6 +563,7 @@ async fn another_devices_chat_is_asked_through_its_doc() {
         tool: None,
         tool_since: None,
         refreshing: false,
+        proxy: false,
         eta_secs: None,
         updated_at: Utc::now(),
     };
@@ -812,5 +815,124 @@ async fn without_a_model_the_answer_is_the_replys_first_real_sentence() {
     core.orchestration.progress().set_note_fn(f);
     super::super::watchers::record_answer(&core.orchestration, &rpc, "auth2", &dump, &route, "when?", REPLY.into()).await;
     assert_eq!(route_of(&core, &dump, &route).answer.as_deref(), Some("It lands Friday, once `cargo test -p auth` passes on CI."));
+    core.sessions.shutdown().await;
+}
+
+// ── Progress by proxy ───────────────────────────────────────────────────────
+
+/// A device row for `id`, with or without progress.
+fn host(core: &crate::EngineCore, id: &str, writes_progress: bool) {
+    let mut capabilities = vec![zeron_proto::capabilities::BACKGROUND_TASKS_V1.to_owned()];
+    if writes_progress {
+        capabilities.push(zeron_proto::capabilities::ORCHESTRATION_PROGRESS_V1.to_owned());
+    }
+    core.workspace.upsert_device_row(&zeron_proto::Device {
+        id: id.into(),
+        name: id.into(),
+        platform: "linux".into(),
+        last_seen_at: Some(Utc::now()),
+        created_at: None,
+        version: Some(if writes_progress { "0.3.3" } else { "0.3.2" }.into()),
+        cursor_sdk_version: None,
+        capabilities,
+    });
+}
+
+/// `chat` working on `device` (its synced session row), its transcript a
+/// todo list 2 of 4 with the third in progress and a command running.
+async fn working_elsewhere(core: &crate::EngineCore, rpc: &EngineRpc, chat_id: &str, device: &str) {
+    use zeron_proto::{TodoItem, TodoStatus};
+    chat(rpc, chat_id, device, None).await;
+    core.workspace.record_session(&Session {
+        chat_id: chat_id.into(),
+        device_id: device.into(),
+        started_at: Some(Utc::now() - TimeDelta::minutes(7)),
+        updated_at: Utc::now(),
+        ..session(SessionStatus::Working)
+    });
+    let doc = core.doc_host.open(chat_id).unwrap();
+    let at = (Utc::now() - TimeDelta::minutes(6)).timestamp_millis();
+    doc.doc().push_message(&entry("u1", MessageRole::User, vec![text("Wire progress by proxy")], at)).unwrap();
+    let items = vec![
+        zeron_proto::TodoItem::new("Read the host row", TodoStatus::Completed),
+        TodoItem::new("Derive steps", TodoStatus::Completed),
+        TodoItem::new("Wire the proxy", TodoStatus::InProgress),
+        TodoItem::new("Test it", TodoStatus::Pending),
+    ];
+    doc.doc()
+        .push_message(&entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![tool(ToolCall::Todo { items }, true), tool(ToolCall::Exec { command: "cargo test -p zeron-engine".into() }, false)],
+            at + 60_000,
+        ))
+        .unwrap();
+}
+
+fn rows(frame: &Value) -> Vec<Value> {
+    frame.as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn a_chat_on_an_older_host_gets_progress_worked_out_here() {
+    let (_temp, core, rpc) = core().await;
+    let orch = &core.orchestration;
+    host(&core, "dev-old", false);
+    working_elsewhere(&core, &rpc, "old", "dev-old").await;
+    // No one watching: nothing worked out.
+    orch.progress().proxies().pass(orch, &rpc, Utc::now());
+    assert!(orch.progress().proxies().rows().is_empty(), "only while someone watches");
+    let frame = call(&rpc, Caller::Local, methods::WATCH_PROGRESS, json!({})).await.unwrap();
+    let row = rows(&frame).into_iter().find(|r| r["chatId"] == "old").expect("a proxy row");
+    assert_eq!(row["proxy"], true);
+    assert_eq!(row["deviceId"], "dev-old");
+    assert_eq!(row["state"], "working");
+    assert_eq!(row["steps"], json!({"done":2,"total":4}));
+    assert_eq!(row["step"], "Wire the proxy");
+    assert!(row["startedAt"].is_string() && row["lastStepAt"].is_string(), "{row}");
+    // Never written to the registry (the host is another device).
+    assert!(core.workspace.read_orchestration_with(|doc| doc.progress("old")).is_none());
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn progress_check_on_an_older_hosts_chat_makes_the_note_here() {
+    let (_temp, core, rpc) = core().await;
+    let orch = &core.orchestration;
+    let (f, runs) = notes("Wiring the proxy; tests running next");
+    orch.progress().set_note_fn(f);
+    host(&core, "dev-old", false);
+    working_elsewhere(&core, &rpc, "old", "dev-old").await;
+    let check = json!({"op":"progressCheck","chatId":"old"});
+    let reply = call(&rpc, Caller::Local, methods::ORCHESTRATE, check.clone()).await.unwrap();
+    assert_eq!(reply["note"], "Wiring the proxy; tests running next");
+    assert_eq!((reply["proxy"].as_bool(), reply["refreshing"].as_bool()), (Some(true), Some(false)));
+    assert_eq!(reply["steps"], json!({"done":2,"total":4}));
+    // The same limits: right away again, no new run.
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, check).await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    // The old host is never asked (it would ignore it), the chat never touched.
+    let commands = core.doc_host.open("old").unwrap().doc().read_commands().unwrap();
+    assert!(!commands.iter().any(|c| matches!(c.payload, SessionCommandPayload::ProgressCheck {})));
+    assert!(sent(&core, "old").is_empty());
+    assert!(core.workspace.read_orchestration_with(|doc| doc.progress("old")).is_none());
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_capable_hosts_chat_is_never_proxied() {
+    let (_temp, core, rpc) = core().await;
+    let orch = &core.orchestration;
+    host(&core, "dev-new", true);
+    working_elsewhere(&core, &rpc, "new", "dev-new").await;
+    assert!(!proxy::needs_proxy(orch, "dev-new"));
+    assert!(!proxy::needs_proxy(orch, &core.device_id), "this engine's own chats");
+    assert!(proxy::needs_proxy(orch, "dev-unknown"), "a host that says nothing");
+    let frame = call(&rpc, Caller::Local, methods::WATCH_PROGRESS, json!({})).await.unwrap();
+    assert!(!rows(&frame).iter().any(|r| r["chatId"] == "new"), "its host writes its row");
+    assert!(orch.progress().proxies().rows().is_empty());
+    // progressCheck asks its host instead.
+    let none = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({"op":"progressCheck","chatId":"new"})).await;
+    assert!(none.unwrap_err().contains("no progress"), "no row from its host yet");
     core.sessions.shutdown().await;
 }
