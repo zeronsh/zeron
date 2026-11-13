@@ -42,15 +42,17 @@ return ui.component(function(props: Props): Node
 		end
 		return fmt(v) .. suffix
 	end
-	return RollText {
+	-- Held still for now: the roll painted digits outside the counter and
+	-- left ghosts of the rows around it (live, 2026-11-12). It rolls again
+	-- once it is clipped and paint-only.
+	local _ = RollText
+	return ui.text {
 		shown,
 		class = "orch-counter",
 		tabular = true,
-		anchor = props.anchor,
 		shrink = props.shrink or 0,
 		text_size = props.text_size or "$font.size.sm",
 		weight = props.weight,
 		color = props.color or "$text.primary",
-		label = props.label,
 	}
 end)
