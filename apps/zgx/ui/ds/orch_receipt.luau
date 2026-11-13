@@ -312,7 +312,9 @@ return ui.component(function(props: Props): Node
 			return tg ~= nil and tg.kind == "unsure"
 		end
 		local opener: ((x: number, y: number) -> boolean)? = nil
-		local chip_el: Element? = nil
+		-- The chip's element as it is now (one handed over as it came into
+		-- view may be gone, its chip drawn anew).
+		local chip_ref = ui.ref()
 		local function intent(): string
 			return row:get().intent or "task"
 		end
@@ -348,13 +350,16 @@ return ui.component(function(props: Props): Node
 					hovered:set(nil)
 				end
 			end,
-			on_visible = function(_v: boolean, el: Element)
-				chip_el = el
-			end,
+			ref = chip_ref,
 			on_click = function()
-				local el = chip_el
-				if opener and el and el.x and el.y then
-					opener(el.x, el.y + (el.height or 26) + 4)
+				-- Under the chip, from its start; not while it has no box.
+				local el = chip_ref:peek()
+				if not (opener and el and el.mounted) then
+					return
+				end
+				local x, y, h = el.x, el.y, el.height
+				if x and y and h and h > 0 and (el.width or 0) > 0 then
+					opener(x, y + h + 4)
 				end
 			end,
 			ui.switch(function(): string

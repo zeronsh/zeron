@@ -27,6 +27,7 @@ local FadeText = require("@self/fade_text")
 local RollText = require("@self/roll_text")
 local Kbd = require("@self/kbd")
 local Menu = require("@self/menu")
+local menu_point = require("@self/menu_point")
 local glass_of = require("@self/glass")
 local control = require("@self/control")
 local locale = require("@self/locale")
@@ -801,7 +802,7 @@ return ui.component(function(props: Props): Node
 			return false
 		end
 		local list = items(e)
-		if not list or #list == 0 then
+		if not menu_point.has_items(list) then
 			return false
 		end
 		claimed = true
@@ -811,8 +812,10 @@ return ui.component(function(props: Props): Node
 		ui.batch(function()
 			-- Opened again elsewhere: closed first, so it opens anew there.
 			open:set(false)
-			entries = list
-			at:set({ x = e.local_x, y = e.local_y })
+			entries = list :: { Entry }
+			-- (On whole window points: ds/menu_point.)
+			local x, y = menu_point.at(e.x, e.y, e.x - e.local_x, e.y - e.local_y)
+			at:set({ x = x, y = y })
 		end)
 		ui.after(0, function()
 			asked = true
@@ -865,7 +868,14 @@ return ui.component(function(props: Props): Node
 				local h = if el then el.height or 0 else 0
 				local x, y = if el then el.x or 0 else 0, if el then el.y or 0 else 0
 				entries = items({ x = x, y = y + h, local_x = 0, local_y = h }) or {}
-				at:set({ x = 0, y = h })
+				local px, py = menu_point.at(x, y + h, x, y)
+				at:set({ x = px, y = py })
+				-- Nothing to choose: closed again, no panel.
+				if not menu_point.has_items(entries) then
+					ui.after(0, function()
+						open:set(false)
+					end)
+				end
 				keyed = true
 				ringed:set(true)
 			end
@@ -914,6 +924,7 @@ return ui.component(function(props: Props): Node
 		}))
 	end
 	table.insert(box, ui.div {
+		class = "context-menu-point",
 		absolute = true,
 		left = function(): number
 			return at:get().x
