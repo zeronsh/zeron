@@ -71,7 +71,52 @@ pub(crate) fn start(orchestration: Orchestration) {
         }
     });
     super::turn_asks::start(orchestration.clone());
+    // Questions still waiting on a reply that's there: one whose
+    // transcript synced in after every retry, or came while this engine
+    // wasn't running and its thread hasn't ended a turn since.
+    let sweep = orchestration.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(SWEEP_AFTER).await;
+        let mut tick = tokio::time::interval(SWEEP_QUESTIONS_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            if let Some(rpc) = sweep.rpc() {
+                sweep_questions(&sweep, &rpc).await;
+            }
+        }
+    });
     tokio::spawn(async move { route_answers(orchestration).await });
+}
+
+/// How often questions still waiting are looked for in their transcripts.
+const SWEEP_QUESTIONS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Take in the reply each question route of this engine's dumps still
+/// waits on, where its target's transcript (here, or as synced) has one.
+/// How many it took in.
+pub(crate) async fn sweep_questions(orchestration: &Orchestration, rpc: &crate::rpc::EngineRpc) -> usize {
+    let here = orchestration.device_id().to_owned();
+    let mut by_chat: HashMap<String, Vec<WaitingRoute>> = HashMap::new();
+    for d in orchestration.state().dumps.iter().filter(|d| d.device_id == here) {
+        for r in &d.routes {
+            if r.intent != RouteIntent::Question || r.state != RouteState::Delivered {
+                continue;
+            }
+            let Some(chat) = target_chat(&r.target).filter(|c| !c.is_empty()) else { continue };
+            let message = if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() };
+            by_chat
+                .entry(chat.to_owned())
+                .or_default()
+                .push((d.id.clone(), r.id.clone(), message, r.excerpt.clone(), r.intent));
+        }
+    }
+    let mut taken = 0;
+    for (chat, waiting) in by_chat {
+        let asked = waiting.len();
+        taken += asked - take_outcomes(orchestration, rpc, &chat, None, waiting).await.len();
+    }
+    taken
 }
 
 /// How often question routes are checked for going unanswered.
@@ -616,7 +661,7 @@ fn turns_ended(
                 if let Some(wait) = wait {
                     tokio::time::sleep(wait).await;
                 }
-                left = take_outcomes(&orchestration, &rpc, &chat, &session, left).await;
+                left = take_outcomes(&orchestration, &rpc, &chat, Some(&session), left).await;
                 if left.is_empty() {
                     break;
                 }
@@ -633,7 +678,7 @@ async fn take_outcomes(
     orchestration: &Orchestration,
     rpc: &crate::rpc::EngineRpc,
     chat: &str,
-    session: &Session,
+    session: Option<&Session>,
     waiting: Vec<WaitingRoute>,
 ) -> Vec<WaitingRoute> {
     let Ok(handle) = rpc.doc_host_ref().open(chat) else { return waiting };
@@ -652,7 +697,15 @@ async fn take_outcomes(
             left.push(w);
             continue;
         };
-        let task = (!question).then(|| task_state(session));
+        // (A task's state is its session's: none known, it waits.)
+        let task = match (question, session) {
+            (true, _) => None,
+            (false, Some(session)) => Some(task_state(session)),
+            (false, None) => {
+                left.push(w);
+                continue;
+            }
+        };
         let asked = if question { excerpt.clone() } else { message.clone() };
         record_outcome_at(orchestration, rpc, chat, dump_id, route_id, &asked, full, task, at).await;
     }

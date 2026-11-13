@@ -1042,6 +1042,27 @@ async fn replies_taken_in_late_each_answer_their_own_question_at_their_own_time(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sweep_takes_in_a_reply_no_turn_end_brought() {
+    use zeron_proto::orchestration::RouteState;
+    let (_temp, core, rpc) = core().await;
+    host(&core, "dev-remote", true);
+    let (dump, route) = question_with(&core, &rpc, "quiet", "is the MSI signed?", "Is the Windows MSI signed yet?").await;
+    // Its reply synced in with no session row moving (after every retry).
+    let doc = core.doc_host.open("quiet").unwrap();
+    let t0 = (Utc::now() - TimeDelta::hours(1)).timestamp_millis();
+    let said = zeron_proto::agent_messages::agent_message("Brain dump", "brain", "Is the Windows MSI signed yet?");
+    doc.doc().push_message(&entry("u", MessageRole::User, vec![text(&said)], t0)).unwrap();
+    doc.doc().push_message(&entry("a", MessageRole::Assistant, vec![text("Yes, signed this morning with the EV cert.")], t0 + 5_000)).unwrap();
+    assert_eq!(route_of(&core, &dump, &route).state, RouteState::Delivered);
+    assert_eq!(super::super::watchers::sweep_questions(&core.orchestration, &rpc).await, 1);
+    let r = route_of(&core, &dump, &route);
+    assert_eq!(r.state, RouteState::Answered);
+    assert_eq!(r.answered_at.map(|t| t.timestamp_millis()), Some(t0 + 5_000));
+    assert_eq!(super::super::watchers::sweep_questions(&core.orchestration, &rpc).await, 0, "once");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_that_files_its_own_routes_is_left_to_it() {
     use zeron_proto::orchestration::RouteState;
     let (_temp, core, rpc) = core().await;
