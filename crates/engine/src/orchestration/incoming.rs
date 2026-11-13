@@ -64,17 +64,41 @@ pub(crate) fn ends_on_question(text: &str) -> Option<String> {
 /// The open route of the newest dump that targets `chat`: `(dump, route,
 /// intent, what it was sent)`.
 pub(crate) fn open_route_of(dumps: &[Dump], chat: &str) -> Option<(String, String, RouteIntent, String)> {
+    open_route_where(dumps, chat, |_| true)
+}
+
+/// [`open_route_of`] among the routes `keep` keeps.
+fn open_route_where(
+    dumps: &[Dump],
+    chat: &str,
+    keep: impl Fn(&zeron_proto::orchestration::Route) -> bool,
+) -> Option<(String, String, RouteIntent, String)> {
     let mut dumps: Vec<_> = dumps.iter().collect();
     dumps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     dumps.into_iter().find_map(|d| {
         d.routes
             .iter()
             .filter(|r| matches!(r.state, RouteState::Delivered | RouteState::Answered))
-            .find(|r| super::watchers::target_chat(&r.target) == Some(chat))
+            .find(|r| super::watchers::target_chat(&r.target) == Some(chat) && keep(r))
             .map(|r| {
                 let sent = if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() };
                 (d.id.clone(), r.id.clone(), r.intent, sent)
             })
+    })
+}
+
+/// The open route a message from `sender` answers: one to it, else one to
+/// its orchestrator whose card its crew row is on (the work that route
+/// became). Another crew thread's message to the Brain dump is an update.
+pub(crate) fn route_answered_by(
+    dumps: &[Dump],
+    sender: &str,
+    crew: Option<&zeron_proto::orchestration::CrewMember>,
+) -> Option<(String, String, RouteIntent, String)> {
+    open_route_of(dumps, sender).or_else(|| {
+        let crew = crew?;
+        let card = crew.item_id.as_deref()?;
+        open_route_where(dumps, &crew.orchestrator_id, |r| r.item_id.as_deref() == Some(card))
     })
 }
 
@@ -88,10 +112,7 @@ impl EngineRpc {
         let orchestration = self.orchestration().clone();
         let body = body.trim().to_owned();
         let dumps = orchestration.state().dumps;
-        let routed = open_route_of(&dumps, sender).or_else(|| {
-            let crew = orchestration.crew_of(sender)?;
-            open_route_of(&dumps, &crew.orchestrator_id)
-        });
+        let routed = route_answered_by(&dumps, sender, orchestration.crew_of(sender).as_ref());
         let Some((dump, route, intent, asked)) = routed else {
             return self.brain_update(sender, &body);
         };
@@ -338,6 +359,40 @@ pub(crate) fn chase_unanswered(orchestration: &Orchestration, rpc: &EngineRpc, n
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crew_thread_answers_only_the_route_its_card_came_from() {
+        use zeron_proto::orchestration::{CrewMember, Route};
+        let route = |id: &str, to: &str, item: Option<&str>| -> Route {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "excerpt": "x", "target": { "kind": "orchestrator", "id": to },
+                "intent": "task", "state": "delivered", "span": [0, 1], "message": "do x",
+                "itemId": item,
+            }))
+            .unwrap()
+        };
+        let mut dump: Dump = serde_json::from_value(serde_json::json!({
+            "id": "d", "text": "x", "state": "routed", "createdAt": "2026-11-13T00:00:00Z",
+            "updatedAt": "2026-11-13T00:00:00Z", "deviceId": "here"
+        }))
+        .unwrap();
+        dump.routes = vec![route("r1", "orch", Some("card-1")), route("r2", "orch", None)];
+        let dumps = [dump];
+        let member = |item: Option<&str>| -> CrewMember {
+            serde_json::from_value(serde_json::json!({
+                "chatId": "crew", "orchestratorId": "orch", "itemId": item, "joinedAt": "2026-11-13T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let on_card = member(Some("card-1"));
+        let other = member(Some("card-9"));
+        let loose = member(None);
+        assert_eq!(route_answered_by(&dumps, "crew", Some(&on_card)).map(|r| r.1).as_deref(), Some("r1"));
+        assert_eq!(route_answered_by(&dumps, "crew", Some(&other)), None, "another card's thread");
+        assert_eq!(route_answered_by(&dumps, "crew", Some(&loose)), None, "a thread on no card");
+        assert_eq!(route_answered_by(&dumps, "crew", None), None);
+        assert_eq!(route_answered_by(&dumps, "orch", None).map(|r| r.1).as_deref(), Some("r1"), "its own target");
+    }
 
     #[test]
     fn a_closing_question_is_found_and_a_statement_is_not() {
