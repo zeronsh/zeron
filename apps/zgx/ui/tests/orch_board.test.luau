@@ -338,3 +338,24 @@ test("orch board: in the Control room, a card's dump is brought into view", func
 	app:frames(10)
 	expect(app:error()).to_be_nil()
 end)
+
+test("orch board: done today is since midnight, on the board and in the Control room's count alike", function()
+	local app = mount("control_board_live_fixture.luau")
+	app:resize(1440, 2600)
+	app:frames(30)
+	local now = os.time()
+	local here = os.date("*t", now) :: any
+	local midnight = now - (here.hour * 3600 + here.min * 60 + here.sec)
+	local n = table.clone(app:state("orchestration") :: any)
+	n.items = {
+		{ id = "it-today", orchestrator_id = "orc-tally", title = "Done this morning", state = "done", priority = "normal", order = 1, done = midnight, updated = midnight },
+		-- (Within the last day, but before midnight: yesterday's.)
+		{ id = "it-yesterday", orchestrator_id = "orc-tally", title = "Done last night", state = "done", priority = "normal", order = 2, done = midnight - 60, updated = midnight - 60 },
+	}
+	app:set_state("orchestration", n)
+	app:frames(20)
+	expect(app:has('#control-board-done >> role:button "Done this morning"')).to_be(true)
+	expect(app:has('#control-board-done >> role:button "Done last night"')).to_be(false)
+	expect(app:has('#control-widget-board >> "1 done today"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)

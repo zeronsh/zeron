@@ -21,6 +21,11 @@
 --                                     one), urgent first, then the longest
 --                                     waiting
 --   data.ACTIVITY                     each activity's glyph and word key
+--   data.day_start(t)                 local midnight of `t` (Unix seconds)
+--   data.shown_today(item, now)       whether an item stands on the board
+--                                     today: any not done; a done one,
+--                                     done since local midnight (the
+--                                     board's Done column and its count)
 
 local M = {}
 
@@ -292,6 +297,23 @@ function M.answer_line(route: any): string
 		first = string.sub(first, 1, 157) .. "…"
 	end
 	return first
+end
+
+-- Local midnight of `t`.
+function M.day_start(t: number): number
+	local d = os.date("*t", t) :: any
+	return t - (d.hour * 3600 + d.min * 60 + d.sec)
+end
+
+-- Whether an item stands on the board today: one not done always; a done
+-- one when it was done (else last changed) since local midnight. `now`
+-- in Unix seconds (os.time()'s when left out).
+function M.shown_today(item: any, now: number?): boolean
+	if item.state ~= "done" then
+		return true
+	end
+	local at = item.done or item.updated or 0
+	return at >= M.day_start(now or os.time())
 end
 
 -- A todo's fraction, or nil.

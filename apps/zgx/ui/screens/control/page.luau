@@ -626,9 +626,10 @@ end
 -- The board's items by column today, counted.
 local function board_counts(): { [string]: number }
 	local out: { [string]: number } = {}
-	local today = os.time() - 86400
+	-- (Done today as the board's Done column has it: since local midnight.)
+	local now = os.time()
 	for _, it in orchestration.now:get().items or {} do
-		if it.state ~= "done" or (it.done or it.updated or 0) >= today then
+		if data.shown_today(it, now) then
 			out[it.state] = (out[it.state] or 0) + 1
 		end
 	end

@@ -67,6 +67,7 @@ local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
+local data = require("@self/orch_data")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -154,22 +155,10 @@ local function space(key: string, fallback: number): number
 	return (ui.theme.get(key) :: number?) or fallback
 end
 
--- Local midnight of `t`.
-local function day_start(t: number): number
-	local d = os.date("*t", t) :: any
-	return t - (d.hour * 3600 + d.min * 60 + d.sec)
-end
-
--- Whether `item` stands in `col` today.
-local function in_column(item: Item, col: Column, today: number): boolean
-	if item.state ~= col.state then
-		return false
-	end
-	if col.state == "done" then
-		local at = item.done or item.updated or 0
-		return at >= today
-	end
-	return true
+-- Whether `item` stands in `col` today (a done one, done since local
+-- midnight: `data.shown_today`, as the Control room's count has it).
+local function in_column(item: Item, col: Column, now: number): boolean
+	return item.state == col.state and data.shown_today(item, now)
 end
 
 local function sorted(list: { Item }): { Item }
@@ -359,7 +348,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local list = (control.value(props.items) :: { Item }?) or {}
 		local only = filter()
 		local moved = pending:get()
-		local today = day_start(now())
+		local at = now()
+		local today = data.day_start(at)
 		local out: { [string]: { Item } } = {}
 		for _, c in columns do
 			out[c.key] = {}
@@ -375,7 +365,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 			if not only or it.orchestrator_id == only then
 				for _, c in columns do
-					if in_column(it, c, today) then
+					if in_column(it, c, at) then
 						table.insert(out[c.key], it)
 						break
 					end
