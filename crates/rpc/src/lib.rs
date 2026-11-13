@@ -806,6 +806,11 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // Orchestration: the board, crews, reports, asks and routes,
+            // each op scoped to the calling chat's role by the engine.
+            | methods::WATCH_ORCHESTRATION
+            | methods::ORCHESTRATE
+            | methods::WATCH_COMMS
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their

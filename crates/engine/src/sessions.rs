@@ -2668,18 +2668,18 @@ impl Inner {
 
     /// Whether a run of `chat_id` launches without its provider's own
     /// subagents (Settings → Providers), delegating through side chats
-    /// instead. Never for a chat that has a parent: delegation is one level
-    /// deep, so a side chat can't create chats and keeps its provider's own.
+    /// instead. Never for a chat that has a parent (a side chat or subagent
+    /// can't create chats, so it keeps its provider's own), except a crew
+    /// thread: an orchestrator's thread delegates to subagents of its own.
     /// Nor while its parent is unknown here (its run outran its row).
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
         !self.registry.native_subagents(harness_id)
             && self.workspace().is_none_or(|ws| {
                 !ws.parent_unknown(chat_id)
-                    && !ws
-                        .chat(chat_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|chat| chat.parent_chat_id.is_some())
+                    && !ws.chat(chat_id).ok().flatten().is_some_and(|chat| {
+                        chat.parent_chat_id.is_some()
+                            && chat.child_kind != Some(zeron_proto::ChildKind::Crew)
+                    })
             })
     }
 

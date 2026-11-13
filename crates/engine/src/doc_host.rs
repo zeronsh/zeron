@@ -1865,6 +1865,11 @@ impl DocHost {
         &self.inner.config.device_id
     }
 
+    /// The harness a chat without a config runs on.
+    pub fn default_harness(&self) -> HarnessId {
+        self.inner.config.default_harness
+    }
+
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
     /// start the change-driven task, and request budgeted sync when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {

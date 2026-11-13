@@ -1784,6 +1784,28 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// A chat's parent and what it is to it (`None`: no parent, top-level).
+    /// `false` when no such row.
+    pub fn set_chat_parent(
+        &mut self,
+        chat_id: &str,
+        parent: Option<(&str, zeron_proto::ChildKind)>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.update_changed(
+            KIND_CHATS,
+            chat_id,
+            fields([
+                ("parentChatId", opt_str(parent.map(|(p, _)| p))),
+                ("childKind", opt_str(parent.map(|(_, k)| k.as_str()))),
+            ]),
+            same_value,
+        );
+        Ok(true)
+    }
+
     pub fn set_chat_branch(&mut self, chat_id: &str, branch: &str) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
