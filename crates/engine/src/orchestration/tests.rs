@@ -527,11 +527,11 @@ async fn crews_reports_and_the_board() {
         auth
     );
 
-    // An existing thread joins, on an item.
+    // The person puts an existing thread in the crew, on an item.
     chat(&core, "helper", "Helper", None).await;
     op(
         &core,
-        agent(&auth),
+        Caller::Local,
         json!({"op":"addToCrew","orchestratorId":auth,"chatId":"helper","role":"tests","itemId":item}),
     )
     .await
@@ -806,7 +806,7 @@ async fn agents_stay_inside_their_own_orchestrator() {
     // (3) A report naming another's item counts for its own item.
     op(
         &core,
-        agent(&auth),
+        Caller::Local,
         json!({"op":"addToCrew","orchestratorId":auth,"chatId":"plain","itemId":mine}),
     )
     .await
@@ -1042,5 +1042,122 @@ async fn the_watch_publishes_each_change_coalesced() {
     })
     .await
     .expect("the watch caught up");
+    core.sessions.shutdown().await;
+}
+
+/// An agent's crew is only threads it started; the person adds any plain one.
+#[tokio::test]
+async fn an_agents_crew_is_only_threads_it_started() {
+    let (_temp, core) = core().await;
+    let auth = orchestrator(&core, "Auth").await;
+    let billing = orchestrator(&core, "Billing").await;
+    chat(&core, "mine-top", "My chat", None).await;
+    chat(&core, "someones-sub", "Sub", Some(("mine-top", "subagent"))).await;
+    chat(&core, "its-own", "Own", Some((&auth, "subagent"))).await;
+    let voice = format!("{}x", zeron_proto::voice::ORCHESTRATOR_CHAT_PREFIX);
+    let fake_brain = format!("{BRAIN_DUMP_CHAT_PREFIX}x");
+    chat(&core, &voice, "Voice", None).await;
+    chat(&core, &fake_brain, "Fake", None).await;
+    let brain_dump = {
+        op(&core, Caller::Local, json!({"op":"dump","text":"x"}))
+            .await
+            .unwrap();
+        core.orchestration
+            .state()
+            .orchestrators
+            .into_iter()
+            .find(|o| o.kind == OrchestratorKind::BrainDump)
+            .unwrap()
+            .id
+    };
+    let add = |chat: &str| json!({"op":"addToCrew","orchestratorId":auth,"chatId":chat});
+    for refused in [
+        "mine-top",
+        "someones-sub",
+        voice.as_str(),
+        fake_brain.as_str(),
+        brain_dump.as_str(),
+        billing.as_str(),
+    ] {
+        assert!(
+            op(&core, agent(&auth), add(refused)).await.is_err(),
+            "{refused}"
+        );
+        assert!(core.orchestration.crew_of(refused).is_none(), "{refused}");
+    }
+    // The person's own chat keeps its place in their sidebar.
+    assert!(
+        core.workspace
+            .chat("mine-top")
+            .unwrap()
+            .unwrap()
+            .is_top_level()
+    );
+    // Its own child joins.
+    op(&core, agent(&auth), add("its-own")).await.unwrap();
+    assert_eq!(
+        core.orchestration
+            .crew_of("its-own")
+            .unwrap()
+            .orchestrator_id,
+        auth
+    );
+
+    // A crew create of a chat that exists is no way to add it.
+    let rpc = core.rpc_service();
+    let crew_create = |id: &str| {
+        json!({"op":"createChat","chatId":id,"deviceId":REMOTE,"parentChatId":auth,"childKind":"crew",
+            "config":{"harness":"codex","sandbox":"workspace-write"}})
+    };
+    assert!(
+        with_caller(
+            agent(&auth),
+            rpc.handle(methods::MUTATE, crew_create("mine-top"))
+        )
+        .await
+        .is_err()
+    );
+    assert!(core.orchestration.crew_of("mine-top").is_none());
+    assert!(
+        with_caller(
+            agent(&auth),
+            rpc.handle(methods::MUTATE, crew_create(&voice))
+        )
+        .await
+        .is_err()
+    );
+    with_caller(
+        agent(&auth),
+        rpc.handle(methods::MUTATE, crew_create("fresh")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        core.orchestration.crew_of("fresh").unwrap().orchestrator_id,
+        auth
+    );
+
+    // The person may still add any plain thread, but not an orchestrator,
+    // Zeron's own chats, or another chat's delegate.
+    op(&core, Caller::Local, add("mine-top")).await.unwrap();
+    assert_eq!(
+        core.orchestration
+            .crew_of("mine-top")
+            .unwrap()
+            .orchestrator_id,
+        auth
+    );
+    for refused in [
+        voice.as_str(),
+        fake_brain.as_str(),
+        brain_dump.as_str(),
+        billing.as_str(),
+        "someones-sub",
+    ] {
+        assert!(
+            op(&core, Caller::Local, add(refused)).await.is_err(),
+            "{refused}"
+        );
+    }
     core.sessions.shutdown().await;
 }

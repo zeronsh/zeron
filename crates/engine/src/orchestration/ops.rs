@@ -414,6 +414,11 @@ impl EngineRpc {
         if chat_id == orchestrator_id {
             return Err(failed("An orchestrator isn't in its own crew"));
         }
+        if zeron_proto::voice::is_orchestrator_chat(chat_id)
+            || zeron_proto::orchestration::is_brain_dump_chat(chat_id)
+        {
+            return Err(failed("Zeron's own chats aren't in a crew"));
+        }
         if !matches!(
             orch.role_of(chat_id),
             ChatRole::Plain | ChatRole::Crew { .. }
@@ -648,18 +653,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             chat_id,
             item_id,
             ..
-        } => match role {
-            ChatRole::Orchestrator { id } if id == orchestrator_id => {
-                if orch.crew_of(chat_id).is_some_and(|m| m.orchestrator_id != *id) {
-                    refuse("That thread is in another orchestrator's crew")
-                } else if !item_is_of(rpc, item_id.as_deref(), id) {
-                    refuse("That board item isn't yours")
-                } else {
-                    Ok(())
-                }
-            }
-            _ => refuse("Only an orchestrator adds threads, to its own crew"),
-        },
+        } => crew_join_permitted(who, orchestrator_id, chat_id, item_id.as_deref(), false, rpc),
         OrchestrateOp::ReleaseFromCrew { chat_id } => match (role, orch.crew_of(chat_id)) {
             (ChatRole::Orchestrator { id }, Some(member)) if member.orchestrator_id == *id => Ok(()),
             _ => refuse("Only an orchestrator releases threads, from its own crew"),
@@ -688,6 +682,63 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         tracing::info!(chat = %chat, %e, "orchestrate: an agent's op refused");
         e
     })
+}
+
+/// Whether `who` may put `chat_id` in `orchestrator_id`'s crew. The person
+/// may add any plain thread. An agent only its own orchestrator's, and
+/// only threads it started: a chat whose parent is already the calling
+/// orchestrator (`new_child`: one `createChat` is making with that parent
+/// now). Joining sets the chat's parent, which would take the person's own
+/// chat, or another chat's subagent, off where they keep it.
+pub(crate) fn crew_join_permitted(
+    who: &Who,
+    orchestrator_id: &str,
+    chat_id: &str,
+    item_id: Option<&str>,
+    new_child: bool,
+    rpc: &EngineRpc,
+) -> Result<(), RpcError> {
+    let Who::Agent { chat: caller, role } = who else {
+        return Ok(());
+    };
+    let refuse = |why: &str| Err(failed(why.to_owned()));
+    let ChatRole::Orchestrator { id } = role else {
+        return refuse("Only an orchestrator adds threads, to its own crew");
+    };
+    if id != orchestrator_id || caller != id {
+        return refuse("Only an orchestrator adds threads, to its own crew");
+    }
+    if zeron_proto::voice::is_orchestrator_chat(chat_id)
+        || zeron_proto::orchestration::is_brain_dump_chat(chat_id)
+        || !matches!(
+            rpc.orchestration().role_of(chat_id),
+            ChatRole::Plain | ChatRole::Crew { .. }
+        )
+    {
+        return refuse("An orchestrator or Zeron's own chat isn't in a crew");
+    }
+    if !new_child {
+        let parent = rpc
+            .workspace_host()
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|c| c.parent_chat_id);
+        if parent.as_deref() != Some(id.as_str()) {
+            return refuse("An orchestrator's crew is threads it started: the person adds others");
+        }
+    }
+    if rpc
+        .orchestration()
+        .crew_of(chat_id)
+        .is_some_and(|m| m.orchestrator_id != *id)
+    {
+        return refuse("That thread is in another orchestrator's crew");
+    }
+    if !item_is_of(rpc, item_id, id) {
+        return refuse("That board item isn't yours");
+    }
+    Ok(())
 }
 
 /// Whether `item` (when named) is on `orchestrator`'s board.

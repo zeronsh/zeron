@@ -2045,19 +2045,19 @@ impl EngineRpc {
                     .clone()
                     .filter(|_| child_kind == Some(zeron_proto::ChildKind::Crew));
                 // Joining the crew is an `addToCrew`, held to its rules (an
-                // agent: its own crew only), before anything is written.
+                // agent: a new thread of its own, in its own crew), before
+                // anything is written. An agent's create of a chat that
+                // exists (idempotent for retries) is no way to add one.
                 if let Some(orchestrator) = &crew_of {
                     let who = self.current_who()?;
-                    crate::orchestration::ops::permitted(
-                        &who,
-                        &zeron_proto::orchestration::OrchestrateOp::AddToCrew {
-                            orchestrator_id: orchestrator.clone(),
-                            chat_id: chat_id.clone(),
-                            role: String::new(),
-                            item_id: None,
-                        },
-                        self,
-                    )?;
+                    if matches!(who, crate::orchestration::ops::Who::Agent { .. })
+                        && self.workspace.chat(&chat_id).map_err(failed)?.is_some()
+                    {
+                        return Err(RpcError::Failed(
+                            "That chat already exists: an orchestrator's crew is threads it starts".into(),
+                        ));
+                    }
+                    crate::orchestration::ops::crew_join_permitted(&who, orchestrator, &chat_id, None, true, self)?;
                 }
                 self.workspace
                     .create_chat_hosted(
