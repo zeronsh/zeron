@@ -141,6 +141,55 @@ ui.command { id = "map_small", title = "Map: a small world", run = function()
 	})
 	orchestration.loads:set({ ["dev-desk"] = { cpu = 0.07, mem_used = 17e9, mem_total = 67e9, online = true, at = t } })
 end }
+-- The live one's shape: three machines; the Brain dump and an orchestrator
+-- on this one; threads the Brain dump started on the others (one with a
+-- long name), and one it handed a part to.
+ui.command { id = "map_live", title = "Map: the live shape", run = function()
+	local t = os.time()
+	local here = { id = "dev-hp1", name = "honeypot-1", platform = "linux", here = true, online = true }
+	local hp = { id = "dev-hp", name = "honeypot", platform = "linux", online = true }
+	local win = { id = "dev-win", name = "DESKTOP-3NFV6JC", platform = "windows", online = true }
+	sessions.now:set({
+		state = "ready",
+		here = "dev-hp1",
+		devices = { here, hp, win },
+		projects = { { id = "p-zeron", name = "zeron", device = "dev-hp1", path = "/home/you/zeron", git = true } },
+		chats = {
+			{ id = "orc-brain", title = "Brain dump", device = "dev-hp1", status = "working", updated = t - 30, created = t - 9000, agent = "claude",
+				activity = { kind = "thinking", label = "", since = t - 20 } },
+			{ id = "orc-fixes", title = "Zeron fixes", device = "dev-hp1", project = "p-zeron", updated = t - 300, created = t - 5000, agent = "claude",
+				started_by = "orc-brain" },
+			{ id = "th-codex", title = "Codex Slash Commands Missing", device = "dev-hp", status = "done", updated = t - 200, created = t - 3000, agent = "openai",
+				started_by = "orc-brain" },
+			{ id = "th-capy", title = "Explaining Capy.ai Captains", device = "dev-hp", updated = t - 100, created = t - 2000, agent = "claude" },
+			{ id = "th-installer", title = "Windows installer check", device = "dev-win", status = "working", updated = t - 10, created = t - 1500, agent = "claude",
+				started_by = "orc-brain", activity = { kind = "running", label = "", since = t - 15 } },
+			{ id = "th-notes", title = "Release notes draft", device = "dev-hp1", status = "done", updated = t - 400, created = t - 2500, agent = "claude",
+				started_by = "orc-brain" },
+		},
+		archived = {},
+		children = {},
+		places = { pinned = {}, sections = {} },
+		places_ready = true,
+	} :: any)
+	local function orch(id: string, name: string, hue: number, kind: string?): any
+		return { id = id, kind = kind or "standard", name = name, goal = "", rules = "", crew_rules = "", notes = "", hue = hue,
+			crew = { devices = {} }, paused = false, archived = false, created = t - 9000, updated = t - 60, project = if kind then nil else "p-zeron" }
+	end
+	orchestration.now:set({
+		state = "ready",
+		orchestrators = { orch("orc-brain", "Brain dump", 172, "brain_dump"), orch("orc-fixes", "Zeron fixes", 20) },
+		crew = {},
+		items = {},
+		asks = {},
+		dumps = { { id = "d1", routes = { { target = { kind = "chat", id = "th-capy" } } } } },
+	})
+	orchestration.loads:set({
+		["dev-hp1"] = { cpu = 0.3, mem_used = 17e9, mem_total = 67e9, online = true, at = t },
+		["dev-hp"] = { cpu = 0.1, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
+		["dev-win"] = { cpu = 0.05, mem_used = 7e9, mem_total = 32e9, online = true, at = t },
+	})
+end }
 -- A secondary click's menu for the id in `map_menu_id`, as on the Map.
 local menu_id = ui.state("map_menu_id", "")
 ui.command { id = "map_menu", title = "Map: open a menu", run = function()

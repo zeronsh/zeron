@@ -443,7 +443,7 @@ M.View = ui.component(function(props: {
 			for i = 0, k do
 				local t = i / k
 				local u = 1 - t
-				table.insert(pts, { u * u * ln.ax + 2 * u * t * ln.cx + t * t * ln.bx, u * u * ln.ay + 2 * u * t * ln.cy + t * t * ln.by })
+				table.insert(pts, { u * u * ln.ax + 2 * u * t * ln.cx + t * t * ln.bx, u * u * ln.ay + 2 * u * t * ln.cy + t * t * ln.by, ln.e.a, ln.e.b } :: any)
 			end
 		end
 		for _, rim in rims do
@@ -456,7 +456,9 @@ M.View = ui.component(function(props: {
 		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string, rim_w: number?): number
 			local k = 0
 			for _, p in pts do
-				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
+				-- (Its own lines in are ranked apart (`on_own`), not counted
+				-- against it here.)
+				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 and (p :: any)[3] ~= own and (p :: any)[4] ~= own then
 					k += 0.15
 				end
 			end
@@ -574,13 +576,20 @@ M.View = ui.component(function(props: {
 			end
 			-- (Lines may run under a name, broken round it; marks and other
 			-- names may not: a thread whose name fits nowhere keeps its dot.)
-			-- (A name that need not show cuts nothing.)
-			if best and least >= (if must then 1 else 0.05) and not force and fit then
+			-- (A name that need not show may cross a rim, never a mark or a name.)
+			if best and least >= (if must then 1 else 0.65) and not force and fit then
 				-- (Ranked best but not allowed: the least crowded instead.)
 				best, least = fit, fit_k
 			end
-			if not best or (least >= (if must then 1 else 0.05) and not force) then
+			if not best or (least >= (if must then 1 else 0.65) and not force) then
 				return
+			end
+			-- (Never past the field's edge: slid back in, a leader tying it.)
+			local cx0 = math.clamp(best.x, 6, math.max(6, w - best.tw - 6))
+			local cy0 = math.clamp(best.y, 4, math.max(4, h - best.th - 4))
+			if cx0 ~= best.x or cy0 ~= best.y then
+				best = table.clone(best)
+				best.x, best.y, best.aside = cx0, cy0, true
 			end
 			table.insert(taken, { best.x - 3, best.y - 1, best.x + best.tw + 3, best.y + best.th + 1 })
 			-- (Set off from its mark: a fine leader ties it back.)
@@ -639,6 +648,8 @@ M.View = ui.component(function(props: {
 						end
 					end
 					local x0, y0 = name_box(rim, best_a)
+					x0 = math.clamp(x0, 6, math.max(6, w - rim.w - 6))
+					y0 = math.clamp(y0, 4, math.max(4, h - rim.h - 4))
 					rim.nx, rim.ny = x0, y0 + rim.h / 2
 					table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2 })
 				end
@@ -798,6 +809,78 @@ M.View = ui.component(function(props: {
 			end
 		end
 
+		-- Where a line meets a mark: the mark's own outline (a disc, the
+		-- diamond, the machine's square, a working thread's ring), and a
+		-- hair's gap.
+		local leave: (q: { number }, n: sim.Node, at_end: boolean) -> number
+		local sub_quad: (q: { number }, t0: number, t1: number) -> { number }
+		local quad_length: (q: { number }) -> number
+		local GAP = 2
+		local function inside(n: sim.Node, px: number, py: number): boolean
+			local x, y = at(n)
+			local dx, dy = math.abs(px - x), math.abs(py - y)
+			local r = n.r * zs
+			if n.kind == "device" then
+				return dx <= r + GAP and dy <= r + GAP
+			elseif n.kind == "brain" then
+				return dx + dy <= r * 1.15 + GAP * 1.4
+			elseif n.kind == "thread" then
+				local st = state_of(n.id)
+				local rr = if st == "working" or st == "waiting" then 9
+					elseif st == "input" or st == "approval" or st == "failed" then r
+					else r * 0.85
+				return dx * dx + dy * dy <= (rr + GAP) ^ 2
+			end
+			return dx * dx + dy * dy <= (r + GAP) ^ 2
+		end
+		local function qpt(q: { number }, t: number): (number, number)
+			local u = 1 - t
+			return u * u * q[1] + 2 * u * t * q[3] + t * t * q[5], u * u * q[2] + 2 * u * t * q[4] + t * t * q[6]
+		end
+		-- The parameter where `q` crosses `n`'s outline: leaving it from the
+		-- start, or (`at_end`) reaching it at the end.
+		leave = function(q: { number }, n: sim.Node, at_end: boolean): number
+			local lo, hi = if at_end then 0.5 else 0, if at_end then 1 else 0.5
+			-- (Inside at one end, outside at the other: halve till close.)
+			for _ = 1, 24 do
+				local mid = (lo + hi) / 2
+				local x, y = qpt(q, mid)
+				local within = inside(n, x, y)
+				if at_end then
+					if within then
+						hi = mid
+					else
+						lo = mid
+					end
+				else
+					if within then
+						lo = mid
+					else
+						hi = mid
+					end
+				end
+			end
+			return if at_end then lo else hi
+		end
+		-- The part of `q` from t0 to t1, as a curve of its own.
+		sub_quad = function(q: { number }, t0: number, t1: number): { number }
+			local x0, y0 = qpt(q, t0)
+			local x1, y1 = qpt(q, t1)
+			local function blossom(i: number): number
+				return (1 - t0) * (1 - t1) * q[i] + ((1 - t0) * t1 + t0 * (1 - t1)) * q[i + 2] + t0 * t1 * q[i + 4]
+			end
+			return { x0, y0, blossom(1), blossom(2), x1, y1 }
+		end
+		quad_length = function(q: { number }): number
+			local total, px, py = 0, q[1], q[2]
+			for i = 1, 16 do
+				local x, y = qpt(q, i / 16)
+				total += math.sqrt((x - px) ^ 2 + (y - py) ^ 2)
+				px, py = x, y
+			end
+			return total
+		end
+
 		-- 2. Island grounds.
 		for _, rim in rims do
 			local lit = lit_of(rim.n.id)
@@ -809,6 +892,13 @@ M.View = ui.component(function(props: {
 		local field = ui.path():move(0, 0):line(w, 0):line(w, h):line(0, h):close()
 		for _, bx in taken do
 			field:move(bx[1], bx[2]):line(bx[1], bx[4]):line(bx[3], bx[4]):line(bx[3], bx[2]):close()
+		end
+		-- (But round every mark a line reaches it whole: added back, traced
+		-- the field's way.)
+		for _, n in graph.nodes do
+			local x, y = at(n)
+			local rr = reach(n) + 14
+			field:move(x + rr, y):arc(x, y, rr, 0, 360):close()
 		end
 		c:clip(field)
 		for _, rim in rims do
@@ -826,17 +916,55 @@ M.View = ui.component(function(props: {
 		end
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
-			local p = if ln.via
-				then ui.path():move(ln.ax, ln.ay):quad(ln.via[3], ln.via[4], ln.via[1], ln.via[2]):quad(ln.via[5], ln.via[6], ln.bx, ln.by)
-				else ui.path():move(ln.ax, ln.ay):quad(ln.cx, ln.cy, ln.bx, ln.by)
+			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
+			-- (From centre to centre, cut where it leaves each mark.)
+			local ax, ay = at(a)
+			local bx, by = at(b)
+			local segs
+			if ln.via then
+				local v1 = ln.via
+				local s1 = { ax, ay, v1[3], v1[4], v1[1], v1[2] }
+				local s2 = { v1[1], v1[2], v1[5], v1[6], bx, by }
+				local t0 = leave(s1, a, false)
+				local t1 = leave(s2, b, true)
+				segs = { sub_quad(s1, t0, 1), sub_quad(s2, 0, t1) }
+			else
+				-- (Its bow kept, now about the centres.)
+				local mx, my = (ln.ax + ln.bx) / 2, (ln.ay + ln.by) / 2
+				local cx, cy = (ax + bx) / 2 + (ln.cx - mx), (ay + by) / 2 + (ln.cy - my)
+				local q = { ax, ay, cx, cy, bx, by }
+				local t0 = leave(q, a, false)
+				local t1 = leave(q, b, true)
+				if t1 <= t0 then
+					continue
+				end
+				segs = { sub_quad(q, t0, t1) }
+			end
+			local p = ui.path():move(segs[1][1], segs[1][2])
+			local length = 0
+			for _, sg in segs do
+				p:quad(sg[3], sg[4], sg[5], sg[6])
+				length += quad_length(sg)
+			end
+			-- (A dashed line begins and ends on a dash, its pattern fitted to
+			-- its length.)
+			local function fitted(on: number, off: number): { number }
+				local period = on + off
+				local n = math.max(1, math.floor((length - on) / period + 0.5))
+				local k = (length - on) / (n * period)
+				if k <= 0 then
+					return { on, off }
+				end
+				return { on * k, off * k }
+			end
 			if e.kind == "host" then
-				c:stroke(p, ink(0.32, lit), 1, { dash = { 2, 3 } })
+				c:stroke(p, ink(0.32, lit), 1, { dash = fitted(2, 3) })
 			elseif e.kind == "control" then
 				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.95 else 0.6, lit)), if lit then 2 else 1.5, { cap = "round" })
 			elseif e.kind == "started" then
-				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.85 else 0.4, lit)), 1, { cap = "round", dash = { 4, 3 } })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.85 else 0.45, lit)), 1.25, { cap = "round", dash = fitted(4, 3) })
 			else
-				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.7 else 0.35, lit)), 1.25, { cap = "round", dash = { 0.5, 3 } })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.7 else 0.4, lit)), 1.25, { cap = "round", dash = fitted(0.5, 3) })
 			end
 		end
 		-- Pulses along them.
