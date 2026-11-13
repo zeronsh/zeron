@@ -462,6 +462,54 @@ local function list_of(given: any): any
 	return given or {}
 end
 
+-- The access modes the chosen model's agent honours, in its own words
+-- (OpenCode's two are its TUI's: Prompt and Auto accept). Every mode while
+-- the agent isn't known yet, or says none.
+local function access_items(
+	model: State<string?>,
+	models: any,
+	harnesses: any
+): { Dropdown.Item }
+	local all = ACCESS()
+	local chosen = model:get()
+	local harness: ModelPicker.Harness? = nil
+	if chosen then
+		for _, m: ModelPicker.Model in list_of(models) do
+			if m.value == chosen then
+				for _, h: ModelPicker.Harness in list_of(harnesses) do
+					if h.id == m.harness then
+						harness = h
+					end
+				end
+				break
+			end
+		end
+	end
+	if not harness or not harness.access or #harness.access == 0 then
+		return all
+	end
+	local offered = harness.access
+	local opencode = harness.access_style == "opencode"
+	local out: { Dropdown.Item } = {}
+	for _, item: any in all do
+		if table.find(offered, item.value) then
+			if opencode and item.value == "supervised" then
+				item = worded(item, {
+					label = "ds.composer.access.prompt",
+					description = "ds.composer.access.prompt_hint",
+				})
+			elseif opencode and item.value == "full" then
+				item = worded(item, {
+					label = "ds.composer.access.auto_accept",
+					description = "ds.composer.access.auto_accept_hint",
+				})
+			end
+			table.insert(out, item)
+		end
+	end
+	return out
+end
+
 local function submenu(
 	siblings: { State<boolean> },
 	label: Message,
@@ -1418,7 +1466,9 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				return access_items(props.model, props.models, props.harnesses)
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,

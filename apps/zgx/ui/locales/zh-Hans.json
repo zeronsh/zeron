@@ -591,7 +591,11 @@
         "edits": "自动接受编辑",
         "edits_hint": "应用编辑，执行其他操作前先询问。",
         "full": "完全访问",
-        "full_hint": "运行命令和编辑时不询问。"
+        "full_hint": "运行命令和编辑时不询问。",
+        "prompt": "询问",
+        "prompt_hint": "按 OpenCode 的权限设置询问。",
+        "auto_accept": "自动接受",
+        "auto_accept_hint": "接受 OpenCode 权限未拒绝的所有请求。"
       },
       "plan": {
         "mode": "计划模式",

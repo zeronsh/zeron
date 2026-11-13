@@ -1684,6 +1684,23 @@ pub(crate) fn made(params: &Json) {
 /// `chat.catalog`: the agents with models listed, each model as the picker
 /// takes it; ready once any agent's models are in (more may follow), or all
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
+/// The access modes a listed harness honours (`accessModes`), as the
+/// composer's values: `supervised`, `edits`, `full`.
+fn access_values(harness: &Json) -> Vec<Value> {
+    harness["accessModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|mode| match mode.as_str()? {
+            "supervised" => Some("supervised"),
+            "auto-accept-edits" => Some("edits"),
+            "full-access" => Some("full"),
+            _ => None,
+        })
+        .map(Value::from)
+        .collect()
+}
+
 fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, device: Option<&str>) -> Value {
     let any = by.values().any(|l| !l.is_empty());
     let state = if any || done { "ready" } else { "looking" };
@@ -1700,6 +1717,10 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
             ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
+            // The access modes it honours, as the composer names them.
+            ("access", Value::List(access_values(h).into())),
+            // OpenCode's own words for its two (its TUI's permission modes).
+            ("access_style", if id == "opencode" { Value::from("opencode") } else { Value::Nil }),
         ]));
         for m in list {
             models.push(model_value(id, m));

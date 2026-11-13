@@ -591,7 +591,11 @@
         "edits": "Auto-accept edits",
         "edits_hint": "Apply edits, ask before other actions.",
         "full": "Full access",
-        "full_hint": "Run commands and edits without asking."
+        "full_hint": "Run commands and edits without asking.",
+        "prompt": "Prompt",
+        "prompt_hint": "Ask about what OpenCode's permissions ask about.",
+        "auto_accept": "Auto accept",
+        "auto_accept_hint": "Accept every request OpenCode's permissions don't deny."
       },
       "plan": {
         "mode": "Plan mode",
