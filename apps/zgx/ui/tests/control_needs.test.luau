@@ -137,3 +137,25 @@ test("a thread's turn-end ask gone stale comes first, urgent", function()
 	expect(approve ~= nil and after ~= nil and (approve :: number) < (after :: number)).to_be(true)
 	expect(app:count('#control-widget-needs >> "Urgent"')).to_be(2)
 end)
+
+test("waiting for you counts open asks, chats awaiting input and unread Q&A answers once", function()
+	local data = require("@ds/orch_data")
+	local now = {
+		orchestrators = {},
+		crew = {},
+		items = {},
+		dumps = {},
+		asks = {
+			{ id = "a1", from_chat = "c1", kind = "decision", question = "A or B?", options = {}, urgent = false, state = "open", created = 10, origin = "turn_end" },
+			{ id = "a2", from_chat = "c2", kind = "question", question = "?", options = {}, urgent = false, state = "open", created = 20, escalated = 40 },
+			{ id = "a3", from_chat = "c3", kind = "question", question = "?", options = {}, urgent = false, state = "answered", created = 5 },
+		},
+	}
+	local w = data.waiting_for_you(now, {})
+	expect(w.count).to_be(2)
+	expect(w.urgent).to_be(1)
+	expect(w.qa_unread).to_be(0)
+	local with_qa = data.waiting_for_you(now, {}, { unread = 3, waiting = 1 })
+	expect(with_qa.count).to_be(5)
+	expect(#with_qa.needs).to_be(2)
+end)

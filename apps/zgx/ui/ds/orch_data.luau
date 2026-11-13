@@ -275,14 +275,13 @@ function M.needs(now: any, sessions_now: any): { Need }
 end
 
 -- What waits on the person, counted once for every place that says how
--- many (the Control room's head, its figures): today the open asks and
--- chats awaiting input (`needs`, as data.needs lists them). The Control
--- room's Q&A (questions the person asked, answered and not read yet) joins
--- here as one more source: add its count to `count` (and `urgent` where it
--- says so) below, nowhere else.
-export type Waiting = { count: number, urgent: number, needs: { Need } }
+-- many: the open asks and chats awaiting input (`needs`, as data.needs
+-- lists them) and, when given, the Control room's Q&A answers not read yet
+-- (`qa`: ds/orch_qa's `counts`; passed in, as orch_qa reads this module).
+-- Another source of "waiting for you" joins here, nowhere else.
+export type Waiting = { count: number, urgent: number, needs: { Need }, qa_unread: number }
 
-function M.waiting_for_you(now: any, sessions_now: any): Waiting
+function M.waiting_for_you(now: any, sessions_now: any, qa: { unread: number, waiting: number }?): Waiting
 	local needs = M.needs(now, sessions_now)
 	local urgent = 0
 	for _, n in needs do
@@ -290,8 +289,8 @@ function M.waiting_for_you(now: any, sessions_now: any): Waiting
 			urgent += 1
 		end
 	end
-	-- (Q&A answered-unread: its count goes here.)
-	return { count = #needs, urgent = urgent, needs = needs }
+	local unread = if qa then qa.unread else 0
+	return { count = #needs + unread, urgent = urgent, needs = needs, qa_unread = unread }
 end
 
 -- An ask raised from a turn's end (the thread's plain question), not by

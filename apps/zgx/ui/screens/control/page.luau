@@ -710,9 +710,17 @@ function tally.working(): number
 	local w = Progress.counts()
 	return w
 end
+-- What waits on the person (data.waiting_for_you): Needs you's rows alone
+-- (`needs`), or with the Q&A answers not read yet (`waiting`).
+local function waiting(): data.Waiting
+	return data.waiting_for_you(orchestration.now:get(), sessions.now:get(), QA.counts(qa_entries:get()))
+end
 function tally.needs(urgent: boolean?): number
-	local w = data.waiting_for_you(orchestration.now:get(), sessions.now:get())
-	return if urgent then w.urgent else w.count
+	local w = waiting()
+	return if urgent then w.urgent else #w.needs
+end
+function tally.waiting(): number
+	return waiting().count
 end
 M.tally = tally
 
@@ -1026,12 +1034,12 @@ local function head(): Node
 				},
 				ui.text {
 					function(): string
-						return locale.s("control.head.needs", { n = tally.needs() })
+						return locale.s("control.head.needs", { n = tally.waiting() })
 					end,
 					tabular = true,
 					text_size = "$font.size.sm",
 					color = function(): string
-						return if tally.needs() > 0 then "$zeron.status.input" else "$text.tertiary"
+						return if tally.waiting() > 0 then "$zeron.status.input" else "$text.tertiary"
 					end,
 				},
 			},
