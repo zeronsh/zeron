@@ -202,6 +202,12 @@ pub mod methods {
     /// dedupe by `id` (never replace the list with a frame). Agents see only
     /// their own traffic.
     pub const WATCH_COMMS: &str = "WatchComms";
+    /// `Vec<orchestration::Progress>`: how far each chat's work has got,
+    /// for every chat that is working (or waiting to go on), finished in the
+    /// last 24 h, or in a crew. Whole on subscribe and on every change
+    /// (coalesced ≤ 4/s); clients tick the clocks. Agents see the chats they
+    /// may check (`Orchestrate{op: progressCheck}`).
+    pub const WATCH_PROGRESS: &str = "WatchProgress";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
