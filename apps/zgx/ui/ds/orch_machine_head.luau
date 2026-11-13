@@ -137,7 +137,7 @@ function M.MachineHead(props: Props): Node
 				class = "orch-machine-head-load",
 				shrink = 0,
 				pl = "$space.2",
-				gap = "$space.2",
+				gap = "$space.1",
 				items = "center",
 				ui.canvas {
 					class = "orch-machine-head-meter",
@@ -156,16 +156,17 @@ function M.MachineHead(props: Props): Node
 						end
 					end,
 				},
-				-- (Its cells as many as 100% has: always as wide.)
 				ui.div {
 					class = "orch-machine-head-figure",
 					shrink = 0,
 					overflow = "hidden",
 					y = small,
+					-- (As many cells as it has figures: no blank ones before it.)
 					Counter {
 						value = cpu,
 						suffix = "%",
-						anchor = "end",
+						anchor = "start",
+						max = 0,
 						text_size = "$font.size.xs",
 						color = "$text.secondary",
 					},

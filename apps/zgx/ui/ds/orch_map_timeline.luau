@@ -397,8 +397,7 @@ M.View = ui.component(function(props: {
 						elseif s == "input" or s == "approval" or s == "failed" then
 							return status.KINDS[s :: any].long
 						elseif s == "done" then
-							local u = c().updated
-							return if u then `{status.KINDS.done.label} · {status.ago(kit.since(u))}` else status.KINDS.done.label
+							return status.KINDS.done.label
 						end
 						return ""
 					end,
@@ -406,12 +405,25 @@ M.View = ui.component(function(props: {
 					text_size = "$font.size.xs",
 					color = function(): string
 						local s = st()
-						if s == "input" or s == "approval" or s == "failed" then
+						if s == "input" or s == "approval" or s == "failed" or s == "done" then
 							return `$zeron.status.{s}`
 						end
-						return if s == "done" then "$text.tertiary" else "$text.secondary"
+						return "$text.secondary"
 					end,
 				},
+				-- Done: how long ago, quiet after the word.
+				ui.show(function(): boolean
+					return st() == "done" and c().updated ~= nil
+				end, ui.text {
+					function(): string
+						local u = c().updated
+						return if u then status.ago(kit.since(u)) else ""
+					end,
+					shrink = 0,
+					tabular = true,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				}),
 				ui.text {
 					function(): string
 						local a = activity()
