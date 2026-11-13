@@ -457,10 +457,10 @@ M.View = ui.component(function(props: {
 			local k = 0
 			for _, p in pts do
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
-					k += 0.1
+					k += 0.15
 				end
 			end
-			k = math.min(k, 0.45)
+			k = math.min(k, 0.6)
 			-- (A rim cut reads worse than a line's.)
 			for _, p in rim_pts do
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
@@ -518,21 +518,21 @@ M.View = ui.component(function(props: {
 					if must then
 						-- (Then hanging under or over it, either way; then the
 						-- corners, close in.)
-						table.insert(spots, { x - 8, y + r + 1, "start" })
-						table.insert(spots, { x + 8 - tw, y + r + 1, "end" })
-						table.insert(spots, { x - 8, y - r - th - 1, "start" })
-						table.insert(spots, { x + 8 - tw, y - r - th - 1, "end" })
+						table.insert(spots, { x - 8, y + r + 1, "start", true })
+						table.insert(spots, { x + 8 - tw, y + r + 1, "end", true })
+						table.insert(spots, { x - 8, y - r - th - 1, "start", true })
+						table.insert(spots, { x + 8 - tw, y - r - th - 1, "end", true })
 						local d = r * 0.72
-						table.insert(spots, { x + d, y + d - th / 2, "start" })
-						table.insert(spots, { x + d, y - d - th / 2, "start" })
-						table.insert(spots, { x - d - tw, y + d - th / 2, "end" })
-						table.insert(spots, { x - d - tw, y - d - th / 2, "end" })
+						table.insert(spots, { x + d, y + d - th / 2, "start", true })
+						table.insert(spots, { x + d, y - d - th / 2, "start", true })
+						table.insert(spots, { x - d - tw, y + d - th / 2, "end", true })
+						table.insert(spots, { x - d - tw, y - d - th / 2, "end", true })
 					end
 					for _, sp in spots do
 						-- (A working thread's name may cross a rim, if it must.)
 						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id, if must and n.kind == "thread" then 0.35 else nil) + far * 0.03
 						if k < least then
-							best, least = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text }, k
+							best, least = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 }, k
 						end
 					end
 					if least < 0.5 then
@@ -557,7 +557,8 @@ M.View = ui.component(function(props: {
 			local qy = math.clamp(y, best.y, best.y + best.th)
 			local gx, gy = qx - x, qy - y
 			local gd = math.sqrt(gx * gx + gy * gy)
-			if gd - mr > 13 then
+			-- (Always for a name hung aside or stepped out; else past 13px.)
+			if gd - mr > (if best.aside then 4 else 13) then
 				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
 			end
 			for i, t in best.text do
