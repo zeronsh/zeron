@@ -207,7 +207,18 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?): Node
+--
+-- `take`: what a send does instead of messaging the chat (the Control
+-- room's Capture: a dump): told the words as they'd be sent and what they
+-- carry (Carried.pack's `attachments`), it returns a promise; the draft
+-- clears as it goes and comes back, with its chips, if it fails.
+-- `placeholder`: the words in it while it's empty. `footer`: which of its
+-- footer's pickers it shows (each by default): `access = false` leaves out
+-- the access mode, `place = false` where it works (project, device,
+-- checkout, branch); the model and agent always show.
+export type Take = (text: string, attachments: { any }) -> any
+export type Footer = { access: boolean?, place: boolean? }
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -656,7 +667,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
 			or (focused ~= nil and not focused())
 	end, name)
-	return ds.Composer {
+	local p: { [string]: any } = {
 		dictation = dictation,
 		value = draft,
 		snap = if split then snap else nil,
@@ -701,7 +712,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		-- (ds.Composer's placeholder is a string: read as the tab is made.)
 		-- (A split's pane is a chat of its own, as is a lane that shows one
 		-- (`data.own`: an orchestrator's page): the chat page's words.)
-		placeholder = locale.s(if split or own then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
+		placeholder = placeholder or locale.s(if split or own then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
 		plan = plan,
@@ -819,6 +830,20 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
+			-- Taken by its page (a dump): the words and what they carry, never
+			-- a message of the chat's.
+			if take then
+				take(prompt, pack.attachments):after(function() end, function(err: any)
+					ui.batch(function()
+						draft:set(text)
+						quotes:set(said_quotes)
+					end)
+					Shared.restore_cargo_of(chat, chips)
+					local why = if type(err) == "table" and err.message then tostring(err.message) else nil
+					notice:set({ tone = "danger", text = why or locale.s("chat.lane_tab.didnt_send"), dismissable = true })
+				end)
+				return
+			end
 			-- (While a turn runs it's queued instead: it shows in the queue, and
 			-- what's picked waits for the turn it will run in.)
 			local queued = not is_unsent and running:peek()
@@ -903,6 +928,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		tray = tray,
 	}
+	-- (A footer without some of its pickers: a page's own composer, as the
+	-- Control room's Capture keeps only the model.)
+	if footer and footer.access == false then
+		p.access = nil
+	end
+	if footer and footer.place == false then
+		for _, k in { "project", "projects", "device", "devices", "checkout", "branch", "branches", "branches_empty", "branch_fixed", "on_new_project" } do
+			p[k] = nil
+		end
+	end
+	return ds.Composer(p :: any)
 end
 
 -- A fork's tab while the engine copies it, or once it couldn't: the
@@ -938,6 +974,42 @@ end
 function M.dock_height(slot: string): State<number>
 	return ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
 end
+
+-- A chat's composer on a page of its own, outside the panel's tabs: the
+-- side chat's (above), bound to chat `chat` in `slot` (its session watched
+-- while it shows, so its model, agent and access are the chat's and change
+-- it), its sends taken by `take` where given (the Control room's Capture:
+-- each a dump). Laid in the page's flow, as wide as what holds it.
+--
+--   LaneTab.Composer { chat = function() return id end, slot = "capture",
+--     take = function(text, attachments) return promise end,
+--     placeholder = "Dump anything" }
+M.Composer = ui.component(function(props: { chat: () -> string?, slot: string, take: Take?, placeholder: string?, footer: Footer?, id: string? }): Node
+	local slot = props.slot
+	local view = lanes.view(slot)
+	local focus = ui.use_state(0)
+	local open_model = ui.use_state(0)
+	ui.effect(function()
+		local id = props.chat()
+		lanes.watch(slot, id)
+	end)
+	ui.on_cleanup(function()
+		lanes.watch(slot, nil)
+	end)
+	-- (A real swap: the chat it's bound to, once known.)
+	return ui.presence(function(): string
+		return props.chat() or ""
+	end, function(id: string): Node
+		if id == "" then
+			return ui.div {}
+		end
+		return ui.column {
+			id = props.id,
+			w_full = true,
+			composer(id, view, `lane.{slot}`, focus, open_model, false, nil, true, props.take, props.placeholder, props.footer),
+		}
+	end, { w_full = true })
+end)
 
 M.Tab = ui.component(function(props: { tab: any }): Node
 	local tab = props.tab

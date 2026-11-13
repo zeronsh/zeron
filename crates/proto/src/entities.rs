@@ -341,6 +341,35 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+    /// The agent that started this chat for the person: the Brain dump
+    /// (a dump's route) or an orchestrator (its crew). Provenance only: a
+    /// top-level chat it started stays top-level and the person's. Set by
+    /// the engine; missing on older rows and peers, and a shape this build
+    /// can't read decodes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_started_by")]
+    pub started_by: Option<StartedBy>,
+}
+
+/// Who started a chat ([`Chat::started_by`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedBy {
+    /// The starting chat: a Brain dump's or an orchestrator's.
+    pub chat_id: String,
+    /// The dump and route it was started for, when a route started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+}
+
+/// [`Chat::started_by`], leniently.
+pub fn lenient_started_by<'de, D>(deserializer: D) -> Result<Option<StartedBy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// A chat put to sleep ([`Chat::sleep`]).

@@ -982,6 +982,10 @@ impl EngineRpc {
         &self.sessions
     }
 
+    pub(crate) fn uploads_ref(&self) -> &Uploads {
+        &self.uploads
+    }
+
     /// This engine's data folder.
     pub(crate) fn data_dir(&self) -> &std::path::Path {
         self.repos.data_dir()
@@ -2090,6 +2094,8 @@ impl EngineRpc {
                 }
                 if let Some(orchestrator) = crew_of {
                     self.add_to_crew(&orchestrator, &chat_id, "", None)?;
+                    // Started by its orchestrator (besides being its child).
+                    self.mark_started_by(&chat_id, &orchestrator, None, None);
                 }
                 Ok(())
             }

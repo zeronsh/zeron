@@ -281,6 +281,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         sleep: None,
+        started_by: None,
     }
 }
 
@@ -341,6 +342,28 @@ fn background_processes_replicate_and_clear() {
     host.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
+fn who_started_a_chat_replicates_and_a_bad_value_costs_only_itself() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let row = chat("c1", "host");
+    host.upsert_chat(&row).unwrap();
+    let started = zeron_proto::StartedBy { chat_id: "brain".into(), dump_id: Some("d".into()), route_id: Some("r".into()) };
+    assert!(host.set_chat_started_by("c1", &started).unwrap());
+    assert!(!host.set_chat_started_by("nope", &started).unwrap());
+    // A full upsert of the row (older code) keeps it.
+    host.upsert_chat(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.chat("c1").unwrap().unwrap().started_by, Some(started));
+    let bad: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+        "id": "x", "deviceId": "d", "archived": false, "createdAt": "2026-11-01T00:00:00Z", "startedBy": "garbage"
+    }))
+    .unwrap();
+    assert_eq!(bad.started_by, None);
 }
 
 #[test]
