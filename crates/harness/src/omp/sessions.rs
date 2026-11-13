@@ -16,27 +16,47 @@ use std::{
 /// `~/.omp/agent`; a named profile (`OMP_PROFILE`, else `PI_PROFILE`) keeps
 /// its own under `~/.omp/profiles/<name>/agent`.
 pub(super) fn agent_dir() -> PathBuf {
+    agent_dir_in(&|name| std::env::var(name).ok())
+}
+
+/// `agent_dir`, reading its variables through `env` (a run's own, which
+/// override the engine's: omp is launched with them).
+pub(super) fn agent_dir_in(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     let home = crate::executable::home_or_current_dir();
-    let profile = std::env::var("OMP_PROFILE")
-        .ok()
-        .or_else(|| std::env::var("PI_PROFILE").ok())
-        .map(|p| p.trim().to_owned())
-        .filter(|p| !p.is_empty() && p != "default");
+    let set = |name: &str| {
+        env(name)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    let profile = set("OMP_PROFILE")
+        .or_else(|| set("PI_PROFILE"))
+        .filter(|p| p != "default");
     match profile {
         Some(name) => home.join(".omp/profiles").join(name).join("agent"),
-        None => crate::model_context::root("PI_CODING_AGENT_DIR", home.join(".omp/agent")),
+        None => set("PI_CODING_AGENT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".omp/agent")),
     }
 }
 
 /// The directories a session may be in: an explicit `--session-dir`, the
 /// launch override omp reads (`PI_CODING_AGENT_SESSION_DIR`), then the
-/// profile's store.
-pub(super) fn roots(explicit: Option<&Path>) -> Vec<PathBuf> {
+/// profile's store; each variable as the run sets it, else the engine's.
+pub(super) fn roots(
+    explicit: Option<&Path>,
+    run_env: &std::collections::BTreeMap<String, String>,
+) -> Vec<PathBuf> {
+    let env = |name: &str| {
+        run_env
+            .get(name)
+            .cloned()
+            .or_else(|| std::env::var(name).ok())
+    };
     let mut roots: Vec<PathBuf> = explicit.map(Path::to_path_buf).into_iter().collect();
-    if let Some(dir) = std::env::var_os("PI_CODING_AGENT_SESSION_DIR").filter(|d| !d.is_empty()) {
+    if let Some(dir) = env("PI_CODING_AGENT_SESSION_DIR").filter(|d| !d.is_empty()) {
         roots.push(dir.into());
     }
-    roots.push(agent_dir().join("sessions"));
+    roots.push(agent_dir_in(&env).join("sessions"));
     roots
 }
 
@@ -105,6 +125,34 @@ fn header_id(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run's own variables say where its sessions are, over the engine's:
+    /// omp is launched with them, so a resume looks where it writes.
+    #[test]
+    fn a_runs_own_variables_say_where_its_sessions_are() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(
+            "PI_CODING_AGENT_SESSION_DIR".to_owned(),
+            "/tmp/omp-run-sessions".to_owned(),
+        );
+        assert!(roots(None, &env).contains(&PathBuf::from("/tmp/omp-run-sessions")));
+        env.insert("OMP_PROFILE".to_owned(), "work".to_owned());
+        assert!(
+            roots(None, &env)
+                .last()
+                .unwrap()
+                .ends_with(".omp/profiles/work/agent/sessions")
+        );
+        let mut dir = std::collections::BTreeMap::new();
+        dir.insert(
+            "PI_CODING_AGENT_DIR".to_owned(),
+            "/tmp/omp-agent".to_owned(),
+        );
+        assert_eq!(
+            roots(None, &dir).last().unwrap(),
+            &PathBuf::from("/tmp/omp-agent/sessions")
+        );
+    }
 
     #[test]
     fn sessions_are_found_by_id_in_project_folders_and_checked_against_their_header() {

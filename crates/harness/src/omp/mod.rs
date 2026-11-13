@@ -398,7 +398,10 @@ impl Harness for OmpHarness {
         // would strand the chat: the engine resumes the same id forever.
         let mut lost_context = None;
         let resume = match request.resume.clone() {
-            Some(id) => match sessions::find(&id, &sessions::roots(self.session_dir.as_deref())) {
+            Some(id) => match sessions::find(
+                &id,
+                &sessions::roots(self.session_dir.as_deref(), &request.env),
+            ) {
                 Ok(file) => Some(file),
                 Err(error) => {
                     lost_context = Some(format!(

@@ -349,14 +349,36 @@ impl Runner {
             }
         }
         if catalog::thinking_selected(request) {
-            let supported = self
+            // (As a model change: refused, the run goes on at omp's level,
+            // and says so; only at startup is it the run's failure.)
+            let result = match self
                 .process
                 .query(json!({"type":"get_available_thinking_levels"}), backlog)
-                .await?;
-            if let Some(level) = catalog::thinking_level(request, &supported) {
-                self.process
-                    .query(json!({"type":"set_thinking_level","level":level}), backlog)
+                .await
+            {
+                Ok(supported) => match catalog::thinking_level(request, &supported) {
+                    Some(level) => self
+                        .process
+                        .query(json!({"type":"set_thinking_level","level":level}), backlog)
+                        .await
+                        .map(|_| ()),
+                    None => Ok(()),
+                },
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => {}
+                Err(error) if startup => {
+                    return Err(HarnessError::Protocol(format!(
+                        "omp cannot use that reasoning level: {error}"
+                    )));
+                }
+                Err(error) => {
+                    self.emit(AgentEvent::Error {
+                        message: format!("omp kept its reasoning level: {error}"),
+                    })
                     .await?;
+                }
             }
         }
         Ok(())
@@ -508,6 +530,9 @@ impl Runner {
     }
 
     async fn frame(&mut self, frame: Value) -> Result<(), HarnessError> {
+        // (A tool's arguments, kept until it ends: an approval omp asks for
+        // it is worded from them, not from its prompt's text.)
+        self.process.dialogs.note_tool(&frame);
         match string(&frame, "type") {
             "response" => return self.response(&frame).await,
             "prompt_result" => return self.prompt_result(&frame).await,
