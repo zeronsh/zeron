@@ -391,7 +391,7 @@ impl DemoHost {
                     }
                 }
                 // The demo has no orchestrators.
-                SessionCommandPayload::CrewReport { .. } => {}
+                SessionCommandPayload::CrewReport { .. } | SessionCommandPayload::ProgressCheck {} => {}
             }
         }
         if !lock(&self.turns).contains_key(chat_id) {

@@ -860,7 +860,7 @@ impl Tools {
                 SHOW_VISUAL | SHOW_IMAGE => in_chat,
                 WAIT_ON_BACKGROUND => waits,
                 // `ask` is for a chat's agent; the rest by role.
-                orchestration::ASK => in_chat,
+                orchestration::ASK | orchestration::PROGRESS => in_chat,
                 name if orchestration::NAMES.contains(&name) => role.offers(name),
                 _ => true,
             })

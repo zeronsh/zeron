@@ -365,11 +365,15 @@ impl EngineRpc {
                 intent,
                 message,
                 candidates,
+                progress,
             } => {
                 let id = self
-                    .route(&dump_id, excerpt, target, intent, message, candidates)
+                    .route(&dump_id, excerpt, target, intent, message, candidates, progress)
                     .await?;
                 Ok(json!({ "id": id }))
+            }
+            OrchestrateOp::ProgressCheck { chat_id } => {
+                super::progress::check_reply(self, &chat_id).await
             }
             OrchestrateOp::DumpDone { dump_id, summary } => {
                 self.dump_done(&dump_id, summary)?;
@@ -669,6 +673,13 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             _ => refuse("Only the Brain dump routes"),
         },
         OrchestrateOp::Reroute { .. } => refuse("Only the person moves a route"),
+        OrchestrateOp::ProgressCheck { chat_id } => {
+            if super::progress::may_check(rpc, who, chat_id) {
+                Ok(())
+            } else {
+                refuse("You may check the progress of your own chat, the chats you started and your crew")
+            }
+        }
     }
     .map_err(|e: RpcError| {
         tracing::info!(chat = %chat, %e, "orchestrate: an agent's op refused");

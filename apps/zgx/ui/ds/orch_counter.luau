@@ -15,8 +15,6 @@
 -- which side of its box the digits hold to ("end", a figure at a row's
 -- end, by default; "start" a count after a title).
 
-local RollText = require("@self/roll_text")
-
 export type Props = {
 	value: number | () -> number?,
 	format: ((n: number) -> string)?,
@@ -84,19 +82,13 @@ return ui.component(function(props: Props): Node
 			overflow = "hidden",
 			-- (Unseen, it sizes the box.)
 			face(widest, { opacity = 0, selectable = false }),
+			-- (Held still for now: the roll waits until its digits are
+			-- clipped to their own cells, so a roll can't leave marks
+			-- outside them.)
 			ui.row {
 				w_full = true,
 				justify = if anchor == "start" then "start" else "end",
-				RollText {
-					digits,
-					tabular = true,
-					glide = false,
-					anchor = anchor,
-					shrink = 0,
-					text_size = text_size,
-					weight = props.weight,
-					color = color,
-				},
+				face(digits, { shrink = 0 }),
 			},
 		},
 		if suffix ~= "" then face(suffix, { shrink = 0 }) else nil,

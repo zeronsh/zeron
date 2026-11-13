@@ -19,7 +19,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Map;
 use zeron_proto::orchestration::{
-    Ask, CrewMember, Dump, OrchestrationState, Orchestrator, Route, WorkItem,
+    Ask, CrewMember, Dump, OrchestrationState, Orchestrator, Progress, Route, WorkItem,
 };
 
 use super::*;
@@ -29,6 +29,10 @@ pub const KIND_CREW: &str = "crew";
 pub const KIND_WORK_ITEMS: &str = "workItems";
 pub const KIND_ASKS: &str = "asks";
 pub const KIND_DUMPS: &str = "dumps";
+/// How far each chat's work has got (`Progress`), keyed by chat id, written
+/// by the chat's host only. Not one of [`ORCHESTRATION_KINDS`]: it changes
+/// far more often than the rest and has its own watch (`WatchProgress`).
+pub const KIND_PROGRESS: &str = "progress";
 
 /// Every orchestration kind (publishers watch their versions together).
 pub const ORCHESTRATION_KINDS: [&str; 5] = [
@@ -105,6 +109,14 @@ impl Entity for Ask {
         &["id", "fromChat", "kind", "question", "state", "createdAt"];
     fn row_id(&self) -> &str {
         &self.id
+    }
+}
+
+impl Entity for Progress {
+    const KIND: &'static str = KIND_PROGRESS;
+    const REQUIRED: &'static [&'static str] = &["chatId", "deviceId", "state", "updatedAt"];
+    fn row_id(&self) -> &str {
+        &self.chat_id
     }
 }
 
@@ -431,6 +443,33 @@ impl RegistryDoc {
                 .then_with(|| a.id.cmp(&b.id))
         });
         all
+    }
+
+    // ── progress ────────────────────────────────────────────────────────────
+
+    /// Writes the fields that changed (the host's own row).
+    pub fn upsert_progress(&mut self, progress: &Progress) {
+        self.write_entity(progress);
+    }
+
+    pub fn progress(&self, chat_id: &str) -> Option<Progress> {
+        self.read_entity(chat_id)
+    }
+
+    /// Every chat's, newest change first.
+    pub fn read_progress(&self) -> Vec<Progress> {
+        let mut all: Vec<Progress> = self.read_entities();
+        all.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.chat_id.cmp(&b.chat_id))
+        });
+        all
+    }
+
+    /// Changes whenever a progress row may have changed.
+    pub fn progress_version(&self) -> u64 {
+        self.kind_version(KIND_PROGRESS)
     }
 
     /// Everything, as `WatchOrchestration` sends it (the newest

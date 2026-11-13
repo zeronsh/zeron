@@ -22,6 +22,7 @@ pub enum SessionCommandKind {
     Interrupt,
     RespondInput,
     CrewReport,
+    ProgressCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,11 @@ pub enum SessionCommandPayload {
     CrewReport {
         report: zeron_proto::orchestration::Report,
     },
+    /// Someone wants this chat's progress note fresh (`progressCheck` from
+    /// another device): the host writes one on its progress row, rate
+    /// limited. Never reaches the chat's agent. Hosts that predate it skip
+    /// the entry.
+    ProgressCheck {},
 }
 
 impl SessionCommandPayload {
@@ -71,6 +77,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
             SessionCommandPayload::CrewReport { .. } => SessionCommandKind::CrewReport,
+            SessionCommandPayload::ProgressCheck {} => SessionCommandKind::ProgressCheck,
         }
     }
 }

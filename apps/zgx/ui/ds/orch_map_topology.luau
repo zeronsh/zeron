@@ -1,9 +1,10 @@
--- The Map's Topology: each machine a band, its projects under it, and in
--- them the orchestrators and threads at work, one row each; each
--- orchestrator's rail in its hue, a branch to each of its rows, crossing
--- to another machine's band (dashed over its head) for crew there. When
--- agents talk, a pulse runs along the rail between them. Where everything
--- sits is ds/orch_map_layout's.
+-- The Map's Topology: each machine a lane, its projects in it, and in
+-- them the orchestrators and threads at work, one row each. An
+-- orchestrator leads: its rail, in its hue, drops from under its dot, and
+-- its crew sit indented under it, an elbow into each, on down across the
+-- line between machines for crew on another. When agents talk, a pulse
+-- runs along the rail between them. Where everything sits is
+-- ds/orch_map_layout's.
 --
 --   Topology {
 --     world = function() return the Map's world end,
@@ -149,19 +150,11 @@ return ui.component(function(props: Props): Node
 		for _, rail in l.rails do
 			local alpha = if rail.paused then 0.3 else (if hue.dark() then 0.62 else 0.7)
 			local ink = hue.canvas(rail.hue, alpha)
-			local solid, dashed = Layout.lines(rail)
 			local path = ui.path()
-			for _, pts in solid do
+			for _, pts in Layout.lines(rail) do
 				path = polyline(path, pts)
 			end
 			c:stroke(path, ink, 1.5, { join = "round", cap = "round" })
-			if #dashed > 0 then
-				local dpath = ui.path()
-				for _, pts in dashed do
-					dpath = polyline(dpath, pts)
-				end
-				c:stroke(dpath, hue.canvas(rail.hue, alpha * 0.8), 1.5, { cap = "round", dash = { 1, 4 } })
-			end
 		end
 	end
 
@@ -223,16 +216,16 @@ return ui.component(function(props: Props): Node
 				},
 				ui.text {
 					function(): string
-						local r = row:get()
-						local word = kit.platform_word(r.device)
-						return if r.here then `{word} · {locale.s("ds.orch.map.here")}` else word
+						return kit.platform_word(row:get().device)
 					end,
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
-					wrap = true,
-					w_full = true,
+					truncate = true,
 					pl = 20,
 				},
+				ui.show(function(): boolean
+					return row:get().here == true
+				end, ui.text { locale.t("ds.orch.map.here"), text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, pl = 20 }),
 				ui.row {
 					w_full = true,
 					pl = 20,
@@ -289,7 +282,7 @@ return ui.component(function(props: Props): Node
 			class = "orch-project",
 			absolute = true,
 			left = function(): number
-				return layout:get().content_x + 4
+				return row:get().x + 4
 			end,
 			top = function(): number
 				return row:get().y
@@ -381,7 +374,7 @@ return ui.component(function(props: Props): Node
 					return row:get().w * 0.5
 				end,
 				truncate = true,
-				text_size = "$font.size.sm",
+				text_size = "$font.size.md",
 				weight = "$font.weight.semibold",
 				color = function(): string
 					return if row:get().paused then "$text.tertiary" else "$text.primary"
