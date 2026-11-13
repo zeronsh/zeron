@@ -74,6 +74,8 @@ M.View = ui.component(function(props: {
 	comms: () -> { any },
 	on_open_chat: (id: string) -> (),
 	on_open_orchestrator: (id: string) -> (),
+	menu: ((id: string) -> { any }?)?,
+	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
 }): Node
 	local width = ui.use_state(720)
 	local function height(): number
@@ -299,6 +301,15 @@ M.View = ui.component(function(props: {
 		local taken: { { number } } = {}
 		local rims: { any } = {}
 		local NAME = { size = 12, weight = 500 }
+		-- (Each name outside its rim, on the side facing away from the
+		-- rest, so the channels between islands stay clear.)
+		local cx, cy, count = 0, 0, 0
+		for _, isl in islands do
+			cx += isl.x
+			cy += isl.y
+			count += 1
+		end
+		cx, cy = cx / math.max(1, count), cy / math.max(1, count)
 		for _, n in graph.nodes do
 			if n.kind ~= "device" then
 				continue
@@ -307,26 +318,17 @@ M.View = ui.component(function(props: {
 			local x, y = isl.x * z + v.x, isl.y * z + v.y
 			local r = isl.r * z
 			local name_w, name_h = c:measure_text(n.title, NAME)
-			local function crowded(ny: number): number
-				local k = 0
-				local x0, x1, y0, y1 = x - name_w / 2 - 6, x + name_w / 2 + 6, ny - 10, ny + 10
-				for _, m in graph.nodes do
-					if m.kind ~= "device" then
-						local mx, my = at(m)
-						local mr = reach(m) + 4
-						local far = if m.kind == "thread" then mr else mr + 150
-						if mx + far > x0 and mx - mr < x1 and my + mr > y0 and my - mr < y1 then
-							k += 1
-						end
-					end
-				end
-				return k
-			end
-			local top = crowded(y - r) <= crowded(y + r)
-			local ny = if top then y - r else y + r
-			table.insert(taken, { x - name_w / 2 - 6, ny - name_h / 2 - 2, x + name_w / 2 + 6, ny + name_h / 2 + 2 })
-			local gap = math.deg(math.asin(math.clamp((name_w / 2 + 9) / r, 0, 0.95)))
-			table.insert(rims, { n = n, x = x, y = y, r = r, ny = ny, from = (if top then -90 else 90) + gap, sweep = 360 - gap * 2 })
+			local dx, dy = isl.x - cx, isl.y - cy
+			local angle = if count <= 1 or dx * dx + dy * dy < 1 then -90 else math.deg(math.atan2(dy, dx))
+			-- (Snapped to eight directions, so names line up.)
+			angle = math.floor(angle / 45 + 0.5) * 45
+			local ux, uy = math.cos(math.rad(angle)), math.sin(math.rad(angle))
+			local px, py = x + ux * (r + 8), y + uy * (r + 8)
+			-- Its box: beside the rim, growing outward.
+			local x0 = if ux > 0.3 then px elseif ux < -0.3 then px - name_w else px - name_w / 2
+			local y0 = if uy > 0.3 then py elseif uy < -0.3 then py - name_h else py - name_h / 2
+			table.insert(taken, { x0 - 4, y0 - 2, x0 + name_w + 4, y0 + name_h + 2 })
+			table.insert(rims, { n = n, x = x, y = y, r = r, nx = x0, ny = y0 + name_h / 2, from = -90, sweep = 360 })
 		end
 
 		local lines: { any } = {}
@@ -350,7 +352,9 @@ M.View = ui.component(function(props: {
 			end
 			local ux, uy = dx / d, dy / d
 			ax, ay, bx, by = ax + ux * ra, ay + uy * ra, bx - ux * rb, by - uy * rb
-			local bend = if e.kind == "host" then 0 else 0.12
+			-- (Each kind bowed its own way, so lines sharing a corridor
+			-- run apart.)
+			local bend = if e.kind == "host" then 0 elseif e.kind == "control" then 0.12 elseif e.kind == "started" then -0.16 else -0.26
 			local mx, my = (ax + bx) / 2, (ay + by) / 2
 			table.insert(lines, { e = e, lit = lit, ax = ax, ay = ay, bx = bx, by = by, cx = mx - (by - ay) * bend, cy = my + (bx - ax) * bend })
 		end
@@ -360,11 +364,30 @@ M.View = ui.component(function(props: {
 		-- mark and name before it (a leader's on the least crowded); a
 		-- thread's that can't is left to its card. Lines and rims break
 		-- round them.
-		local function short(t: string, most: number): string
-			if utf8.len(t) and (utf8.len(t) :: number) > most then
-				return string.sub(t, 1, (utf8.offset(t, most) :: number) - 1) .. "…"
+		-- A name in one line, or two split at a word near its middle (each
+		-- at most `most` characters; past that, shortened).
+		local function lines_of(t: string, most: number): { string }
+			local n = utf8.len(t) or #t
+			if n <= most then
+				return { t }
 			end
-			return t
+			local best, off = nil, math.huge
+			for i in string.gmatch(t, "() ") do
+				local d = math.abs(i - #t / 2)
+				if d < off then
+					best, off = i, d
+				end
+			end
+			local function cut(x: string): string
+				if (utf8.len(x) or #x) > most then
+					return string.sub(x, 1, (utf8.offset(x, most) :: number) - 1) .. "…"
+				end
+				return x
+			end
+			if not best then
+				return { cut(t) }
+			end
+			return { cut(string.sub(t, 1, best - 1)), cut(string.sub(t, best + 1)) }
 		end
 		-- Points along every line and rim, which a name would rather not cut.
 		local pts: { { number } } = {}
@@ -411,21 +434,23 @@ M.View = ui.component(function(props: {
 			return k
 		end
 		local labels: { any } = {}
-		local function place(n: sim.Node, t: string, opts: any, force: boolean)
+		local function place(n: sim.Node, text: { string }, opts: any, force: boolean)
 			local x, y = at(n)
-			local r = (if n.kind == "thread" then 9 else reach(n)) + 6
-			local tw, th = c:measure_text(t, opts)
+			local r = (if n.kind == "thread" then 9 else reach(n)) + 7
+			local tw, lh = 0, 0
+			for _, t in text do
+				local a, b = c:measure_text(t, opts)
+				tw, lh = math.max(tw, a), math.max(lh, b)
+			end
+			local th = lh * #text
+			-- Right, left (centred on the mark), then below, above.
 			local spots = {
-				{ x + r, y - th / 2 },
-				{ x - r - tw, y - th / 2 },
-				{ x - tw / 2, y + r - 2 },
-				{ x - tw / 2, y - r - th + 2 },
-				{ x + r - 4, y - r - th + 6 },
-				{ x + r - 4, y + r - 6 },
-				{ x - r - tw + 4, y - r - th + 6 },
-				{ x - r - tw + 4, y + r - 6 },
+				{ x + r, y - th / 2, "start" },
+				{ x - r - tw, y - th / 2, "end" },
+				{ x - tw / 2, y + r - 3, "center" },
+				{ x - tw / 2, y - r - th + 3, "center" },
 			}
-			local best: { number }, least = spots[1], math.huge
+			local best: { any }, least = spots[1], math.huge
 			for _, sp in spots do
 				local k = crowd(sp[1] - 3, sp[2] - 1, sp[1] + tw + 3, sp[2] + th + 1, n.id)
 				if k < least then
@@ -436,17 +461,22 @@ M.View = ui.component(function(props: {
 				end
 			end
 			-- (Lines may run under a name, broken round it; marks and other
-			-- names may not.)
+			-- names may not: a thread whose name fits nowhere keeps its dot.)
 			if least >= 1 and not force then
 				return
 			end
 			table.insert(taken, { best[1] - 3, best[2] - 1, best[1] + tw + 3, best[2] + th + 1 })
-			opts.baseline = "middle"
-			table.insert(labels, { t = t, x = best[1], y = best[2] + th / 2, opts = opts })
+			for i, t in text do
+				local o = table.clone(opts)
+				o.baseline = "middle"
+				o.align = best[3]
+				local ax = if best[3] == "start" then best[1] elseif best[3] == "end" then best[1] + tw else best[1] + tw / 2
+				table.insert(labels, { t = t, x = ax, y = best[2] + lh * (i - 0.5), opts = o })
+			end
 		end
 		for _, n in graph.nodes do
 			if n.kind == "orchestrator" or n.kind == "brain" then
-				place(n, short(n.title, 28), { size = 13, weight = 600, color = ink(if dark then 0.92 else 0.9, lit_of(n.id)) }, true)
+				place(n, lines_of(n.title, 24), { size = 13, weight = 600, color = ink(if dark then 0.92 else 0.9, lit_of(n.id)) }, true)
 			end
 		end
 		for pass = 1, 2 do
@@ -459,7 +489,7 @@ M.View = ui.component(function(props: {
 				local lit_here = near ~= nil and near[n.id] == true
 				if (pass == 1) == (busy or lit_here) then
 					local a = if busy then (if dark then 0.76 else 0.82) else (if dark then 0.52 else 0.64)
-					place(n, short(n.title, 26), { size = 12, color = ink(a, lit_of(n.id)) }, lit_here)
+					place(n, lines_of(n.title, 22), { size = 12, color = ink(a, lit_of(n.id)) }, lit_here)
 				end
 			end
 		end
@@ -483,12 +513,11 @@ M.View = ui.component(function(props: {
 			local l = (loads :: any)[rim.n.device or ""]
 			local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
 			if f > 0.005 then
-				-- (Neutral, by its length; past 80% the rest in amber.)
-				local calm = math.min(f, 0.8)
-				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * calm), ink(if dark then 0.45 else 0.4, lit), 2, { cap = "round" })
-				if f > 0.8 then
-					c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from + rim.sweep * 0.8, rim.sweep * (f - 0.8)), kit.ink(string.sub(ContextUsage.ink(f), 2), dim(if dark then 0.8 else 0.9, lit)), 2, { cap = "round" })
-				end
+				-- (Neutral, by its length; all of it a muted amber past 80%.)
+				local paint = if f > 0.8
+					then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(if dark then 0.55 else 0.75, lit))
+					else ink(if dark then 0.45 else 0.4, lit)
+				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 2, { cap = "round" })
 			end
 		end
 		for _, ln in lines do
@@ -530,16 +559,16 @@ M.View = ui.component(function(props: {
 				local rad = 6 * zs
 				if dark then
 					c:rect(x - r, y - r, r * 2, r * 2, kit.ink("background", dim(0.96, lit)), rad)
+					c:rect(x - r, y - r, r * 2, r * 2, ink(0.05, lit), rad)
 				end
-				c:rect(x - r, y - r, r * 2, r * 2, ink(if dark then 0.05 else 0.07, lit), rad)
-				c:stroke(ui.path():rect(x - r + 0.5, y - r + 0.5, r * 2 - 1, r * 2 - 1, rad), ink(if dark then 0.22 else 0.24, lit), 1)
+				c:stroke(ui.path():rect(x - r + 0.6, y - r + 0.6, r * 2 - 1.2, r * 2 - 1.2, rad), ink(if dark then 0.22 else 0.35, lit), if dark then 1 else 1.25)
 				local d = nil
 				for _, dev in world.devices or {} do
 					if dev.id == n.device then
 						d = dev
 					end
 				end
-				glyph(c, MachineHead.icon(d), x, y, ink(0.75, lit))
+				glyph(c, MachineHead.icon(d), x, y, ink(if dark then 0.75 else 0.7, lit))
 				if n.device == here or (d and d.here) then
 					c:circle(x + r - 1, y - r + 1, 4.5, kit.ink("background", 1))
 					c:circle(x + r - 1, y - r + 1, 3, kit.ink("zeron.tone.info.ink", dim(1, lit)))
@@ -582,7 +611,7 @@ M.View = ui.component(function(props: {
 
 		-- 5. The names.
 		for _, rim in rims do
-			c:text(rim.n.title, rim.x, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), align = "center", baseline = "middle" })
+			c:text(rim.n.title, rim.nx, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), baseline = "middle" })
 		end
 		for _, l in labels do
 			c:text(l.t, l.x, l.y, l.opts)
@@ -849,7 +878,23 @@ M.View = ui.component(function(props: {
 				end
 			end
 		end,
-		ui.div {
+		-- A secondary click on a node: its menu (a machine's, "dev:<id>", too).
+		kit.MenuField {
+			menu = props.menu,
+			register = props.register,
+			key = "graph",
+			hit = function(x: number, y: number): string?
+				local n = hit(x, y)
+				return if n then n.id else nil
+			end,
+			center = function(id: string): (number?, number?)
+				local n = graph.nodes[graph.index[id] or 0]
+				if not n then
+					return nil, nil
+				end
+				return screen(n, view:peek())
+			end,
+			child = ui.div {
 			class = "orch-graph-field",
 			id = "orch-graph-field",
 			relative = true,
@@ -992,6 +1037,7 @@ M.View = ui.component(function(props: {
 					end,
 				},
 			},
+		},
 		},
 	}
 end)
