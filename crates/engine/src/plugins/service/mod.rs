@@ -19,6 +19,7 @@
 //! memory, a crash, a stop), since running it twice does no harm.
 
 pub mod commands;
+pub mod files;
 pub mod vm;
 
 use std::collections::{HashMap, VecDeque};
@@ -112,7 +113,7 @@ pub struct Plan {
 }
 
 impl Plan {
-    fn allows(&self, permission: &str) -> bool {
+    pub(crate) fn allows(&self, permission: &str) -> bool {
         self.allowed.iter().any(|p| p == permission)
     }
 }
@@ -762,6 +763,16 @@ impl Ops for PluginOps {
                 };
                 // Off the VM's thread: a write may wait on a window's.
                 self.runtime.spawn_blocking(move || done(zeron_plugin_db::call(&path, &args)));
+            }
+            "write_file" => {
+                // Into its Documents folder, or a chat's or project's (files.rs).
+                if !self.plan.allows("files.write") {
+                    return done(Err(format!("{name} wasn't allowed to write files on this device")));
+                }
+                let (hooks, name) = (self.hooks.clone(), name.clone());
+                self.runtime.spawn_blocking(move || {
+                    done(files::write(&args, &name, &hooks.folders(), &crate::repos::home_dir()))
+                });
             }
             "folders" => {
                 // (Where its chats are: as much as "sessions.read" says.)

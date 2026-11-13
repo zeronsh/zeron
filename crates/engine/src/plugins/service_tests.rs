@@ -141,6 +141,52 @@ async fn an_agents_tool_is_answered_with_no_window_open() {
 }
 
 #[tokio::test]
+async fn a_tool_call_says_its_chats_folder_with_sessions_read() {
+    let f = fixture();
+    let docs = tempfile::tempdir().unwrap();
+    let workspace = crate::WorkspaceHost::open(
+        Arc::new(zeron_sync::DocsStore::open(&docs.path().join("docs")).unwrap()),
+        crate::workspace_host::WorkspaceHostConfig {
+            device_id: "dev-1".into(),
+            device_name: "Laptop".into(),
+            platform: "macos".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            edge: None,
+            local_only: true,
+        },
+    )
+    .unwrap();
+    let here = docs.path().join("shop").display().to_string();
+    workspace.create_chat_hosted("here", None, Some("dev-1"), None, None, Some(here.clone()), None, None).unwrap();
+    workspace.create_chat_hosted("there", None, Some("dev-2"), None, None, Some("/elsewhere".into()), None, None).unwrap();
+    f.plugins.set_workspace(workspace);
+    let service = r#"
+local zeron = require("./zeron")("svc")
+zeron.tool { name = "where", run = function(_args, call) return call.cwd or false end }
+"#;
+    let manifest = |extra: &[&str]| {
+        let mut permissions = vec!["service", "tools"];
+        permissions.extend_from_slice(extra);
+        json!({ "permissions": permissions, "service": "service.luau",
+            "tools": [{ "name": "where", "description": "Where", "input": { "type": "object" } }] })
+    };
+    let ask_where = |chat: &'static str| {
+        let plugins = &f.plugins;
+        async move { call(plugins, methods::CALL_PLUGIN_TOOL, json!({ "plugin": "svc", "tool": "where", "args": {}, "chatId": chat })).await }
+    };
+    write(&f.plugins, "1.0.0", manifest(&["sessions.read"]), Some(service)).await;
+    allow(&f.plugins).await;
+    assert_eq!(ask_where("here").await, json!({ "ok": true, "value": here }));
+    // A chat on another device: its folder isn't one here.
+    assert_eq!(ask_where("there").await, json!({ "ok": true, "value": false }));
+    // Without "sessions.read": not said.
+    write(&f.plugins, "1.0.1", manifest(&[]), Some(service)).await;
+    allow(&f.plugins).await;
+    assert_eq!(ask_where("here").await, json!({ "ok": true, "value": false }));
+}
+
+#[tokio::test]
 async fn a_peer_is_refused_with_a_reason() {
     let f = fixture();
     // Not installed.

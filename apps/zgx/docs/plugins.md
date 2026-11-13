@@ -48,6 +48,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `profile.read` | read your id, name, username, avatar |
 | `account.email` | read your email (unless you hide email addresses) |
 | `files.read` | read file paths, and folders: a session's (`cwd`) and a project's (`path`) (without it a file is an id of the plugin's own) |
+| `files.write` | a service writes files (`zeron.write_file`): in its own folder in Documents, or inside a chat's or project's folder |
 | `panel.tabs` | open tabs of its own in a chat's panel |
 | `pages.add` | add pages of its own to the sidebar |
 | `navigate` | open chats and pages (`zeron.open`) |
@@ -372,6 +373,7 @@ end)
 | `zeron.run(program, args, { cwd, stdin, timeout, env })` | a promise of `{ status, stdout, stderr }`, as the window's | `commands` |
 | `zeron.fetch(url, { method, headers, body, timeout, binary })` | a promise of `{ status, headers, body }` (http and https; public addresses, or the manifest's `network.hosts`; 16 MB at most). `body` is text, any byte that isn't UTF-8 replaced; with `binary = true` it is the bytes in base64, whole (a font, a picture) | `network` |
 | `zeron.folders()` | a promise of this device's chats' and projects' folders (whole paths) | `sessions.read` |
+| `zeron.write_file(path, data, { base64? })` | a promise of `{ path, bytes }`: a relative `path` lands in `~/Documents/<plugin name>/`, a whole one must be inside a chat's or project's folder. Folders on the way are made; `..` and links out are refused; `base64 = true` writes `data`'s bytes (a picture); 64 MB at most | `files.write` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
 | `zeron.measure_text(text, { font, size, weight, italic, tabular, line_height, letter_spacing, width })` | the width and height `text` takes, as your window's canvas measures it (`c:measure_text`), with no window: the same shaper, the system's fonts and the app's. `width` wraps it; `line_height` and `letter_spacing` are in points. A family it doesn't have falls back as in a window | |

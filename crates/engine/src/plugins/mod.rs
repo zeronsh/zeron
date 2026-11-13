@@ -675,6 +675,13 @@ impl Plugins {
         lock(&self.inner.directory).clone()
     }
 
+    /// Chat `id`'s folder, when it's on this device.
+    fn chat_folder(&self, id: &str) -> Option<String> {
+        let workspace = lock(&self.inner.workspace).clone()?;
+        let chat = workspace.chat(id).ok()??;
+        (chat.device_id == self.inner.device_id).then_some(chat.cwd?).filter(|cwd| !cwd.is_empty())
+    }
+
     fn device_name(&self, device_id: &str) -> String {
         let workspace = lock(&self.inner.workspace).clone();
         let known = workspace
@@ -2478,11 +2485,19 @@ impl Plugins {
         // Its service answers it, window or not; a tool it doesn't serve
         // goes to the window.
         if let Some(plan) = self.entry(&plugin).as_ref().and_then(service_plan) {
-            let call = serde_json::json!({
+            let mut call = serde_json::json!({
                 "kind": "tool",
                 "from": self.here(),
                 "chat": p.chat_id,
             });
+            // The chat's folder, where its work goes (`zeron.write_file`):
+            // as much as "sessions.read" says, for a chat on this device.
+            if plan.allows("sessions.read")
+                && let Some(chat) = p.chat_id.as_deref()
+                && let Some(cwd) = self.chat_folder(chat)
+            {
+                call["cwd"] = serde_json::json!(cwd);
+            }
             match self
                 .inner
                 .services
