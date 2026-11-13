@@ -101,9 +101,12 @@ const PRIVATE_SERVER_ENV: &str = "ZERON_OPENCODE_PRIVATE_SERVER";
 /// What the TUI offers: prompt for what OpenCode's rules ask, or accept it.
 pub const OPENCODE_ACCESS_MODES: [AccessMode; 2] = [AccessMode::Supervised, AccessMode::FullAccess];
 
+mod actions;
 mod client_mcp;
 mod service;
 mod sync;
+
+use actions::TuiAction;
 
 pub use sync::{NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession};
 
@@ -589,9 +592,8 @@ impl OpencodeHarness {
                         .into(),
                 ));
             }
-            if let Ok(commands) = server.commands_wire(None).await {
-                *self.commands_cache.lock().await =
-                    Some((self.generation(), commands_from_wire(&commands)));
+            if let Ok(commands) = server.slash_commands(None).await {
+                *self.commands_cache.lock().await = Some((self.generation(), commands));
             }
             Ok(models)
         }
@@ -609,10 +611,7 @@ impl OpencodeHarness {
             return Ok(commands.clone());
         }
         let mut server = self.server(None, None).await?;
-        let result = server
-            .commands_wire(None)
-            .await
-            .map(|v| commands_from_wire(&v));
+        let result = server.slash_commands(None).await;
         server.shutdown(self.kill_grace).await;
         if let Ok(commands) = &result {
             *self.commands_cache.lock().await = Some((generation, commands.clone()));
@@ -858,10 +857,7 @@ impl Harness for OpencodeHarness {
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
         let mut server = self.server(Some(directory), None).await?;
-        let result = server
-            .commands_wire(Some(directory))
-            .await
-            .map(|v| commands_from_wire(&v));
+        let result = server.slash_commands(Some(directory)).await;
         server.shutdown(self.kill_grace).await;
         result
     }
@@ -1552,6 +1548,20 @@ impl Server {
         Ok(unwrap_data(raw))
     }
 
+    /// The slash commands the composer offers: the server's own, then (2.x)
+    /// OpenCode's TUI actions it has no command of the same name for.
+    async fn slash_commands(&self, directory: Option<&str>) -> Result<Vec<SlashCommand>, HarnessError> {
+        let mut commands = commands_from_wire(&self.commands_wire(directory).await?);
+        if self.protocol().await == Protocol::V2 {
+            for action in TuiAction::ALL {
+                if !commands.iter().any(|command| command.name == action.name()) {
+                    commands.push(action.command());
+                }
+            }
+        }
+        Ok(commands)
+    }
+
     /// Is the session mid-turn? V1 keeps a status map on `/session/status`;
     /// V2 lists running sessions on `/api/session/active`. `Err` = can't
     /// tell — the caller treats that as still running.
@@ -2237,6 +2247,9 @@ enum TurnSignal {
     /// A permission or question answer could not be delivered: the agent is
     /// blocked on a reply it will never get.
     ReplyFailed(String),
+    /// A TUI action or `!command` finished ([`actions`]): what it shows,
+    /// and the turn is over — no turn of the agent's own follows.
+    ActionDone(Vec<AgentEvent>),
 }
 
 /// A canonical leading command or provider-backed skill was selected in the
@@ -2489,11 +2502,7 @@ async fn run_session(session: Session) {
     // Advertise slash commands (composer popup); a warm cache skips the call.
     let commands = match known_commands {
         Some(commands) => commands,
-        None => server
-            .commands_wire(dir)
-            .await
-            .map(|v| commands_from_wire(&v))
-            .unwrap_or_default(),
+        None => server.slash_commands(dir).await.unwrap_or_default(),
     };
     if !commands.is_empty()
         && !send(
@@ -3023,6 +3032,16 @@ async fn run_session(session: Session) {
                         continue 'main;
                     }
                     TurnSignal::PromptFailed(message) | TurnSignal::CommandFailed(message) => message,
+                    TurnSignal::ActionDone(events) => {
+                        turn.prompt_in_flight = false;
+                        for event in events {
+                            if !send(&event_tx, event).await {
+                                break 'main;
+                            }
+                        }
+                        turn.saw_content = true;
+                        settle_idle!('main);
+                    }
                     TurnSignal::ReplyFailed(message) => {
                         // Whatever waits on the reply would never resume.
                         let _ = tokio::time::timeout(
@@ -3694,6 +3713,43 @@ async fn post_prompt(
     let protocol = server.protocol().await;
     // A prompt or command naming no agent runs the default one.
     let agent = (plan && protocol == Protocol::V1).then_some(PLAN_AGENT);
+    // OpenCode's TUI actions and `!command` (2.x): routes of their own, no
+    // turn of the agent's.
+    if protocol == Protocol::V2 {
+        let action = native_command_request(prompt, commands, native_command_selected)?
+            .and_then(|(name, _)| actions::TuiAction::of(name, commands));
+        let shell = actions::shell_command(prompt).map(str::to_owned);
+        if action.is_some() || shell.is_some() {
+            if !attachments.is_empty() {
+                return Err(HarnessError::Protocol(
+                    "OpenCode actions cannot include attachments; send them in a separate prompt"
+                        .into(),
+                ));
+            }
+            let server = server.handle();
+            let session_id = session_id.to_owned();
+            let dir = dir.map(str::to_owned);
+            let updates = updates.clone();
+            tokio::spawn(async move {
+                let done = match (action, shell) {
+                    (Some(action), _) => action.run(&server, &session_id, dir.as_deref()).await,
+                    (None, Some(command)) => {
+                        actions::run_shell(&server, &session_id, dir.as_deref(), &command).await
+                    }
+                    (None, None) => unreachable!("one of them was asked for"),
+                };
+                let signal = match done {
+                    Ok(events) => TurnSignal::ActionDone(events),
+                    Err(error) => TurnSignal::CommandFailed(error.to_string()),
+                };
+                let _ = updates.send(TurnUpdate {
+                    generation: turn_generation,
+                    signal,
+                });
+            });
+            return Ok(false);
+        }
+    }
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
     {

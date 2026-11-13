@@ -45,6 +45,9 @@ pub struct NativeSession {
     pub model: Option<String>,
     /// The Zeron chat a run of Zeron's made it for (its metadata).
     pub zeron_chat: Option<String>,
+    /// An undo staged in it: this message and everything after it are taken
+    /// back until a redo, and gone at the next prompt.
+    pub reverted_from: Option<String>,
 }
 
 /// One message of a session's history.
@@ -368,7 +371,10 @@ fn change_of(frame: &Value) -> Option<NativeChange> {
         | "session.tool.called"
         | "session.tool.success"
         | "session.tool.failed"
+        | "session.revert.staged"
+        | "session.revert.cleared"
         | "session.revert.committed"
+        | "session.shell.ended"
         | "session.compaction.ended"
         | "form.created"
         | "form.replied"
@@ -425,6 +431,10 @@ fn native_session(info: &Value) -> Option<NativeSession> {
             .and_then(Value::as_str)
             .filter(|chat| !chat.is_empty())
             .map(str::to_owned),
+        reverted_from: info
+            .pointer("/revert/messageID")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -457,6 +467,16 @@ fn native_message(message: &Value) -> Option<NativeMessage> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+        },
+        // A `!command` run in the session, as the command chip it is.
+        "shell" => NativeMessageKind::Assistant {
+            events: super::actions::shell_events(
+                Some(message),
+                message
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ),
         },
         "assistant" => NativeMessageKind::Assistant {
             events: message

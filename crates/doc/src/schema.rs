@@ -867,6 +867,18 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Remove the entry at `index` (nothing past the end). For entries kept
+    /// in step with another source whose message is gone — an OpenCode
+    /// session's message undone there.
+    pub fn remove_message(&self, index: usize) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        if index < messages.len() {
+            messages.delete(index, 1)?;
+            self.commit();
+        }
+        Ok(())
+    }
+
     /// [`push_message`](Self::push_message), but inserted before the last
     /// `from_end` entries of the messages list (clamped to its start).
     pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
@@ -2739,6 +2751,10 @@ mod tests {
         // (Past the end appends.)
         doc.replace_message(9, &entry("d", "new")).unwrap();
         assert_eq!(doc.read_entries().unwrap().len(), 4);
+        doc.remove_message(1).unwrap();
+        doc.remove_message(9).unwrap();
+        let ids: Vec<String> = doc.read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["a", "c", "d"]);
     }
 
     #[test]

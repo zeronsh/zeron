@@ -81,9 +81,9 @@ struct Mirror {
     doc_host: DocHost,
     sessions: SessionsEngine,
     registry: Arc<HarnessRegistry>,
-    /// When each session was last read (its `updated` time): one unchanged
-    /// since is skipped.
-    read: HashMap<String, i64>,
+    /// How each session was when last read (its `updated` time and staged
+    /// undo): one unchanged since is skipped.
+    read: HashMap<String, (i64, Option<String>)>,
     /// Chats shown working for a turn in another client, and when that was
     /// last stamped.
     working: HashMap<String, tokio::time::Instant>,
@@ -179,7 +179,8 @@ impl Mirror {
         {
             return;
         }
-        let unchanged = self.read.get(&session.id) == Some(&session.updated_at_ms);
+        let unchanged = self.read.get(&session.id)
+            == Some(&(session.updated_at_ms, session.reverted_from.clone()));
         if unchanged && known.is_some() && !session.busy {
             return;
         }
@@ -203,7 +204,10 @@ impl Mirror {
         };
         match result {
             Ok(()) => {
-                self.read.insert(session.id.clone(), session.updated_at_ms);
+                self.read.insert(
+                    session.id.clone(),
+                    (session.updated_at_ms, session.reverted_from.clone()),
+                );
                 self.show_working(session);
             }
             Err(error) => {
@@ -435,13 +439,38 @@ fn write_history(
     since: Option<i64>,
     device_id: &str,
 ) -> Result<Written, zeron_doc::DocError> {
+    // An undo staged in the session takes its message and all after it back,
+    // as OpenCode's own clients show it; a redo brings them in again.
+    let cut = session
+        .reverted_from
+        .as_ref()
+        .and_then(|id| history.iter().position(|message| &message.id == id))
+        .unwrap_or(history.len());
+    let history = &history[..cut];
+    // Entries read from the session whose message it no longer has (undone,
+    // or an undo that a new prompt made final) go too.
+    let kept: HashSet<String> = history
+        .iter()
+        .map(|message| format!("{ENTRY_PREFIX}{}", message.id))
+        .collect();
+    let mut written = Written::default();
+    let gone: Vec<usize> = doc
+        .read_entries()?
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.id.starts_with(ENTRY_PREFIX) && !kept.contains(&entry.id))
+        .map(|(index, _)| index)
+        .collect();
+    for index in gone.into_iter().rev() {
+        doc.remove_message(index)?;
+        written.changed = true;
+    }
     let existing = doc.read_entries()?;
     let at: HashMap<&str, usize> = existing
         .iter()
         .enumerate()
         .map(|(index, entry)| (entry.id.as_str(), index))
         .collect();
-    let mut written = Written::default();
     let last = history.len().saturating_sub(1);
     for (index, message) in history.iter().enumerate() {
         if since.is_some_and(|since| message.created_at_ms <= since) {
@@ -628,6 +657,7 @@ mod tests {
             busy,
             model: None,
             zeron_chat: None,
+            reverted_from: None,
         }
     }
 
@@ -672,6 +702,45 @@ mod tests {
         // Read again unchanged: nothing written.
         let again = write_history(&doc, &history, &session(false), None, "dev").unwrap();
         assert!(!again.changed);
+    }
+
+    #[test]
+    fn an_undo_takes_its_messages_back_and_a_redo_brings_them_again() {
+        let doc = zeron_doc::SessionDoc::init("undo").unwrap();
+        let history = vec![
+            user("m1", 10, "one"),
+            reply("m2", 11, "1"),
+            user("m3", 12, "two"),
+            reply("m4", 13, "2"),
+        ];
+        write_history(&doc, &history, &session(false), None, "dev").unwrap();
+        let ids = |doc: &zeron_doc::SessionDoc| -> Vec<String> {
+            doc.read_entries()
+                .unwrap()
+                .into_iter()
+                .map(|e| e.id)
+                .collect()
+        };
+        // /undo in the TUI: staged at the second prompt.
+        let mut undone = session(false);
+        undone.reverted_from = Some("m3".into());
+        assert!(
+            write_history(&doc, &history, &undone, None, "dev")
+                .unwrap()
+                .changed
+        );
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2"]);
+        // /redo: the same messages, back in their place.
+        write_history(&doc, &history, &session(false), None, "dev").unwrap();
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m3", "oc:m4"]);
+        // The undo made final by a new prompt: the session no longer has them.
+        let after = vec![
+            user("m1", 10, "one"),
+            reply("m2", 11, "1"),
+            user("m5", 20, "three"),
+        ];
+        write_history(&doc, &after, &session(false), None, "dev").unwrap();
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m5"]);
     }
 
     #[test]
