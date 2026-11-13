@@ -766,7 +766,9 @@ M.View = ui.component(function(props: {
 				-- (Only a point well along the way: no hook back.)
 				local along = ((wx - ln.ax) * tx + (wy - ln.ay) * ty) / len
 				local aside_d = math.abs((wx - ln.ax) * -ty + (wy - ln.ay) * tx)
-				if along < 0.2 or along > 0.8 or aside_d > len * 0.35 then
+				-- (A long dashed route may swing wider round a name.)
+				local wide = if ln.e.kind == "control" then 0.35 else 0.6
+				if along < 0.15 or along > 0.85 or aside_d > len * wide then
 					continue
 				end
 				local l1 = math.sqrt((wx - ln.ax) ^ 2 + (wy - ln.ay) ^ 2)
