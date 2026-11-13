@@ -183,26 +183,37 @@ return ui.component(function(props: Props): Node
 				end
 			end,
 		},
-		-- The current cell's glow, over it.
+		-- The current cell's glow, over it: laid in the flow of a row of its
+		-- own (a spacer the width of the cells before it, then the glow), the
+		-- overlay stacking that row on the canvas, so it sits on its cell
+		-- whatever holds the cells (no absolute place to lose).
 		ui.show(function(): boolean
 			return current_at() ~= nil
-		end, pulse {
-			class = "orch-cells-current",
-			absolute = true,
-			top = 0,
-			left = function(): number
-				local i = current_at() or 1
-				local each, g = geometry(#cells:get(), width:get())
-				return (i - 1) * (each + g)
-			end,
-			w = function(): number
-				local each = geometry(#cells:get(), width:get())
-				return each
-			end,
+		end, ui.row {
 			h = h,
-			opacity = 0.35,
-			rounded = ui.raw(1.5, "a cell's corner, as the canvas draws it"),
-			bg = "$text.primary",
+			pointer_events = "none",
+			ui.div {
+				shrink = 0,
+				h = h,
+				w = function(): number
+					local i = current_at() or 1
+					local each, g = geometry(#cells:get(), width:get())
+					return (i - 1) * (each + g)
+				end,
+			},
+			pulse {
+				id = if props.id then `{props.id}-current` else nil,
+				class = "orch-cells-current",
+				shrink = 0,
+				w = function(): number
+					local each = geometry(#cells:get(), width:get())
+					return each
+				end,
+				h = h,
+				opacity = 0.35,
+				rounded = ui.raw(1.5, "a cell's corner, as the canvas draws it"),
+				bg = "$text.primary",
+			},
 		}),
 	}
 end)

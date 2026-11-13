@@ -1,6 +1,7 @@
 -- The orchestration live pieces alone, for tests/orch_live.test.luau: a
 -- status held by ds/orch_hold (the state `kind`, the held value shown as
--- `#held`), segmented cells (`#cells`, from `done` of 8) and a sparkline.
+-- `#held`), segmented cells (`#cells` in a row, `#cells-fill` stretched;
+-- from `done` of 8) and a sparkline.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -32,9 +33,19 @@ return ui.column {
 	gap = "$space.4",
 	bg = "$background",
 	Held {},
-	Cells { id = "cells", done = function(): number
+	-- (In a row with words before it, as a card's or a thread's are.)
+	ui.row {
+		gap = "$space.2",
+		items = "center",
+		ui.text { "Steps" },
+		Cells { id = "cells", done = function(): number
+			return done:get()
+		end, total = 8 },
+		ui.text { "3/8" },
+	},
+	Cells { id = "cells-fill", done = function(): number
 		return done:get()
-	end, total = 8 },
+	end, total = 8, fill = true },
 	Spark.Spark {
 		id = "spark",
 		samples = function(): { Spark.Sample }
