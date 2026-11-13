@@ -33,11 +33,16 @@ local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local LaneTab = require("@app/screens/chat/lane_tab")
+local KeptScroll = require("@ds/kept_scroll")
 
 local M = {}
 
 -- Where the page goes to two columns.
 M.WIDE = 1100
+
+-- Where the page is scrolled: kept as the page is made again (a thread
+-- opened from it and back) and as its widgets change under it.
+M.place = ui.state("control_scroll", 0)
 -- The right column's width, wide.
 local SIDE_W = 420
 -- Between blocks: enough that each reads as its own.
@@ -980,6 +985,7 @@ M.Page = ui.component(function(): Node
 	ui.on_cleanup(function()
 		orchestration.loads_wanted(false)
 	end)
+	local kept = KeptScroll.use(M.place)
 	return ui.column {
 		id = "control-room",
 		w_full = true,
@@ -992,6 +998,10 @@ M.Page = ui.component(function(): Node
 			min_h = 0,
 			fade = { 12, 12 },
 			fade_overflow = true,
+			offset = kept.offset,
+			on_wheel = kept.on_wheel,
+			on_press = kept.on_press,
+			on_key = kept.on_key,
 			ui.column {
 				w_full = true,
 				items = "center",
@@ -1002,6 +1012,7 @@ M.Page = ui.component(function(): Node
 					if math.abs(size.w - width:peek()) >= 1 then
 						width:set(size.w)
 					end
+					kept.on_resize(size, nil)
 				end,
 				ui.column {
 					w_full = true,

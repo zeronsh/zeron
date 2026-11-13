@@ -26,12 +26,18 @@ local lanes = require("@app/screens/chat/lanes")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local actions = require("@app/screens/orchestrator/actions")
 local Progress = require("@app/screens/control/progress")
+local KeptScroll = require("@ds/kept_scroll")
 
 local M = {}
 
 -- Narrow: which half shows, the conversation or the live state (one for
 -- the window, kept across a reload).
 local half = ui.state("orch_page_half", "chat")
+
+-- Where its live state is scrolled: kept as the page is made again (a
+-- thread opened from it and back, the orchestrator a moment unknown while
+-- the host publishes) and as the board and crew change under it.
+M.place = ui.state("orch_page_scroll", 0)
 
 -- Both side by side from this wide (the page's own width); narrower, one.
 local SPLIT_AT = 880
@@ -310,6 +316,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 	end
 
 	-- The live state: what needs you, its board, its crew.
+	local kept = KeptScroll.use(M.place)
 	local function live(): Node
 		return ui.scroll {
 			id = "orch-live",
@@ -318,8 +325,13 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 			min_h = 0,
 			fade = { 12, 12 },
 			fade_overflow = true,
+			offset = kept.offset,
+			on_wheel = kept.on_wheel,
+			on_press = kept.on_press,
+			on_key = kept.on_key,
 			ui.column {
 				w_full = true,
+				on_resize = kept.on_resize,
 				gap = "$space.4",
 				px = "$space.4",
 				pt = "$space.2",
