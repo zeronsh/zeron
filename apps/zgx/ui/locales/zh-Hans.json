@@ -1267,6 +1267,54 @@
         "actions": "问题操作",
         "more": "另外 {n} 个",
         "fewer": "收起"
+      },
+      "scratchpad": {
+        "write": "Write",
+        "preview": "Preview",
+        "draw": "Draw",
+        "view": "View",
+        "editor": "Scratchpad text",
+        "placeholder": "Ideas, plans, how it should work",
+        "empty": "Nothing written yet",
+        "saved": "Saved",
+        "saving": "Saving…",
+        "syncing": "Syncing",
+        "failed": "Not saved",
+        "history": "History",
+        "undo": "Undo",
+        "no_history": "No earlier versions",
+        "by_you": "You",
+        "by_brain_dump": "Brain dump",
+        "by_other": "Someone",
+        "untitled": "Empty",
+        "expand": "Expand",
+        "collapse": "Collapse",
+        "drawing_label": "{n, plural, =0 {No drawing} one {Drawing, # shape} other {Drawing, # shapes}}",
+        "no_drawing": "No drawing yet",
+        "restore_failed": "Couldn't restore that version",
+        "title": "Scratchpad",
+        "notes": "Notes",
+        "delete": "Delete",
+        "undo_step": "Undo",
+        "redo": "Redo",
+        "words": "Label",
+        "tool": {
+          "select": "Select",
+          "pen": "Pen",
+          "rect": "Rectangle",
+          "ellipse": "Ellipse",
+          "arrow": "Arrow",
+          "text": "Text"
+        },
+        "color": {
+          "fg": "Ink",
+          "accent": "Accent",
+          "red": "Red",
+          "orange": "Orange",
+          "green": "Green",
+          "blue": "Blue",
+          "purple": "Purple"
+        }
       }
     }
   },
@@ -4240,7 +4288,8 @@
       "machines": "Machines",
       "comms": "Comms",
       "progress": "Progress",
-      "qa": "问答"
+      "qa": "问答",
+      "scratchpad": "Scratchpad"
     },
     "widgets": {
       "title": "Widgets",

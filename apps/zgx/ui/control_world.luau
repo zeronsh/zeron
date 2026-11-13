@@ -349,6 +349,76 @@ return function()
 			o.asks = asks
 		end)
 	end }
+	-- The Scratchpad (account/scratchpad): the sample's, each edit noted in
+	-- `calls` (`set_text:<text>`, `set_shapes:<n>`, `restore:<id>`) and
+	-- answered at once with its rev, the watch's frame a moment later (as the
+	-- engine's comes: the editor "Syncing" meanwhile).
+	local scratchpad = require("@account/scratchpad")
+	scratchpad.now:set(sample.scratchpad)
+	-- Each revision's text, for a restore (the sample lists only previews).
+	local texts: { [string]: string } = {}
+	for i, r in sample.scratchpad.history do
+		texts[r.id] = if i == 1 then sample.scratchpad.text else `# {r.preview}\n`
+	end
+	local revs = 41
+	local function edited(text: string?, shapes: { any }?, by: string, restored_from: string?): string
+		revs += 1
+		local rev = `r-{revs}`
+		local now = os.time()
+		local pad = table.clone(scratchpad.now:peek())
+		local history = table.clone(pad.history or {})
+		local head = history[1]
+		local new_text = text or pad.text
+		local new_shapes = shapes or pad.shapes
+		local info = { id = `rv-n{revs}`, at = now, edited_at = now, by = by, restored_from = restored_from, chars = utf8.len(new_text) or #new_text, shape_count = #new_shapes, preview = string.match(new_text, "^#*%s*([^\n]*)") or "" }
+		-- (Edits by the same editor within a minute fold into its snapshot.)
+		if head and head.by == by and not restored_from and now - (head.edited_at or 0) < 60 then
+			info.id, info.at = head.id, head.at
+			history[1] = info
+		else
+			table.insert(history, 1, info)
+		end
+		texts[info.id] = new_text
+		ui.after(300, function()
+			local p = table.clone(scratchpad.now:peek())
+			p.text, p.shapes, p.rev, p.updated_at, p.updated_by, p.history = new_text, new_shapes, rev, now, by, history
+			scratchpad.now:set(p)
+		end)
+		return rev
+	end
+	local pad_stub = scratchpad :: any
+	pad_stub.set_text = function(text: string): any
+		note(`set_text:{text}`)
+		return settled(edited(text, nil, "person"))
+	end
+	local sent = ui.state("scratchpad_sent", {} :: { any })
+	pad_stub.set_shapes = function(shapes: { any }): any
+		note(`set_shapes:{#shapes}`)
+		sent:set(shapes)
+		return settled(edited(nil, shapes, "person"))
+	end
+	pad_stub.restore = function(id: string): any
+		note(`restore:{id}`)
+		return settled(edited(texts[id] or "", nil, "person", id))
+	end
+	pad_stub.revision = function(id: string): any
+		note(`revision:{id}`)
+		return settled({ id = id, text = texts[id] or "", shapes = {} })
+	end
+	-- The Brain dump writing to it (another device's edit comes the same way).
+	ui.command { id = "fixture.scratchpad_remote", title = "Fixture: the Brain dump adds to the Scratchpad", run = function()
+		local p = scratchpad.now:peek()
+		edited(`{p.text}\n\n## From the Brain dump\n\nAsk Wing about the relay window.\n`, nil, "brain_dump")
+	end }
+	-- Another device adding to the drawing.
+	ui.command { id = "fixture.scratchpad_remote_shapes", title = "Fixture: another device draws on the Scratchpad", run = function()
+		local list = table.clone(scratchpad.now:peek().shapes or {})
+		table.insert(list, { id = "sh-remote", kind = "ellipse", x = 20, y = 20, w = 60, h = 40, points = {}, text = "far", color = "blue", z = 99 })
+		edited(nil, list, "other")
+	end }
+	ui.command { id = "fixture.scratchpad_empty", title = "Fixture: an empty Scratchpad", run = function()
+		scratchpad.now:set({ loaded = true, text = "", rev = "", updated_by = "person", shapes = {}, history = {} })
+	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)
 		ui.theme.current:set("zeron-light")
