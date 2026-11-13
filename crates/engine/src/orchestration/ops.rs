@@ -384,6 +384,7 @@ impl EngineRpc {
                 target,
                 intent,
                 message,
+                title,
                 candidates,
                 progress,
                 space_id,
@@ -391,7 +392,7 @@ impl EngineRpc {
                 attachments,
             } => {
                 let id = self
-                    .route(&dump_id, excerpt, target, intent, message, candidates, progress, space_id, device_id, attachments)
+                    .route(&dump_id, excerpt, target, intent, message, title, candidates, progress, space_id, device_id, attachments)
                     .await?;
                 Ok(json!({ "id": id }))
             }
