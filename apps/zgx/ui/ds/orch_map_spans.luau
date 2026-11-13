@@ -65,8 +65,10 @@ local function spans_of(entries: { any }?, c: any, t0: number, now: number): ({ 
 			elseif e.status == "done" then
 				table.insert(ticks, { t = e.at, kind = "done" })
 			end
-			if prev and prev.kind == "merging" and e.status ~= "failed" then
-				table.insert(ticks, { t = e.at, kind = "merged" })
+			-- (A merge step finished is a step done: one Done tick, not two
+			-- when the thread finished at once.)
+			if prev and prev.kind == "merging" and e.status ~= "failed" and e.status ~= "done" then
+				table.insert(ticks, { t = e.at, kind = "done" })
 			end
 		end
 		-- (What it does now shows from now, even for no time yet.)

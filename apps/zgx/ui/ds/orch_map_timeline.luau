@@ -3,7 +3,7 @@
 -- whose texture says what at (thinking stippled, testing in cells,
 -- building solid, editing lighter); waiting on you, an open bar in input's
 -- ink; ticks where something happened (a report, an ask, a failure, a
--- merge); at "now" a head on what still works, and at the end of the lane
+-- step done); at "now" a head on what still works, and at the end of the lane
 -- what it does now. A click opens the thread.
 --
 --   Timeline {
@@ -59,7 +59,6 @@ local TICK_INK: { [string]: string } = {
 	report = "text.primary",
 	ask = "zeron.status.input",
 	failed = "zeron.status.failed",
-	merged = "zeron.status.done",
 	done = "zeron.status.done",
 }
 
@@ -91,15 +90,13 @@ local function bar(c: any, x0: number, x1: number, mid: number, texture: string)
 end
 
 -- A tick: a stem, its head the kind's own shape (a report and an ask a
--- square, finished a round head, a merge a diamond, a failure a cross).
+-- square, done a round head, a failure a cross).
 local function tick(c: any, x: number, mid: number, kind: string)
 	local ink = kit.ink(TICK_INK[kind] or "text.primary", if kind == "report" then 0.6 else 1)
 	c:line(x, mid - 7, x, mid + 6, ink, 1.25)
 	local hy = mid - 9
 	if kind == "done" then
 		c:circle(x, hy, 2.25, ink)
-	elseif kind == "merged" then
-		c:fill(ui.path():move(x, hy - 3):line(x + 3, hy):line(x, hy + 3):line(x - 3, hy):close(), ink)
 	elseif kind == "failed" then
 		c:line(x - 2.5, hy - 2.5, x + 2.5, hy + 2.5, ink, 1.5, { cap = "round" })
 		c:line(x - 2.5, hy + 2.5, x + 2.5, hy - 2.5, ink, 1.5, { cap = "round" })
@@ -109,14 +106,14 @@ local function tick(c: any, x: number, mid: number, kind: string)
 end
 
 -- The legend's entries: what a thread was doing (the textures), then what
--- happened (the ticks), each only where one is drawn.
+-- happened (the ticks): Report, Ask, Failed, Done, always all four.
 local LEGEND = {
 	{ kind = "thinking", texture = "stipple" },
 	{ kind = "editing", texture = "mid" },
 	{ kind = "testing", texture = "cells" },
 	{ kind = "building", texture = "solid" },
 }
-local LEGEND_TICKS = { "report", "ask", "done", "failed", "merged" }
+local LEGEND_TICKS = { "report", "ask", "failed", "done" }
 
 M.View = ui.component(function(props: {
 	world: () -> any,
@@ -500,25 +497,13 @@ M.View = ui.component(function(props: {
 	for _, e in LEGEND do
 		table.insert(legend, legend_item(locale.t(`ds.orch.activity.{e.kind}`), e.texture, nil))
 	end
-	-- (What happened, after a divider: each tick's own mark, listed only
-	-- when one shows in the window.)
-	local function shows(kind: string): () -> boolean
-		return function(): boolean
-			for _, r in built:get().rows do
-				for _, k in r.ticks or {} do
-					if k.kind == kind then
-						return true
-					end
-				end
-			end
-			return false
-		end
-	end
+	-- (What happened, after a divider: the same four always, each its own
+	-- mark.)
 	local ticks_legend: any = { gap = "$space.3", items = "center", shrink = 0,
 		ui.div { w = 1, h = 14, bg = "$border.subtle", shrink = 0 } }
 	for _, k in LEGEND_TICKS do
 		local item = legend_item(locale.t(`ds.orch.map.tick.{k}`), nil, k)
-		table.insert(ticks_legend, ui.show(shows(k), item))
+		table.insert(ticks_legend, item)
 	end
 
 	local function span_button(mins: number): Node

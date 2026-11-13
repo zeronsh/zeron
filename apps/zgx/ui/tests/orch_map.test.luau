@@ -403,7 +403,9 @@ test("timeline: spans from what the host kept, ticks where things happened", fun
 		kinds[t.kind] = t.t
 	end
 	expect(kinds.failed).to_be(now - 800)
-	expect(kinds.merged).to_be(now - 400)
+	-- (A merge step finished: a Done tick, not a mark of its own.)
+	expect(kinds.done).to_be(now - 400)
+	expect(kinds.merged).to_be(nil)
 	-- Its state now, newer than what was kept: added.
 	local s2 = Timeline.spans_of(entries, { status = "input" }, now - 900, now)
 	expect(s2[#s2].status).to_be("input")
@@ -806,4 +808,21 @@ test("a crew row is never blank: the chat's name, else its card's, else its role
 	local f = model.fleet(w)
 	expect(f.threads["th-a"].title).to_be("Board card declutter")
 	expect(f.threads["th-b"].title).to_be("scroll fix")
+end)
+
+test("timeline: the legend's events are always Report, Ask, Failed, Done", function()
+	local app = open(1440, 1400)
+	view(app, "timeline")
+	app:frames(10)
+	local tree = app:tree("#control-widget-map >> .orch-tl-top")
+	local at = {}
+	for _, word in { "Report", "Ask", "Failed", "Done" } do
+		local i = string.find(tree, `"{word}"`, 1, true)
+		expect(i ~= nil).to_be(true)
+		table.insert(at, i)
+	end
+	for k = 2, #at do
+		expect(at[k] > at[k - 1]).to_be(true)
+	end
+	expect(string.find(tree, '"Merged"', 1, true)).to_be(nil)
 end)
