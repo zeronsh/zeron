@@ -4053,7 +4053,8 @@
       "deleted": "Deleted from the board",
       "undo": "Undo",
       "delete_failed": "Couldn't delete it",
-      "undo_failed": "Couldn't put it back"
+      "undo_failed": "Couldn't put it back",
+      "needs_you": "Needs you"
     },
     "reports": {
       "title": "Crew updates",

@@ -12,16 +12,16 @@
 -- one under another. A board with nothing on it (or nothing of the
 -- orchestrator chosen) is one quiet line.
 --
--- A card: how its lead thread stands (Zeron's status glyph, held 300 ms at
--- least), its title, how far along it is (its threads' todo as segmented
--- cells, else its own progress), and a quiet line of what else it has:
--- whose it is (its orchestrator's hue dot and name, and the project it's in
--- where that's named otherwise; a loose item, its project), its threads as
--- dots when it has several, its pull request, and, made from a dump's part,
--- a mark that shows that dump (`on_source`). (On an orchestrator's own
--- page, whose is implied: none says.) Its priority stands at its title's end when it's high or
--- urgent. A card in Review or Done carries its outcome, two lines of it,
--- all of it in a hover card. Each card is a plugin slot
+-- A card is calm: its title (two lines at most, a long one clamped) and one
+-- quiet line under it. That line leads with whose it is (its
+-- orchestrator's hue, named in its tooltip) where cards say so, then only
+-- what adds something: its priority's word when urgent or high, how its
+-- threads stand when that's worth a look (working, stalled, needs you,
+-- failed), its todo's cells and figure once a step of it is done, and one
+-- clock (how long it has worked, how long stalled, or how long since it
+-- last moved while it waits), then its pull request. Its menu's "…" shows
+-- where the pointer rests. A card in Review or Done carries its outcome,
+-- two lines of it, all of it in a hover card. Each card is a plugin slot
 -- (`orchestration.item`, `provide = { item = id }`).
 --
 -- Cards are dragged between columns and within one (`on_move(id, state,
@@ -55,8 +55,8 @@
 --                                -- orchestrator's own page, where it's
 --                                -- implied: the default when `filter` is
 --                                -- given without `show_filter`)
---     progress = fn(chat) -> Node?,  -- a line of its lead thread's progress
---                                -- (the app's ds/orch_progress strip)
+--     progress_of = fn(chat) -> Row?,  -- its lead thread's progress row
+--                                -- (orchestration.progress[chat]): its clocks
 --   }
 
 local Icon = require("@self/icon")
@@ -64,14 +64,16 @@ local ContextMenu = require("@self/context_menu")
 local Markdown = require("@self/markdown")
 local HoverCard = require("@self/hover_card")
 local badge = require("@self/badge")
-local status = require("@self/status")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local material = require("@self/material")
 local motion = require("@self/motion")
 local hue = require("@self/orch_hue")
 local Cells = require("@self/orch_cells")
-local hold = require("@self/orch_hold")
+local Progress = require("@self/orch_progress")
+local Clocks = require("@self/orch_progress_clocks")
+local Card = require("@self/orch_card")
+local Tooltip = require("@self/tooltip")
 local data = require("@self/orch_data")
 local toast = require("@self/toast")
 
@@ -104,7 +106,7 @@ export type Props = {
 	orchestrators: control.Live<{ Orchestrator }>?,
 	todo_of: ((chat: string) -> Todo?)?,
 	thread_of: ((chat: string) -> Thread?)?,
-	progress: ((chat: string) -> Node?)?,
+	progress_of: ((chat: string) -> { [string]: any }?)?,
 	filter: control.Live<string?>?,
 	show_filter: boolean?,
 	inbox: boolean?,
@@ -156,7 +158,7 @@ local COLUMN_INK: { [string]: string } = {
 	review = "$zeron.status.input",
 	done = "$zeron.status.done",
 }
-local CARD_RADIUS = "$radius.lg"
+local CARD_RADIUS = Card.RADIUS
 local DRAG_TAG = "orch-item"
 -- An outcome longer than about two lines' words: all of it in a hover card.
 local OUTCOME_FOLD = 64
@@ -205,29 +207,9 @@ local function todo_of_item(item: Item, todo_of: ((string) -> Todo?)?): (number?
 	return done, total
 end
 
--- How its lead thread stands (the one that needs you first, then one that
--- failed, then one working), else how the card's column says it does.
+-- Which of its threads' statuses leads: the one that needs you first, then
+-- one that failed, then one working.
 local LEAD: { [string]: number } = { input = 0, approval = 0, failed = 1, limited = 1, working = 2, connecting = 2, waiting = 2, done = 3 }
-local function lead_status(item: Item, thread_of: ((string) -> Thread?)?): string
-	local best, rank = nil :: string?, math.huge
-	for _, chat in item.threads or {} do
-		local t = if thread_of then thread_of(chat) else nil
-		local st = t and t.status
-		if st and LEAD[st] and LEAD[st] < rank then
-			best, rank = st, LEAD[st]
-		end
-	end
-	if item.state == "done" then
-		return "done"
-	elseif best then
-		return best
-	elseif item.state == "review" then
-		return "input"
-	elseif item.state == "blocked" then
-		return "approval"
-	end
-	return "none"
-end
 
 -- An outcome's words as one quiet run (its lines folded): the markdown's
 -- marks left out.
@@ -239,69 +221,34 @@ local function plain(md: string): string
 	return s
 end
 
--- A thread's state as a dot's kind (idle: none).
-local DOT_KINDS: { [string]: boolean } = { working = true, connecting = true, waiting = true, input = true, approval = true, done = true, failed = true, limited = true }
-
-local function thread_dot(chat: string, thread_of: ((string) -> Thread?)?, on_open: ((string) -> ())?): Node
-	local function info(): Thread?
-		return if thread_of then thread_of(chat) else nil
+-- How its threads stand where that's worth a word on its card: the lead
+-- thread's status (nil: none says, or it's idle).
+local function thread_status(item: Item, thread_of: ((string) -> Thread?)?): string?
+	local best, rank = nil :: string?, math.huge
+	for _, chat in item.threads or {} do
+		local t = if thread_of then thread_of(chat) else nil
+		local st = t and t.status
+		if st and LEAD[st] and LEAD[st] < rank then
+			best, rank = st, LEAD[st]
+		end
 	end
-	local t = info()
-	return ui.button {
-		label = if t then t.title else chat,
-		tooltip = if t then t.title else nil,
-		tooltip_delay = 300,
-		w = 14,
-		h = 14,
-		items = "center",
-		justify = "center",
-		rounded = "$radius.full",
-		shrink = 0,
-		hover = {},
-		active = {},
-		on_click = if on_open
-			then function()
-				on_open(chat)
-			end
-			else nil,
-		ui.switch(function(): string
-			local now = info()
-			local k = now and now.status
-			return if k and DOT_KINDS[k] then k else "idle"
-		end, (function(): { [string]: Node }
-			local cases: { [string]: Node } = {
-				idle = ui.div { w = 7, h = 7, rounded = "$radius.full", border = 1, border_color = "$text.tertiary" },
-			}
-			for k in DOT_KINDS do
-				cases[k] = status.StatusDot { kind = k :: any, size = 7 }
-			end
-			return cases
-		end)() :: any),
-	}
+	return best
 end
 
--- Its priority, where it says something: urgent and high (low, quietly).
-local function priority_mark(p: () -> string): Node
-	local function mark(key: string, icon: Icon.Name, ink: string): Node
-		return ui.div {
-			shrink = 0,
-			color = ink,
-			tooltip = locale.s(`orch.board.priority.{key}`),
-			label = locale.t(`orch.board.priority.{key}`),
-			role = "img",
-			Icon { name = icon, size = 12 },
-		}
-	end
-	return ui.switch(function(): string
-		local k = p()
-		return if k == "urgent" or k == "high" or k == "low" then k else "normal"
-	end, {
-		urgent = mark("urgent", "flag", "$zeron.tone.danger.ink"),
-		high = mark("high", "arrow-up", "$zeron.tone.warning.ink"),
-		low = mark("low", "arrow-down", "$text.tertiary"),
-		normal = ui.div {},
-	})
-end
+-- A status's word on a card, and its ink (nil: it says nothing). Working is
+-- the quiet default; what wants the person stands out.
+local WORD: { [string]: { key: string, ink: string } } = {
+	working = { key = "ds.status.working", ink = "$text.secondary" },
+	connecting = { key = "ds.status.working", ink = "$text.secondary" },
+	waiting = { key = "ds.status.working", ink = "$text.secondary" },
+	input = { key = "orch.board.needs_you", ink = "$zeron.status.input" },
+	approval = { key = "orch.board.needs_you", ink = "$zeron.status.input" },
+	failed = { key = "ds.status.failed", ink = "$zeron.status.failed" },
+	limited = { key = "ds.status.failed", ink = "$zeron.status.failed" },
+}
+local STALLED = { key = "ds.orch.progress.stalled", ink = "$zeron.tone.warning.ink" }
+-- Its priority's word, where it says something.
+local PRIORITY_INK: { [string]: string } = { urgent = "$zeron.tone.danger.ink", high = "$zeron.tone.warning.ink" }
 
 local function rect_of(r: any): { x: number, y: number, width: number, height: number }?
 	local el = if r then r:peek() else nil
@@ -753,85 +700,30 @@ local OrchBoard = ui.component(function(props: Props): Node
 		return if #entries > 0 then entries else nil
 	end
 
-	local line = (ui.theme.get("font.line.sm") :: number?) or 16
-
-	-- Whose it is, quietly: its orchestrator's hue and name, and its
-	-- project (a folder, as the Map names one).
-	local function owner(item: () -> Item): Node
-		local function orch(): Orchestrator?
-			local o = context_of(item())
-			return o
-		end
-		local function project(): string?
-			local _, p = context_of(item())
-			return p
-		end
-		return ui.show(function(): boolean
-			return orch() ~= nil or project() ~= nil
-		end, ui.row {
-			class = "orch-card-owner",
-			min_w = 0,
-			shrink = 1,
-			gap = "$space.2",
-			items = "center",
-			ui.show(function(): boolean
-				return orch() ~= nil
-			end, ui.row {
-				min_w = 0,
-				shrink = 1,
-				gap = "$zeron.space.tight",
-				items = "center",
-				hue.Dot {
-					hue = function(): number?
-						local o = orch()
-						return o and o.hue
-					end,
-					size = 6,
-				},
-				ui.text {
-					function(): string
-						local o = orch()
-						return if o then o.name else ""
-					end,
-					class = "orch-card-orchestrator",
-					truncate = true,
-					min_w = 0,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				},
-			}),
-			ui.show(function(): boolean
-				return project() ~= nil
-			end, ui.row {
-				min_w = 0,
-				shrink = 1,
-				gap = "$zeron.space.tight",
-				items = "center",
-				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "folder", size = 11 } },
-				ui.text {
-					function(): string
-						return project() or ""
-					end,
-					class = "orch-card-project",
-					truncate = true,
-					min_w = 0,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				},
-			}),
-		})
+	-- The cards' clocks, to the minute: they move once a minute, on the
+	-- minute (as the progress strip's), nothing by the second. A test's
+	-- `now` is its clock.
+	local minute = ui.use_state(os.time())
+	if not props.now then
+		ui.effect(function()
+			minute:get()
+			ui.after(Clocks.until_minute(os.time()) * 1000, function()
+				minute:set(math.max(os.time(), minute:peek() + 1))
+			end)
+		end)
+	end
+	local function clock_now(): number
+		return if props.now then props.now() else minute:get()
 	end
 
-	-- What a card shows lifted and carried: its status and title, at its
-	-- size, risen off the board.
+	-- What a card shows lifted and carried: its title, at its size, risen
+	-- off the board.
 	local function lifted(it: Item, w: number, h: number): Node
-		local lead = lead_status(it, props.thread_of)
 		return ui.row {
 			class = "orch-card-lifted",
 			w = w,
 			min_h = ui.raw(h, "the card's own height"),
-			p = if compact then "$space.2" else ui.raw(10, "a card's even inset"),
-			gap = "$zeron.space.tight",
+			p = Card.pad(compact),
 			items = "start",
 			rounded = CARD_RADIUS,
 			bg = "$zeron.menu.solid",
@@ -839,9 +731,6 @@ local OrchBoard = ui.component(function(props: Props): Node
 			border_color = "$border",
 			shadow = "$shadow.md",
 			scale = motion.TAB_LIFT,
-			if lead ~= "none"
-				then ui.div { h = line, items = "center", shrink = 0, status.StatusIcon { kind = lead :: any, size = 14 } }
-				else nil,
 			ui.text {
 				it.title,
 				wrap = true,
@@ -871,18 +760,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 				slot_refs[id] = nil
 			end
 		end)
-		local pad = if compact then "$space.2" else ui.raw(10, "a card's even inset")
-		local lead = hold.value(function(): string
-			return lead_status(item(), props.thread_of)
-		end)
+		local pad = Card.pad(compact)
 		local function outcome(): string?
 			local it = item()
 			local o = it.outcome
 			return if (it.state == "done" or it.state == "review") and o ~= nil and o ~= "" then o else nil
-		end
-		local function from_dump(): boolean
-			local src = item().source
-			return src ~= nil and src.dump_id ~= nil and src.dump_id ~= ""
 		end
 		local function prs(): { Link }
 			local out: { Link } = {}
@@ -946,180 +828,238 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 		end)
 
-		-- Its title: two lines at most, how its lead thread stands before it.
-		local title_text = ui.text {
-			function(): string
+		-- Its title: two lines at most (a long one, from before cards had
+		-- short titles, clamped).
+		local title_text = Card.Title {
+			text = function(): string
 				return item().title
 			end,
-			wrap = true,
-			lines = 2,
-			truncate = true,
-			grow = 1,
-			min_w = 0,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			weight = "$font.weight.medium",
-			color = function(): string
-				return if item().state == "done" then "$text.secondary" else "$text.primary"
+			quiet = function(): boolean
+				return item().state == "done"
 			end,
 		}
-		local title = ui.row {
-			w_full = true,
-			min_w = 0,
-			gap = "$zeron.space.tight",
-			items = "start",
-			ui.show(function(): boolean
-				return lead() ~= "none"
-			end, ui.div {
-				class = "orch-card-status",
-				h = line,
-				items = "center",
-				shrink = 0,
-				status.StatusIcon {
-					kind = function(): any
-						local k = lead()
-						return if k == "none" then "done" else k
-					end,
-					size = 14,
-				},
-			}),
-			title_text,
-			ui.div {
-				h = line,
-				items = "center",
-				shrink = 0,
-				priority_mark(function(): string
-					return item().priority
-				end),
-			},
-		}
-		-- Its quiet line: whose it is, its threads, its pull request.
-		local function has_meta(): boolean
-			local o, p = context_of(item())
-			return o ~= nil or p ~= nil or #(item().threads or {}) > 1 or #prs() > 0 or from_dump()
+
+		-- Its one quiet line, each part only where it adds something.
+		local function owner(): Orchestrator?
+			local o = context_of(item())
+			return o
 		end
-		local meta = ui.row {
-			class = "orch-card-meta",
-			w_full = true,
-			min_w = 0,
-			h = line,
-			gap = "$space.2",
-			items = "center",
-			owner(item),
-			ui.row {
-				shrink = 0,
-				gap = "$space.1",
-				items = "center",
-				-- Made from a dump's part: the dump, shown where it was said.
-				ui.show(from_dump, ui.button {
-					class = "orch-card-source",
-					label = locale.t("orch.board.from_dump"),
-					tooltip = locale.s("orch.board.from_dump"),
-					tooltip_delay = 300,
-					w = 16,
-					h = 16,
-					items = "center",
-					justify = "center",
-					rounded = "$radius.sm",
-					shrink = 0,
-					color = "$text.tertiary",
-					bg = "#00000000",
-					hover = { bg = "$hover", color = "$text.secondary" },
-					active = { bg = "$pressed" },
-					on_click = if props.on_source
-						then function()
-							local src = item().source
-							if src then
-								(props.on_source :: any)(src)
-							end
-						end
-						else nil,
-					Icon { name = "pen-new-square", size = 12 },
-				}),
-				ui.each(ui.computed(function(): { string }
-					-- (One thread: its status leads the title already.)
-					local threads = item().threads or {}
-					return if #threads > 1 then threads else {}
-				end), function(chat: string): Node
-					return thread_dot(chat, props.thread_of, props.on_open_thread)
-				end, { key = function(chat: string): string
-					return chat
-				end }),
-				ui.each(ui.computed(prs), function(l: Link): Node
-					local n = tonumber(string.match(l.label, "%d+"))
-					return ui.button {
-						label = l.label,
-						shrink = 0,
-						grow = 0,
-						p = 0,
-						h = "auto",
-						rounded = "$radius.full",
-						bg = "#00000000",
-						hover = { bg = "#00000000" },
-						active = { bg = "#00000000" },
-						on_click = if props.on_link
-							then function()
-								(props.on_link :: any)(l)
-							end
-							else nil,
-						badge.PullRequest { state = if item().state == "done" then "merged" else "open", number = n, size = "sm" },
-					}
-				end, { key = function(l: Link): string
-					return l.target
-				end }),
-			},
-		}
-		-- How far along: its threads' steps as cells, else its own share in
-		-- ten; and the figure.
+		local function urgency(): string?
+			local p = item().priority
+			return if PRIORITY_INK[p] then p else nil
+		end
+		local function progress_row(): { [string]: any }?
+			local chat = (item().threads or {})[1]
+			return if chat and props.progress_of then props.progress_of(chat) else nil
+		end
+		local function stalled(): boolean
+			return item().state ~= "done" and Progress.stalled(progress_row())
+		end
+		local function word(): { key: string, ink: string }?
+			local it = item()
+			if it.state == "done" then
+				return nil
+			elseif stalled() then
+				return STALLED
+			end
+			local st = thread_status(it, props.thread_of)
+			return if st then WORD[st] else nil
+		end
+		-- How far along: its threads' todo once a step of it is done, else
+		-- its own share once there is some (nil: nothing to show yet).
 		local function steps(): (number?, number?)
+			if item().state == "done" then
+				return nil, nil
+			end
 			local d, t = todo_of_item(item(), props.todo_of)
-			if d then
-				return d, t
+			if d and t then
+				return if d > 0 then d else nil, t
 			end
 			local p = item().progress
-			if p then
+			if p and p > 0 then
 				return math.floor(math.clamp(p, 0, 1) * 10 + 0.5), 10
 			end
 			return nil, nil
 		end
-		local progress_bar = ui.show(function(): boolean
-			return steps() ~= nil and item().state ~= "done"
-		end, ui.row {
-			class = "orch-card-progress",
-			w_full = true,
-			gap = "$space.2",
-			items = "center",
-			Cells {
-				done = function(): number
-					local d = steps()
-					return d or 0
-				end,
-				total = function(): number
-					local _, t = steps()
-					return t or 0
-				end,
-				current = function(): boolean
-					return lead() == "working"
-				end,
-				cell = 4,
-				h = 8,
-				max = 24,
-			},
-			ui.text {
-				function(): string
-					local d, t = todo_of_item(item(), props.todo_of)
-					if d and t then
-						return `{d}/{t}`
-					end
-					local p = item().progress
-					return if p then `{math.floor(math.clamp(p, 0, 1) * 100 + 0.5)}%` else ""
-				end,
+		local function steps_text(): string
+			local d, t = todo_of_item(item(), props.todo_of)
+			if d and t then
+				return `{d}/{t}`
+			end
+			local p = item().progress
+			return if p then `{math.floor(math.clamp(p, 0, 1) * 100 + 0.5)}%` else ""
+		end
+		-- One clock: how long it's been stalled, else how long it has worked,
+		-- else (waiting on someone) how long since it last moved.
+		local function clock(): string
+			local it = item()
+			if it.state == "done" or it.state == "planned" or it.state == "inbox" then
+				return ""
+			end
+			local at = clock_now()
+			local c = Progress.clocks(progress_row(), at)
+			if stalled() and c.since_step then
+				return Progress.short(c.since_step)
+			elseif it.state == "active" then
+				return if c.elapsed then Progress.short(c.elapsed) else ""
+			elseif it.updated then
+				return Progress.short(at - it.updated)
+			end
+			return ""
+		end
+		local function has_word(): boolean
+			return urgency() ~= nil or word() ~= nil
+		end
+		local function has_steps(): boolean
+			return (steps()) ~= nil
+		end
+		local function has_clock(): boolean
+			return clock() ~= ""
+		end
+		local sep = Card.Sep
+		local menu_open = ui.use_state(false)
+		local status_line = Card.Line {
+			-- Whose it is: its orchestrator's hue, named where the pointer rests.
+			ui.show(function(): boolean
+				return owner() ~= nil
+			end, ui.div {
+				class = "orch-card-owner",
 				shrink = 0,
-				tabular = true,
-				text_size = "$font.size.xs",
-				color = "$text.tertiary",
+				pr = "$zeron.space.hair",
+				tooltip = Tooltip { function(): string
+					local o = owner()
+					return if o then o.name else ""
+				end },
+				tooltip_delay = 300,
+				label = function(): string
+					local o = owner()
+					return if o then o.name else ""
+				end,
+				role = "img",
+				hue.Dot {
+					hue = function(): number?
+						local o = owner()
+						return o and o.hue
+					end,
+					size = 6,
+				},
+			}),
+			-- Its name too, where the line has nothing else to say.
+			ui.show(function(): boolean
+				return owner() ~= nil and not (has_word() or has_steps() or has_clock())
+			end, Card.Word {
+				text = function(): string
+					local o = owner()
+					return if o then o.name else ""
+				end,
+				class = "orch-card-owner-name",
+			}),
+			ui.show(function(): boolean
+				return urgency() ~= nil
+			end, Card.Word {
+				text = function(): string
+					local u = urgency()
+					return if u then locale.s(`orch.board.priority.{u}`) else ""
+				end,
+				class = "orch-card-priority",
+				shrink = 0,
+				strong = true,
+				ink = function(): string
+					return PRIORITY_INK[urgency() or ""] or "$text.tertiary"
+				end,
+			}),
+			sep(function(): boolean
+				return urgency() ~= nil and word() ~= nil
+			end),
+			ui.show(function(): boolean
+				return word() ~= nil
+			end, Card.Word {
+				text = function(): string
+					local w = word()
+					return if w then locale.s(w.key) else ""
+				end,
+				class = "orch-card-word",
+				ink = function(): string
+					local w = word()
+					return if w then w.ink else "$text.tertiary"
+				end,
+			}),
+			sep(function(): boolean
+				return has_word() and has_steps()
+			end),
+			ui.show(has_steps, ui.row {
+				class = "orch-card-progress",
+				shrink = 0,
+				gap = "$zeron.space.tight",
+				items = "center",
+				Cells {
+					done = function(): number
+						local d = steps()
+						return d or 0
+					end,
+					total = function(): number
+						local _, t = steps()
+						return t or 0
+					end,
+					current = function(): boolean
+						return not stalled() and thread_status(item(), props.thread_of) == "working"
+					end,
+					cell = 3,
+					h = 6,
+					max = 10,
+				},
+				ui.text { steps_text, shrink = 0, tabular = true, text_size = "$font.size.xs", color = "$text.tertiary" },
+			}),
+			sep(function(): boolean
+				return (has_word() or has_steps()) and has_clock()
+			end),
+			ui.show(has_clock, Card.Word {
+				text = clock,
+				class = "orch-card-clock",
+				shrink = 0,
+				ink = function(): string
+					return if stalled() then "$zeron.tone.warning.ink" else "$text.tertiary"
+				end,
+			}),
+			ui.div { grow = 1 },
+			ui.each(ui.computed(prs), function(l: Link): Node
+				local n = tonumber(string.match(l.label, "%d+"))
+				return ui.button {
+					label = l.label,
+					shrink = 0,
+					grow = 0,
+					p = 0,
+					h = "auto",
+					rounded = "$radius.full",
+					bg = "#00000000",
+					hover = { bg = "#00000000" },
+					active = { bg = "#00000000" },
+					on_click = if props.on_link
+						then function()
+							(props.on_link :: any)(l)
+						end
+						else nil,
+					badge.PullRequest { state = if item().state == "done" then "merged" else "open", number = n, size = "sm" },
+				}
+			end, { key = function(l: Link): string
+				return l.target
+			end }),
+			-- Its menu, where the pointer rests (or while it's open).
+			Card.Menu {
+				items = function(): { any }
+					return menu(item) or {}
+				end,
+				open = menu_open,
+				shown = function(): boolean
+					return hovered:get() and not carry:get()
+				end,
+				label = locale.t("orch.board.card_actions"),
 			},
-		})
+		}
+		local function has_status(): boolean
+			return owner() ~= nil or has_word() or has_steps() or has_clock() or #prs() > 0
+		end
+
 		-- Its outcome: two lines of it, quietly; all of it where the pointer
 		-- rests, when there's more.
 		local outcome_text = ui.show(function(): boolean
@@ -1167,19 +1107,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 				w_full = true,
 				min_w = 0,
 				gap = if compact then "$space.1" else "$zeron.space.snug",
-				title,
-				progress_bar,
-				-- How its lead thread's work is going, while it's under way.
-				if props.progress
-					then ui.presence(function(): string
-						local it = item()
-						return if it.state ~= "done" then (it.threads or {})[1] or "" else ""
-					end, function(chat: string): Node
-						return if chat == "" then ui.div {} else (props.progress :: any)(chat) or ui.div {}
-					end, { w_full = true, min_w = 0 })
-					else nil,
+				title_text,
 				outcome_text,
-				ui.show(has_meta, meta),
+				ui.show(has_status, status_line),
 			},
 			-- Where plugins decorate it (the github plugin: its checks).
 			-- (Outside the steps' gaps: empty, it takes no room.)
@@ -1194,12 +1124,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 			p = 0,
 			items = "start",
 			rounded = CARD_RADIUS,
-			bg = function(): string
-				if hovered:get() and not carry:get() then
-					return "$hover"
-				end
-				return material.pick("$zeron.settings.note", "$zeron.settings.card")()
-			end,
+			bg = Card.bg(function(): boolean
+				return hovered:get() and not carry:get()
+			end),
 			hover = {},
 			active = { bg = "$pressed" },
 			y = function(): number

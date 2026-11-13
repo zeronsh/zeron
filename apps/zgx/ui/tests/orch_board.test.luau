@@ -3,7 +3,8 @@
 -- the next; a card dragged to another column or within one says where (its
 -- state and an order between its new neighbours); its menu sets a
 -- priority; an outcome is two quiet lines; every card says whose it is
--- (but on its orchestrator's own page); an empty board is one line; and it
+-- (but on its orchestrator's own page), its orchestrator's hue on its one
+-- quiet line; an empty board is one line; and it
 -- holds side by side when wide, in rows of three when narrower, stacked
 -- when narrow. (Raw pointer drags, fast and slow, Escape
 -- and click: src/orchestration_board_tests.rs.)
@@ -250,39 +251,38 @@ test("orch board: a card carried between rows lands in the row below", function(
 	expect(count(app, "done")).to_be(2)
 end)
 
-test("orch board: every card says whose it is, its project where that's named otherwise", function()
+test("orch board: every card says whose it is, its orchestrator's hue named", function()
 	local app = board()
-	-- Its orchestrator's dot and name, and the project it's in.
-	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-owner >> "Exnomic VPN"')).to_be(true)
-	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-project >> "exnomic"')).to_be(true)
-	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-owner >> "Orchestrators"')).to_be(true)
-	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-project >> "zeron"')).to_be(true)
+	-- Its orchestrator's hue on its quiet line, named for the pointer and
+	-- for a screen reader; no row of names and folders under it.
+	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-owner')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> role:img "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Control room" >> role:img "Orchestrators"')).to_be(true)
+	expect(app:has(".orch-card-orchestrator")).to_be(false)
+	expect(app:has(".orch-card-project")).to_be(false)
 	-- Filtered to one orchestrator (the Control room's chip), still said.
 	app:set_state("filter", "orc-orch")
 	app:frames(10)
-	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-owner >> "Orchestrators"')).to_be(true)
-	-- One orchestrator's work alone on the board, still said.
+	expect(app:has('#orch-col-now >> role:button "Control room" >> role:img "Orchestrators"')).to_be(true)
+	-- Loose items: no one's.
 	app:set_state("filter", nil)
 	app:set_state("orch_board_items", {
 		{ id = "it-a", orchestrator_id = "orc-vpn", title = "One thing", state = "planned", priority = "normal" },
-		-- Loose: its project, if its thread has one; no orchestrator.
 		{ id = "it-b", title = "Loose with a thread", state = "planned", priority = "normal", threads = { "th-loose" } },
 		{ id = "it-c", title = "Loose alone", state = "planned", priority = "normal" },
 	})
 	app:frames(10)
-	expect(app:has('#orch-col-next >> role:button "One thing" >> .orch-card-orchestrator >> "Exnomic VPN"')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "Loose with a thread" >> .orch-card-project >> "dotfiles"')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "Loose with a thread" >> .orch-card-orchestrator')).to_be(false)
+	expect(app:has('#orch-col-next >> role:button "One thing" >> role:img "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-next >> role:button "Loose with a thread" >> .orch-card-owner')).to_be(false)
 	expect(app:has('#orch-col-next >> role:button "Loose alone" >> .orch-card-owner')).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
-test("orch board: a project named as its orchestrator is left out", function()
+test("orch board: in the Control room, a done card says whose", function()
 	local app = mount("control_board_live_fixture.luau")
 	app:resize(1440, 2600)
 	app:frames(30)
-	expect(app:has('#control-board-done >> .orch-card-orchestrator >> "Tally"')).to_be(true)
-	expect(app:has("#control-board-done >> .orch-card-project")).to_be(false)
+	expect(app:has('#control-board-done >> role:img "Tally"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -292,7 +292,6 @@ test("orch board: on an orchestrator's own page, no card says whose", function()
 	app:frames(30)
 	expect(app:has('#orch-page-board >> "Control room"')).to_be(true)
 	expect(app:has("#orch-page-board >> .orch-card-owner")).to_be(false)
-	expect(app:has("#orch-page-board >> .orch-card-orchestrator")).to_be(false)
 end)
 
 test("orch board: two orchestrators of one name, their chips say their projects", function()
@@ -311,20 +310,25 @@ test("orch board: two orchestrators of one name, their chips say their projects"
 	expect(app:has('.orch-board-filter >> .orch-filter-project >> "zeron"')).to_be(true)
 end)
 
-test("orch board: a card made from a dump's part shows that dump", function()
+test("orch board: a card made from a dump's part shows that dump from its menu", function()
 	local app = board()
-	expect(app:has(".orch-card-source")).to_be(false)
 	app:set_state("orch_board_items", {
 		{ id = "it-d", orchestrator_id = "orc-orch", title = "From what was said", state = "planned", priority = "normal", source = { dump_id = "dp-2", route_id = "rt-5" } },
 		{ id = "it-e", orchestrator_id = "orc-orch", title = "Made by hand", state = "planned", priority = "normal" },
 	})
 	app:frames(10)
-	expect(app:has('#orch-col-next >> role:button "From what was said" >> .orch-card-source')).to_be(true)
-	expect(app:has('#orch-col-next >> role:button "Made by hand" >> .orch-card-source')).to_be(false)
-	app:click('#orch-col-next >> role:button "From what was said" >> role:button "From a dump"')
-	app:frames(5)
+	-- No mark of it on the card: its menu says it.
+	expect(app:has(".orch-card-source")).to_be(false)
+	app:right_click('#orch-col-next >> role:button "Made by hand"')
+	app:frames(10)
+	expect(app:has('role:menuitem "Show dump"')).to_be(false)
+	app:key("Escape")
+	app:frames(10)
+	app:right_click('#orch-col-next >> role:button "From what was said"')
+	app:frames(10)
+	app:click('role:menuitem "Show dump"')
+	app:frames(10)
 	expect(app:state("calls")).to_contain("source:dp-2")
-	-- (Its own click, not the card's: no thread opened.)
 	expect(app:state("calls")).never.to_contain("open:")
 end)
 
@@ -332,9 +336,10 @@ test("orch board: in the Control room, a card's dump is brought into view", func
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 2600)
 	app:frames(30)
-	-- The loose item the newest dump made, in the Inbox.
-	expect(app:has("#control-board-inbox >> .orch-card-source")).to_be(true)
-	app:click('#control-board-inbox >> role:button "From a dump"')
+	-- The loose item the newest dump made, in the Inbox: its menu's Show dump.
+	app:right_click("#control-board-inbox >> .orch-card")
+	app:frames(10)
+	app:click('role:menuitem "Show dump"')
 	app:frames(10)
 	expect(app:error()).to_be_nil()
 end)
@@ -402,4 +407,94 @@ test("orch board: Delete takes a card off the board at once, Undo puts it back",
 	expect(app:state("calls")).to_contain("restore:it-phase2:Phase 2 migration")
 	expect(app:has('#orch-col-next >> role:button "Phase 2 migration"')).to_be(true)
 	expect(app:error()).to_be_nil()
+end)
+
+-- The cards themselves (ui/orch_board_cards_fixture.luau): a title and one
+-- quiet line, the rest only where it says something.
+local function cards(): any
+	local app = mount("orch_board_cards_fixture.luau")
+	app:resize(1440, 900)
+	app:frames(20)
+	return app
+end
+local LEGACY = "Feature request for the Board: the person wants to delete a card from its menu, with an Undo beside it for a while"
+
+test("orch board cards: a long title is two lines at most", function()
+	local app = cards()
+	local _, _, _, h = box(app, `#cards-now >> role:button "{LEGACY}" >> .orch-card-title`)
+	expect(h > 14).to_be(true)
+	expect(h <= 34).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board cards: priority is a word on the quiet line, urgent and high alone", function()
+	local app = cards()
+	expect(app:has('#cards-now >> role:button "Fix slash menu in Codex chats" >> .orch-card-priority >> "Urgent"')).to_be(true)
+	expect(app:has('#cards-now >> role:button "Scroll position resets on live re-renders" >> .orch-card-priority >> "High"')).to_be(true)
+	expect(app:has('#cards-now >> role:button "Delete cards from the Board" >> .orch-card-priority')).to_be(false)
+	expect(app:has('#cards-next >> role:button "Phase 2 migration" >> .orch-card-priority')).to_be(false)
+end)
+
+test("orch board cards: progress only once a step is done, one clock", function()
+	local app = cards()
+	local scroll = '#cards-now >> role:button "Scroll position resets on live re-renders"'
+	expect(app:has(`{scroll} >> .orch-card-progress >> "3/7"`)).to_be(true)
+	-- 25 minutes at it.
+	expect(app:has(`{scroll} >> .orch-card-clock >> "25m"`)).to_be(true)
+	-- Nothing of its five steps done yet: no bar; stalled 15 minutes.
+	local slash = '#cards-now >> role:button "Fix slash menu in Codex chats"'
+	expect(app:has(`{slash} >> .orch-card-progress`)).to_be(false)
+	expect(app:has(`{slash} >> .orch-card-word >> "Stalled"`)).to_be(true)
+	expect(app:has(`{slash} >> .orch-card-clock >> "15m"`)).to_be(true)
+	-- No thread, no todo: whose it is alone.
+	expect(app:has('#cards-now >> role:button "Delete cards from the Board" >> .orch-card-clock')).to_be(false)
+	expect(app:has('#cards-now >> role:button "Delete cards from the Board" >> .orch-card-owner-name >> "Zeron fixes"')).to_be(true)
+	expect(app:has('#cards-now >> role:button "Fix slash menu in Codex chats" >> .orch-card-owner-name')).to_be(false)
+	-- Its own share, once there's some.
+	expect(app:has('#cards-next >> role:button "Write the mesh runbook" >> .orch-card-progress >> "40%"')).to_be(true)
+	-- Waiting on the person: how long since it moved.
+	expect(app:has('#cards-blocked >> role:button "Approve engine migration" >> .orch-card-word >> "Needs you"')).to_be(true)
+	expect(app:has('#cards-blocked >> role:button "Approve engine migration" >> .orch-card-clock >> "10m"')).to_be(true)
+	expect(app:has('#cards-blocked >> role:button "DNS failover between regions" >> .orch-card-word >> "Failed"')).to_be(true)
+	-- No old strip of its own clocks and menu.
+	expect(app:has(".orch-progress")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board cards: its menu shows where the pointer rests, and deletes", function()
+	local app = cards()
+	local card = '#cards-now >> role:button "Delete cards from the Board"'
+	expect(app:has(`{card} >> .orch-card-menu`)).to_be(false)
+	app:hover(card)
+	app:frames(10)
+	expect(app:has(`{card} >> .orch-card-menu`)).to_be(true)
+	app:click(`{card} >> .orch-card-menu`)
+	app:frames(10)
+	-- Its own press, not the card's: no thread opened, its menu open.
+	expect(app:state("calls")).never.to_contain("open:")
+	expect(app:has('role:menuitem "Move to"')).to_be(true)
+	app:click('role:menuitem "Delete"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("remove:it-delete")
+	expect(app:has(card)).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board cards: right-click Delete still takes a card off", function()
+	local app = cards()
+	app:right_click(`#cards-now >> role:button "{LEGACY}"`)
+	app:frames(10)
+	app:click('role:menuitem "Delete"')
+	app:frames(20)
+	expect(app:state("calls")).to_contain("remove:it-legacy")
+	expect(app:has(`#cards-now >> role:button "{LEGACY}"`)).to_be(false)
+	expect(app:has('"Deleted from the board"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board cards: a click opens its thread", function()
+	local app = cards()
+	app:click('#cards-now >> role:button "Scroll position resets on live re-renders"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open:th-scroll")
 end)

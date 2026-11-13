@@ -547,6 +547,7 @@ mod tests {
             target: RouteTarget::Orchestrator { id: "o1".into() },
             intent: RouteIntent::Task,
             message: excerpt.into(),
+            title: None,
             state: RouteState::Delivered,
             candidates: vec![],
             answer: None,

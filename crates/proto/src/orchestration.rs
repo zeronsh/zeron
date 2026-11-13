@@ -648,6 +648,11 @@ pub struct Route {
     /// What was sent to the target, rewritten for it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message: String,
+    /// For a task: its board card's title, a few words the Brain dump
+    /// names it with ("Delete cards from the Board"). `None` from an older
+    /// Brain dump: the card's title is made from `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub state: RouteState,
     /// For `Unsure`: the likely places, best first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1066,6 +1071,7 @@ pub mod role_prompts {
 - Route each to the existing orchestrator or thread that owns it. Only an owner of that very work counts; an old thread that merely shares a word doesn't.\n\
 - Bias to action: a task with no owner is a `newThread` in the project it is about (`world` lists projects: the one the text names, else the most recently active), with `project` set; it starts at once with your `message` as its first prompt. A new, lasting, multi-part area of work is a `newOrchestrator` in that project.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
+- Give every task a `title`: 3 to 6 words naming the work, as a board card would (\"Delete cards from the Board\", \"Fix slash menu in Codex chats\"); never the message's opening words.\n\
 - A task, priority or cancel for a crew thread goes to its orchestrator (`world` lists each crew thread under it, with its item): route it to the orchestrator, naming the thread in `message`. Zeron delivers it there whichever you pick. Info and questions may go to the thread itself.\n\
 - A question about how a thread's work is going (\"how's X going?\", \"progress on Y?\") is never the thread's to answer: call `progress` on it, then `route` it as a question to that thread with `progress: true`. Zeron answers it from the thread's progress and doesn't interrupt the thread.\n\
 - Use `unsure` only when two or more existing owners fit, with them as candidates; never because nothing exists. The person is asked where it goes.\n\
@@ -1678,6 +1684,9 @@ pub enum OrchestrateOp {
         intent: RouteIntent,
         #[serde(default)]
         message: String,
+        /// For a task: its board card's title, in a few words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         candidates: Vec<RouteTarget>,
         /// A question about how a thread's work is going ("how's X going?").

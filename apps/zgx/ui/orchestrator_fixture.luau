@@ -9,6 +9,8 @@
 --   orch.dark / orch.light      the theme
 --   orch.vpn                    Exnomic VPN's page instead
 --   orch.rich                   replies in its conversation too (markdown)
+--   orch.unknown / orch.known   orchestration as the host has it before its
+--                               first publish, and the sample again
 
 local shell = require("./shell_fixture")
 local sessions = require("@account/sessions")
@@ -192,6 +194,14 @@ ui.command { id = "orch.orch", title = "Orchestrators", run = function()
 end }
 ui.command { id = "orch.rich", title = "Replies too", run = function()
 	show(true)
+end }
+local published = orchestration.now:peek()
+ui.command { id = "orch.unknown", title = "Orchestration unknown", run = function()
+	published = orchestration.now:peek()
+	orchestration.now:set({ state = "loading", orchestrators = {}, crew = {}, items = {}, asks = {}, dumps = {} })
+end }
+ui.command { id = "orch.known", title = "Orchestration again", run = function()
+	orchestration.now:set(published)
 end }
 
 route.orchestrator("orc-orch")

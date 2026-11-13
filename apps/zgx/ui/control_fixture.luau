@@ -28,6 +28,14 @@ store.catalog:set({
 local route = require("@app/screens/shell/route")
 local shell = require("@app/screens/shell")
 local built = shell()
+-- Another page (Settings) opened from the page, and the Control room again
+-- (as Back takes it there).
+ui.command { id = "fixture.leave", title = "Fixture: open Settings", run = function()
+	route.settings()
+end }
+ui.command { id = "fixture.control", title = "Fixture: the Control room", run = function()
+	route.control()
+end }
 ui.after(0, function()
 	route.control()
 end)

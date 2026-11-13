@@ -37,6 +37,16 @@ pub(crate) fn card_title(message: &str) -> String {
     if title.is_empty() { "Untitled".into() } else { title }
 }
 
+/// A routed task's card title: the few words the Brain dump named it with,
+/// else (an older Brain dump, which named none) made from what it sent.
+/// The whole of what it sent stays the card's detail.
+pub(crate) fn route_card_title(route: &Route, sent: &str) -> String {
+    match route.title.as_deref().map(|t| one_line(t, TITLE_MAX)) {
+        Some(title) if !title.is_empty() => title,
+        _ => card_title(sent),
+    }
+}
+
 /// How urgent the wording says it is.
 pub(crate) fn priority_of(text: &str) -> Priority {
     let t = text.to_lowercase();
@@ -112,7 +122,7 @@ impl EngineRpc {
             Some(id) => Ok(id),
             None => orch.patch_item(WorkItemPatch {
                 orchestrator_id: Some(owner.clone()),
-                title: Some(card_title(sent)),
+                title: Some(route_card_title(route, sent)),
                 detail: Some(sent.trim().to_owned()),
                 state: Some(WorkState::Active),
                 priority: Some(priority_of(&format!("{} {sent}", route.excerpt))),
@@ -239,6 +249,21 @@ mod tests {
         assert_eq!(card_title("Fix the login — it 500s on Safari"), "Fix the login");
         assert_eq!(card_title(&"x".repeat(200)).chars().count(), TITLE_MAX);
         assert_eq!(card_title("   "), "Untitled");
+    }
+
+    #[test]
+    fn a_routed_card_takes_the_title_the_brain_dump_named() {
+        let sent = "Feature request for the Board: the person wants to delete a card from its menu, with an Undo";
+        let mut route: Route = serde_json::from_value(serde_json::json!({
+            "id": "r", "excerpt": "x", "target": { "kind": "chat", "id": "c" }, "intent": "task", "state": "delivered",
+            "message": sent, "title": "  Delete cards from the Board\n"
+        }))
+        .unwrap();
+        assert_eq!(route_card_title(&route, sent), "Delete cards from the Board");
+        route.title = Some("   ".into());
+        assert_eq!(route_card_title(&route, sent), card_title(sent), "a blank title falls back");
+        route.title = None;
+        assert_eq!(route_card_title(&route, sent), card_title(sent), "an older Brain dump named none");
     }
 
     #[test]

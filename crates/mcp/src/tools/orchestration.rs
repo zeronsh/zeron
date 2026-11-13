@@ -238,6 +238,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "target": target_schema("Where it goes."),
                     "intent": { "type": "string", "enum": ["task", "info", "question", "priority", "cancel", "note"] },
                     "message": s("What the target is sent."),
+                    "title": s("For a task: its board card's title, 3 to 6 words naming the work (\"Delete cards from the Board\"), never the message's opening words."),
                     "candidates": { "type": "array", "items": target_schema("A likely place."), "description": "For unsure: the likely places, best first." },
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "The dump's files this fragment is about (their paths or names, as the dump lists them). Omit to send all of them with a task or info, and none otherwise." },
                     "project": s("For newThread/newOrchestrator: the project it is about (id, name or path, from world)."),
@@ -362,6 +363,8 @@ struct RouteArgs {
     intent: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     candidates: Vec<RouteTarget>,
     #[serde(default)]
@@ -533,9 +536,14 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             if matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. } | RouteTarget::NewOrchestrator { .. } | RouteTarget::NewThread { .. }) && a.message.trim().is_empty() {
                 return Err("message is empty: say what the target should do".into());
             }
+            let title = a.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            let delivered = matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. } | RouteTarget::NewOrchestrator { .. } | RouteTarget::NewThread { .. });
+            if intent == RouteIntent::Task && delivered && title.is_none() {
+                return Err("title is empty: name the task in 3 to 6 words for its board card".into());
+            }
             Ok(json!({
                 "op": "route", "dumpId": nonempty("dump", &a.dump)?, "excerpt": nonempty("excerpt", &a.excerpt)?,
-                "target": a.target, "intent": intent, "message": a.message, "candidates": a.candidates,
+                "target": a.target, "intent": intent, "message": a.message, "title": title, "candidates": a.candidates,
                 "progress": a.progress, "attachments": a.attachments,
             }))
         }
@@ -1107,7 +1115,7 @@ mod tests {
         let route = |target: Value, candidates: Value| {
             op_for(
                 ROUTE,
-                json!({ "dump": "d", "excerpt": "x", "target": target, "intent": "task", "message": "do x", "candidates": candidates }),
+                json!({ "dump": "d", "excerpt": "x", "target": target, "intent": "task", "message": "do x", "title": "Do x", "candidates": candidates }),
                 &brain,
             )
         };
@@ -1262,11 +1270,19 @@ mod tests {
         let brain = Role::BrainDump { id: "b".into() };
         let route = op_for(
             ROUTE,
-            json!({ "dump": "d", "excerpt": "fix auth", "target": { "kind": "orchestrator", "id": "o" }, "intent": "task", "message": "Fix auth" }),
+            json!({ "dump": "d", "excerpt": "fix auth", "target": { "kind": "orchestrator", "id": "o" }, "intent": "task", "message": "Fix auth", "title": " Fix auth " }),
             &brain,
         )
         .unwrap();
         assert_eq!(route["target"], json!({ "kind": "orchestrator", "id": "o" }));
+        assert_eq!(route["title"], "Fix auth");
+        let untitled = op_for(
+            ROUTE,
+            json!({ "dump": "d", "excerpt": "fix auth", "target": { "kind": "orchestrator", "id": "o" }, "intent": "task", "message": "Fix auth" }),
+            &brain,
+        );
+        assert!(untitled.unwrap_err().contains("title"), "a task's card needs a short title");
+        assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "note" }, "intent": "note" }), &brain).is_ok(), "a note needs none");
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "chat" }, "intent": "task", "message": "m" }), &brain).is_err());
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "unsure" }, "intent": "task" }), &brain).is_err());
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "chat", "id": "c" }, "intent": "task" }), &brain).is_err());
