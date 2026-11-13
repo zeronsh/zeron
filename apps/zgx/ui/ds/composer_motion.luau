@@ -65,17 +65,17 @@ end
 
 -- Changes in natural content height at the viewport cap, or in hysteresis
 -- metadata, don't change the destination and must not restart a run.
-function M.same_destination(a: Layout.Geometry, b: Layout.Geometry): boolean
-	if a.width ~= b.width or a.height ~= b.height or a.mode ~= b.mode or a.expanded ~= b.expanded
+local function same_shape(a: Layout.Geometry, b: Layout.Geometry): boolean
+	if a.height ~= b.height or a.mode ~= b.mode or a.expanded ~= b.expanded
 		or a.header_height ~= b.header_height then
 		return false
 	end
-	for name, value in a.text do
-		if (b.text :: any)[name] ~= value then
+	for name, value in a.text :: { [string]: number } do
+		if name ~= "width" and (b.text :: any)[name] ~= value then
 			return false
 		end
 	end
-	for key, anchors in a.controls do
+	for key, anchors in a.controls :: { [string]: { [string]: number } } do
 		for name, value in anchors do
 			if (b.controls :: any)[key][name] ~= value then
 				return false
@@ -83,6 +83,10 @@ function M.same_destination(a: Layout.Geometry, b: Layout.Geometry): boolean
 		end
 	end
 	return true
+end
+
+function M.same_destination(a: Layout.Geometry, b: Layout.Geometry): boolean
+	return a.width == b.width and a.text.width == b.text.width and same_shape(a, b)
 end
 
 function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, settlement: ReadOnlyState<{ revision: number, status: string }>?)
@@ -119,7 +123,6 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, set
 	ui.effect(function()
 		local next = target:get()
 		local reduced = motion.reduced()
-		local measured = if settlement then settlement:get() else { revision = 0, status = "ready" }
 		if cancel_ack then cancel_ack(); cancel_ack = nil end
 		if snap then
 			local n = snap:get()
@@ -134,6 +137,7 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, set
 			return
 		end
 		if settling:peek() then
+			local measured = if settlement then settlement:get() else { revision = 0, status = "ready" }
 			settle(next)
 			if measured.status == "ready" then
 				local context, revision = snap_seen, measured.revision
@@ -152,7 +156,8 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, set
 			return
 		end
 		local shown = frame:peek()
-		if M.same_destination(shown, next) then
+		-- Layout already applies width; an otherwise unchanged frame needs no run.
+		if same_shape(shown, next) then
 			settle(next)
 			return
 		end

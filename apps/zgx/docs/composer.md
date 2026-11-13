@@ -77,7 +77,9 @@ next decision and target geometry together in a batch.
 ## Text metrics
 
 `Metrics.use { value, width, editor, keep? }` returns a computed `result` and
-creates no measurement nodes. The visible textarea supplies
+a read-only `sample` state, and creates no measurement nodes. Geometry follows
+the sample without subscribing to request/readiness-only changes. The visible
+textarea supplies
 `Element:text_metrics(content_width)` (Rust: `EditorHandle::text_metrics`).
 It uses the editor's plain/rich shaping, spans, fonts and fallback, includes a
 final empty line and displayed IME composition, and excludes placeholder,
@@ -97,8 +99,11 @@ next target geometry.
 | `sample.width`, `sample.revision` | Width and request generation represented by the complete sample. |
 
 Requests follow draft, width, theme and settled editor metrics, including
-uncommitted IME. Deferred publication checks request and editor revisions;
-replacement or unmount cancels obsolete callbacks. Width and height publish
+uncommitted IME. A width-only query publishes immediately when the mounted
+editor, draft, theme and native metric revision match the last acknowledged
+request. Mount generations distinguish editor replacement from fresh userdata
+wrappers. Other requests retain deferred publication, checking request and
+editor revisions; replacement or unmount cancels obsolete callbacks. Width and height publish
 together. Zero width of measured text is valid for an empty draft, not an
 initialization sentinel; an unknown/non-positive available width cannot
 publish a fresh sample.
@@ -118,10 +123,13 @@ metric revision. The API is supplied by the immutable ZGX revision pinned in
 ## Geometry transitions and context changes
 
 One controller keeps origin, destination and progress, with a 220 ms `out(3)`
-animation. Every view binding reads its complete presented snapshot. A changed
+animation. Every view binding derives from the same presented snapshot. A changed
 destination cancels the previous animation and starts from the geometry
 currently presented. An unchanged visual destination retains progress, even
-if natural height above the cap or other metadata changes.
+if natural height above the cap or other metadata changes. Width-only changes
+publish without starting an animation when height and anchors already match.
+View bindings share a projection of the complete presented snapshot, so changes
+to width or measurement metadata alone do not wake unchanged controls/insets.
 
 The vertical envelope and controls move together. During expansion, the editor
 keeps compact width until a complete line fits above both control groups, then

@@ -1639,7 +1639,9 @@ fn drag_script_of(fixture: &Path, panes_n: usize) -> u64 {
     app.frames(60);
     let calls = app.calls();
     drag_sidebar(&mut app, 120., |_| ());
-    (app.calls() - calls) / 20
+    let per_frame = (app.calls() - calls) / 20;
+    eprintln!("RESIZE-CALLS {panes_n} panes: {per_frame}");
+    per_frame
 }
 
 /// The sidebar's edge dragged, the sidebar's list isn't built again, and

@@ -248,3 +248,43 @@ fn composer_metrics_follow_styled_editor_and_uncommitted_ime_without_extra_nodes
     assert_eq!(editor.value().get(), "@mention hello\n");
     assert_eq!(editor_only(&mut app), node);
 }
+
+#[test]
+fn composer_metrics_acknowledge_width_only_queries_without_waiting_but_revalidate_content() {
+    let app = mount();
+    let mut previous = ready(&app);
+    for width in [240., 180., 360.] {
+        app.host
+            .set_state("fixture_metrics_width", Value::Num(width))
+            .unwrap();
+        let sample = ready(&app);
+        assert_eq!(number(&sample, "width"), width);
+        assert!(number(&sample, "revision") > number(&previous, "revision"));
+        previous = sample;
+    }
+    app.host
+        .set_state("fixture_metrics_text", Value::from("changed words"))
+        .unwrap();
+    app.host
+        .set_state("fixture_metrics_width", Value::Num(120.))
+        .unwrap();
+    assert_eq!(result(&app).field("status"), Some(&Value::from("stale")));
+    app.frames(3);
+    assert_eq!(number(&ready(&app), "width"), 120.);
+}
+
+#[test]
+fn composer_metrics_width_fast_path_cannot_reuse_an_editor_replaced_under_the_same_ref() {
+    let mut app = mount();
+    let original = editor_only(&mut app);
+    app.host
+        .set_state("fixture_metrics_editor", Value::Num(2.))
+        .unwrap();
+    app.host
+        .set_state("fixture_metrics_width", Value::Num(120.))
+        .unwrap();
+    assert_eq!(result(&app).field("status"), Some(&Value::from("stale")));
+    app.frames(3);
+    assert_ne!(editor_only(&mut app), original);
+    assert_eq!(number(&ready(&app), "width"), 120.);
+}

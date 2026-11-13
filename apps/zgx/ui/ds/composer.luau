@@ -59,6 +59,12 @@ local Layout = require("@self/composer_layout")
 local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
 
+type ViewGeometry = {
+	height: number, header_height: number, tray_inset: number,
+	text: { left: number, right: number, top: number, height: number },
+	controls: Layout.Controls,
+}
+
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
 export type Usage = context_usage.Usage
@@ -1150,7 +1156,7 @@ return ui.component(function(props: Props): Node
 		return {
 			width = pill_w:get(),
 			-- Retain the last complete sample while a request is stale.
-			sample = metrics.result:get().sample,
+			sample = metrics.sample:get(),
 			trailing_width = trailing_seen:get(),
 			control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),
 			header_height = head_h_seen:get(),
@@ -1179,10 +1185,19 @@ return ui.component(function(props: Props): Node
 	end)
 	local transition = ComposerMotion.use(target_geometry, props.snap, settlement)
 	local frame_geometry = transition.frame
+	-- Width is applied by layout, not a view binding. Project the presented
+	-- snapshot once so width/measurement metadata alone cannot wake every
+	-- height, inset and control binding in each split composer.
+	local view_geometry = ui.computed(function(): ViewGeometry
+		local g = frame_geometry:get()
+		return { height = g.height, header_height = g.header_height,
+			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = g.text.height },
+			controls = g.controls, tray_inset = g.tray_inset }
+	end)
 	-- Every binding reads the same frame snapshot; none starts an animation.
-	local function presented(select: (Layout.Geometry) -> number): () -> number
+	local function presented(select: (ViewGeometry) -> number): () -> number
 		return function(): number
-			return select(frame_geometry:get())
+			return select(view_geometry:get())
 		end
 	end
 
@@ -2171,7 +2186,7 @@ return ui.component(function(props: Props): Node
 				return if on_tray() then `${TRAY_GAP}` else 0
 			end :: any,
 			px = function(): any
-				return if on_tray() then ui.raw(frame_geometry:get().tray_inset, "the pill's controls' inset") else "$zeron.space.snug"
+				return if on_tray() then ui.raw(view_geometry:get().tray_inset, "the pill's controls' inset") else "$zeron.space.snug"
 			end :: any,
 			items = "center",
 			gap = "$space.1",

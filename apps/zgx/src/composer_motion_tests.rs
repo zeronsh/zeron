@@ -190,3 +190,30 @@ fn composer_transition_replaced_context_cannot_acknowledge_a_pending_revision() 
     assert_eq!(c.report().field("settling"), Some(&Value::Bool(false)));
     assert!(!c.app.clock.wants_frame());
 }
+
+#[test]
+fn composer_width_only_resize_publishes_the_frame_without_animating_and_preserves_height_motion() {
+    let mut c = Controller::new();
+    for height in [22., 132.] {
+        c.height(height);
+        c.frames(30);
+        for width in [620., 580., 660.] {
+            c.set("fixture_transition_width", Value::Num(width));
+            let report = c.report();
+            assert_eq!(report.field("active"), Some(&Value::Bool(false)));
+            assert_eq!(report.field("frame"), report.field("destination"));
+            assert_eq!(num(report.field("frame").unwrap(), "width"), width);
+            assert!(!c.app.clock.wants_frame());
+        }
+    }
+    c.height(500.);
+    c.frames(3);
+    let shown = c.report();
+    c.set("fixture_transition_width", Value::Num(600.));
+    let resized = c.report();
+    assert_eq!(resized.field("active"), Some(&Value::Bool(true)));
+    assert_eq!(resized.field("origin"), shown.field("frame"));
+    c.frames(30);
+    assert_eq!(c.report().field("frame"), c.report().field("destination"));
+    assert!(!c.app.clock.wants_frame());
+}

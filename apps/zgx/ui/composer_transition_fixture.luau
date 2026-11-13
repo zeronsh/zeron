@@ -3,6 +3,7 @@ local ds = require("@ds")
 local Layout = require("@ds/composer_layout")
 local Motion = require("@ds/composer_motion")
 ds.setup()
+local width = ui.state("fixture_transition_width", 660)
 local height = ui.state("fixture_transition_height", 22)
 local shown = ui.state("fixture_transition_shown", true)
 local snap = ui.state("fixture_transition_snap", 0)
@@ -14,7 +15,7 @@ end)
 local report = ui.state("fixture_transition_report", {} :: any)
 local target = ui.computed(function()
 	return Layout.calculate({
-		width = 660,
+		width = width:get(),
 		sample = { unwrapped_width = 40, wrapped_height = height:get(), line_height = 22 },
 		trailing_width = 64, control_corner = 25,
 		header_height = 0, header_gap = 12,
@@ -36,6 +37,6 @@ ui.command {
 local Controller = ui.component(function(): Node
 	last = Motion.use(target, snap, settlement)
 	local own = last
-	return ui.div { w = 660, h = function() return own.frame:get().height end }
+	return ui.div { w = width, h = function() return own.frame:get().height end }
 end)
 return ui.show(function() return shown:get() end, Controller {})

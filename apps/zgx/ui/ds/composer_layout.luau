@@ -26,6 +26,11 @@ export type Input = {
 	dictating: boolean,
 	multiline: boolean,
 }
+export type Controls = {
+	leading: { left: number, bottom: number, height: number },
+	trailing: { right: number, bottom: number, height: number },
+	voice: { left: number, right: number, bottom: number },
+}
 export type Geometry = {
 	width: number,
 	mode: "compact" | "expanded",
@@ -40,11 +45,7 @@ export type Geometry = {
 	compact_inset: number,
 	compact_text: { left: number, right: number },
 	text: { left: number, right: number, width: number, top: number, height: number },
-	controls: {
-		leading: { left: number, bottom: number, height: number },
-		trailing: { right: number, bottom: number, height: number },
-		voice: { left: number, right: number, bottom: number },
-	},
+	controls: Controls,
 }
 
 function M.measurement(width: number)
