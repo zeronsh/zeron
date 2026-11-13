@@ -92,13 +92,13 @@ export type Layout = {
 
 -- Polylines with their straight upright pieces cut where they cross a
 -- band (y ranges): what's left, as polylines. (Corners never sit in one.)
-local function cut(lines: { { number } }, bands: { { number } }): { { number } }
+local function cut(lines: { { number } }, bands: { { number } }, only_x: number?): { { number } }
 	local out: { { number } } = {}
 	for _, pts in lines do
 		local cur = { pts[1], pts[2] }
 		for i = 3, #pts - 1, 2 do
 			local x0, y0, x1, y1 = pts[i - 2], pts[i - 1], pts[i], pts[i + 1]
-			if x0 == x1 and y0 ~= y1 then
+			if x0 == x1 and y0 ~= y1 and (only_x == nil or math.abs(x0 - only_x) < 0.5) then
 				local dir = if y1 > y0 then 1 else -1
 				local hits = {}
 				for _, b in bands do
@@ -239,7 +239,9 @@ function M.layout(world: any, width: number): Layout
 	-- back in: every orchestrator keeps the same left edge as its peers.
 	local channels = 0
 	type Own = { mid: number, top: number, bottom: number, dot: boolean }
-	type Span = { o: string, x: number, dot: number, top: number, bottom: number, own: { Own }, crew: { Row }, passes: { { number } } }
+	-- `column`: a rail across machines keeps a gutter column of its own,
+	-- the whole way (0 till given); `hop` its step from its dot into it.
+	type Span = { o: string, x: number, dot: number, top: number, bottom: number, own: { Own }, crew: { Row }, passes: { { number } }, node: Row?, column: number?, hop: { number }? }
 	local spans: { Span } = {}
 	local span_of: { [string]: Span } = {}
 	for o, rows in by_orch do
@@ -262,9 +264,18 @@ function M.layout(world: any, width: number): Layout
 			end)
 			-- (No row of its own shown: the rail starts at its first crew row.)
 			local dot = if node then node.mid else crew[1].mid
-			local sp: Span = { o = o, x = 0, dot = dot, top = own[1].mid, bottom = own[#own].mid, own = own, crew = crew, passes = {} }
-			-- Between two of its rows with another's between them: a pass.
-			for i = 1, #own - 1 do
+			local lanes_of: { [string]: boolean } = {}
+			local n_lanes = 0
+			for _, r in rows do
+				if not lanes_of[r.lane] then
+					lanes_of[r.lane] = true
+					n_lanes += 1
+				end
+			end
+			local sp: Span = { o = o, x = 0, dot = dot, top = own[1].mid, bottom = own[#own].mid, own = own, crew = crew, passes = {}, node = node, column = if n_lanes > 1 then 0 else nil }
+			-- Between two of its rows with another's between them: a pass
+			-- (a rail with a column of its own needs none).
+			for i = 1, if sp.column then 0 else #own - 1 do
 				local a, b = own[i], own[i + 1]
 				for _, r in out.rows do
 					if r.orchestrator ~= o and r.mid > a.mid and r.mid < b.mid then
@@ -303,7 +314,27 @@ function M.layout(world: any, width: number): Layout
 		ends[k] = p[2]
 		p[3] = k
 	end
-	channels = #ends
+	-- The rails across machines first, leftmost the one starting highest:
+	-- each a column of its own; then the passes' channels after them.
+	local across: { Span } = {}
+	for _, sp in spans do
+		if sp.column then
+			table.insert(across, sp)
+		end
+	end
+	table.sort(across, function(a: Span, b: Span): boolean
+		if a.dot ~= b.dot then
+			return a.dot < b.dot
+		end
+		return a.o < b.o
+	end)
+	for i, sp in across do
+		sp.column = i
+	end
+	for _, p in all do
+		p[3] += #across
+	end
+	channels = #ends + #across
 	-- (The channels, then a little room before the rows.)
 	local base = INSET + channels * CHANNEL
 	out.content_x = base
@@ -331,7 +362,31 @@ function M.layout(world: any, width: number): Layout
 			pass_at[p[1]] = p
 		end
 		local head, tail = sp.own[1], sp.own[#sp.own]
-		for i = 1, #sp.own - 1 do
+		local col = sp.column
+		if col then
+			-- Its column, the whole way; from its dot a hop left into it.
+			local cx = INSET + (channels - col) * CHANNEL + CHANNEL / 2 - 4
+			x = cx
+			sp.x = cx
+			local lo, hi = head.mid + CORNER, tail.mid - CORNER
+			if sp.node then
+				local node = sp.node :: Row
+				local yh = node.y + node.h - 3
+				local dx = base + DOT
+				table.insert(paths, { dx, node.mid + clear, dx, yh - CORNER, dx, yh, dx - CORNER, yh, cx + CORNER, yh, cx, yh, cx, yh + CORNER })
+				sp.hop = { yh, cx, dx }
+				-- (Down from the hop, and up too if crew sit above it.)
+				if hi > yh + CORNER then
+					table.insert(paths, { cx, yh + CORNER, cx, hi })
+				end
+				if head.mid < node.mid then
+					table.insert(paths, { cx, yh - 0.01, cx, head.mid + CORNER })
+				end
+			elseif hi > lo then
+				table.insert(paths, { cx, lo, cx, hi })
+			end
+		end
+		for i = 1, if col then 0 else #sp.own - 1 do
 			local a, b = sp.own[i], sp.own[i + 1]
 			local y1 = if a.dot then a.mid + clear else a.mid
 			local y2 = if b.dot then b.mid - clear else b.mid
@@ -378,6 +433,26 @@ function M.layout(world: any, width: number): Layout
 			runs = paths,
 			dashed = o.kind == "brain_dump",
 		})
+	end
+
+	-- Where an elbow (or a rail's hop from its dot) passes over another
+	-- rail's column, that rail breaks round it: a hop, never a crossing.
+	for _, a in out.rails do
+		local overs: { { number } } = {}
+		for _, b in a.branches do
+			table.insert(overs, { b.y, a.x, b.to })
+		end
+		local sp = span_of[a.orchestrator]
+		if sp and sp.hop then
+			table.insert(overs, sp.hop :: { number })
+		end
+		for _, o in overs do
+			for _, other in out.rails do
+				if other ~= a and other.x > math.min(o[2], o[3]) + 0.5 and other.x < math.max(o[2], o[3]) - 0.5 then
+					other.runs = cut(other.runs, { { o[1] - 4, o[1] + 4 } }, other.x)
+				end
+			end
+		end
 	end
 
 	-- A project's name, and a machine's word that nothing runs there: where
