@@ -246,6 +246,8 @@ mod tests {
             answer: None,
             created_at: Utc::now(),
             answered_at: None,
+            dump_id: None,
+            route_id: None,
         }
     }
 

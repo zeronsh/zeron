@@ -549,6 +549,8 @@ mod tests {
             answer: None,
             answer_full: None,
             item_id: None,
+            space_id: None,
+            device_id: None,
         }
     }
 
@@ -597,6 +599,8 @@ mod tests {
             answer: None,
             created_at: ts(1_600),
             answered_at: None,
+            dump_id: None,
+            route_id: None,
         };
         doc.upsert_ask(&ask);
         let mut d = dump("d1");

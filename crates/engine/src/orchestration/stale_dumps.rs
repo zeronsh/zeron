@@ -86,6 +86,8 @@ pub(crate) fn settle(dump: &Dump, candidates: &[RouteTarget]) -> Option<Dump> {
             answer: None,
             answer_full: None,
             item_id: None,
+            space_id: None,
+            device_id: None,
         });
     }
     dump.state = super::brain::settled_state(&dump);
@@ -116,14 +118,28 @@ fn marker(dump_id: &str) -> String {
 }
 
 /// Settle `dump_id` if still routing. Whether it changed.
-fn settle_now(orchestration: &Orchestration, dump_id: &str) -> bool {
-    let candidates = candidates(orchestration);
+fn settle_now(orchestration: &Orchestration, rpc: &EngineRpc, dump_id: &str) -> bool {
+    let candidates = rpc.existing_candidates(candidates(orchestration));
+    let Some(dump) = orchestration.workspace().read_orchestration_with(|doc| doc.dump(dump_id)) else {
+        return false;
+    };
+    let Some(mut settled) = settle(&dump, &candidates) else { return false };
+    // Each part with no place asks the person where it goes.
+    let brain = rpc.brain_of(&dump);
+    let fresh: Vec<String> = settled.routes[dump.routes.len()..].iter().map(|r| r.id.clone()).collect();
+    for route_id in fresh {
+        let snapshot = settled.clone();
+        if let Some(route) = settled.routes.iter_mut().find(|r| r.id == route_id) {
+            rpc.ask_where(&snapshot, route, brain.as_deref());
+        }
+    }
     orchestration.workspace().write_orchestration(|doc| {
-        let Some(dump) = doc.dump(dump_id) else { return false };
-        let Some(settled) = settle(&dump, &candidates) else { return false };
-        doc.upsert_dump(&settled);
-        true
-    })
+        // Routed meanwhile: leave it be.
+        if doc.dump(dump_id).is_some_and(|d| d.state == DumpState::Routing) {
+            doc.upsert_dump(&settled);
+        }
+    });
+    true
 }
 
 /// The Brain dump `brain`'s turn ended: every dump it was given and has
@@ -146,7 +162,7 @@ pub(crate) fn after_turn(orchestration: &Orchestration, rpc: &EngineRpc, brain: 
     routing
         .iter()
         .filter(|d| super::watchers::reply_to(&entries, &marker(&d.id)).is_some())
-        .filter(|d| settle_now(orchestration, &d.id))
+        .filter(|d| settle_now(orchestration, rpc, &d.id))
         .map(|d| d.id.clone())
         .collect()
 }
@@ -193,7 +209,7 @@ pub(crate) fn sweep(orchestration: &Orchestration, rpc: &EngineRpc) -> Vec<Strin
             if queued.iter().any(|q| q.contains(&marker)) {
                 continue; // still on its way
             }
-            if settle_now(orchestration, &dump.id) {
+            if settle_now(orchestration, rpc, &dump.id) {
                 settled.push(dump.id.clone());
             }
         }
@@ -218,6 +234,8 @@ mod tests {
             answer: None,
             answer_full: None,
             item_id: None,
+            space_id: None,
+            device_id: None,
         }
     }
 

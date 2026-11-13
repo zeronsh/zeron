@@ -482,6 +482,11 @@ async fn a_dump_the_brain_dump_leaves_unrouted_needs_the_person() {
     assert_eq!(routes[0].target, RouteTarget::Unsure);
     assert_eq!(routes[0].excerpt, "add a -l alias");
     assert_eq!(routes[0].candidates, vec![RouteTarget::Orchestrator { id: ORCH.into() }]);
+    // And the person is asked where it goes.
+    let asks = core.workspace.read_orchestration_with(|d| d.read_asks());
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].route_id.as_deref(), Some(routes[0].id.as_str()));
+    assert_eq!(asks[0].options.last().unwrap().label, "New thread");
     core.shutdown().await;
 }
 
@@ -526,6 +531,124 @@ async fn every_kind_of_traffic_shows_in_comms() {
         assert!(kinds.contains(&kind), "{kind:?} missing from {kinds:?}");
     }
     let _ = prompts;
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+/// The Brain dump's chat id, once a dump made it.
+fn brain_of(core: &EngineCore) -> String {
+    use zeron_proto::orchestration::OrchestratorKind;
+    core.workspace
+        .read_orchestration_with(|d| d.read_orchestrators())
+        .into_iter()
+        .find(|o| o.kind == OrchestratorKind::BrainDump)
+        .unwrap()
+        .id
+}
+
+/// A `zeron` project on this device, and an older one.
+fn projects(core: &EngineCore) -> (String, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let zeron = dir.join("zeron");
+    let other = dir.join("tally");
+    std::fs::create_dir_all(&zeron).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    core.workspace
+        .create_space("space-tally", &core.device_id, other.to_str().unwrap(), Some("tally".into()), false)
+        .unwrap();
+    core.workspace
+        .create_space("space-zeron", &core.device_id, zeron.to_str().unwrap(), Some("zeron".into()), true)
+        .unwrap();
+    ("space-zeron".into(), zeron)
+}
+
+const DEVICES_TEXT: &str =
+    "make it so that there cant be 2 devices with same name in zeron, like device-1, device-2";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_with_no_owner_starts_a_thread_in_the_project_it_names() {
+    use zeron_proto::orchestration::{RouteState, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let (space, _) = projects(&core);
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let message = "Make device names unique: a second device with a taken name gets -1, -2… like files.";
+    // Even asked as unsure with nothing to pick between, it starts the work.
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(brain_of(&core)) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": DEVICES_TEXT, "target": { "kind": "unsure" },
+            "intent": "task", "message": message, "candidates": [{ "kind": "chat", "id": "an-old-thread" }] }),
+    )
+    .await;
+    let route = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.remove(0);
+    let RouteTarget::NewThread { id: thread } = route.target.clone() else {
+        panic!("not a new thread: {route:?}");
+    };
+    assert_eq!(route.state, RouteState::Delivered);
+    assert_eq!(route.space_id.as_deref(), Some(space.as_str()), "in the project the text names");
+    let chat = core.workspace.chat(&thread).unwrap().unwrap();
+    assert_eq!(chat.space_id.as_deref(), Some(space.as_str()));
+    assert_eq!(chat.device_id, core.device_id, "on that project's device");
+    assert!(chat.parent_chat_id.is_none(), "a standalone thread");
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains(message)), "its first prompt").await;
+    assert!(
+        core.workspace.read_orchestration_with(|d| d.read_asks()).is_empty(),
+        "nothing to ask: it just started"
+    );
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsure_between_owners_asks_and_the_answer_starts_the_work() {
+    use zeron_proto::orchestration::{AskKind, AskState, DumpState, RouteState, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let (space, _) = projects(&core);
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let route_id = call(
+        &rpc,
+        Caller::Agent { chat: Some(brain_of(&core)) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": DEVICES_TEXT, "target": { "kind": "unsure" },
+            "intent": "task", "message": "Make device names unique.",
+            "candidates": [{ "kind": "orchestrator", "id": ORCH }, { "kind": "chat", "id": CREW }, { "kind": "chat", "id": "gone" }] }),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let asks = core.workspace.read_orchestration_with(|d| d.read_asks());
+    assert_eq!(asks.len(), 1);
+    let ask = &asks[0];
+    assert_eq!(ask.kind, AskKind::Decision);
+    assert_eq!((ask.dump_id.as_deref(), ask.route_id.as_deref()), (Some(dump_id.as_str()), Some(route_id.as_str())));
+    assert!(ask.question.starts_with("Where should this go?"));
+    let labels: Vec<_> = ask.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Ops", CREW, "New thread in zeron"], "existing candidates only, then a new thread");
+    assert_eq!(
+        core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().state,
+        DumpState::NeedsYou
+    );
+
+    // The person picks the new thread: it starts in that project.
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "answerAsk", "id": ask.id, "answer": "New thread in zeron" })).await;
+    let route = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.remove(0);
+    let RouteTarget::NewThread { id: thread } = route.target.clone() else {
+        panic!("not moved to a new thread: {route:?}");
+    };
+    assert_eq!(route.state, RouteState::Delivered);
+    assert_eq!(core.workspace.chat(&thread).unwrap().unwrap().space_id.as_deref(), Some(space.as_str()));
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Make device names unique.")), "its first prompt").await;
+    assert_eq!(
+        core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().state,
+        DumpState::Routed
+    );
+    assert_eq!(core.workspace.read_orchestration_with(|d| d.ask(&ask.id)).unwrap().state, AskState::Answered);
     let _ = finish.send(());
     core.shutdown().await;
 }

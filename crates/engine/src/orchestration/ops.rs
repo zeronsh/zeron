@@ -310,6 +310,8 @@ impl EngineRpc {
                     answer: None,
                     created_at: now,
                     answered_at: None,
+                    dump_id: None,
+                    route_id: None,
                 };
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
@@ -334,6 +336,12 @@ impl EngineRpc {
                     doc.upsert_ask(&ask);
                     Ok(ask)
                 })?;
+                if ask.dump_id.is_some() {
+                    // "Where should this go?": the route moves to the pick.
+                    self.answer_where(&ask, &answer).await?;
+                    orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+                    return Ok(json!({ "id": id }));
+                }
                 // One line each: an ask's text can't pass for another message.
                 let text =
                     zeron_proto::orchestration::prompt_text::answer_delivery(&ask.question, &answer);
@@ -366,9 +374,11 @@ impl EngineRpc {
                 message,
                 candidates,
                 progress,
+                space_id,
+                device_id,
             } => {
                 let id = self
-                    .route(&dump_id, excerpt, target, intent, message, candidates, progress)
+                    .route(&dump_id, excerpt, target, intent, message, candidates, progress, space_id, device_id)
                     .await?;
                 Ok(json!({ "id": id }))
             }
