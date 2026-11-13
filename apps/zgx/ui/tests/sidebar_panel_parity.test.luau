@@ -1,7 +1,7 @@
 -- The panel home's side chats are drawn as the sidebar draws sessions, for
 -- every one of its view options: each option on and off, in both
 -- densities and each way of grouping, a side chat's row matches a sidebar
--- row with the same data (Tidy the tests: on this Mac, in Atlas, no
+-- row with the same data (Tidy the tests: on this computer, in Atlas, no
 -- branch), and its group's header matches the sidebar's: height, where
 -- its title starts (its mark, its project's tile, its tree's gutter), its
 -- second line's words, its header's tile. On the shell in
@@ -13,7 +13,10 @@ local KEY = "screens/shell/sidebar.luau::"
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
-	app:resize(1400, 1000)
+	-- (A panel's content an even width: its home, centred, then stands on
+	-- whole points. At an odd one it stands half a point over, and the
+	-- tree's whole points put a row's tile a point off the sidebar's.)
+	app:resize(1402, 1000)
 	app:frames(30)
 	app:command("side_chats")
 	app:frames(5)

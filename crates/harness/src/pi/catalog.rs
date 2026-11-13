@@ -33,6 +33,7 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
             )
             .await?;
         result.push(Model {
+            default: false,
             id: format!("{provider}/{id}"),
             label: model["name"].as_str().unwrap_or(id).into(),
             description: Some(provider.into()),

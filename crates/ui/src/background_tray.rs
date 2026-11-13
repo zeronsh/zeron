@@ -826,9 +826,11 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sleep: None,
         }
     }
 
@@ -869,6 +871,7 @@ mod tests {
                 terminal_activity: None,
                 running_subagents: 0,
                 background_tasks: tasks,
+                waiting: None,
             }];
             state.selected_chat = Some(chat_id.into());
         });

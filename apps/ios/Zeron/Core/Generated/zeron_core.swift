@@ -1142,6 +1142,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func onBackground() 
     
     /**
+     * Still backgrounded after any delivery's had its time, where the OS doesn't
+     * suspend the process: every socket closes until `on_foreground`.
+     */
+    func onBackgroundIdle() 
+    
+    /**
      * App returned to the foreground: resume, redial/probe rooms.
      */
     func onForeground() 
@@ -1232,6 +1238,18 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Stop all background work (sign-out). Snapshots stay readable.
      */
     func shutdown() 
+    
+    /**
+     * Put a chat to sleep until `until_ms` (the Activity view's Asleep),
+     * or wake it now (`None`). Synced: every device shows it asleep.
+     */
+    func sleepSession(chatId: String, untilMs: Int64?) throws 
+    
+    /**
+     * Stop waiting on the background processes a chat's agent said it
+     * waits on (asked of its host). `false` when it no longer was.
+     */
+    func stopWaiting(chatId: String) async throws  -> Bool
     
     /**
      * `git checkout <ref>` in `repo_path` on the device.
@@ -1861,6 +1879,18 @@ open func onBackground()  {try! rustCall() {
 }
     
     /**
+     * Still backgrounded after any delivery's had its time, where the OS doesn't
+     * suspend the process: every socket closes until `on_foreground`.
+     */
+open func onBackgroundIdle()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_on_background_idle(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * App returned to the foreground: resume, redial/probe rooms.
      */
 open func onForeground()  {try! rustCall() {
@@ -2160,6 +2190,40 @@ open func shutdown()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Put a chat to sleep until `until_ms` (the Activity view's Asleep),
+     * or wake it now (`None`). Synced: every device shows it asleep.
+     */
+open func sleepSession(chatId: String, untilMs: Int64?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_sleep_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),
+        FfiConverterOptionInt64.lower(untilMs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Stop waiting on the background processes a chat's agent said it
+     * waits on (asked of its host). `false` when it no longer was.
+     */
+open func stopWaiting(chatId: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_stop_waiting(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_i8,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_i8,
+            freeFunc: ffi_zeron_mobile_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -3985,6 +4049,12 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
     func deliverQueuedNow(id: String) async throws  -> Bool
     
     /**
+     * Dismiss the restored-from-server note (for every chat on the machine,
+     * until it is rebuilt again).
+     */
+    func dismissRestoredNote() 
+    
+    /**
      * Park a message on the shared queue directly. Returns the row id.
      */
     func enqueue(text: String, attachments: [String], holdForTurnEnd: Bool) throws  -> String
@@ -4014,6 +4084,12 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      * Remove a queued row (applied locally after the host acks).
      */
     func removeQueued(id: String) async throws  -> Bool
+    
+    /**
+     * Remove a pending send that's `removable`: it never goes out. `false`
+     * when it already went.
+     */
+    func removeSend(messageId: String) throws  -> Bool
     
     func renewQueuedEdit(lease: QueueEditLease) async  -> Bool
     
@@ -4178,6 +4254,18 @@ open func deliverQueuedNow(id: String)async throws  -> Bool  {
 }
     
     /**
+     * Dismiss the restored-from-server note (for every chat on the machine,
+     * until it is rebuilt again).
+     */
+open func dismissRestoredNote()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_dismiss_restored_note(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Park a message on the shared queue directly. Returns the row id.
      */
 open func enqueue(text: String, attachments: [String], holdForTurnEnd: Bool)throws  -> String  {
@@ -4283,6 +4371,20 @@ open func removeQueued(id: String)async throws  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+    /**
+     * Remove a pending send that's `removable`: it never goes out. `false`
+     * when it already went.
+     */
+open func removeSend(messageId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_remove_send(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),uniffiCallStatus
+    )
+})
 }
     
 open func renewQueuedEdit(lease: QueueEditLease)async  -> Bool  {
@@ -8061,6 +8163,10 @@ public struct ComposerState: Equatable, Hashable {
      */
     public var lastSubmittedMessageId: String?
     public var contextUsage: ContextUsage?
+    /**
+     * What to show in place of an empty transcript, if anything.
+     */
+    public var transcriptLoad: TranscriptLoad
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8088,7 +8194,10 @@ public struct ComposerState: Equatable, Hashable {
          */queueError: String?, 
         /**
          * Scroll-to-own-send target.
-         */lastSubmittedMessageId: String?, contextUsage: ContextUsage?) {
+         */lastSubmittedMessageId: String?, contextUsage: ContextUsage?, 
+        /**
+         * What to show in place of an empty transcript, if anything.
+         */transcriptLoad: TranscriptLoad) {
         self.chatId = chatId
         self.revision = revision
         self.title = title
@@ -8104,6 +8213,7 @@ public struct ComposerState: Equatable, Hashable {
         self.queueError = queueError
         self.lastSubmittedMessageId = lastSubmittedMessageId
         self.contextUsage = contextUsage
+        self.transcriptLoad = transcriptLoad
     }
 
     
@@ -8136,7 +8246,8 @@ public struct FfiConverterTypeComposerState: FfiConverterRustBuffer {
                 openInput: FfiConverterOptionTypeInputRequest.read(from: &buf), 
                 queueError: FfiConverterOptionString.read(from: &buf), 
                 lastSubmittedMessageId: FfiConverterOptionString.read(from: &buf), 
-                contextUsage: FfiConverterOptionTypeContextUsage.read(from: &buf)
+                contextUsage: FfiConverterOptionTypeContextUsage.read(from: &buf), 
+                transcriptLoad: FfiConverterTypeTranscriptLoad.read(from: &buf)
         )
     }
 
@@ -8156,6 +8267,7 @@ public struct FfiConverterTypeComposerState: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.queueError, into: &buf)
         FfiConverterOptionString.write(value.lastSubmittedMessageId, into: &buf)
         FfiConverterOptionTypeContextUsage.write(value.contextUsage, into: &buf)
+        FfiConverterTypeTranscriptLoad.write(value.transcriptLoad, into: &buf)
     }
 }
 
@@ -8335,6 +8447,11 @@ public struct CoreConfig: Equatable, Hashable {
      */
     public var platform: String
     public var appVersion: String
+    /**
+     * Run the relay layer (docs/design/relay-mobile.md). Off, this device sends what
+     * a shipped phone does, and holds its account's chats on stored rows.
+     */
+    public var relayLayer: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8354,13 +8471,18 @@ public struct CoreConfig: Equatable, Hashable {
          */deviceName: String, 
         /**
          * `ios` / `android`.
-         */platform: String, appVersion: String) {
+         */platform: String, appVersion: String, 
+        /**
+         * Run the relay layer (docs/design/relay-mobile.md). Off, this device sends what
+         * a shipped phone does, and holds its account's chats on stored rows.
+         */relayLayer: Bool = false) {
         self.edgeUrl = edgeUrl
         self.dataDir = dataDir
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.platform = platform
         self.appVersion = appVersion
+        self.relayLayer = relayLayer
     }
 
     
@@ -8384,7 +8506,8 @@ public struct FfiConverterTypeCoreConfig: FfiConverterRustBuffer {
                 deviceId: FfiConverterString.read(from: &buf), 
                 deviceName: FfiConverterString.read(from: &buf), 
                 platform: FfiConverterString.read(from: &buf), 
-                appVersion: FfiConverterString.read(from: &buf)
+                appVersion: FfiConverterString.read(from: &buf), 
+                relayLayer: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8395,6 +8518,7 @@ public struct FfiConverterTypeCoreConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.deviceName, into: &buf)
         FfiConverterString.write(value.platform, into: &buf)
         FfiConverterString.write(value.appVersion, into: &buf)
+        FfiConverterBool.write(value.relayLayer, into: &buf)
     }
 }
 
@@ -10738,6 +10862,11 @@ public struct PendingSend: Equatable, Hashable {
     public var kind: PendingKind
     public var sentAtMs: Int64
     public var state: SendState
+    /**
+     * Still on this device, failed or uploading: Remove applies
+     * (`SessionHandle::remove_send`), and it then never goes out.
+     */
+    public var removable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10747,7 +10876,11 @@ public struct PendingSend: Equatable, Hashable {
          */messageId: String, 
         /**
          * Raw content (attachment trailer included).
-         */text: String, visibleText: String, images: [String], kind: PendingKind, sentAtMs: Int64, state: SendState) {
+         */text: String, visibleText: String, images: [String], kind: PendingKind, sentAtMs: Int64, state: SendState, 
+        /**
+         * Still on this device, failed or uploading: Remove applies
+         * (`SessionHandle::remove_send`), and it then never goes out.
+         */removable: Bool) {
         self.messageId = messageId
         self.text = text
         self.visibleText = visibleText
@@ -10755,6 +10888,7 @@ public struct PendingSend: Equatable, Hashable {
         self.kind = kind
         self.sentAtMs = sentAtMs
         self.state = state
+        self.removable = removable
     }
 
     
@@ -10779,7 +10913,8 @@ public struct FfiConverterTypePendingSend: FfiConverterRustBuffer {
                 images: FfiConverterSequenceString.read(from: &buf), 
                 kind: FfiConverterTypePendingKind.read(from: &buf), 
                 sentAtMs: FfiConverterInt64.read(from: &buf), 
-                state: FfiConverterTypeSendState.read(from: &buf)
+                state: FfiConverterTypeSendState.read(from: &buf), 
+                removable: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -10791,6 +10926,7 @@ public struct FfiConverterTypePendingSend: FfiConverterRustBuffer {
         FfiConverterTypePendingKind.write(value.kind, into: &buf)
         FfiConverterInt64.write(value.sentAtMs, into: &buf)
         FfiConverterTypeSendState.write(value.state, into: &buf)
+        FfiConverterBool.write(value.removable, into: &buf)
     }
 }
 
@@ -12179,6 +12315,20 @@ public struct SessionRow: Equatable, Hashable {
      * 2 = chat2; 1 = legacy (not dialable).
      */
     public var roomGen: UInt32
+    /**
+     * Asleep until then (ms; the Activity view's Asleep). `None` when
+     * awake or woken.
+     */
+    public var sleepUntilMs: Int64?
+    /**
+     * Woke from sleep then (ms) and not seen since.
+     */
+    public var wokeAtMs: Int64?
+    /**
+     * Waiting on a background process its agent said it waits on: the
+     * person may stop waiting (`CoreClient::stop_waiting`).
+     */
+    public var waitsOnProcess: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -12218,7 +12368,18 @@ public struct SessionRow: Equatable, Hashable {
          */sendState: SendState?, parentChatId: String?, 
         /**
          * 2 = chat2; 1 = legacy (not dialable).
-         */roomGen: UInt32) {
+         */roomGen: UInt32, 
+        /**
+         * Asleep until then (ms; the Activity view's Asleep). `None` when
+         * awake or woken.
+         */sleepUntilMs: Int64?, 
+        /**
+         * Woke from sleep then (ms) and not seen since.
+         */wokeAtMs: Int64?, 
+        /**
+         * Waiting on a background process its agent said it waits on: the
+         * person may stop waiting (`CoreClient::stop_waiting`).
+         */waitsOnProcess: Bool) {
         self.id = id
         self.revision = revision
         self.title = title
@@ -12250,6 +12411,9 @@ public struct SessionRow: Equatable, Hashable {
         self.sendState = sendState
         self.parentChatId = parentChatId
         self.roomGen = roomGen
+        self.sleepUntilMs = sleepUntilMs
+        self.wokeAtMs = wokeAtMs
+        self.waitsOnProcess = waitsOnProcess
     }
 
     
@@ -12298,7 +12462,10 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
-                roomGen: FfiConverterUInt32.read(from: &buf)
+                roomGen: FfiConverterUInt32.read(from: &buf), 
+                sleepUntilMs: FfiConverterOptionInt64.read(from: &buf), 
+                wokeAtMs: FfiConverterOptionInt64.read(from: &buf), 
+                waitsOnProcess: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -12334,6 +12501,9 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
+        FfiConverterOptionInt64.write(value.sleepUntilMs, into: &buf)
+        FfiConverterOptionInt64.write(value.wokeAtMs, into: &buf)
+        FfiConverterBool.write(value.waitsOnProcess, into: &buf)
     }
 }
 
@@ -13217,6 +13387,12 @@ public struct TranscriptStatus: Equatable, Hashable {
      * Id of the newest entry (host or echo).
      */
     public var lastEntryId: String?
+    /**
+     * The chat's Cloud machine rebuilt its chat store from the server copy
+     * at this Unix ms: show a quiet note ("This chat was restored from its
+     * server copy") until [`SessionHandle::dismiss_restored_note`].
+     */
+    public var restoredAtMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -13229,7 +13405,12 @@ public struct TranscriptStatus: Equatable, Hashable {
          */entryCount: UInt32, pendingCount: UInt32, streaming: Bool, working: Bool, workingSinceMs: Int64?, 
         /**
          * Id of the newest entry (host or echo).
-         */lastEntryId: String?) {
+         */lastEntryId: String?, 
+        /**
+         * The chat's Cloud machine rebuilt its chat store from the server copy
+         * at this Unix ms: show a quiet note ("This chat was restored from its
+         * server copy") until [`SessionHandle::dismiss_restored_note`].
+         */restoredAtMs: Int64?) {
         self.revision = revision
         self.hydrated = hydrated
         self.entryCount = entryCount
@@ -13238,6 +13419,7 @@ public struct TranscriptStatus: Equatable, Hashable {
         self.working = working
         self.workingSinceMs = workingSinceMs
         self.lastEntryId = lastEntryId
+        self.restoredAtMs = restoredAtMs
     }
 
     
@@ -13263,7 +13445,8 @@ public struct FfiConverterTypeTranscriptStatus: FfiConverterRustBuffer {
                 streaming: FfiConverterBool.read(from: &buf), 
                 working: FfiConverterBool.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
-                lastEntryId: FfiConverterOptionString.read(from: &buf)
+                lastEntryId: FfiConverterOptionString.read(from: &buf), 
+                restoredAtMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -13276,6 +13459,7 @@ public struct FfiConverterTypeTranscriptStatus: FfiConverterRustBuffer {
         FfiConverterBool.write(value.working, into: &buf)
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
         FfiConverterOptionString.write(value.lastEntryId, into: &buf)
+        FfiConverterOptionInt64.write(value.restoredAtMs, into: &buf)
     }
 }
 
@@ -14768,6 +14952,11 @@ public enum ChatIndicator: Equatable, Hashable {
     
     case working
     case awaitingInput
+    /**
+     * Its turn ended, and the agent waits on background work that will
+     * wake it: under way, never "done". Drawn as Working.
+     */
+    case waiting
     case errored
     /**
      * Finished but not seen yet on any device.
@@ -14799,11 +14988,13 @@ public struct FfiConverterTypeChatIndicator: FfiConverterRustBuffer {
         
         case 2: return .awaitingInput
         
-        case 3: return .errored
+        case 3: return .waiting
         
-        case 4: return .completed
+        case 4: return .errored
         
-        case 5: return .idle
+        case 5: return .completed
+        
+        case 6: return .idle
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -14821,16 +15012,20 @@ public struct FfiConverterTypeChatIndicator: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
         
         
-        case .errored:
+        case .waiting:
             writeInt(&buf, Int32(3))
         
         
-        case .completed:
+        case .errored:
             writeInt(&buf, Int32(4))
         
         
-        case .idle:
+        case .completed:
             writeInt(&buf, Int32(5))
+        
+        
+        case .idle:
+            writeInt(&buf, Int32(6))
         
         }
     }
@@ -18141,6 +18336,113 @@ public func FfiConverterTypeTerminalPhase_lift(_ buf: RustBuffer) throws -> Term
 #endif
 public func FfiConverterTypeTerminalPhase_lower(_ value: TerminalPhase) -> RustBuffer {
     return FfiConverterTypeTerminalPhase.lower(value)
+}
+
+
+
+/**
+ * Why a transcript with nothing in it has nothing in it. Anything stored on this
+ * device always shows, so this is only about a chat it has never loaded.
+ */
+
+public enum TranscriptLoad: Equatable, Hashable {
+    
+    /**
+     * Show the transcript: it has content, or the chat really is empty.
+     */
+    case ready
+    /**
+     * "Syncing…"
+     */
+    case syncing
+    /**
+     * "Reconnecting…"
+     */
+    case reconnecting
+    /**
+     * "Offline — this chat loads when you're back online". No spinner.
+     */
+    case offline
+    /**
+     * "This chat lives on another device — it loads when that device is back
+     * online". No spinner: nothing is lost, and nothing's happening here.
+     */
+    case hostAway
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TranscriptLoad: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTranscriptLoad: FfiConverterRustBuffer {
+    typealias SwiftType = TranscriptLoad
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TranscriptLoad {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ready
+        
+        case 2: return .syncing
+        
+        case 3: return .reconnecting
+        
+        case 4: return .offline
+        
+        case 5: return .hostAway
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TranscriptLoad, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .ready:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .syncing:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .reconnecting:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .offline:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .hostAway:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptLoad_lift(_ buf: RustBuffer) throws -> TranscriptLoad {
+    return try FfiConverterTypeTranscriptLoad.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptLoad_lower(_ value: TranscriptLoad) -> RustBuffer {
+    return FfiConverterTypeTranscriptLoad.lower(value)
 }
 
 
@@ -21919,6 +22221,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_on_background() != 34188) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_on_background_idle() != 33519) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_on_foreground() != 37345) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21992,6 +22297,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_shutdown() != 4352) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_sleep_session() != 47154) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_stop_waiting() != 28732) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_switch_ref() != 45706) {
@@ -22153,6 +22464,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_deliver_queued_now() != 65003) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_dismiss_restored_note() != 26740) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_enqueue() != 37832) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -22175,6 +22489,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_remove_queued() != 25599) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_remove_send() != 18915) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_renew_queued_edit() != 7655) {

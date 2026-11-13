@@ -135,6 +135,28 @@ test("a thought being written folds to its first lines, as a settled one does", 
 	expect(app:error()).to_be(nil)
 end)
 
+-- Its words as they arrive reach the row by the draft alone, its own words
+-- left to catch up when it's written (src/chat.rs `with_thought`).
+test("a thought being written shows its words as they arrive", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("go_s2")
+	settle(app)
+	app:command("thinking_turn")
+	settle(app)
+	expect(app:has('~"Then the host."')).to_be(false)
+	app:command("thought_streams")
+	settle(app)
+	expect(app:has('~"Weighing the parser first. Then the host."')).to_be(true)
+	-- Written: the row has them, the draft has let them go.
+	app:command("thought_written")
+	settle(app)
+	app:click('role:button ~"Thought process"')
+	settle(app)
+	expect(app:has('~"Weighing the parser first. Then the host."')).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
 test("a thought that fits shows no button", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)

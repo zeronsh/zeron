@@ -13,6 +13,7 @@
 -- page, plain on the page.
 
 local Button = require("@self/button")
+local material = require("@self/material")
 local IconButton = require("@self/icon_button").IconButton
 local Icon = require("@self/icon")
 local TextArea = require("@self/text_area")
@@ -24,7 +25,8 @@ local M = {}
 
 export type Comment = {
 	author: people.Who,
-	at: number,
+	-- When it was said; none for a draft not sent yet (the code editor's).
+	at: number?,
 	body: string,
 	-- A badge after the time (a review's verdict, "Author", "Pending").
 	badge: Node?,
@@ -139,7 +141,7 @@ M.CommentCard = ui.component(function(props: Comment & { on_edit: (() -> ())?, o
 				gap = "$space.2",
 				items = "center",
 				people.name(props.author, "$font.size.md"),
-				people.Timestamp { at = props.at },
+				if props.at then people.Timestamp { at = props.at } else nil,
 				if props.edited then ui.text { "· edited", shrink = 0, text_size = "$font.size.sm", color = "$text.tertiary" } else nil,
 				props.badge,
 			},
@@ -244,7 +246,7 @@ M.ReplyComposer = ui.component(function(props: ComposerProps): Node
 				ui.row {
 					gap = "$space.2",
 					items = "center",
-					ui.text { locale.t("ds.comment.send_hint"), grow = 1, text_size = "$font.size.xs", color = "$text.tertiary" },
+					ui.text { locale.t("ds.comment.send_hint", { key = ui.shortcut_text("cmd+enter") }), grow = 1, text_size = "$font.size.xs", color = "$text.tertiary" },
 					Button { locale.t("common.cancel"), tone = "ghost", size = "sm", on_click = cancel },
 					if props.secondary then Button { props.secondary.label, tone = "secondary", size = "sm", on_click = props.secondary.on_click } else nil,
 					Button {
@@ -266,7 +268,7 @@ M.ReplyComposer = ui.component(function(props: ComposerProps): Node
 				items = "center",
 				rounded = "$radius.lg",
 				border = 1,
-				bg = "$zeron.field.bg",
+				bg = material.pick("$zeron.field.glass", "$zeron.field.bg"),
 				border_color = "$zeron.field.edge",
 				role = "button",
 				label = props.placeholder or locale.t("ds.comment.reply"),
@@ -381,7 +383,7 @@ function M.Thread(props: ThreadProps): Node
 		gap = "$space.4",
 		p = if props.card then "$space.4" else nil,
 		rounded = if props.card then "$radius.xl" else nil,
-		bg = if props.card then "$zeron.settings.card" else nil,
+		bg = if props.card then material.pick("$zeron.settings.comment", "$zeron.settings.card") else nil,
 		border = if props.card then 1 else nil,
 		border_color = if props.card then "$zeron.settings.edge" else nil,
 		head,

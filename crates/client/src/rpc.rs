@@ -21,6 +21,9 @@ pub mod capability {
     /// The host can move a chat to another provider between turns.
     pub const PROVIDER_SWITCH_V1: &str = zeron_proto::capabilities::PROVIDER_SWITCH_V1;
 
+    /// The host fetches attachment bytes from the edge's store.
+    pub const ATTACHMENT_STORE_V1: &str = zeron_proto::capabilities::ATTACHMENT_STORE_V1;
+
     /// Every queue capability (demo hosts advertise the full surface).
     pub const ALL_QUEUE: &[&str] = &[
         MESSAGE_QUEUE_V1,

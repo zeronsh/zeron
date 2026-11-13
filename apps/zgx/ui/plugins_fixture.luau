@@ -68,12 +68,33 @@ local function publish()
 	})
 end
 
+-- The engine answering `setup_incomplete` (the account's setup isn't
+-- finished: no organization chosen), as the host says it; then set up,
+-- the list arriving.
+ui.command {
+	id = "setup_incomplete",
+	title = "Fixture: the account's setup isn't finished",
+	run = function()
+		state.now:set({ state = "setup", list = {} } :: any)
+	end,
+}
+ui.command { id = "set_up", title = "Fixture: setup finished", run = publish }
+
 -- What the page asks, answered here.
 local said: { string } = {}
 local calls = ui.state("calls", "")
 local function note(what: string)
 	table.insert(said, what)
 	calls:set(table.concat(said, ","))
+end
+-- What a toast says, noted (there's no toast host here).
+local stub_toast = ds.toast :: any
+local shown_toast = stub_toast.show
+stub_toast.show = function(t: any): any
+	if type(t.body) == "string" then
+		note(`toast:{t.body}`)
+	end
+	return shown_toast(t)
 end
 local stub = state :: any
 stub.review = function(id: string)
@@ -141,7 +162,7 @@ ui.command {
 		local p = open_install
 		open_install = nil
 		if p then
-			p.err({ message = "That release has no .zeron-plugin file" })
+			p.err({ message = "rate_limited: GitHub is turning away requests from this device for now" })
 		end
 	end,
 }
@@ -261,7 +282,7 @@ ui.command {
 	title = "A newer Focus is found, signed by someone else",
 	run = function()
 		local f: any = find("focus")
-		f.update = { version = "6.6.6", added = {}, removed = {}, refused = "The new version is signed by someone else, so it won't be installed" }
+		f.update = { version = "6.6.6", added = {}, removed = {}, refused = "new_signer: The new version is signed by someone else, so it won't be installed" }
 		publish()
 	end,
 }

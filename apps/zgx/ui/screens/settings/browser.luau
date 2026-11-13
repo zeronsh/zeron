@@ -152,7 +152,7 @@ function M.view(): Node
 			ds.Settings.Group {
 				row("default_zoom", {
 					label = ui.t("settings.browser.default_zoom.label"),
-					description = ui.t("settings.browser.default_zoom.description"),
+					description = ui.t("settings.browser.default_zoom.description", { zoom_in = ui.shortcut_text("cmd+="), zoom_out = ui.shortcut_text("cmd+-") }),
 					control = ds.Select { value = data.default_zoom, name = ui.t("settings.browser.default_zoom.label"), w = SELECT_W, options = data.zoom_options },
 				}),
 			},

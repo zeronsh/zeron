@@ -3,11 +3,9 @@
 -- Settings → Plugins is (screens/plugins/page), both through
 -- ds.Settings.Catalog: the same search, tabs, card of rows and empty states.
 -- Its tabs are what's installed (Zeron's own, built in, first; yours; and
--- others', imported, each by who signed it) and what's yours. Zeron's
--- official templates come after its own, built in as it is: each recolours
--- Zeron and changes nothing else (src/plugins/theme_templates.rs). Every
--- row's preview is drawn from its template's colours (src/plugins/looks.rs):
--- a swatch of each appearance it changes, or Zeron's own.
+-- others', imported, each by who signed it) and what's yours. Every row's
+-- preview is drawn from its template's colours (src/plugins/looks.rs): a
+-- swatch of each appearance it changes, or the default's.
 --
 -- Templates are shared as signed .zeron-template files: Export… (a row's
 -- ⋯) signs one as yours; Install brings one in, as Plugins' does: from a
@@ -27,20 +25,17 @@
 -- swaps only when the template's use does.
 --
 -- Agents make and change templates (Zeron's MCP tools), so the page says to
--- ask one.
+-- ask one. A template's colours are only its suggestion: the theme you
+-- choose on the Themes page (screens/themes) is worn over any template.
 
 local ds = require("@ds")
 local Menu = require("@ds/menu")
 local control = require("@ds/control")
 local state = require("@app/screens/templates/state")
 local words = require("@app/screens/plugins/words")
+local ThemeSwatch = require("@ds/theme_swatch")
 
 local M = {}
-
--- A preview's box in a row: a window's shape, a row's tile high.
-local THUMB_W = 48
-local THUMB_H = 32
-local THUMB_RADIUS = "$radius.md"
 
 local tab = ui.state("templates_tab", "installed")
 local query = ui.state("templates_query", "")
@@ -135,7 +130,7 @@ local function failed(title: string | Message): (err: any) -> ()
 	return function(err: any)
 		ds.toast.show {
 			title = title,
-			body = if type(err) == "table" and err.message then tostring(err.message) else nil,
+			body = if type(err) == "table" and err.message then words.failure(tostring(err.message)) else nil,
 			tone = "warning",
 		}
 	end
@@ -306,65 +301,15 @@ local function waiting(): Node
 	})
 end
 
--- A template's preview, drawn from its colours (no picture needed): each
--- appearance it changes, side by side (light, then dark), or Zeron's own
--- two for one that changes none, one alone across the whole card. Each half
--- wears that appearance's theme (state.previews) and draws its window, a
--- raised bar, its text's two inks, and its accent and code's colours as
--- dots.
-local function swatch_half(id: string, i: number): Node
-	local function names(): { string }
-		return state.previews:get()[id] or {}
-	end
-	local function bar(color: string, width: string): Node
-		return ui.div { w = width, h = 3, shrink = 0, rounded = "$radius.sm", bg = color }
-	end
-	local dots: { Node } = {}
-	for _, color in { "$accent", "$zeron.syntax.keyword", "$zeron.syntax.string", "$zeron.syntax.function" } do
-		table.insert(dots, ui.div { w = 4, h = 4, shrink = 0, rounded = "$radius.sm", bg = color })
-	end
-	return ui.show(
-		function(): boolean
-			return #names() >= i
-		end,
-		ui.column {
-			theme = function(): string
-				return names()[i] or "zeron-dark"
-			end,
-			-- (Inside the box's 1pt edge, the halves sharing it.)
-			w = function(): number
-				return (THUMB_W - 2) / math.max(#names(), 1)
-			end,
-			shrink = 0,
-			h_full = true,
-			bg = "$zeron.window",
-			class = "template-swatch-half",
-			ui.div { w_full = true, h = 6, shrink = 0, bg = "$popover.bg" },
-			ui.column {
-				p = "$zeron.space.hair",
-				gap = "$zeron.space.hair",
-				pt = "$space.1",
-				bar("$text.primary", "70%"),
-				bar("$text.secondary", "45%"),
-				ui.row { gap = "$zeron.space.hair", pt = "$zeron.space.hair", table.unpack(dots) },
-			},
-		}
-	)
-end
-
+-- A template's preview, drawn from its colours (ds/theme_swatch): each
+-- appearance it changes (state.previews), or the default's two for one that
+-- changes none.
 local function preview(t: state.Template): Node
-	return ui.row {
-		w = THUMB_W,
-		h = THUMB_H,
-		shrink = 0,
-		rounded = THUMB_RADIUS,
-		overflow = "hidden",
-		border = 1,
-		border_color = "$zeron.settings.edge",
-		aria_hidden = true,
+	return ThemeSwatch.Swatch {
+		themes = function(): { string }
+			return state.previews:get()[t.id] or {}
+		end,
 		class = "template-swatch",
-		swatch_half(t.id, 1),
-		swatch_half(t.id, 2),
 	}
 end
 

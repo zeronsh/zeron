@@ -19,6 +19,8 @@ pub mod plan_usage;
 pub mod preview;
 pub mod program_status;
 pub mod projectless;
+pub mod redact;
+pub mod relay_gen;
 pub mod providers;
 pub mod run_errors;
 pub mod sidebar_pins;

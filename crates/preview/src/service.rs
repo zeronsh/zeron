@@ -38,6 +38,8 @@ enum Verdict {
     },
 }
 const NOT_HTTP_INITIAL_BACKOFF: Duration = Duration::from_secs(4);
+/// How often discovery scans while something Zeron started is alive.
+const SCAN_CADENCE: Duration = Duration::from_secs(2);
 const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// (servers already confirmed HTTP, listeners to probe this cycle)
@@ -103,6 +105,8 @@ struct Inner {
     peers: std::sync::OnceLock<Peers>,
     /// Engine-provided stream services peers may open, by id prefix.
     streams: StreamServices,
+    /// Wakes a parked discovery scan ([`PreviewService::rescan`]).
+    scan_wake: Arc<tokio::sync::Notify>,
 }
 /// Stream services beyond previews (terminals), keyed by service id prefix.
 /// Each handler sees the authenticated peer that opened the stream and
@@ -122,19 +126,25 @@ pub struct Scope {
     pub terminals: HashMap<String, String>,
     /// Ports agent CLIs serve their own protocol on (`opencode serve`).
     pub reserved_ports: HashSet<u16>,
+    /// A run or terminal here is live now. Discovery keeps its cadence
+    /// while it is, even before the agent's own process exists.
+    pub live: bool,
 }
 pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
 
 /// This scan's candidates (`None` when the process table could not be read),
-/// each with the checkout it is listed under.
+/// each with the checkout it is listed under, and whether anything that
+/// could start one is alive: a live run or terminal, or a process one of
+/// them started ([`discovery::Owned`]). Only then is the next scan due.
 fn candidates(
     scope: Scope,
     origins: &mut discovery::Origins,
-) -> Option<Vec<(PathBuf, discovery::Listener)>> {
+) -> Option<(Vec<(PathBuf, discovery::Listener)>, bool)> {
     let Scope {
         chats,
         terminals,
         reserved_ports,
+        live,
     } = scope;
     let mut canonical = HashMap::new();
     let chats: HashMap<String, PathBuf> = chats
@@ -154,11 +164,19 @@ fn candidates(
         .into_iter()
         .collect();
     if roots.is_empty() {
-        return Some(Vec::new());
+        return Some((Vec::new(), live));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    let listeners = discovery::listeners(origins)?;
-    Some(
+    // The origins a listed server can have (see the filter below).
+    let accept = |origin: &str| match origin.split_once(':') {
+        Some(("chat", chat)) => chats.contains_key(chat),
+        Some(("terminal", terminal)) => terminals.get(terminal).is_some_and(|chat| chats.contains_key(chat)),
+        _ => false,
+    };
+    let owned = discovery::owned(origins, &accept)?;
+    let active = live || !owned.is_empty();
+    let listeners = discovery::owned_listeners(origins, &owned)?;
+    Some((
         listeners
             .into_iter()
             .filter(|l| {
@@ -187,12 +205,14 @@ fn candidates(
                 Some((root, listener))
             })
             .collect(),
-    )
+        active,
+    ))
 }
 impl PreviewService {
     pub fn new(file: PathBuf, device_id: String, device_name: String) -> anyhow::Result<Self> {
         let signaling_wake = Arc::new(tokio::sync::Notify::new());
         Ok(Self(Arc::new(Inner {
+            scan_wake: Arc::new(tokio::sync::Notify::new()),
             catalog: Catalog::open(file, device_id, device_name)?,
             stop: CancellationToken::new(),
             started: AtomicBool::new(false),
@@ -245,6 +265,12 @@ impl PreviewService {
     }
     pub fn catalog(&self) -> &Catalog {
         &self.0.catalog
+    }
+    /// Scan for development servers now: a run or terminal here started or
+    /// changed state. Discovery parks while nothing Zeron started is alive,
+    /// and only this wakes it.
+    pub fn rescan(&self) {
+        self.0.scan_wake.notify_one();
     }
     /// The registry the agent-login flows publish their callback ports to.
     pub fn callback_routes(&self) -> CallbackRoutes {
@@ -302,6 +328,7 @@ impl PreviewService {
             self.0.catalog.clone(),
             self.0.callback_routes.clone(),
             self.0.streams.clone(),
+            self.0.scan_wake.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
         let (peers, output) = Peers::new(
@@ -345,6 +372,12 @@ impl PreviewService {
         self.0.tasks.lock().unwrap().push(listener_task);
         let catalog = self.0.catalog.clone();
         let stop = self.0.stop.clone();
+        let wake = self.0.scan_wake.clone();
+        // Every 2 s while anything Zeron started here is alive (a run, a
+        // terminal, or a process either left running): a server one starts
+        // is listed within one cadence, as before. With none alive no
+        // listener could be listed, so the scan parks until a run or
+        // terminal changes state, or an open preview loses its process.
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
             let mut origins = discovery::Origins::default();
@@ -359,23 +392,23 @@ impl PreviewService {
                         (candidates(projects(), &mut origins), origins)
                     })
                     .await;
-                    let candidates = match scanned {
-                        Ok((Some(candidates), kept)) => {
+                    let (candidates, active) = match scanned {
+                        Ok((Some(scanned), kept)) => {
                             *origins = kept;
-                            candidates
+                            scanned
                         }
                         // A failed enumeration says nothing about what runs:
-                        // keep the services already listed.
+                        // keep the services already listed, and look again.
                         Ok((None, kept)) => {
                             *origins = kept;
                             tracing::debug!(
                                 "preview scan could not read processes; keeping the last result"
                             );
-                            return;
+                            return true;
                         }
                         Err(error) => {
                             tracing::warn!(%error, "preview scan failed; keeping the last result");
-                            return;
+                            return true;
                         }
                     };
                     let (mut servers, probe) = memory.plan(candidates, Instant::now());
@@ -397,9 +430,15 @@ impl PreviewService {
                     if let Err(error) = catalog.replace_local(servers) {
                         tracing::warn!(%error, "could not update preview services");
                     }
+                    active
                 };
-                tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
+                let active = tokio::select! { _ = stop.cancelled() => break, active = scan => active };
+                if active {
+                    // (A wake meanwhile is served by this cadence.)
+                    tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(SCAN_CADENCE) => {} }
+                } else {
+                    tokio::select! { _ = stop.cancelled() => break, _ = wake.notified() => {} }
+                }
             }
         });
         let mut tasks = self.0.tasks.lock().unwrap();
@@ -428,7 +467,7 @@ impl PreviewService {
         }
     }
 }
-struct LocalConnector(Catalog, CallbackRoutes, StreamServices);
+struct LocalConnector(Catalog, CallbackRoutes, StreamServices, Arc<tokio::sync::Notify>);
 #[async_trait::async_trait]
 impl Connector for LocalConnector {
     async fn connect(&self, id: &str) -> anyhow::Result<BoxIo> {
@@ -462,6 +501,10 @@ impl Connector for LocalConnector {
         let (pid, started_at) = (route.listener.pid, route.listener.started_at);
         let valid =
             tokio::task::spawn_blocking(move || discovery::same_process(pid, started_at)).await?;
+        if !valid {
+            // Rediscovery: the scan may be parked.
+            self.3.notify_one();
+        }
         anyhow::ensure!(valid, "preview process changed; waiting for rediscovery");
         Ok(Box::new(
             tokio::net::TcpStream::connect(route.listener.address).await?,
@@ -551,6 +594,63 @@ mod tests {
             memory.plan(vec![((), listener(7, 8081))], t0 + Duration::from_secs(11));
         assert!(known.is_empty());
         assert_eq!(probe.len(), 1);
+    }
+    /// A chat's development server is found by the scan of what Zeron
+    /// started, and with nothing Zeron started alive the scan finds nothing
+    /// to do: the loop parks instead of scanning again.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_chats_server_is_found_and_nothing_alive_parks_the_scan() {
+        let folder = tempfile::tempdir().unwrap();
+        let chat = format!("idle-test-{}", std::process::id());
+        let scope = |live| Scope {
+            chats: vec![(chat.clone(), folder.path().to_path_buf())],
+            terminals: HashMap::new(),
+            reserved_ports: HashSet::new(),
+            live,
+        };
+        let mut origins = discovery::Origins::default();
+        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        assert!(found.is_empty());
+        assert!(!active, "nothing of this chat runs: nothing to scan for");
+        let (_, active) = candidates(scope(true), &mut origins).unwrap();
+        assert!(active, "a live run keeps the cadence before its process exists");
+
+        // What an agent of this chat starts: a listener in its folder.
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import socket,sys,time\ns=socket.socket()\ns.bind(('127.0.0.1',0))\ns.listen()\nprint(s.getsockname()[1],flush=True)\ntime.sleep(60)",
+            ])
+            .current_dir(folder.path())
+            .env(zeron_proto::ORIGIN_ENV, zeron_proto::chat_origin(&chat))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let server = Kill(child);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line).unwrap();
+        let port: u16 = line.trim().parse().unwrap();
+        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        assert!(active, "a process the chat started is alive");
+        assert!(
+            found.iter().any(|(_, l)| l.address.port() == port
+                && l.pid == server.0.id()
+                && l.chat_id.as_deref() == Some(chat.as_str())),
+            "the chat's server is listed: {:?}",
+            found.iter().map(|(_, l)| (l.pid, l.address)).collect::<Vec<_>>()
+        );
+        drop(server);
+        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        assert!(found.is_empty() && !active, "gone with its process");
     }
     #[test]
     fn backoff_is_capped() {

@@ -115,7 +115,9 @@ pub struct Space {
     pub device_id: String,
     /// Absolute folder path on the owning device.
     pub path: String,
-    /// User rename; absent ⇒ display = basename(path).
+    /// User rename; absent ⇒ display = basename(path). As read from the
+    /// registry, its repository's: the same on every copy with a shared
+    /// `repository_id` (any but `local:`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Owner-stamped: is `path` inside a git work tree?
@@ -142,7 +144,8 @@ pub struct Space {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<String>,
     /// The picture its people chose for it (LWW, from any device); absent ⇒
-    /// its default tile (its repository's artwork, else its initial).
+    /// its default tile (its repository's artwork, else its initial). Shared
+    /// by a repository's copies like `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<SpaceIcon>,
     pub created_at: DateTime<Utc>,
@@ -316,6 +319,92 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// What a child (`parent_chat_id`) is to its parent: a side chat the
+    /// person treats as a conversation of its own, or a subagent the
+    /// parent's agent delegated to (listed under the parent's Subagents).
+    /// Recorded when an agent creates the child through the Zeron MCP
+    /// server; `None` on top-level chats, on side chats a person started or
+    /// forked, and on rows written before the field existed (all read as
+    /// side chats). A value from a newer peer this build doesn't know
+    /// decodes to `None` rather than costing the row.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_child_kind"
+    )]
+    pub child_kind: Option<ChildKind>,
+    /// Put to sleep by the person until a time (the Activity sidebar's
+    /// Asleep): synced, so every device shows it asleep, and the engine that
+    /// hosts the chat wakes it early the moment it starts asking for the
+    /// person or fails (an ask already open when it was put to sleep is no
+    /// such moment). Read it through [`Chat::sleep_state`]. Missing on older
+    /// peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep: Option<ChatSleep>,
+}
+
+/// A chat put to sleep ([`Chat::sleep`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSleep {
+    /// When it wakes on its own.
+    pub until: DateTime<Utc>,
+    /// When it was put to sleep.
+    pub at: DateTime<Utc>,
+    /// Woken early (it asked for the person, or failed): when. Its time
+    /// passing needs no write; [`Chat::sleep_state`] reads that from `until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woke_at: Option<DateTime<Utc>>,
+}
+
+/// Where a chat stands with its sleep at a moment ([`Chat::sleep_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepState {
+    /// Never put to sleep, or woken and seen since.
+    Awake,
+    /// Asleep until then.
+    Asleep { until: DateTime<Utc> },
+    /// Woke then (its time came, or it asked for the person), and nobody
+    /// has looked at it since.
+    Woke { at: DateTime<Utc> },
+}
+
+/// A child chat's relation to its parent ([`Chat::child_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildKind {
+    /// A side conversation: shown under the parent's side chats.
+    Side,
+    /// Delegated work: shown under the parent's subagents.
+    Subagent,
+}
+
+impl ChildKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChildKind::Side => "side",
+            ChildKind::Subagent => "subagent",
+        }
+    }
+
+    /// The kind a stored value names; `None` for one this build doesn't know.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "side" => Some(ChildKind::Side),
+            "subagent" => Some(ChildKind::Subagent),
+            _ => None,
+        }
+    }
+}
+
+/// Decode `childKind` leniently: an unknown kind (a newer peer's) or a
+/// non-string reads as `None`, never failing the row.
+pub fn lenient_child_kind<'de, D>(deserializer: D) -> Result<Option<ChildKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().and_then(serde_json::Value::as_str).and_then(ChildKind::parse))
 }
 
 impl Chat {
@@ -334,10 +423,60 @@ impl Chat {
 impl Chat {
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
+        self.seen_marks().unseen()
+    }
+
+    /// What its display status reads from the chat itself.
+    pub fn seen_marks(&self) -> SeenMarks {
+        SeenMarks {
+            last_message_at: self.last_message_at,
+            last_seen_at: self.last_seen_at,
+        }
+    }
+
+    /// Its sleep at `now` ([`ChatSleep::state`]). Pure.
+    pub fn sleep_state(&self, now: DateTime<Utc>) -> SleepState {
+        self.sleep
+            .as_ref()
+            .map_or(SleepState::Awake, |sleep| sleep.state(self.last_seen_at, now))
+    }
+}
+
+/// What a chat's display status reads from the chat itself: when it last
+/// said something, and when it was last seen. A viewport that holds chats
+/// as raw rows reads these two and derives the status as every other does
+/// ([`crate::view::display_status_from`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeenMarks {
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl SeenMarks {
+    /// It said something since it was last seen.
+    pub fn unseen(&self) -> bool {
         match (self.last_message_at, self.last_seen_at) {
             (Some(msg), Some(seen)) => msg > seen,
             (Some(_), None) => true,
             (None, _) => false,
+        }
+    }
+}
+
+impl ChatSleep {
+    /// Where its chat stands at `now`, last seen at `last_seen_at`: asleep
+    /// until its time unless woken early; once woken, "woke" until the chat
+    /// is seen after it woke. Pure.
+    pub fn state(&self, last_seen_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> SleepState {
+        let woke = match self.woke_at {
+            Some(at) => at,
+            None if self.until > now => return SleepState::Asleep { until: self.until },
+            None => self.until,
+        };
+        if last_seen_at.is_some_and(|seen| seen >= woke) {
+            SleepState::Awake
+        } else {
+            SleepState::Woke { at: woke }
         }
     }
 }
@@ -349,6 +488,10 @@ impl Chat {
 pub enum ChatIndicator {
     Working,
     AwaitingInput,
+    /// Its turn ended, and the agent waits on background work it started (a
+    /// background agent, or a command it said it waits on) that will wake it
+    /// when it ends: not finished, not working, nothing for the person yet.
+    Waiting,
     Errored,
     /// Finished running (or errored out) but not seen yet on any device.
     Completed,
@@ -358,11 +501,11 @@ pub enum ChatIndicator {
 /// Derive display status from fresh evidence. Use `view::display_status` at
 /// presentation boundaries; it handles stale activity without inventing success.
 pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
-    chat_indicator_inner(chat, live, true)
+    indicator_from(chat.seen_marks(), live, true)
 }
 
-pub(crate) fn chat_indicator_inner(
-    chat: &Chat,
+pub(crate) fn indicator_from(
+    chat: SeenMarks,
     live: Option<&Session>,
     terminal_activity: bool,
 ) -> ChatIndicator {
@@ -382,6 +525,9 @@ pub(crate) fn chat_indicator_inner(
     }) {
         Some(SessionStatus::Working) => ChatIndicator::Working,
         Some(SessionStatus::AwaitingInput) => ChatIndicator::AwaitingInput,
+        Some(SessionStatus::Idle) if live.is_some_and(|s| s.waiting.is_some()) => {
+            ChatIndicator::Waiting
+        }
         _ if live.is_some_and(|s| s.status == SessionStatus::Errored) && chat.unseen()
             || terminal_unseen
                 && terminal.is_some_and(|a| a.report.state == crate::ProgramState::Error) =>
@@ -458,6 +604,49 @@ pub struct Session {
     /// through `view::background_tasks`. Missing on older peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// Set while the turn has ended and the agent waits on background work
+    /// that wakes it when it ends (`status` stays `Idle`; the completion it
+    /// would mark is held back until the wait is over). Only the hosting
+    /// engine writes it, heartbeating the row while it holds; read it
+    /// through `view::waiting`, which drops a stale one. Missing on older
+    /// peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<SessionWaiting>,
+}
+
+/// What a chat's agent waits on after its turn ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWaiting {
+    /// When the turn ended into the wait.
+    pub since: DateTime<Utc>,
+    /// The work it waits on, oldest first (empty for a moment after the
+    /// last of it ended, while the wake turn starts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<WaitingOn>,
+}
+
+/// One piece of work a waiting agent will be woken by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingOn {
+    /// The runtime's id for it (a background process's `BackgroundTask::id`).
+    pub id: String,
+    pub kind: WaitingKind,
+    /// What it is, as the person would read it: a command, or an agent's task.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WaitingKind {
+    /// A background agent: it always reports back.
+    Agent,
+    /// A background process the agent said it waits on.
+    Process,
+    /// A kind from a newer peer.
+    #[serde(other)]
+    Other,
 }
 
 /// One background process of a chat's agent, as its runtime reports it.
@@ -486,6 +675,37 @@ pub struct BackgroundTaskOutput {
     /// Earlier output was cut off.
     #[serde(default)]
     pub truncated: bool,
+}
+
+/// Bytes of a command's whole output its host serves (`ReadToolOutput`): the
+/// END of it, redacted. A run journal holds at most
+/// [`crate::COMMAND_OUTPUT_CAP`] per command today; this bounds a journal
+/// that holds more (an older build's, a harness without the cap).
+pub const TOOL_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
+/// Bytes of text one `ReadToolOutput` reply carries (an attachment chunk's
+/// size, so a relayed reply stays as small as theirs).
+pub const TOOL_OUTPUT_CHUNK_BYTES: usize = 48 * 1024;
+
+/// One chunk of a command's whole output, read from its host's run journal
+/// (`ReadToolOutput {chatId, toolId, offset}`), redacted as the chat's tail
+/// is. Ask again from `next_offset` until `done`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputChunk {
+    /// The text from the asked-for byte offset, ending on a character.
+    pub text: String,
+    pub next_offset: u64,
+    pub done: bool,
+    /// Bytes in the whole (redacted, trimmed) text served.
+    pub bytes: u64,
+    /// Lines in it.
+    pub lines: u64,
+    /// Earlier output was trimmed to [`TOOL_OUTPUT_MAX_BYTES`].
+    #[serde(default)]
+    pub trimmed: bool,
+    /// The command's exit status, as its harness reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 impl Session {
@@ -1705,6 +1925,58 @@ pub struct TransferProgress {
     pub total: u64,
 }
 
+/// A send waiting for its attachment bytes to reach the edge's store before it
+/// enters the chat (`WatchHeldSends`). It survives restarts, so a restarted
+/// interface can still show the message and what it's waiting on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldSendStatus {
+    pub id: String,
+    pub chat_id: String,
+    /// The transcript message it becomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// As the transcript would show it, attachment trailer included.
+    pub prompt: String,
+    /// It becomes a queue row, not a message going out now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_row: bool,
+    /// Epoch millis.
+    pub created_at: i64,
+    /// Why it stopped trying; it waits for the user's retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+/// A message on its way to a chat's agent and not yet taken (`WatchWaitingMessages`):
+/// in the chat's doc for its host to run, or held here while its files upload. A
+/// composer can say how old one is before it runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingMessage {
+    /// The command's id, or the outbox row's.
+    pub id: String,
+    pub chat_id: String,
+    /// The transcript message it becomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// As the transcript would show it, attachment trailer included.
+    pub prompt: String,
+    /// The device that sent it.
+    pub issued_by: String,
+    /// Epoch millis: when it went out to the chat (held: when it was sent).
+    pub sent_at: i64,
+    /// Epoch millis past which it won't run. Held sends have none yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// Still in this device's outbox, its files uploading.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// Why a held send stopped trying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
 /// Live edge-connectivity posture (the `WatchConnectivity` stream): the truth
 /// the connection pill, composer honesty, and queued-send badges render.
 /// Derived engine-side from the registry room's reconnect state, the OS
@@ -2303,5 +2575,37 @@ mod space_icon_tests {
         assert_eq!(icon(Some("🚀"), Some("https://e.test/a"), None).normalized(), Err("both"));
         // A hue alone colours the default tile.
         assert_eq!(icon(None, None, Some("amber")).normalized(), Ok(Some(icon(None, None, Some("amber")))));
+    }
+}
+
+#[cfg(test)]
+mod child_kind_tests {
+    use super::{Chat, ChildKind};
+
+    fn row(extra: serde_json::Value) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "id": "c", "deviceId": "d", "title": null, "archived": false, "cwd": null,
+            "branch": null, "checkoutId": null, "config": null, "lastMessagePreview": null,
+            "lastMessageAt": null, "createdAt": "2026-11-03T10:00:00Z", "parentChatId": "p"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            row[k] = v.clone();
+        }
+        row
+    }
+
+    #[test]
+    fn a_child_kind_round_trips_and_an_unknown_one_costs_only_itself() {
+        let chat: Chat = serde_json::from_value(row(serde_json::json!({ "childKind": "subagent" }))).unwrap();
+        assert_eq!(chat.child_kind, Some(ChildKind::Subagent));
+        assert_eq!(serde_json::to_value(&chat).unwrap()["childKind"], "subagent");
+        let side: Chat = serde_json::from_value(row(serde_json::json!({ "childKind": "side" }))).unwrap();
+        assert_eq!(side.child_kind, Some(ChildKind::Side));
+        // A newer peer's kind, or none at all: the row stays, the kind is None.
+        for extra in [serde_json::json!({ "childKind": "orbit" }), serde_json::json!({ "childKind": 3 }), serde_json::json!({})] {
+            let chat: Chat = serde_json::from_value(row(extra)).unwrap();
+            assert_eq!(chat.child_kind, None);
+            assert!(serde_json::to_value(&chat).unwrap().get("childKind").is_none());
+        }
     }
 }

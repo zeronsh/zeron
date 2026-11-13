@@ -4,9 +4,9 @@
 --
 -- `FadeText { title, grow = 1, text_size = "$font.size.md" }` (the first entry:
 -- a string, a message, a state or a function). Text props style it; `grow`, `shrink`,
--- `w`, `w_full`, `min_w`, `max_w` and the margins go to its box. `fade`: the
+-- `basis`, `w`, `w_full`, `min_w`, `max_w` and the margins go to its box. `fade`: the
 -- fade's length (24 points); `roll = true`: a RollText (it rolls as it
--- changes).
+-- changes; `glide = false` as RollText takes it).
 
 local RollText = require("@self/roll_text")
 
@@ -14,6 +14,7 @@ local RollText = require("@self/roll_text")
 local BOX = {
 	grow = true,
 	shrink = true,
+	basis = true,
 	w = true,
 	w_full = true,
 	min_w = true,
@@ -37,6 +38,10 @@ return ui.component(function(props: { [any]: any }): Node
 		elseif k ~= "fade" and k ~= "roll" and k ~= "children" and k ~= "truncate" then
 			style[k] = v
 		end
+	end
+	-- (`glide`: a RollText's, as `roll` is.)
+	if not props.roll then
+		style.glide = nil
 	end
 	-- The text at its own width, inside a box that clips it.
 	style.ref = text

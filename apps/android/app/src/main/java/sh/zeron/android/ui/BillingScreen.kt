@@ -62,8 +62,8 @@ import kotlin.math.roundToLong
 
 private const val MAX_PACKS = 20
 
-/** "about 750 hours" of the default machine. */
-private fun hours(credits: Double) = "about ${CloudStore.credits((credits / 60).roundToLong().toDouble())} hours"
+/** "about 750 small-machine hours": a credit is a minute of a small machine. */
+private fun hours(credits: Double) = "about ${CloudStore.credits((credits / 60).roundToLong().toDouble())} small-machine hours"
 
 /**
  * Settings → Billing (iOS `BillingViewController`): the balance and the time

@@ -203,6 +203,9 @@ test("a queued message edits in the composer and saves, the draft put back", fun
 	app:type('role:textbox "Message"', "My own draft")
 	app:command("queue_one")
 	settle(app)
+	-- (The queue waits in the pill, folded, until opened.)
+	app:click('role:button "Open Queued"')
+	settle(app)
 	-- (Its actions show under the pointer.)
 	app:hover('role:listitem "1. Queued words"')
 	settle(app)
@@ -275,8 +278,12 @@ test("Escape stops the running agent only with the setting on", function()
 	app:key("Escape")
 	settle(app)
 	expect(app:state("calls")).never.to_contain("interrupt:s1")
+	-- With the setting off, Escape gives the keyboard back instead (the
+	-- window's bare letters work again, I to come back).
+	expect(app:tree():find('textbox "[^"\n]*" focused')).to_be(nil)
 	app:set_state("settings_escape_stops", true)
 	settle(app)
+	app:click("role:textbox")
 	app:key("Escape")
 	settle(app)
 	expect(app:state("calls")).to_contain("interrupt:s1")
@@ -326,6 +333,9 @@ test("a model's name rolls into place: the chip eases once, and nothing moves as
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	open(app, "s2")
+	-- (Picked in its panel: a change from elsewhere is there at once.)
+	app:click('role:button "Model"')
+	app:frames(30)
 	local before = chip(app)
 	app:set_state("chat_model", "opus")
 	local widths: { number } = {}
@@ -645,6 +655,23 @@ test("the model picker opens from a shortcut", function()
 	expect(listed()).to_be(true)
 end)
 
+-- A composer that replaced another still takes the shortcut: a page that
+-- swaps its composer mounts the new one before the old one's cleanup runs,
+-- and a flag that cleanup cleared left ⌘/ doing nothing under the new one
+-- (seen on Windows, on the new chat page). screens/chat/shared counts the
+-- composers mounted instead; a template's composer from before the count
+-- (true or false) still reads as one or none.
+test("the model picker opens from a shortcut after the composer is swapped", function()
+	local app = mount("composer_count_fixture.luau")
+	app:command("overlap")
+	app:frames(2)
+	expect(app:state("calls")).to_be("none:false,swapped:true,gone:false,floor:0")
+	app:command("legacy")
+	app:frames(2)
+	expect(app:state("calls")).to_contain("true:true,counted:true,false:false")
+	expect(app:error()).to_be(nil)
+end)
+
 -- An agent's completion settings (Settings → Providers): "Use $ for skills"
 -- off makes `$` ordinary text; "Separate / commands" off lists the skills
 -- under `/` with the commands (Zeron's composer.rs `completion_trigger`).
@@ -760,7 +787,8 @@ test("a chat mentioned (a session dropped from the sidebar) goes as production's
 	settle(app)
 	app:wait("#never-shown", { timeout_ms = 100 })
 	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:Compare with [")
+	-- (In its block after the words, as an attachment: carried.luau.)
+	expect(calls).to_contain("send:s2:Compare with\n\nChats attached:\n- [")
 	expect(calls).to_contain("](zeron-chat:s1)")
 	-- (Once, though mentioned twice.)
 	local _, n = string.gsub(calls, "zeron%-chat:s1", "")

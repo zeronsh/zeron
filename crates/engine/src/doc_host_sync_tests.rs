@@ -1413,3 +1413,96 @@ async fn cold_jobs_get_a_real_timed_turn_without_any_writer_ending() {
     assert_eq!(writers.len(), ACTIVE_SYNC_CAP);
     host.shutdown_workers().await;
 }
+
+/// A wake's receipt is written once. After complete_sync_job deletes the row,
+/// the scheduler must stop re-checking it: each check reads the whole command
+/// ledger (59–127 ms on real 3–7k-command chats) and forces a snapshot export,
+/// and the scheduler ticks every 100 ms for as long as the chat syncs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completed_wake_is_not_rechecked_every_tick() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay(Hold::Hello).await;
+    relay.release.send_replace(true);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    store.initialize_chat_outbox("busy", &[]).unwrap();
+    let host = host(store.clone(), &relay);
+    let busy = host.open("busy").unwrap();
+    until(|| lock(&busy.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    host.enqueue_wakeup("busy").unwrap();
+    until(|| store.sync_job_version("busy", "wake").unwrap().is_none()).await;
+    assert!(busy.sync_started.load(Ordering::Acquire), "the chat must still sync");
+    let before = host.inner.wake_checks.load(Ordering::Relaxed);
+    // Ten scheduler ticks with the chat open and syncing, and no new wake.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    busy.touch();
+    assert!(busy.sync_started.load(Ordering::Acquire), "the chat must still sync");
+    let rechecks = host.inner.wake_checks.load(Ordering::Relaxed) - before;
+    assert!(rechecks <= 1, "a completed wake was re-checked {rechecks} times in 1 s");
+    // A newer wake is still seen and retired.
+    host.enqueue_wakeup("busy").unwrap();
+    until(|| store.sync_job_version("busy", "wake").unwrap().is_none()).await;
+    drop(busy);
+    host.shutdown_workers().await;
+}
+
+/// A chat open in the app with its connection caught up and nothing owed
+/// costs the dispatcher nothing: no pass runs while it sits there. When the
+/// view goes, its idle grace starts counting and the connection closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watched_caught_up_connection_runs_no_passes() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay(Hold::Checkpoint).await;
+    relay.release.send_replace(true);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let host = host(store.clone(), &relay);
+    let handle = host.open("viewed").unwrap();
+    let view = handle.watch_messages();
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    until(|| !store.has_pending_chat_updates("viewed").unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let passes = || host.inner.scheduler_passes.load(Ordering::Relaxed);
+    let settled = passes();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(passes(), settled, "a settled, watched connection was polled");
+    assert!(handle.sync_started.load(Ordering::Acquire));
+
+    // The last viewer leaving wakes the dispatcher; the grace has run out.
+    handle
+        .last_access
+        .store(now_ms() - SYNC_IDLE_MS - 1, Ordering::Release);
+    drop(view);
+    until(|| !handle.sync_started.load(Ordering::Acquire)).await;
+    assert!(lock(&handle.chat2).is_none());
+    host.shutdown_workers().await;
+}
+
+/// Retiring a viewed handle (a cutover, a delete) must end its viewers'
+/// streams, so they resubscribe: the waiter that kicks the dispatcher when
+/// views leave must not hold them open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_handle_ends_its_viewers_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = DocHost::new(
+        Arc::new(DocsStore::open(dir.path()).unwrap()),
+        DocHostConfig {
+            device_id: "here".into(),
+            default_harness: HarnessId::Mock,
+            edge: None,
+        },
+    );
+    let handle = host.open("viewed").unwrap();
+    let mut messages = handle.watch_messages();
+    let mut queue = handle.watch_queue();
+    tokio::time::sleep(Duration::from_millis(50)).await; // the waiter runs
+    lock(&host.inner.handles).remove("viewed");
+    drop(handle);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while messages.changed().await.is_ok() {}
+        while queue.changed().await.is_ok() {}
+    })
+    .await
+    .expect("a viewer's stream outlived its dropped handle");
+    host.shutdown_workers().await;
+}

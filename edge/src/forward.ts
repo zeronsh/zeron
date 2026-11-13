@@ -5,7 +5,7 @@
  * is cleared from the inbound request before the verified values are set.
  */
 import type { Verified } from "./auth";
-import { AUTH_USER_HEADER, ROOM_KIND_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER } from "./env";
+import { AUTH_USER_HEADER, CALLER_DEVICE_HEADER, ROOM_KIND_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER } from "./env";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -17,7 +17,8 @@ export const forward = (
   auth: Verified,
   path: string,
   search?: string,
-  roomKind?: "workspace"
+  roomKind?: "workspace",
+  callerDevice?: string
 ): Promise<Response> => {
   const stub = ns.get(ns.idFromName(name));
   const url = new URL(request.url);
@@ -34,7 +35,10 @@ export const forward = (
   // it (RegistryRoom narrows such callers to the rows their device hosts).
   headers.delete(RUNNER_DEVICE_HEADER);
   headers.delete(RUNNER_ACCOUNT_HEADER);
+  // And the calling device: only a dial the Worker verified (device-link.ts).
+  headers.delete(CALLER_DEVICE_HEADER);
   headers.set(AUTH_USER_HEADER, auth.userId);
+  if (callerDevice) headers.set(CALLER_DEVICE_HEADER, callerDevice);
   if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
   // A runner without a device id (never minted) owns nothing: fail closed.
   if (auth.kind === "runner") {

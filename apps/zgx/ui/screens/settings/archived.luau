@@ -37,7 +37,7 @@ local function all(): { sessions.Chat }
 	return sessions.now:get().archived or {}
 end
 local function device_of(id: string?): sessions.Device?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.id == id then
 			return d
 		end
@@ -45,7 +45,7 @@ local function device_of(id: string?): sessions.Device?
 	return nil
 end
 local function project_of(id: string?): sessions.Project?
-	for _, p in sessions.now:get().projects or {} do
+	for _, p in sessions.projects:get() or {} do
 		if p.id == id then
 			return p
 		end
@@ -173,7 +173,7 @@ local Row = ui.component(function(props: { now: State<any> }): Node
 			}
 		end
 		local l = route.look(p.id) or { hue = route.hue(p.id) }
-		return Tile { label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, size = 28 }
+		return Tile { label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, size = 28, project = p.id }
 	end)
 	local function lit(): boolean
 		return over:get()
@@ -257,19 +257,32 @@ local Row = ui.component(function(props: { now: State<any> }): Node
 end)
 
 -- A group: its name over a card of its rows, a hairline between them (each
--- its session's, kept as others come and go).
+-- its session's, kept as others come and go; each as tall as `Settings.Row`
+-- with a 28 tile makes it).
 local function group(g: Group, _i: number, now: State<any>): Node
 	local chats = ui.computed(function(): { sessions.Chat }
 		return (now:get() :: Group).chats
 	end)
+	-- A row's height: all alike (read once, not for each of thousands; a 28
+	-- tile leads it).
+	local row_h = ui.computed(function(): number
+		return ds.Settings.truncated_row_h(28)
+	end)
 	-- (A group's key is its name: it stays the same group.)
 	return ds.Settings.Section {
 		title = ui.t(`settings.archived.group.{g.key}`),
-		ds.Settings.Each(chats, function(_c: sessions.Chat, _j: number, n: State<any>): Node
+		-- (Thousands can be archived: only the rows the page shows are built.)
+		ds.Settings.EachList(chats, function(_c: sessions.Chat, _j: State<number>, n: State<any>): Node
 			return Row { now = n }
 		end, {
 			key = function(x: sessions.Chat): string
 				return x.id
+			end,
+			height = function(_x: sessions.Chat): number
+				return row_h:get()
+			end,
+			text = function(x: sessions.Chat): string
+				return `{title_of(x)}\t{M.where(x)}`
 			end,
 		}),
 	}

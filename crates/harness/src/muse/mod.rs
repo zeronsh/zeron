@@ -203,6 +203,10 @@ impl Harness for MuseHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Muse
     }
+    /// It starts a wake turn of its own when a background subagent ends.
+    fn wakes_on_background(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Muse Code"
     }
@@ -263,6 +267,7 @@ impl Harness for MuseHarness {
     }
     fn fallback_models(&self) -> Vec<Model> {
         vec![Model {
+            default: false,
             id: "muse-spark-1.2".into(),
             label: "Muse Spark 1.2".into(),
             description: Some("Muse Code's default coding model".into()),

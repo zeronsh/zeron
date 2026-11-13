@@ -95,6 +95,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
       - name: Build application
+        # (Luau without its asserts, as scripts/package-windows.ps1 builds it
+        # next: the same flags, so it doesn't build it again.)
+        env:
+          LUAU_CXXFLAGS: -DNDEBUG
         run: cargo build --release --locked -p zeron
       - name: Verify portable and installer packaging
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"

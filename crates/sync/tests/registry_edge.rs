@@ -40,9 +40,11 @@ fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_cwd: None,
         harness_session_harness: None,
         parent_chat_id: None,
+        child_kind: None,
         space_id: None,
         last_seen_at: None,
         room_gen: None,
+        sleep: None,
     }
 }
 
@@ -90,6 +92,7 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
             status: SessionStatus::Working,
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
+            waiting: None,
         })
         .unwrap();
     }
@@ -215,6 +218,7 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
                 },
                 started_at: Some(ts(i)),
                 updated_at: ts(i + 1),
+                waiting: None,
             })
             .unwrap();
         }

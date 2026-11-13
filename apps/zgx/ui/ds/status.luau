@@ -13,7 +13,7 @@ local locale = require("@self/locale")
 
 local M = {}
 
-export type Kind = "working" | "connecting" | "waiting" | "input" | "approval" | "plan" | "done" | "failed" | "limited"
+export type Kind = "working" | "connecting" | "waiting" | "input" | "approval" | "plan" | "done" | "failed" | "limited" | "woke"
 
 -- Each state's glyph (none: its name alone) and its names: short, in a
 -- header; long, on a list's dot. The names are read as strings in the
@@ -30,6 +30,8 @@ local NAMES: { [Kind]: { string } } = {
 	done = { "ds.status.done", "ds.status.done_long" },
 	failed = { "ds.status.failed", "ds.status.failed" },
 	limited = { "ds.status.limited", "ds.status.limited" },
+	-- Put to sleep, and woken (its time came, or it asked): not looked at since.
+	woke = { "ds.status.woke", "ds.status.woke_long" },
 }
 local function kind(name: Kind, glyph: Icon.Name?, pulse: boolean?): KindInfo
 	local names = NAMES[name]
@@ -47,15 +49,23 @@ end
 local KINDS: { [Kind]: KindInfo } = {
 	working = kind("working", "status-working", true),
 	connecting = kind("connecting", "status-working", true),
-	waiting = kind("waiting"),
+	-- Waiting on background work that will wake it: under way, drawn as
+	-- working is (its ring, in working's hue), its name its own.
+	waiting = kind("waiting", "status-working", true),
 	input = kind("input", "status-input"),
 	approval = kind("approval", "status-approval"),
 	plan = kind("plan"),
 	done = kind("done", "status-done"),
 	failed = kind("failed", "status-failed"),
 	limited = kind("limited", "status-failed"),
+	woke = kind("woke", "status-woke"),
 }
 M.KINDS = KINDS
+
+-- The hue a state is drawn in: waiting wears working's.
+local function hue(kind: Kind): string
+	return if kind == "waiting" then "working" else kind
+end
 
 -- How long it has worked ("42s", "5m", "1h 5m"), and how long ago in a
 -- corner's room ("now", "5m", "3d"), in the locale's words (ds/locale).
@@ -63,6 +73,18 @@ local elapsed = locale.elapsed
 M.elapsed = elapsed
 local ago = locale.ago_short
 M.ago = ago
+
+-- Seconds since `t` (a time, `os.time()` seconds), followed: what reads it
+-- in a binding moves on as the clock ticks, so "now" becomes "1m" without
+-- anything else changing. One timer for every reader, sleeping between
+-- ticks. (The clock is never behind the wall's: a test can set it ahead.)
+local clock = ui.state("ds_status_clock", os.time())
+ui.every(30000, function()
+	clock:set(os.time())
+end)
+function M.since(t: number): number
+	return math.max(0, math.max(clock:get(), os.time()) - t)
+end
 
 -- Working: the dashed ring (the glyph's eight dashes, on its 24-unit grid:
 -- radius 10, stroke 2, round ends), drawn along. An unseen lead runs the
@@ -132,27 +154,38 @@ fn fill(input:FillInput)->vec4<f32> {
 -- the frames that draw one draw them all.
 local RUN, REST, FPS = 3.9, 900, 30
 
--- A node whose loop (`start(el)`'s animation) plays only while it can be
--- seen: out of sight (in a collapsed sidebar, a closed panel) it stops,
--- and starts again as it shows.
+-- Its loop put where one clock has it: a loop of `period` ms that started
+-- when that clock read 0. Every ring (and every dot) stands at the same
+-- point of its cycle whenever it shows, so one coming back into sight picks
+-- up in step with the rest, not from its start. (Set as the loop is made,
+-- before the renderer ever takes it over, which it still may.)
+function M.in_phase(anim: any, period: number)
+	anim.currentTime = ui.now() % period
+end
+
+-- A node whose loop (`start(el)`'s animation, `period` ms a cycle) plays
+-- only while it can be seen: out of sight (in a collapsed sidebar, a
+-- closed panel, scrolled away) it stops, and starts again as it shows, in
+-- step with the clock (`in_phase`).
 -- Left looping there, it would be all the animation engine had to play,
 -- and the engine, seeing only unseen loops, looks just four times a second:
 -- an animation starting then would wait for that look, and leap. Still
 -- when motion is reduced.
-local function looping(props: ContainerProps, start: (el: Element) -> Animation): Node
-	-- The loop, held weakly: the engine holds it while it plays. Held here
-	-- strongly, it would hold its element, the element this node, and this
-	-- node this function: a cycle through Rust that no collector sees, and
-	-- every row with a loop would stay alive after it leaves.
-	local held = setmetatable({}, { __mode = "v" }) :: { anim: Animation? }
+local function looping(props: ContainerProps, start: (el: Element) -> Animation, period: number): Node
+	-- Whether it plays, and not the loop itself: a handle held here strongly
+	-- would hold its element, the element this node, and this node this
+	-- function, a cycle through Rust that no collector sees; held weakly, the
+	-- collector takes it while the loop plays, and nothing could stop it.
+	local playing = false
 	props.on_visible = function(visible: boolean, el: Element)
 		if visible then
-			if not held.anim and not motion.reduced_now() then
-				held.anim = start(el)
+			if not playing and not motion.reduced_now() then
+				playing = true
+				M.in_phase(start(el), period)
 			end
-		elseif held.anim then
-			held.anim:cancel()
-			held.anim = nil
+		elseif playing then
+			playing = false
+			anime.utils.remove(el)
 		end
 	end
 	return ui.div(props)
@@ -177,7 +210,7 @@ local function ring(ink: string, size: number): Node
 			ease = "linear",
 			frameRate = FPS,
 		})
-	end)
+	end, RUN * 1000 + REST)
 end
 
 -- The working ring alone, as a spinner: `size` points, in `ink` (a token;
@@ -186,11 +219,12 @@ function M.Spinner(props: { size: number?, ink: string? }): Node
 	return ring(props.ink or "$zeron.status.working", props.size or 14)
 end
 
--- A state's glyph, `size` points: working and connecting their ring.
+-- A state's glyph, `size` points: working, waiting and connecting their
+-- ring.
 local function glyph(kind: Kind, size: number): Node?
 	local k = KINDS[kind]
-	if kind == "working" or kind == "connecting" then
-		return ring(`$zeron.status.{kind}`, size)
+	if kind == "working" or kind == "connecting" or kind == "waiting" then
+		return ring(`$zeron.status.{hue(kind)}`, size)
 	end
 	return if k.glyph then Icon { name = k.glyph, size = size } else nil
 end
@@ -203,17 +237,18 @@ function M.StatusIcon(props: { kind: Kind | () -> Kind, size: number? }): Node
 	local given = props.kind
 	if type(given) ~= "function" then
 		local kind = given :: Kind
-		return ui.div { shrink = 0, color = `$zeron.status.{kind}`, glyph(kind, size) }
+		return ui.div { shrink = 0, color = `$zeron.status.{hue(kind)}`, glyph(kind, size) }
 	end
 	local kind = given :: () -> Kind
+	-- (Working and waiting share one ring: a move between them keeps it.)
 	local function drawn(): string
-		local k = kind()
+		local k = hue(kind())
 		return if k == "working" or k == "connecting" then k else "glyph"
 	end
 	return ui.div {
 		shrink = 0,
 		color = function(): string
-			return `$zeron.status.{kind()}`
+			return `$zeron.status.{hue(kind())}`
 		end,
 		ui.switch(drawn, {
 			working = ring("$zeron.status.working", size),
@@ -243,7 +278,7 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
-		color = `$zeron.status.{props.kind}`,
+		color = `$zeron.status.{hue(props.kind)}`,
 		text_size = "$font.size.sm",
 		weight = "$font.weight.medium",
 		glyph(props.kind, 16),
@@ -259,8 +294,8 @@ M.Status = ui.component(function(props: { kind: Kind, label: string?, since: num
 end)
 
 -- A list row's dot: 9 points, its state's hue, its long name a tooltip;
--- working or connecting, it pulses (dimming to half and back every two
--- seconds, in six steps each way).
+-- working, waiting or connecting, it pulses (dimming to half and back every
+-- two seconds, in six steps each way).
 function M.StatusDot(props: { kind: Kind, size: number? }): Node
 	local k = KINDS[props.kind]
 	local size = props.size or 9
@@ -269,7 +304,7 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 		h = size,
 		shrink = 0,
 		rounded = "$radius.full",
-		bg = `$zeron.status.dot.{props.kind}`,
+		bg = `$zeron.status.dot.{hue(props.kind)}`,
 		tooltip = k.long,
 		label = k.long,
 	}
@@ -288,7 +323,8 @@ function M.StatusDot(props: { kind: Kind, size: number? }): Node
 			loopDelay = 800,
 			frameRate = FPS,
 		})
-	end)
+		-- (A dimming and a brightening, each with its pause.)
+	end, 2 * (200 + 800))
 end
 
 -- A state's dot and its long name beside it, small, in its hue (a list
@@ -298,7 +334,7 @@ function M.StatusTag(props: { kind: Kind }): Node
 	return ui.row {
 		gap = "$space.1",
 		items = "center",
-		color = `$zeron.status.{props.kind}`,
+		color = `$zeron.status.{hue(props.kind)}`,
 		M.StatusDot { kind = props.kind, size = 6 },
 		ui.text { locale.t(NAMES[props.kind][2]), text_size = "$font.size.xs" },
 	}

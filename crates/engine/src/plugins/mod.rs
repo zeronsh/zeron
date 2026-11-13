@@ -14,7 +14,9 @@
 //! [`snapshot`], [`broker`], [`scaffold`]; [`templates`] stores whole-app
 //! templates for agents. This file does the IO around them.
 
+pub mod agents;
 pub mod broker;
+pub mod capability;
 pub mod files;
 pub mod guides;
 pub mod install;
@@ -22,6 +24,7 @@ pub mod keys;
 mod lifecycle;
 pub mod manifest;
 pub mod package;
+pub mod reviews;
 pub mod scaffold;
 pub mod scan;
 pub mod service;
@@ -30,6 +33,8 @@ pub mod snapshot;
 pub mod status;
 pub mod template_packages;
 pub mod templates;
+pub mod themes;
+pub mod uploads;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -55,8 +60,51 @@ use status::{Author, State, Status};
 pub const PLUGINS_DIR: &str = "plugins";
 pub const TEMPLATES_DIR: &str = "templates";
 pub const REMOVED_DIR: &str = ".removed";
-/// `PluginSend`'s `data`, serialized.
+
+/// Forget what plugin `id` kept under `plugins_dir/.storage`: `zeron.store`
+/// (the app's and its service's), its settings, and its database with
+/// SQLite's files beside it. A plugin installed later under the id starts
+/// with none of it.
+pub(crate) fn forget_storage(plugins_dir: &Path, id: &str) {
+    let storage = plugins_dir.join(".storage");
+    for end in ["json", "settings.json", "sqlite3", "sqlite3-wal", "sqlite3-shm"] {
+        let _ = std::fs::remove_file(storage.join(format!("{id}.{end}")));
+    }
+    let _ = std::fs::remove_file(Services::store_path(&storage, id));
+}
+
+/// Take away what removing plugins left in `plugins_dir/.removed` (each is
+/// moved there first, so it's gone from the list at once, then deleted).
+pub(crate) fn sweep_removed(plugins_dir: &Path) {
+    let removed = plugins_dir.join(REMOVED_DIR);
+    let Ok(listed) = std::fs::read_dir(&removed) else { return };
+    for entry in listed.flatten() {
+        let path = entry.path();
+        let gone = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        if let Err(error) = gone {
+            tracing::debug!(path = %path.display(), %error, "plugins: couldn't delete a removed plugin yet");
+        }
+    }
+}
+/// `PluginSend`'s `data`, serialized (checked again where it lands).
 pub const MAX_SEND_BYTES: usize = 64 * 1024;
+/// A service call's `args` from another device, serialized.
+pub const MAX_CALL_BYTES: usize = 1024 * 1024;
+/// The author Zeron's own plugins say they are across devices: never a
+/// key, so never the same as one.
+pub const BUILTIN_AUTHOR: &str = "zeron";
+/// How often this device looks for signing keys added on the account's
+/// other devices, and rescans so authors looked up longer ago than
+/// `keys::CACHE_TTL_SECS` are looked up again (a key revoked elsewhere
+/// stops counting within the hour).
+const NEW_KEYS_EVERY: Duration = Duration::from_secs(15 * 60);
+/// A peer's word (`CheckPluginKey`) looks this device's key up at most this often.
+const OWN_KEY_CHECK_APART: Duration = Duration::from_secs(5);
+/// Until those checks can run (auth not ready, the edge not answering).
+const KEYS_RETRY: Duration = Duration::from_secs(30);
 
 const RESCAN_DEBOUNCE: Duration = Duration::from_millis(200);
 const RESIGN_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -91,6 +139,8 @@ pub fn handles(method: &str) -> bool {
         methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
             | methods::DECIDE_PLUGIN
+            | methods::REVIEW_PLUGIN
+            | methods::REVIEW_TEMPLATE
             | methods::SET_PLUGIN_OFF
             | methods::SET_BUILTIN_PLUGINS
             | methods::REMOVE_PLUGIN
@@ -106,8 +156,11 @@ pub fn handles(method: &str) -> bool {
             | methods::PLUGIN_DELIVER
             | methods::CALL_PLUGIN_SERVICE
             | methods::SERVE_PLUGIN_CALL
+            | methods::PLUGIN_AGENTS
+            | methods::SERVE_PLUGIN_AGENTS
             | methods::WATCH_PLUGIN_CHANNEL
             | methods::PLUGIN_SIGNING_KEY
+            | methods::CHECK_PLUGIN_KEY
             | methods::LIST_TEMPLATES
             | methods::CREATE_TEMPLATE
             | methods::USE_TEMPLATE
@@ -121,7 +174,9 @@ pub fn handles(method: &str) -> bool {
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::PLUGIN_STATUS
+            | methods::WATCH_THEMES
     ) || lifecycle::handles(method)
+        || themes::handles(method)
 }
 
 /// How long `PluginStatus` waits for the window's account.
@@ -134,6 +189,8 @@ pub const ELEMENTS_FILE: &str = ".elements.json";
 type AccountFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 /// Posts a plugin's notification: `(source, title, body, session)` → outcome.
 type NotifyFn = Arc<dyn Fn(&str, &str, &str, Option<&str>) -> String + Send + Sync>;
+/// This device's chats' and projects' folders (a service's `zeron.folders`).
+type FoldersFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 enum Kick {
     Rescan,
@@ -182,6 +239,8 @@ struct Inner {
     written: Mutex<HashMap<String, Vec<u8>>>,
     tools: Arc<ToolBroker>,
     channel: Arc<Slot>,
+    /// The window, told when the theme methods change the theme files.
+    themes: Arc<Slot>,
     kick: Mutex<Option<mpsc::UnboundedSender<Kick>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     watch: Mutex<Option<crate::fs_watch::FsWatch>>,
@@ -194,13 +253,39 @@ struct Inner {
     builtin_watch: Mutex<Option<crate::fs_watch::FsWatch>>,
     /// Plugins' services (plugins/service).
     services: Services,
+    /// The agents' usage, accounts and models, as plugins reach them
+    /// (plugins/agents), and their events.
+    agents: agents::Agents,
     /// Devices whose windows watch this device's service events, by plugin:
     /// each until it renews.
     watchers: Mutex<HashMap<String, HashMap<String, Instant>>>,
     /// The (plugin, device) services this device's windows watch.
     watching: Mutex<HashSet<(String, String)>>,
     notifier: Mutex<Option<NotifyFn>>,
+    /// Where this device's chats and projects are (`zeron.folders`).
+    folders: Mutex<Option<FoldersFn>>,
+    /// One-time capabilities for Zeron's consent window (`ReviewPlugin`,
+    /// `ReviewTemplate`): what allowing and signing need.
+    reviews: Mutex<reviews::Reviews>,
+    /// Plugin files on their way here from another of your devices
+    /// (`StagePluginPackage`).
+    uploads: Mutex<uploads::Uploads>,
+    /// The ticket of the sign-in just made (`Auth::step_up`), which
+    /// registering a new key needs.
+    step_up: Mutex<Option<StepUpFn>>,
+    /// Signing keys added on the account's other devices that this device
+    /// noticed (`PluginSigningKey`'s `new_keys`).
+    new_keys: Mutex<Vec<keys::KeyRow>>,
+    /// What the host says about the account's signing keys (a key added on
+    /// another device, this device's revoked): `{id, kind, words}`, carried
+    /// on the plugin list for the app's own strip, newest last.
+    key_notices: Mutex<Vec<serde_json::Value>>,
+    /// When this device's own key was last looked up on a peer's word
+    /// (`CheckPluginKey`): at most every few seconds.
+    own_key_checked: Mutex<Option<Instant>>,
 }
+
+type StepUpFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[derive(Deserialize)]
 struct IdParams {
@@ -211,6 +296,18 @@ struct IdParams {
 struct DecideParams {
     id: String,
     allow: bool,
+    hash: String,
+    /// `ReviewPlugin`'s capability: needed to allow.
+    #[serde(default)]
+    review: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReviewParams {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    pending: Option<String>,
     hash: String,
 }
 
@@ -236,6 +333,9 @@ struct SignParams {
     id: Option<String>,
     #[serde(default)]
     path: Option<String>,
+    /// `ReviewPlugin`'s capability for the plugin signed.
+    #[serde(default)]
+    review: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -287,6 +387,10 @@ struct DeliverParams {
     /// A service's event (`zeron.emit`) for windows here, not a message.
     #[serde(default)]
     event: Option<String>,
+    /// From another device whose id the link didn't say: `from` is only
+    /// what it claimed.
+    #[serde(skip)]
+    unverified_from: bool,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +422,9 @@ struct ServeParams {
     args: serde_json::Value,
     #[serde(default)]
     timeout: Option<f64>,
+    /// From another device whose id the link didn't say.
+    #[serde(skip)]
+    unverified_from: bool,
 }
 
 /// `PluginDeliver` outcomes (and the sender's `offline`).
@@ -327,6 +434,7 @@ pub mod outcome {
     pub const NOT_ALLOWED: &str = "not_allowed";
     pub const NOT_OPEN: &str = "not_open";
     pub const OFFLINE: &str = "offline";
+    pub const TOO_BIG: &str = "too_big";
 }
 
 /// `<plugin>__<tool>`, with `-` → `_`.
@@ -415,8 +523,11 @@ impl Plugins {
                 retention: Mutex::new(Retention::default()),
                 sweep_scheduled: AtomicBool::new(false),
                 written: Mutex::new(HashMap::new()),
+                reviews: Mutex::new(reviews::Reviews::default()),
+                uploads: Mutex::new(uploads::Uploads::default()),
                 tools: Arc::new(ToolBroker::default()),
                 channel: Arc::new(Slot::default()),
+                themes: Arc::new(Slot::default()),
                 kick: Mutex::new(None),
                 tasks: Mutex::new(Vec::new()),
                 watch: Mutex::new(None),
@@ -424,12 +535,21 @@ impl Plugins {
                 builtin_dir: Mutex::new(None),
                 builtin_watch: Mutex::new(None),
                 services: Services::new(&storage, config),
+                agents: agents::Agents::default(),
                 watchers: Mutex::new(HashMap::new()),
                 watching: Mutex::new(HashSet::new()),
                 notifier: Mutex::new(None),
+                folders: Mutex::new(None),
+                step_up: Mutex::new(None),
+                new_keys: Mutex::new(Vec::new()),
+                key_notices: Mutex::new(Vec::new()),
+                own_key_checked: Mutex::new(None),
             }),
         };
         plugins.inner.services.set_hooks(Arc::new(ServiceHooks {
+            inner: Arc::downgrade(&plugins.inner),
+        }));
+        plugins.inner.agents.set_sink(Arc::new(AgentSink {
             inner: Arc::downgrade(&plugins.inner),
         }));
         plugins.publish_tools();
@@ -442,6 +562,29 @@ impl Plugins {
         notify: impl Fn(&str, &str, &str, Option<&str>) -> String + Send + Sync + 'static,
     ) {
         *lock(&self.inner.notifier) = Some(Arc::new(notify));
+    }
+
+    /// Where this device's chats and projects are, for a service's
+    /// `zeron.folders()` (the engine's workspace; a test's own).
+    pub fn set_folders(&self, folders: impl Fn() -> Vec<String> + Send + Sync + 'static) {
+        *lock(&self.inner.folders) = Some(Arc::new(folders));
+    }
+
+    /// Plugins' agent ops and events (the engine sets their host and feeds).
+    pub fn agents(&self) -> &agents::Agents {
+        &self.inner.agents
+    }
+
+    /// Follow what the engine learns of accounts, sessions and chats, for
+    /// plugins' events, while the plugins service runs.
+    pub fn follow_agents(
+        &self,
+        accounts: watch::Receiver<Option<zeron_proto::AgentAccountsSnapshot>>,
+        sessions: watch::Receiver<Vec<zeron_proto::Session>>,
+        chats: watch::Receiver<Vec<zeron_proto::Chat>>,
+    ) {
+        let tasks = agents::follow(&self.inner.agents, accounts, sessions, chats);
+        lock(&self.inner.tasks).extend(tasks);
     }
 
     pub fn plugins_dir(&self) -> &Path {
@@ -471,6 +614,30 @@ impl Plugins {
     pub fn attach_auth(&self, auth: crate::Auth) {
         let for_account = auth.clone();
         self.set_account(move || for_account.user_id());
+        let for_step_up = auth.clone();
+        *lock(&self.inner.step_up) = Some(Arc::new(move || for_step_up.step_up()));
+        // Signed in on an engine with no edge of its own (local mode, where
+        // the first sign-in happens): its keys are looked up and registered
+        // with the edge it signs in against.
+        if self.directory().is_none() && auth.workos_enabled() {
+            self.set_directory(Arc::new(keys::EdgeDirectory::new(auth.edge_url(), Arc::new(auth.clone()))));
+        }
+        // A fresh ticket (a sign-in, before it's announced and the app
+        // restarts the engine; a step-up): this device's key registered with
+        // it while it's here.
+        // Through the edge it signs in against, with the session's own
+        // bearer: the engine may have no edge of its own (local mode, where
+        // the first sign-in happens), and the sign-in isn't announced yet.
+        let weak = Arc::downgrade(&self.inner);
+        let fresh: Arc<dyn KeyDirectory> = Arc::new(keys::EdgeDirectory::new(auth.edge_url(), auth.session_bearer()));
+        auth.on_fresh_ticket(Arc::new(move |account: String| {
+            let (weak, fresh) = (weak.clone(), fresh.clone());
+            Box::pin(async move {
+                if let Some(inner) = weak.upgrade() {
+                    Plugins { inner }.register_key_through(fresh.as_ref(), &account).await;
+                }
+            })
+        }));
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -486,7 +653,9 @@ impl Plugins {
                 let Some(inner) = weak.upgrade() else { return };
                 let plugins = Plugins { inner };
                 lock(&plugins.inner.lookup_failed).clear();
+                plugins.settle_revokes().await;
                 plugins.register_key().await;
+                plugins.check_keys().await;
                 plugins.kick(Kick::Rescan);
             }
         });
@@ -529,6 +698,8 @@ impl Plugins {
         let worker = runtime.spawn(Self::worker(Arc::downgrade(&self.inner), rx));
         let this = self.clone();
         let setup = runtime.spawn(async move {
+            let plugins_dir = this.inner.plugins_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || sweep_removed(&plugins_dir)).await;
             let watcher = this.clone();
             let _ = tokio::task::spawn_blocking(move || watcher.install_watch(tx)).await;
             this.register_key().await;
@@ -561,7 +732,20 @@ impl Plugins {
                 }
             }
         });
-        lock(&self.inner.tasks).extend([worker, setup, renew]);
+        let weak = Arc::downgrade(&self.inner);
+        // At start (as soon as auth and the edge answer: retried every
+        // half minute until they do), then every 15 minutes.
+        let new_keys = runtime.spawn(async move {
+            loop {
+                let Some(inner) = weak.upgrade() else { return };
+                let plugins = Plugins { inner };
+                let checked = plugins.check_keys().await;
+                plugins.kick(Kick::Rescan);
+                drop(plugins);
+                tokio::time::sleep(if checked { NEW_KEYS_EVERY } else { KEYS_RETRY }).await;
+            }
+        });
+        lock(&self.inner.tasks).extend([worker, setup, renew, new_keys]);
         self.spawn_update_checks();
     }
 
@@ -609,6 +793,9 @@ impl Plugins {
         }
         self.inner.tools.drop_pending();
         self.inner.services.shutdown();
+        // Its host holds the engine (doc host, sessions, workspace), and the
+        // engine holds these plugins: let go, so the graph can be freed.
+        self.inner.agents.shutdown();
     }
 
     fn kick(&self, kick: Kick) {
@@ -726,14 +913,42 @@ impl Plugins {
     /// Register this device's key for the signed-in account (retried next
     /// start, or next sign-in, when it fails).
     async fn register_key(&self) {
-        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+        if let Some(account) = self.account() {
+            self.register_key_as(&account).await;
+        }
+    }
+
+    /// [`Self::register_key`] in the background, when this device's key
+    /// isn't registered for the account signed in.
+    fn spawn_register(&self) {
+        let (Some(account), Ok(runtime)) = (self.account(), tokio::runtime::Handle::try_current()) else {
             return;
         };
+        let registered = signing::load_key(&self.inner.data_dir)
+            .is_some_and(|key| keys::Registration::load(&self.inner.data_dir).covers(&key.public(), &account));
+        if !registered {
+            let this = self.clone();
+            runtime.spawn(async move { this.register_key().await });
+        }
+    }
+
+    /// [`Self::register_key`] for `account` (a sign-in not yet announced).
+    async fn register_key_as(&self, account: &str) {
+        if let Some(directory) = self.directory() {
+            self.register_key_through(directory.as_ref(), account).await;
+        }
+    }
+
+    /// Register this device's key for `account` through `directory`.
+    async fn register_key_through(&self, directory: &dyn KeyDirectory, account: &str) {
+        let account = account.to_owned();
+        let step_up = lock(&self.inner.step_up).clone().and_then(|f| f());
         match keys::ensure_registered(
             &self.inner.data_dir,
-            directory.as_ref(),
+            directory,
             &self.inner.device_id,
             &account,
+            step_up.as_deref(),
         )
         .await
         {
@@ -747,9 +962,191 @@ impl Plugins {
         }
     }
 
+    /// Revoke the keys owed a revoke on the account signed in now.
+    async fn settle_revokes(&self) {
+        if let (Some(directory), Some(account)) = (self.directory(), self.account()) {
+            keys::settle_revokes(&self.inner.data_dir, directory.as_ref(), &account).await;
+        }
+    }
+
+    /// Before signing out: this device's key revoked on the edge (or owed
+    /// a revoke when it can't be reached) and its private half deleted, so
+    /// nobody signs as this account with it again. (`SignOut`, with the
+    /// session still there to revoke with.)
+    pub async fn retire_signing_key(&self) {
+        let directory = self.directory();
+        keys::retire_key(&self.inner.data_dir, directory.as_deref(), self.account().as_deref()).await;
+        lock(&self.inner.new_keys).clear();
+    }
+
+    /// Look for signing keys added on the account's other devices since
+    /// last time; each is posted as a notice and kept for `PluginSigningKey`.
+    async fn look_for_new_keys(&self) -> bool {
+        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+            return false;
+        };
+        match keys::new_keys_elsewhere(&self.inner.data_dir, directory.as_ref(), &self.inner.device_id, &account).await {
+            Ok(rows) => {
+                for row in &rows {
+                    let named = self.device_name(&row.device_id);
+                    let device = if named == row.device_id || named.trim().is_empty() { "another device".to_owned() } else { named };
+                    tracing::info!(device = %row.device_id, fingerprint = %row.fingerprint, "plugins: a new signing key on the account");
+                    self.key_notice(
+                        &format!("key-added:{}", row.key),
+                        "key_added",
+                        Some(&device),
+                        "A new signing key",
+                        &format!(
+                            "A new signing key was added to your account on {device}. If that wasn't you, revoke it in Settings → Account. (Fingerprint {}.)",
+                            row.fingerprint
+                        ),
+                    );
+                }
+                lock(&self.inner.new_keys).extend(rows);
+                true
+            }
+            Err(error) => {
+                tracing::info!(%error, "plugins: couldn't look for new signing keys yet");
+                false
+            }
+        }
+    }
+
+    /// Whether this device's key is still registered: one revoked from
+    /// another device (or gone from the edge) stops being yours at once. The
+    /// key is deleted, a fresh one made (registered with the next sign-in's
+    /// ticket), plugins it signed checked again like anyone's, your own
+    /// plugins re-signed and asked about again, and you're told.
+    async fn check_own_key(&self) -> bool {
+        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+            return false;
+        };
+        let Some(key) = signing::load_key(&self.inner.data_dir).map(|k| k.public()) else {
+            return true;
+        };
+        let registered = keys::Registration::load(&self.inner.data_dir).covers(&key, &account);
+        *lock(&self.inner.own_key_checked) = Some(Instant::now());
+        let revoked = match directory.lookup(&key).await {
+            // Revoked on this account (whatever this device's file says).
+            Ok(keys::Lookup::Found { revoked: true, mine: true, .. }) => true,
+            // Registered here, and now gone or someone else's.
+            Ok(keys::Lookup::Found { mine: false, .. }) | Ok(keys::Lookup::Unknown) => registered,
+            Ok(keys::Lookup::Found { .. }) => false,
+            Err(error) => {
+                tracing::info!(%error, "plugins: couldn't check this device's signing key yet");
+                return false;
+            }
+        };
+        if revoked {
+            self.own_key_revoked(&key).await;
+        }
+        true
+    }
+
+    async fn own_key_revoked(&self, key: &str) {
+        tracing::warn!("plugins: this device's signing key was revoked elsewhere; making a new one");
+        // Revoked already: nothing to revoke, just never sign with it again.
+        signing::delete_key(&self.inner.data_dir);
+        let _ = std::fs::remove_file(self.inner.data_dir.join(keys::REGISTRATION_FILE));
+        let cached = {
+            let mut cache = lock(&self.inner.cache);
+            if let Some(account) = self.account() {
+                cache.0.insert(key.to_owned(), keys::CachedKey::from_lookup(&keys::Lookup::Unknown, &account, now_secs()));
+            }
+            cache.clone()
+        };
+        cached.save(&self.inner.data_dir);
+        // What runs outside their sandbox was allowed your own plugins as
+        // you: asked again (what stays inside it is kept).
+        let _ = self.update_state(|state| {
+            let own: Vec<String> = state.own.iter().cloned().collect();
+            for id in own {
+                if let Some(d) = state.decisions.get_mut(&id) {
+                    let inside = capability::inside_sandbox(&d.allowed_record());
+                    d.permissions.retain(|p| !capability::OUTSIDE_SANDBOX.contains(&p.as_str()));
+                    d.grants = Some(inside);
+                }
+            }
+        });
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if signing::load_or_create_key(&this.inner.data_dir).is_ok() {
+                this.resign_all_own();
+            }
+        })
+        .await;
+        lock(&self.inner.new_keys).retain(|row| row.key != key);
+        let here = if cfg!(target_os = "macos") { "This Mac's" } else { "This device's" };
+        self.key_notice(
+            &format!("key-revoked:{key}"),
+            "own_key_revoked",
+            None,
+            "Signing key revoked",
+            &format!(
+                "{here} signing key was revoked from another device. Plugins it signed no longer count as yours; your own plugins' programs, services and other code-running powers wait for you to allow them again. Sign in again to register a new key."
+            ),
+        );
+        self.register_key().await;
+        self.kick(Kick::Rescan);
+    }
+
+    /// Tell `device` a key was revoked, so it checks its own now rather
+    /// than at its next regular check (best effort: offline, it checks then).
+    fn tell_key_revoked(&self, device: String) {
+        let (Some(links), Ok(runtime)) = (lock(&self.inner.links).clone(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        runtime.spawn(async move {
+            let told = tokio::time::timeout(DELIVER_TIMEOUT, async {
+                links.client(&device).await?.call(methods::CHECK_PLUGIN_KEY, serde_json::json!({})).await
+            })
+            .await;
+            if !matches!(told, Ok(Ok(_))) {
+                tracing::info!(%device, "plugins: couldn't tell the device its key was revoked; it checks on its own");
+            }
+        });
+    }
+
+    /// Said by the host (the app's toasts, from the plugin list, in its
+    /// own words from `kind` and `device`, the other device's name) and as
+    /// a desktop banner: once per `id`.
+    fn key_notice(&self, id: &str, kind: &str, device: Option<&str>, title: &str, words: &str) {
+        {
+            let mut notices = lock(&self.inner.key_notices);
+            if notices.iter().any(|n| n["id"] == id) {
+                return;
+            }
+            notices.push(serde_json::json!({ "id": id, "kind": kind, "device": device, "words": words }));
+            let excess = notices.len().saturating_sub(20);
+            notices.drain(..excess);
+        }
+        self.publish_list();
+        if let Some(notify) = lock(&self.inner.notifier).clone() {
+            notify("zeron", title, words, None);
+        }
+    }
+
+    /// A peer said it revoked a key (`CheckPluginKey`): this device's own
+    /// looked up now, unless it was a moment ago.
+    async fn check_own_key_soon(&self) {
+        let recent = lock(&self.inner.own_key_checked).is_some_and(|at| at.elapsed() < OWN_KEY_CHECK_APART);
+        if !recent {
+            self.check_own_key().await;
+        }
+    }
+
+    /// The account's key checks: this device's own key's standing, and keys
+    /// added on other devices. Whether they could run (signed in, edge up).
+    async fn check_keys(&self) -> bool {
+        let own = self.check_own_key().await;
+        let others = self.look_for_new_keys().await;
+        own && others
+    }
+
     // ── Scanning ────────────────────────────────────────────────────────────
 
     fn scan_blocking(&self) -> (Vec<Entry>, Vec<String>, bool) {
+        self.prune_state();
         let state = lock(&self.inner.state).clone();
         let cache = lock(&self.inner.cache).clone();
         let failed = lock(&self.inner.lookup_failed).clone();
@@ -833,6 +1230,32 @@ impl Plugins {
         (entries, owed, keeps)
     }
 
+    /// Forget own ids and decisions whose folder is gone (yours, or Zeron's
+    /// own for its off switch). Under the scan lock, which installs hold
+    /// while they swap a folder.
+    fn prune_state(&self) {
+        let names = |dir: &Path| -> Vec<String> {
+            scan::plugin_dirs(dir)
+                .iter()
+                .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect()
+        };
+        let mut present: std::collections::BTreeSet<String> = names(&self.inner.plugins_dir).into_iter().collect();
+        if let Some(dir) = lock(&self.inner.builtin_dir).clone() {
+            present.extend(names(&dir));
+        }
+        let pruned = {
+            let mut state = lock(&self.inner.state);
+            state.prune(&present).then(|| state.clone())
+        };
+        if let Some(state) = pruned {
+            tracing::info!("plugins: forgot decisions for plugins that are gone");
+            if let Err(error) = state.save(&self.inner.plugins_dir) {
+                tracing::warn!(%error, "plugins: couldn't save pruned choices");
+            }
+        }
+    }
+
     /// Scan every plugin folder and push the list (and tools) if it changed.
     pub async fn rescan(&self) {
         let _guard = self.inner.scan_lock.lock().await;
@@ -869,12 +1292,14 @@ impl Plugins {
     fn list_value(&self) -> serde_json::Value {
         let entries = lock(&self.inner.entries);
         let items: Vec<&scan::PluginItem> = entries.iter().map(|e| &e.item).collect();
+        let key_notices = lock(&self.inner.key_notices).clone();
         serde_json::json!({
             "dirs": {
                 "plugins": self.inner.plugins_dir.display().to_string(),
                 "templates": self.inner.data_dir.join(TEMPLATES_DIR).display().to_string(),
             },
             "plugins": items,
+            "key_notices": key_notices,
         })
     }
 
@@ -992,13 +1417,13 @@ impl Plugins {
         let gave_up = self.directory().is_none()
             || account.is_none()
             || lock(&self.inner.lookup_failed).contains_key(key);
-        match keys::resolve_cached(&cache, key, own_key.as_deref(), account.as_deref(), now_secs(), gave_up) {
-            Ok(author) => author,
-            Err(author) => {
-                self.spawn_lookups(vec![key.to_owned()]);
-                author
-            }
+        let resolved = keys::resolve_cached(&cache, key, own_key.as_deref(), account.as_deref(), now_secs(), gave_up);
+        if resolved.is_err() {
+            self.spawn_lookups(vec![key.to_owned()]);
         }
+        // What a template's install is decided by: stale or unchecked is
+        // Unknown, never the last author known.
+        keys::for_granting(resolved, gave_up)
     }
 
     /// Who signed with `key`, waiting (briefly) on the edge if need be.
@@ -1056,10 +1481,9 @@ impl Plugins {
                 false,
             )
         };
-        let stale = match cached {
-            Ok(author) => return author,
-            Err(author) => author,
-        };
+        if let Ok(author) = cached {
+            return author;
+        }
         let (Some(directory), Some(account)) = (self.directory(), account) else {
             return Author::unknown(keys::COULD_NOT_CHECK);
         };
@@ -1070,17 +1494,42 @@ impl Plugins {
         .await
         {
             Ok(Some(entry)) => entry.author(),
-            _ => match stale {
-                Author::Unknown { .. } => Author::unknown(keys::COULD_NOT_CHECK),
-                known => known,
-            },
+            // Stale or offline: Unknown, never the last author known (a
+            // revoked key would keep passing for its owner).
+            _ => Author::unknown(keys::COULD_NOT_CHECK),
         }
     }
 
+    /// Whether `new` is another live key of the account that signed with
+    /// `old` ([`keys::same_account`]), asked of the edge now (never the
+    /// cache: a key revoked a minute ago mustn't take a plugin over).
+    /// Offline, signed out or slow: no.
+    pub(super) async fn same_account(&self, old: &str, new: &str) -> bool {
+        if old == new {
+            return false;
+        }
+        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+            return false;
+        };
+        let look = |key: &str| {
+            let (directory, account, key) = (directory.clone(), account.clone(), key.to_owned());
+            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, &account)).await.ok().flatten() }
+        };
+        let (Some(old), Some(new)) = (look(old).await, look(new).await) else {
+            return false;
+        };
+        keys::same_account(&old, &new)
+    }
+
+    /// The plugin `id`: Zeron's own when a folder of yours squats its id
+    /// (that folder is listed Broken beside it, and what's kept under the id
+    /// is the built-in's).
     fn entry(&self, id: &str) -> Option<Entry> {
-        lock(&self.inner.entries)
+        let entries = lock(&self.inner.entries);
+        entries
             .iter()
-            .find(|e| e.item.id == id)
+            .find(|e| e.item.id == id && e.item.builtin)
+            .or_else(|| entries.iter().find(|e| e.item.id == id))
             .cloned()
     }
 
@@ -1132,6 +1581,61 @@ impl Plugins {
             .collect()
     }
 
+    /// Use up a consent-window review for `subject` as shown (`hash`):
+    /// only by whom it was minted for (`reviews::Origin`): this device's own
+    /// app, or (a plugin's) the verified device that asked for it over the
+    /// link. Never an agent's token, never an unverified dial; a template's
+    /// and a signing are this device's app's alone.
+    fn redeem_review(
+        &self,
+        kind: reviews::Kind,
+        subject: &str,
+        hash: &str,
+        review: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let what = match kind {
+            reviews::Kind::Plugin => "Allowing a plugin",
+            reviews::Kind::Template => "Allowing a template",
+        };
+        let origin = reviews::Origin::of(&zeron_rpc::caller()).ok_or_else(|| reviews::needed(what))?;
+        if kind == reviews::Kind::Template && origin != reviews::Origin::Local {
+            return Err(reviews::needed(what));
+        }
+        lock(&self.inner.reviews).redeem(kind, &origin, subject, hash, review)
+    }
+
+    /// `SignPlugin`'s review: for the plugin `id` names, or `path` when it's
+    /// a folder in the plugins folder, as it is now. Anything else (a folder
+    /// elsewhere, no review) is refused.
+    async fn redeem_sign_review(
+        &self,
+        id: Option<&str>,
+        path: Option<&str>,
+        review: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let id = match (id, path) {
+            (Some(id), _) => Some(id.to_owned()),
+            (None, Some(path)) => {
+                let canonical = std::fs::canonicalize(path).ok();
+                let root = std::fs::canonicalize(&self.inner.plugins_dir).ok();
+                canonical
+                    .filter(|c| root.is_some() && c.parent() == root.as_deref())
+                    .and_then(|c| c.file_name().map(|n| n.to_string_lossy().into_owned()))
+            }
+            (None, None) => None,
+        };
+        let Some(id) = id else {
+            return Err(failed("Only a plugin in your plugins folder can be signed, by its id"));
+        };
+        // Signing is with this device's key: its own app's alone.
+        if !zeron_rpc::caller().is_local() {
+            return Err(reviews::needed("Signing a plugin"));
+        }
+        self.rescan().await;
+        let hash = self.entry(&id).map(|e| e.item.hash).unwrap_or_default();
+        self.redeem_review(reviews::Kind::Plugin, &id, &hash, review)
+    }
+
     // ── Methods ─────────────────────────────────────────────────────────────
 
     pub async fn dispatch(
@@ -1149,6 +1653,31 @@ impl Plugins {
                 self.rescan().await;
                 RpcReply::value(&self.list_value())
             }
+            methods::REVIEW_PLUGIN | methods::REVIEW_TEMPLATE => {
+                let p: ReviewParams = parse_params(params)?;
+                // This device's app, or (a plugin's) another of the
+                // account's devices as the edge verified the link: its
+                // consent window shows this plugin as listed here. The
+                // review is good only to whoever asked for it.
+                let origin = reviews::Origin::of(&zeron_rpc::caller())
+                    .filter(|origin| method == methods::REVIEW_PLUGIN || *origin == reviews::Origin::Local)
+                    .ok_or_else(|| reviews::needed("A review"))?;
+                let review = if method == methods::REVIEW_PLUGIN {
+                    let id = p.id.unwrap_or_default();
+                    self.rescan().await;
+                    let entry = self
+                        .entry(&id)
+                        .ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+                    if entry.item.hash != p.hash {
+                        return Err(failed("It changed while you were looking; review it again"));
+                    }
+                    lock(&self.inner.reviews).mint(reviews::Kind::Plugin, origin, &id, &p.hash)?
+                } else {
+                    let pending = p.pending.unwrap_or_default();
+                    lock(&self.inner.reviews).mint(reviews::Kind::Template, origin, pending.trim(), &p.hash)?
+                };
+                RpcReply::value(&serde_json::json!({ "review": review }))
+            }
             methods::WATCH_PLUGINS => {
                 self.ensure_scanned().await;
                 Ok(RpcReply::Stream(watch_stream(
@@ -1157,12 +1686,32 @@ impl Plugins {
             }
             methods::DECIDE_PLUGIN => {
                 let p: DecideParams = parse_params(params)?;
+                // Allowing is Zeron's consent window's alone: this device's
+                // app's, or another of the account's devices' (its Settings →
+                // Plugins), with a review minted for this plugin as shown,
+                // for whoever decides.
+                if p.allow {
+                    // (Changed since it was shown: say so, keeping the review.)
+                    self.rescan().await;
+                    if self.entry(&p.id).is_some_and(|e| e.item.hash != p.hash) {
+                        return Err(failed("It changed while you were looking; review it again"));
+                    }
+                    self.redeem_review(reviews::Kind::Plugin, &p.id, &p.hash, p.review.as_deref())?;
+                }
                 self.rescan().await;
                 let entry = self
                     .entry(&p.id)
                     .ok_or_else(|| failed(format!("There's no plugin {}", p.id)))?;
                 if entry.item.hash != p.hash {
                     return Err(failed("It changed while you were looking; review it again"));
+                }
+                // Changed since you allowed it: it's removed or installed
+                // again, never allowed as it is now.
+                if p.allow && entry.item.status == Status::Tampered {
+                    return Err(failed(format!(
+                        "{} changed after you allowed it. Remove it, or install it again from where it came from",
+                        entry.item.name
+                    )));
                 }
                 if entry.item.status == Status::Broken {
                     return Err(failed(
@@ -1171,6 +1720,17 @@ impl Plugins {
                             .error
                             .unwrap_or_else(|| "It can't be turned on".into()),
                     ));
+                }
+                // Allowed for who made it as known now: a stale or offline
+                // lookup is Unknown, and what was shown must still hold.
+                if p.allow
+                    && !entry.item.own
+                    && !entry.item.builtin
+                    && let Some(key) = entry.key()
+                    && self.resolve_now(key).await != entry.item.author
+                {
+                    self.rescan().await;
+                    return Err(failed("Who made it couldn't be confirmed just now; review it again"));
                 }
                 let decision = entry.facts().record(p.allow);
                 self.update_state(|state| {
@@ -1229,34 +1789,42 @@ impl Plugins {
             }
             methods::REMOVE_PLUGIN => {
                 let p: IdParams = parse_params(params)?;
-                if self.entry(&p.id).is_some_and(|e| e.item.builtin) {
-                    return Err(failed("Zeron's own plugins can be turned off, not removed"));
-                }
-                if p.id.is_empty() || p.id.starts_with('.') || p.id.contains(['/', '\\']) {
-                    return Err(failed(format!("There's no plugin {}", p.id)));
-                }
-                let dir = self.inner.plugins_dir.join(&p.id);
+                // A folder of yours under a built-in's id is taken away, but
+                // what's kept under the id (its decision, storage) is the
+                // built-in's, and stays.
+                let builtin = self.entry(&p.id).is_some_and(|e| e.item.builtin);
+                // (One plain name, joined so it stays in the plugins folder on
+                // every system: never `C:`, a device name or a trailing dot.)
+                let dir = match zeron_plugin_guard::path::join(&self.inner.plugins_dir, &p.id) {
+                    Ok(dir) if !p.id.starts_with('.') && !p.id.contains('/') => dir,
+                    _ => return Err(failed(format!("There's no plugin {}", p.id))),
+                };
                 if std::fs::symlink_metadata(&dir).is_err() {
-                    return Err(failed(format!("There's no plugin {}", p.id)));
+                    return Err(failed(if builtin {
+                        "Built-in plugins can be turned off, but not removed".to_string()
+                    } else {
+                        format!("There's no plugin {}", p.id)
+                    }));
                 }
                 let removed = self.inner.plugins_dir.join(REMOVED_DIR);
                 std::fs::create_dir_all(&removed).map_err(|_| failed("Couldn't remove it"))?;
                 std::fs::rename(&dir, removed.join(format!("{}-{}", p.id, now_secs())))
                     .map_err(|_| failed("Couldn't remove it"))?;
+                // Gone from the list now; its files go with it (what can't
+                // be deleted yet goes when the engine next starts).
+                let plugins_dir = self.inner.plugins_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || sweep_removed(&plugins_dir)).await;
+                if builtin {
+                    self.rescan().await;
+                    return RpcReply::value(&serde_json::json!({}));
+                }
                 self.update_state(|state| {
                     state.decisions.remove(&p.id);
                     state.own.remove(&p.id);
                 })?;
-                // What it kept (`zeron.store`, the app's) goes with it.
-                let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.json", p.id)));
-                // And its settings (the app's: what you set on its page).
-                let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.settings.json", p.id)));
-                // Its service's (`zeron.store` in service.luau).
-                let _ = std::fs::remove_file(Services::store_path(&self.inner.plugins_dir.join(".storage"), &p.id));
-                // Its database (`zeron.db`), and SQLite's files beside it.
-                for end in ["sqlite3", "sqlite3-wal", "sqlite3-shm"] {
-                    let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.{end}", p.id)));
-                }
+                // What it kept (`zeron.store`, its settings, its database)
+                // goes with it.
+                forget_storage(&self.inner.plugins_dir, &p.id);
                 install::forget_found(&self.inner.plugins_dir, &p.id);
                 self.rescan().await;
                 RpcReply::value(&serde_json::json!({}))
@@ -1321,37 +1889,62 @@ impl Plugins {
             }
             methods::SIGN_PLUGIN => {
                 let p: SignParams = parse_params(params)?;
-                let (id, dir) = match (p.id, p.path) {
-                    (Some(id), _) => {
-                        manifest::check_id(&id).map_err(failed)?;
-                        (Some(id.clone()), self.inner.plugins_dir.join(id))
-                    }
+                // Signing makes a plugin yours: the consent window's alone,
+                // with a review minted for this plugin as shown. Only a
+                // plugin in the plugins folder can be signed.
+                self.redeem_sign_review(p.id.as_deref(), p.path.as_deref(), p.review.as_deref())
+                    .await?;
+                // Only a folder in the plugins folder: this device's key
+                // signs nothing anywhere else (it would vouch for it as you).
+                let not_here = || failed("Only a plugin in your plugins folder can be signed");
+                let id = match (p.id, p.path) {
+                    (Some(id), _) => id,
                     (None, Some(path)) => {
-                        let path = PathBuf::from(path);
-                        let canonical = std::fs::canonicalize(&path)
+                        let canonical = std::fs::canonicalize(PathBuf::from(path))
                             .map_err(|_| failed("That folder can't be found"))?;
                         let root = std::fs::canonicalize(&self.inner.plugins_dir).ok();
-                        let id = (canonical.parent() == root.as_deref())
-                            .then(|| {
-                                canonical
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                            })
-                            .flatten();
-                        (id, canonical)
+                        if root.is_none() || canonical.parent() != root.as_deref() {
+                            return Err(not_here());
+                        }
+                        canonical
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .ok_or_else(not_here)?
                     }
                     (None, None) => return Err(failed("Say which plugin to sign")),
                 };
-                if !dir.is_dir() {
+                manifest::check_id(&id).map_err(failed)?;
+                let dir = self.inner.plugins_dir.join(&id);
+                if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
                     return Err(failed("That folder can't be found"));
                 }
+                if self.entry(&id).is_some_and(|e| e.item.builtin) {
+                    return Err(failed(manifest::RESERVED_ID_ERROR));
+                }
+                let id = Some(id);
                 let this = self.clone();
                 let id_for_sign = id.clone();
                 let dir_for_sign = dir.clone();
                 let files = tokio::task::spawn_blocking(move || -> Result<usize, String> {
                     let key = signing::load_or_create_key(&this.inner.data_dir)?;
                     if let Some(id) = &id_for_sign {
+                        let own = lock(&this.inner.state).own.contains(id);
+                        if !own {
+                            // Someone else's, signed and intact: never taken
+                            // over (it would keep what they were allowed, as
+                            // yours, with whatever was changed in it).
+                            if let SigCheck::Valid(theirs) = scan::inspect(&dir_for_sign, true).sig
+                                && theirs != key.public()
+                            {
+                                return Err("It's signed by someone else, so it can't be made yours. Copy it under a new id to make your own version.".into());
+                            }
+                        }
                         this.update_state(|state| {
+                            // Taken as yours: what was allowed for whoever it
+                            // was before is asked again.
+                            if !own {
+                                state.decisions.remove(id);
+                            }
                             state.own.insert(id.clone());
                         })
                         .map_err(|e| e.to_string())?;
@@ -1367,6 +1960,9 @@ impl Plugins {
                 .await
                 .map_err(|_| failed("Couldn't sign it"))?
                 .map_err(failed)?;
+                // Signed with a key the edge doesn't know yet: registered
+                // now if a fresh sign-in's ticket is here (else at the next).
+                self.spawn_register();
                 match id {
                     Some(id) => {
                         self.rescan().await;
@@ -1436,7 +2032,8 @@ impl Plugins {
                 self.send(p).await
             }
             methods::PLUGIN_DELIVER => {
-                let p: DeliverParams = parse_params(params)?;
+                let mut p: DeliverParams = parse_params(params)?;
+                p.from = self.trusted_from(p.from, &mut p.unverified_from);
                 let outcome = self.deliver(p).await;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
@@ -1445,11 +2042,36 @@ impl Plugins {
                 RpcReply::value(&self.call_service(p).await)
             }
             methods::SERVE_PLUGIN_CALL => {
-                let p: ServeParams = parse_params(params)?;
+                let mut p: ServeParams = parse_params(params)?;
+                p.from = self.trusted_from(p.from, &mut p.unverified_from);
                 RpcReply::value(&self.serve_call(p).await)
+            }
+            methods::PLUGIN_AGENTS => {
+                let p: AgentsParams = parse_params(params)?;
+                RpcReply::value(&self.plugin_agents(p).await)
+            }
+            methods::SERVE_PLUGIN_AGENTS => {
+                let mut p: ServeAgentsParams = parse_params(params)?;
+                p.from = self.trusted_from(p.from, &mut p.unverified_from);
+                RpcReply::value(&self.serve_agents(p).await)
             }
             methods::WATCH_PLUGIN_CHANNEL => {
                 Ok(RpcReply::Stream(self.inner.channel.subscribe(|| {})))
+            }
+            methods::WATCH_THEMES => Ok(RpcReply::Stream(self.inner.themes.subscribe(|| {}))),
+            method if themes::handles(method) => {
+                if let Some(by) = zeron_rpc::caller().record() {
+                    tracing::info!(method, %by, "themes: asked by an agent");
+                }
+                let (data_dir, asked) = (self.inner.data_dir.clone(), method.to_owned());
+                let reply = tokio::task::spawn_blocking(move || themes::answer(&data_dir, &asked, &params))
+                    .await
+                    .map_err(|_| failed("Couldn't reach the themes"))?
+                    .map_err(failed)?;
+                if themes::changes(method) {
+                    self.inner.themes.push(serde_json::json!({ "changed": true }));
+                }
+                RpcReply::value(&reply)
             }
             methods::LIST_TEMPLATES
             | methods::CREATE_TEMPLATE
@@ -1469,6 +2091,11 @@ impl Plugins {
                 let p: TemplateParams = parse_params(params)?;
                 let dir = self.inner.data_dir.join(TEMPLATES_DIR);
                 let data_dir = self.inner.data_dir.clone();
+                // Who asked, when it wasn't this device's app (for the record).
+                let by = zeron_rpc::caller().record();
+                if let Some(by) = &by {
+                    tracing::info!(method, id = ?p.id, %by, "templates: asked by an agent or another device");
+                }
                 let method = method.to_owned();
                 let reply = tokio::task::spawn_blocking(move || {
                     let id = p.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
@@ -1492,7 +2119,7 @@ impl Plugins {
                                 v
                             })
                         }
-                        (methods::USE_TEMPLATE, Some(id)) => templates::use_template(&dir, id),
+                        (methods::USE_TEMPLATE, Some(id)) => templates::use_template(&dir, id, by.as_ref()),
                         (methods::TEMPLATE_STATUS, Some(id)) => templates::status(&dir, id),
                         (_, Some(id)) => templates::delete(&dir, id),
                     }
@@ -1561,8 +2188,31 @@ impl Plugins {
                     allow: bool,
                     #[serde(default)]
                     hash: Option<String>,
+                    #[serde(default)]
+                    review: Option<String>,
                 }
                 let p: PackageParams = parse_params(params)?;
+                // Allowing a template is Zeron's template consent window's
+                // alone, with a review minted for this package as shown.
+                if method == methods::DECIDE_TEMPLATE && p.allow {
+                    let pending = p.pending.as_deref().unwrap_or_default().trim();
+                    self.redeem_review(
+                        reviews::Kind::Template,
+                        pending,
+                        p.hash.as_deref().unwrap_or_default(),
+                        p.review.as_deref(),
+                    )?;
+                }
+                // R29: an agent exports to Zeron's exports folder only; a
+                // path of its choosing is the person's (their save dialog).
+                if method == methods::EXPORT_TEMPLATE
+                    && !zeron_rpc::caller().is_local()
+                    && p.path.as_deref().is_some_and(|path| !path.trim().is_empty())
+                {
+                    return Err(failed(
+                        "Agents export to Zeron's exports folder: leave out `path` (the reply says where it went)",
+                    ));
+                }
                 let dir = self.inner.data_dir.join(TEMPLATES_DIR);
                 let this = self.clone();
                 let method = method.to_owned();
@@ -1572,8 +2222,23 @@ impl Plugins {
                     match method.as_str() {
                         methods::EXPORT_TEMPLATE => {
                             let id = p.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
-                            let (Some(id), Some(path)) = (id, path) else {
-                                return Err("Say which template (`id`) and where to save it (`path`, ending in .zeron-template).".to_string());
+                            let Some(id) = id else {
+                                return Err("Say which template (`id`).".to_string());
+                            };
+                            // Where it's asked to go, if that's a folder of
+                            // yours; else Zeron's exports folder.
+                            let path = match path {
+                                Some(path) => {
+                                    template_packages::check_export_path(&path, &this.inner.data_dir, Some(&crate::repos::home_dir()))?;
+                                    path
+                                }
+                                None => {
+                                    let path = template_packages::default_export_path(&this.inner.data_dir, id);
+                                    if let Some(parent) = path.parent() {
+                                        std::fs::create_dir_all(parent).map_err(|e| format!("Couldn't make its folder: {e}"))?;
+                                    }
+                                    path
+                                }
                             };
                             let key = signing::load_or_create_key(&this.inner.data_dir)?;
                             template_packages::export(&dir, id, &path, &key)
@@ -1617,6 +2282,12 @@ impl Plugins {
                     let status = self.inner.services.status(&entry.item.id);
                     out["service"] = if status.is_null() { serde_json::json!({ "running": false }) } else { status };
                 }
+                // What it did to your agents' accounts and models here, and
+                // what its row says (a listener failing, a loop stopped).
+                let agents = self.inner.agents.status(&entry.item.id);
+                if !agents.is_null() {
+                    out["agents"] = agents;
+                }
                 // The window's account: where the plugin's nodes are, and
                 // what its row says (the app answers this call itself).
                 let tool = if p.snapshot { "@snapshot" } else { "@status" };
@@ -1659,7 +2330,56 @@ impl Plugins {
                 map["guide_summary"] = serde_json::json!(guides::PLUGINS_SUMMARY);
                 RpcReply::value(&map)
             }
+            methods::CHECK_PLUGIN_KEY => {
+                // Nothing in it is trusted: it only hastens the check.
+                let this = self.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move { this.check_own_key_soon().await });
+                }
+                RpcReply::value(&serde_json::json!({ "checking": true }))
+            }
             methods::PLUGIN_SIGNING_KEY => {
+                // Settings → Account: the account's keys (`keys: true`), and
+                // revoking one (`revoke: <key>`; this device's own is also
+                // deleted here, and a fresh one made at the next sign-in).
+                #[derive(Deserialize, Default)]
+                struct KeyParams {
+                    #[serde(default)]
+                    keys: bool,
+                    #[serde(default)]
+                    revoke: Option<String>,
+                }
+                let p: KeyParams = parse_params(params)?;
+                if let Some(revoke) = p.revoke.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()) {
+                    let directory = self.directory().ok_or_else(|| failed("Sign in to revoke a key"))?;
+                    let own = signing::load_key(&self.inner.data_dir).map(|k| k.public());
+                    if own.as_deref() == Some(revoke.as_str()) {
+                        self.retire_signing_key().await;
+                    } else {
+                        // Whose device it's on, to tell it at once.
+                        let device = directory
+                            .keys_since(0)
+                            .await
+                            .ok()
+                            .and_then(|(rows, _)| rows.into_iter().find(|r| r.key == revoke).map(|r| r.device_id));
+                        directory.revoke(&revoke).await.map_err(|_| failed("Couldn't revoke it: the edge can't be reached"))?;
+                        if let Some(device) = device.filter(|d| !d.is_empty() && *d != self.inner.device_id) {
+                            self.tell_key_revoked(device);
+                        }
+                    }
+                    lock(&self.inner.new_keys).retain(|row| row.key != revoke);
+                    // Plugins it signed are checked again: no longer verified.
+                    lock(&self.inner.cache).0.remove(&revoke);
+                    self.kick(Kick::Rescan);
+                    return RpcReply::value(&serde_json::json!({ "revoked": revoke }));
+                }
+                let listed = if p.keys {
+                    let directory = self.directory().ok_or_else(|| failed("Sign in to see your keys"))?;
+                    let (rows, _) = directory.keys_since(0).await.map_err(|_| failed("Couldn't list your keys"))?;
+                    Some(rows)
+                } else {
+                    None
+                };
                 let data_dir = self.inner.data_dir.clone();
                 let key =
                     tokio::task::spawn_blocking(move || signing::load_or_create_key(&data_dir))
@@ -1669,9 +2389,22 @@ impl Plugins {
                 let registered = self.account().is_some_and(|account| {
                     keys::Registration::load(&self.inner.data_dir).covers(&key.public(), &account)
                 });
-                RpcReply::value(
-                    &serde_json::json!({ "key": key.public(), "registered": registered }),
-                )
+                // Only the public half, ever: the private key never leaves
+                // the engine.
+                let new_keys = lock(&self.inner.new_keys).clone();
+                let mut reply = serde_json::json!({ "key": key.public(), "registered": registered, "new_keys": new_keys });
+                if let Some(rows) = listed {
+                    reply["keys"] = serde_json::json!(rows
+                        .iter()
+                        .map(|row| {
+                            let mut row_value = serde_json::json!(row);
+                            row_value["this_device"] = serde_json::json!(row.key == key.public());
+                            row_value["device_name"] = serde_json::json!(self.device_name(&row.device_id));
+                            row_value
+                        })
+                        .collect::<Vec<_>>());
+                }
+                RpcReply::value(&reply)
             }
             method if lifecycle::handles(method) => self.lifecycle(method, params).await,
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
@@ -1814,7 +2547,7 @@ impl Plugins {
         let deliver = serde_json::json!({
             "plugin": p.plugin,
             "from": self.inner.device_id,
-            "author_key": entry.key(),
+            "author_key": author_identity(&entry),
             "data": p.data,
         });
         let links = lock(&self.inner.links).clone();
@@ -1871,12 +2604,19 @@ impl Plugins {
         if !entry.allows(needs) {
             return outcome::NOT_ALLOWED;
         }
-        if !self.same_author(entry.key(), p.author_key.as_deref()).await {
+        // Its size where it lands, whatever the sender checked.
+        let size = serde_json::to_vec(&p.data).map_or(usize::MAX, |b| b.len())
+            + p.event.as_ref().map_or(0, String::len);
+        if size > MAX_SEND_BYTES {
+            return outcome::TOO_BIG;
+        }
+        if !self.same_author(&entry, p.author_key.as_deref()).await {
             return outcome::NOT_ALLOWED;
         }
+        let from = self.sender(&p.from, p.unverified_from);
         let mut message = serde_json::json!({
             "plugin": p.plugin,
-            "from": { "id": p.from, "name": self.device_name(&p.from) },
+            "from": from,
             "data": p.data,
             "at": crate::now_ms(),
         });
@@ -1890,16 +2630,26 @@ impl Plugins {
         }
     }
 
-    /// Both sides have to be the same author: when both are signed, their
-    /// keys' accounts must match; otherwise the ids (already equal) do.
-    async fn same_author(&self, here: Option<&str>, there: Option<&str>) -> bool {
-        let (Some(here), Some(there)) = (here, there) else {
-            return true;
+    /// Both sides have to be the same author, failing closed: Zeron's own
+    /// only with Zeron's own; a signed one only with one signed by the same
+    /// key, or by a key of the same account (each looked up now: stale or
+    /// offline is Unknown, which matches nothing); unsigned only with
+    /// unsigned (the ids, already equal, are all there is).
+    async fn same_author(&self, entry: &Entry, there: Option<&str>) -> bool {
+        let here = author_identity(entry);
+        let (here, there) = match (here.as_deref(), there) {
+            (Some(BUILTIN_AUTHOR), there) | (there, Some(BUILTIN_AUTHOR)) => {
+                return entry.item.builtin && there == Some(BUILTIN_AUTHOR);
+            }
+            (None, None) => return true,
+            (Some(here), Some(there)) => (here.to_owned(), there.to_owned()),
+            // Exactly one side signed.
+            _ => return false,
         };
         if here == there {
             return true;
         }
-        let (a, b) = futures::join!(self.resolve_now(here), self.resolve_now(there));
+        let (a, b) = futures::join!(self.resolve_now(&here), self.resolve_now(&there));
         same_account(&a, &b)
     }
 }
@@ -1923,6 +2673,7 @@ fn service_plan(entry: &Entry) -> Option<Plan> {
         entry: file,
         allowed: item.allowed.clone(),
         commands: item.commands.clone(),
+        hosts: item.network_hosts.clone(),
     })
 }
 
@@ -1952,9 +2703,266 @@ impl service::Hooks for ServiceHooks {
             None => serde_json::Value::Null,
         }
     }
+
+    fn folders(&self) -> Vec<String> {
+        let folders = self.inner.upgrade().and_then(|inner| lock(&inner.folders).clone());
+        folders.map(|f| f()).unwrap_or_default()
+    }
+
+    fn agents(&self, plugin: &str, args: serde_json::Value, done: service::vm::Done) {
+        let (Some(inner), Ok(runtime)) = (self.inner.upgrade(), tokio::runtime::Handle::try_current()) else {
+            return done(Err("Zeron is stopping".into()));
+        };
+        let (agents, plugin) = (inner.agents.clone(), plugin.to_owned());
+        drop(inner);
+        runtime.spawn(async move {
+            done(agents.call(&plugin, args).await.map_err(|refused| refused.text()));
+        });
+    }
+
+    fn listeners(&self, plugin: &str, listeners: &[(String, String, serde_json::Value)]) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.agents.listen(plugin, agents::Target::Service, listeners);
+        }
+    }
+
+    /// R11: the snapshot a service loads from is the version allowed, or it
+    /// isn't loaded: it's removed, and a rescan makes it again from the
+    /// plugin's (checked) folder.
+    fn verify(&self, plan: &service::Plan) -> Result<(), String> {
+        let Err(why) = snapshot::verify_hash(&plan.dir, &plan.hash) else {
+            return Ok(());
+        };
+        tracing::warn!(plugin = %plan.plugin, %why, "plugins: a service's snapshot changed; not loaded");
+        snapshot::remove(&plan.dir);
+        if let (Some(inner), Ok(runtime)) = (self.inner.upgrade(), tokio::runtime::Handle::try_current()) {
+            runtime.spawn(async move { Plugins { inner }.rescan().await });
+        }
+        Err(format!("its files changed since you allowed it ({why}); Zeron is checking it again"))
+    }
+}
+
+/// Where plugins' agent events go, and what each plugin was allowed here.
+struct AgentSink {
+    inner: Weak<Inner>,
+}
+
+impl agents::Sink for AgentSink {
+    fn grants(&self, plugin: &str) -> Option<agents::Grant> {
+        let entry = Plugins { inner: self.inner.upgrade()? }.entry(plugin)?;
+        (entry.item.status == Status::On).then(|| agents::Grant {
+            name: entry.item.name.clone(),
+            allowed: entry.item.allowed.clone(),
+        })
+    }
+
+    fn to_window(&self, plugin: &str, listener: &str, event: &str, data: serde_json::Value) {
+        let Some(inner) = self.inner.upgrade() else { return };
+        let plugins = Plugins { inner };
+        // As a service's event to this device's windows, named `zeron:…`
+        // (no service's event can be: `zeron.emit` names are its own).
+        plugins.inner.channel.push(serde_json::json!({
+            "plugin": plugin,
+            "from": plugins.here(),
+            "event": format!("zeron:{event}"),
+            "here": true,
+            "data": { "listener": listener, "data": data },
+            "at": crate::now_ms(),
+        }));
+    }
+
+    fn to_service(
+        &self,
+        plugin: &str,
+        listener: &str,
+        event: &str,
+        data: serde_json::Value,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let asked = self.ask_service(plugin, listener, event, data);
+        Box::pin(async move { asked.await.map(|_| ()) })
+    }
+
+    fn ask_service(
+        &self,
+        plugin: &str,
+        listener: &str,
+        event: &str,
+        data: serde_json::Value,
+    ) -> futures::future::BoxFuture<'static, Result<serde_json::Value, String>> {
+        let plan = self
+            .inner
+            .upgrade()
+            .and_then(|inner| Some((inner.services.clone(), service_plan(&Plugins { inner }.entry(plugin)?)?)));
+        let (listener, event) = (listener.to_owned(), event.to_owned());
+        Box::pin(async move {
+            let Some((services, plan)) = plan else {
+                return Err("its service isn't running here".into());
+            };
+            let call = serde_json::json!({ "kind": "event", "event": event });
+            services
+                .call(&plan, service::Kind::Event, &listener, data, call, AGENT_EVENT_TIMEOUT)
+                .await
+                .map_err(|refusal| refusal.message)
+        })
+    }
+}
+
+/// How long a service's listener may take over one event.
+const AGENT_EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `PluginAgents`' params (the app's window).
+#[derive(Deserialize)]
+struct AgentsParams {
+    plugin: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    args: serde_json::Value,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    listeners: Vec<ListenerParam>,
+}
+
+#[derive(Deserialize)]
+struct ListenerParam {
+    key: String,
+    event: String,
+    #[serde(default)]
+    opts: serde_json::Value,
+}
+
+/// `ServePluginAgents`' params (another device of yours).
+#[derive(Deserialize, serde::Serialize)]
+struct ServeAgentsParams {
+    plugin: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default, rename = "authorKey", alias = "author_key")]
+    author_key: Option<String>,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    args: serde_json::Value,
+    #[serde(skip)]
+    unverified_from: bool,
+}
+
+fn agents_reply(result: Result<serde_json::Value, agents::Refused>) -> serde_json::Value {
+    match result {
+        Ok(value) => serde_json::json!({ "ok": true, "value": value }),
+        Err(refused) => serde_json::json!({ "ok": false, "reason": refused.reason, "message": refused.message }),
+    }
 }
 
 impl Plugins {
+    /// `PluginAgents`: a window's op, here or on the device it names.
+    async fn plugin_agents(&self, p: AgentsParams) -> serde_json::Value {
+        self.ensure_scanned().await;
+        let here = self.device_name(&self.inner.device_id);
+        let Some(entry) = self.entry(&p.plugin) else {
+            return Refusal::new(reason::NOT_INSTALLED, format!("There's no plugin {} on {here}", p.plugin)).to_json();
+        };
+        if p.op == "listen" {
+            let listeners: Vec<(String, String, serde_json::Value)> =
+                p.listeners.into_iter().map(|l| (l.key, l.event, l.opts)).collect();
+            self.inner.agents.listen(&p.plugin, agents::Target::Window, &listeners);
+            return serde_json::json!({ "ok": true, "value": null });
+        }
+        let mut args = if p.args.is_object() { p.args } else { serde_json::json!({}) };
+        args["op"] = serde_json::json!(p.op);
+        let target = p.device.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty() && *d != self.inner.device_id);
+        let Some(target) = target else {
+            return agents_reply(self.inner.agents.call(&p.plugin, args).await);
+        };
+        let call = ServeAgentsParams {
+            plugin: p.plugin,
+            version: entry.item.version.clone(),
+            author_key: author_identity(&entry),
+            from: self.inner.device_id.clone(),
+            op: p.op,
+            args,
+            unverified_from: false,
+        };
+        let name = self.device_name(&target);
+        let Some(links) = lock(&self.inner.links).clone() else {
+            return Refusal::new(reason::OFFLINE, format!("{name} can't be reached: this device isn't connected")).to_json();
+        };
+        let params = serde_json::to_value(&call).unwrap_or_default();
+        let reply = tokio::time::timeout(service::DEFAULT_TIMEOUT + LINK_SLACK, async {
+            links.client(&target).await?.call(methods::SERVE_PLUGIN_AGENTS, params).await
+        })
+        .await;
+        match reply {
+            Ok(Ok(value)) => value,
+            Ok(Err(RpcError::UnknownMethod(_))) => Refusal::new(
+                reason::OLD_ENGINE,
+                format!("{name} runs a Zeron from before plugins could read usage: update Zeron there"),
+            )
+            .to_json(),
+            Ok(Err(error)) => {
+                if matches!(error, RpcError::Closed | RpcError::Transport(_)) {
+                    links.invalidate(&target);
+                }
+                Refusal::new(reason::OFFLINE, format!("{name} can't be reached right now ({error})")).to_json()
+            }
+            Err(_) => {
+                links.invalidate(&target);
+                Refusal::new(reason::TIMEOUT, format!("{name} didn't answer in time")).to_json()
+            }
+        }
+    }
+
+    /// `ServePluginAgents`: another of your devices asking for its plugin's
+    /// op here. The plugin must be installed and on here, the same version
+    /// by the same author, and what this device allowed it decides.
+    async fn serve_agents(&self, p: ServeAgentsParams) -> serde_json::Value {
+        self.ensure_scanned().await;
+        let here = self.device_name(&self.inner.device_id);
+        if p.unverified_from || p.from.is_empty() {
+            return Refusal::new(reason::BAD_CALL, "Only another of your devices may ask this").to_json();
+        }
+        let Some(entry) = self.entry(&p.plugin) else {
+            return Refusal::new(reason::NOT_INSTALLED, format!("{} isn't installed on {here}", p.plugin)).to_json();
+        };
+        let name = entry.item.name.clone();
+        match entry.item.status {
+            Status::On => {}
+            Status::Off => return Refusal::new(reason::OFF, format!("{name} is turned off on {here}")).to_json(),
+            Status::Pending => {
+                return Refusal::new(reason::NOT_APPROVED, format!("{name} is waiting to be allowed on {here}")).to_json();
+            }
+            Status::Tampered | Status::Broken => {
+                return Refusal::new(reason::BROKEN, format!("{name} can't run on {here}")).to_json();
+            }
+        }
+        if entry.item.version != p.version {
+            return Refusal::new(
+                reason::VERSION_MISMATCH,
+                format!("{here} has {name} {}, the caller {}", entry.item.version, p.version),
+            )
+            .to_json();
+        }
+        if !self.same_author(&entry, p.author_key.as_deref()).await {
+            return Refusal::new(reason::OTHER_AUTHOR, format!("The {name} on {here} is someone else's plugin by the same name"))
+                .to_json();
+        }
+        if serde_json::to_vec(&p.args).map_or(usize::MAX, |b| b.len()) > MAX_CALL_BYTES {
+            return Refusal::new(reason::BAD_CALL, "That call's arguments are too big").to_json();
+        }
+        // A window's own (the default for new chats is that window's), or
+        // only the window here says what it listens for.
+        if matches!(p.op.as_str(), "set_default_model" | "listen") {
+            return Refusal::new(reason::BAD_CALL, format!("\"{}\" is a window's own, on its device", p.op)).to_json();
+        }
+        let mut args = if p.args.is_object() { p.args } else { serde_json::json!({}) };
+        args["op"] = serde_json::json!(p.op);
+        tracing::info!(plugin = %p.plugin, from = %p.from, op = %p.op, "plugins: another device asked for an agent op");
+        agents_reply(self.inner.agents.call(&p.plugin, args).await)
+    }
+
     /// This device, as `{ id, name }`.
     fn here(&self) -> serde_json::Value {
         let id = &self.inner.device_id;
@@ -1963,7 +2971,19 @@ impl Plugins {
 
     /// Run what should run, after a scan.
     fn sync_services(&self) {
-        let plans: Vec<Plan> = lock(&self.inner.entries).iter().filter_map(service_plan).collect();
+        let (plans, on): (Vec<Plan>, HashSet<String>) = {
+            let entries = lock(&self.inner.entries);
+            let on = entries.iter().filter(|e| e.item.status == Status::On).map(|e| e.item.id.clone()).collect();
+            (entries.iter().filter_map(service_plan).collect(), on)
+        };
+        // Listeners of plugins no longer on here are forgotten; a service
+        // that may no longer run here hears nothing.
+        self.inner.agents.retain(&on);
+        for id in &on {
+            if !plans.iter().any(|p| p.plugin == *id) {
+                self.inner.agents.listen(id, agents::Target::Service, &[]);
+            }
+        }
         self.inner.services.sync(plans);
     }
 
@@ -1991,7 +3011,7 @@ impl Plugins {
         let deliver = serde_json::json!({
             "plugin": plugin,
             "from": self.inner.device_id,
-            "author_key": self.entry(plugin).and_then(|e| e.key().map(str::to_owned)),
+            "author_key": self.entry(plugin).and_then(|e| author_identity(&e)),
             "event": event,
             "data": data,
         });
@@ -2031,11 +3051,12 @@ impl Plugins {
         let call = ServeParams {
             plugin: p.plugin.clone(),
             version: entry.item.version.clone(),
-            author_key: entry.key().map(str::to_owned),
+            author_key: author_identity(&entry),
             from: self.inner.device_id.clone(),
             method: p.method.clone(),
             args: p.args,
             timeout: p.timeout,
+            unverified_from: false,
         };
         let target = p.device.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty() && *d != self.inner.device_id);
         let Some(target) = target else {
@@ -2117,7 +3138,9 @@ impl Plugins {
         if !entry.allows("service") {
             return Err(Refusal::new(reason::NOT_APPROVED, format!("{name}'s service isn't allowed on {here} yet")));
         }
-        if !p.version.is_empty() && entry.item.version != p.version {
+        // Every caller says its version (an engine before that said none,
+        // and was let through).
+        if entry.item.version != p.version {
             return Err(Refusal::new(
                 reason::VERSION_MISMATCH,
                 format!(
@@ -2126,7 +3149,13 @@ impl Plugins {
                 ),
             ));
         }
-        if !self.same_author(entry.key(), p.author_key.as_deref()).await {
+        // From another device: its size checked where it lands.
+        if p.from != self.inner.device_id
+            && serde_json::to_vec(&p.args).map_or(usize::MAX, |b| b.len()) > MAX_CALL_BYTES
+        {
+            return Err(Refusal::new(reason::BAD_CALL, "That call's arguments are too big"));
+        }
+        if !self.same_author(&entry, p.author_key.as_deref()).await {
             return Err(Refusal::new(
                 reason::OTHER_AUTHOR,
                 format!("The {name} on {here} is someone else's plugin by the same name"),
@@ -2135,6 +3164,8 @@ impl Plugins {
         let plan = service_plan(&entry)
             .ok_or_else(|| Refusal::new(reason::NOT_LOADED, format!("{name} isn't ready on {here} yet")))?;
         if p.method == "@watch" {
+            // Only another of your devices is sent events (never an id
+            // that isn't one: `trusted_from` empties it).
             if !p.from.is_empty() && p.from != self.inner.device_id {
                 lock(&self.inner.watchers)
                     .entry(p.plugin.clone())
@@ -2146,10 +3177,14 @@ impl Plugins {
         if p.method.is_empty() || p.method.starts_with('@') {
             return Err(Refusal::new(reason::BAD_CALL, format!("\"{}\" isn't a method", p.method)));
         }
-        let from = if p.from.is_empty() { self.inner.device_id.clone() } else { p.from.clone() };
+        let from = if p.from.is_empty() && !p.unverified_from {
+            self.sender(&self.inner.device_id, false)
+        } else {
+            self.sender(&p.from, p.unverified_from)
+        };
         let call = serde_json::json!({
             "kind": "call",
-            "from": { "id": from, "name": self.device_name(&from) },
+            "from": from,
         });
         let args = if p.args.is_null() { serde_json::json!({}) } else { p.args };
         self.inner
@@ -2166,12 +3201,56 @@ fn clamp_timeout(asked: Option<f64>) -> Duration {
         .map_or(service::DEFAULT_TIMEOUT, |s| Duration::from_secs_f64(s).min(service::MAX_TIMEOUT))
 }
 
-/// Whether two resolved authors are the same account.
+/// Whether two resolved authors are the same account: this device's key
+/// and the account's other devices' keys are; two verified keys are when
+/// they have the same username. Unknown matches nothing.
 pub fn same_account(a: &Author, b: &Author) -> bool {
+    let mine = |x: &Author| matches!(x, Author::You | Author::Verified { mine: true, .. });
     match (a, b) {
-        (Author::You, Author::You) => true,
-        (Author::Verified { username: Some(x) }, Author::Verified { username: Some(y) }) => x == y,
+        _ if mine(a) && mine(b) => true,
+        (Author::Verified { username: Some(x), .. }, Author::Verified { username: Some(y), .. }) => x == y,
         _ => false,
+    }
+}
+
+/// What a device that isn't vouched for is called (`from`).
+pub const UNKNOWN_DEVICE: &str = "unknown";
+
+/// Who a plugin's author is across devices: Zeron for its own, else its
+/// signing key (none when unsigned).
+fn author_identity(entry: &Entry) -> Option<String> {
+    if entry.item.builtin {
+        return Some(BUILTIN_AUTHOR.to_owned());
+    }
+    entry.key().map(str::to_owned)
+}
+
+impl Plugins {
+    /// `from` as the request's caller vouches for it: this device's own app
+    /// says who it is; another device is the one the edge verified on the
+    /// link (`Caller::Peer{device}`). Anything else (a dial the edge didn't
+    /// verify, an agent) is unknown: empty, and never sent events.
+    fn trusted_from(&self, claimed: String, unverified: &mut bool) -> String {
+        match zeron_rpc::caller() {
+            zeron_rpc::Caller::Local => claimed,
+            zeron_rpc::Caller::Peer { device: Some(device) } => device,
+            zeron_rpc::Caller::Peer { device: None } | zeron_rpc::Caller::Agent { .. } => {
+                *unverified = true;
+                String::new()
+            }
+        }
+    }
+
+    /// `{id, name}` of who sent it, as vouched for (`trusted_from`).
+    fn sender(&self, from: &str, unverified: bool) -> serde_json::Value {
+        if from.is_empty() && unverified {
+            return serde_json::json!({ "id": UNKNOWN_DEVICE, "name": "Another device", "unverified": true });
+        }
+        let mut sender = serde_json::json!({ "id": from, "name": self.device_name(from) });
+        if unverified {
+            sender["unverified"] = serde_json::json!(true);
+        }
+        sender
     }
 }
 
@@ -2188,8 +3267,14 @@ fn watch_stream(rx: watch::Receiver<serde_json::Value>) -> BoxStream<'static, se
 }
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+mod agents_service_tests;
 #[cfg(all(test, unix))]
 mod git_service_tests;

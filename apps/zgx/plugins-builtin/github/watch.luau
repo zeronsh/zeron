@@ -4,9 +4,12 @@
 -- from GitHub through gh, kept up to date by the plugin itself.
 --
 -- A session's repository is its folder's on this Mac (or its project's
--- folder's), found once and kept. A session whose folder isn't on this Mac
--- is looked for on GitHub by its branch, among pull requests that involve
--- you. What was last heard is kept, so badges show at launch.
+-- folder's), found once and kept, and its pull request is that
+-- repository's own from the session's branch: never one found by its
+-- branch's name alone, since every repository has a `main`. A session whose
+-- repository can't be told here (its folder elsewhere, no GitHub remote)
+-- shows none from gh; the engine's watch, on the session's own device, may
+-- still tell its. What was last heard is kept, so badges show at launch.
 --
 -- How often a session is asked depends on how much it matters now: one on
 -- screen (its row, its card, its panel) or working, every half minute;
@@ -43,9 +46,10 @@ local LOOKUPS = 8
 -- After a failed ask, the next waits longer each time (a beat, doubling,
 -- at most 15 minutes), as Zeron's own watcher does.
 local BACKOFF_FIRST, BACKOFF_MAX = 1, 30
--- A session looked for on GitHub by its branch (its folder isn't here) is
--- looked for again this many times less often than it'd be asked.
-local SEARCH_SLOWER = 5
+-- Where what was last heard is kept. (`watch` was written while a session
+-- whose repository wasn't known took any pull request of yours from a
+-- branch of its name, in any repository: not read again.)
+local KEPT = "watch.v2"
 
 -- What a badge and a notification read of a pull request.
 local FIELDS = [[number title url state isDraft reviewDecision baseRefName headRefName isCrossRepository
@@ -94,8 +98,6 @@ return function(zeron: any, pulls: any)
 	-- The beat it is, and when each session was last asked of GitHub.
 	local beat = 0
 	local asked_at: { [string]: number } = {}
-	-- When each session not found on this Mac was last looked for.
-	local searched: { [string]: number } = {}
 
 	-- GitHub's pull request as a badge reads it.
 	local function record(pr: any): any
@@ -186,7 +188,9 @@ return function(zeron: any, pulls: any)
 	local function publish(changes: { [string]: any })
 		local moved: { string } = {}
 		for id, pr in changes do
-			if ui.json.encode(known[id] or false) ~= ui.json.encode(pr) then
+			-- (Never heard counts as moved: a session's state outlives a
+			-- reload, holding what was shown before it.)
+			if known[id] == nil or ui.json.encode(known[id]) ~= ui.json.encode(pr) then
 				known[id] = pr
 				if cells[id] then
 					cells[id]:set(pr)
@@ -195,7 +199,7 @@ return function(zeron: any, pulls: any)
 			end
 		end
 		if #moved > 0 then
-			pulls.keep("watch", known)
+			pulls.keep(KEPT, known)
 			for _, id in moved do
 				for _, listen in listeners do
 					local ok, why = pcall(listen, id)
@@ -274,7 +278,7 @@ return function(zeron: any, pulls: any)
 					-- same name (anyone's `main`) is someone else's.
 					local found = nil
 					for _, pr in pulls.nodes(repository[`b{r}_{k}`]) do
-						if not pr.isCrossRepository then
+						if not pr.isCrossRepository and pr.headRefName == s.branch then
 							found = pr
 							break
 						end
@@ -290,33 +294,6 @@ return function(zeron: any, pulls: any)
 			failed_ask()
 			done()
 		end)
-	end
-
-	-- A session whose folder isn't here: its branch's pull request among
-	-- those that involve you, the repository named as its project first.
-	local function search(id: string, branch: string, project: string?)
-		local query = `query($q: String!) \{ viewer \{ login \} rateLimit \{ cost remaining limit resetAt \} search(query: $q, type: ISSUE, first: 10) \{ nodes \{ ... on PullRequest \{ repository \{ nameWithOwner name \} {FIELDS} \} \} \} \}`
-		pulls.graphql(query, { q = `is:pr head:{branch} involves:@me sort:updated-desc` }, { background = true }):after(function(data: any)
-			viewer = data.viewer and data.viewer.login or viewer
-			heard_quota(data.rateLimit)
-			local pick = nil
-			for _, pr in pulls.nodes(data.search) do
-				if pr.headRefName == branch and not pr.isCrossRepository then
-					local named = project and pr.repository and string.lower(pr.repository.name or "") == string.lower(project)
-					if not pick or named then
-						pick = pr
-					end
-					if named then
-						break
-					end
-				end
-			end
-			if pick and pick.repository then
-				-- (Its repository now known: asked with the rest from here on.)
-				repos[`session:{id}`] = pick.repository.nameWithOwner
-			end
-			publish({ [id] = if pick then record(pick) else false })
-		end, failed_ask)
 	end
 
 	-- The rounds: each asks what's due, on the beat and as something new
@@ -382,6 +359,8 @@ return function(zeron: any, pulls: any)
 		local due: { [string]: number } = {}
 		local lookups = 0
 		local later = false
+		-- (Sessions whose repository isn't known here.)
+		local unknown: { [string]: any } = {}
 		for id, s in zeron.sessions() do
 			local branch = branch_of(s)
 			local period = branch and every(id, s, now)
@@ -412,15 +391,14 @@ return function(zeron: any, pulls: any)
 				if at <= beat then
 					due[repo] = math.min(due[repo] or math.huge, period)
 				end
-			elseif at <= beat then
-				-- Not here: GitHub, by its branch, now and then.
-				if beat - (searched[id] or -math.huge) >= period * SEARCH_SLOWER then
-					searched[id] = beat
-					asked_at[id] = beat
-					local project = if s.project then zeron.context_of("project", s.project) else nil
-					search(id, branch :: string, project and project.name)
-				end
+			elseif known[id] ~= false then
+				-- No repository to tell here: none from gh, rather than a
+				-- guess from its branch's name.
+				unknown[id] = false
 			end
+		end
+		if next(unknown) then
+			publish(unknown)
 		end
 		-- The due repositories, a batch at a time.
 		local batches: { { { repo: string, sessions: { Ask } } } } = {}
@@ -471,7 +449,7 @@ return function(zeron: any, pulls: any)
 	end
 
 	-- What was heard last time, at once; then GitHub.
-	pulls.cached("watch", function(value: any?)
+	pulls.cached(KEPT, function(value: any?)
 		if type(value) == "table" and next(known) == nil then
 			publish(value)
 		end
@@ -487,7 +465,6 @@ return function(zeron: any, pulls: any)
 		title = zeron.s("command.refresh"),
 		run = function()
 			table.clear(asked_at)
-			table.clear(searched)
 			resume_at = 0
 			round()
 		end,

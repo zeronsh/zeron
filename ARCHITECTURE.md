@@ -58,6 +58,13 @@ Binaries `zeron` (app + CLI) and `zeron-engine` (the app's background engine, no
   (with Retry) rather than embedding — an engine bug would crash an in-process engine too.
   The engine stops by itself once idle if its app is moved to the Trash or uninstalled, and its log
   (like every long-running mode's) moves to `.old` past 64 MB rather than growing for weeks.
+- **Updates from another device are transactions** (`crates/update/src/transaction.rs`, `crates/engine/src/update_trial.rs`).
+  The installed version changes in one step, only once a new version has proved it's ready: `app/current` on Linux, an atomic
+  bundle swap on macOS, a rename on Windows. Until then every start runs the old version, which is how a new binary that exits,
+  hangs or loses power gets undone. The old version copies the SQLite stores, leaves a watchdog and hands over; the new one holds
+  back what it can't take back (resuming chats, queued messages) until it has committed. A failed trial restores the stores, and
+  `UpdateStatus.update` says which happened under the id `ApplyUpdate` answered with. Only the SQLite stores roll back. Provider
+  CLIs update under running chats where their installer keeps old files (`UpdatePlan::while_chats_run`), and wait otherwise.
 - Desktop banners are the engine's (`desktop_notify.rs`, advertised as `desktop-notifications-v1`):
   finished runs, questions, failures, connection loss and agent updates keep arriving with the app
   closed. Preferences come from the app's `ui-settings.json`; "only in the background" uses window

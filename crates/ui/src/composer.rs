@@ -490,6 +490,21 @@ pub fn flip_morph_step(
 /// remotely-hosted chats, the host device's stamped registry version.
 const QUEUED_ATTACHMENTS_MIN: (u64, u64, u64) = (0, 2, 12);
 
+/// Whether a send's files commit locally and travel as `pending://` refs, or
+/// upload straight to the host first. Through the store it's every send, since
+/// the host may be asleep. Over a peer link, a queue row has no escort and an
+/// app capture's escaped refs need a host that rewrites them, so those upload
+/// first (and a host too old for refs has no choice).
+fn uses_queued_flow(
+    has_files: bool,
+    queue: bool,
+    has_appshots: bool,
+    refs_supported: bool,
+    through_store: bool,
+) -> bool {
+    has_files && (through_store || (!queue && !has_appshots && refs_supported))
+}
+
 /// What the send button is right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendButtonMode {
@@ -9401,12 +9416,7 @@ impl Composer {
         let host_is_remote = host_device_id
             .as_deref()
             .is_some_and(|id| local_device_id.as_deref() != Some(id));
-        // Queue rows do not carry upstream's attachment-transfer escort, so
-        // they retain the proven host-upload path and store absolute refs.
-        // Appshot XML attributes require escaped final paths. The engine's plain
-        // string replacement of pending refs cannot safely rewrite those, so
-        // rich captures use the existing upload-before-send path.
-        let queued_flow = !queue && staged_appshots.is_empty() && !staged.is_empty() && {
+        let queued_flow = {
             let state = self.state.read(cx);
             let local_ok = local_device_id
                 .as_deref()
@@ -9415,7 +9425,23 @@ impl Composer {
                 || host_device_id
                     .as_deref()
                     .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
-            local_ok && host_ok
+            // A new Cloud chat's machine doesn't exist yet: it can't have
+            // reported in, and it's as current as Cloud gets.
+            let through_store = engine
+                .engine_info()
+                .supports(capabilities::ATTACHMENT_STORE_V1)
+                && (matches!(plan, crate::pickers::CheckoutPlan::Cloud { .. }) && is_new
+                    || host_is_remote
+                        && host_device_id
+                            .as_deref()
+                            .is_some_and(|id| state.host_fetches_from_store(id)));
+            uses_queued_flow(
+                !staged.is_empty(),
+                queue,
+                !staged_appshots.is_empty(),
+                local_ok && host_ok,
+                through_store,
+            )
         };
         // Upload identities minted NOW: in the queued flow the `pending://`
         // ref IS the persisted transport until the host rewrites it, so the
@@ -9901,12 +9927,15 @@ impl Composer {
                     } else {
                         queue_body.as_str()
                     };
-                    let params = serde_json::json!({
+                    let mut params = serde_json::json!({
                         "chatId": chat_id,
                         "text": queue_text,
                         "attachments": attachment_paths,
                         "holdForTurnEnd": true,
                     });
+                    if !transfers.is_empty() {
+                        params["transfers"] = serde_json::Value::Array(transfers);
+                    }
                     let reply = engine
                         .client()
                         .call(methods::QUEUE_MESSAGE, params)
@@ -13352,6 +13381,7 @@ mod tests {
                 terminal_activity: None,
                 running_subagents: 0,
                 background_tasks: Vec::new(),
+                waiting: None,
             }];
             state.selected_chat = Some("c".into());
             state.watch_clock_transitions(cx);
@@ -17278,6 +17308,24 @@ mod appshot_rebase_tests {
                 0
             ));
         });
+    }
+
+    #[test]
+    fn every_send_through_the_store_stages_locally_however_it_was_attached() {
+        // No files, nothing to stage.
+        assert!(!uses_queued_flow(false, false, false, true, true));
+        // Cloud: a plain send, a queued one, an app capture, all the same.
+        assert!(uses_queued_flow(true, false, false, true, true));
+        assert!(uses_queued_flow(true, true, false, true, true));
+        assert!(uses_queued_flow(true, false, true, true, true));
+        assert!(uses_queued_flow(true, true, true, true, true));
+        // A machine that hasn't reported a version still goes through the store.
+        assert!(uses_queued_flow(true, false, true, false, true));
+        // Peer link: only a plain send to a host that understands refs.
+        assert!(uses_queued_flow(true, false, false, true, false));
+        assert!(!uses_queued_flow(true, true, false, true, false));
+        assert!(!uses_queued_flow(true, false, true, true, false));
+        assert!(!uses_queued_flow(true, false, false, false, false));
     }
 
     #[gpui::test]

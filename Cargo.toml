@@ -12,6 +12,7 @@ members = [
     "crates/audio",
     "crates/proto",
     "crates/preview",
+    "crates/preview-label",
     "crates/doc",
     "crates/sync",
     "crates/harness",
@@ -32,11 +33,12 @@ members = [
     "crates/visual",
     "crates/visual-gpu",
     "crates/zatex",
+    "crates/plugin-guard",
     "apps/zeron",
 ]
 
 [workspace.package]
-version = "0.2.134"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -51,6 +53,7 @@ zeron-voice-media = { path = "crates/voice-media" }
 zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
+zeron-preview-label = { path = "crates/preview-label" }
 zeron-doc = { path = "crates/doc" }
 zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }
@@ -71,6 +74,7 @@ zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
+zeron-plugin-guard = { path = "crates/plugin-guard" }
 
 # CRDT
 loro = "1.17"
@@ -109,15 +113,18 @@ loro-protocol = "0.3"
 # Atlas tiles updated in place from pixels or imported dma-bufs, display-rate
 # frame callbacks in inactive windows, and Wayland frames that no longer stop
 # after a forced draw (b564a34, zeronsh/zui#18).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9", features = [
+# Dropped images stay in the atlas until the next draw, so presenting the last
+# frame again no longer aborts with "texture must exist" (15ee708,
+# zeronsh/zui#19; gpui-base cab50b0, zeronsh/gpui-component#7).
+gpui = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "59f89243cea79dd70eb7a619b3930c374ef6958a" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "cab50b071497683a119ae0e4038880f195c0f23f" }
 
 # diffs
 similar = "2"
@@ -181,6 +188,8 @@ fff-search = "=0.11.0"
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
 # LTO's size/speed win at a fraction of the link time; strip debug symbols.
+# scripts/package-linux.sh builds the Linux release with fat LTO in one codegen
+# unit instead (16% smaller, which Cloud wakes copy back in).
 lto = "thin"
 strip = "symbols"
 

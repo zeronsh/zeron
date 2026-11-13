@@ -74,17 +74,21 @@ settings.add {
 	title = "Plugins",
 	icon = "widget",
 	view = page.View,
-	group = "Organization",
+	group = "Customize",
 	before = "archived",
 }
 
--- Templates have their own page, beside this one (added after it, so it
--- lists right after Plugins).
+-- Themes and Templates have their own pages, beside this one (added after
+-- it, so they list right after Plugins).
+require("@app/screens/themes")
 require("@app/screens/templates")
 
 -- Each plugin's own settings: a page of its own under "Plugins", while
 -- it's on (screens/plugins/settings).
 require("@app/screens/plugins/settings")
+
+-- What's waiting for you to allow it: a notice each, until it's dealt with.
+require("@app/screens/plugins/waiting")
 
 -- What plugins see, written as it changes (each a steady table, so a
 -- plugin reading one hears only real changes).
@@ -144,11 +148,10 @@ ui.effect(function()
 	put(out.project, if p then { id = p.id, name = p.name or "" } else nil)
 end)
 ui.effect(function()
-	local now = sessions.now:get()
 	local id = route.device:get()
 	local list = {}
 	local here: any = nil
-	for _, d in now.devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		table.insert(list, { id = d.id, name = d.name, here = d.here })
 		if d.id == id then
 			here = { id = d.id, name = d.name }
@@ -161,6 +164,11 @@ ui.effect(function()
 	ui.theme.current:get()
 	local kind = ui.theme.kind()
 	put(out.appearance, if kind == "light" or kind == "high-contrast-light" then "light" else "dark")
+end)
+
+-- What a failed plugin's notice offers (a toast's action: `ds/toast`).
+ds.toast.action("plugins.open_folder", function(id: string)
+	state.open_folder(id)
 end)
 
 -- What plugins asked for, done here in order. The host numbers each;
@@ -207,35 +215,14 @@ local function run(r: any)
 		end
 	elseif r.kind == "link" and type(r.value) == "string" then
 		-- A plugin's link (the host checked "links.open" and that it's a web
-		-- link): where Zeron opens links.
-		require("@ds/links").open(r.value)
+		-- link): where Zeron opens links, never back into a plugin's tab (the
+		-- GitHub viewer's Open on GitHub is a pull request's link too).
+		local url = r.value
+		require("@app/screens/shell/plugin_links").unclaimed(function()
+			require("@ds/links").open(url)
+		end)
 	elseif r.kind == "toast" then
 		ds.toast.show { title = r.title, body = r.value }
-	elseif r.kind == "waiting" then
-		ds.toast.show {
-			title = ui.t("plugins.init.waiting", { name = r.title }),
-			tone = "info",
-			action = {
-				label = ui.t("plugins.init.review"),
-				run = function()
-					state.review(r.value)
-				end,
-			},
-		}
-	elseif r.kind == "template_waiting" then
-		-- Someone else's template, brought in (an agent's import_template):
-		-- its consent window, the host's, installs it.
-		ds.toast.show {
-			title = ui.t("plugins.init.waiting", { name = r.title }),
-			body = ui.t("plugins.init.template_waiting_body"),
-			tone = "info",
-			action = {
-				label = ui.t("plugins.init.review"),
-				run = function()
-					ui.invoke("templates.review", r.value)
-				end,
-			},
-		}
 	elseif r.kind == "plugin_failed" then
 		ds.toast.show {
 			title = ui.t("plugins.init.failed", { name = r.title }),
@@ -243,9 +230,8 @@ local function run(r: any)
 			tone = "warning",
 			action = {
 				label = ui.t("plugins.init.show_folder"),
-				run = function()
-					state.open_folder(r.value.id)
-				end,
+				run = "plugins.open_folder",
+				value = r.value.id,
 			},
 		}
 	elseif r.kind == "template_failed" then

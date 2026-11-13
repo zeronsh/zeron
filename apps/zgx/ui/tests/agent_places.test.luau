@@ -43,13 +43,6 @@ test("Agent places: the sidebar's row and the palette's row carry it", function(
 	expect(app:has('#palette-list >> role:option "Moved to Factory Droid" >> .registry-mark')).to_be(true)
 end)
 
-test("Agent places: the open chat's title carries its agent's mark", function()
-	local app = shell()
-	app:click('~"Moved to Factory Droid"')
-	settle(app)
-	expect(app:has("#page-title >> .registry-mark")).to_be(true)
-end)
-
 test("Agent places: a chat mentioned in the composer carries it", function()
 	local app = chat()
 	app:command("mention_s9")

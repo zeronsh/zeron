@@ -9,11 +9,14 @@ local function open(): any
 	return app
 end
 
--- The focused node's line, as the tree says.
+-- The focused node's line, as the tree says. (The window's dump stops
+-- past a budget: the title bar, drawn last, is read on its own too.)
 local function focused(app: any): string
-	for line in app:tree():gmatch("[^\n]+") do
-		if line:find(" focused", 1, true) then
-			return line
+	for _, dump in { app:tree(), app:tree("#titlebar") } do
+		for line in dump:gmatch("[^\n]+") do
+			if line:find(" focused", 1, true) then
+				return line
+			end
 		end
 	end
 	return ""
@@ -86,6 +89,24 @@ test("Tab reads each part of the shell in its order: the sidebar's rows, the pag
 			error(`{order[i - 1]} should come before {order[i]}:\n{table.concat(round, "\n")}`)
 		end
 	end
+end)
+test("I with no text field holding the keyboard goes into the composer; Escape there gives the keyboard back", function()
+	local app = open()
+	app:click('#shell-sidebar >> role:button "Fix the build"')
+	app:frames(30)
+	app:click("role:textbox")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	app:key("Escape")
+	app:frames(5)
+	expect(focused(app)).never.to_contain("textbox")
+	app:key("i")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
+	-- Typed into the composer, I is a letter of the draft.
+	app:key("i")
+	app:frames(5)
+	expect(focused(app)).to_contain("textbox")
 end)
 test("⌘F with nothing focused taking it opens a session's find bar, and nothing on a new chat", function()
 	local app = open()

@@ -47,6 +47,9 @@ pub const PENDING: &str = ".pending";
 pub const IMPORTED: &str = ".imported.json";
 /// Updates found, waiting to be installed (`<id>.json`, `<id>.zeron-template`).
 pub const UPDATES: &str = ".updates";
+/// The app's mark of one of Zeron's built-in themes (apps/zgx
+/// theme_templates `MARK`): never written from a package.
+const BUILTIN_THEME: &str = "builtin_theme";
 /// A package's largest size on disk: its files' limit, as base64, and room.
 const MAX_PACKAGE_BYTES: u64 = MAX_BYTES * 4 / 3 + 1024 * 1024;
 
@@ -54,10 +57,15 @@ const MAX_PACKAGE_BYTES: u64 = MAX_BYTES * 4 / 3 + 1024 * 1024;
 /// `NEVER_TEMPLATED`, apps/zgx/src/plugins/live.rs).
 pub const PROTECTED: [&str; 4] = ["screens/plugins/", "screens/templates/", "account/", ".luaurc"];
 
+/// Whether `rel` is (or, on a case-insensitive filesystem, opens) one of
+/// [`PROTECTED`]: compared folded (R30), so `Screens/Plugins/…`,
+/// `ſcreens/plugins/…` or `account./x` is protected too.
 pub fn protected(rel: &str) -> bool {
-    PROTECTED
-        .iter()
-        .any(|p| if p.ends_with('/') { rel.starts_with(p) } else { rel == *p })
+    let rel = zeron_plugin_guard::path::fold(rel);
+    PROTECTED.iter().any(|p| {
+        let p = zeron_plugin_guard::path::fold(p);
+        rel == p || rel.starts_with(&format!("{p}/"))
+    })
 }
 
 const UNSIGNED: &str = "This template isn't signed, so Zeron can't tell who made it or whether it was changed. Ask its author to export it again from Zeron.";
@@ -120,7 +128,7 @@ impl Package {
 /// `{id, path, files, key}`.
 pub fn export(dir: &Path, id: &str, out: &Path, key: &SigningKey) -> Result<Value, String> {
     if id == ZERON {
-        return Err("Zeron's own interface is already everyone's. Export one of your templates.".into());
+        return Err("Everyone already has the default interface. Export one of your own templates.".into());
     }
     let folder = templates::template_dir(dir, id)
         .ok_or_else(|| format!("There's no template {id}. list_templates names them."))?;
@@ -192,6 +200,43 @@ pub fn export(dir: &Path, id: &str, out: &Path, key: &SigningKey) -> Result<Valu
         "files": files.len(),
         "key": key.public(),
     }))
+}
+
+/// Where Zeron saves an export when it isn't told where:
+/// `<data>/template-exports/<id>.zeron-template`.
+pub fn default_export_path(data_dir: &Path, id: &str) -> PathBuf {
+    data_dir.join("template-exports").join(format!("{id}.{EXTENSION}"))
+}
+
+/// A path someone named for an export (R29): never inside Zeron's own data,
+/// never in a hidden folder of your home (`~/.ssh`, `~/.config`), and never
+/// over a file that isn't a template package (an earlier export is
+/// replaced; nothing else is).
+pub fn check_export_path(out: &Path, data_dir: &Path, home: Option<&Path>) -> Result<(), String> {
+    let refuse = || Err("A template can only be saved in a folder of yours: not a hidden folder, not one of Zeron's, and not over a different kind of file.".to_string());
+    let parent = out.parent().ok_or("Say where to save it.")?;
+    let canonical = std::fs::canonicalize(parent).map_err(|_| "That folder can't be found.".to_string())?;
+    let data = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    if canonical.starts_with(&data) {
+        return refuse();
+    }
+    if let Some(home) = home {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        if let Ok(rest) = canonical.strip_prefix(&home)
+            && rest.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            return refuse();
+        }
+    }
+    match std::fs::symlink_metadata(out) {
+        Err(_) => Ok(()),
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_PACKAGE_BYTES => {
+            let bytes = std::fs::read(out).map_err(|_| "That file can't be read.".to_string())?;
+            let was = serde_json::from_slice::<Value>(&bytes).ok();
+            if was.as_ref().and_then(|v| v["format"].as_str()) == Some(FORMAT) { Ok(()) } else { refuse() }
+        }
+        Ok(_) => refuse(),
+    }
 }
 
 /// Reads and verifies the package at `path`: its signature over every file
@@ -317,7 +362,14 @@ fn write_folder(dir: &Path, id: &str, package: &Package, author: &Author, source
             }
             std::fs::write(&to, bytes).map_err(|e| format!("Couldn't write {rel}: {e}"))?;
         }
-        std::fs::write(tmp.join(MANIFEST), signing::pretty(&package.manifest))
+        // What marks Zeron's own built-in themes (`builtin_theme`, the
+        // app's theme_templates) is the app's to write, never a package's:
+        // left out, so an imported template never shows as Zeron's own.
+        let mut manifest = package.manifest.clone();
+        if let Some(m) = manifest.as_object_mut() {
+            m.remove(BUILTIN_THEME);
+        }
+        std::fs::write(tmp.join(MANIFEST), signing::pretty(&manifest))
             .map_err(|e| format!("Couldn't write {MANIFEST}: {e}"))?;
         let mut imported = json!({
             "key": package.key,
@@ -390,6 +442,12 @@ fn valid_pending(name: &str) -> bool {
 /// Keeps the package (as read: it's checked again when allowed) and what
 /// to show of it, under `.pending/`.
 fn stage(dir: &Path, package: &Package, from: &str, source: &Source) -> Result<String, String> {
+    stage_as(dir, package, from, source, None)
+}
+
+/// `stage`, as an update of installed template `update_of` when it is one
+/// (allowed, it replaces that template in place: `decide`).
+fn stage_as(dir: &Path, package: &Package, from: &str, source: &Source, update_of: Option<&str>) -> Result<String, String> {
     let pending_dir = dir.join(PENDING);
     std::fs::create_dir_all(&pending_dir).map_err(|e| format!("Couldn't keep it for you to allow: {e}"))?;
     let stamp = super::now_secs();
@@ -407,6 +465,9 @@ fn stage(dir: &Path, package: &Package, from: &str, source: &Source) -> Result<S
     // (Where it came from, whole: carried to what's installed. Listed as
     // `from`, never with a local path.)
     about["origin"] = json!(source);
+    if let Some(id) = update_of {
+        about["update_of"] = json!(id);
+    }
     templates::write_atomic(&pending_dir, &format!("{name}.json"), &signing::pretty(&about))?;
     Ok(name)
 }
@@ -480,7 +541,28 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: imp
         return Err("This template changed while it waited for you. Import it again to see what it is now.".into());
     }
     let author = author_of(&package.key);
-    let source: Option<Source> = serde_json::from_value(about["origin"].clone()).ok();
+    let mut source: Option<Source> = serde_json::from_value(about["origin"].clone()).ok();
+    // An update that changes its code, allowed: in place of the template it
+    // updates, if that's still the one it was for.
+    if let Some(of) = about["update_of"].as_str() {
+        let folder = templates::template_dir(dir, of).ok_or_else(|| format!("There's no template {of} to update any more"))?;
+        let installed = imported(&folder).ok_or("It wasn't installed from a package")?;
+        if installed["key"].as_str() != Some(package.key.as_str()) {
+            return Err("The new version is signed by someone else, so it won't be installed".into());
+        }
+        let was = installed["version"].as_str().unwrap_or("");
+        if !install::newer(&package.version(), was) {
+            return Err(install::not_newer(&package.version(), was));
+        }
+        if let Some(source) = &mut source {
+            source.version = package.version();
+            source.installed_at = super::now_secs();
+        }
+        replace(dir, of, &folder, &package, &author, source.as_ref())?;
+        forget();
+        forget_found(dir, of);
+        return Ok(json!({ "installed": of, "updated": of, "name": package.name(), "author": author }));
+    }
     let id = install(dir, &package, &author, source.as_ref())?;
     forget();
     Ok(json!({ "installed": id, "name": package.name(), "author": author }))
@@ -539,7 +621,14 @@ pub async fn fetch(origin: &Origin) -> Result<(Package, Source), String> {
         Origin::Release { repo, tag } => {
             let asset = install::release_asset_of(repo, tag.as_deref(), EXTENSION).await.map_err(|error| {
                 // (A repository with no release yet, or none with a template.)
-                if tag.is_none() { "That repository has no release with a template in it".to_string() } else { error }
+                // (Anything else, GitHub turning requests away among them,
+                // says what it is.)
+                let missing = matches!(install::reason_of(&error), Some(install::reason::RELEASE_NOT_FOUND | install::reason::NO_PACKAGE));
+                if tag.is_none() && missing {
+                    install::failure(install::reason::NO_PACKAGE, "That repository has no release with a template in it")
+                } else {
+                    error
+                }
             })?;
             (
                 install::download(&asset).await?,
@@ -624,17 +713,30 @@ pub fn keep_found(dir: &Path, id: &str, found: &Found, package: Option<&Package>
     templates::write_atomic(&updates, &format!("{id}.json"), &signing::pretty(&json!(found)))
 }
 
-/// What a check of template `id` (installed from package `hash`, signed by
-/// `key`) found in `fetched`: nothing new, or an update (refused when it's
-/// another template, or someone else signed it).
-pub fn compare(id: &str, key: &str, hash: &str, fetched: &Package, source: Source) -> Option<Found> {
+/// What a check of template `id` in `dir` (installed from package `hash`,
+/// signed by `key`) found in `fetched`: nothing new, or an update (refused
+/// when it's another template, someone else signed it, or it isn't a later
+/// version). Another template is told by the package's own id, as its
+/// installed manifest has it: one installed beside another of that id
+/// (`<id>-2`) is still that package.
+pub fn compare(dir: &Path, id: &str, key: &str, hash: &str, fetched: &Package, source: Source) -> Option<Found> {
     if fetched.hash == hash {
         return None;
     }
-    let refused = if fetched.id() != id {
+    let folder = templates::template_dir(dir, id);
+    let manifest: Value = folder
+        .as_ref()
+        .and_then(|f| templates::read_regular(&f.join(MANIFEST)))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let package_id = manifest["id"].as_str().map(str::trim).filter(|p| !p.is_empty()).unwrap_or(id).to_owned();
+    let was = folder.as_deref().and_then(imported).and_then(|i| i["version"].as_str().map(str::to_owned)).unwrap_or_default();
+    let refused = if fetched.id() != package_id {
         Some(format!("The new version is a different template ({})", fetched.id()))
     } else if fetched.key != key {
         Some("The new version is signed by someone else, so it won't be installed".to_string())
+    } else if !install::newer(&fetched.version(), &was) {
+        Some(install::not_newer(&fetched.version(), &was))
     } else {
         None
     };
@@ -646,6 +748,8 @@ pub fn compare(id: &str, key: &str, hash: &str, fetched: &Package, source: Sourc
         removed: Vec::new(),
         refused,
         source: Some(source),
+        digest_diff: None,
+        new_key: false,
     })
 }
 
@@ -692,13 +796,70 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
     if imported["key"].as_str() != Some(package.key.as_str()) {
         return Err("The new version is signed by someone else, so it won't be installed".into());
     }
+    let was = imported["version"].as_str().unwrap_or("");
+    if !install::newer(&package.version(), was) {
+        return Err(install::not_newer(&package.version(), was));
+    }
     let mut source: Option<Source> = found.source.clone().or_else(|| serde_json::from_value(imported["source"].clone()).ok());
+    // A new version whose code differs from what's installed (anything but
+    // its preview picture) is a new template to allow: it waits for you in
+    // Zeron's own consent window, as someone else's does, and replaces this
+    // one only once you allow it there (`decide`).
+    if changes_code(&folder, &package) {
+        let shown = source.clone().unwrap_or_else(|| Source {
+            kind: "file".into(),
+            url: None,
+            path: None,
+            git_ref: None,
+            commit: None,
+            version: String::new(),
+            installed_at: 0,
+        });
+        let from = shown.url.clone().unwrap_or_default();
+        let pending = stage_as(dir, &package, &from, &shown, Some(id))?;
+        let mut out = package.about();
+        out["pending"] = json!(pending);
+        out["update_of"] = json!(id);
+        out["author"] = json!(author_of(&package.key));
+        out["needs_consent"] = json!(true);
+        return Ok(out);
+    }
     if let Some(source) = &mut source {
         source.version = package.text("version");
         source.installed_at = super::now_secs();
     }
     let author = author_of(&package.key);
-    let tmp = write_folder(dir, id, &package, &author, source.as_ref())?;
+    replace(dir, id, &folder, &package, &author, source.as_ref())?;
+    forget_found(dir, id);
+    Ok(json!({
+        "updated": id,
+        "name": package.name(),
+        "version": package.text("version"),
+        "from": imported["version"],
+    }))
+}
+
+/// Whether installing `package` over `folder` changes any of its code: a
+/// file of its own added, removed or changed, but its preview picture.
+fn changes_code(folder: &Path, package: &Package) -> bool {
+    let mut now: BTreeMap<String, String> = BTreeMap::new();
+    for rel in templates::own_files(folder) {
+        let Some(bytes) = inside(folder, &rel).and_then(|p| templates::read_regular(&p)) else { return true };
+        now.insert(rel, signing::sha256_hex(&bytes));
+    }
+    let next: BTreeMap<String, String> = package
+        .files
+        .iter()
+        .filter(|(rel, _)| rel.as_str() != PREVIEW)
+        .map(|(rel, bytes)| (rel.clone(), signing::sha256_hex(bytes)))
+        .collect();
+    now != next
+}
+
+/// `package` written in place of template `id`'s `folder`: the old aside,
+/// the new in, then the old gone.
+fn replace(dir: &Path, id: &str, folder: &Path, package: &Package, author: &Author, source: Option<&Source>) -> Result<(), String> {
+    let tmp = write_folder(dir, id, package, author, source)?;
     // In its place: the old aside, the new in, then the old gone.
     let old = dir.join(format!(".tmp-old-{id}-{}-{}", std::process::id(), super::now_secs()));
     std::fs::rename(&folder, &old).map_err(|e| {
@@ -711,13 +872,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
         return Err(format!("Couldn't update it: {error}"));
     }
     let _ = std::fs::remove_dir_all(&old);
-    forget_found(dir, id);
-    Ok(json!({
-        "updated": id,
-        "name": package.name(),
-        "version": package.text("version"),
-        "from": imported["version"],
-    }))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1022,10 +1177,11 @@ mod tests {
 
         // Nothing new where it came from.
         let (same, at) = fetch_again(&source).await.unwrap().unwrap();
-        assert!(compare("midnight", &alice.public(), &hash, &same, at).is_none());
+        assert!(compare(&other, "midnight", &alice.public(), &hash, &same, at).is_none());
 
-        // A new version, signed by the same key: found, kept, installed in
-        // its place with no asking.
+        // A new version, signed by the same key, that changes its code:
+        // found and kept, then it waits for you as someone else's would,
+        // and replaces the installed one in place once allowed.
         write(&d.join("midnight/ds/tokens.luau"), "-- midnight tokens, v2");
         write(
             &d.join("midnight").join(MANIFEST),
@@ -1033,12 +1189,16 @@ mod tests {
         );
         export(&d, "midnight", &out, &alice).unwrap();
         let (newer, at) = fetch_again(&source).await.unwrap().unwrap();
-        let found_now = compare("midnight", &alice.public(), &hash, &newer, at).unwrap();
+        let found_now = compare(&other, "midnight", &alice.public(), &hash, &newer, at).unwrap();
         assert_eq!((found_now.version.as_str(), found_now.refused.as_deref()), ("1.1.0", None));
         keep_found(&other, "midnight", &found_now, Some(&newer)).unwrap();
         assert!(found(&other, "midnight", &hash).is_some());
-        let done = update(&other, "midnight", author_as(&alice)).unwrap();
-        assert_eq!((done["version"].as_str(), done["from"].as_str()), (Some("1.1.0"), Some("1.0.0")));
+        let waiting = update(&other, "midnight", author_as(&alice)).unwrap();
+        assert_eq!((waiting["needs_consent"].as_bool(), waiting["update_of"].as_str()), (Some(true), Some("midnight")));
+        assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens", "nothing changes before you allow it");
+        let done = decide(&other, waiting["pending"].as_str().unwrap(), true, waiting["hash"].as_str().unwrap(), author_as(&alice)).unwrap();
+        assert_eq!((done["installed"].as_str(), done["updated"].as_str()), (Some("midnight"), Some("midnight")));
+        assert!(!other.join("midnight-2").exists(), "in place, never beside it");
         assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens, v2");
         let after = imported(&t).unwrap();
         assert_eq!(after["source"]["kind"], "file");
@@ -1051,11 +1211,140 @@ mod tests {
         export(&d, "midnight", &out, &eve).unwrap();
         let installed = after["hash"].as_str().unwrap().to_owned();
         let (theirs, at) = fetch_again(&source).await.unwrap().unwrap();
-        let refused = compare("midnight", &alice.public(), &installed, &theirs, at).unwrap();
+        let refused = compare(&other, "midnight", &alice.public(), &installed, &theirs, at).unwrap();
         assert!(refused.refused.as_deref().unwrap().contains("someone else"));
         keep_found(&other, "midnight", &refused, None).unwrap();
         assert!(!other.join(UPDATES).join(format!("midnight.{EXTENSION}")).exists());
         assert!(update(&other, "midnight", author_as(&alice)).unwrap_err().contains("someone else"));
         assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens, v2");
+    }
+
+    /// R23: a package signed by the same key but not a later version (a
+    /// signed downgrade, or the same version again) is refused, found or
+    /// installed.
+    #[tokio::test]
+    async fn plugins_template_packages_a_signed_downgrade_never_updates() {
+        let d = with_template("downgrade");
+        let out = d.parent().unwrap().join("midnight.zeron-template");
+        let alice = key();
+        write(&d.join("midnight").join(MANIFEST), r#"{"id":"midnight","name":"Midnight","version":"2.0.0"}"#);
+        export(&d, "midnight", &out, &alice).unwrap();
+        let other = dir("downgrade-other").join("templates");
+        import(&other, &out, author_as(&alice)).unwrap();
+        let first = imported(&other.join("midnight")).unwrap();
+        let (hash, source): (String, Source) = (first["hash"].as_str().unwrap().into(), serde_json::from_value(first["source"].clone()).unwrap());
+        // The old 1.0.0, signed again by the same key.
+        write(&d.join("midnight").join(MANIFEST), r#"{"id":"midnight","name":"Midnight","version":"1.0.0"}"#);
+        write(&d.join("midnight/ds/tokens.luau"), "-- the old, vulnerable tokens");
+        export(&d, "midnight", &out, &alice).unwrap();
+        let (older, at) = fetch_again(&source).await.unwrap().unwrap();
+        let found_now = compare(&other, "midnight", &alice.public(), &hash, &older, at).unwrap();
+        assert!(found_now.refused.as_deref().unwrap().contains("isn't later"), "{:?}", found_now.refused);
+        // Kept anyway (an .updates file written by hand): update refuses it.
+        let planted = Found { refused: None, ..found_now };
+        keep_found(&other, "midnight", &planted, Some(&older)).unwrap();
+        assert!(update(&other, "midnight", author_as(&alice)).unwrap_err().contains("isn't later"));
+        assert_eq!(std::fs::read_to_string(other.join("midnight/ds/tokens.luau")).unwrap(), "-- midnight tokens");
+    }
+
+    /// R23: a template installed beside another of its id (`midnight-2`)
+    /// still updates: it's told by its package's id, not its folder's.
+    #[tokio::test]
+    async fn plugins_template_packages_one_installed_under_a_free_id_still_updates() {
+        let d = with_template("want2");
+        let out = d.parent().unwrap().join("midnight.zeron-template");
+        let alice = key();
+        export(&d, "midnight", &out, &alice).unwrap();
+        let other = dir("want2-other").join("templates");
+        write(&other.join("midnight").join(MANIFEST), r#"{"id":"midnight","name":"Mine"}"#);
+        assert_eq!(import(&other, &out, author_as(&alice)).unwrap()["installed"], "midnight-2");
+        let first = imported(&other.join("midnight-2")).unwrap();
+        let (hash, source): (String, Source) = (first["hash"].as_str().unwrap().into(), serde_json::from_value(first["source"].clone()).unwrap());
+        write(&d.join("midnight").join(MANIFEST), r#"{"id":"midnight","name":"Midnight","version":"1.1.0"}"#);
+        export(&d, "midnight", &out, &alice).unwrap();
+        let (newer, at) = fetch_again(&source).await.unwrap().unwrap();
+        let found_now = compare(&other, "midnight-2", &alice.public(), &hash, &newer, at).unwrap();
+        assert_eq!(found_now.refused, None, "the same template, under a free id");
+        keep_found(&other, "midnight-2", &found_now, Some(&newer)).unwrap();
+        // (Its code is the same: in place, no asking.)
+        let done = update(&other, "midnight-2", author_as(&alice)).unwrap();
+        assert_eq!(done["updated"], "midnight-2");
+        assert_eq!(imported(&other.join("midnight-2")).unwrap()["version"], "1.1.0");
+    }
+
+    /// R18: a package's manifest never carries the app's mark of Zeron's
+    /// own built-in themes into what's installed.
+    #[test]
+    fn plugins_template_packages_builtin_theme_is_never_installed_from_a_package() {
+        let d = with_template("posing");
+        let alice = key();
+        let out = d.parent().unwrap().join("midnight.zeron-template");
+        // A package whose signed manifest says it's Zeron's Catppuccin.
+        let mut files = BTreeMap::new();
+        files.insert("theme.luau".to_owned(), b"return nil".to_vec());
+        files.insert("screens/shell/sidebar.luau".to_owned(), b"-- takes over".to_vec());
+        let hashes: FileHashes = files.iter().map(|(r, b)| (r.clone(), signing::sha256_hex(b))).collect();
+        let manifest = json!({ "id": "theme-catppuccin", "name": "Catppuccin", "builtin_theme": "catppuccin", "version": "1.0.0" });
+        let signed = alice.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, &manifest, &hashes);
+        let package = json!({
+            "format": FORMAT,
+            "manifest": signed,
+            "files": files.iter().map(|(r, b)| (r.clone(), json!(B64.encode(b)))).collect::<serde_json::Map<_, _>>(),
+        });
+        std::fs::write(&out, serde_json::to_vec(&package).unwrap()).unwrap();
+        let installed = import(&d, &out, author_as(&alice)).unwrap();
+        let id = installed["installed"].as_str().unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(d.join(id).join(MANIFEST)).unwrap()).unwrap();
+        assert!(written.get(BUILTIN_THEME).is_none(), "{written}");
+        assert_eq!(written["name"], "Catppuccin");
+    }
+
+    /// R30: on a case-insensitive filesystem (macOS, Windows) these open
+    /// the protected files, so they're protected too.
+    #[test]
+    fn protected_paths_fold_as_the_filesystem_does() {
+        for same in [
+            "screens/plugins/page.luau",
+            "Screens/Plugins/page.luau",
+            "\u{17f}creens/plugins/page.luau",
+            "SCREENS/TEMPLATES/x.luau",
+            "Account/x.luau",
+            "account./x.luau",
+            ".LUAURC",
+            ".luaurc.",
+        ] {
+            assert!(protected(same), "{same}");
+        }
+        for not in ["screens/plugin/page.luau", "screens/shell/x.luau", "accounts/x.luau", "luaurc"] {
+            assert!(!protected(not), "{not}");
+        }
+    }
+
+    /// R29: an export lands only in a folder of yours, never over another
+    /// kind of file, never in Zeron's data or a hidden folder of home.
+    #[test]
+    fn an_export_goes_only_where_it_should() {
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join(".zeron");
+        let ssh = home.path().join(".ssh");
+        let docs = home.path().join("Documents");
+        for d in [&data, &ssh, &docs] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let ok = |p: &Path| check_export_path(p, &data, Some(home.path()));
+        assert!(ok(&docs.join("m.zeron-template")).is_ok());
+        assert!(ok(&ssh.join("authorized_keys.zeron-template")).is_err());
+        assert!(ok(&data.join("m.zeron-template")).is_err());
+        // Over a file that isn't a package: refused; over an earlier export: fine.
+        std::fs::write(docs.join("notes.zeron-template"), "my notes").unwrap();
+        assert!(ok(&docs.join("notes.zeron-template")).is_err());
+        std::fs::write(docs.join("old.zeron-template"), serde_json::to_vec(&json!({ "format": FORMAT })).unwrap()).unwrap();
+        assert!(ok(&docs.join("old.zeron-template")).is_ok());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ssh.join("x"), docs.join("link.zeron-template")).unwrap();
+            assert!(ok(&docs.join("link.zeron-template")).is_err());
+        }
+        assert!(default_export_path(&data, "midnight").starts_with(&data));
     }
 }

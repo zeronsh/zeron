@@ -1,6 +1,6 @@
 //! The main window's shortcuts reach their commands from wherever focus is,
 //! as a desktop window routes them. A command's shortcut is its menu item's
-//! (src/main.rs `serve_commands`): the window binds the menus' keymap at
+//! (src/menu_bar.rs): the window binds the menus' keymap at
 //! its root, a key goes first to what has focus, and one nothing takes
 //! reaches the root as the menu item's action, which runs the command. This
 //! mounts the shell headless (ui/shell_fixture.luau), binds the commands'
@@ -16,6 +16,8 @@ use zgx::{
 };
 use zgx_desktop::MenuAction;
 use zgx_script::{ScriptHost, Value, testing::TestApp};
+
+// (The menu bar itself, its plugins and its windows: src/menu_bar_tests.rs.)
 
 struct Window {
     app: TestApp,
@@ -59,7 +61,7 @@ fn mount() -> Window {
             continue;
         };
         // (Every shortcut a menu can show: one it can't would never fire.)
-        let accelerator = crate::accelerator(key).unwrap_or_else(|| panic!("{}: `{key}` isn't a shortcut", command.id));
+        let accelerator = crate::menu_bar::accelerator(key).unwrap_or_else(|| panic!("{}: `{key}` isn't a shortcut", command.id));
         let mut stroke = accelerator.0;
         if let zgx::input::Key::Character(s) = &mut stroke.key {
             *s = s.to_ascii_lowercase();
@@ -205,191 +207,149 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
             press(&mut w, "ctrl+tab", "shell.next_session", false, &|w| w.route() != session);
             press(&mut w, "ctrl+shift+tab", "shell.previous_session", true, &|w| w.route() == session);
         }
-        // ⌘N a new chat, then ⌘[ back, ⌘] forward and ⌘[ back again from
-        // where focus went (putting it back would move the history).
+        // ⌘N a new chat, then back, forward and back again from where
+        // focus went (putting it back would move the history): ⌘[ ⌘] on a
+        // Mac, Alt+←/→ elsewhere (zgx's router's keys there).
+        let (back, forward) = if cfg!(target_os = "macos") { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
         press(&mut w, "cmd+n", "shell.new_chat", false, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
-        press(&mut w, "cmd+]", "router.forward", true, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
+        press(&mut w, forward, "router.forward", true, &|w| w.route() == "/");
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// Alt+←/→ step the history on Windows and Linux (zgx's router binds them
+/// there, ⌘[ ⌘] on macOS, where ⌥← ⌥→ are the caret's word-jump and must
+/// not): from anywhere, text fields included, as a browser's are (the
+/// caret's word-jump on Windows and Linux is Ctrl+←/→).
 #[test]
-fn command_w_closes_the_panels_tab_while_it_has_the_keyboard_else_the_window() {
+fn alt_arrows_step_the_history_on_windows_and_linux_only() {
+    let mac = cfg!(target_os = "macos");
+    let mut wrong = Vec::new();
+    for at in [Focus::Nothing, Focus::Composer] {
+        let mut w = mount();
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(20);
+        let session = w.route();
+        w.press("cmd+n");
+        assert_eq!(w.route(), "/");
+        let (back, forward) = if mac { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
+        focus(&mut w, at);
+        let heard = w.press(back);
+        if heard.as_deref() != Some("router.back") || w.route() != session {
+            wrong.push(format!("{at:?}: {back} reached {heard:?}, at {}", w.route()));
+        }
+        focus(&mut w, at);
+        let heard = w.press(forward);
+        if heard.as_deref() != Some("router.forward") || w.route() != "/" {
+            wrong.push(format!("{at:?}: {forward} reached {heard:?}, at {}", w.route()));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The mouse's side buttons (X1, X2) go back and forward, over the chat or
+/// a session's tab.
+#[test]
+fn the_mouse_side_buttons_step_the_history() {
+    use zgx::input::{InputEvent, PointerButton};
+    let mut w = mount();
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(20);
+    let session = w.route();
+    w.press("cmd+n");
+    assert_eq!(w.route(), "/");
+    let side = |w: &mut Window, n: u16, id: &str| {
+        let b = w.app.bounds(id);
+        let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+        w.app.ui.dispatch(InputEvent::PointerDown { x, y, button: PointerButton::Other(n) });
+        w.app.ui.dispatch(InputEvent::PointerUp { x, y, button: PointerButton::Other(n) });
+        w.app.frames(30);
+    };
+    side(&mut w, 4, "#shell-chats");
+    assert_eq!(w.route(), session, "X1 didn't go back");
+    side(&mut w, 5, "#shell-chats");
+    assert_eq!(w.route(), "/", "X2 didn't go forward");
+    // Over the sidebar too (not a node with a handler of its own).
+    side(&mut w, 4, "#shell-sidebar");
+    assert_eq!(w.route(), session, "X1 over the sidebar didn't go back");
+}
+
+/// ⌘W: the visible panel's active tab, wherever the keyboard is; else the chat's tab
+/// (a split's focused pane: split_tests), a new chat's page after the last; only
+/// with no chat, the window.
+#[test]
+fn command_w_closes_the_visible_panels_tab_then_the_chats_tab_then_the_window() {
+    for at in [Focus::Nothing, Focus::Composer, Focus::Sidebar, Focus::Editor] {
+        let mut w = mount();
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(20);
+        w.app.click("#titlebar >> role:button \"Panel\"");
+        w.app.frames(40);
+        w.app.click("#panel-open-files");
+        w.app.frames(40);
+        assert!(w.app.find("#panel-strip >> role:tab").is_some());
+        let session = w.route();
+
+        // The visible panel's tab first, wherever the keyboard is.
+        focus(&mut w, at);
+        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        w.app.frames(30);
+        assert!(w.app.find("#panel-strip >> role:tab").is_none(), "{at:?}: tab left open");
+        assert!(!w.closed.get(), "{at:?}: window closed with the tab");
+        assert_eq!(w.route(), session, "{at:?}: chat changed");
+
+        // No panel tab: the chat's tab, its last leaving a new chat.
+        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        w.app.frames(30);
+        assert!(!w.closed.get(), "{at:?}: window closed with a chat open");
+        assert_eq!(w.route(), "/", "{at:?}: the chat's tab stayed");
+
+        // No chat: the window.
+        assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
+        assert!(w.closed.get(), "{at:?}: no chat, and the window stayed");
+    }
+}
+
+/// A hidden panel's tabs are left be: ⌘W goes on to the chat's tab.
+#[test]
+fn command_w_leaves_a_hidden_panels_tabs_intact() {
     let mut w = mount();
     w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
     w.app.frames(20);
     w.app.click("#titlebar >> role:button \"Panel\"");
     w.app.frames(40);
-    // A file viewer's tab (README.md in its tree).
     w.app.click("#panel-open-files");
     w.app.frames(40);
     let tabs = |w: &mut Window| w.app.find("#panel-strip >> role:tab").is_some();
     assert!(tabs(&mut w), "the panel has a tab");
-    // In the file: the tab closes, the window stays.
-    focus(&mut w, Focus::Editor);
+    focus(&mut w, Focus::Composer);
+    assert_eq!(w.press("cmd+r").as_deref(), Some("shell.toggle_files"));
+    assert_eq!(w.app.bounds("#shell-files").width, 0.);
     assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
     w.app.frames(30);
-    assert!(!tabs(&mut w), "⌘W in the panel's file left its tab open");
-    assert!(!w.closed.get(), "⌘W in the panel closed the window too");
-    // In the composer: the panel left be, the window closes (the app with
-    // it, as Zeron's). (Its last tab closed, the panel closed with it: open
-    // again, a file viewer in it.)
+    assert!(!w.closed.get(), "⌘W with a hidden panel closed the window, with a chat open");
+    assert_eq!(w.route(), "/", "⌘W with a hidden panel didn't close the chat's tab");
+    // The chat opened again, its panel shown: the hidden tab was left be.
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(40);
     if w.app.bounds("#shell-files").width == 0. {
-        w.app.click("#titlebar >> role:button \"Panel\"");
+        w.press("cmd+r");
         w.app.frames(40);
     }
-    w.app.click("#panel-open-files");
-    w.app.frames(40);
-    assert!(tabs(&mut w), "the panel has a tab again");
-    focus(&mut w, Focus::Composer);
-    assert_eq!(w.press("cmd+w").as_deref(), Some("shell.close"));
-    assert!(tabs(&mut w), "⌘W in the composer closed the panel's tab");
-    assert!(w.closed.get(), "⌘W in the composer didn't close the window");
-}
-
-/// What zgx-desktop's `set_menus` refuses a whole bar for (app_menu.rs
-/// `validate`): an empty label or action, an action twice, or a shortcut
-/// twice. Refused, the bar before it stays, and with none before it there
-/// are no shortcuts at all.
-fn refused(menus: &[zgx_desktop::AppMenu]) -> Option<String> {
-    let (mut ids, mut keys): (Vec<String>, Vec<zgx::actions::Keystroke>) = (Vec::new(), Vec::new());
-    for menu in menus {
-        for entry in &menu.entries {
-            if let zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } = entry {
-                if label.is_empty() || action.0.is_empty() {
-                    return Some(format!("an empty label or action in {}", menu.label));
-                }
-                if ids.contains(&action.0) {
-                    return Some(format!("the action `{}` twice", action.0));
-                }
-                ids.push(action.0.clone());
-                if let Some(key) = accelerator {
-                    if keys.contains(&key.0) {
-                        return Some(format!("a shortcut twice ({}'s)", action.0));
-                    }
-                    keys.push(key.0.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// The window as the desktop serves it: the bar src/main.rs makes of the
-/// commands set as the platform would (kept as it was if refused), and its
-/// keymap bound at the root, again after each load.
-struct Served {
-    app: TestApp,
-    bar: Option<Vec<zgx_desktop::AppMenu>>,
-    refusals: Vec<String>,
-    heard: Rc<RefCell<Vec<String>>>,
-    keys: Option<KeymapBinding>,
-}
-
-impl Served {
-    fn new(plugin: Option<&std::path::Path>) -> Self {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
-        let entry = plugin.map(std::path::Path::to_path_buf);
-        let app = TestApp::new(move |runtime| {
-            let host = ScriptHost::new(runtime, path);
-            host.action("close", |_| {});
-            if let Some(entry) = entry {
-                host.set_plugins(vec![zgx_script::Plugin { name: "keys".into(), entry, grants: vec![] }]);
-            }
-            host
-        });
-        app.ui.scene.borrow_mut().resize(1200., 800.);
-        app.frames(30);
-        assert_eq!(app.error(), None, "the shell failed");
-        let heard: Rc<RefCell<Vec<String>>> = Rc::default();
-        let into = heard.clone();
-        let root = app.ui.scene.borrow().root();
-        let listener = app.ui.input.listen(root, move |event| {
-            if event.phase == zgx::input::EventPhase::Capture || event.default_prevented() {
-                return;
-            }
-            if let InputEvent::Action(action) = &event.event
-                && let Some(action) = action.downcast_ref::<MenuAction>()
-            {
-                into.borrow_mut().push(action.0.clone());
-                event.prevent_default();
-            }
-        });
-        std::mem::forget(listener);
-        let mut s = Served { app, bar: None, refusals: Vec::new(), heard, keys: None };
-        s.serve();
-        s
-    }
-
-    /// The commands' bar, set as src/main.rs sets it.
-    fn serve(&mut self) {
-        let bar = crate::menus(&self.app.host.commands().get());
-        match refused(&bar) {
-            Some(why) => self.refusals.push(why),
-            None => self.bar = Some(bar),
-        }
-        let mut map = Keymap::new();
-        for menu in self.bar.iter().flatten() {
-            for entry in &menu.entries {
-                if let zgx_desktop::AppMenuEntry::Item { action, accelerator: Some(key), .. } = entry {
-                    map = map.bind(KeyBinding::new([key.0.clone()], Action::new(MenuAction(action.0.clone()))).expect("a shortcut"));
-                }
-            }
-        }
-        self.keys = None;
-        let root = self.app.ui.scene.borrow().root();
-        self.keys = Some(self.app.ui.input.bind_keys(root, map));
-    }
-
-    /// What `keys` reached, if anything.
-    fn press(&mut self, keys: &str) -> Option<String> {
-        self.heard.borrow_mut().clear();
-        self.app.keys(keys);
-        self.app.frames(5);
-        self.heard.borrow_mut().drain(..).next()
-    }
+    assert!(tabs(&mut w), "⌘W closed a hidden panel's tab");
 }
 
 #[test]
-fn a_plugin_s_commands_never_cost_the_app_its_shortcuts() {
-    let dir = std::env::temp_dir().join(format!("zgx-shortcuts-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("init.luau");
-    // ⌘N as the app has it, ⌘N again by another name (`meta` is ⌘ on a
-    // Mac, as `cmd` is), and one key free. (zgx refuses an id declared
-    // twice as an error: the plugin is set aside, src/plugins/recovery.rs.)
-    let alias = if cfg!(target_os = "macos") { "meta+n" } else { "ctrl+n" };
-    std::fs::write(&entry, r#"
-ui.command { id = "mine", title = "Mine", menu = "Keys", key = "cmd+n", run = function() end }
-ui.command { id = "alias", title = "Also new", menu = "Keys", key = "ALIAS", run = function() end }
-ui.command { id = "free", title = "Free", menu = "Keys", key = "cmd+shift+y", run = function() end }
-"#.replace("ALIAS", alias)).unwrap();
-    let mut w = Served::new(Some(&entry));
-    let check = |w: &mut Served, when: &str, free: bool| {
-        assert!(w.refusals.is_empty(), "{when}: the bar was refused: {:?}", w.refusals);
-        assert_eq!(w.press("cmd+n").as_deref(), Some("shell.new_chat"), "{when}: ⌘N");
-        assert_eq!(w.press("cmd+k").as_deref(), Some("shell.palette"), "{when}: ⌘K");
-        w.app.key(zgx::input::Key::Escape);
-        w.app.frames(10);
-        let got = w.press("cmd+shift+y");
-        assert_eq!(got.as_deref(), if free { Some("keys/free") } else { None }, "{when}: the plugin's free key");
-    };
-    check(&mut w, "loaded", true);
-    // Reloaded: the same commands again, not twice over.
-    w.app.host.reload().unwrap();
-    w.app.frames(20);
-    w.serve();
-    check(&mut w, "reloaded", true);
-    // Unloaded: its commands go with it.
-    w.app.host.set_plugins(vec![]);
-    w.app.host.reload().unwrap();
-    w.app.frames(20);
-    w.serve();
-    check(&mut w, "unloaded", false);
-    assert!(!w.app.host.commands().get().iter().any(|c| c.id.starts_with("keys/")), "its commands stayed");
+fn command_w_active_tab_preserves_visibility_and_unsaved_file_gates() {
+    let report = zgx_script::test_runner::run(&std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"), Some("closing the active tab"), |outcome| {
+        if let Some(failure) = &outcome.failure {
+            eprintln!("{}: {failure}", outcome.name);
+        }
+    }).expect("panel tests load");
+    assert_eq!(report.outcomes.len(), 3, "all active-tab regression tests ran");
+    assert_eq!(report.failed(), 0, "{report:?}");
 }
 
 /// ⌘1–9 open the sidebar's sessions as it shows them, top to bottom
@@ -544,18 +504,41 @@ fn command_slash_opens_the_model_picker() {
     }
 }
 
-/// Holds `meta` (and `shift`) as the window reports a modifier alone
-/// (zgx's `ui.modifiers`, which `app.keys` never sets: it presses and lets
-/// go at once).
-fn hold(w: &mut Window, meta: bool, shift: bool) {
-    let held = zgx::input::Modifiers { meta, shift, ..Default::default() };
+/// ⌘/ still finds a composer that replaced another: the new one mounts
+/// before the old one's cleanup runs (ui/tests/chat_actions.test.luau).
+#[test]
+fn command_slash_survives_a_swapped_composer() {
+    let ui = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let report = zgx_script::test_runner::run(&ui, Some("after the composer is swapped"), |outcome| {
+        if let Some(failure) = &outcome.failure {
+            eprintln!("{}: {failure}", outcome.name);
+        }
+    })
+    .expect("chat tests load");
+    assert_eq!(report.outcomes.len(), 1, "{report:?}");
+    assert_eq!(report.failed(), 0, "{report:?}");
+}
+
+/// Holds ⌘ (and `shift`) as the window reports a modifier alone (zgx's
+/// `ui.modifiers`, which `app.keys` never sets: it presses and lets go at
+/// once). ⌘ is what `cmd` shortcuts are pressed with: Command on macOS,
+/// Control elsewhere.
+fn hold(w: &mut Window, command: bool, shift: bool) {
+    let mut held = zgx::input::Modifiers { shift, ..Default::default() };
+    if cfg!(target_os = "macos") {
+        held.meta = command;
+    } else {
+        held.control = command;
+    }
     zgx::input::set_held_modifiers(&w.app.ui.runtime, held);
     w.app.frames(2);
 }
 
-/// Whether the first row wears its jump (`find` names one node; nine show).
+/// Whether the first row wears its jump (`find` names one node; nine show),
+/// as the platform writes it: ⌘1, or Ctrl+1.
 fn hints(w: &mut Window) -> bool {
-    w.app.tree().lines().any(|line| line.contains("text \"⌘1\""))
+    let keys = if cfg!(target_os = "macos") { "⌘1" } else { "Ctrl+1" };
+    w.app.tree().lines().any(|line| line.contains(&format!("text \"{keys}\"")))
 }
 
 /// ⌘ held alone shows the sidebar's ⌘1–9 hints at once, kept through the
@@ -599,6 +582,26 @@ fn jump_hints_follow_command_held_alone() {
     hold(&mut w, false, false);
 }
 
+/// The other of Command and Control (Control on macOS; Super, `meta`,
+/// elsewhere) is no ⌘: held alone it shows no hints, and held with ⌘ it
+/// hides them, as ⇧ does.
+#[test]
+fn jump_hints_want_the_platforms_command_not_the_other() {
+    let mut w = mount();
+    let mac = cfg!(target_os = "macos");
+    let other = zgx::input::Modifiers { control: mac, meta: !mac, ..Default::default() };
+    zgx::input::set_held_modifiers(&w.app.ui.runtime, other);
+    w.app.frames(2);
+    assert!(!hints(&mut w), "the other alone: none");
+    let both = zgx::input::Modifiers { control: true, meta: true, ..Default::default() };
+    zgx::input::set_held_modifiers(&w.app.ui.runtime, both);
+    w.app.frames(2);
+    assert!(!hints(&mut w), "with the other: not alone");
+    hold(&mut w, true, false);
+    assert!(hints(&mut w), "⌘ alone: shown");
+    hold(&mut w, false, false);
+}
+
 /// The command `id`'s shortcut as published now (the menu bar's).
 fn published(w: &Window, id: &str) -> Option<String> {
     w.app.host.commands().get().iter().find(|c| c.id == id).and_then(|c| c.key.clone())
@@ -619,9 +622,12 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     let recorder = "#settings-page >> role:button ~\"Change Toggle terminal\"";
     w.app.click(recorder);
     w.app.frames(5);
-    w.app.keys("ctrl+alt+t");
+    // (A key besides the command key: Control on a Mac, Super elsewhere,
+    // where Ctrl is the command key.)
+    let other = if cfg!(target_os = "macos") { "ctrl+alt+t" } else { "meta+alt+t" };
+    w.app.keys(other);
     w.app.frames(10);
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "rebound at once");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "rebound at once");
     assert!(w.app.texts().iter().any(|t| t.contains("Reset")), "a rebound row offers Reset");
 
     // ⌘B is Toggle sidebar's: recorded (the recorder takes every key while
@@ -629,7 +635,7 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     w.app.click(recorder);
     w.app.frames(5);
     assert_eq!(w.press("cmd+b"), None, "⌘B goes to the recorder, not its command");
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "a taken key is refused");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "a taken key is refused");
     assert_eq!(published(&w, "shell.toggle_sidebar").as_deref(), Some("cmd+b"));
     let said = w.app.texts();
     assert!(
@@ -647,4 +653,43 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     w.app.frames(10);
     assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("cmd+j"));
     assert_eq!(w.app.error(), None);
+}
+
+/// Check for Updates… and Settings lead the application menu (macOS's
+/// first, over Services), a line between them, as Zeron's did; Settings
+/// keeps ⌘, and isn't in File any more. Check for Updates… opens About &
+/// updates.
+#[test]
+fn check_for_updates_and_settings_lead_the_application_menu() {
+    let w = mount();
+    let commands = w.app.host.commands().get();
+    let bar = crate::menu_bar::Bar::of(&commands, &[], &[], None);
+    assert_eq!(super::menu_bar_tests::refusal(&bar.menus), None);
+    let menu = |label: &str| bar.menus.iter().find(|m| m.label == label).cloned();
+    let application = menu(zgx_desktop::APPLICATION_MENU).expect("no application menu");
+    let shown: Vec<String> = application
+        .entries
+        .iter()
+        .map(|e| match e {
+            zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } => {
+                format!("{label} [{}]{}", action.0, if accelerator.is_some() { " ⌘" } else { "" })
+            }
+            zgx_desktop::AppMenuEntry::Separator => "—".into(),
+            _ => "?".into(),
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        ["Check for Updates… [shell.check_updates]", "—", "Settings [shell.settings] ⌘"],
+        "{shown:?}"
+    );
+    let file = menu("File").expect("no File menu");
+    assert!(
+        !file.entries.iter().any(|e| matches!(e, zgx_desktop::AppMenuEntry::Item { action, .. } if action.0 == "shell.settings")),
+        "Settings is still in File"
+    );
+    let mut w = w;
+    assert!(w.app.host.run_command("shell.check_updates"), "no shell.check_updates command");
+    w.app.frames(20);
+    assert_eq!(w.route(), "/settings/about", "Check for Updates… didn't open About & updates");
 }

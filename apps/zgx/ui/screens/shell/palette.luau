@@ -22,6 +22,9 @@ local boundary = require("@app/screens/shell/boundary")
 local paths = require("@app/screens/files/paths")
 local files_api = require("@app/screens/files/api")
 local templates = require("@app/screens/templates/state")
+local themes = require("@app/screens/themes/state")
+local keys = require("@app/screens/shell/keys")
+local host = require("@app/screens/settings/host")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -56,6 +59,7 @@ local function session_items(): { Item }
 				time = c.updated,
 				agent = c.agent,
 				project = if p then p.name else nil,
+				project_id = if p then p.id else nil,
 				hue = if p then (route.look(p.id) or { hue = route.hue(p.id) }).hue else nil,
 				src = if p then (route.look(p.id) or {}).src else nil,
 				emoji = if p then (route.look(p.id) or {}).emoji else nil,
@@ -95,11 +99,12 @@ local function projects_page(): any
 		placeholder = locale.s("shell.palette.search_projects"),
 		items = function(): { Item }
 			local out: { Item } = {}
-			for _, p in sessions.now:get().projects do
+			for _, p in sessions.projects:get() do
 				table.insert(out, {
 					id = `project:{p.id}`,
 					label = p.name,
 					section = locale.s("shell.palette.projects"),
+					project = p.id,
 					hue = (route.look(p.id) or { hue = route.hue(p.id) }).hue,
 					src = (route.look(p.id) or {}).src,
 					emoji = (route.look(p.id) or {}).emoji,
@@ -178,6 +183,85 @@ local function template_items(): { Item }
 				templates.use(id)
 			end,
 		})
+	end
+	return out
+end
+
+-- Every theme Zeron can wear, Zeron's first: picking one wears it for each
+-- scheme it has, as the Themes page's Use does. One worn for every scheme
+-- it can be is checked.
+local function theme_items(): { Item }
+	local out: { Item } = {}
+	for _, e in themes.entries:get() do
+		local id = e.id
+		local function now(): any
+			for _, it in themes.entries:get() do
+				if it.id == id then
+					return it
+				end
+			end
+			return nil
+		end
+		table.insert(out, {
+			id = `use-theme:{id}`,
+			label = locale.s("shell.palette.use_theme", { name = e.name }),
+			section = locale.s("shell.palette.themes"),
+			scope = "settings",
+			icon = "palette-search",
+			keywords = "theme colours colors palette",
+			verb = locale.s("shell.palette.use"),
+			checked = function(): boolean
+				local it = now()
+				return it ~= nil and themes.full(it)
+			end,
+			run = function()
+				local it = now()
+				if it then
+					themes.use(it)
+				end
+			end,
+		})
+	end
+	return out
+end
+
+-- Everything the app's menus hold (src/main.rs `serve_commands` publishes
+-- them), each run as its menu item would be, its shortcut beside it. Where
+-- the system draws no menu bar (Windows, Linux) this is how a pointer
+-- reaches them. Those the palette lists as its own already are left out.
+local menu_commands = ui.shared("app.menu_commands", {} :: { any })
+local LISTED: { [string]: boolean } = {
+	["shell.new_chat"] = true,
+	["shell.new_project"] = true,
+	["shell.archive"] = true,
+	["shell.toggle_sidebar"] = true,
+	["shell.settings"] = true,
+	["shell.reload"] = true,
+	["shell.reload_interface"] = true,
+	-- (The palette itself.)
+	["shell.palette"] = true,
+}
+-- The host's own way back from any template (its "Use Default Interface").
+local DEFAULT_INTERFACE = "zeron.use-zeron-template"
+local function command_items(): { Item }
+	local out: { Item } = {}
+	for _, c in menu_commands:get() do
+		local id = c.id :: string
+		if not LISTED[id] then
+			local default = id == DEFAULT_INTERFACE
+			table.insert(out, {
+				id = `menu:{id}`,
+				label = if default then locale.s("shell.palette.default_interface") else c.title,
+				section = locale.s(if default then "shell.palette.templates" else "shell.palette.commands"),
+				icon = if default then "gallery" else nil,
+				shortcut = c.key,
+				keywords = if default then "template interface safe revert" else c.menu,
+				verb = locale.s("shell.palette.run"),
+				run = function()
+					host.invoke("app.run_menu_command", id)
+				end,
+			})
+		end
 	end
 	return out
 end
@@ -396,6 +480,36 @@ local function root(): { Item }
 			end
 		end
 	end
+	-- The app itself, for when something has left it in a bad state:
+	-- relaunched whole (the engine keeps running, the chat open comes back),
+	-- or its interface's scripts evaluated again in place. (Their keys, if
+	-- Settings → Shortcuts gave them any.)
+	local function key_of(id: string): string?
+		local combo = keys.combo(id)
+		return if combo ~= "" then combo else nil
+	end
+	table.insert(out, {
+		id = "a-reload",
+		label = locale.s("shell.palette.reload_zeron"),
+		section = locale.s("shell.palette.app"),
+		icon = "restart",
+		shortcut = key_of("shell.reload"),
+		keywords = "reload restart relaunch refresh quit app",
+		run = function()
+			host.invoke("app.relaunch")
+		end,
+	})
+	table.insert(out, {
+		id = "a-reload-interface",
+		label = locale.s("shell.palette.reload_interface"),
+		section = locale.s("shell.palette.app"),
+		icon = "refresh",
+		shortcut = key_of("shell.reload_interface"),
+		keywords = "reload refresh scripts ui window",
+		run = function()
+			host.invoke("app.reload_interface")
+		end,
+	})
 	-- Where settings go: each of its pages.
 	for _, id in settings.pages:get() do
 		local page = settings.page(id)
@@ -421,6 +535,12 @@ local function root(): { Item }
 	table.insert(out, { id = "t-frosted", label = locale.s("shell.palette.frosted_glass"), section = locale.s("shell.palette.settings"), icon = "moon", keywords = "material translucent opaque window appearance", toggle = material.frosted })
 	for _, t in template_items() do
 		table.insert(out, t)
+	end
+	for _, t in theme_items() do
+		table.insert(out, t)
+	end
+	for _, c in command_items() do
+		table.insert(out, c)
 	end
 	for _, s in session_items() do
 		table.insert(out, s)

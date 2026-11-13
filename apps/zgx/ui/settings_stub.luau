@@ -1,6 +1,6 @@
 -- Settings' host calls, answered here as the host would (no engine or edge
 -- in a test host): your profile and card, your organization, its members
--- and invitations, this Mac's engine settings and banners. The shell's
+-- and invitations, this computer's engine settings and banners. The shell's
 -- fixture requires it, so Settings' pages build headless; the tests drive
 -- it (tests/settings_in_place.test.luau).
 --
@@ -8,10 +8,13 @@
 -- "name:detail" each). `ui.command`s change the data as the edge would on
 -- its own, or make the next change fail:
 --   settings_stub.sign_in          signed in as Ada, in org_1 (else signed out)
+--   settings_stub.restoring        the engine hasn't answered yet
+--   settings_stub.signed_out       the engine says signed out
 --   settings_stub.open_account     a way in to `settings/account` (a link)
 --   settings_stub.member_joins     someone accepts an invitation
 --   settings_stub.refuse_next      the next change is refused ("refused")
 --   settings_stub.not_admin        you're a member, not an admin, from now on
+--   settings_stub.signed_in_again  the browser sign-in a delete waits on lands
 
 local host = require("@app/screens/settings/host")
 local api = require("@account/api")
@@ -24,6 +27,40 @@ local refuse = ui.state("settings_stub_refuse", false)
 local role = ui.state("settings_stub_role", "admin")
 local about_next = ui.state("settings_stub_about_next", "ok")
 local delete_word = ui.state("settings_stub_delete_word", "ok")
+-- What a delete after signing in again answers: "ok", "wait" (until
+-- `settings_stub.signed_in_again`, or cancelled), or a refusal.
+local step_up_word = ui.state("settings_stub_step_up_word", "ok")
+-- The account's signing keys: "some" (this computer's, one new on another
+-- device, one revoked; listed out of order) or "none".
+local keys_mode = ui.state("settings_stub_keys", "some")
+local signing_keys = {
+	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
+	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
+	{ key = "k_mac", fingerprint = "a1b2 c3d4 e5f6 0718 2930 4a5b 6c7d 8e9f", device_name = "Ada's MacBook Pro", device_id = "d_mac", this_device = true, created_at = 1790000000 },
+}
+-- That wait, while it's open.
+local signing_in: { ok: any, bad: any }? = nil
+local function waiting(): any
+	local p = {}
+	function p.after(_self: any, ok: ((any) -> ())?, bad: ((any) -> ())?)
+		signing_in = { ok = ok, bad = bad }
+	end
+	return p
+end
+local function signed_in_again(word: string?)
+	local w = signing_in
+	signing_in = nil
+	if not w then
+		return
+	end
+	if word then
+		if w.bad then
+			w.bad({ message = word })
+		end
+	elseif w.ok then
+		w.ok(true)
+	end
+end
 -- What the next photo upload answers ("ok", or a refusal like "too_large").
 local photo_word = ui.state("settings_stub_photo_word", "ok")
 -- The last square a photo was cut at, for a test to read.
@@ -103,6 +140,9 @@ local answers: { [string]: (arg: any) -> any } = {
 	["account.me"] = function()
 		return settled(table.clone(me))
 	end,
+	["dictation.call"] = function(arg: any)
+		return settled(if arg.op == "status" then { installed = false, size = 670479942 } elseif arg.op == "inputs" then {} else nil)
+	end,
 	["account.rename"] = function(name: string)
 		local r = change(nil)
 		if r.error then
@@ -156,6 +196,35 @@ local answers: { [string]: (arg: any) -> any } = {
 			return settled(nil, "invalid")
 		elseif word ~= "ok" then
 			return settled(nil, word)
+		end
+		return settled(true)
+	end,
+	["account.delete_signed_in"] = function(arg: any)
+		local word = step_up_word:peek()
+		if arg.confirm ~= me.email then
+			return settled(nil, "invalid")
+		elseif word == "wait" then
+			return waiting()
+		elseif word ~= "ok" then
+			return settled(nil, word)
+		end
+		return settled(true)
+	end,
+	["account.signing_keys"] = function()
+		if keys_mode:peek() == "none" then
+			return settled({ keys = {}, new_keys = {} })
+		end
+		local out = {}
+		for _, k in signing_keys do
+			table.insert(out, table.clone(k))
+		end
+		return settled({ keys = out, new_keys = { "k_dev" } })
+	end,
+	["account.revoke_key"] = function(key: string)
+		for _, k in signing_keys do
+			if k.key == key then
+				k.revoked_at = 1793700000
+			end
 		end
 		return settled(true)
 	end,
@@ -278,6 +347,15 @@ local answers: { [string]: (arg: any) -> any } = {
 		end
 		return settled({ version = "0.2.140" })
 	end,
+	-- This computer's fonts (src/fonts.rs), a few of each kind.
+	["fonts.list"] = function()
+		return settled({
+			{ family = "Fira Code", mono = true },
+			{ family = "Inter", mono = false },
+			{ family = "JetBrains Mono", mono = true },
+			{ family = "Noto Serif", mono = false },
+		})
+	end,
 	-- A background image kept: the picked file itself (the app's own PNG,
 	-- so a headless host can draw it), 512 square.
 	["wallpaper.keep"] = function(arg: any)
@@ -303,6 +381,9 @@ stub.call = function(name: string, arg: any?): any
 end
 stub.invoke = function(name: string, arg: any?)
 	log(if detail(arg) ~= "" then `{name}:{detail(arg)}` else name)
+	if name == "account.cancel_step_up" then
+		signed_in_again("cancelled")
+	end
 end
 -- A photo picked: the app's own PNG, so a headless host can draw it.
 stub.open_files = function(_opts: any): any
@@ -347,7 +428,7 @@ apis.invite = function(_org: string, emails: { string }): any
 	end
 	return settled({ sent = sent, failed = failed })
 end
--- This Mac's agents and another device's (account/agents): one each, so
+-- This computer's agents and another device's (account/agents): one each, so
 -- a switch of device shows whose.
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
@@ -428,6 +509,22 @@ auths.sign_out = function(done: (() -> ())?)
 	end
 end
 
+-- The launch before the engine has answered, and the engine saying signed out.
+ui.command {
+	id = "settings_stub.restoring",
+	title = "The engine hasn't answered yet",
+	run = function()
+		auth.account:set({ state = "restoring", env = "staging" } :: any)
+	end,
+}
+ui.command {
+	id = "settings_stub.signed_out",
+	title = "The engine says signed out",
+	run = function()
+		auth.account:set({ state = "signed_out", env = "staging" } :: any)
+	end,
+}
+
 ui.command {
 	id = "settings_stub.member_joins",
 	title = "A member joins",
@@ -441,6 +538,13 @@ ui.command {
 		local store = require("@app/screens/settings/store")
 		store.load_members()
 		store.load_invitations()
+	end,
+}
+ui.command {
+	id = "settings_stub.signed_in_again",
+	title = "Signed in again in the browser",
+	run = function()
+		signed_in_again(nil)
 	end,
 }
 ui.command {
@@ -462,8 +566,8 @@ ui.command {
 		require("@app/screens/shell/route").settings("account")
 	end,
 }
--- What the main window's theme overrides now (ds.look): its accent and a
--- syntax colour, for a test to read.
+-- What the main window's theme overrides now (ds.look): its accent, a
+-- syntax colour and its fonts, for a test to read.
 local window_theme = ui.state("settings_stub_window_theme", {} :: { [string]: any })
 ui.command {
 	id = "settings_stub.read_theme",
@@ -475,6 +579,22 @@ ui.command {
 			keyword = t["zeron.syntax.keyword"],
 			body = t["font.size.md"],
 			window = t["zeron.window"],
+			sans = t["font.sans"],
+			mono = t["font.mono"],
+			secondary = t["text.secondary"],
+			tertiary = t["text.tertiary"],
+			-- "Accent colour throughout": a status dot, a find's highlight,
+			-- an @file token, a list marker, and a link's ink (nil: the
+			-- text's own).
+			working_dot = t["zeron.status.dot.working"],
+			working = t["zeron.status.working"],
+			find = t["zeron.editor.match"],
+			file_token = t["zeron.composer.token.file"],
+			marker = t["zeron.prose.marker"],
+			link = require("@ds/look").accented_ink(nil)(),
+			-- What the accent's own token is, and what the theme's says.
+			accented_ink = ui.theme.get("zeron.accented.ink"),
+			accent_ink = ui.theme.get("accent"),
 		})
 	end,
 }

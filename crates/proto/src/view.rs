@@ -40,6 +40,27 @@ pub enum Indicator {
 /// §1.12). Engines heartbeat sessions well inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
+/// How often a host restamps `updated_at` on a session row that says
+/// something readers drop once it goes stale ([`session_expires`]). Every
+/// restamp is a stored registry write, so it is as rare as shipped readers
+/// allow: they judge staleness against [`SESSION_STALE_MS`] with no other
+/// signal. Hosts check every 5 s, so restamps land at most 30 s apart and
+/// leave 15 s for delivery and clock skew.
+pub const SESSION_HEARTBEAT_MS: i64 = 25_000;
+
+/// Whether a session row says anything that [`SESSION_STALE_MS`] expires: a
+/// live status, running subagents, background processes or a wait. Only
+/// such a row needs its host's heartbeat; any other row reads the same
+/// stale or fresh. Terminal activity is restamped by its own projection.
+pub fn session_expires(session: &Session) -> bool {
+    matches!(
+        session.status,
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    ) || session.running_subagents > 0
+        || !session.background_tasks.is_empty()
+        || session.waiting.is_some()
+}
+
 /// Only live activity expires. Completed/error records remain useful after
 /// process exit; a lost heartbeat is never evidence of successful completion.
 pub fn session_stale(session: &Session, now: DateTime<Utc>) -> bool {
@@ -113,14 +134,50 @@ pub fn background_tasks(session: Option<&Session>, now: DateTime<Utc>) -> &[crat
         .map_or(&[], |s| s.background_tasks.as_slice())
 }
 
+/// What a chat's agent waits on after its turn ended, while its engine still
+/// says so: a row nobody refreshed inside [`SESSION_STALE_MS`] belongs to an
+/// engine that is gone, and its wait with it. Pure.
+pub fn waiting(session: Option<&Session>, now: DateTime<Utc>) -> Option<&crate::SessionWaiting> {
+    session
+        .filter(|s| now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS)
+        .and_then(|s| s.waiting.as_ref())
+}
+
+/// A session whose wait has gone stale, read as if it held none: its turn
+/// did end, so it reads as finished (unseen) rather than idle or waiting.
+fn without_stale_wait<'a>(
+    session: Option<&'a Session>,
+    now: DateTime<Utc>,
+) -> Option<std::borrow::Cow<'a, Session>> {
+    let session = session?;
+    if session.waiting.is_some() && waiting(Some(session), now).is_none() {
+        let mut cleared = session.clone();
+        cleared.waiting = None;
+        return Some(std::borrow::Cow::Owned(cleared));
+    }
+    Some(std::borrow::Cow::Borrowed(session))
+}
+
 /// The full display status for a chat row / tab dot: live states win, then the
 /// synced seen marker decides completed-vs-idle. Staleness gating rides on
-/// [`effective_indicator`]; the derivation itself is [`crate::chat_indicator`].
+/// [`effective_indicator`] and [`waiting`]; the derivation itself is
+/// [`crate::chat_indicator`].
 pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
+    display_status_from(chat.seen_marks(), session, now)
+}
+
+/// [`display_status`] from a chat's [`crate::SeenMarks`] alone, for a viewport
+/// that holds chats as raw rows. The same rule, not a copy of it.
+pub fn display_status_from(
+    chat: crate::SeenMarks,
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+) -> ChatIndicator {
     if session.is_some_and(|s| session_stale(s, now)) {
         return ChatIndicator::Idle;
     }
-    crate::chat_indicator(chat, session)
+    let session = without_stale_wait(session, now);
+    crate::entities::indicator_from(chat, session.as_deref(), true)
 }
 
 /// Same seen/outcome rules, restricted to native work for composer controls.
@@ -137,7 +194,8 @@ pub fn native_display_status(
     }) {
         return ChatIndicator::Idle;
     }
-    crate::entities::chat_indicator_inner(chat, session, false)
+    let session = without_stale_wait(session, now);
+    crate::entities::indicator_from(chat.seen_marks(), session.as_deref(), false)
 }
 
 /// Includes terminal-only results, which do not append an assistant message.
@@ -161,8 +219,10 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
         ChatIndicator::AwaitingInput => 0,
         ChatIndicator::Errored => 1,
         ChatIndicator::Working => 2,
-        ChatIndicator::Completed => 3,
-        ChatIndicator::Idle => 4,
+        // (It isn't the person's yet: after work, before anything done.)
+        ChatIndicator::Waiting => 3,
+        ChatIndicator::Completed => 4,
+        ChatIndicator::Idle => 5,
     }
 }
 
@@ -397,7 +457,77 @@ mod gate_tests {
             terminal_activity: None,
             running_subagents: running,
             background_tasks: Vec::new(),
+            waiting: None,
         }
+    }
+
+    fn chat_at(now: DateTime<Utc>, seen: Option<DateTime<Utc>>) -> Chat {
+        let mut chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "chat", "deviceId": "dev", "archived": false,
+            "createdAt": now, "lastMessageAt": now,
+        }))
+        .unwrap();
+        chat.last_seen_at = seen;
+        chat
+    }
+
+    fn waiting_session(updated_at: DateTime<Utc>) -> Session {
+        let mut s = running_session(0, updated_at);
+        s.status = SessionStatus::Idle;
+        s.waiting = Some(crate::SessionWaiting {
+            since: updated_at,
+            on: vec![crate::WaitingOn {
+                id: "bn1".into(),
+                kind: crate::WaitingKind::Process,
+                label: "cargo test".into(),
+            }],
+        });
+        s
+    }
+
+    #[test]
+    fn a_wait_shows_while_its_engine_holds_it_and_reads_finished_once_gone() {
+        let now = Utc::now();
+        let chat = chat_at(now, None);
+        let fresh = waiting_session(now - chrono::Duration::seconds(10));
+        assert_eq!(display_status(&chat, Some(&fresh), now), ChatIndicator::Waiting);
+        assert!(waiting(Some(&fresh), now).is_some());
+        // The engine that held it went away: the turn did end, so it reads
+        // as finished and unseen, never waiting forever, never idle.
+        let stale = waiting_session(now - chrono::Duration::milliseconds(SESSION_STALE_MS + 1));
+        assert!(waiting(Some(&stale), now).is_none());
+        assert_eq!(display_status(&chat, Some(&stale), now), ChatIndicator::Completed);
+        assert_eq!(native_display_status(&chat, Some(&stale), now), ChatIndicator::Completed);
+    }
+
+    #[test]
+    fn asking_and_working_beat_waiting() {
+        let now = Utc::now();
+        let chat = chat_at(now, None);
+        let mut s = waiting_session(now);
+        s.status = SessionStatus::AwaitingInput;
+        assert_eq!(display_status(&chat, Some(&s), now), ChatIndicator::AwaitingInput);
+        s.status = SessionStatus::Working;
+        assert_eq!(display_status(&chat, Some(&s), now), ChatIndicator::Working);
+    }
+
+    #[test]
+    fn sleep_states_follow_time_early_wakes_and_seen() {
+        use crate::{ChatSleep, SleepState};
+        let now = Utc::now();
+        let hour = chrono::Duration::hours(1);
+        let mut chat = chat_at(now - hour * 3, Some(now - hour * 3));
+        assert_eq!(chat.sleep_state(now), SleepState::Awake);
+        chat.sleep = Some(ChatSleep { until: now + hour, at: now - hour, woke_at: None });
+        assert_eq!(chat.sleep_state(now), SleepState::Asleep { until: now + hour });
+        // Its time passed: woke then, until it's seen.
+        assert_eq!(chat.sleep_state(now + hour * 2), SleepState::Woke { at: now + hour });
+        chat.last_seen_at = Some(now + hour + chrono::Duration::seconds(1));
+        assert_eq!(chat.sleep_state(now + hour * 2), SleepState::Awake);
+        // Woken early by its engine: woke then, whatever its time says.
+        chat.last_seen_at = Some(now - hour);
+        chat.sleep.as_mut().unwrap().woke_at = Some(now);
+        assert_eq!(chat.sleep_state(now), SleepState::Woke { at: now });
     }
 
     #[test]

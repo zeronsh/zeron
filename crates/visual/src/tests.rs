@@ -109,6 +109,31 @@ fn the_sandbox_has_no_io_and_bounds_time_and_memory() {
     assert!(Visual::load("ui.text = nil return ui.text 'x'", 1).is_err());
 }
 
+/// R5: Luau doesn't validate bytecode, so a script that is a binary chunk
+/// (precompiled, or hand-made to corrupt the VM) is refused, never run.
+#[test]
+fn a_bytecode_script_is_refused() {
+    // A real compiled chunk whose bytes happen to be UTF-8 (as a script's
+    // must): before R5 it ran.
+    let script = ["return { kind = 'text' }", "return 7", "return nil", "return {}", "return 'x'"]
+        .iter()
+        .find_map(|source| {
+            for level in 0..=2 {
+                let bytes = mlua::chunk::Compiler::new().set_optimization_level(level).compile(source).unwrap();
+                if let Ok(text) = String::from_utf8(bytes) {
+                    return Some(text);
+                }
+            }
+            None
+        })
+        .expect("a chunk whose bytecode is UTF-8");
+    let err = Visual::load(&script, 1).err().expect("bytecode was run");
+    assert!(err.message.contains("binary chunk"), "{}", err.message);
+    // A hand-made chunk too: a version byte, then garbage.
+    let err = Visual::load("\u{6}\u{3}\u{1}garbage", 1).err().expect("garbage bytecode was loaded");
+    assert!(err.message.contains("binary chunk"), "{}", err.message);
+}
+
 #[test]
 fn random_data_is_stable_across_renders() {
     let script = r#"
@@ -224,6 +249,25 @@ fn charts_and_tables_parse() {
     };
     // Numeric columns right-align.
     assert_eq!(table.columns[1].align, Align::End);
+}
+
+// show_visual's hover advice, as written there, checks clean: a line kept
+// for what a pick shows, the same height before and after.
+#[test]
+fn the_hover_advice_example_checks_clean() {
+    check(
+        r#"
+        local s = ui.state { picked = false }
+        return function()
+          return ui.column { gap = 8,
+            ui.row { hover = true, on_click = function() s.picked = "us-east, 182 ms" end, ui.text "us-east" },
+            ui.text { s.picked or " " },
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap();
 }
 
 #[test]

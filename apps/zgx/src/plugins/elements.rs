@@ -23,21 +23,25 @@ const fn e(selector: &'static str, place: &'static str, about: &'static str, pro
     Element { selector, place, about, provides }
 }
 
-/// Zeron's named elements. Everything in the window also has `profile`,
-/// `appearance` and `route` (`#shell`'s).
+/// Zeron's named elements. Everything in the window also has `appearance`
+/// and `route` (`#shell`'s). What a place gives is an id or a plain value,
+/// never a record: a session's, a message's or a project's id, a file's or
+/// a block's token (`tokens`), each found in the plugin's records as far
+/// as its grants reach.
 pub const ELEMENTS: &[Element] = &[
-    e("#shell", "the window", "The main window: everything below is in it.", &["profile", "appearance", "route"]),
+    e("#shell", "the window", "The main window: everything below is in it.", &["appearance", "route"]),
     e("#sidebar", "the sidebar", "The sidebar's list of sessions.", &["sessions"]),
     e(".session-row", "a sidebar row", "A session's row in the sidebar.", &["session"]),
     e(".session-title", "a sidebar row", "A session row's title.", &[]),
     e(".section-header", "the sidebar", "A project's, device's or section's header in the sidebar.", &["project"]),
+    // A project's tile wherever it's drawn (ui/ds/tile.luau's `project`): its
+    // box gives `project`, so a replacement draws each project's own.
+    e(".project-icon", "a project's icon", "A project's icon, wherever one shows: the sidebar's groups and rows, tabs, the composer's and pickers' project, the panel, the palette. Replace it (`ui.change`) to draw your own; `project` is its project (`{ id }`, and with \"sessions.read\" its name, device and `icon`).", &["project"]),
     e("#sidebar-actions", "the sidebar", "New chat and Search, at the sidebar's top.", &[]),
     e("#titlebar", "the title bar", "The title bar.", &[]),
     e("#titlebar-actions", "the title bar", "The title bar's actions, at its end.", &[]),
     e("#rail", "the sidebar's rail", "The collapsed sidebar's rail.", &[]),
-    e("#settings-nav", "Settings", "Settings' list of pages.", &[]),
-    e(".settings-nav-row", "Settings", "A page in Settings' list.", &[]),
-    e("#settings-page", "Settings", "The open page of Settings.", &[]),
+    // (Not Settings: sealed, no plugin's to change or add to.)
     e("#chat-home", "a new chat", "A new chat, before it's sent: no session here.", &[]),
     // What a new chat opens on, when Settings → Appearance's Wallpaper names
     // the plugin replacing it (`ui.change`): Zeron's effect is drawn over it.
@@ -61,8 +65,8 @@ pub const ELEMENTS: &[Element] = &[
     e("#panel-empty", "the side panel", "The side panel with nothing open.", &[]),
     // A reply's blocks, as markdown draws them (ui/ds/markdown.luau): a
     // renderer of its own replaces one (`.md-code.lang-mermaid`).
-    e(".md-code", "a reply's code block", "A fenced code block, also .lang-<its language> (.md-code.lang-mermaid). `code` is { lang, source }.", &["code"]),
-    e(".md-math", "a reply's formula", "Display math ($$…$$ or a ```math fence), drawn or, where it can't be, as code. `tex` is its TeX.", &["tex"]),
+    e(".md-code", "a reply's code block", "A fenced code block, also .lang-<its language> (.md-code.lang-mermaid). `code` is { lang, source }, for a plugin allowed \"messages.read\" or to change these blocks.", &["code"]),
+    e(".md-math", "a reply's formula", "Display math ($$…$$ or a ```math fence), drawn or, where it can't be, as code. `tex` is its TeX, for a plugin allowed \"messages.read\" or to change these blocks.", &["tex"]),
     e(".md-table", "a reply's table", "A table in a reply.", &[]),
     e(".md-image", "a reply's picture", "A picture in a reply (its alt text where it isn't shown).", &[]),
     e(".md-quote", "a reply's quote", "A quote in a reply.", &[]),
@@ -75,6 +79,7 @@ pub const ELEMENTS: &[Element] = &[
 pub const STABLE: &[&str] = &[
     "#sidebar",
     ".session-row",
+    ".project-icon",
     "#session-header",
     ".message",
     "#chat-composer",
@@ -205,7 +210,7 @@ pub fn describe(ids: &BTreeSet<String>, classes: &BTreeSet<String>, tree: serde_
         .collect();
     serde_json::json!({
         "elements": elements,
-        "everywhere": ["profile", "appearance", "route"],
+        "everywhere": ["appearance", "route"],
         "window": tree,
         "stable": "Elements marked stable keep their names across Zeron's updates, and every template keeps them: place by these where you can. Others may move.",
         "how": "Place a node by selector: zeron.place { at = \".session-row\", after = function() return ui.text { … } end }. \
@@ -257,6 +262,8 @@ mod tests {
         assert_eq!(row["present"], false);
         assert_eq!(row["provides"], serde_json::json!(["session"]));
         assert_eq!((row["stable"].as_bool(), bar["stable"].as_bool()), (Some(true), Some(false)));
+        let icon = els.iter().find(|e| e["selector"] == ".project-icon").unwrap();
+        assert_eq!((icon["stable"].as_bool(), &icon["provides"]), (Some(true), &serde_json::json!(["project"])));
         for s in STABLE {
             assert!(ELEMENTS.iter().any(|e| e.selector == *s), "{s} is stable but not an element");
         }

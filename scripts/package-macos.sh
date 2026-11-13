@@ -22,7 +22,14 @@ DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
-cargo build --release -p zeron
+# Luau (the engine's visuals and plugin services) without its asserts.
+LUAU_CXXFLAGS=-DNDEBUG cargo build --release -p zeron
+# With them, each LUAU_ASSERT keeps its Luau source file's path (Luau/
+# Common.h's __FILE__), VM/src/l*.cpp; with NDEBUG, none.
+if LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$ROOT/target/release/zeron-engine"; then
+  echo "target/release/zeron-engine was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG" >&2
+  exit 1
+fi
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -38,18 +45,7 @@ cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licen
 mkdir -p "$APP/Contents/Resources/licenses"
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/parakeet-v3.txt
 
-# Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
-# baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
-# applied ahead of time; dist/zeron.png stays the full-bleed shared artwork).
-ICONSET="$OUT_DIR/zeron.iconset"
-rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  retina=$((size * 2))
-  sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/zeron.icns"
-rm -rf "$ICONSET"
+"$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.

@@ -146,12 +146,17 @@ function M.since(joined_on: string): string
 	return ui.t("time.date", { m = tostring(month), day = tostring(tonumber(d)), year = y }):get()
 end
 
+-- How served badges look, by id: maintainer is a dark (ink) pill,
+-- anything else an outline one. card-web's BADGE_STYLES (site/card.js) keeps
+-- the same table, so a card reads alike in the app and on the web.
+local BADGE_STYLES: { [string]: string } = { maintainer = "ink" }
+
 -- A card's face as ds.MemberCard takes it: the scene, foil and sky the
 -- server gave, the member's number, first name, day and badges.
 function M.member(card: Card): { [string]: any }
 	local badges = {}
 	for _, b in card.badges do
-		table.insert(badges, { label = b.name, style = "outline" })
+		table.insert(badges, { label = b.name, style = BADGE_STYLES[b.id] or "outline" })
 	end
 	return {
 		number = card.number,

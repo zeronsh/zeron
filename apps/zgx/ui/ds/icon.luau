@@ -9,6 +9,7 @@ export type Name =
 	| "check"
 	| "clipboard"
 	| "close"
+	| "close-thin"
 	| "copy"
 	| "more-horizontal"
 	| "pen"
@@ -44,6 +45,7 @@ export type Name =
 	| "status-approval"
 	| "status-failed"
 	| "status-done"
+	| "status-woke"
 	| "archive-minimalistic"
 	| "archive-up-minimalistic"
 	| "pin"
@@ -61,10 +63,12 @@ export type Name =
 	| "project-default"
 	| "calendar"
 	| "keyboard"
+	| "palette"
 	| "palette-search"
 	| "split-columns"
 	| "volume-loud"
 	| "moon"
+	| "sun"
 	| "terminal"
 	| "document"
 	| "file-diff"
@@ -88,6 +92,7 @@ export type Name =
 	| "flag"
 	| "upload-minimalistic"
 	| "arrow-down"
+	| "download"
 	| "alt-arrow-up"
 	| "stop"
 	| "action-play"
@@ -105,6 +110,7 @@ export type Name =
 	| "danger-triangle"
 	-- A row's grip, dragged to reorder it (the view menu's Organize rows).
 	| "grip"
+	| "grip-horizontal"
 	| "file-code"
 	| "info-circle"
 	| "info-square"
@@ -139,7 +145,20 @@ export type Name =
 
 -- `name` may be a function: the icon follows it (a checkout's folder or
 -- worktree).
-export type Props = { name: Name | () -> Name, size: number? }
+-- `glyph_stroke`: its lines in the theme's glyph stroke, not its own: for an
+-- icon that stands beside the panel toggles (ds/sidebar_icon), so it weighs as
+-- they do in either theme.
+-- `absolute`, `left`, `top` and `color`: placed and coloured itself, with no
+-- box around it to do that (a row of thousands' glyph: one node, not three).
+export type Props = {
+	name: Name | () -> Name,
+	size: number?,
+	glyph_stroke: boolean?,
+	absolute: boolean?,
+	left: number?,
+	top: number?,
+	color: any?,
+}
 
 -- One glyph for search everywhere: the sidebar's (an older name for the
 -- magnifying glass draws it too).
@@ -154,13 +173,22 @@ local function file(name: string): string
 	return if code then `code:{code}` else `assets/icons/ui/{key}.svg`
 end
 
+-- `src`, its stroke the theme's, those points at any `size`. (The source is
+-- 24 units across, drawn `size` points across.)
+local function in_glyph_stroke(src: string, size: number): string
+	local points = (ui.theme.get("zeron.glyph.stroke") :: number?) or 1.1667
+	return (string.gsub(src, 'stroke%-width="[%d%.]+"', `stroke-width="{points * 24 / size}"`))
+end
+
 return function(props: Props): Node
 	local size = props.size or 16
 	local name = props.name
+	local themed = props.glyph_stroke == true
 	return ui.svg {
-		src = if type(name) == "function"
+		src = if type(name) == "function" or themed
 			then function()
-				return file(name())
+				local src = file(if type(name) == "function" then name() else name)
+				return if themed then in_glyph_stroke(src, size) else src
 			end
 			else file(name),
 		w = size,
@@ -169,5 +197,9 @@ return function(props: Props): Node
 		-- A glyph says nothing a screen reader needs: what holds it is named.
 		aria_hidden = true,
 		tint = "currentColor",
+		absolute = props.absolute,
+		left = props.left,
+		top = props.top,
+		color = props.color,
 	}
 end

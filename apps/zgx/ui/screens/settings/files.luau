@@ -59,7 +59,7 @@ function M.view(): Node
 				},
 				row("word_wrap", {
 					label = ui.t("settings.files.word_wrap.label"),
-					description = ui.t("settings.files.word_wrap.description"),
+					description = ui.t("settings.files.word_wrap.description", { key = ui.shortcut_text("alt+z") }),
 					control = ds.Switch { value = prefs.word_wrap, label = ui.t("settings.files.word_wrap.label") },
 				}),
 			},

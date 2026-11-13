@@ -2,7 +2,8 @@
 -- at the title's end shows another device's plugins, and everything done
 -- there names that device (switching, reviewing, removing, installing,
 -- updating, checking sources); a device that's away says so in plain
--- words; and a file installs only on this Mac. On the page in
+-- words; and a file on this computer installs on any of them (sent
+-- there, src/plugins/remote.rs `send_file`). On the page in
 -- ui/plugins_devices_fixture.luau.
 
 local function open(): any
@@ -39,7 +40,7 @@ local function landed(app: any)
 	app:frames(10)
 end
 
-test("choosing another computer shows its plugins, and this Mac's again", function()
+test("choosing another computer shows its plugins, and this computer's again", function()
 	local app = open()
 	expect(app:tree()).to_contain("Focus")
 	expect(asked(app, "check:")).to_be(true)
@@ -89,7 +90,7 @@ test("a dialog opened on one computer acts there, even after a switch", function
 	pick(app, "devbox")
 	app:click('role:button "Remove Ping"')
 	app:frames(20)
-	-- (This Mac's list shown underneath before it's confirmed.)
+	-- (This computer's list shown underneath before it's confirmed.)
 	app:command("switch_here")
 	app:frames(5)
 	app:click('role:button "Remove"')
@@ -97,7 +98,7 @@ test("a dialog opened on one computer acts there, even after a switch", function
 	expect(calls(app)).to_contain("remove:ping@devbox")
 end)
 
-test("this Mac's actions name no device; another computer's folders aren't offered", function()
+test("this computer's actions name no device; another computer's folders aren't offered", function()
 	local app = open()
 	app:click('role:switch "Focus"')
 	landed(app)
@@ -106,7 +107,7 @@ test("this Mac's actions name no device; another computer's folders aren't offer
 	-- One that can't load there says why, with no folder to show here.
 	expect(app:tree()).to_contain("permission Zeron doesn")
 	expect(app:has('role:button "Show folder"')).to_be(false)
-	-- None there: a link to install one, not this Mac's folder.
+	-- None there: a link to install one, not this computer's folder.
 	app:command("devbox_empty")
 	app:frames(30)
 	expect(app:has('role:button "Show plugins folder"')).to_be(false)
@@ -150,7 +151,7 @@ test("a computer that's away says so, and is looked at again when it's back", fu
 	expect(app:tree()).to_contain("Checkout status")
 end)
 
-test("a file installs only on this Mac; a link installs on any computer", function()
+test("a file on this computer or a link installs on any computer", function()
 	local app = open()
 	app:click('role:button "Install"')
 	app:frames(20)
@@ -162,8 +163,8 @@ test("a file installs only on this Mac; a link installs on any computer", functi
 	app:click('role:button "Install"')
 	app:frames(20)
 	expect(app:tree()).to_contain("Install a plugin on devbox")
-	expect(app:has('role:button "Choose File"')).to_be(false)
-	expect(app:tree()).to_contain("installs only on the computer it")
+	expect(app:has('role:button "Choose File"')).to_be(true)
+	expect(app:tree()).never.to_contain("installs only on the computer it")
 	app:type('role:textbox "Link"', "ada/clock")
 	app:click('role:dialog >> role:button "Install"')
 	app:frames(20)

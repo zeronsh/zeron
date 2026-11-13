@@ -9,6 +9,9 @@
 --   seen.unseen(lane)   whether a lane `{ id, status?, at? }` done or failed
 --                       hasn't been seen since (tracked)
 --   seen.mark(id)       seen now
+--   seen.mark_all(lanes)  each of `{ { id, at? } }` seen now (or at its `at`,
+--                       where that's later: a clock ahead of this one's), in
+--                       one write (the panel home's "Mark all done as read")
 --
 -- Kept across launches, the latest 500 lanes (the oldest seen forgotten
 -- first: a lane that old shows its glyph again, which is the safe side).
@@ -21,14 +24,8 @@ local CAP = 500
 -- Lane id → when it was last seen (unix seconds).
 M.store = ui.persist("panel_lanes_seen", {} :: { [string]: number })
 
-function M.mark(id: string, at: number?)
-	local now = at or os.time()
-	local all = M.store:peek()
-	if all[id] == now then
-		return
-	end
-	local next = table.clone(all)
-	next[id] = now
+-- `next` kept, the longest ago gone past the cap.
+local function keep(next: { [string]: number })
 	-- Over the cap: the longest ago go.
 	local n = 0
 	for _ in next do
@@ -47,6 +44,34 @@ function M.mark(id: string, at: number?)
 		end
 	end
 	M.store:set(next)
+end
+
+function M.mark(id: string, at: number?)
+	local now = at or os.time()
+	local all = M.store:peek()
+	if all[id] == now then
+		return
+	end
+	local next = table.clone(all)
+	next[id] = now
+	keep(next)
+end
+
+function M.mark_all(lanes: { { id: string, at: number? } })
+	local now = os.time()
+	local all = M.store:peek()
+	local next = table.clone(all)
+	local changed = false
+	for _, l in lanes do
+		local at = math.max(now, l.at or 0)
+		if all[l.id] ~= at then
+			next[l.id] = at
+			changed = true
+		end
+	end
+	if changed then
+		keep(next)
+	end
 end
 
 -- Done or failed, and not seen since it last moved.

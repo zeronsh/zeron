@@ -16,10 +16,13 @@ local Mark = require("@self/mark")
 local AgentMark = require("@self/agent_mark")
 local RollText = require("@self/roll_text")
 local FadeText = require("@self/fade_text")
+local PrivateText = require("@self/private_text")
+local Avatar = require("@self/avatar")
 local Text = require("@self/text")
 local Tile = require("@self/tile")
 local ascii = require("@self/ascii")
 local Menu = require("@self/menu")
+local Skeleton = require("@self/skeleton")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
@@ -40,11 +43,17 @@ export type Item = {
 	-- Its tile on a palette hue (a project's: its initial in the hue's 50 on
 	-- its 500), in place of the plain letter tile.
 	hue: string?,
+	-- A project's id, where the item is one: its tile is then
+	-- `.project-icon` (ds/tile).
+	project: string?,
 	-- Its own artwork (a project's favicon), in place of its hue's tile.
 	src: string?,
 	-- A picture chosen for it (a project's emoji), on its hue's wash.
 	emoji: string?,
 	description: string?,
+	-- Its label is an email address: drawn as ds.PrivateText draws one, its
+	-- tile no letter of it (`seed`'s avatar).
+	private: boolean?,
 	tag: string?,
 	warn: boolean?,
 	-- Shown but not to be picked (a device out of reach): dimmed, passed
@@ -52,12 +61,14 @@ export type Item = {
 	disabled: boolean?,
 }
 -- What a caller's own trigger is given: whether the panel is open, and how
--- to open or close it.
-export type Menu = { open: State<boolean>, toggle: () -> () }
+-- to open or close it. A submenu trigger forwards its hover changes so
+-- leaving both the row and its panel can close it.
+export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())? }
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
-export type Action = { label: string | Message | () -> string, icon: Icon.Name, on_click: (() -> ())? }
+-- `shown`: whether it's offered now (followed as it changes); none, always.
+export type Action = { label: string | Message | () -> string, icon: Icon.Name, on_click: (() -> ())?, shown: (() -> boolean)? }
 -- What an empty list shows: what is missing, and how to fill it.
 export type Empty = { title: string | Message, hint: (string | Message)? }
 -- The trigger's weight: `filled` (a control on its own, with a chevron),
@@ -79,6 +90,11 @@ export type Props = {
 	placeholder: (string | Message)?,
 	-- A muted second half to the trigger's label (a model's effort).
 	detail: (string | Message | () -> string)?,
+	-- After the detail, at the trigger's end (the model chip's usage ring).
+	trail: Node?,
+	-- The label and detail roll only for a change made in the open panel; one
+	-- from elsewhere (another chat's own choice shown) is there at once.
+	roll_in_panel: boolean?,
 	-- The search field's placeholder (a function follows what it names);
 	-- `false`, no search.
 	search: (string | Message | boolean | () -> string)?,
@@ -89,6 +105,9 @@ export type Props = {
 	-- Bumped, the panel opens, as a press on its trigger opens it (a
 	-- shortcut that opens this menu).
 	open_with: State<number>?,
+	-- Set to whether the panel is open (the caller holding still what it
+	-- hangs from while it is).
+	showing: State<boolean>?,
 	-- Whether `extra` (and its rule) shows; always, by default.
 	extra_when: (() -> boolean)?,
 	-- A row's own control at its end (a star to favourite it), given the
@@ -107,12 +126,15 @@ export type Props = {
 	empty: ((query: string) -> Empty)?,
 	-- A panel that opens folded on its chosen item: while `expanded` is
 	-- false the head and the search fold away and every item but the chosen
-	-- one folds to nothing (clipped, fading out), and they ease open around it
-	-- as it turns true. `on_expand` asks to open out (a click on the chosen
+	-- one folds to nothing (clipped, out of sight), and they open around it
+	-- as it turns true (at once: see `folding`). `on_expand` asks to open out (a click on the chosen
 	-- item, ↑/↓, typing). `keep_open`: a pick leaves the panel open
 	-- (`on_choose` hears it: the caller folds it again); `on_escape` takes
 	-- Escape first (true: handled, the panel stays).
 	expanded: (() -> boolean)?,
+	-- What it lists is still on its way: its chosen item's name and its rows
+	-- hold their shape rather than saying there's nothing.
+	loading: (() -> boolean)?,
 	on_expand: (() -> ())?,
 	keep_open: boolean?,
 	on_choose: ((value: string) -> ())?,
@@ -126,6 +148,8 @@ export type Props = {
 	-- The caller's own trigger in place of the chip (a row of another
 	-- panel opening this one beside it, as a submenu).
 	trigger: ((menu: Menu) -> Node)?,
+	-- A side-opening menu whose parent stays reachable by the pointer.
+	submenu: boolean?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -191,8 +215,11 @@ end
 
 -- An item's tile: the first letter of its name, or its mark or icon.
 local function tile(item: Item): Node
+	if item.private then
+		return Avatar { seed = item.label, size = 18, label = locale.t("ds.provider_card.account") }
+	end
 	if item.hue or item.src or item.emoji then
-		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18 }
+		return Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = 18, project = item.project }
 	end
 	if item.icon then
 		return Menu.glyph(item.icon)
@@ -287,26 +314,29 @@ local TRIGGER = {
 -- it is longer.
 local CHIP_LABEL, CHIP_FADE = 160, 24
 
--- How folding eases (the list's height takes the same, so all of it moves
--- as one).
-local FOLD: TweenOptions = { duration = 240, ease = "out(3)" }
+-- Folding and opening out are one step, no easing and no fading: the panel
+-- is a popup window of its own, so a height easing over frames resized it
+-- on every one (on Wayland each a new configure; before xdg_popup moved in
+-- place, a new surface the compositor faded in, the whole panel flickering
+-- see-through as it opened out), and parts of it fading in read as the
+-- panel going transparent.
 
--- What folds: `height` tall while `open`, clipped to nothing while not, the
--- height a tween (in place as it mounts, easing only as it turns: what
--- shows and what is laid out, and so what a click lands on, agree), its
--- content fading as it folds and opens.
+-- What folds: `height` tall while `open`, clipped to nothing (and out of
+-- sight and reach: the search no field to find) while not.
 local function folding(open: () -> boolean, height: number, ...: Node): Node
 	return ui.column {
+		-- (Named for tests: what opens out with the list.)
+		class = "dropdown-fold",
 		w_full = true,
 		gap = 0,
 		shrink = 0,
 		overflow = "hidden",
-		h = ui.tween(ui.computed(function(): number
+		h = function(): number
 			return if open() then height else 0
-		end), FOLD),
-		opacity = ui.tween(ui.computed(function(): number
+		end,
+		opacity = function(): number
 			return if open() then 1 else 0
-		end), { duration = 180 }),
+		end,
 		...,
 	}
 end
@@ -418,8 +448,10 @@ return ui.component(function(props: Props): Node
 				table.insert(out, item.value)
 			end
 		end
-		for n in actions do
-			table.insert(out, `action:{n}`)
+		for n, action in actions do
+			if not action.shown or action.shown() then
+				table.insert(out, `action:{n}`)
+			end
 		end
 		return out
 	end
@@ -489,8 +521,8 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- Folding (a panel that opens folded). Its rows never fold: the list is
-	-- a window over them, its height and scroll easing together, folded to
-	-- the one row of the chosen item, opening out from where that row is
+	-- a window over them, its height and scroll set together, folded to the
+	-- one row of the chosen item, opening out from where that row is
 	-- (upward, the rows over it come into view), folding back onto the pick.
 	-- The search clears as it folds; folded, typing opens it out.
 	local view_h = ui.use_state(0)
@@ -501,38 +533,23 @@ return ui.component(function(props: Props): Node
 	local function on_row(i: number): number
 		return (i - 1) * step()
 	end
-	-- Each state's glide in flight: a new one, or a jump, stops it.
-	local gliding: { [any]: any } = {}
-	local function stop(state: State<number>)
-		if gliding[state] then
-			gliding[state]:cancel()
-			gliding[state] = nil
-		end
-	end
-	local function glide(state: State<number>, to: number)
-		stop(state)
-		local anim
-		anim = anime.animate(state, {
-			value = to,
-			duration = FOLD.duration,
-			ease = FOLD.ease,
-			onComplete = function()
-				if gliding[state] == anim then
-					gliding[state] = nil
-				end
-			end,
-		})
-		gliding[state] = anim
-	end
-	-- The list's height, and whether it was folded, as last laid out (nil:
-	-- not yet).
+	-- The list's height: folded, one row; opened out, one height whatever
+	-- the tab or the search shows (as tall as every item, up to the view,
+	-- and room for the empty list's message), a short list leaving room
+	-- under it: switching tabs or searching never moves the panel's edge.
+	-- (It began as a fix: a popup that changed size was shown anew on
+	-- Wayland, a new `xdg_popup` the compositor faded in as the last faded
+	-- out, so a list easing to each tab's height flickered the panel
+	-- see-through. zgx moves and resizes a popup in place since 0e7cd810;
+	-- the one height stays, as the picker's look.)
 	local function height_for(list: { Item }, now: boolean, i: number?): number
 		if now and i then
 			return list_h(1)
 		end
-		return if #list == 0 then EMPTY_H else math.min(VIEW, list_h(#list))
+		return math.min(VIEW, math.max(EMPTY_H, list_h(#items())))
 	end
 	local was_folded: boolean? = nil
+	local back_on_chosen: () -> () = function() end
 	if props.expanded then
 		ui.effect(function()
 			local list = shown:get()
@@ -564,14 +581,16 @@ return ui.component(function(props: Props): Node
 						hi:set(v)
 					end
 				end
-				glide(view_h, h)
-				glide(offset, to)
+				ui.batch(function()
+					view_h:set(h)
+					offset:set(to)
+				end)
 			else
-				-- A tab, a search: the height eases to the new list's.
-				glide(view_h, h)
+				-- A tab, a search (opened out, one height: see height_for).
+				view_h:set(h)
 				if now then
 					if i then
-						glide(offset, on_row(i))
+						offset:set(on_row(i))
 					end
 				else
 					settle(list)
@@ -579,14 +598,26 @@ return ui.component(function(props: Props): Node
 			end
 			was_folded = now
 		end)
+		-- An offset set before the rows are laid out is clamped to the top by the
+		-- list, and said again unchanged it's no news to it: the chosen row is
+		-- out of the window, and the panel's head is blank. So once the rows have
+		-- their height, it's said again, a hair different (well under a point).
+		local hair = false
+		back_on_chosen = function()
+			local i = index_of(value:peek())
+			if folded() and i then
+				hair = not hair
+				offset:set(on_row(i) + (if hair then 0.01 else 0))
+			end
+		end
 		-- Folded, the window stays on the chosen row: whatever else moves it
 		-- (a wheel over it, the list clamping an offset set before it had its
-		-- rows) is put back, all but a glide on its way there. Put back a
+		-- rows) is put back. Put back a
 		-- frame later, once at a time (never in the same update: the list's
 		-- own write back would answer it, and so on without end).
 		local function astray(): boolean
 			local i = index_of(value:peek())
-			return folded() and not gliding[offset] and i ~= nil and math.abs(offset:peek() - on_row(i)) > 0.5
+			return folded() and i ~= nil and math.abs(offset:peek() - on_row(i)) > 0.5
 		end
 		local mending = false
 		ui.effect(function()
@@ -700,6 +731,11 @@ return ui.component(function(props: Props): Node
 				else glyph())
 		end
 	end
+	local rolls = if props.roll_in_panel
+		then function(): boolean
+			return open:peek()
+		end
+		else nil
 	-- The detail, shown only while it says something (an empty one would
 	-- still take the trigger's gap) and the trigger hasn't folded it away.
 	local detail: Child = nil
@@ -715,6 +751,7 @@ return ui.component(function(props: Props): Node
 			said,
 			mb = TRIGGER[tone].lift,
 			roll = true,
+			rolls = rolls,
 			color = TRIGGER[tone].detail,
 		})
 	end
@@ -738,13 +775,21 @@ return ui.component(function(props: Props): Node
 				local over = (text.width or 0) > (clip.width or 0) + 0.5
 				return { 0, if over then CHIP_FADE else 0 }
 			end,
-			RollText { chosen, ref = text, shrink = 0, color = TRIGGER[tone].label },
+			RollText { chosen, rolls = rolls, ref = text, shrink = 0, color = TRIGGER[tone].label },
 		}
 	else
-		label_node = FadeText { chosen, roll = true, color = TRIGGER[tone].label }
+		label_node = FadeText { chosen, roll = true, rolls = rolls, color = TRIGGER[tone].label }
 	end
-	-- Opening: the search cleared, on the chosen item, in view.
+	if props.loading then
+		label_node = ui.show(props.loading, Skeleton.Bar { w = ui.raw(64, "about a model's name"), h = 10 }, label_node)
+	end
+	-- Opening: the search cleared, on the chosen item, in view. (Open
+	-- already, it stays as it is: asked again, by its shortcut or its
+	-- trigger, it was put back folded, the search and tab lost.)
 	local function show_panel()
+		if open:peek() then
+			return
+		end
 		if props.on_open then
 			props.on_open()
 		end
@@ -756,9 +801,7 @@ return ui.component(function(props: Props): Node
 		open:set(true)
 		local i = index_of(v)
 		if props.expanded then
-			-- Folded on the chosen item from the start: no easing in.
-			stop(view_h)
-			stop(offset)
+			-- Folded on the chosen item from the start.
 			local now = folded()
 			view_h:set(height_for(shown:peek(), now, i))
 			offset:set(if now and i then on_row(i) else 0)
@@ -780,6 +823,20 @@ return ui.component(function(props: Props): Node
 			end
 		end)
 	end
+	if props.showing then
+		local showing = props.showing
+		ui.effect(function()
+			local now = open:get()
+			if showing:peek() ~= now then
+				showing:set(now)
+			end
+		end)
+		ui.on_cleanup(function()
+			if showing:peek() then
+				showing:set(false)
+			end
+		end)
+	end
 	local function toggle()
 		if open:peek() then
 			open:set(false)
@@ -787,8 +844,60 @@ return ui.component(function(props: Props): Node
 			show_panel()
 		end
 	end
+	-- A hover-opened submenu stays open across the gap between its row
+	-- and panel. Leaving both starts a short, cancellable closing grace.
+	local over_trigger = false
+	local over_panel = false
+	local cancel_close: (() -> ())? = nil
+	local function stop_close()
+		if cancel_close then
+			cancel_close()
+			cancel_close = nil
+		end
+	end
+	local function hover(inside: boolean, panel: boolean)
+		if panel then
+			over_panel = inside
+		else
+			over_trigger = inside
+		end
+		stop_close()
+		if not over_trigger and not over_panel and open:peek() then
+			cancel_close = ui.after(150, function()
+				cancel_close = nil
+				if not over_trigger and not over_panel then
+					open:set(false)
+				end
+			end)
+		end
+	end
+	if props.submenu then
+		ui.on_cleanup(stop_close)
+		ui.effect(function()
+			if not open:get() then
+				stop_close()
+				over_panel = false
+			end
+		end)
+	end
 	local trigger_ref = ui.ref()
-	local trigger = if props.trigger then props.trigger({ open = open, toggle = toggle }) else ui.button {
+	-- (Its trigger gone from view, as Settings stand over the page: closed, not left
+	-- with nothing to hang from.)
+	ui.effect(function()
+		local w = trigger_ref.width
+		if w ~= nil and w <= 0 and open:peek() then
+			open:set(false)
+		end
+	end)
+	local trigger = if props.trigger then props.trigger({
+		open = open,
+		toggle = toggle,
+		on_hover = if props.submenu
+			then function(inside: boolean)
+				hover(inside, false)
+			end
+			else nil,
+	}) else ui.button {
 		ref = trigger_ref,
 		label = props.label,
 		h = trigger_props.h,
@@ -803,7 +912,8 @@ return ui.component(function(props: Props): Node
 		color = trigger_props.color,
 		hover = trigger_props.hover,
 		active = trigger_props.active,
-		on_click = show_panel,
+		-- (Open, a press on it closes it, as a menu's trigger does.)
+		on_click = toggle,
 		leading,
 		if props.fold
 			then ui.show(function()
@@ -811,13 +921,16 @@ return ui.component(function(props: Props): Node
 			end, label_node)
 			else label_node,
 		detail,
+		props.trail,
 		if tone == "filled" then Icon { name = "alt-arrow-down", size = 12 } else nil,
 	}
 
 	-- The menus' glass (frosted: a light tint over the platform's own
 	-- popover material; opaque: a solid panel). No padding of its own: its
 	-- rules run edge to edge; each section insets itself.
-	return ui.popover(Menu.panel {
+	local panel = Menu.panel {
+		-- (Named for tests.)
+		class = "dropdown-panel",
 		open = open,
 		anchor = trigger,
 		placement = props.placement or { side = "bottom", align = "start", offset = 6 },
@@ -1024,13 +1137,23 @@ return ui.component(function(props: Props): Node
 									grow = 1,
 									min_w = 0,
 									gap = "$zeron.space.hair",
-									ui.text {
-										item.label,
-										text_size = "$font.size.md",
-										line_height = "$font.line.md",
-										weight = "$font.weight.medium",
-										color = "$text.primary",
-									},
+									if item.private
+										then PrivateText {
+											item.label,
+											reveal = false,
+											truncate = true,
+											text_size = "$font.size.md",
+											line_height = "$font.line.md",
+											weight = "$font.weight.medium",
+											color = "$text.primary",
+										}
+										else ui.text {
+											item.label,
+											text_size = "$font.size.md",
+											line_height = "$font.line.md",
+											weight = "$font.weight.medium",
+											color = "$text.primary",
+										},
 									ui.text {
 										item.description,
 										text_size = "$font.size.sm",
@@ -1072,14 +1195,15 @@ return ui.component(function(props: Props): Node
 						if not props.expanded then
 							return r
 						end
-						-- Folding, the others fade as the window closes over
-						-- them (never shrinking: the window moves, not they).
+						-- Folded, the others are out of sight (the edges of
+						-- the rows either side would show in the window's
+						-- insets), at once as it folds and opens out.
 						local expanded = props.expanded
 						return ui.div {
 							w_full = true,
-							opacity = ui.tween(ui.computed(function(): number
+							opacity = function(): number
 								return if expanded() or value:get() == item.value then 1 else 0
-							end), FOLD),
+							end,
 							r,
 						}
 					end, {
@@ -1106,10 +1230,28 @@ return ui.component(function(props: Props): Node
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0
+						return #shown:get() == 0 and props.loading ~= nil and props.loading()
 					end, ui.column {
 						w_full = true,
-						h = EMPTY_H - INSET * 2,
+						gap = "$zeron.list.gap",
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+						Skeleton.Bar { w_full = true, h = ROW, rounded = Menu.row_radius() },
+					})
+				)
+				table.insert(
+					items,
+					ui.show(function()
+						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
+					end, ui.column {
+						w_full = true,
+						-- (Opened out, the list's whole window: its message in
+						-- the middle of it.)
+						h = if props.expanded
+							then function(): number
+								return math.max(EMPTY_H, view_h:get()) - INSET * 2
+							end
+							else EMPTY_H - INSET * 2,
 						relative = true,
 						overflow = "hidden",
 						rounded = Menu.row_radius(),
@@ -1190,6 +1332,7 @@ return ui.component(function(props: Props): Node
 								if math.abs(size.h - content_h:peek()) >= 0.5 then
 									content_h:set(size.h)
 								end
+								back_on_chosen()
 							end,
 							table.unpack(items),
 						},
@@ -1247,25 +1390,23 @@ return ui.component(function(props: Props): Node
 					local acts: { Node } = {}
 					for n, action in props.actions do
 						local key = `action:{n}`
-						table.insert(
-							acts,
-							row({
-								color = "$text.secondary",
-								bg = function()
-									return if hi:get() == key then "$hover" else "#00000000"
-								end,
-								on_hover = function(inside: boolean)
-									if inside then
-										hi:set(key)
-									end
-								end,
-								on_click = function()
-									run(n)
-								end,
-								Menu.glyph(action.icon),
-								text(action.label),
-							}, false)
-						)
+						local made = row({
+							color = "$text.secondary",
+							bg = function()
+								return if hi:get() == key then "$hover" else "#00000000"
+							end,
+							on_hover = function(inside: boolean)
+								if inside then
+									hi:set(key)
+								end
+							end,
+							on_click = function()
+								run(n)
+							end,
+							Menu.glyph(action.icon),
+							text(action.label),
+						}, false)
+						table.insert(acts, if action.shown then ui.show(action.shown, made) else made)
 					end
 					table.insert(rows, ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) })
 				end
@@ -1338,7 +1479,44 @@ return ui.component(function(props: Props): Node
 					table.unpack(rows),
 				}
 			end
-			return ui.column { w_full = true, gap = 0, table.unpack(rows) }
+			-- Escape from whatever in it has the keys (the slider, a tab, a
+			-- star, not only the search) is the panel's first: opened out,
+			-- it folds it back, rather than reaching the popover, which
+			-- closes.
+			local on_escape = props.on_escape
+			return ui.column {
+				w_full = true,
+				gap = 0,
+				on_key = if on_escape
+					then function(e): boolean
+						return e.key == "Escape" and on_escape()
+					end
+					else nil,
+				table.unpack(rows),
+			}
 		end,
-	})
+	}
+	if props.submenu then
+		local build = panel.build
+		panel.build = nil
+		panel.anchor = nil
+		panel.trigger = trigger
+		panel.label = props.label
+		panel[1] = ui.presence(function(): boolean
+			return open:get()
+		end, function(visible: boolean): Node
+			if not visible then
+				return ui.div {}
+			end
+			return ui.column {
+				w_full = true,
+				on_hover = function(inside: boolean)
+					hover(inside, true)
+				end,
+				build(),
+			}
+		end)
+		return ui.submenu(panel)
+	end
+	return ui.popover(panel)
 end)

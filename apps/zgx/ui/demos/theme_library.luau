@@ -1,11 +1,10 @@
--- The gallery's Theme library page: every palette a window can wear, Zeron's
--- built in and your imported VS Code themes (screens/settings/theme_library,
--- src/themes.rs), each as a swatch of its surfaces, inks, accent, tones and
--- code colours; and the import itself, as Settings → Appearance has it.
+-- The gallery's Themes page: the palettes a window can wear (src/themes.rs;
+-- here a few of Zeron's built in, a template's and an imported one, as
+-- ui/themes_fixture_data.luau has them), each as a swatch of its surfaces,
+-- inks, accent, tones and code colours. Settings → Themes lists every one.
 
 local ds = require("@ds")
-local palettes = require("@ds/palettes")
-local library = require("@app/screens/settings/theme_library")
+local data = require("@app/themes_fixture_data")
 
 -- A colour of a palette's own (not a token: it's the palette's).
 local function own(color: string): any
@@ -62,24 +61,20 @@ end
 
 return {
 	id = "theme-library",
-	title = "Theme library",
-	about = "Every palette a window can wear: Zeron's built in, and VS Code themes you import (a theme's .json, comments allowed, or an extension's package.json), mapped by the shipping app's importer.",
+	title = "Themes",
+	about = "The palettes a window can wear: Zeron's built in, a template's own, and VS Code themes you import (a theme's .json, comments allowed, or an extension's folder), mapped by the shipping app's importer.",
 	demo = function(): Node
 		return ui.column {
 			w_full = true,
 			gap = "$space.6",
-			ds.Text { "Built in", style = "caption", tone = "secondary" },
+			ds.Text { "Built in and a template's", style = "caption", tone = "secondary" },
 			grid(function(): { any }
-				return palettes.LIST
+				return data.BUILTIN
 			end),
 			ds.Text { "Imported", style = "caption", tone = "secondary" },
-			ui.show(function(): boolean
-				return #palettes.imported() == 0
-			end, ds.Text { "None yet: import one below.", style = "caption", tone = "tertiary" }),
 			grid(function(): { any }
-				return palettes.imported()
+				return { data.HARBOR }
 			end),
-			library.Section(),
 		}
 	end,
 }

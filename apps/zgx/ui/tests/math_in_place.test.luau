@@ -22,6 +22,13 @@ test("display math becomes a math block, inline math inline code, prices stay te
 	expect(Source.prepare("$a`b$")).to_be("``$a`b$``")
 end)
 
+test("skills invoked in a prompt stay links, never a formula between their dollars", function()
+	local sent = "run [$commit](zeron-invoke:7b22) and [$gh-pr](zeron-invoke:7b23) to main"
+	expect(Source.prepare(sent)).to_be(sent)
+	-- math beside them is still math
+	expect(Source.prepare("[$a](zeron-invoke:7b) costs $x^2$")).to_be("[$a](zeron-invoke:7b) costs `$x^2$`")
+end)
+
 local function open(): any
 	local app = mount("math_fixture.luau")
 	app:resize(900, 700)

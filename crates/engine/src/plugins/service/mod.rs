@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value as Json, json};
+use zeron_plugin_guard::net;
 
 pub use vm::{Described, Failure, Kind, Limits};
 use vm::{Done, Ops, Spec, Vm};
@@ -103,6 +104,8 @@ pub struct Plan {
     pub allowed: Vec<String>,
     /// The programs its manifest names.
     pub commands: Vec<String>,
+    /// The hosts its manifest names (`network.hosts`; none: any public).
+    pub hosts: Vec<String>,
 }
 
 impl Plan {
@@ -119,6 +122,24 @@ pub trait Hooks: Send + Sync + 'static {
     fn notify(&self, plugin: &str, title: &str, body: &str, session: Option<&str>) -> String;
     /// This device's `{ id, name }`.
     fn device(&self) -> Json;
+    /// `zeron.folders`: this device's chats' and projects' folders.
+    fn folders(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Whether `plan`'s snapshot is still what was allowed, checked before
+    /// each load (a changed one is never run).
+    fn verify(&self, _plan: &Plan) -> Result<(), String> {
+        Ok(())
+    }
+    /// `zeron.usage`, `zeron.switch_account`, `zeron.set_model`, …: asked
+    /// of the engine for `plugin`, which checks what this device allowed it
+    /// (plugins/agents). `done` with the answer, or why not.
+    fn agents(&self, _plugin: &str, _args: Json, done: Done) {
+        done(Err("Usage, accounts and models aren't available here".into()));
+    }
+    /// The `zeron.on` listeners `plugin`'s service registered, as it loaded:
+    /// the engine tells each its events (`Kind::Event`).
+    fn listeners(&self, _plugin: &str, _listeners: &[(String, String, Json)]) {}
 }
 
 #[derive(Debug, Clone)]
@@ -168,7 +189,6 @@ struct Shared {
     store_dir: PathBuf,
     hooks: OnceLock<Arc<dyn Hooks>>,
     slots: Mutex<HashMap<String, Arc<Slot>>>,
-    http: OnceLock<reqwest::Client>,
     closed: AtomicBool,
 }
 
@@ -229,7 +249,6 @@ impl Services {
                 store_dir: store_dir.to_path_buf(),
                 hooks: OnceLock::new(),
                 slots: Mutex::new(HashMap::new()),
-                http: OnceLock::new(),
                 closed: AtomicBool::new(false),
             }),
         }
@@ -377,10 +396,17 @@ impl Services {
         let Some(hooks) = self.hooks() else {
             return Err(Refusal::new(reason::NOT_LOADED, "Plugin services aren't ready yet"));
         };
+        if let Err(why) = hooks.verify(plan) {
+            slot.note(format!("not loaded: {why}"));
+            return Err(not_loaded(&why));
+        }
         let ops = Arc::new(PluginOps {
             plan: plan.clone(),
             hooks: hooks.clone(),
-            http: self.inner.http.get_or_init(reqwest::Client::new).clone(),
+            http: match guarded_client(&plan.hosts) {
+                Ok(http) => http,
+                Err(why) => return Err(not_loaded(&why)),
+            },
             runtime: tokio::runtime::Handle::current(),
             slot: Arc::downgrade(slot),
         });
@@ -457,6 +483,7 @@ impl Services {
             st.running.replace(running.clone())
         };
         slot.note(format!("started ({} {})", plan.name, plan.version));
+        hooks.listeners(&plan.plugin, &described.listeners);
         // The old version finishes its calls in flight, then stops.
         if let Some(old) = old {
             old.vm.stop();
@@ -495,7 +522,8 @@ impl Services {
             let safe = match kind {
                 Kind::Method => *running.described.methods.get(name).ok_or_else(unknown)?,
                 Kind::Tool if !running.described.tools.iter().any(|t| t == name) => return Err(unknown()),
-                Kind::Tool | Kind::Timer => false,
+                Kind::Event if !running.described.listeners.iter().any(|l| l.0 == name) => return Err(unknown()),
+                Kind::Tool | Kind::Timer | Kind::Event => false,
             };
             let reply = running.vm.call(kind, name, args.clone(), call.clone());
             match tokio::time::timeout(timeout, reply).await {
@@ -583,6 +611,15 @@ impl Services {
                     .map(|(key, seconds)| json!({ "key": key, "seconds": seconds }))
                     .collect::<Vec<_>>()
             );
+            if !described.listeners.is_empty() {
+                out["listeners"] = json!(
+                    described
+                        .listeners
+                        .iter()
+                        .map(|(key, event, opts)| json!({ "key": key, "event": event, "opts": opts }))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         if let Some((_, why)) = &st.failed {
             out["error"] = json!(why);
@@ -683,15 +720,30 @@ impl Ops for PluginOps {
                 if !self.plan.allows("commands") {
                     return done(Err(format!("{name} wasn't allowed to run programs on this device")));
                 }
-                let allowed = self.plan.commands.clone();
-                self.runtime.spawn_blocking(move || done(commands::run(&args, &allowed)));
+                let (allowed, hooks) = (self.plan.commands.clone(), self.hooks.clone());
+                self.runtime.spawn_blocking(move || {
+                    // A git that commits or pushes in one of this device's
+                    // chats' or projects' folders runs that checkout's hooks
+                    // (pre-commit, pre-push), as git does for you; anywhere
+                    // else, or reading, none.
+                    let trusted = |dir: &Path| hooks.folders().iter().any(|f| dir.starts_with(f));
+                    done(commands::run_trusting(&args, &allowed, &trusted))
+                });
             }
             "fetch" => {
                 if !self.plan.allows("network") {
                     return done(Err(format!("{name} wasn't allowed to connect to the internet")));
                 }
-                let http = self.http.clone();
-                self.runtime.spawn(async move { done(fetch(&http, &args).await) });
+                let (http, policy) = (self.http.clone(), self.policy());
+                self.runtime.spawn(async move { done(fetch(&http, &policy, &args).await) });
+            }
+            "folders" => {
+                // (Where its chats are: as much as "sessions.read" says.)
+                if !self.plan.allows("sessions.read") {
+                    return done(Err(format!("{name} wasn't allowed to see your chats")));
+                }
+                let hooks = self.hooks.clone();
+                self.runtime.spawn_blocking(move || done(Ok(json!(hooks.folders()))));
             }
             "notify" => {
                 if !self.plan.allows("notifications") {
@@ -709,6 +761,12 @@ impl Ops for PluginOps {
                     let session = args["session"].as_str().filter(|s| !s.is_empty());
                     done(Ok(json!(hooks.notify(&plugin, &title, body, session))))
                 });
+            }
+            "agents" => {
+                // (Each op's permission is the engine's to check: agents.rs.)
+                let (hooks, plugin) = (self.hooks.clone(), self.plan.plugin.clone());
+                let _runtime = self.runtime.enter();
+                hooks.agents(&plugin, args, done);
             }
             other => done(Err(format!("zeron.{other} isn't something a service can do"))),
         }
@@ -776,14 +834,98 @@ impl Ops for PluginOps {
     }
 }
 
-/// `zeron.fetch`: `{ url, method?, headers?, body?, timeout? }` → `{ status,
-/// headers, body }` (http and https only; the body as text, 16 MB at most).
-async fn fetch(http: &reqwest::Client, args: &Json) -> Result<Json, String> {
-    let url = args["url"].as_str().unwrap_or_default();
-    let parsed = reqwest::Url::parse(url).map_err(|_| format!("\"{url}\" isn't a web address"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+impl PluginOps {
+    fn policy(&self) -> net::Policy {
+        // (Checked when the manifest was: a bad list never gets here.)
+        net::Policy::new(&self.plan.hosts).unwrap_or_default()
+    }
+}
+
+/// A URL a plugin's request may go to (and each redirect's): http(s), a
+/// host its manifest allows, an address literal that's public or named.
+fn check_url(policy: &net::Policy, url: &reqwest::Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
         return Err("zeron.fetch reaches http and https addresses only".into());
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("zeron.fetch doesn't take credentials in an address".into());
+    }
+    let port = url.port_or_known_default().unwrap_or(0);
+    // (As the URL parser wrote it: `0x7f.1` is `127.0.0.1` by now.)
+    let name = url.host_str().ok_or("That address has no host")?.to_owned();
+    let ip = name.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok();
+    policy.host(&name, port)?;
+    // (A name is checked as it resolves: `GuardedResolver`.)
+    if let Some(ip) = ip {
+        policy.address(&name, port, ip)?;
+    }
+    Ok(())
+}
+
+/// Names resolved, then each address checked before anything connects to
+/// it: a name that resolves (or later rebinds) to this device, your
+/// network or instance metadata never reaches it.
+struct GuardedResolver {
+    policy: net::Policy,
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let policy = self.policy.clone();
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            let found: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let mut refused = None;
+            let allowed: Vec<std::net::SocketAddr> = found
+                .into_iter()
+                .filter(|addr| match policy.resolved(&host, addr.ip()) {
+                    Ok(()) => true,
+                    Err(why) => {
+                        refused = Some(why);
+                        false
+                    }
+                })
+                .collect();
+            if allowed.is_empty() {
+                let why = refused.unwrap_or_else(|| format!("{host} has no address"));
+                return Err(why.into());
+            }
+            Ok(Box::new(allowed.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// A plugin's HTTP client: its hosts' rules at every connection and
+/// redirect, and never a proxy from the environment.
+fn guarded_client(hosts: &[String]) -> Result<reqwest::Client, String> {
+    let policy = net::Policy::new(hosts)?;
+    let redirects = policy.clone();
+    reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(GuardedResolver { policy }))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            match check_url(&redirects, attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(why) => attempt.error(why),
+            }
+        }))
+        .build()
+        .map_err(|e| format!("The network isn't available: {e}"))
+}
+
+/// `zeron.fetch`: `{ url, method?, headers?, body?, timeout? }` → `{ status,
+/// headers, body }` (http and https only; the body as text, 16 MB at most).
+/// Where it may go is plugin-guard's `net` (R15): public addresses, or the
+/// hosts the manifest names; checked again on every redirect and at every
+/// address a name resolves to.
+async fn fetch(http: &reqwest::Client, policy: &net::Policy, args: &Json) -> Result<Json, String> {
+    let url = args["url"].as_str().unwrap_or_default();
+    let parsed = reqwest::Url::parse(url).map_err(|_| format!("\"{url}\" isn't a web address"))?;
+    check_url(policy, &parsed)?;
+    let (host, port) = (parsed.host_str().unwrap_or_default().to_owned(), parsed.port_or_known_default().unwrap_or(0));
     let method = args["method"].as_str().unwrap_or("GET").to_ascii_uppercase();
     let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| format!("\"{method}\" isn't an HTTP method"))?;
     let timeout = args["timeout"]
@@ -793,13 +935,23 @@ async fn fetch(http: &reqwest::Client, args: &Json) -> Result<Json, String> {
     let mut request = http.request(method, parsed).timeout(timeout);
     for (key, value) in args["headers"].as_object().into_iter().flatten() {
         if let Some(value) = value.as_str() {
+            policy.header(&host, port, key)?;
             request = request.header(key.as_str(), value);
         }
     }
     if let Some(body) = args["body"].as_str() {
         request = request.body(body.to_owned());
     }
-    let mut response = request.send().await.map_err(|e| format!("The request failed: {e}"))?;
+    let mut response = request.send().await.map_err(|e| {
+        // (Say the rule that stopped it, not reqwest's wrapping of it.)
+        let mut source: Option<&dyn std::error::Error> = Some(&e);
+        let mut deepest = e.to_string();
+        while let Some(s) = source {
+            deepest = s.to_string();
+            source = s.source();
+        }
+        format!("The request failed: {deepest}")
+    })?;
     let status = response.status().as_u16();
     let headers: serde_json::Map<String, Json> = response
         .headers()

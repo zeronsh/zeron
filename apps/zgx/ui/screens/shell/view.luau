@@ -41,35 +41,73 @@ local function owner(c: any): string?
 	if c.name == "plugin" and c.plugin and c.page then
 		return `page:{c.plugin}/{c.page}`
 	end
+	-- (A new chat's page has a panel of its own too.)
+	if c.name == "home" then
+		return "home"
+	end
 	return if c.name == "session" then c.session else nil
 end
 local function session(): string?
 	return owner(route.chat:get())
 end
+-- The chats side by side in the page's split (screens/shell/split
+-- keeps the list). Their panel is one: open for any of them, it stays open
+-- as the focus moves between them, at its one width, so nothing shifts;
+-- opened or closed, it is for all of them.
+local split_grouped = ui.shared("split.grouped", {} :: { string })
+-- The sessions whose panel is this one's: its split's, else it alone.
+local function sharing(id: string, peek: boolean?): { string }
+	local g = if peek then split_grouped:peek() else split_grouped:get()
+	if table.find(g, id) then
+		return g
+	end
+	return { id }
+end
 M.files = ui.computed(function(): boolean
 	local id = session()
-	return id ~= nil and M.panels:get()[id] == true
+	if id == nil then
+		return false
+	end
+	local open = M.panels:get()
+	for _, member in sharing(id) do
+		if open[member] == true then
+			return true
+		end
+	end
+	return false
 end)
 function M.set_files(on: boolean)
 	local id = owner(route.chat:peek())
 	if not id then
 		return
 	end
+	local members = sharing(id, true)
+	local was_open = M.files:peek()
 	local now = table.clone(M.panels:peek())
-	now[id] = if on then true else nil
+	for _, member in members do
+		now[member] = if on then true else nil
+	end
 	M.panels:set(now)
 	-- (Closed, it isn't expanded: reopening over a chat gone from view
 	-- reads as a broken chat, as the shipping app found.)
-	if not on and M.expanded_panels:peek()[id] then
-		M.expanded_panels:set_key(id, nil)
+	if not on then
+		for _, member in members do
+			if M.expanded_panels:peek()[member] then
+				M.expanded_panels:set_key(member, nil)
+			end
+		end
+	else
+		require("@app/screens/shell/fit").panel_opened(was_open)
 	end
 end
 function M.toggle_files()
 	M.set_files(not M.files:peek())
 end
+-- (Open by its split's panel counts: expanding a chat whose own was
+-- never opened, its split's being, works as its own would.)
 M.expanded = ui.computed(function(): boolean
 	local id = session()
-	return id ~= nil and M.panels:get()[id] == true and M.expanded_panels:get()[id] == true
+	return id ~= nil and M.files:get() and M.expanded_panels:get()[id] == true
 end)
 function M.toggle_expanded()
 	local id = owner(route.chat:peek())
@@ -78,6 +116,12 @@ function M.toggle_expanded()
 	end
 	M.expanded_panels:set_key(id, if M.expanded:peek() then nil else true)
 end
+-- The sidebar's width as it shows, each frame as it folds or comes back
+-- (its column, the window's gap before its card included).
+M.sidebar_shown = ui.state("shell_sidebar_shown", 0)
+-- Counts the sidebar's edge double-clicked (its width put back): the page
+-- splits the chat and the panel again then.
+M.seam_reset = ui.state("shell_seam_reset", 0)
 -- The command palette (⌘K), open.
 M.palette = ui.state("shell_palette_open", false)
 -- New project's palette, open (screens/shell/add_project).

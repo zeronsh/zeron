@@ -44,8 +44,13 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                // A `HEAD /` is preview discovery probing this listener on
+                // localhost (seen from the Zeron engine already running on a
+                // developer's Mac), not a request to the edge.
+                if !request[..n].starts_with(b"HEAD / ") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

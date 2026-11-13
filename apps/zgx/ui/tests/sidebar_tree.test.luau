@@ -102,7 +102,7 @@ local function second(app: any, title: string): string
 end
 
 -- Each setting: its rows, ⌘'s order, and Fix the build's second line
--- (on this Mac, in Atlas, on fix/build) in regular density.
+-- (on this computer, in Atlas, on fix/build) in regular density.
 local SETTINGS = {
 	{
 		name = "none",
@@ -205,7 +205,7 @@ test("Show N more is per innermost group", function()
 	app:command("crowd_atlas")
 	app:frames(10)
 	set(app, { "project", "device" }, true)
-	-- Atlas on this Mac holds nine: its first five (and the working one),
+	-- Atlas on this computer holds nine: its first five (and the working one),
 	-- then Show 4 more; on devbox, its one.
 	expect(app:has(`{SIDE} >> role:button "Show 4 more"`)).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "Atlas 3"`)).to_be(false)
@@ -379,4 +379,21 @@ test("an inner group with a session in a state, or the session open, shows past 
 	app:frames(30)
 	expect(shows(app, "Proj 5")).to_be(true)
 	expect(shows(app, "Show 1 more")).to_be(false)
+end)
+
+test("a chat moved to pinned gains its project's tile, and moved back loses it, the row staying itself", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1400, 860)
+	app:frames(30)
+	local function tile(): boolean
+		-- (Atlas's tile draws its initial.)
+		return app:tree('#shell-sidebar >> role:button "Write the docs"'):find('text "A"', 1, true) ~= nil
+	end
+	expect(tile()).to_be(false)
+	app:set_state("shell_places", { pinned = { "a2" }, sections = {} })
+	app:frames(30)
+	expect(tile()).to_be(true)
+	app:set_state("shell_places", { pinned = {}, sections = {} })
+	app:frames(30)
+	expect(tile()).to_be(false)
 end)

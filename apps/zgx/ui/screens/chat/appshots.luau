@@ -18,6 +18,7 @@
 
 local route = require("@app/screens/shell/route")
 local shared = require("@app/screens/chat/shared")
+local toast = require("@ds/toast")
 
 local M = {}
 
@@ -108,7 +109,7 @@ local chips = 0
 -- the limit.
 function M.land(shot: any)
 	if staged() + (shot.bytes or 0) > M.MAX_STAGED then
-		ui.toast { title = ui.t("chat.appshots.limit"):get(), kind = "warning" }
+		toast.show { title = ui.t("chat.appshots.limit"):get(), tone = "warning" }
 		return
 	end
 	local now = route.current:peek()
@@ -125,7 +126,9 @@ function M.land(shot: any)
 		last_session:set(at.session)
 	end
 	chips += 1
-	shared.cargo:push(M.chip(shot, `appshot{chips}-{shot.id}`))
+	-- (Through the draft's own way in: it's numbered there, as a picture
+	-- an `@` can mention.)
+	shared.push_cargo(nil, M.chip(shot, `appshot{chips}-{shot.id}`))
 	shared.focus:add(1)
 end
 
@@ -146,7 +149,7 @@ ui.effect(function()
 		return
 	end
 	said:set(f.n)
-	ui.toast { title = ui.t("chat.appshots.couldnt_capture"):get(), body = f.message, kind = "error" }
+	toast.show { title = ui.t("chat.appshots.couldnt_capture"):get(), body = f.message, tone = "danger" }
 end)
 
 return M

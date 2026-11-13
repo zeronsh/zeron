@@ -14,6 +14,9 @@
 --   zeron.place { at = 'role:button "Send"', after = Hint }
 --   zeron.place { at = "#chat-home", replace = Welcome }   (needs "ui.change"
 --                                                           on that selector)
+--   zeron.place { at = "slot:git.branch", after = PrButton }  (a slot another
+--                                                           plugin offers:
+--                                                           zeron.slot("branch"))
 --
 -- `Badge` is a function that builds a node (`function() return ui.text { … }
 -- end`): it's built where each match is, once per match (a badge per session
@@ -53,7 +56,11 @@
 --       (the tool is listed in the manifest's "tools") ("tools")
 --   zeron.menu { kind, id, label, run }
 --       an item in Zeron's menus: kind "session" (a session's row; run
---       gets { id }), "file" (a file's row; { path, session }) ("ui.add")
+--       gets { id }), "file" (a file's row; { path, session }), or a menu
+--       another plugin offers ("git.commit": a History row's) ("ui.add")
+--   zeron.menu_entries(name, context)
+--       the items others added to a menu this plugin offers ("<id>.<name>"),
+--       as ContextMenu entries, run in their plugin with `context`
 --   zeron.send(to, data)
 --       data (anything JSON, 64 KB at most) to the same plugin on another of
 --       your devices (a device id), or to all of them ("*"); a promise of
@@ -63,6 +70,12 @@
 --       what arrives: { from = { id, name }, data, at }      ("devices")
 --   zeron.open(route)    "home", { session = id }, { settings = page } ("navigate")
 --   zeron.compose(text)  text into the message box, for you to send   ("compose")
+--   zeron.compose_comment { file, line, note, to?, side?, snippet?, key?, session? }
+--                        a review comment chip on a session's draft, sent as
+--                        Zeron's review comments block (file:line, the note,
+--                        the code under it)                              ("compose")
+--   zeron.composed()     in a build: your comments still on a draft, by key
+--                        ({ [key] = { session, hovered } }), reactive    ("compose")
 --   zeron.toast(text)    a short note at the window's foot   (always)
 --   zeron.notify { title, body?, session? }  a notification, as Zeron's
 --                        own (Settings → Notifications)     ("notifications")
@@ -70,7 +83,8 @@
 --                        Links: the browser beside the chat, or yours)
 --                                                            ("links.open")
 --   zeron.need("panel").open_tab { kind, title, icon?, data? }
---       a tab of your own in the open chat's panel, kept with its tabs
+--       a tab of your own in the open chat's panel (on a page of yours,
+--       the page's own panel), kept with its tabs
 --                                                            ("panel.tabs")
 --   zeron.tab(kind, function(tab) return <node> end)
 --       how a kind of your tabs draws; `tab` is { kind, title, data }
@@ -80,6 +94,19 @@
 --       (What a place gives, `page` and `tab` among it, is read-only: hand
 --       a component props of its own, `Board { page = page }`, not `page`.)
 --   zeron.store(key, default)  what it keeps between runs: :get(), :set(v)
+--   zeron.db.exec(sql, params) / zeron.db.query(sql, params)  its own
+--       SQLite database (no permission; a promise)
+--   zeron.run(program, args, { cwd, stdin, timeout, env })  a program its
+--       manifest's "commands" names, as you: { status, stdout, stderr } ("commands")
+--   zeron.settings()           its settings' values by id (declared in
+--       zeron-plugin.json's "settings"; Zeron draws their page in Settings,
+--       under Plugins, while the plugin is on), followed where read
+--   zeron.setting(id)          one of them: :get() (followed), :peek()
+--   zeron.on_setting(function(id, value, was) end)  told as one changes
+--   zeron.set_status(id, { badge, tone?, text? })  what Zeron says of one
+--       beside its control: a short badge in a tone ("neutral", "success",
+--       "warning", "danger") and words in its description's place, plain
+--       text; nil clears it
 --   zeron.every(seconds, fn)   now and then, 30 seconds at least
 --   zeron.github.watch_pr(session_id)  in a build function: a function
 --       reading that session's pull request as it changes ("github"; your
@@ -98,6 +125,15 @@ type Item = { kind: string, id: string, label: string, run: (context: any) -> ()
 local made: { [string]: any } = {}
 
 return function(id: string): any
+	-- In the plugin's service (service.luau, run headless by the engine on
+	-- each device), the engine's own helpers: zeron.serve, zeron.tool,
+	-- zeron.every, zeron.on_stop, zeron.emit, zeron.run, zeron.fetch,
+	-- zeron.notify, zeron.sleep, zeron.task, zeron.store, zeron.json,
+	-- zeron.device (see the guide's "Services").
+	local service = (_G :: any).zeron_service
+	if service then
+		return service(id)
+	end
 	if made[id] then
 		return made[id]
 	end
@@ -116,6 +152,7 @@ return function(id: string): any
 	-- read in such a function by its id: `zeron.context_of("session", id)`;
 	-- a list that moves (the sidebar's `sessions`) by `zeron.live(name)`.
 	local building: string? = nil
+	local spent: (at: string, ms: number) -> ()
 	-- What the node being built has read of its place, by name: the
 	-- provided value or state, kept so the node is built again as a state
 	-- changes (a header's session as you switch).
@@ -153,8 +190,6 @@ return function(id: string): any
 			return ui.shared("zeron.appearance", "dark"):get()
 		elseif name == "session" then
 			return ui.shared("zeron.page_session", nil :: any):get()
-		elseif name == "profile" then
-			return ui.shared("zeron.profile_id", nil :: any):get()
 		end
 		return nil
 	end
@@ -175,22 +210,44 @@ return function(id: string): any
 		return string.format("f%08x", h)
 	end
 
+	-- What's behind a token a place gave (a file's, a block's), as this
+	-- plugin may read it: nil when it may not.
+	local function behind(kind: string, token: any): any
+		if type(token) ~= "string" then
+			return nil
+		end
+		local ok, found = pcall(ui.call_sync, `{prefix}.{kind}`, token)
+		return if ok then found else nil
+	end
+
 	function M.context(name: string): any
+		-- You, as you allowed it (your account's id and name with
+		-- "profile.read"): never from a place, which gives no account.
+		if name == "profile" then
+			return table.clone((records:get() or {}).profile or {})
+		end
 		local value = M.read(name)
 		if name == "panel" then
-			-- The panel of the session where this is (a tab of it, inside
-			-- the panel; else the session there, or the window's).
-			local session = M.read("session") or ui.shared("zeron.page_session", nil :: any):get()
-			if session == nil then
-				return nil
+			if type(value) == "table" and type(value.page) == "table" then
+				-- A plugin's page's own panel (the page provides it).
+				value = { page = { plugin = value.page.plugin, id = value.page.id } }
+			else
+				-- The panel of the session where this is (a tab of it, inside
+				-- the panel; else the session there, or the window's).
+				local session = M.read("session") or ui.shared("zeron.page_session", nil :: any):get()
+				if session == nil then
+					return nil
+				end
+				value = { id = value, session = session }
 			end
-			value = { id = value, session = session }
 		end
 		if value == nil then
 			return nil
 		end
 		local r = records:get() or {}
-		if name == "session" or name == "message" then
+		-- (A project's, as `.project-icon` gives it: its name, device and
+		-- icon with "sessions.read".)
+		if name == "session" or name == "message" or name == "project" then
 			local found = (r[name .. "s"] or {})[value]
 			local out = { id = value }
 			for k, v in found or {} do
@@ -203,16 +260,29 @@ return function(id: string): any
 				table.insert(out, M.context_of("session", sid))
 			end
 			return out
-		elseif name == "profile" then
-			return table.clone(r.profile or {})
+		elseif name == "panel_branch" or name == "panel_details" then
+			-- The session, by its id: its device, branch and folder as its
+			-- record holds them ("sessions.read"; the folder "files.read"'s).
+			local sid = if type(value) == "table" then value.session else nil
+			if type(sid) ~= "string" then
+				return nil
+			end
+			local s = (r.sessions or {})[sid] or {}
+			return { session = sid, device = s.device, cwd = s.cwd, branch = s.branch }
+		elseif name == "code" or name == "tex" then
+			-- A reply's block ("messages.read", or a plugin allowed to change
+			-- how such blocks show): `{ lang, source }`, or the TeX.
+			return behind("block", value)
 		elseif name == "panel" then
 			-- Plain data, and what can be done with it: a tab of this
 			-- plugin's own ("panel.tabs").
 			local panel = value
-			local session = panel.session
+			-- (A session's panel, or a page's: a plugin's page has its own.)
+			local session, page = panel.session, panel.page
 			panel.open_tab = function(tab: { kind: string, title: string, icon: string?, data: any? })
 				ui.invoke(`{prefix}.open_tab`, {
 					session = session,
+					page = page,
 					kind = tab.kind,
 					title = tab.title,
 					icon = tab.icon,
@@ -221,10 +291,13 @@ return function(id: string): any
 			end
 			return panel
 		elseif name == "file" then
-			if r.files_read then
-				return { id = value, path = value, name = string.match(value, "([^/]+)$") or value }
+			-- A token: its path with "files.read", else an id of this
+			-- plugin's own (the same file, the same id, this run).
+			local f = if r.files_read then behind("file", value) else nil
+			if type(f) == "table" and type(f.path) == "string" then
+				return { id = f.path, path = f.path, name = f.name or (string.match(f.path, "([^/]+)$") or f.path) }
 			end
-			return { id = own_id(value) }
+			return { id = own_id(tostring(value)) }
 		end
 		return value
 	end
@@ -269,7 +342,42 @@ return function(id: string): any
 	-- own, so `ui.use_state` works there), kept to itself: what fails in it
 	-- draws nothing, and is said once, as this plugin's.
 	type Build = (props: any) -> Node
-	type Place = { at: string, before: Build?, after: Build?, replace: Build? }
+	-- `fill`: what it puts there fills the room the element it replaces
+	-- had (a panel's tab, a page), rather than taking only what it needs.
+	type Place = { at: string, before: Build?, after: Build?, replace: Build?, fill: boolean? }
+	-- What building this plugin's nodes costs, by place: how many builds,
+	-- their time in all and at most, and the most time in one frame (a
+	-- frame: builds within 16 ms of each other). Told to Zeron at most twice
+	-- a second, so Settings can say when a plugin is slow.
+	local costs: { [string]: { builds: number, total: number, most: number } } = {}
+	local frame = { at = -1, ms = 0, most = 0 }
+	local telling = false
+	local function tell()
+		telling = false
+		local places = {}
+		for at, c in costs do
+			table.insert(places, { at = at, builds = c.builds, mean_ms = c.total / c.builds, max_ms = c.most })
+		end
+		ui.invoke(`{prefix}.cost`, { places = places, frame_ms = frame.most })
+	end
+	function spent(at: string, ms: number)
+		local c = costs[at] or { builds = 0, total = 0, most = 0 }
+		c.builds += 1
+		c.total += ms
+		c.most = math.max(c.most, ms)
+		costs[at] = c
+		local now = ui.now()
+		if now - frame.at > 16 then
+			frame.at, frame.ms = now, 0
+		end
+		frame.ms += ms
+		frame.most = math.max(frame.most, frame.ms)
+		if not telling then
+			telling = true
+			ui.after(500, tell)
+		end
+	end
+
 	-- Each place this plugin made, and the ref its nodes carry: where they
 	-- are, for an agent asking (`plugin_status`).
 	local placed: { { at: string, how: string, ref: any } } = {}
@@ -283,10 +391,12 @@ return function(id: string): any
 			local function build(): Node
 				local was, was_capturing = building, capturing
 				building, capturing = p.at, captured
+				local started = os.clock()
 				local ok, node = pcall(inner, props)
+				spent(p.at, (os.clock() - started) * 1000)
 				building, capturing = was, was_capturing
 				if ok then
-					return ui.div { ref = here, node }
+					return ui.div { ref = here, w_full = p.fill, h_full = p.fill, node }
 				end
 				if type(node) == "table" and getmetatable(node) == NEED then
 					ui.invoke(`{prefix}.problem`, { need = node.need, at = p.at })
@@ -335,6 +445,21 @@ return function(id: string): any
 				return build()
 			end)
 		end)
+		-- Another plugin's slot (`slot:<plugin>.<name>`, which that plugin
+		-- offers with `zeron.slot`): added to it, in plugin order, reading
+		-- what that plugin provides there.
+		local slot = string.match(p.at, "^slot:(.+)$")
+		if slot then
+			if p.replace then
+				ui.invoke(`{prefix}.problem`, { error = "a slot is added to, not replaced", at = p.at })
+				return
+			end
+			local ok, why = pcall(ui.contribute, slot, Guard {})
+			if not ok then
+				ui.invoke(`{prefix}.problem`, { error = tostring(why), at = p.at })
+			end
+			return
+		end
 		do
 			local spec: { [string]: any } = { target = p.at }
 			if p.before then
@@ -353,6 +478,17 @@ return function(id: string): any
 		end
 	end
 
+	-- A place of this plugin's own where other plugins add things: a
+	-- column holding what each adds (`zeron.place { at = "slot:<id>.<name>",
+	-- after = … }`, "ui.add"), in plugin order, each reading what's
+	-- provided around the slot (`provide = { … }` on an element above it:
+	-- plain data, or a state of it, never a function). Named under this
+	-- plugin's id, so no other plugin can offer the same one; `props` style
+	-- the column.
+	function M.slot(name: string, props: { [string]: any }?): Node
+		return ui.slot(`{id}.{name}`, props or {})
+	end
+
 	-- Tabs of this plugin's own in a chat's panel ("panel.tabs"): one opens
 	-- with `zeron.need("panel").open_tab { kind, title, icon?, data? }`, and
 	-- Zeron keeps it with the panel's own tabs (closing, reordering, as the
@@ -367,6 +503,7 @@ return function(id: string): any
 		tabs_placed = true
 		M.place {
 			at = `.plugin-tab.plugin-{id}`,
+			fill = true,
 			replace = function(): Node
 				local tab = M.need("tab")
 				local draw = tab_kinds[tab.kind]
@@ -406,6 +543,7 @@ return function(id: string): any
 		pages_placed = true
 		M.place {
 			at = `.plugin-page.plugin-{id}`,
+			fill = true,
 			replace = function(): Node
 				local shown = M.need("page")
 				local draw = pages[shown.id]
@@ -422,7 +560,8 @@ return function(id: string): any
 	-- that session's pull request watched while the node shows (the engine
 	-- pushes changes; nothing polls) and returns a function reading it:
 	-- `{ number, title, url, state = "open" | "merged" | "closed", base,
-	-- head }`, or nil for none (or not heard yet).
+	-- head }`, or nil for none (or not heard yet). It follows that session
+	-- alone: another's moving tells it nothing.
 	local github_heard = ui.shared(`{prefix}.github`, {} :: any)
 	local watched: { [string]: number } = {}
 	local asking = false
@@ -562,11 +701,49 @@ return function(id: string): any
 			watched[session] = if n > 0 then n else nil
 			soon()
 		end)
-		return function(): any
+		-- (That session's entry alone: a pull request moving for another
+		-- session changes nothing the caller reads, so its node isn't told.)
+		local mine = ui.computed(function(): any
 			local pr = (github_heard:get() or {})[session]
 			return if pr == false then nil else pr
+		end)
+		return function(): any
+			return mine:get()
 		end
 	end
+
+	-- Every watched session's pull request as last heard (`{ [session] =
+	-- pr | false }`), read as a state is: for the plugin's own bookkeeping
+	-- (what to notify of), never for a row's drawing (`watch_pr`'s, its own).
+	function M.github.heard(): any
+		return github_heard:get() or {}
+	end
+
+	-- A program its manifest names (`"commands": ["gh"]`, "commands"), run
+	-- as you on this Mac, with `args` passed as they are (no shell):
+	--   zeron.run("gh", { "api", "user" }):after(function(r) … r.stdout … end)
+	-- A promise of { status, stdout, stderr }; `opts`: { cwd, stdin,
+	-- timeout } (seconds, 60 unless said, 300 at most).
+	function M.run(program: string, args: { string }?, opts: { cwd: string?, stdin: string?, timeout: number?, env: { [string]: string }? }?): any
+		local o = opts or {}
+		return ui.call(`{prefix}.run`, { program = program, args = args or {}, cwd = o.cwd, stdin = o.stdin, timeout = o.timeout, env = o.env })
+	end
+
+	-- This plugin's own database (SQLite; no permission, removed with the
+	-- plugin, 100 MB at most). Parameters are bound, never put in the SQL:
+	--   zeron.db.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
+	--   zeron.db.exec("INSERT OR REPLACE INTO kv VALUES (?, ?)", { k, v })
+	--   zeron.db.query("SELECT v FROM kv WHERE k = ?", { k }):after(function(rows) … end)
+	-- `exec` answers { changes, last_id } (no params: a script of several
+	-- statements); `query`, its rows, each { column = value }.
+	M.db = {
+		exec = function(sql: string, params: { any }?): any
+			return ui.call(`{prefix}.db`, { op = "exec", sql = sql, params = params or {} })
+		end,
+		query = function(sql: string, params: { any }?): any
+			return ui.call(`{prefix}.db`, { op = "query", sql = sql, params = params or {} })
+		end,
+	}
 
 	-- What this plugin keeps between runs, for it alone (Zeron keeps it, a
 	-- megabyte at most; removing the plugin removes it):
@@ -587,6 +764,123 @@ return function(id: string): any
 			ui.invoke(`{prefix}.store_set`, { key = key, value = if value == nil then ui.null else value })
 		end
 		return box
+	end
+
+	-- Its own words, in the language Zeron shows (Settings → General →
+	-- Language): `locales/<locale>.json` beside zeron-plugin.json, `en.json`
+	-- the source, nested keys, ICU messages (`{name}`, `{n, plural, one {#
+	-- item} other {# items}}`, `{x, select, … other {…}}`):
+	--   ui.text { zeron.t("timer.start") }          follows the language
+	--   ui.text { zeron.t("timer.left", { n = 3 }) }
+	--   tooltip = zeron.s("timer.hint")             the text now, a string
+	-- A language the plugin lacks, or a key, falls back to its English (then
+	-- the key itself). Without a locales folder it all says the key: use
+	-- plain strings instead. (Zeron's own words, the design system's, follow
+	-- the language by themselves.)
+	local words = ui.shared(`{prefix}.locales`, {} :: any)
+	-- (The locale Zeron shows, as it shares it.)
+	local locale_shown = ui.shared("zeron.locale", "en")
+	local function shown(): string
+		local locale = locale_shown:get()
+		return if type(locale) == "string" then locale else "en"
+	end
+	local formats: ((string, { [string]: any }?) -> string)? = nil
+	local function format(msg: string, args: { [string]: any }?): string
+		if not formats then
+			local ok, locale = pcall(require, "@ds/locale")
+			formats = if ok and type(locale) == "table" and locale.format then locale.format else function(m: string): string
+				return m
+			end
+		end
+		return (formats :: any)(msg, args)
+	end
+	function M.s(key: string, args: { [string]: any }?): string
+		local all = words:get() or {}
+		-- The locale shown, its parents (zh-Hans, then zh), then English.
+		local locale: string? = shown()
+		while locale and locale ~= "" do
+			local these = all[locale]
+			if these and these[key] then
+				return format(these[key], args)
+			end
+			locale = string.match(locale, "^(.*)%-[^-]*$")
+		end
+		local english = all.en
+		if english and english[key] then
+			return format(english[key], args)
+		end
+		return key
+	end
+	function M.t(key: string, args: { [string]: any }?): () -> string
+		return function(): string
+			return M.s(key, args)
+		end
+	end
+
+	-- Its settings: declared in zeron-plugin.json's "settings", each
+	-- `{ id, kind, label, description?, default? }` (kinds: switch, choice,
+	-- text, number, shortcut, folder). Zeron draws their page and keeps
+	-- what the person sets, for this plugin alone; a setting never touched
+	-- reads its default. Read only here: only the person sets them.
+	--   zeron.settings().tone      every value, followed where it's read
+	--   zeron.setting("tone"):get()
+	--   zeron.on_setting(function(id, value, was) … end)
+	local settings_now = ui.shared(`{prefix}.settings`, {} :: any)
+	function M.settings(): { [string]: any }
+		return table.clone(settings_now:get() or {})
+	end
+	function M.setting(key: string): any
+		local box = {}
+		function box.get(_self: any): any
+			return (settings_now:get() or {})[key]
+		end
+		function box.peek(_self: any): any
+			return (settings_now:peek() or {})[key]
+		end
+		return box
+	end
+	-- Told of each change as it comes (not of the values it starts with).
+	local setting_listeners: { (id: string, value: any, was: any) -> () } = {}
+	local setting_seen: { [string]: any }? = nil
+	local function tell_setting(key: string, value: any, was: any)
+		for _, listen in setting_listeners do
+			local ok, why = pcall(listen, key, value, was)
+			if not ok then
+				print(`{id}: a setting's listener failed: {why}`)
+			end
+		end
+	end
+	-- A status for one of its settings, drawn by Zeron beside its control
+	-- (gone when the plugin is off): `{ badge = "Ready", tone = "success" }`,
+	-- `text` in the setting's description's place; nil clears it.
+	function M.set_status(key: string, status: { badge: string?, tone: string?, text: string? }?)
+		ui.invoke(`{prefix}.setting_status`, { id = key, status = if status == nil then ui.null else status })
+	end
+	function M.on_setting(listen: (id: string, value: any, was: any) -> ())
+		table.insert(setting_listeners, listen)
+		if setting_seen ~= nil then
+			return
+		end
+		setting_seen = table.clone(settings_now:peek() or {})
+		ui.effect(function()
+			local now = settings_now:get() or {}
+			local was = setting_seen or {}
+			setting_seen = table.clone(now)
+			-- (Its values arriving at first are what it starts with.)
+			if next(was) == nil then
+				return
+			end
+			for key, value in now do
+				if was[key] ~= value then
+					tell_setting(key, value, was[key])
+				end
+			end
+			for key, value in was do
+				if now[key] == nil then
+					tell_setting(key, nil, value)
+				end
+			end
+		end)
 	end
 
 	-- Something to do now and then, with no window part (a check that has
@@ -706,6 +1000,74 @@ return function(id: string): any
 		publish_items()
 	end
 
+	-- Menus this plugin offers others (`<id>.<name>`: a row's own menu):
+	-- what other plugins added to `name` (`zeron.menu { kind =
+	-- "<id>.<name>", … }`), as ContextMenu entries under each plugin's
+	-- name, run there with `context` (plain data) as chosen. Read as the
+	-- menu opens.
+	local offered = ui.shared(`{prefix}.menu_items`, {} :: { any })
+	function M.menu_entries(name: string, context: { [string]: any }?): { any }
+		local kind = `{id}.{name}`
+		local out: { any } = {}
+		local heading: string? = nil
+		for _, item in offered:peek() or {} do
+			if item.kind == kind then
+				if heading ~= item.plugin then
+					heading = item.plugin
+					table.insert(out, { heading = item.plugin_name })
+				end
+				local plugin, item_id = item.plugin, item.id
+				table.insert(out, {
+					label = item.label,
+					on_select = function()
+						ui.invoke(`{prefix}.menu_run`, { plugin = plugin, id = item_id, kind = kind, context = if context == nil then ui.null else context })
+					end,
+				})
+			end
+		end
+		return out
+	end
+
+	-- Its service's events (`zeron.emit` in service.luau), by device
+	-- (`@here`: this device's) and event.
+	local service_listeners: { [string]: { [string]: { (any, any) -> () } } } = {}
+	-- Its `zeron.on` listeners (usage, accounts, models, turns), by key.
+	local agent_listeners: { [string]: { event: string, opts: any, fn: (any, string) -> () } } = {}
+	local function heard_event(message: any)
+		-- Zeron's own (`zeron:<event>`), for one of its listeners.
+		local event = message.event
+		if type(event) == "string" and string.sub(event, 1, 6) == "zeron:" then
+			local wrapped = message.data or {}
+			if wrapped.listener == "@notice" then
+				-- What Zeron says of it (a listener failing, a loop stopped): its row says so.
+				local notice = (wrapped.data and wrapped.data.notice) or "A listener failed"
+				ui.invoke(`{prefix}.problem`, { error = notice, at = "zeron.on" })
+				return
+			end
+			local listener = agent_listeners[wrapped.listener or ""]
+			if listener then
+				local ok, why = pcall(listener.fn, wrapped.data, string.sub(event, 7))
+				if not ok then
+					print(`{id}: a {listener.event} listener failed: {why}`)
+				end
+			end
+			return
+		end
+		local keys = { message.from and message.from.id or "" }
+		if message.here then
+			table.insert(keys, "@here")
+		end
+		for _, key in keys do
+			local by_event = service_listeners[key]
+			for _, listen in (by_event and by_event[message.event]) or {} do
+				local ok, why = pcall(listen, message.data, message)
+				if not ok then
+					print(`{id}: a service event's listener failed: {why}`)
+				end
+			end
+		end
+	end
+
 	-- Messages from your other devices, each heard once, in order.
 	local inbox = ui.shared(`{prefix}.inbox`, {} :: { Message })
 	local listeners: { (Message) -> () } = {}
@@ -715,6 +1077,10 @@ return function(id: string): any
 		for _, message in inbox:get() do
 			if message.seq > heard then
 				heard = message.seq
+				if (message :: any).event ~= nil then
+					heard_event(message)
+					continue
+				end
 				for _, listen in listeners do
 					local ok, why = pcall(listen, message)
 					if not ok then
@@ -740,6 +1106,227 @@ return function(id: string): any
 		return ui.shared("zeron.devices", {} :: { any })
 	end
 
+	-- The window it's drawn in: whether it shows (not hidden, minimised or
+	-- covered by another) and whether it's the one in front. Read as a
+	-- state is (an effect or computed reading them runs again as they
+	-- change); true where the app doesn't say. Leave work no one would see
+	-- for when it shows. (`peek`: read as `:peek()` reads, followed by
+	-- nothing.)
+	function M.window(peek: boolean?): { shown: boolean, active: boolean }
+		local ok, shown, active = pcall(function(): (any, any)
+			local s, a = ui.shared("zgx.window.shown", true), ui.shared("zgx.window.active", true)
+			if peek then
+				return s:peek(), a:peek()
+			end
+			return s:get(), a:get()
+		end)
+		if not ok then
+			return { shown = true, active = true }
+		end
+		return { shown = shown ~= false, active = active ~= false }
+	end
+
+	-- Its service ("service": "service.luau", with the "service"
+	-- permission): on this device (no device), or on another of yours by
+	-- its id (`zeron.devices()`). Each device runs it only if it allowed
+	-- the plugin there, in the same version.
+	--   local git = zeron.service(session.device)
+	--   git:call("status", { cwd = session.worktree }):after(function(s) … end,
+	--       function(err) if zeron.reason(err) == "offline" then … end end)
+	--   git:on("progress", function(data) … end)   -- its zeron.emit("progress", …)
+	-- `:call(method, args, { timeout })` is a promise of what the method
+	-- returned (30 s unless said, 300 at most); a refusal fails it with
+	-- "<reason>: <words>" (`zeron.reason(err)` reads the reason).
+	local services: { [string]: any } = {}
+	function M.service(device: string?): any
+		local key = device or "@here"
+		if services[key] then
+			return services[key]
+		end
+		local service = {}
+		function service.call(_self: any, method: string, args: any?, opts: { timeout: number? }?): any
+			return ui.call(`{prefix}.service_call`, {
+				device = device or ui.null,
+				method = method,
+				args = if args == nil then ui.null else args,
+				timeout = (opts and opts.timeout) or ui.null,
+			})
+		end
+		-- `fn(data, event)` for each `zeron.emit(event, data)` it makes;
+		-- returns a function that stops listening.
+		function service.on(_self: any, event: string, fn: (any, any) -> ()): () -> ()
+			local by_event = service_listeners[key] or {}
+			service_listeners[key] = by_event
+			local list = by_event[event] or {}
+			by_event[event] = list
+			table.insert(list, fn)
+			if device then
+				-- (Another device's events reach this one while it's watched.)
+				ui.call(`{prefix}.service_call`, { device = device, method = "@watch", args = ui.null, timeout = ui.null })
+					:after(nil, function(why)
+						print(`{id}: watching {device}'s service: {why}`)
+					end)
+			end
+			return function()
+				local i = table.find(list, fn)
+				if i then
+					table.remove(list, i)
+				end
+			end
+		end
+		services[key] = service
+		return service
+	end
+
+	-- ── Agents: usage, accounts, models, and their events ─────────────────
+	-- Each asks the engine, which checks what this device (or `device`,
+	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
+	-- "accounts.switch", "accounts.pin", "models.read", "models.set". Each is a promise; a
+	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
+	-- not_allowed, paced, already, loop, not_found, offline, …).
+	local function agents(op: string, args: any?, device: string?): any
+		return ui.call(`{prefix}.agents`, {
+			op = op,
+			args = if args == nil then {} else args,
+			device = device or ui.null,
+		})
+	end
+
+	-- Each provider's accounts' usage, as Zeron last read it (never a new
+	-- read): { { provider, account, active, plan?, fetched_at?, error?,
+	-- windows = { { label, used, remaining, resets_at? } } } }.
+	function M.usage(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("usage", { provider = o.provider }, o.device)
+	end
+
+	-- Read usage again now (once every 5 minutes, per plugin).
+	function M.usage_refresh(opts: { device: string? }?): any
+		return agents("usage_refresh", {}, opts and opts.device)
+	end
+
+	-- The saved accounts ("accounts.read"): { { provider, account, active,
+	-- switchable, email?, name?, organization?, plan? } }.
+	function M.accounts(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("accounts", { provider = o.provider }, o.device)
+	end
+
+	-- Make a saved account the active one ("accounts.switch"), on this
+	-- device or `device`, at once; with `when_idle`, once that provider's
+	-- chats there are done.
+	function M.switch_account(s: { provider: string, account: string, when_idle: boolean?, device: string? }): any
+		return agents("switch_account", { provider = s.provider, account = s.account, when_idle = s.when_idle }, s.device)
+	end
+
+	-- Run one chat on a saved account of its own ("accounts.pin"), on this
+	-- device or `device`, while the active account stays as it is. No
+	-- `account` takes the pin back. { provider, chat, account? }.
+	function M.pin_account(s: { provider: string, chat: string, account: string?, device: string? }): any
+		return agents("pin_account", { provider = s.provider, chat = s.chat, account = s.account }, s.device)
+	end
+
+	-- The chats pinned to an account ("accounts.read"): { { provider,
+	-- account, since, chat? } } (`chat` with "sessions.read").
+	function M.pins(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("pins", { provider = o.provider }, o.device)
+	end
+
+	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	function M.models(harness: string, opts: { device: string? }?): any
+		return agents("models", { harness = harness }, opts and opts.device)
+	end
+
+	-- A chat's model, effort and options ("models.read").
+	function M.chat_model(chat: string): any
+		return agents("chat_model", { chat = chat })
+	end
+
+	-- Set a chat's model, effort or options ("models.set"), for its next
+	-- turn, on the provider it has.
+	function M.set_model(s: { chat: string, model: string?, effort: string?, options: { [string]: string }? }): any
+		return agents("set_model", { chat = s.chat, model = s.model, effort = s.effort, options = s.options })
+	end
+
+	-- What a new chat starts with here ("models.set").
+	function M.set_default_model(s: { harness: string, model: string, effort: string? }): any
+		return agents("set_default_model", { harness = s.harness, model = s.model, effort = s.effort })
+	end
+
+	-- A message into a chat ("messages.send"), as you'd send it from the
+	-- composer: a turn of its own when nothing runs; while a turn runs,
+	-- queued for its end (`mode = "queue"`, the default) or steering it
+	-- (`"steer"`). `attachments`: files' paths on the chat's device (they
+	-- need "files.read" too). A promise of { status, chat, delivery, id }.
+	function M.send_message(s: { chat: string, text: string, attachments: { string }?, mode: string? }): any
+		return agents("send_message", { chat = s.chat, text = s.text, attachments = s.attachments, mode = s.mode })
+	end
+
+	-- A new chat, sent its first message ("messages.send"): `device`,
+	-- `project` (a project's id), `harness`, `model`, `effort`, `cwd` as you'd
+	-- pick them. A promise of { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+		return agents("new_chat", {
+			prompt = s.prompt,
+			device = s.device,
+			project = s.project,
+			harness = s.harness,
+			model = s.model,
+			effort = s.effort,
+			cwd = s.cwd,
+		})
+	end
+
+	-- The question (or approval) a chat waits on, answered ("messages.send"):
+	-- `answers` by question id, `{ [question] = label or { labels } }` (or a
+	-- list of { question, labels }); `request` names one, else the latest.
+	function M.answer(s: { chat: string, answers: any, request: string? }): any
+		return agents("answer", { chat = s.chat, answers = s.answers, request = s.request })
+	end
+
+	-- `fn(data, event)` for each `event` on this device while a window is
+	-- open: "usage.changed", "usage.threshold" (`opts.below`: percent
+	-- remaining), "usage.reset", "limit.hit", "account.switched",
+	-- "account.signed_out", "login.expired", "model.changed",
+	-- "models.updated", "turn.started", "turn.finished", "turn.errored",
+	-- "chat.awaiting_input", "chat.input_answered". `opts.provider`,
+	-- `account`, `window` and `chat` narrow it. Told as it changes, never
+	-- by polling. Returns a function that stops it. (A service's own
+	-- `zeron.on` hears them with no window open.)
+	local next_listener = 0
+	local function listen_all()
+		local list = {}
+		for key, l in agent_listeners do
+			table.insert(list, { key = key, event = l.event, opts = l.opts })
+		end
+		ui.call(`{prefix}.agents`, { op = "listen", args = {}, device = ui.null, listeners = list })
+			:after(nil, function(why)
+				print(`{id}: listening for Zeron's events: {why}`)
+			end)
+	end
+	function M.on(event: string, fn: (any, string) -> (), opts: { [string]: any }?): () -> ()
+		assert(type(event) == "string" and event ~= "", "zeron.on(event, fn)")
+		assert(type(fn) == "function", "zeron.on(event, fn)")
+		next_listener += 1
+		local key = `w{next_listener}`
+		agent_listeners[key] = { event = event, opts = opts or {}, fn = fn }
+		listen_all()
+		return function()
+			if agent_listeners[key] then
+				agent_listeners[key] = nil
+				listen_all()
+			end
+		end
+	end
+
+	-- A failed service call's reason: "offline", "not_installed",
+	-- "not_approved", "off", "version_mismatch", "timeout", "failed", …
+	function M.reason(err: any): string
+		local text = tostring(err)
+		return string.match(text, "^([%a_]+):") or string.match(text, "^([%a_]+)$") or "failed"
+	end
+
 	function M.open(route: any)
 		ui.invoke("zeron.open", route)
 	end
@@ -758,6 +1345,33 @@ return function(id: string): any
 
 	function M.compose(text: string)
 		ui.invoke("zeron.compose.insert", text)
+	end
+
+	-- A review comment on a file or a diff, as a chip on a session's draft
+	-- (the one shown without `session`): `file` the project's path, `line`
+	-- (and a range's last, `to`), `side` "L" (the original file's line) or
+	-- "R" (the changed one's) on a diff, `snippet` the code it's on, `note`
+	-- what you say. Sent as Zeron's review comments block. `key`: yours, to
+	-- know it by in `composed()` while it's carried.
+	function M.compose_comment(c: { file: string, line: number, note: string, to: number?, side: string?, snippet: string?, key: string?, session: string? })
+		ui.invoke(`{prefix}.compose_comment`, {
+			file = c.file,
+			line = c.line,
+			note = c.note,
+			to = c.to or ui.null,
+			side = c.side or ui.null,
+			snippet = c.snippet or ui.null,
+			key = c.key or ui.null,
+			session = c.session or ui.null,
+		})
+	end
+
+	-- Your comments still on a draft (not sent, not taken off), by their
+	-- `key`: the session's draft each is on, and whether its chip is under
+	-- the pointer. Read in a build: it changes as they do.
+	local composed = ui.shared(`{prefix}.composed`, {} :: { [string]: any })
+	function M.composed(): { [string]: { session: string?, hovered: boolean } }
+		return composed:get() or {}
 	end
 
 	function M.toast(text: string)

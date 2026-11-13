@@ -59,6 +59,8 @@ export type Session = {
 	time: (number | string)?,
 	agent: Mark.Name?,
 	project: string?,
+	-- Its project's id (its tile then `.project-icon`).
+	project_id: string?,
 	hue: string?,
 	src: string?,
 	emoji: string?,
@@ -84,6 +86,8 @@ export type Item = {
 	hue: string?,
 	src: string?,
 	emoji: string?,
+	-- A project's id, where it is one (its tile then `.project-icon`).
+	project: string?,
 	-- Other words it answers to ("dark" for Appearance), matched as its
 	-- label is but weighing less, and never marked.
 	keywords: string?,
@@ -766,7 +770,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	local shown_rows = ui.use_state(0)
 	-- The last search, to narrow from: its page, query and what it found
 	-- (before scopes).
-	local last: { page: Page?, q: string, found: { Item } } = { page = nil, q = "", found = {} }
+	local last: { page: Page?, q: string, found: { Item }, list: { Item }? } = { page = nil, q = "", found = {}, list = nil }
 	-- Where the highlight lands as the list changes: on the first row (a new
 	-- search, a new page), or kept where it is (anything else).
 	local last_query, last_depth, last_scope = nil :: string?, 0, ""
@@ -795,14 +799,14 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local placed = order_of(items)
 		if #terms == 0 then
 			pool = by_recency(items)
-		elseif last.page == p and last.q ~= "" and string.sub(q, 1, #last.q) == last.q then
+		elseif last.page == p and last.list == items and last.q ~= "" and string.sub(q, 1, #last.q) == last.q then
 			pool = last.found
 		end
 
 		-- (`rank`: the score, then when it last moved, as one number to sort
 		-- by: scores stay below 10^5 and times below 10^10, well inside a
 		-- double's exact range.)
-		type Hit = { item: Item, score: number, order: number, rank: number }
+		type Hit = { item: Item, score: number, order: number?, rank: number }
 		local n_all, n_kind = 0, { sessions = 0, commands = 0, settings = 0 } :: { [string]: number }
 		local found: { Hit } = {}
 		local matched: { Item } = {}
@@ -870,7 +874,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				end
 			end
 		end
-		last.page, last.q, last.found = p, q, if #terms > 0 then matched else {}
+		last.page, last.q, last.found, last.list = p, q, if #terms > 0 then matched else {}, items
 		hits_of = new_hits
 
 		-- Into sections: with nothing typed, pinned and recent first, then
@@ -917,7 +921,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			end
 			for _, h in found do
 				if not taken[h.item] then
-					table.insert(section(h.item.section, h.order).hits, h)
+					table.insert(section(h.item.section, h.order or 1e9).hits, h)
 				end
 			end
 			-- (The pool came most recent first: the sections take the page's
@@ -927,7 +931,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			end)
 		else
 			for _, h in found do
-				local s = section(h.item.section, h.order)
+				local s = section(h.item.section, h.order or 1e9)
 				table.insert(s.hits, h)
 				s.best = math.max(s.best, h.score)
 			end
@@ -936,7 +940,21 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					if a.rank ~= b.rank then
 						return a.rank > b.rank
 					end
-					return a.order < b.order
+					-- (Total: a hit without an order sorts after the ordered ones,
+					-- then by score and title.)
+					local ao, bo = a.order, b.order
+					if ao ~= bo then
+						if ao == nil then
+							return false
+						elseif bo == nil then
+							return true
+						end
+						return ao < bo
+					end
+					if a.score ~= b.score then
+						return a.score > b.score
+					end
+					return a.item.label < b.item.label
 				end)
 			end
 			table.sort(sections, function(a: Section, b: Section): boolean
@@ -1612,7 +1630,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				then Mark { name = s.agent, size = 14, bare = true }
 				else ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.disabled" }
 		elseif item.hue or item.src or item.emoji then
-			inner = Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = SLOT }
+			inner = Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = SLOT, project = item.project }
 		elseif item.mark then
 			inner = Mark { name = item.mark, size = 14, bare = true }
 		elseif item.icon then
@@ -1646,7 +1664,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			}
 		end
 		local t = s.time
-		local said = if type(t) == "number" then status.ago(os.time() - t) else t
+		local said = if type(t) == "number" then status.ago(status.since(t)) else t
 		if not said then
 			return nil
 		end
@@ -1790,7 +1808,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					)
 				end
 				if s.project then
-					part(Tile { label = s.project, hue = s.hue, src = s.src, emoji = s.emoji, size = 12 }, "project", s.project, s.branch == nil and s.device == nil)
+					part(Tile { label = s.project, hue = s.hue, src = s.src, emoji = s.emoji, size = 12, project = s.project_id }, "project", s.project, s.branch == nil and s.device == nil)
 				end
 				if s.branch then
 					part(ui.div { color = "$text.tertiary", Icon { name = "git-branch", size = 11 } }, "branch", s.branch, s.device == nil)
@@ -2058,10 +2076,10 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		-- Frosted: the palette's glass over a blur of the page under it.
 		-- Opaque: a solid card.
 		bg = function()
-			return if material.frosted:get() then "$zeron.palette.tint" else "$zeron.palette.solid"
+			return if material.see_through() then "$zeron.palette.tint" else "$zeron.palette.solid"
 		end,
 		backdrop_blur = function()
-			return if material.frosted:get() then "$zeron.menu.blur" else 0
+			return if material.see_through() then "$zeron.menu.blur" else 0
 		end,
 		border = 1,
 		border_color = "$border",

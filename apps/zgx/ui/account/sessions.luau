@@ -22,16 +22,30 @@
 --                          promise ({ emoji?, image?, hue? }; nil, its
 --                          default tile again)
 --   sessions.rename_device(id, name)  a promise (Settings → Devices)
+--   sessions.remove_device(id)  another of your devices off the account, on
+--                          every device: a promise, refused "here" (this
+--                          one), "online" (it's on now), "cloud", "outdated"
+--                          or "offline"; its sessions and projects stay
+--   sessions.rename_project_or_say(id, name)  rename_project, as a promise
 --   sessions.delete(id)    gone for good: a promise
+--   sessions.deleted_with(id)  what its delete takes with it: a promise of
+--                          { subagents, sides } (theirs in turn; archived too)
 --   sessions.link(id)      its Zeron conversation link: a promise
 --   sessions.collapse(id, folded)  a section of yours folded, everywhere
 --   sessions.seen(id)      its finished state seen, on every device
+--   sessions.sleep(id, until?)  asleep until `until` (Unix seconds), on every
+--                          device; none, awake (its host wakes it early when
+--                          it asks for you)
+--   sessions.stop(id)      its turn stopped, wherever it runs: a promise
+--   sessions.stop_waiting(id)  what its agent said it waits on no longer
+--                          holds it
 --   sessions.place(places) where sessions are put by hand, as the sidebar
 --                          has them now ({ pinned, sections })
 --
 -- A chat: { id, title, project?, device, branch?, cwd?, status?, updated,
 -- created, harness?, agent?, model? }: `status` the sidebar's state
--- ("working", "input", "failed", "done"), nil idle; `updated` and `created`
+-- ("working", "waiting" on background work that will wake it, "input",
+-- "failed", "done"), nil idle; `updated` and `created`
 -- Unix seconds; `agent` ds.Mark's name for its harness. A project: { id,
 -- name, device, path, git, github? }. A device: { id, name, platform, here }.
 
@@ -57,7 +71,14 @@ export type Chat = {
 	running_subagents: number?,
 	side_chats: number?,
 	working_side_chats: number?,
+	-- What its agent waits on after its turn (status "waiting").
+	waiting: { WaitingOn }?,
+	-- Put to sleep: until when; or, woken and not looked at since, when it
+	-- woke (Unix seconds).
+	sleep_until: number?,
+	woke: number?,
 }
+export type WaitingOn = { id: string, kind: string, label: string }
 -- A side chat: a chat under another (its `parent`).
 export type Child = {
 	id: string,
@@ -69,15 +90,20 @@ export type Child = {
 	created: number,
 	harness: string?,
 	agent: string?,
+	-- Started by a Zeron chat (through Zeron's tools), as a subagent or a
+	-- side chat: "subagent" | "side"; nil for one the person started.
+	child_kind: string?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.
 -- A project's chosen picture: an emoji, or an uploaded image's https URL,
 -- on a palette hue (each optional; none of them is no icon).
 export type ProjectIcon = { emoji: string?, image: string?, hue: string? }
-export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, icon: ProjectIcon? }
--- `online`: its presence heartbeat fresh (this device always); `seen`: its
--- last beat, in unix seconds, to judge that again as time passes.
+export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, repository: string?, created: number?, icon: ProjectIcon? }
+-- `online`: its presence heartbeat fresh (this device always), published
+-- again as that changes; `seen`: while it's away, its last beat, in unix
+-- seconds ("last seen …"; online, none: its beat moves every few seconds and
+-- shows nowhere).
 -- `cloud`: one of Cloud's (the account's, or a session's machine): never a
 -- device to pick.
 export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string?, cloud: boolean? }
@@ -110,6 +136,32 @@ M.now = ui.shared("sessions", {
 	places = { pinned = {}, sections = {} },
 	places_ready = false,
 } :: Now)
+
+-- Its parts, each followed on its own: a chat's message changes `chats`
+-- (every few seconds while chats run), and what reads only the projects,
+-- the devices or the places doesn't run again for it. Read one of these,
+-- not `now:get().projects`, where the part is all that's used.
+M.projects = ui.computed(function(): { Project }
+	return M.now:get().projects
+end)
+M.devices = ui.computed(function(): { Device }
+	return M.now:get().devices
+end)
+M.places = ui.computed(function(): Places
+	return M.now:get().places
+end)
+M.here = ui.computed(function(): string?
+	return M.now:get().here
+end)
+M.state = ui.computed(function(): string
+	return M.now:get().state
+end)
+M.archived = ui.computed(function(): { Chat }
+	return M.now:get().archived or {}
+end)
+M.connection = ui.computed(function(): string?
+	return M.now:get().connection
+end)
 
 local function quietly(): (any) -> ()
 	return function() end
@@ -155,6 +207,15 @@ function M.rename_device(id: string, name: string): any
 	return ui.call("sessions.rename_device", { id = id, name = name })
 end
 
+function M.remove_device(id: string): any
+	return ui.call("sessions.remove_device", id)
+end
+
+-- (Settings → Projects says when it didn't go; the sidebar's editor doesn't.)
+function M.rename_project_or_say(id: string, name: string): any
+	return ui.call("sessions.rename_project", { id = id, name = name })
+end
+
 -- Its Zeron conversation link (`zeron://open/chat/…`, the shipping app's,
 -- so either opens it): a promise; refused while it can't be known yet.
 function M.link(id: string): any
@@ -164,12 +225,30 @@ function M.delete(id: string): any
 	return ui.call("sessions.delete", id)
 end
 
+function M.deleted_with(id: string): any
+	return ui.call("sessions.deleted_with", id)
+end
+
 function M.collapse(id: string, folded: boolean)
 	ui.invoke("sessions.collapse", { id = id, collapsed = folded })
 end
 
 function M.seen(id: string)
 	ui.invoke("sessions.seen", id)
+end
+
+function M.sleep(id: string, until_at: number?): any
+	-- (`until` is Luau's word: a key spelled out.)
+	return ui.call("sessions.sleep", { id = id, ["until"] = until_at })
+end
+
+-- Its turn stopped, wherever it runs (the composer's Stop): a promise.
+function M.stop(id: string): any
+	return ui.call("chat.interrupt", id)
+end
+
+function M.stop_waiting(id: string): any
+	return ui.call("chat.stop_waiting", id)
 end
 
 function M.place(places: Places)

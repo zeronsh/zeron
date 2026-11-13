@@ -20,6 +20,7 @@
 
 local ds = require("@ds")
 local control = require("@ds/control")
+local token = require("@ds/token")
 local FilesPane = require("@ds/files_pane")
 local Workspace = require("@app/screens/files/workspace")
 local comments = require("@app/screens/files/comments")
@@ -55,9 +56,6 @@ export type Props = {
 	-- A file picked here that's open in another of the panel's tabs: that
 	-- tab is shown instead (true), this one left as it was.
 	open_elsewhere: ((path: string) -> boolean)?,
-	-- Whether the tree has room beside the file (the shell's fit); not
-	-- given, the pane decides by its own width (ds/files_pane `docked`).
-	docked: (() -> boolean)?,
 	-- Files carried with the chat's next message (the tree's row menu's Add
 	-- to Chat), in place of the chat page's own.
 	on_add_to_chat: ((paths: { string }, root: string?) -> ())?,
@@ -318,9 +316,10 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 		id = "files-pane",
 		hook = "files.pane",
 		shown = tree_shown,
+		-- Narrow with a file open, the tree over it: kept by the view, so a
+		-- pane made again shows it as it was.
+		over = ui.state(`files_tree_over:{v.id}`, false),
 		room = w.pane_room,
-		drawer = w.drawer,
-		docked = props.docked,
 		head = "line",
 		w_full = true,
 		grow = 1,
@@ -368,11 +367,11 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 		},
 		viewer = {
 			id = "file-viewer",
-			-- (What's under it, for plugins: the open file's path.)
+			-- (What's under it, for plugins: the open file, as a token.)
 			provide = {
 				file = ui.computed(function(): string?
 					local d = v.doc:get()
-					return if d then d.path else nil
+					return if d then token.file(d.path) else nil
 				end),
 			},
 			doc = v.doc,
@@ -448,9 +447,9 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 						-- (A string: the card says it in its name.)
 						-- zgx-lint: allow(untracked-get)
 						author = { id = "me", name = ui.t("files.comment.you"):get() },
-						at = os.time(),
+						-- (A draft that goes with your next message: no time,
+						-- and nothing to call it pending, every one is.)
 						body = b.body,
-						badge = ui.text { ui.t("files.comment.pending"), text_size = "$font.size.xs", color = "$text.tertiary" },
 						mine = true,
 						compact = true,
 						on_edit = function()
@@ -582,7 +581,7 @@ local Folder = ui.component(function(props: Props): Node
 	end
 	local box: { [any]: any } = {}
 	for k, v in props do
-		if k ~= "project" and k ~= "session" and k ~= "radius" and k ~= "children" and k ~= "view" and k ~= "on_open_in_new_tab" and k ~= "initial" and k ~= "docked" and k ~= "open_elsewhere" and k ~= "on_add_to_chat" and k ~= "escape_hint" then
+		if k ~= "project" and k ~= "session" and k ~= "radius" and k ~= "children" and k ~= "view" and k ~= "on_open_in_new_tab" and k ~= "initial" and k ~= "open_elsewhere" and k ~= "on_add_to_chat" and k ~= "escape_hint" then
 			box[k] = v
 		end
 	end

@@ -13,7 +13,7 @@ local TAB = `{NAV} >> role:tab "Greeter"`
 
 local function open(): any
 	local app = mount("plugin_settings_fixture.luau")
-	app:resize(1200, 900)
+	app:resize(1200, 940)
 	app:frames(30)
 	app:command("settings_stub.sign_in")
 	app:command("shell.settings")
@@ -76,9 +76,12 @@ test("a plugin's page is listed under Plugins while it's on, and goes when it's 
 	-- Drawn by Zeron from what it declares: its sections and every kind.
 	app:click(TAB)
 	app:frames(30)
-	for _, part in { 'heading "Greeter"', 'heading "Greeting"', 'heading "More"', 'switch "Show the greeting"', 'textbox "Greeting"', 'radio "Excited"', 'button "Where it shows"', 'textbox "Greet again every"', 'button "Change Wave shortcut, now ⌃⌥G"', 'button "Choose Postcards folder"' } do
+	for _, part in { 'heading "Greeter"', 'heading "Greeting"', 'heading "More"', 'switch "Show the greeting"', 'textbox "Greeting"', 'radio "Excited"', 'button "Where it shows"', 'textbox "Greet again every"', 'button "Choose Postcards folder"' } do
 		expect(app:tree(PAGE)).to_contain(part)
 	end
+	-- (Its keys as this platform writes them: ⌃⌥G, or Ctrl+Alt+G off a Mac.)
+	local page = app:tree(PAGE)
+	expect(page:find('button "Change Wave shortcut, now ⌃⌥G"', 1, true) ~= nil or page:find('button "Change Wave shortcut, now Ctrl+Alt+G"', 1, true) ~= nil).to_be(true)
 	-- Turned off while open: the page goes, and its row with it.
 	app:command("plugin_off")
 	app:frames(30)
@@ -236,6 +239,9 @@ test("permission rows are Zeron's own plugins' alone, every word Zeron's", funct
 	expect(app:tree(PAGE)).never.to_contain("Screen Recording")
 	app:command("snapper_on")
 	app:frames(20)
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
+	app:frames(10)
 	app:click(`{NAV} >> role:tab "Snapper"`)
 	app:frames(30)
 	local rec = app:tree("#setting-screen-recording")
@@ -257,6 +263,9 @@ test("Check again asks the host afresh", function()
 	local app = open()
 	app:command("snapper_on")
 	app:frames(20)
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
+	app:frames(10)
 	app:click(`{NAV} >> role:tab "Snapper"`)
 	app:frames(30)
 	expect(app:tree("#setting-screen-recording")).to_contain('"Required"')
@@ -278,6 +287,9 @@ test("a page says the plugin's own intro under its title, or Zeron's line", func
 	expect(app:tree(PAGE)).to_contain("Settings for the Greeter plugin.")
 	app:command("snapper_on")
 	app:frames(20)
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
+	app:frames(10)
 	app:click(`{NAV} >> role:tab "Snapper"`)
 	app:frames(30)
 	expect(app:tree(PAGE)).to_contain("Set up once, one permission at a time.")

@@ -118,13 +118,11 @@ pub fn hashes(files: &BTreeMap<String, Vec<u8>>) -> FileHashes {
 }
 
 /// A plain relative path: `/`-separated parts, none empty, `.` or `..`, and
-/// none starting with a dot (dot entries are never part of what's signed).
+/// none starting with a dot (dot entries are never part of what's signed);
+/// and one that stays in its folder on every system (no `C:`, device
+/// names or trailing dots: crates/plugin-guard's `path`).
 pub fn plain_path(rel: &str) -> bool {
-    !rel.is_empty()
-        && rel.len() <= 1024
-        && !rel.starts_with('/')
-        && !rel.contains(['\\', '\0'])
-        && rel.split('/').all(|part| !part.is_empty() && !part.starts_with('.'))
+    zeron_plugin_guard::path::is_safe(rel) && rel.split('/').all(|part| !part.starts_with('.'))
 }
 
 #[cfg(test)]
@@ -167,10 +165,28 @@ mod tests {
         assert_eq!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS).unwrap_err(), "unsigned");
     }
 
+    /// R9: a signed package naming a drive-relative path (`D:x.cmd`, or
+    /// `C:../…/Startup/x.cmd`), a device name or a trailing dot is refused
+    /// before anything is written: on Windows each would land outside the
+    /// staging folder.
+    #[test]
+    fn a_package_path_that_escapes_on_windows_is_refused() {
+        let (key, _) = SigningKey::generate().unwrap();
+        for bad in ["D:x.cmd", "C:../Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.cmd", "ui/NUL.luau", "init.luau.", "a:stream"] {
+            let mut files = BTreeMap::new();
+            files.insert("init.luau".to_string(), b"return 1".to_vec());
+            files.insert(bad.to_string(), b"evil".to_vec());
+            let manifest = key.sign_manifest(&json!({ "id": "p", "name": "P" }), &hashes(&files));
+            let raw = pack("zeron-plugin:v1", &manifest, &files).unwrap();
+            let refused = parse(raw, "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS);
+            assert!(refused.is_err_and(|e| e.starts_with("won't write")), "{bad}");
+        }
+    }
+
     #[test]
     fn plain_paths_only() {
         assert!(plain_path("init.luau") && plain_path("ui/badge.luau"));
-        for bad in ["", "/etc/x", "../x", "a/../b", ".git/config", "a//b", "a\\b"] {
+        for bad in ["", "/etc/x", "../x", "a/../b", ".git/config", "a//b", "a\\b", "D:x.cmd", "CON", "com1.luau", "a. ", "x."] {
             assert!(!plain_path(bad), "{bad}");
         }
     }

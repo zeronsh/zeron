@@ -13,16 +13,17 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zeron_doc::SessionCommandPayload;
+use zeron_doc::{SessionCommandPayload, TranscriptWindow};
 use zeron_proto::{
     AccessMode, Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
 mod plugins;
+mod themes;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
 
@@ -66,6 +67,8 @@ fn chat_key_schema(extra: Value) -> Value {
     json!({ "type": "object", "properties": properties, "required": ["chat"] })
 }
 
+const DEVICE_STATS: &str = "device_stats";
+
 fn device_schema() -> Value {
     json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
 }
@@ -81,6 +84,11 @@ fn catalog() -> Vec<ToolDef> {
             name: "list_devices",
             description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
             input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: DEVICE_STATS,
+            description: "One device's machine stats, asked live of that device (local when omitted): OS (name, version, kernel, architecture), CPU (model, physical and logical cores), memory (total and available bytes), storage (the volumes holding Zeron's data and the home folder, plus every local volume: mount point, filesystem, total/available/used bytes), GPU names where the platform says them cheaply, uptime, load average (Unix), battery, and the Zeron engine version. Any field is null when that machine can't say. Another device answers within about 5 s, or the error says it's offline (with when it was last seen) or its Zeron is too old. Reports are cached for 5 s.",
+            input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_projects",
@@ -125,19 +133,19 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["chat", "side"], "description": "chat: standalone, no parent allowed. side: requires parent or origin. Omit for legacy defaults." },
+                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. Omitted: subagent with a parent/origin, chat otherwise." },
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Prefers a connected provider, claude-code first." },
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
-                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to, and can't exceed, the access of the chat you are speaking from." },
+                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
                     "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
@@ -211,7 +219,7 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create multiple standalone or side chats concurrently (kind per request). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
+            "Create multiple chats concurrently: subagents of your chat by default, or side/standalone chats (kind per request, as create_chat). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
         ),
         (
             "send_messages",
@@ -268,7 +276,29 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["path"]
         }),
     });
+    tools.push(ToolDef {
+        name: WAIT_ON_BACKGROUND,
+        description: WAIT_ON_BACKGROUND_DESCRIPTION,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "task_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "The background tasks' ids, as your tools reported them."
+                },
+                "waiting": {
+                    "type": "boolean",
+                    "description": "false takes the marks back. Default true."
+                }
+            },
+            "required": ["task_ids"]
+        }),
+    });
     tools.extend(plugins::catalog());
+    tools.extend(themes::catalog());
     tools
 }
 
@@ -278,6 +308,20 @@ const SHOW_VISUAL: &str = "show_visual";
 
 /// Shows an image file in the CALLING chat; offered like `show_visual`.
 const SHOW_IMAGE: &str = "show_image";
+
+/// Says what the CALLING chat's agent waits on after its turn; offered like
+/// `show_visual`.
+const WAIT_ON_BACKGROUND: &str = "wait_on_background";
+
+const WAIT_ON_BACKGROUND_DESCRIPTION: &str = "\
+Say that you'll wait on background work you started, so this chat reads as waiting (not finished) \
+after your turn ends, until that work ends and you're woken to carry on. Pass the ids your tools \
+gave the background tasks (a background command says the id it runs under). Use it for work you'll \
+come back to: a test run, a build, a long check. Never for something you leave running on purpose \
+(a dev server, a file watcher): nothing is coming, and the chat would look busy. Background agents \
+you started are waited on already. `waiting: false` takes a mark back. It doesn't stop or change \
+the work. Refused where your runtime doesn't wake you when background work ends: wait for the work \
+inside your turn instead.";
 
 const SHOW_IMAGE_DESCRIPTION: &str = "\
 Show an image file (a screenshot, a rendered chart or diagram, a photo) inline in this chat, above \
@@ -406,6 +450,14 @@ chart5, chart6 (series, in order; \
 chart1 is the accent). They follow the reader's theme, light or dark, on frosted glass or an opaque \
 surface, so never assume a background color.\n\
 \n\
+Hover must not move the page. A visual sits in a transcript, so anything you show only while the \
+pointer is on something (a custom readout, a detail line, a hint, a row's or canvas's hover state) must \
+not change the visual's height, or everything under it jumps as the pointer crosses it. Reserve its \
+space at rest (a placeholder or an empty line of the same height, e.g. ui.text { s.picked or \" \" }), \
+or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or a scene point's hint). \
+Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
+never changes the chart's height.\n\
+\n\
 Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
 of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
 cards, tiles, boxed panels, banners, or canvas backgrounds. Stats are a row of plain ui.stat figures; \
@@ -518,6 +570,13 @@ struct ShowImageArgs {
 }
 
 #[derive(Deserialize)]
+struct WaitOnBackgroundArgs {
+    task_ids: Vec<String>,
+    #[serde(default)]
+    waiting: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct ShowVisualArgs {
     script: String,
     title: String,
@@ -556,6 +615,7 @@ struct ListChatsArgs {
 enum ChatKind {
     Chat,
     Side,
+    Subagent,
 }
 
 #[derive(Deserialize, Default)]
@@ -563,23 +623,41 @@ struct DeviceArgs {
     device: Option<String>,
 }
 
-/// Messages already in the transcript before a send. Replies are matched by
-/// id, not by time: `createdAt` is stamped on the host's clock, which can run
-/// behind the caller's when the chat lives on another device.
+/// Where a turn's replies start: the message that began it, whose id the
+/// sender chose. Replies are matched by position after it, not by time
+/// (`createdAt` is stamped on the host's clock, which can run behind the
+/// caller's when the chat lives on another device), and knowing it takes no
+/// read of the transcript, so nothing about the transcript can hold up a send.
 #[derive(Clone, Default)]
 struct TurnStart {
-    message_ids: Vec<String>,
+    after_message: Option<String>,
+}
+
+impl TurnStart {
+    fn window(&self) -> TranscriptWindow {
+        match &self.after_message {
+            Some(id) => TranscriptWindow::after(id.clone(), REPLIES_WINDOW),
+            None => TranscriptWindow::tail(REPLIES_WINDOW),
+        }
+    }
+}
+
+/// The most entries a wait reports as a turn's replies.
+const REPLIES_WINDOW: usize = 500;
+/// How long a finished turn's wait keeps trying a transcript it can't read.
+const FOLLOW_GRACE: Duration = Duration::from_secs(30);
+
+/// What [`Tools::deliver`] did: the tool's receipt, and the id the message
+/// will have in the transcript.
+struct Delivered {
+    receipt: Value,
+    message_id: String,
 }
 
 #[derive(Clone)]
 struct PendingTurn {
     baseline: Option<Session>,
     start: TurnStart,
-}
-
-/// Least to most trusting.
-fn access_rank(mode: AccessMode) -> usize {
-    AccessMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
 }
 
 #[derive(Deserialize, Default)]
@@ -718,6 +796,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
         "archived": chat.archived,
         "parentChatId": chat.parent_chat_id,
+        "childKind": chat.child_kind,
         "status": status,
         "sessionStatus": session.as_ref().map(|s| s.status),
         "statusStale": session.as_ref().is_some_and(|s| zeron_proto::view::session_stale(s, now)),
@@ -728,10 +807,6 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "lastMessagePreview": chat.last_message_preview,
         "createdAt": chat.created_at,
     })
-}
-
-fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
-    messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
 
 // ---- dispatch ----------------------------------------------------------------
@@ -751,11 +826,23 @@ impl Tools {
         self.zeron.origin().side_chats_only
     }
 
+    /// Whether this server's agent is offered `wait_on_background`: a
+    /// chat's, on a runtime that wakes it as background work ends.
+    pub fn waits_on_background(&self) -> bool {
+        let origin = self.zeron.origin();
+        origin.chat_id.is_some() && origin.waits_on_background
+    }
+
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
+        let waits = self.waits_on_background();
         catalog()
             .into_iter()
-            .filter(|tool| in_chat || ![SHOW_VISUAL, SHOW_IMAGE].contains(&tool.name))
+            .filter(|tool| match tool.name {
+                SHOW_VISUAL | SHOW_IMAGE => in_chat,
+                WAIT_ON_BACKGROUND => waits,
+                _ => true,
+            })
             .collect()
     }
 
@@ -769,6 +856,7 @@ impl Tools {
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
+            DEVICE_STATS => self.device_stats(parse(args)?).await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
@@ -785,12 +873,14 @@ impl Tools {
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
+            WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
             plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
             plugins::LIST_PLUGINS => return self.list_plugins().await,
             plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
             plugins::PLUGIN_STATUS => return self.plugin_status(args).await,
             plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
             plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
+            plugins::EXPORT_PLUGIN => return self.export_plugin(args).await,
             plugins::LIST_TEMPLATES
             | plugins::CREATE_TEMPLATE
             | plugins::USE_TEMPLATE
@@ -801,6 +891,9 @@ impl Tools {
             }
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
+            }
+            theme if themes::NAMES.contains(&theme) => {
+                return self.themes(theme, args).await;
             }
             plugin if is_plugin_tool_name(plugin) => {
                 return self.call_plugin_tool(plugin, args).await;
@@ -882,6 +975,35 @@ impl Tools {
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
             })).collect::<Vec<_>>()
+        }))
+    }
+
+    /// The chosen device's machine stats (`DeviceStats`, routed by
+    /// `targetDeviceId`). The engine words a remote failure (offline, too
+    /// old, no answer); only this engine lacking the method is said here.
+    async fn device_stats(&self, args: DeviceArgs) -> anyhow::Result<Value> {
+        let (devices, local) =
+            tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
+        let mut params = json!({});
+        if device != local {
+            params["targetDeviceId"] = json!(device);
+        }
+        let stats = match self
+            .zeron
+            .call_rpc(zeron_rpc::methods::DEVICE_STATS, params)
+            .await
+        {
+            Ok(stats) => stats,
+            Err(zeron_rpc::RpcError::UnknownMethod(_)) => anyhow::bail!(
+                "This device's running Zeron is too old to report stats: update Zeron and restart it"
+            ),
+            Err(error) => anyhow::bail!("{error}"),
+        };
+        let name = devices.iter().find(|d| d.id == device).map(|d| d.name.clone());
+        Ok(json!({
+            "device": { "id": device, "name": name, "local": device == local },
+            "stats": stats,
         }))
     }
 
@@ -987,20 +1109,26 @@ impl Tools {
 
     async fn get_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let (spaces, sessions, entries) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.transcript_on(&chat.id, Some(&chat.device_id))
-        )?;
-        let rendered = render_entries(&entries, RenderOptions::default());
+        let (spaces, sessions) = tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
         let mut summary = summarize_chat(&chat, &spaces, &sessions);
-        summary["messageCount"] = json!(rendered.len());
-        summary["pendingInput"] = if summary["statusStale"] == true {
-            Value::Null
-        } else {
-            last_pending_input(&rendered).unwrap_or(Value::Null)
-        };
-        summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
+        // The chat's facts don't depend on reaching its host.
+        match self
+            .zeron
+            .window_of(&chat, TranscriptWindow::tail(1))
+            .await
+        {
+            Ok(view) => {
+                let rendered = render_entries(&view.entries, RenderOptions::default());
+                summary["messageCount"] = json!(view.info.total);
+                summary["pendingInput"] = if summary["statusStale"] == true {
+                    Value::Null
+                } else {
+                    json!(view.info.pending_input)
+                };
+                summary["lastMessage"] = rendered.last().map(|m| json!(m)).unwrap_or(Value::Null);
+            }
+            Err(error) => summary["transcriptError"] = json!(format!("{error:#}")),
+        }
         Ok(summary)
     }
 
@@ -1027,20 +1155,25 @@ impl Tools {
             .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent))
         };
         anyhow::ensure!(
-            args.kind != Some(ChatKind::Side) || parent_chat_id.is_some(),
-            "kind side requires a parent or origin chat"
+            !matches!(args.kind, Some(ChatKind::Side | ChatKind::Subagent)) || parent_chat_id.is_some(),
+            "kind {} requires a parent or origin chat",
+            if args.kind == Some(ChatKind::Side) { "side" } else { "subagent" }
         );
-        let kind = if parent_chat_id.is_some() {
-            ChatKind::Side
-        } else {
-            ChatKind::Chat
+        // A child is a subagent unless asked for as a side chat: delegated
+        // work lists under its parent's Subagents, not its side chats.
+        let kind = match (args.kind, parent_chat_id.is_some()) {
+            (_, false) => ChatKind::Chat,
+            (Some(ChatKind::Side), true) => ChatKind::Side,
+            (_, true) => ChatKind::Subagent,
         };
 
         // Delegation is one level deep: a chat that has a parent never
         // creates chats, and a new chat's parent is a top-level chat.
-        // The calling chat's access mode caps the new one's: a supervised
-        // agent must not hand its work to one that asks nothing.
+        // The calling chat's sandbox and access cap the new one's: a
+        // supervised or sandboxed agent must not hand its work to one that
+        // asks nothing (the engine caps it again: rpc/agent_gate.rs).
         let mut ceiling = AccessMode::FullAccess;
+        let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
         {
@@ -1049,7 +1182,10 @@ impl Tools {
                 origin.parent_chat_id.is_none(),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
-            ceiling = origin.config.map(|c| c.access).unwrap_or_default();
+            if let Some(config) = origin.config {
+                ceiling = config.access;
+                sandbox_ceiling = config.sandbox;
+            }
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
@@ -1102,19 +1238,28 @@ impl Tools {
             Some(raw) => Some(parse_enum("reasoning level", raw).map_err(anyhow::Error::msg)?),
             None => None,
         };
-        let sandbox: SandboxLevel = match args.sandbox.as_deref() {
+        let asked_sandbox: SandboxLevel = match args.sandbox.as_deref() {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
-        let access: AccessMode = match args.access.as_deref() {
+        let asked_access: AccessMode = match args.access.as_deref() {
             Some(raw) => parse_enum("access", raw).map_err(anyhow::Error::msg)?,
             None => ceiling,
         };
-        anyhow::ensure!(
-            access_rank(access) <= access_rank(ceiling),
-            "This chat runs {}, so the chats it creates can't have more access than that.",
-            ceiling.label()
-        );
+        // Never more than this chat's own: lowered, and the reply says so.
+        let (sandbox, access, capped) =
+            zeron_proto::cap_access((asked_sandbox, asked_access), (sandbox_ceiling, ceiling));
+        let capped = capped.then(|| {
+            format!(
+                "This chat runs {} in a {} sandbox, so the new chat runs with no more: {}, {} sandbox (asked {}, {}).",
+                ceiling.label(),
+                sandbox_ceiling.label(),
+                access.label(),
+                sandbox.label(),
+                asked_access.label(),
+                asked_sandbox.label(),
+            )
+        });
         // A Cloud machine's catalog is checked when it runs, not here; an
         // engine predating modes lists none and runs with full access.
         if let Some(info) = harnesses.iter().find(|h| h.id == harness).filter(|_| !args.cloud) {
@@ -1152,6 +1297,10 @@ impl Tools {
         }
         if let Some(parent) = &parent_chat_id {
             mutate["parentChatId"] = json!(parent);
+            mutate["childKind"] = json!(match kind {
+                ChatKind::Side => zeron_proto::ChildKind::Side,
+                _ => zeron_proto::ChildKind::Subagent,
+            });
         }
         if let Some(branch) = args
             .branch
@@ -1230,6 +1379,9 @@ impl Tools {
             "title": args.title,
             "parentChatId": parent_chat_id,
         });
+        if let Some(capped) = &capped {
+            result["accessCapped"] = json!(capped);
+        }
         if signed_out {
             result["warning"] = json!(format!(
                 "{harness:?} does not look signed in on this device, so its first turn may fail. Pick a connected harness (list_harnesses) if it does."
@@ -1255,18 +1407,25 @@ impl Tools {
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 parent_chat_id: parent_chat_id.clone(),
+                child_kind: match kind {
+                    ChatKind::Side => Some(zeron_proto::ChildKind::Side),
+                    ChatKind::Subagent => Some(zeron_proto::ChildKind::Subagent),
+                    ChatKind::Chat => None,
+                },
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
+                sleep: None,
             };
-            let sent = self
+            let delivered = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
                 .await?;
-            result["sent"] = sent;
+            result["sent"] = delivered.receipt;
             let pending = Arc::new(PendingTurn {
                 baseline: None,
-                // A new chat has no earlier messages.
-                start: TurnStart::default(),
+                start: TurnStart {
+                    after_message: Some(delivered.message_id),
+                },
             });
             self.pending_turns
                 .lock()
@@ -1283,31 +1442,36 @@ impl Tools {
 
     async fn read_chat(&self, args: ReadChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let entries = self
+        let limit = args.limit.unwrap_or(40).clamp(1, 500);
+        let view = self
             .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
+            .window_of(
+                &chat,
+                TranscriptWindow {
+                    limit,
+                    offset: args.offset,
+                    after: None,
+                },
+            )
             .await?;
         let rendered = render_entries(
-            &entries,
+            &view.entries,
             RenderOptions {
                 include_reasoning: args.include_reasoning,
                 include_tools: args.include_tools.unwrap_or(true),
             },
         );
-        let total = rendered.len();
-        let limit = args.limit.unwrap_or(40).clamp(1, 500);
-        let end = total.saturating_sub(args.offset);
-        let start = end.saturating_sub(limit);
-        let window = &rendered[start..end];
+        let total = view.info.total;
+        let start = view.info.start;
         Ok(json!({
             "chatId": chat.id,
             "title": chat.title,
             "total": total,
-            "returned": window.len(),
+            "returned": rendered.len(),
             "olderRemaining": start,
-            "newerSkipped": total - end,
-            "pendingInput": last_pending_input(&rendered),
-            "messages": window,
+            "newerSkipped": total - start - view.entries.len(),
+            "pendingInput": view.info.pending_input,
+            "messages": rendered,
         }))
     }
 
@@ -1323,44 +1487,52 @@ impl Tools {
                 short(&chat.id)
             );
         }
-        let (spaces, sessions, harnesses) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.harnesses_on(Some(&chat.device_id))
-        )?;
+        let (spaces, sessions) = tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
+        // Only a chat with no harness of its own needs its host's catalog:
+        // the others are delivered through the doc, host reachable or not.
+        let harnesses = if chat.config.is_some() {
+            Vec::new()
+        } else {
+            self.zeron.harnesses_on(Some(&chat.device_id)).await?
+        };
         let space = chat
             .space_id
             .as_deref()
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
         let mode = args.mode.as_deref().unwrap_or("auto");
-        let message_ids = self
-            .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
-            .await?
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
         let body = self.attribute(&chat, text).await;
         let mut result = json!({
             "chatId": chat.id,
             "title": chat.title,
         });
-        result["sent"] = self
+        let delivered = self
             .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
             .await?;
+        result["sent"] = delivered.receipt;
         let pending = Arc::new(PendingTurn {
             baseline,
-            start: TurnStart { message_ids },
+            start: TurnStart {
+                after_message: Some(delivered.message_id),
+            },
         });
         self.pending_turns
             .lock()
             .await
             .insert(chat.id.clone(), pending.clone());
         if args.wait {
+            // The message is on its way: not being able to watch the turn
+            // must not read as not having sent it.
             result["turn"] = self
                 .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
-                .await?;
+                .await
+                .unwrap_or_else(|error| {
+                    json!({
+                        "outcome": "unknown",
+                        "followError": format!("{error:#}"),
+                        "replies": [],
+                    })
+                });
         }
         Ok(result)
     }
@@ -1452,6 +1624,36 @@ impl Tools {
         }))
     }
 
+    async fn wait_on_background(&self, args: WaitOnBackgroundArgs) -> anyhow::Result<Value> {
+        let chat_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("wait_on_background only works from an agent Zeron launched in a chat")?;
+        let waiting = args.waiting.unwrap_or(true);
+        let marked = self
+            .zeron
+            .call(
+                zeron_rpc::methods::AWAIT_BACKGROUND,
+                json!({ "chatId": chat_id, "taskIds": args.task_ids, "waiting": waiting }),
+            )
+            .await?;
+        let none_matched = marked["matched"].as_array().is_none_or(Vec::is_empty);
+        let message = if none_matched {
+            "None of those are running background tasks of yours now (they may have ended): nothing is waited on."
+        } else if waiting {
+            "This chat reads as waiting on that work after your turn, until it ends and you're woken."
+        } else {
+            "No longer waited on."
+        };
+        Ok(json!({
+            "matched": marked["matched"],
+            "unmatched": marked["unmatched"],
+            "message": message,
+        }))
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -1465,22 +1667,16 @@ impl Tools {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let request_id = match args.request_id {
             Some(id) => id,
-            None => {
-                let entries = self
-                    .zeron
-                    .transcript_on(&chat.id, Some(&chat.device_id))
-                    .await?;
-                let rendered = render_entries(&entries, RenderOptions::default());
-                last_pending_input(&rendered)
-                    .and_then(|p| {
-                        p.get("requestId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("chat {} has no pending question", short(&chat.id))
-                    })?
-            }
+            None => self
+                .zeron
+                .window_of(&chat, TranscriptWindow::tail(1))
+                .await?
+                .info
+                .pending_input
+                .map(|p| p.request_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("chat {} has no pending question", short(&chat.id))
+                })?,
         };
         if args.answers.is_empty() {
             anyhow::bail!("answers is empty");
@@ -1541,7 +1737,7 @@ impl Tools {
         session: Option<&Session>,
         text: String,
         mode: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<Delivered> {
         let harness = chat
             .config
             .as_ref()
@@ -1563,7 +1759,8 @@ impl Tools {
             "run" | "steer" | "queue" => mode,
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
-        let id = match chosen {
+        let new_message_id = uuid::Uuid::new_v4().to_string();
+        let (id, message_id) = match chosen {
             "run" => {
                 let config = chat.config.clone();
                 let cwd = chat
@@ -1595,34 +1792,45 @@ impl Tools {
                     env: Default::default(),
                     extra_mcp: Vec::new(),
                 };
-                self.zeron
+                let id = self
+                    .zeron
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Run {
                             request,
-                            message_id: uuid::Uuid::new_v4().to_string(),
+                            message_id: new_message_id.clone(),
                         },
                     )
-                    .await?
+                    .await?;
+                (id, new_message_id)
             }
             "steer" => {
-                self.zeron
+                let id = self
+                    .zeron
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Steer {
                             prompt: text,
-                            message_id: Some(uuid::Uuid::new_v4().to_string()),
+                            message_id: Some(new_message_id.clone()),
                         },
                     )
-                    .await?
+                    .await?;
+                (id, new_message_id)
             }
-            _ => self.zeron.queue_message(&chat.id, &text).await?,
+            // A held message keeps its row's id when it's sent.
+            _ => {
+                let id = self.zeron.queue_message(&chat.id, &text).await?;
+                (id.clone(), id)
+            }
         };
-        Ok(json!({
-            "delivery": chosen,
-            "id": id,
-            "chatStatusAtSend": status,
-        }))
+        Ok(Delivered {
+            receipt: json!({
+                "delivery": chosen,
+                "id": id,
+                "chatStatusAtSend": status,
+            }),
+            message_id,
+        })
     }
 
     async fn await_pending_turn(
@@ -1668,36 +1876,68 @@ impl Tools {
             .zeron
             .wait_for_turn(chat, baseline, expect_turn, timeout)
             .await?;
-        // Registry session updates can arrive before the separate transcript doc.
-        // Keep the same deadline while waiting for a response to this send.
-        let mut rendered = Vec::new();
-        let mut replies = Vec::new();
+        // Registry session updates can arrive before the separate transcript
+        // doc: follow it until the reply lands, inside the same deadline.
+        let mut pending_input = None;
+        let mut replies: Vec<RenderedMessage> = Vec::new();
+        let mut follow = None;
+        let mut transcript_error: Option<String> = None;
+        let mut failing_since: Option<Instant> = None;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                if outcome == TurnOutcome::Completed && expect_turn {
+                if outcome == TurnOutcome::Completed && expect_turn && transcript_error.is_none() {
                     outcome = TurnOutcome::TimedOut;
                 }
                 break;
             }
-            let entries = match tokio::time::timeout(
-                remaining,
-                self.zeron.transcript_on(&chat.id, Some(&chat.device_id)),
-            )
-            .await
-            {
-                Ok(entries) => entries?,
-                Err(_) => {
-                    outcome = TurnOutcome::TimedOut;
-                    break;
+            let next = tokio::time::timeout(remaining, async {
+                if follow.is_none() {
+                    follow = Some(
+                        self.zeron
+                            .follow_transcript(&chat.id, Some(&chat.device_id), start.window())
+                            .await?,
+                    );
                 }
+                match follow.as_mut() {
+                    Some(follow) => follow.next().await,
+                    None => Ok(()),
+                }
+            })
+            .await;
+            match next {
+                Err(_) => continue, // Out of time: the top of the loop settles it.
+                Ok(Err(error)) => {
+                    // A stream that ends after reading fine is a lifecycle
+                    // boundary (the same contract as the UI's): attach again.
+                    if follow.take().is_some_and(|f: TranscriptFollow| f.opened()) {
+                        tokio::time::sleep(Duration::from_millis(300).min(remaining)).await;
+                        continue;
+                    }
+                    // Not the send's failure. Say so if it doesn't come back.
+                    transcript_error = Some(format!("{error:#}"));
+                    let since = *failing_since.get_or_insert_with(Instant::now);
+                    if !expect_turn
+                        || outcome != TurnOutcome::Completed
+                        || since.elapsed() >= FOLLOW_GRACE
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(300).min(remaining)).await;
+                    continue;
+                }
+                Ok(Ok(())) => {
+                    transcript_error = None;
+                    failing_since = None;
+                }
+            }
+            let Some(view) = follow.as_ref().map(|f| f.view()) else {
+                continue;
             };
-            rendered = render_entries(&entries, RenderOptions::default());
-            replies = rendered
-                .iter()
+            pending_input = view.info.pending_input.map(|p| json!(p));
+            replies = render_entries(&view.entries, RenderOptions::default())
+                .into_iter()
                 .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
-                .filter(|m| !start.message_ids.contains(&m.id))
-                .cloned()
                 .collect();
             if !expect_turn
                 || outcome != TurnOutcome::Completed
@@ -1707,14 +1947,13 @@ impl Tools {
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100).min(remaining)).await;
         }
         let now = chrono::Utc::now();
         let status = zeron_proto::view::display_status(chat, session.as_ref(), now);
         let stale = session
             .as_ref()
             .is_some_and(|s| zeron_proto::view::session_stale(s, now));
-        Ok(json!({
+        let mut turn = json!({
             "outcome": outcome,
             "status": status,
             "sessionStatus": session.as_ref().map(|s| s.status),
@@ -1722,9 +1961,13 @@ impl Tools {
             "statusStale": stale,
             "terminalActivity": session.as_ref().and_then(|s| s.terminal_activity.as_ref()),
             "timedOut": outcome == TurnOutcome::TimedOut,
-            "pendingInput": if stale { None } else { last_pending_input(&rendered) },
+            "pendingInput": if stale { None } else { pending_input },
             "replies": replies,
-        }))
+        });
+        if let Some(error) = transcript_error {
+            turn["transcriptError"] = json!(error);
+        }
+        Ok(turn)
     }
 }
 
@@ -1774,9 +2017,14 @@ mod tests {
         accounts: Option<Value>,
         remote_accounts: Option<Value>,
         beta_remote: bool,
+        /// `dev-remote` is asleep: every read addressed to it fails, the way
+        /// a dial to a sleeping Cloud machine does.
+        remote_dark: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// `DeviceStats` reply; absent = an engine without the method.
+        stats: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1799,6 +2047,15 @@ mod tests {
                 }
             }
             let remote = params["targetDeviceId"] == "dev-remote";
+            if remote && self.remote_dark && method != methods::LIST_HARNESSES {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                return Err(RpcError::Transport(
+                    "peer dev-remote: device is offline (no recent presence)".into(),
+                ));
+            }
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
                 methods::ENGINE_INFO => RpcReply::Value(json!({
@@ -1919,6 +2176,13 @@ mod tests {
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
+                methods::DEVICE_STATS if self.stats.is_some() => {
+                    self.reads
+                        .lock()
+                        .unwrap()
+                        .push((method.into(), params.clone()));
+                    RpcReply::Value(self.stats.clone().unwrap_or_default())
+                }
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -1940,6 +2204,56 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn device_stats_asks_the_chosen_device_and_names_it() {
+        let def = catalog().into_iter().find(|d| d.name == DEVICE_STATS).expect("listed");
+        assert_eq!(def.input_schema["properties"]["device"]["type"], "string");
+        assert!(def.input_schema.get("required").is_none(), "device is optional");
+
+        let stats = json!({
+            "os": { "name": "Darwin", "arch": "arm64" },
+            "memory": { "totalBytes": 34359738368u64, "availableBytes": null },
+            "zeron": { "engineVersion": "0.2.139" }
+        });
+        let world = Arc::new(World { stats: Some(stats.clone()), ..Default::default() });
+        let tools = tools(world.clone(), Origin::default());
+        assert!(tools.has(DEVICE_STATS));
+
+        // Local: no target, the engine answers for itself.
+        let local = tools.call(DEVICE_STATS, json!({})).await.unwrap();
+        assert_eq!(local["device"], json!({ "id": "dev-local", "name": "Laptop", "local": true }));
+        assert_eq!(local["stats"], stats, "the report passes through as is, nulls kept");
+        // By name: routed to that device.
+        let remote = tools.call(DEVICE_STATS, json!({ "device": "worker" })).await.unwrap();
+        assert_eq!(remote["device"], json!({ "id": "dev-remote", "name": "Worker", "local": false }));
+        let reads = world.reads.lock().unwrap().clone();
+        let targets: Vec<&Value> = reads
+            .iter()
+            .filter(|(m, _)| m == methods::DEVICE_STATS)
+            .map(|(_, p)| &p["targetDeviceId"])
+            .collect();
+        assert_eq!(targets, [&Value::Null, &json!("dev-remote")]);
+
+        // Not one of this account's devices: refused before anything is asked.
+        let error = tools.call(DEVICE_STATS, json!({ "device": "someone-elses" })).await.unwrap_err();
+        assert!(error.contains("no device matches"), "{error}");
+        assert_eq!(world.reads.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn device_stats_says_when_a_device_is_away_or_this_engine_is_old() {
+        let dark = Arc::new(World { stats: Some(json!({})), remote_dark: true, ..Default::default() });
+        let error = tools(dark, Origin::default())
+            .call(DEVICE_STATS, json!({ "device": "dev-remote" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("offline"), "{error}");
+
+        let old = Arc::new(World::default());
+        let error = tools(old, Origin::default()).call(DEVICE_STATS, json!({})).await.unwrap_err();
+        assert!(error.contains("too old to report stats"), "{error}");
     }
 
     #[test]
@@ -2006,6 +2320,7 @@ mod tests {
         let world = Arc::new(World::default());
         let outside = tools(world.clone(), Origin::default());
         assert!(!outside.has("show_image"));
+        assert!(!outside.has("wait_on_background"), "a wait is a chat's agent's to say");
         assert!(
             outside
                 .call("show_image", json!({ "path": path }))
@@ -2022,6 +2337,8 @@ mod tests {
             },
         );
         assert!(inside.has("show_image"));
+        // (Offered only where the runtime wakes its agent: its own test.)
+        assert!(!inside.has("wait_on_background"));
         let shown = inside
             .call("show_image", json!({ "path": path }))
             .await
@@ -2223,6 +2540,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            waiting: None,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
@@ -2236,7 +2554,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(sent["delivery"], "steer");
+        assert_eq!(sent.receipt["delivery"], "steer");
         let writes = world.writes.lock().unwrap();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, methods::QUEUE_COMMAND);
@@ -2425,6 +2743,45 @@ mod tests {
         assert!(world.writes.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn wait_on_background_is_offered_only_where_the_runtime_wakes_its_agent() {
+        let world = Arc::new(World::default());
+        let offered = |chat: Option<&str>, waits: bool| {
+            let tools = tools(
+                world.clone(),
+                Origin {
+                    chat_id: chat.map(str::to_owned),
+                    waits_on_background: waits,
+                    ..Default::default()
+                },
+            );
+            (tools.has("wait_on_background"), tools.waits_on_background())
+        };
+        // A chat on a runtime that brings its agent back (Claude Code, Muse).
+        assert_eq!(offered(Some("chat-alpha-1"), true), (true, true));
+        // A chat on one that doesn't (Codex): a turn that ends is the agent
+        // done, so there's nothing to say.
+        assert_eq!(offered(Some("chat-alpha-1"), false), (false, false));
+        // No chat at all.
+        assert_eq!(offered(None, true), (false, false));
+        // Not offered, not callable either.
+        let codex = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                ..Default::default()
+            },
+        );
+        let call = crate::jsonrpc::handle_request(
+            &codex,
+            json!(1),
+            "tools/call",
+            json!({ "name": "wait_on_background", "arguments": { "task_ids": ["b1"] } }),
+        )
+        .await;
+        assert!(call["error"]["message"].as_str().unwrap().contains("unknown tool"), "{call}");
+    }
+
     fn origin(chat: &str) -> Origin {
         Origin {
             chat_id: Some(chat.into()),
@@ -2455,21 +2812,24 @@ mod tests {
             .call("create_chat", json!({"access": "supervised", "plan": true}))
             .await
             .unwrap();
-        let err = tools
-            .call("create_chat", json!({"access": "full-access"}))
+        // Asking for more is lowered to its own, silently, and said in the
+        // reply: no full-access child, no wider sandbox.
+        let capped = tools
+            .call("create_chat", json!({"access": "full-access", "sandbox": "danger-full-access"}))
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("can't have more access"), "{err}");
+            .unwrap();
+        assert!(capped["accessCapped"].as_str().unwrap().contains("no more"), "{capped}");
         let writes = world.writes.lock().unwrap();
         let created: Vec<&Value> = writes
             .iter()
             .filter(|(_, w)| w["op"] == "createChat")
             .map(|(_, w)| w)
             .collect();
-        assert_eq!(created.len(), 2);
+        assert_eq!(created.len(), 3);
         assert_eq!(created[0]["config"]["access"], "supervised", "inherited");
         assert_eq!(created[1]["config"]["plan"], true);
+        assert_eq!(created[2]["config"]["access"], "supervised", "capped");
+        assert_eq!(created[2]["config"]["sandbox"], "workspace-write", "capped");
         drop(writes);
         // A top-level chat with no mode of its own runs with full access,
         // which its chats inherit (the field is omitted on the wire).
@@ -2697,11 +3057,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kinds_preserve_defaults_and_reject_invalid_arguments_before_writing() {
+    async fn kinds_default_children_to_subagents_and_reject_invalid_arguments_before_writing() {
         let world = Arc::new(World::default());
         let root = tools(world.clone(), Origin::default());
         for args in [
             json!({"kind":"side"}),
+            json!({"kind":"subagent"}),
             json!({"kind":"unknown"}),
             json!({"kind":"chat", "parent":"Alpha", "title":"must not write"}),
         ] {
@@ -2720,8 +3081,11 @@ mod tests {
             (json!({"kind":"chat"}), "chat", Value::Null),
             (json!({"kind":"chat", "parent":"  "}), "chat", Value::Null),
             (json!({"kind":"side"}), "side", json!("chat-alpha-1")),
-            (json!({}), "side", json!("chat-alpha-1")),
-            (json!({"parent":"Beta"}), "side", json!("chat-beta-2")),
+            (json!({"kind":"subagent"}), "subagent", json!("chat-alpha-1")),
+            // A child of your own chat, kind omitted: a subagent.
+            (json!({}), "subagent", json!("chat-alpha-1")),
+            (json!({"parent":"Beta"}), "subagent", json!("chat-beta-2")),
+            (json!({"kind":"side", "parent":"Beta"}), "side", json!("chat-beta-2")),
         ] {
             let created = from_chat.call("create_chat", args).await.unwrap();
             assert_eq!(created["kind"], kind);
@@ -2730,8 +3094,11 @@ mod tests {
             let row = &writes.last().unwrap().1;
             if kind == "chat" {
                 assert!(row.get("parentChatId").is_none());
+                assert!(row.get("childKind").is_none());
             } else {
                 assert_eq!(row["parentChatId"], parent);
+                // The row says what the child is to its parent.
+                assert_eq!(row["childKind"], kind);
             }
         }
         assert_eq!(
@@ -2743,6 +3110,11 @@ mod tests {
                 .await
                 .unwrap()["kind"],
             "side"
+        );
+        // An explicit parent from outside any chat: a subagent of it.
+        assert_eq!(
+            root.call("create_chat", json!({"parent":"Alpha"})).await.unwrap()["kind"],
+            "subagent"
         );
     }
 
@@ -2943,6 +3315,10 @@ mod tests {
         sent: Mutex<Option<(i64, Instant, String)>>,
         reply_delay: Duration,
         never_reply: bool,
+        /// The id the send gave its message, as the host stores it.
+        message_id: Mutex<Option<String>>,
+        /// The transcript stream ends at once, like a link that drops.
+        no_transcript: bool,
         /// Host clock offset: a remote engine stamps createdAt on its own clock.
         host_skew_millis: i64,
     }
@@ -2968,6 +3344,8 @@ mod tests {
                     Ok(stream(rows))
                 }
                 methods::QUEUE_COMMAND => {
+                    *self.message_id.lock().unwrap() =
+                        params["command"]["messageId"].as_str().map(str::to_owned);
                     let reply = self.world.handle(method, params.clone()).await?;
                     *self.sent.lock().unwrap() = Some((
                         now_millis(),
@@ -3004,6 +3382,15 @@ mod tests {
                             "deviceId":"dev-remote", "status":"complete", "parts":[{"kind":"text", "id":"t", "text":"old reply"}]
                         }));
                     }
+                    if let Some(message_id) = self.message_id.lock().unwrap().clone() {
+                        messages.as_array_mut().unwrap().push(json!({
+                            "id":message_id, "role":"user", "createdAt":0, "deviceId":"dev-local",
+                            "parts":[{"kind":"text", "id":"t", "text":"go"}]
+                        }));
+                    }
+                    if self.no_transcript {
+                        return Ok(RpcReply::Stream(futures::stream::empty().boxed()));
+                    }
                     if let Some((timestamp, started, _)) = sent
                         && started.elapsed() >= self.reply_delay
                         && !self.never_reply
@@ -3020,6 +3407,37 @@ mod tests {
         }
     }
 
+    /// A sleeping host can't be read, and only a send wakes it: the send must go
+    /// out through this engine's doc regardless, and reading the chat falls back
+    /// to the local replica.
+    #[tokio::test]
+    async fn a_send_to_a_sleeping_host_still_goes_out() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            remote_dark: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let result = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .unwrap();
+        assert_eq!(result["sent"]["delivery"], "run");
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::QUEUE_COMMAND);
+            assert!(params.get("targetDeviceId").is_none(), "a local doc write, which wakes the host");
+        }
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(read["total"].as_u64().unwrap() > 0);
+        let info = tools.call("get_chat", json!({"chat":"Beta"})).await.unwrap();
+        assert!(info["messageCount"].as_u64().unwrap() > 0);
+    }
+
     #[tokio::test]
     async fn wait_allows_a_missing_session_and_a_late_remote_transcript() {
         for create in [true, false] {
@@ -3031,6 +3449,8 @@ mod tests {
                 sent: Mutex::new(None),
                 reply_delay: Duration::from_millis(450),
                 never_reply: false,
+                message_id: Mutex::new(None),
+                no_transcript: false,
                 host_skew_millis: 0,
             });
             let tools = Tools::new(Arc::new(Zeron::with_client(
@@ -3070,6 +3490,8 @@ mod tests {
                 sent: Mutex::new(None),
                 reply_delay: Duration::from_millis(450),
                 never_reply: false,
+                message_id: Mutex::new(None),
+                no_transcript: false,
                 host_skew_millis: 0,
             });
             let tools = Tools::new(Arc::new(Zeron::with_client(
@@ -3106,6 +3528,74 @@ mod tests {
         }
     }
 
+    /// The bug this guards against: a transcript that can't be read (a long
+    /// chat over a bad link) must neither stop a send nor make it look failed.
+    #[tokio::test]
+    async fn an_unreadable_transcript_never_makes_a_send_fail() {
+        let service = Arc::new(DelayedTurn {
+            world: World {
+                beta_remote: true,
+                ..Default::default()
+            },
+            sent: Mutex::new(None),
+            reply_delay: Duration::ZERO,
+            never_reply: false,
+            message_id: Mutex::new(None),
+            no_transcript: true,
+            host_skew_millis: 0,
+        });
+        let tools = Tools::new(Arc::new(Zeron::with_client(
+            memory_client(service.clone()),
+            Origin::default(),
+        )));
+        let sent = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .expect("delivery reads nothing");
+        assert_eq!(sent["sent"]["delivery"], "run");
+        assert!(service.sent.lock().unwrap().is_some());
+
+        let waited = tools
+            .call(
+                "send_message",
+                json!({"chat":"Beta", "text":"go", "wait":true, "timeout_secs":1}),
+            )
+            .await
+            .expect("a wait that can't follow the turn doesn't undo the send");
+        assert_eq!(waited["sent"]["delivery"], "run", "{waited}");
+        assert!(
+            waited["turn"]["transcriptError"]
+                .as_str()
+                .is_some_and(|e| e.contains("stream ended")),
+            "{waited}"
+        );
+        assert_eq!(waited["turn"]["replies"], json!([]));
+
+        // The chat's facts still come back, with why the rest didn't.
+        let chat = tools
+            .call("get_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(chat["transcriptError"].is_string(), "{chat}");
+        assert_eq!(chat["id"], "chat-beta-2");
+    }
+
+    /// A host from before windows ignores the param and sends everything: the
+    /// reader takes the same slice, so an old host and a new one read alike.
+    #[tokio::test]
+    async fn an_older_host_sending_everything_reads_the_same_as_a_window() {
+        let world = Arc::new(World::default());
+        let tools = tools(world, Origin::default());
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta", "limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(read["total"], 2);
+        assert_eq!(read["returned"], 1);
+        assert_eq!(read["olderRemaining"], 1);
+        assert_eq!(read["messages"][0]["id"], "a1");
+    }
+
     /// A remote host stamps replies on its own clock. One running behind the
     /// caller must not hide the reply to this send.
     #[tokio::test]
@@ -3119,6 +3609,8 @@ mod tests {
                 sent: Mutex::new(None),
                 reply_delay: Duration::from_millis(100),
                 never_reply: false,
+                message_id: Mutex::new(None),
+                no_transcript: false,
                 host_skew_millis: -30_000,
             });
             let tools = Tools::new(Arc::new(Zeron::with_client(
@@ -3151,6 +3643,8 @@ mod tests {
                 ..Default::default()
             },
             sent: Mutex::new(None),
+            message_id: Mutex::new(None),
+            no_transcript: false,
             reply_delay: Duration::ZERO,
             never_reply: true,
             host_skew_millis: 0,
@@ -3182,6 +3676,8 @@ mod tests {
                     sent: Mutex::new(None),
                     reply_delay: Duration::from_millis(450),
                     never_reply: false,
+                    message_id: Mutex::new(None),
+                    no_transcript: false,
                     host_skew_millis,
                 });
                 let tools = Tools::new(Arc::new(Zeron::with_client(

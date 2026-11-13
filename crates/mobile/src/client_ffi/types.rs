@@ -78,6 +78,10 @@ pub struct CoreConfig {
     /// `ios` / `android`.
     pub platform: String,
     pub app_version: String,
+    /// Run the relay layer (docs/design/relay-mobile.md). Off, this device sends what
+    /// a shipped phone does, and holds its account's chats on stored rows.
+    #[uniffi(default = false)]
+    pub relay_layer: bool,
 }
 
 impl From<CoreConfig> for zc::ClientConfig {
@@ -89,6 +93,7 @@ impl From<CoreConfig> for zc::ClientConfig {
             device_name: c.device_name,
             platform: c.platform,
             app_version: c.app_version,
+            relay_layer: c.relay_layer,
         }
     }
 }
@@ -382,6 +387,9 @@ impl From<zc::ClientEvent> for ClientEvent {
 pub enum ChatIndicator {
     Working,
     AwaitingInput,
+    /// Its turn ended, and the agent waits on background work that will
+    /// wake it: under way, never "done". Drawn as Working.
+    Waiting,
     Errored,
     /// Finished but not seen yet on any device.
     Completed,
@@ -392,6 +400,7 @@ impl From<zc::ChatIndicator> for ChatIndicator {
     fn from(i: zc::ChatIndicator) -> Self {
         match i {
             zc::ChatIndicator::Working => ChatIndicator::Working,
+            zc::ChatIndicator::Waiting => ChatIndicator::Waiting,
             zc::ChatIndicator::AwaitingInput => ChatIndicator::AwaitingInput,
             zc::ChatIndicator::Errored => ChatIndicator::Errored,
             zc::ChatIndicator::Completed => ChatIndicator::Completed,
@@ -509,6 +518,14 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
+    /// Asleep until then (ms; the Activity view's Asleep). `None` when
+    /// awake or woken.
+    pub sleep_until_ms: Option<i64>,
+    /// Woke from sleep then (ms) and not seen since.
+    pub woke_at_ms: Option<i64>,
+    /// Waiting on a background process its agent said it waits on: the
+    /// person may stop waiting (`CoreClient::stop_waiting`).
+    pub waits_on_process: bool,
 }
 
 impl From<&zc::SessionRow> for SessionRow {
@@ -549,6 +566,9 @@ impl From<&zc::SessionRow> for SessionRow {
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
             room_gen: r.room_gen,
+            sleep_until_ms: r.sleep_until_ms,
+            woke_at_ms: r.woke_at_ms,
+            waits_on_process: r.waits_on_process,
         }
     }
 }

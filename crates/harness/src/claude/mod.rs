@@ -70,8 +70,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, McpServer, Model, ReasoningLevel, RunRequest,
+    SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::approval::{self, Action};
@@ -85,6 +85,17 @@ use wire::{
     ControlRequestFrame, Frame, allow_response, control_error_line, control_response_line,
     deny_response,
 };
+
+/// Appended to a chat's system prompt (where Zeron's server offers
+/// `wait_on_background`: [`McpServer::waits_on_background`]): the text Sonnet and Opus were live-probed acting
+/// on. The CLI starts a turn of its own when a background task ends, so a
+/// turn that ends on one isn't the agent's last.
+const WAIT_ON_BACKGROUND_NOTE: &str = "\
+When you start background work you will come back to once it finishes (a test run, a build, a \
+long check) and you end your turn before it finishes, call the Zeron tool wait_on_background \
+with its task id first, so the person sees this chat waiting rather than finished. Never for work \
+you leave running on purpose (a dev server, a watcher). Zeron tools may be deferred: load it \
+with tool search first.";
 
 /// Locate the device's installed Claude Code CLI: our own PATH, then the
 /// login-shell PATH snapshot (the user's shell init shapes PATH in ways a
@@ -217,6 +228,24 @@ fn model_arg(request: &RunRequest) -> Option<String> {
     } else {
         model.clone()
     })
+}
+
+/// Whether this run must really be limited to a 200K window. The model id
+/// alone cannot do it: models such as `claude-opus-5-5` run 1M under their
+/// plain id, so the "200K" choice only held for ids that happen to default to
+/// 200K (zeronsh/zeron#1083). The CLI's `CLAUDE_CODE_DISABLE_1M_CONTEXT`
+/// makes it resolve a 200K window (verified on 2.1.319: `modelUsage.contextWindow`
+/// 1000000 -> 200000), and its own autocompact then works from that window.
+/// It is read at launch, so changing it needs a fresh process.
+///
+/// Only an explicit 200K choice sets it. Unset, a model keeps the window the
+/// CLI gives it (1M for the long-context rows, whose select defaults to 1M).
+fn caps_context_at_200k(request: &RunRequest) -> bool {
+    request
+        .model_options
+        .get("contextWindow")
+        .and_then(Value::as_str)
+        .is_some_and(|window| window.eq_ignore_ascii_case("200k"))
 }
 
 /// Every flag-layer setting a request launches with, for
@@ -476,6 +505,10 @@ impl ClaudeHarness {
         // stream-json`) forwards its own subagents' text too, which only
         // adds tagged frames to its stream.
         cmd.env("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
+        // "200K" really limits the window (see `caps_context_at_200k`).
+        if caps_context_at_200k(request) {
+            cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+        }
         // Host-resolved environment (a Cloud device's `ANTHROPIC_API_KEY`
         // from the user's own key, `GH_TOKEN`, …). Never a Claude.ai
         // subscription token: those stay inside the CLI's own login.
@@ -504,6 +537,15 @@ impl ClaudeHarness {
             // CLI merges an inline JSON config with settings-sourced ones.
             if let Some(config) = mcp_servers_config_arg(request.mcp.as_ref(), &request.extra_mcp) {
                 cmd.args(["--mcp-config", &config]);
+            }
+            // When to say it waits on background work (the Zeron tool
+            // `wait_on_background`), where that tool is offered. Its own
+            // description and the server's instructions say so too, but
+            // neither reaches the model before it decides to end a turn:
+            // live-probed on 2.1.319, Sonnet never called it with those
+            // alone, and Sonnet and Opus both did with this note.
+            if request.mcp.as_ref().is_some_and(McpServer::waits_on_background) {
+                cmd.args(["--append-system-prompt", WAIT_ON_BACKGROUND_NOTE]);
             }
             // Delegation goes through that server's side chats only. A bare
             // tool name "removes the matching tools from Claude's context"
@@ -768,6 +810,10 @@ impl Harness for ClaudeHarness {
     fn id(&self) -> HarnessId {
         HarnessId::ClaudeCode
     }
+    /// Live-verified 2.1.319: a new turn 0.1 s after a background task ends.
+    fn wakes_on_background(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Claude Code"
     }
@@ -804,6 +850,12 @@ impl Harness for ClaudeHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// A steer during an open tool call: the `interrupt` control request
+    /// stops the foreground call (a running Bash is killed) and the CLI keeps
+    /// its background shells and agents (`perTaskStopAffordance`).
+    fn steer_stops_tool(&self) -> bool {
+        true
+    }
     /// Same launch arguments, cwd and access. The CLI ignores the sandbox
     /// level, and option spellings that launch the same flags are the same
     /// runtime; supervised and full access without `auto_approve` launch
@@ -811,6 +863,7 @@ impl Harness for ClaudeHarness {
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && Self::launch_args(live) == Self::launch_args(next)
+            && caps_context_at_200k(live) == caps_context_at_200k(next)
             && access(live) == access(next)
     }
     /// Model, context window, effort, fast mode, thinking, ultracode, the
@@ -823,6 +876,8 @@ impl Harness for ClaudeHarness {
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
+            // The 200K limit is an environment variable of the process.
+            && caps_context_at_200k(live) == caps_context_at_200k(next)
             && strictness(permission_mode(next)) <= strictness(permission_mode(live))
     }
     fn access_modes(&self) -> &[AccessMode] {
@@ -837,8 +892,10 @@ impl Harness for ClaudeHarness {
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
         crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
     }
+    /// Without the curated rows the installed Claude Code is too old for.
     fn fallback_models(&self) -> Vec<Model> {
-        catalog::configured_models()
+        let cli = self.model_context().ok().flatten().and_then(|c| c.binary_version);
+        catalog::fallback_models(cli.as_deref())
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -849,7 +906,12 @@ impl Harness for ClaudeHarness {
                 || self.model_context().map(|c| c.unwrap().key()),
                 || async {
                     let response = self.initialize().await?;
-                    catalog::with_discovered_models(catalog::configured_models(), &response)
+                    let cli = self.model_context()?.and_then(|c| c.binary_version);
+                    catalog::with_discovered_models_for(
+                        catalog::configured_models(),
+                        &response,
+                        cli.as_deref(),
+                    )
                 },
             )
             .await
@@ -1267,6 +1329,11 @@ async fn run_session(session: Session) {
     // A message of ours (or a background wake) began a turn that has not
     // reported its end: the CLI dying now leaves it to us to end it.
     let mut turn_open = true;
+    // The CLI re-invokes the model on its own when a background task ends
+    // (live-verified 2.1.319: `task_notification`, the roster drained, a
+    // fresh `init` 0.1 s later, the wake turn's own `result`), so what the
+    // agent waits on can be shown as a wait.
+    turn.set_wakes_on_background(true);
     // A resumed session the CLI turns out to have no conversation for is
     // relaunched fresh, once (see [`no_conversation`]).
     let mut restore_fallback = launched.resume.is_some();
@@ -1464,10 +1531,17 @@ async fn run_session(session: Session) {
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
                                 turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                                turn.set_background_agents(background::agents(system.tasks.as_deref()));
                             }
                             // The first, or a background wake's: either way a
-                            // turn is running.
-                            "init" => turn_open = true,
+                            // turn is running. One starting with no turn of
+                            // ours open is the CLI's own wake.
+                            "init" => {
+                                if !turn_open {
+                                    turn.note_wake();
+                                }
+                                turn_open = true;
+                            }
                             _ => {}
                         }
                     }
@@ -2259,6 +2333,56 @@ mod tests {
             .and_then(|(_, value)| value.map(|v| v.to_os_string()));
         assert_eq!(value.as_deref(), Some(std::ffi::OsStr::new("1")));
     }
+
+    #[test]
+    fn a_chats_run_is_told_when_to_say_it_waits_and_nothing_else_is() {
+        let appended = |mcp: Option<McpServer>| {
+            let request = RunRequest {
+                mcp,
+                prompt: "hi".into(),
+                harness: None,
+                model: None,
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                cwd: String::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                auto_approve: false,
+                access: Default::default(),
+                plan: false,
+                attachments: Vec::new(),
+                worktree: None,
+                resume: None,
+                env: Default::default(),
+                extra_mcp: Vec::new(),
+            };
+            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.iter()
+                .position(|a| a == "--append-system-prompt")
+                .map(|i| args[i + 1].clone())
+        };
+        let server = |env: &[(&str, &str)]| McpServer {
+            name: "zeron".into(),
+            command: "zeron-engine".into(),
+            args: vec!["mcp".into()],
+            env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        };
+        let waits = (McpServer::WAITS_ON_BACKGROUND_ENV, "1");
+        assert_eq!(
+            appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), waits]))).as_deref(),
+            Some(WAIT_ON_BACKGROUND_NOTE)
+        );
+        // The tool not offered (no chat's server, or not one that waits):
+        // nothing is said of it.
+        assert_eq!(appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1")]))), None);
+        assert_eq!(appended(Some(server(&[waits]))), None);
+        assert_eq!(appended(Some(server(&[]))), None);
+        assert_eq!(appended(None), None);
+    }
 }
 
 #[cfg(test)]
@@ -2392,6 +2516,55 @@ mod access_tests {
         assert!(harness.same_runtime(&auto, &request(Supervised, true, false)));
         assert_eq!(harness.access_modes(), &AccessMode::ALL);
         assert!(harness.supports_plan());
+    }
+
+    fn with_options(model: &str, options: Value) -> RunRequest {
+        let mut r = request(AccessMode::FullAccess, true, false);
+        r.model = Some(model.into());
+        r.model_options = options.as_object().cloned().unwrap_or_default();
+        r
+    }
+
+    #[test]
+    fn the_200k_choice_limits_the_window_through_the_cli() {
+        // Only an explicit 200K choice caps; unset keeps the CLI's window
+        // (1M on Opus 5.5), which is what its select now shows as default.
+        let chosen = with_options("claude-opus-5-5", json!({"contextWindow": "200k"}));
+        let unset = with_options("claude-opus-5-5", json!({}));
+        assert!(caps_context_at_200k(&chosen));
+        assert!(!caps_context_at_200k(&unset));
+        assert!(catalog::static_models().iter().any(|m| m.id == "claude-opus-5-5"
+            && m.options
+                .iter()
+                .any(|o| o.id == "contextWindow" && o.default_choice == "1m")));
+        // 1M keeps the `[1m]` id and never the limit.
+        let one_m = with_options("claude-opus-5-5", json!({"contextWindow": "1m"}));
+        assert!(!caps_context_at_200k(&one_m));
+        assert_eq!(model_arg(&one_m).as_deref(), Some("claude-opus-5-5[1m]"));
+        // A model without the option is left to the CLI.
+        assert!(!caps_context_at_200k(&with_options(
+            "claude-haiku-4-5",
+            json!({})
+        )));
+        // The limit is a launch environment variable, so a change relaunches.
+        let harness = ClaudeHarness::default();
+        assert!(!harness.same_runtime(&chosen, &one_m));
+        assert!(!harness.reconfigures_in_place(&chosen, &one_m));
+        assert!(!harness.reconfigures_in_place(&one_m, &chosen));
+        // Same `--model` and flags; only the 200K limit differs.
+        assert!(!harness.same_runtime(&chosen, &unset));
+        assert!(harness.same_runtime(&unset, &with_options("claude-opus-5-5", json!({}))));
+        // The command carries it.
+        let env_of = |r: &RunRequest| {
+            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
+            cmd.as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "CLAUDE_CODE_DISABLE_1M_CONTEXT")
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(env_of(&chosen).as_deref(), Some("1"));
+        assert_eq!(env_of(&one_m), None);
+        assert_eq!(env_of(&unset), None);
     }
 
     #[test]

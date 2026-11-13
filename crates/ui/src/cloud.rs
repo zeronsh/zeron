@@ -27,6 +27,12 @@ pub const CLOUD_LABEL: &str = "Cloud";
 /// re-read this often; otherwise they are read on focus and page open only.
 pub const SESSION_POLL: Duration = Duration::from_secs(5);
 
+/// How long sessions are still re-read after a send's machine last read as
+/// starting, waking or updating. A woken machine reads ready once its engine
+/// first talks, and only then looks for a release (a few seconds at most) and
+/// says it is updating: stopping at ready never saw that.
+pub const STAGE_WATCH: Duration = Duration::from_secs(60);
+
 /// A Cloud device of either kind (logical or session): the cloud glyph.
 pub fn is_cloud(device: &Device) -> bool {
     zeron_proto::is_cloud_device(&device.id, &device.platform)
@@ -123,7 +129,13 @@ pub fn session_presence(online: bool, session: Option<&CloudSession>) -> Presenc
         Some(CloudState::Ready) => Presence::Online,
         Some(CloudState::Sleeping | CloudState::Stopping) => Presence::Asleep,
         Some(CloudState::Provisioning | CloudState::Starting) => Presence::Waking,
-        Some(CloudState::Off | CloudState::Deleting | CloudState::Error) => Presence::Offline,
+        Some(
+            CloudState::Off
+            | CloudState::Deleting
+            | CloudState::Error
+            | CloudState::DataExpired
+            | CloudState::Unknown,
+        ) => Presence::Offline,
         None if online => Presence::Online,
         None => Presence::Asleep,
     }
@@ -164,9 +176,24 @@ pub fn session_settling(state: CloudState) -> bool {
     )
 }
 
-/// Whether any session is settling (the poll's only reason to run).
+/// The machine is installing a release before it answers its waiting message.
+pub fn session_updating(session: &CloudSession) -> bool {
+    session.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_UPDATING)
+}
+
+/// The machine's wake is taking far longer than normal (the edge kicks it).
+pub fn session_slow(session: &CloudSession) -> bool {
+    session.stage.as_deref() == Some(zeron_proto::CLOUD_STAGE_SLOW)
+}
+
+/// Whether any session is settling, or its machine says it is updating (it
+/// clears that when done, and the edge drops one nobody cleared): a reason
+/// for the poll to run, besides a send waiting on its machine.
 pub fn any_session_settling(sessions: &CloudSessions) -> bool {
-    sessions.sessions.iter().any(|s| session_settling(s.state))
+    sessions
+        .sessions
+        .iter()
+        .any(|s| session_settling(s.state) || session_updating(s) || session_slow(s))
 }
 
 /// Account copy for the Settings → Cloud status row.
@@ -425,7 +452,7 @@ pub fn group_number(value: f64) -> String {
     }
 }
 
-/// "1,240 credits" — whole credits (a minute each), with a decimal only
+/// "1,240 credits" — whole credits, with a decimal only
 /// under ten so a short session still reads as something.
 pub fn format_credits(credits: f64) -> String {
     let negative = credits < 0.0;
@@ -534,6 +561,7 @@ mod tests {
             private: false,
             description: description.map(str::to_string),
             pushed_at,
+            ..Default::default()
         }
     }
 
@@ -600,6 +628,17 @@ mod tests {
     }
 
     #[test]
+    fn a_session_reads_as_updating_only_when_its_edge_says_so() {
+        let mut waking = session("a", "s", CloudState::Ready);
+        assert!(!session_updating(&waking));
+        waking.stage = Some(zeron_proto::CLOUD_STAGE_UPDATING.into());
+        assert!(session_updating(&waking));
+        // A stage from a newer edge is just not this one.
+        waking.stage = Some("something-new".into());
+        assert!(!session_updating(&waking));
+    }
+
+    #[test]
     fn composer_notice_and_polling_follow_the_session_state() {
         assert_eq!(
             session_notice(CloudState::Provisioning),
@@ -623,6 +662,14 @@ mod tests {
             sessions.sessions[0].state = state;
             assert!(any_session_settling(&sessions), "{state:?}");
         }
+        // Up, but installing a release before it answers: still followed,
+        // until it says it's done.
+        sessions.sessions[0].state = CloudState::Ready;
+        assert!(!any_session_settling(&sessions));
+        sessions.sessions[0].stage = Some(zeron_proto::CLOUD_STAGE_UPDATING.into());
+        assert!(any_session_settling(&sessions));
+        sessions.sessions[0].stage = None;
+        assert!(!any_session_settling(&sessions));
         assert_eq!(
             account_recheck_after(CloudState::Deleting),
             Some(SESSION_POLL)

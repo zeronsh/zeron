@@ -7,11 +7,25 @@
 -- message again restarts it rather than adding another.
 --
 --   toast.show { title = "Pushed to origin", tone = "success" }
+--   toast.action("git.output", show_output)   -- at a module's top, each load
 --   toast.show { title = "Commit failed", body = "pre-commit hook exited 1",
---     tone = "danger", action = { label = "Show output", run = … } }
+--     tone = "danger", action = { label = "Show output", run = "git.output", value = sha } }
+--   toast.sync("waiting", { … })   -- this group's toasts are these, by `key`
 --   toast.Host {}   -- once, in the window's root
+--   toast.Host { front = is_up }   -- in a full-window modal (the lightbox)
 --
--- `show` returns the toast's id, which `dismiss(id)` puts away.
+-- `show` returns the toast's id, which `dismiss(id)` puts away. Use this,
+-- never zgx's `ui.toast`: that one's stack is a zgx layer, which zgx draws
+-- the modal dim behind (the whole window tinted while a toast shows).
+--
+-- **An action is data.** A toast is state, which outlives a load of the
+-- scripts (a plugin turned on reloads them, and a launch's first look at the
+-- plugins does), and a function doesn't: it dies with the VM that made it.
+-- So a toast's `run` names an action, which the module that owns it declares
+-- with `toast.action` at its top: every load declares it again, so a toast
+-- kept across a load finds it there. `run` may be a plain function for
+-- what's only worth doing now, as the gallery's: that toast goes with its
+-- load, never staying up without the button it was shown with.
 
 local motion = require("@self/motion")
 local Icon = require("@self/icon")
@@ -30,9 +44,16 @@ export type Toast = {
 	title: string | Message,
 	body: (string | Message)?,
 	tone: Tone?,
-	action: { label: string | Message, run: () -> () }?,
+	-- `run`: an action's name (`M.action`), called with `value`, which is
+	-- kept in state like the rest. `keep`: the toast stays after its button
+	-- is pressed (what it asks isn't done yet; it goes when it is).
+	action: { label: string | Message, run: string | (any) -> (), value: any?, keep: boolean? }?,
 	-- How long it stays, in milliseconds (0: until put away).
 	duration: number?,
+	-- Who it is, when words aren't enough: shown again, the toast with the
+	-- same key starts over, whatever else it says. Put away by you, it's
+	-- told in `M.put_away`.
+	key: string?,
 }
 
 -- How many show at once; older ones wait their turn.
@@ -53,16 +74,72 @@ local hovered = ui.state("ds_toasts_hovered", false)
 -- (Kept as state, as the stack is: a hot reload keeps the toasts showing,
 -- so a new one mustn't take one of their ids.)
 local next_id = ui.state("ds_toasts_next", 0)
--- What the action of each toast runs (functions can't live in state: a
--- toast kept across a hot reload loses its action's button).
-local runs: { [number]: () -> () } = {}
+-- How many hosts in front (`front`) are up: while one is, the stack shows
+-- there, over the modal that holds it, and not under it.
+local fronts = ui.state("ds_toasts_fronts", 0)
+-- Where the stack stands, in points up from the window's foot: over the
+-- host's own toasts (a template in preview, signing keys: drawn by Zeron
+-- itself, in the same corner), as the main window's host measures them
+-- (src/plugins/host_bar.rs `follow`). 16 where no host says (another
+-- window; a plugin, which can't read it).
+local floor_ok, floor = pcall(ui.shared, "toast_floor", 16)
+local function foot(): number
+	local at = if floor_ok and floor then floor:get() else nil
+	return if type(at) == "number" then at else 16
+end
+-- What each action runs, by its name: this load's, as `action` declared
+-- them (functions can't live in state). `declared` says one was added, for a
+-- stack built before the module that owns it loaded.
+local actions: { [string]: (any) -> () } = {}
+local declared = ui.state("ds_toasts_declared", 0)
+-- An action given as a function has a name of its own, `fn:<toast id>`, and
+-- lasts as long as this load.
+local FN = "fn:"
+
+-- The keys of toasts you put away with the ×, for whoever would show them
+-- again to take (and clear): `{ [key]: true }`.
+M.put_away = ui.state("ds_toasts_put_away", {} :: { [string]: boolean })
+
+-- Those of a load before this one, whose function is gone, go now.
+do
+	local kept = {}
+	for _, t in toasts:peek() do
+		if not (t.action and string.sub(t.action.run, 1, #FN) == FN) then
+			table.insert(kept, t)
+		end
+	end
+	if #kept ~= #toasts:peek() then
+		toasts:set(kept)
+	end
+end
+
+-- Declares what `run = name` does. At the top of the module that owns it, so
+-- each load declares it again.
+function M.action(name: string, run: (any) -> ())
+	actions[name] = run
+	declared:set(declared:peek() + 1)
+end
 
 function M.dismiss(id: number)
 	local i = toasts:index_of("id", id)
 	if i then
 		toasts:remove(i)
-		runs[id] = nil
+		actions[`{FN}{id}`] = nil
 	end
+end
+
+-- The action as the stack keeps it: data, its words as strings.
+local function kept_action(given: any, id: number): any
+	if not given then
+		return nil
+	end
+	local run = given.run
+	if type(run) == "function" then
+		local name = `{FN}{id}`
+		actions[name] = run
+		run = name
+	end
+	return { label = control.text(given.label) or "", run = run, value = given.value, keep = given.keep }
 end
 
 function M.show(given: Toast): number
@@ -70,13 +147,13 @@ function M.show(given: Toast): number
 	local t = table.clone(given) :: any
 	t.title = control.text(given.title) or ""
 	t.body = control.text(given.body)
-	if given.action then
-		t.action = { label = control.text(given.action.label) or "", run = given.action.run }
-	end
-	local list = toasts:peek()
-	-- The same message again: restart it in place.
-	for _, existing in list do
-		if existing.title == t.title and existing.body == t.body and existing.tone == (t.tone or "neutral") then
+	local tone: Tone = t.tone or "neutral"
+	-- The same one again (by its key, else its words): restart it in place.
+	for _, existing in toasts:peek() do
+		local same = if t.key
+			then existing.key == t.key
+			else existing.key == nil and existing.title == t.title and existing.body == t.body and existing.tone == tone
+		if same then
 			local i = toasts:index_of("id", existing.id)
 			if i then
 				toasts:set_key({ i, "shown" }, ui.now())
@@ -84,22 +161,48 @@ function M.show(given: Toast): number
 			return existing.id
 		end
 	end
-	local tone: Tone = t.tone or "neutral"
 	local id = next_id:peek() + 1
 	next_id:set(id)
-	if t.action then
-		runs[id] = t.action.run
-	end
 	toasts:push({
 		id = id,
+		key = t.key,
+		group = t.group,
 		title = t.title,
 		body = t.body,
 		tone = tone,
-		action = if t.action then t.action.label else nil,
+		action = kept_action(given.action, id),
 		duration = t.duration or DURATION[tone],
 		shown = ui.now(),
 	})
 	return id
+end
+
+-- The toasts of `group` are these, each by its `key`: one missing shows, one
+-- no longer here goes, one that says something else now is shown anew, and
+-- one already up is left as it is. For what follows a list, so asking again
+-- (each load does) changes nothing anyone can see.
+function M.sync(group: string, wanted: { Toast })
+	local want: { [string]: Toast } = {}
+	for _, w in wanted do
+		want[w.key :: string] = w
+	end
+	for _, t in table.clone(toasts:peek()) do
+		if t.group == group then
+			local w = want[t.key]
+			if w and control.text(w.title) == t.title and control.text(w.body) == t.body then
+				want[t.key] = nil
+			else
+				M.dismiss(t.id)
+			end
+		end
+	end
+	for _, w in wanted do
+		if want[w.key :: string] then
+			local t = table.clone(w) :: any
+			t.group = group
+			M.show(t)
+		end
+	end
 end
 
 -- One card. Its timer runs while the stack isn't under the pointer;
@@ -170,18 +273,20 @@ local Card = ui.component(function(props: { toast: any }): Node
 			if t.body
 				then ui.text { t.body, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary", wrap = true }
 				else nil,
-			if t.action and runs[t.id]
+			if t.action
 				then ui.row {
 					pt = "$space.2",
 					Button {
-						t.action,
+						t.action.label,
 						size = "sm",
 						tone = "secondary",
 						on_click = function()
-							local run = runs[t.id]
-							M.dismiss(t.id)
+							local run = actions[t.action.run]
+							if not t.action.keep then
+								M.dismiss(t.id)
+							end
 							if run then
-								run()
+								run(t.action.value)
 							end
 						end,
 					},
@@ -204,6 +309,9 @@ local Card = ui.component(function(props: { toast: any }): Node
 				tone = "quiet",
 				tooltip = false,
 				on_click = function()
+					if t.key then
+						M.put_away:set_key(t.key, true)
+					end
 					M.dismiss(t.id)
 				end,
 			},
@@ -216,10 +324,24 @@ end)
 -- The stack, in the bottom corner of what holds it: put one in the
 -- window's root (an overlay), over the page; `show` fills it. (It is
 -- not a zgx layer, which would raise it over dialogs too: zgx draws the
--- modal dim behind a layer for now.)
-function M.Host(_props: { [any]: any }?): Node
+-- modal dim behind a layer for now.) A modal over the whole window (the
+-- lightbox) puts one in itself, `front` saying whether it's up (a closed
+-- modal keeps what it built): while it is, the stack shows there, and the
+-- root's stands aside.
+local function Stack(up: () -> boolean): Node
 	local visible = ui.computed(function(): { any }
-		local list = toasts:get()
+		if not up() then
+			return {}
+		end
+		declared:get()
+		-- (Only those whose button is there to press: one whose action isn't
+		-- declared yet waits for the module that owns it.)
+		local list = {}
+		for _, t in toasts:get() do
+			if not t.action or actions[t.action.run] then
+				table.insert(list, t)
+			end
+		end
 		local out = {}
 		for i = math.max(1, #list - MAX + 1), #list do
 			table.insert(out, list[i])
@@ -236,15 +358,41 @@ function M.Host(_props: { [any]: any }?): Node
 		enter = motion.transition({ opacity = { 0, 1 }, y = { 16, 0 }, duration = 260, ease = "out(3)" }),
 		exit = motion.transition({ opacity = { 1, 0 }, scale = { 1, 0.96 }, duration = 160, ease = "in(2)" }),
 		absolute = true,
-		-- (Insets take points: space.4 off the corner.)
+		-- (Insets take points: space.4 off the corner, and up from the
+		-- foot as the host says.)
 		right = 16,
-		bottom = 16,
+		bottom = foot,
 		gap = "$space.2",
 		items = "end",
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
 		end,
 	})
+end
+
+local Front = ui.component(function(props: { up: () -> boolean }): Node
+	local up = ui.computed(props.up)
+	ui.effect(function()
+		if up:get() then
+			fronts:set(fronts:peek() + 1)
+			ui.on_cleanup(function()
+				fronts:set(math.max(0, fronts:peek() - 1))
+			end)
+		end
+	end)
+	return Stack(function(): boolean
+		return up:get()
+	end)
+end)
+
+function M.Host(props: { front: (() -> boolean)?, [any]: any }?): Node
+	local front = if props then props.front else nil
+	if front then
+		return Front { up = front }
+	end
+	return Stack(function(): boolean
+		return fronts:get() == 0
+	end)
 end
 
 return M

@@ -19,36 +19,49 @@ name = "zeron-zgx"
 path = "src/main.rs"
 
 [features]
-# Zeron.app's beta (scripts/package-zgx-beta.sh): this interface as the
+# Zeron.app's beta (scripts/package-zgx-macos.sh): this interface as the
 # Zeron app itself, with the production edge and sign-in only (nothing of
 # staging's built in) and Zeron.app's own engine (the bundle's `Zeron Engine`,
 # ~/.zeron, port 27654), managed as Zeron.app manages it. Without it, the app
 # stays on staging (src/auth.rs, src/engine/manager.rs).
 beta = []
+# The layout benchmarks that read a probed zgx (docs/zgx-layout-probe.patch;
+# `live_reflow_traced` in src/split_tests.rs says how). Off in every build.
+layout_probe = []
 
 [dependencies]
-zgx = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
 # `mimalloc`: the program's allocator, in place of the system's. It hands
 # freed memory back to the system (the system's keeps the most it ever
 # held), and zgx measures 1-10% less CPU for script, text and layout work.
 # `terminal`: `ui.terminal` drawn by zgx (a pseudoterminal and its screen),
 # for the panel's terminal tabs (src/terminal.rs runs the process in it).
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["mimalloc", "terminal"] }
+# `webkitgtk`: `ui.webview` on Linux, for the panel's browser tabs, as
+# WebKitGTK 4.1 pages (webkit2gtk-4.1), opened at run time: building needs
+# none of it, and without it pages are placeholders ("Web view · <url>").
+# zgx-run turns it on by default, but this app takes zgx-run without its
+# defaults (below). Nothing on macOS or Windows.
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["mimalloc", "terminal", "webkitgtk"] }
 # `inspect`: devtools for `zgx inspect` (and its MCP server), asked for
 # with `--inspect`. `i18n`: `ui.t`'s plurals and numbers by each locale's
 # own rules (ICU4X's data, about 90 KB), for ui/locales' translations.
-zgx-script = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["inspect", "i18n"] }
+# `scene3d`: `ui.scene3d`, `ui.mesh`, `ui.light`, `ui.group` (zgx-3d on the
+# wgpu this app already links), for plugins that show 3D: the CAD plugin
+# hands it its own triangles (`geometry = { positions, indices, … }`). It
+# asks no grant; a scene draws a frame only when something in it changes.
+zgx-script = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["inspect", "i18n", "scene3d"] }
 # A picture's pixels for the clipboard (src/images.rs): zgx's own decoder,
 # the formats `ui.image` shows (no features of its own: the ones zgx-desktop
 # turns on).
-zgx-gpu = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", default-features = false }
+zgx-gpu = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", default-features = false }
 # Each plugin's own database (`zeron.db`, src/plugins/db.rs): SQLite,
 # built in; `limits` to keep one from attaching any other file.
-rusqlite = { version = "0.32", features = ["bundled", "limits"] }
+rusqlite = { version = "0.32", features = ["bundled", "limits", "hooks"] }
 # `fetch`: zgx's own transport for `ui.fetch` and remote images (HTTP and
 # HTTPS, rustls), given to every window (src/main.rs): the app's scripts,
 # and plugins granted "network". Nothing else of the runner.
-zgx-run = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", default-features = false, features = ["fetch"] }
+zgx-run = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", default-features = false, features = ["fetch"] }
 # `webp`: `ui.image` decodes through this crate, by what its features
 # allow, so turning WebP on here is all it takes (the member cards' art).
 # `ico`: sites' favicons (the browser tab's: src/favicons.rs), most of
@@ -60,13 +73,29 @@ ureq = { version = "2", features = ["json"] }
 # A template's preview, taken from the window (src/plugins/live.rs): the
 # version zgx's own snapshots are written with.
 png = "0.18"
+# The installed fonts, for Settings' font pickers (src/fonts.rs): the
+# versions zgx's text system reads them with.
+fontdb = "0.23"
+ttf-parser = "0.25"
+# Mermaid diagrams (src/mermaid.rs): the shipping app's renderer, at the root
+# workspace's version, its SVG drawn with text by the usvg and resvg zgx
+# draws SVG with (`text`: glyphs from this machine's fonts).
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+usvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
+resvg = { version = "0.46", default-features = false, features = ["text"] }
 serde_json = "1"
+# Fast hashing for the per-part caches a long reply's every change looks up
+# (src/chat.rs `LIVE_TOOLS`); already in the tree through zgx.
+rustc-hash = "2"
 # Agents' logos: their sites' icon links, resolved (src/agent_logos.rs).
 # A tool's diff as the changes pane draws it (src/tool_details.rs): the
 # shipping app's own line diff.
 similar = "2"
 # (A conversation link's workspace locator, hashed as the shipping app does.)
 sha2 = "0.10"
+# A long chat's rows out of view, compressed (src/chat.rs `FoldedEntry`): the
+# version png and zip already bring.
+miniz_oxide = "0.8"
 open = "5"
 # The engine's local IPC (src/engine/rpc.rs): one plain WebSocket on
 # 127.0.0.1, the version zgx's own examples speak it with.
@@ -81,15 +110,25 @@ zatex = { path = "../../crates/zatex", features = ["bundled"] }
 # Imported VS Code themes (src/themes.rs): the shipping app's theme crate,
 # its importer, library file and error words.
 zeron-theme = { path = "../../crates/theme" }
+# (A preview's process label and redacted command line, one copy with the
+# engine that advertises them; no dependencies.)
+zeron-preview-label = { path = "../../crates/preview-label" }
 # Zeron's command line (`zeron headless`, `zeron login`, …: src/main.rs),
 # the engine helper's start-up (src/engine/manager.rs) and the app's own
 # updates and release channel (src/about.rs): the shipping app's crates,
 # with no engine and no GPUI in them.
+zeron-voice = { path = "../../crates/voice" }
 zeron-cli = { path = "../../crates/cli" }
 zeron-launch = { path = "../../crates/launch" }
 # `zeron://` links: a chat's (src/sessions.rs, src/links.rs) and a clicked
 # banner's, the shipping app's formats.
 zeron-notify = { path = "../../crates/notify" }
+# (A message between chats: its routing header, read as the engine writes it.)
+zeron-proto = { path = "../../crates/proto" }
+# (Already in the build through zeron-proto: its times are chrono's, and its
+# rows are read straight from the engine's JSON, not cloned first.)
+chrono = "0.4"
+serde = "1"
 zeron-update = { path = "../../crates/update" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Templates' theme files, JSON with comments, read for their previews
@@ -99,6 +138,8 @@ json5 = "0.4"
 # `show_visual` scripts, and its offscreen GPU renderer for their scenes and
 # shaders (the same wgpu zgx draws with).
 zeron-visual = { path = "../../crates/visual" }
+# The rules plugins are held to (paths, programs, network), the engine's own.
+zeron-plugin-guard = { path = "../../crates/plugin-guard" }
 zeron-visual-gpu = { path = "../../crates/visual-gpu" }
 # Their frames' pixel loops, optimized in debug builds too (below).
 zeron-zgx-pixels = { path = "pixels" }
@@ -120,18 +161,36 @@ foreign-types = "0.5"
 # elements, box drawing and Powerline glyphs to the cell; zgx's own renderer
 # draws them from the font at its text line height, gapped. Builds Ghostty
 # with Zig 0.16 (cached in ~/Library/Caches/zgx-ghostty).
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["ghostty"] }
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["ghostty"] }
+
+# Windows' Transparency effects (src/transparency.rs), read and watched in
+# the registry, until zgx reports them (zgx-asks/windows-transparency); a
+# visual's thread CPU time (src/visuals.rs).
+#
+# `webview2`: on Windows, the panel's browser tabs as WebView2 pages, in a
+# DirectComposition tree of the window's own. The runtime ships with Windows
+# 11 (and with Edge on Windows 10); without it, pages are placeholders.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8", features = ["webview2"] }
+
+# zgx's D-Bus (menus, portals) linked in rather than loaded: `zeron` is also
+# what a headless Linux server and every Cloud machine runs (`zeron
+# headless`, which only hands over to `zeron-engine`), and those needn't have
+# libdbus-1.so.3, which the old Zeron never required.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
 [patch.crates-io]
-wgpu-hal = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
-winit = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
-accesskit_macos = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
-accesskit_consumer = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
-accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
-accesskit_unix = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
-accesskit_windows = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc" }
+wgpu-hal = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+winit = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+accesskit_macos = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+accesskit_consumer = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+accesskit_atspi_common = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+accesskit_unix = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
+accesskit_windows = { git = "https://github.com/zeronsh/zgx", rev = "06c6d56ac8f2d7788ddb77ab019ee2af121710f8" }
 
 # zgx is slow unoptimized (its own setting): optimize dependencies, keep
 # this crate quick to build.
@@ -150,3 +209,16 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[build-dependencies]
+# The Windows exe's icon (build.rs): the taskbar's, Explorer's, and the one
+# zgx gives its windows (zgx-desktop `window_chrome`, the exe's first icon).
+embed-resource = "3.0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+# src/terminal.rs's test: the bridge line split as Windows itself splits a
+# command line (CommandLineToArgvW).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }

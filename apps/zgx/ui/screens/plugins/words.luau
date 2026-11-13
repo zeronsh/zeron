@@ -13,7 +13,12 @@ local M = {}
 -- `title` and `detail` are read through their messages each time, and
 -- every function gives a string now, so where it's drawn in a function it
 -- follows the locale.)
-export type Line = { title: string, detail: string?, risky: boolean, icon: string }
+-- `literal`: what it names exactly as its manifest writes it (selectors,
+-- modules, programs), shown under the words so a plain-words place can't
+-- hide what it reaches. `items`: named things with words of their own (an
+-- agent tool and its description, as agents will read it).
+export type Item = { name: string, description: string? }
+export type Line = { title: string, detail: string?, risky: boolean, icon: string, literal: { string }?, items: { Item }? }
 
 local function s(key: string, args: { [string]: any }?): string
 	return ui.t(key, args):get()
@@ -121,6 +126,98 @@ function M.places(targets: { string }?): string
 	return s("plugins.words.list", { rest = table.concat(out, s("plugins.words.list_sep")), last = last })
 end
 
+-- `list`'s strings, as given, at most `most` (the rest counted).
+local function literal(list: { any }?, most: number?): { string }?
+	local out: { string } = {}
+	local n = most or 12
+	for i, v in list or {} do
+		if type(v) == "string" then
+			if i > n then
+				table.insert(out, s("plugins.words.more", { n = #(list :: any) - n }))
+				break
+			end
+			table.insert(out, v)
+		end
+	end
+	return if #out > 0 then out else nil
+end
+
+-- Programs by name, as the host rates them: one in `full` (a shell or an
+-- interpreter) says it's full control of the computer, one in `anything`
+-- (all of them when it gave no rating) that it can do anything you can, the
+-- rest (git and gh, what's contained) by name alone.
+local function programs_said(names: { any }?, anything: any, full: any): { list: { string }, anything: boolean, full: boolean, plain: boolean }
+	local list: { string } = {}
+	local said = { list = list, anything = false, full = false, plain = false }
+	for _, n in names or {} do
+		if type(n) == "string" then
+			if type(full) == "table" and table.find(full, n) ~= nil then
+				said.full = true
+				table.insert(list, s("plugins.words.full_control", { name = n }))
+			elseif type(anything) ~= "table" or table.find(anything, n) ~= nil then
+				said.anything = true
+				table.insert(list, s("plugins.words.can_anything", { name = n }))
+			else
+				said.plain = true
+				table.insert(list, n)
+			end
+		end
+	end
+	return said
+end
+
+-- Hosts as written ("*": any site), those in `near` (on this device or
+-- your network, the host's rating) said so.
+local function hosts_said(hosts: { any }?, near: any): { list: { string }, near: boolean }
+	local list: { string } = {}
+	local any_near = false
+	for _, h in hosts or {} do
+		if type(h) == "string" then
+			if h == "*" then
+				table.insert(list, s("plugins.words.any_site"))
+			elseif type(near) == "table" and table.find(near, h) ~= nil then
+				any_near = true
+				table.insert(list, s("plugins.words.near_host", { host = h }))
+			else
+				table.insert(list, h)
+			end
+		end
+	end
+	return { list = list, near = any_near }
+end
+
+-- What of Zeron's interface it reaches, exactly as it names it: a detail
+-- under its asks, never an ask of its own. `{ { title, list } }`, empty
+-- when it reaches none.
+function M.details(item: any): { { title: string, list: { string } } }
+	local out = {}
+	local lists = item.ui or {}
+	local change = literal(lists.change, 40)
+	if change then
+		table.insert(out, { title = s("plugins.words.details.changes"), list = change })
+	end
+	local replace = literal(lists.replace, 40)
+	if replace then
+		table.insert(out, { title = s("plugins.words.details.replaces"), list = replace })
+	end
+	local grew = literal(type(item.digest_diff) == "table" and item.digest_diff.ui_change_added or nil, 40)
+	if grew then
+		table.insert(out, { title = s("plugins.words.details.changes_since"), list = grew })
+	end
+	return out
+end
+
+-- Its agent tools, each by name with what it tells agents.
+local function tool_items(list: { any }?): { Item }?
+	local out: { Item } = {}
+	for _, t in list or {} do
+		if type(t) == "table" and type(t.name) == "string" then
+			table.insert(out, { name = t.name, description = if type(t.description) == "string" and t.description ~= "" then t.description else nil })
+		end
+	end
+	return if #out > 0 then out else nil
+end
+
 local function tools(item: any): string
 	local names: { string } = {}
 	for _, t in item.tools or {} do
@@ -131,8 +228,8 @@ end
 
 -- A permission's line: its words read through their messages (`title`'s
 -- key, `detail`'s key or its own words), with `args` as they are then.
-local function line(risky: boolean, icon: string, title: string, detail: (string | () -> string)?, args: (() -> { [string]: any })?): Line
-	return setmetatable({ risky = risky, icon = icon }, {
+local function line(risky: boolean, icon: string, title: string, detail: (string | () -> string)?, args: (() -> { [string]: any })?, extra: { literal: { string }?, items: { Item }? }?): Line
+	return setmetatable({ risky = risky, icon = icon, literal = extra and extra.literal, items = extra and extra.items }, {
 		__index = function(_, field: string): string?
 			if field == "title" then
 				return s(title, if args then args() else nil)
@@ -149,6 +246,8 @@ function M.permission(item: any, permission: string): Line
 	if permission == "ui.add" then
 		return line(false, "widget", "plugins.words.permission.ui_add.title")
 	elseif permission == "ui.change" then
+		-- (Where, exactly, is a detail: `M.details`. No part of Zeron's
+		-- interface is an ask of its own.)
 		return line(false, "pen", "plugins.words.permission.ui_change.title", "plugins.words.permission.ui_change.detail", function()
 			return { places = M.places(ui_lists.change) }
 		end)
@@ -176,6 +275,23 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "chat-round-line", "plugins.words.permission.github_write.title")
 	elseif permission == "notifications" then
 		return line(false, "bell", "plugins.words.permission.notifications.title", "plugins.words.permission.notifications.detail")
+	elseif permission == "usage.read" then
+		return line(false, "eye", "plugins.words.permission.usage_read.title", "plugins.words.permission.usage_read.detail")
+	elseif permission == "accounts.read" then
+		return line(false, "user-rounded", "plugins.words.permission.accounts_read.title", "plugins.words.permission.accounts_read.detail")
+	elseif permission == "accounts.switch" then
+		-- (A change to what your agents run as: always asked, said so.)
+		return line(true, "user-rounded", "plugins.words.permission.accounts_switch.title", "plugins.words.permission.accounts_switch.detail")
+	elseif permission == "accounts.pin" then
+		-- (A change to what a chat runs as: always asked, said so.)
+		return line(true, "user-rounded", "plugins.words.permission.accounts_pin.title", "plugins.words.permission.accounts_pin.detail")
+	elseif permission == "models.read" then
+		return line(false, "list", "plugins.words.permission.models_read.title", "plugins.words.permission.models_read.detail")
+	elseif permission == "models.set" then
+		return line(true, "pen", "plugins.words.permission.models_set.title", "plugins.words.permission.models_set.detail")
+	elseif permission == "messages.send" then
+		-- (What your agents are told to do, as you: always asked, said so.)
+		return line(true, "chat-round-line", "plugins.words.permission.messages_send.title", "plugins.words.permission.messages_send.detail")
 	elseif permission == "links.open" then
 		return line(false, "arrow-up-right", "plugins.words.permission.links_open.title", "plugins.words.permission.links_open.detail")
 	elseif permission == "navigate" then
@@ -183,6 +299,16 @@ function M.permission(item: any, permission: string): Line
 	elseif permission == "compose" then
 		return line(false, "chat-round-line", "plugins.words.permission.compose.title", "plugins.words.permission.compose.detail")
 	elseif permission == "network" then
+		-- The places it names (any site, with "*"), those on this device or
+		-- your network said so, and risky then.
+		local hosts = item.network_hosts
+		if type(hosts) == "table" and #hosts > 0 then
+			local any = table.find(hosts, "*") ~= nil
+			local listed = hosts_said(hosts, item.network_local)
+			-- (A host named exactly reaches where it resolves.)
+			local maybe_near = type(item.network_named) == "table" and #item.network_named > 0
+			return line(listed.near, "global", if any then "plugins.words.permission.network.title_any" else "plugins.words.permission.network.title_hosts", if maybe_near then "plugins.words.permission.network.detail_named" else nil, nil, { literal = listed.list })
+		end
 		return line(false, "global", "plugins.words.permission.network.title")
 	elseif permission == "clipboard" then
 		return line(false, "copy", "plugins.words.permission.clipboard.title")
@@ -193,9 +319,12 @@ function M.permission(item: any, permission: string): Line
 	elseif permission == "windows" then
 		return line(false, "monitor", "plugins.words.permission.windows.title")
 	elseif permission == "tools" then
-		return line(false, "magic-stick", "plugins.words.permission.tools.title", function(): string
+		-- Each tool by name, with what it tells your agents (their words
+		-- reach every agent's list of tools).
+		local items = tool_items(item.tools)
+		return line(false, "magic-stick", "plugins.words.permission.tools.title", if items then nil else function(): string
 			return tools(item)
-		end)
+		end, nil, { items = items })
 	elseif permission == "devices" then
 		return line(false, "smartphone", "plugins.words.permission.devices.title")
 	elseif permission == "service" then
@@ -213,19 +342,32 @@ function M.permission(item: any, permission: string): Line
 		)
 	elseif permission == "commands" then
 		-- The programs its manifest names, as you: what they can do, it can.
+		-- Each by name; a shell or an interpreter says it's full control, one
+		-- that can do anything you can (any not known to be contained) says
+		-- so, and git and gh are said as what they do.
 		local names = {}
 		for _, c in item.commands or {} do
 			table.insert(names, c)
 		end
 		local on = (item :: any).on_device
+		local said = programs_said(names, item.commands_anything, item.commands_full_control)
+		-- (Only programs that can do anything: "These" is all of them. With
+		-- full control or one of git's kind among them, each row says its own.)
+		local detail = "plugins.words.permission.commands.detail"
+		if said.full or (said.anything and said.plain) then
+			detail = "plugins.words.permission.commands.detail_each"
+		elseif said.anything then
+			detail = "plugins.words.permission.commands.detail_anything"
+		end
 		return line(
 			true,
 			"terminal",
 			if type(on) == "string" then "plugins.words.permission.commands.title_on" else "plugins.words.permission.commands.title",
-			"plugins.words.permission.commands.detail",
+			detail,
 			function()
 				return { list = if #names > 0 then table.concat(names, ", ") else s("plugins.words.programs"), device = on }
-			end
+			end,
+			{ literal = if said.full or said.anything then said.list else nil }
 		)
 	elseif permission == "native" then
 		local on = (item :: any).on_device
@@ -240,6 +382,85 @@ function M.permission(item: any, permission: string): Line
 		)
 	end
 	return { title = permission, risky = true, icon = "danger-triangle" }
+end
+
+-- What grew since you allowed it (the engine's `digest_diff`, of what it
+-- runs, reaches and tells agents beyond its permissions' names): a line
+-- each, risky where it runs or reaches more. Empty when nothing did.
+function M.diff(item: any): { Line }
+	local d = item.digest_diff
+	local out: { Line } = {}
+	if type(d) ~= "table" then
+		return out
+	end
+	local function some(list: any): boolean
+		return type(list) == "table" and #list > 0
+	end
+	if some(d.added_commands) then
+		table.insert(out, line(true, "terminal", "plugins.words.diff.commands", nil, nil, { literal = programs_said(d.added_commands, d.commands_anything, d.commands_full_control).list }))
+	end
+	if type(d.mcp_changed) == "table" then
+		local after = d.mcp_changed.after
+		local said = nil
+		if type(after) == "table" and type(after.command) == "string" then
+			local parts = { after.command }
+			for _, a in (if type(after.args) == "table" then after.args else {}) :: { any } do
+				table.insert(parts, tostring(a))
+			end
+			said = { table.concat(parts, " ") }
+			if type(after.env) == "table" then
+				for k in after.env do
+					table.insert(said, `{k}=…`)
+				end
+			end
+		end
+		table.insert(out, line(true, "danger-triangle", if after == nil then "plugins.words.diff.mcp_gone" else "plugins.words.diff.mcp", nil, nil, { literal = said }))
+	end
+	-- (What of Zeron's interface it changes is never an ask: `M.details`.
+	-- A screen it replaces runs as Zeron's own code: an ask, as running
+	-- a program is.)
+	if some(d.ui_replace_added) then
+		table.insert(out, line(true, "danger-triangle", "plugins.words.diff.ui_replace", "plugins.words.permission.ui_replace.detail", function()
+			return { places = M.places(d.ui_replace_added) }
+		end, { literal = literal(d.ui_replace_added) }))
+	end
+	if some(d.tools_added) then
+		table.insert(out, line(false, "magic-stick", "plugins.words.diff.tools_added", nil, nil, { items = tool_items(d.tools_added) }))
+	end
+	if some(d.tools_changed) then
+		local items: { Item } = {}
+		for _, t in d.tools_changed do
+			if type(t) == "table" and type(t.name) == "string" then
+				table.insert(items, { name = t.name, description = if type(t.description_after) == "string" then t.description_after else nil })
+			end
+		end
+		table.insert(out, line(false, "magic-stick", "plugins.words.diff.tools_changed", nil, nil, { items = items }))
+	end
+	if type(d.service_changed) == "table" then
+		local after = d.service_changed.after
+		table.insert(out, line(true, "action-play", "plugins.words.diff.service", nil, nil, { literal = if type(after) == "string" then { after } else nil }))
+	end
+	if type(d.entry_changed) == "table" then
+		local after = d.entry_changed.after
+		table.insert(out, line(false, "document", "plugins.words.diff.entry", nil, nil, { literal = if type(after) == "string" then { after } else nil }))
+	end
+	if some(d.network_added) then
+		local listed = hosts_said(d.network_added, d.network_local)
+		local maybe_near = type(d.network_named) == "table" and #d.network_named > 0
+		table.insert(out, line(listed.near, "global", "plugins.words.diff.network", if maybe_near then "plugins.words.permission.network.detail_named" else nil, nil, { literal = listed.list }))
+	end
+	if d.settings_changed == true then
+		table.insert(out, line(false, "settings", "plugins.words.diff.settings"))
+	end
+	local risky: { Line } = {}
+	local calm: { Line } = {}
+	for _, l in out do
+		table.insert(if l.risky then risky else calm, l)
+	end
+	for _, l in risky do
+		table.insert(calm, l)
+	end
+	return calm
 end
 
 -- `item` as it stands on another device, `name`: lines that say where
@@ -341,6 +562,50 @@ function M.grants(item: any): string?
 	return if #can > 0 then s("plugins.words.grants", { list = table.concat(can, s("plugins.words.list_sep")) }) else nil
 end
 
+-- Why installing or updating failed, as the engine says it: `"<reason>:
+-- <words>"` (crates/engine/src/plugins/install.rs `reason`). A reason
+-- Zeron knows is said in the locale shown; anything else as it reads.
+local FAILURES: { [string]: boolean } = {
+	not_a_package = true,
+	unsigned = true,
+	tampered = true,
+	bad_signature = true,
+	too_big = true,
+	bad_file = true,
+	git_missing = true,
+	git_timeout = true,
+	repo_unreadable = true,
+	ref_not_found = true,
+	no_manifest = true,
+	rate_limited = true,
+	github_unreachable = true,
+	release_not_found = true,
+	no_package = true,
+	download_failed = true,
+	not_a_link = true,
+	https_only = true,
+	other_signer = true,
+	new_signer = true,
+	installed_unsigned = true,
+	not_newer = true,
+	different_plugin = true,
+	up_to_date = true,
+	no_source = true,
+}
+
+function M.failure(message: string): string
+	local reason = string.match(message, "^([%l_]+): ")
+	if reason and FAILURES[reason] then
+		return s("plugins.failure." .. reason)
+	end
+	return message
+end
+
+-- (Inside a sentence of its own: without its full stop.)
+local function reason_words(message: string): string
+	return (string.gsub(M.failure(message), "[%.。]$", ""))
+end
+
 -- A newer version found where someone else's came from, said under its
 -- description: its version and what it changes in what it asks (new asks
 -- are allowed in the consent window after it's updated). Nil when there's
@@ -353,8 +618,8 @@ function M.update(item: any): string?
 	local version = if type(update.version) == "string" and update.version ~= "" then update.version else nil
 	if type(update.refused) == "string" then
 		return if version
-			then s("plugins.words.update.refused", { version = version, reason = update.refused })
-			else s("plugins.words.update.refused_unversioned", { reason = update.refused })
+			then s("plugins.words.update.refused", { version = version, reason = reason_words(update.refused) })
+			else s("plugins.words.update.refused_unversioned", { reason = reason_words(update.refused) })
 	end
 	local function said(list: { string }?): string?
 		local out: { string } = {}

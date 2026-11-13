@@ -7,14 +7,24 @@
 //! watches the list, reads output on request, and asks for a process to be
 //! stopped; the driver turns that into the agent's own stop request, and the
 //! process leaves the list when the agent reports it gone.
+//!
+//! It also keeps what the agent WAITS on once its turn has ended: work that
+//! will wake it when it ends. That is only true of a runtime that wakes its
+//! agent on its own ([`BackgroundWork::set_wakes`]: Claude Code re-invokes
+//! the model when a background task finishes, Muse starts a wake turn;
+//! Codex leaves a finished background terminal unread, live-verified on
+//! 0.167). On such a runtime its background agents always count (they
+//! report back), and a background process counts only once the agent says
+//! it waits on it ([`BackgroundWork::mark`]): a dev server left running is
+//! no wait. A mark lasts as long as its process is listed.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tokio::sync::{Notify, watch};
-use zeron_proto::{BackgroundTask, BackgroundTaskOutput};
+use zeron_proto::{BackgroundTask, BackgroundTaskOutput, WaitingKind, WaitingOn};
 
 /// Output kept per process the driver buffers itself (Codex output deltas),
 /// and read from the end of an output file at most.
@@ -30,11 +40,39 @@ pub enum OutputSource {
     Buffer { text: String, truncated: bool },
 }
 
+/// A mark the runtime can't honour ([`BackgroundWork::mark`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkRefused {
+    /// This runtime doesn't wake its agent when background work ends: the
+    /// agent must wait for the work inside its turn.
+    NoWake,
+}
+
+/// Which of the ids a mark named are background processes listed now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkOutcome {
+    pub matched: Vec<String>,
+    pub unmatched: Vec<String>,
+}
+
+#[derive(Default)]
+struct Waits {
+    /// The runtime wakes its agent when background work ends.
+    wakes: bool,
+    /// Its background agents now, oldest first.
+    agents: Vec<WaitingOn>,
+    /// Listed processes the agent said it waits on.
+    marked: HashSet<String>,
+}
+
 pub(crate) struct BackgroundWork {
     tasks: watch::Sender<Vec<BackgroundTask>>,
     outputs: Mutex<HashMap<String, OutputSource>>,
     stops: Mutex<VecDeque<String>>,
     stop_requested: Notify,
+    waits: Mutex<Waits>,
+    waiting: watch::Sender<Vec<WaitingOn>>,
+    woke: Notify,
 }
 
 impl Default for BackgroundWork {
@@ -44,6 +82,9 @@ impl Default for BackgroundWork {
             outputs: Mutex::default(),
             stops: Mutex::default(),
             stop_requested: Notify::new(),
+            waits: Mutex::default(),
+            waiting: watch::Sender::new(Vec::new()),
+            woke: Notify::new(),
         }
     }
 }
@@ -76,10 +117,124 @@ impl BackgroundWork {
             *current = tasks;
             true
         });
+        // A mark ends with its process.
+        {
+            let listed = self.tasks.borrow();
+            lock(&self.waits)
+                .marked
+                .retain(|id| listed.iter().any(|t| &t.id == id));
+        }
+        self.publish_waiting();
     }
 
     pub fn watch(&self) -> watch::Receiver<Vec<BackgroundTask>> {
         self.tasks.subscribe()
+    }
+
+    /// Driver: whether this runtime wakes its agent when background work
+    /// ends. Off (the default), nothing is ever waited on.
+    pub fn set_wakes(&self, wakes: bool) {
+        lock(&self.waits).wakes = wakes;
+        self.publish_waiting();
+    }
+
+    /// Driver: the runtime's background agents now, its whole set.
+    pub fn set_agents(&self, agents: Vec<WaitingOn>) {
+        lock(&self.waits).agents = agents;
+        self.publish_waiting();
+    }
+
+    /// Host: the agent says it waits on these background processes (or, with
+    /// `waiting` false, no longer). Only processes listed now match.
+    pub fn mark(&self, ids: &[String], waiting: bool) -> Result<MarkOutcome, MarkRefused> {
+        let mut outcome = MarkOutcome::default();
+        {
+            let listed = self.tasks.borrow();
+            let mut waits = lock(&self.waits);
+            if !waits.wakes {
+                return Err(MarkRefused::NoWake);
+            }
+            for id in ids {
+                let id = id.trim();
+                if id.is_empty() || outcome.matched.iter().chain(&outcome.unmatched).any(|seen| seen == id) {
+                    continue;
+                }
+                if listed.iter().any(|t| t.id == id) {
+                    if waiting {
+                        waits.marked.insert(id.to_owned());
+                    } else {
+                        waits.marked.remove(id);
+                    }
+                    outcome.matched.push(id.to_owned());
+                } else {
+                    outcome.unmatched.push(id.to_owned());
+                }
+            }
+        }
+        self.publish_waiting();
+        Ok(outcome)
+    }
+
+    /// Host: the person says the agent isn't waiting on anything it marked
+    /// (Stop waiting). Its background agents still count.
+    pub fn clear_marks(&self) {
+        lock(&self.waits).marked.clear();
+        self.publish_waiting();
+    }
+
+    /// Host: what the agent waits on now, as it changes: its background
+    /// agents, then the processes it marked, oldest first. Empty on a runtime
+    /// that doesn't wake its agent.
+    pub fn watch_waiting(&self) -> watch::Receiver<Vec<WaitingOn>> {
+        self.waiting.subscribe()
+    }
+
+    /// Driver: the runtime started a turn of its own, to deliver background
+    /// work that ended (a wake turn).
+    pub fn note_wake(&self) {
+        self.woke.notify_one();
+    }
+
+    /// Host: resolves once per [`Self::note_wake`].
+    pub async fn woke(&self) {
+        self.woke.notified().await;
+    }
+
+    fn publish_waiting(&self) {
+        let now: Vec<WaitingOn> = {
+            let listed = self.tasks.borrow();
+            let waits = lock(&self.waits);
+            if !waits.wakes {
+                Vec::new()
+            } else {
+                waits
+                    .agents
+                    .iter()
+                    .cloned()
+                    .chain(
+                        listed
+                            .iter()
+                            .filter(|t| waits.marked.contains(&t.id))
+                            .map(|t| WaitingOn {
+                                id: t.id.clone(),
+                                kind: WaitingKind::Process,
+                                label: t
+                                    .description
+                                    .clone()
+                                    .filter(|d| !d.trim().is_empty())
+                                    .unwrap_or_else(|| t.command.clone()),
+                            }),
+                    )
+                    .collect()
+            }
+        };
+        self.waiting.send_if_modified(|current| {
+            if *current == now {
+                return false;
+            }
+            *current = now;
+            true
+        });
     }
 
     pub fn set_output(&self, id: &str, source: OutputSource) {
@@ -290,6 +445,59 @@ mod tests {
         assert!(work.request_stop("a"));
         work.set(Vec::new());
         assert!(work.output("a").is_none(), "gone with the process");
+    }
+
+    fn agent(id: &str) -> WaitingOn {
+        WaitingOn { id: id.into(), kind: WaitingKind::Agent, label: format!("agent {id}") }
+    }
+
+    #[test]
+    fn nothing_is_waited_on_where_the_runtime_never_wakes_its_agent() {
+        let work = BackgroundWork::default();
+        work.set(vec![task("a")]);
+        work.set_agents(vec![agent("x")]);
+        assert_eq!(work.mark(&["a".into()], true), Err(MarkRefused::NoWake));
+        assert!(work.watch_waiting().borrow().is_empty());
+    }
+
+    #[test]
+    fn agents_always_count_and_processes_only_once_marked() {
+        let work = BackgroundWork::default();
+        work.set_wakes(true);
+        work.set(vec![task("dev"), task("tests")]);
+        let waiting = work.watch_waiting();
+        assert!(waiting.borrow().is_empty(), "a process left running is no wait");
+        work.set_agents(vec![agent("x")]);
+        let outcome = work.mark(&["tests".into(), "gone".into(), "tests".into()], true).unwrap();
+        assert_eq!(outcome, MarkOutcome { matched: vec!["tests".into()], unmatched: vec!["gone".into()] });
+        let ids: Vec<String> = waiting.borrow().iter().map(|w| w.id.clone()).collect();
+        assert_eq!(ids, ["x", "tests"]);
+        assert_eq!(waiting.borrow()[1].label, "run tests");
+        // The process ending takes its mark with it: listed again later
+        // (a reused id), it isn't waited on unless marked again.
+        work.set(vec![task("dev")]);
+        work.set(vec![task("dev"), task("tests")]);
+        let ids: Vec<String> = waiting.borrow().iter().map(|w| w.id.clone()).collect();
+        assert_eq!(ids, ["x"]);
+        // Unmarked, and the person's Stop waiting: agents still count.
+        work.mark(&["dev".into()], true).unwrap();
+        work.mark(&["dev".into()], false).unwrap();
+        work.mark(&["tests".into()], true).unwrap();
+        work.clear_marks();
+        let ids: Vec<String> = waiting.borrow().iter().map(|w| w.id.clone()).collect();
+        assert_eq!(ids, ["x"]);
+        work.set_agents(Vec::new());
+        assert!(waiting.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_wake_reaches_the_host() {
+        let work = std::sync::Arc::new(BackgroundWork::default());
+        let host = work.clone();
+        let waiter = tokio::spawn(async move { host.woke().await });
+        tokio::task::yield_now().await;
+        work.note_wake();
+        waiter.await.unwrap();
     }
 
     #[tokio::test]

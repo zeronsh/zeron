@@ -1,13 +1,58 @@
 import { describe, expect, it } from "vitest";
 import {
+  DISK_CRITICAL,
+  DISK_WARN,
+  FAST_STALE_MIN_MS,
   HEARTBEAT_STALE_MS,
+  MACHINES,
+  REFRESH_MARGIN_MS,
+  diskLevel,
+  heartbeatStaleMs,
   idleDecision,
+  machineName,
+  machineSpec,
+  refreshDueAt,
   parseIdleMs,
   parseTtlSeconds,
   shouldExtendTtl,
   tokenTimestampCheck,
   workflowInstanceId
 } from "./policy";
+
+describe("the machine catalog", () => {
+  it("names every size once, smallest first, and only those", () => {
+    expect(MACHINES.map((m) => m.id)).toEqual(["small", "default", "large", "xlarge"]);
+    for (const machine of MACHINES) expect(machineName(machine.id)).toBe(machine.id);
+    expect(machineName("huge")).toBeUndefined();
+    expect(machineName(1)).toBeUndefined();
+    expect(machineName(undefined)).toBeUndefined();
+    const disks = MACHINES.map((m) => m.diskGiB);
+    expect([...disks].sort((a, b) => a - b)).toEqual(disks);
+  });
+
+  it("carries what Boat's refusal said large holds", () => {
+    expect(machineSpec("large")?.diskGiB).toBe(111.8);
+  });
+});
+
+describe("disk levels", () => {
+  it("warns at 80% and is critical at 90% of what the size holds", () => {
+    expect(diskLevel(79.9, 100)).toBe("ok");
+    expect(diskLevel(100 * DISK_WARN, 100)).toBe("warn");
+    expect(diskLevel(89.9, 100)).toBe("warn");
+    expect(diskLevel(100 * DISK_CRITICAL, 100)).toBe("critical");
+    expect(diskLevel(118.3, 111.8)).toBe("critical");
+    expect(diskLevel(0, 51)).toBe("ok");
+  });
+});
+
+describe("a sleeping machine's refresh", () => {
+  it("falls due before the retention ends, with room for another try", () => {
+    const retention = 14 * 24 * 60 * 60_000;
+    expect(refreshDueAt(1_000, retention)).toBe(1_000 + retention - REFRESH_MARGIN_MS);
+    expect(REFRESH_MARGIN_MS).toBeGreaterThanOrEqual(24 * 60 * 60_000);
+  });
+});
 
 describe("runner token timestamps", () => {
   const now = 1_800_000_000_000;
@@ -69,5 +114,16 @@ describe("TTL extension and config parsing", () => {
     expect(workflowInstanceId("sleep", "cloud-abc", 4)).toBe(workflowInstanceId("sleep", "cloud-abc", 4));
     // Cloudflare caps instance ids at 100 chars; a uuid device id leaves room.
     expect(workflowInstanceId("provision", `cloud-${crypto.randomUUID()}`, 1_000_000).length).toBeLessThanOrEqual(64);
+  });
+});
+
+describe("heartbeatStaleMs", () => {
+  it("is three fast beats, never under 45 s, and 3 min for the idle pace or an engine that doesn't say", () => {
+    expect(heartbeatStaleMs(15_000)).toBe(FAST_STALE_MIN_MS);
+    expect(heartbeatStaleMs(5_000)).toBe(FAST_STALE_MIN_MS);
+    expect(heartbeatStaleMs(20_000)).toBe(60_000);
+    expect(heartbeatStaleMs(60_000)).toBe(HEARTBEAT_STALE_MS);
+    expect(heartbeatStaleMs(undefined)).toBe(HEARTBEAT_STALE_MS);
+    expect(heartbeatStaleMs(0)).toBe(HEARTBEAT_STALE_MS);
   });
 });

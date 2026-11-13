@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::capability;
 use super::files::hash_files;
 use super::manifest::{MANIFEST_FILE, Manifest, McpSpec, ToolSpec, UiSpec, check_id};
 use super::signing::{FileHashes, SigCheck, check, content_hash};
@@ -154,6 +155,10 @@ pub struct PluginItem {
     /// by the app on each run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
+    /// The hosts its requests may reach (`network.hosts`), named on its
+    /// consent; a private one (`localhost:8080`) said as such.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub network_hosts: Vec<String>,
     /// Its service's file (`service.luau`), run headless by the engine
     /// (plugins/service) while it's on and allowed `service`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +181,13 @@ pub struct PluginItem {
     /// listing carries it so another device's window can draw it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_svg: Option<String>,
+    /// The digest of its capability record (`capability.rs`): what a
+    /// decision binds.
+    pub digest: String,
+    /// What grew since you allowed it, when that's why it waits
+    /// (`capability::Diff`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest_diff: Option<serde_json::Value>,
 }
 
 /// The SVG a manifest names as its icon (`"icon": "icon.svg"`), read
@@ -184,10 +196,10 @@ pub struct PluginItem {
 fn icon_svg(dir: &Path, manifest: &serde_json::Value) -> Option<String> {
     const MAX: u64 = 32 * 1024;
     let rel = manifest.get("icon")?.as_str()?;
-    if rel.is_empty() || rel.starts_with('/') || rel.contains("..") || rel.contains('\\') || !rel.ends_with(".svg") {
+    if !rel.ends_with(".svg") {
         return None;
     }
-    let path = dir.join(rel);
+    let path = zeron_plugin_guard::path::join(dir, rel).ok()?;
     let meta = std::fs::symlink_metadata(&path).ok()?;
     if !meta.is_file() || meta.len() > MAX {
         return None;
@@ -202,6 +214,8 @@ pub struct Entry {
     pub item: PluginItem,
     pub inspected: Inspected,
     pub verdict: Verdict,
+    /// Its capability record.
+    pub record: serde_json::Value,
 }
 
 impl Entry {
@@ -227,6 +241,7 @@ impl Entry {
             author: &self.item.author,
             key: self.key(),
             hash: &self.item.hash,
+            record: &self.record,
         }
     }
 }
@@ -239,6 +254,7 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
     let decision: Option<&Decision> = state.decisions.get(&id);
     let manifest = inspected.manifest.as_ref();
     let permissions: Vec<String> = manifest.map(|m| m.permissions.clone()).unwrap_or_default();
+    let record = manifest.map_or_else(capability::empty, capability::record);
     let verdict = decide(
         &Facts {
             broken: inspected.error.is_some(),
@@ -246,6 +262,7 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
             author: &author,
             key: inspected.key(),
             hash: &inspected.hash,
+            record: &record,
         },
         decision,
     );
@@ -270,6 +287,7 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
         ui: manifest.map(|m| m.ui.clone()).unwrap_or_default(),
         tools: manifest.map(|m| m.tools.clone()).unwrap_or_default(),
         commands: manifest.map(|m| m.commands.clone()).unwrap_or_default(),
+        network_hosts: manifest.map(|m| m.network_hosts.clone()).unwrap_or_default(),
         service: manifest.and_then(|m| m.service.clone()),
         mcp: manifest.is_some_and(|m| m.mcp.is_some()),
         error: inspected.error.clone(),
@@ -277,11 +295,14 @@ pub fn entry(inspected: Inspected, author: Author, state: &State) -> Entry {
         source: None,
         update: None,
         icon_svg: manifest.and_then(|m| icon_svg(&inspected.dir, &m.raw)),
+        digest: capability::digest(&record),
+        digest_diff: verdict.diff.clone(),
     };
     Entry {
         item,
         inspected,
         verdict,
+        record,
     }
 }
 
@@ -297,6 +318,7 @@ pub fn builtin_entry(inspected: Inspected, off: bool) -> Entry {
         entry.item.allowed = entry.item.permissions.clone();
         entry.item.allowed.sort();
         entry.item.ask = Vec::new();
+        entry.item.digest_diff = None;
     }
     entry
 }
@@ -354,7 +376,7 @@ mod tests {
         assert!(mismatch.error.unwrap().contains("doesn't match"));
 
         let reserved = inspect(&write_plugin(root.path(), "zeron", manifest("zeron")), true);
-        assert_eq!(reserved.error.as_deref(), Some("That name is Zeron's own"));
+        assert_eq!(reserved.error.as_deref(), Some("Zeron already uses that name"));
 
         let mut no_entry = manifest("noentry");
         no_entry["entry"] = serde_json::json!("main.luau");

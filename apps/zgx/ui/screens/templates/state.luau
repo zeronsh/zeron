@@ -53,9 +53,6 @@ export type Template = {
 	imported: { key: string, author: any, source: any? }?,
 	-- A newer version found where it came from (`{ version, refused? }`).
 	update: { version: string, refused: string? }?,
-	-- One of Zeron's official templates that recolours it (its built-in
-	-- theme's key).
-	theme: string?,
 	-- The colours its preview is drawn in (src/plugins/looks.rs): each
 	-- appearance it changes, as its theme file and its palette over it.
 	-- None for one that changes no colour of Zeron's.
@@ -64,7 +61,8 @@ export type Template = {
 export type Scheme = { theme: { type: string?, extends: string?, tokens: any }?, palette: any? }
 export type Look = { stamp: string, light: Scheme?, dark: Scheme? }
 -- A package waiting for you to allow it.
-export type Pending = { pending: string, name: string, source: string?, files: number?, ignored: { string }? }
+-- (`here`: its window opened as it came, so it has no notice in the corner.)
+export type Pending = { pending: string, name: string, source: string?, files: number?, ignored: { string }?, here: boolean? }
 export type Now = { state: string, active: string?, dir: string?, list: { Template }?, pending: { Pending }? }
 
 M.now = ui.shared("templates", { state = "loading" } :: Now)

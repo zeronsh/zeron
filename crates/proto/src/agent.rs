@@ -323,6 +323,10 @@ pub struct HarnessUpdateStatus {
     /// Provider command shown when mutation cannot be safely automated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_command: Option<String>,
+    /// During `WaitingForIdle`, why this update has to wait for running chats,
+    /// in words for the person. Absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
     /// The installed release is known not to work with (or isn't supported
     /// by) this engine's zeron.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,6 +450,43 @@ impl AccessMode {
     }
 }
 
+impl SandboxLevel {
+    /// Every level, least to most trusting.
+    pub const ALL: [SandboxLevel; 3] = [
+        SandboxLevel::ReadOnly,
+        SandboxLevel::WorkspaceWrite,
+        SandboxLevel::DangerFullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SandboxLevel::ReadOnly => "read-only",
+            SandboxLevel::WorkspaceWrite => "workspace-write",
+            SandboxLevel::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+/// What an agent-made chat may run with: `sandbox` and `access` no more
+/// trusting than its creator's (`ceiling`), and whether either was lowered.
+/// A chat created through Zeron's MCP never gets more access than the chat
+/// that created it.
+pub fn cap_access(
+    (sandbox, access): (SandboxLevel, AccessMode),
+    (max_sandbox, max_access): (SandboxLevel, AccessMode),
+) -> (SandboxLevel, AccessMode, bool) {
+    fn rank<T: PartialEq>(all: &[T], x: &T) -> usize {
+        all.iter().position(|y| y == x).unwrap_or(0)
+    }
+    let sandbox_over = rank(&SandboxLevel::ALL, &sandbox) > rank(&SandboxLevel::ALL, &max_sandbox);
+    let access_over = rank(&AccessMode::ALL, &access) > rank(&AccessMode::ALL, &max_access);
+    (
+        if sandbox_over { max_sandbox } else { sandbox },
+        if access_over { max_access } else { access },
+        sandbox_over || access_over,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -468,6 +509,12 @@ pub struct Model {
     pub reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    /// The harness's own default: what a chat that names no model runs. A
+    /// catalog lists its rows best-first, so the default need not lead it;
+    /// clients pick the marked row and fall back to the first row when none
+    /// is marked (catalogs from older engines mark none).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -628,6 +675,26 @@ impl McpServer {
             .get(Self::SIDE_CHATS_ONLY_ENV)
             .is_some_and(|value| value == "1")
     }
+
+    /// The chat Zeron's own server speaks for, set when the engine launched
+    /// it for a chat's run (its in-chat tools are offered only then).
+    pub const CHAT_ID_ENV: &'static str = "ZERON_CHAT_ID";
+
+    /// Set to `1` on Zeron's own server for a chat's run when the runtime
+    /// brings its agent back on its own as background work ends: only then
+    /// is the agent offered `wait_on_background` (anywhere else a turn that
+    /// ends is the agent done, and the call would only be refused).
+    pub const WAITS_ON_BACKGROUND_ENV: &'static str = "ZERON_WAITS_ON_BACKGROUND";
+
+    /// Whether this is Zeron's server for a chat's run whose agent may say
+    /// it waits on background work.
+    pub fn waits_on_background(&self) -> bool {
+        self.env.get(Self::CHAT_ID_ENV).is_some_and(|id| !id.is_empty())
+            && self
+                .env
+                .get(Self::WAITS_ON_BACKGROUND_ENV)
+                .is_some_and(|value| value == "1")
+    }
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -655,6 +722,25 @@ pub struct WorktreeSpec {
 /// EXEMPT this id — it legitimately reappears in every segment for the whole
 /// life of a run.
 pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
+
+/// Bytes of a command's output a harness adapter puts on its
+/// [`AgentEvent::ToolResult`]: the END of it, where a build's error or a
+/// test run's summary is. The doc keeps far less (a 10-line / 1 KB tail);
+/// this bounds what the run journal holds per command.
+pub const COMMAND_OUTPUT_CAP: usize = 32 * 1024;
+
+/// The last [`COMMAND_OUTPUT_CAP`] bytes of a command's output, started on a
+/// char boundary; `None` when it printed nothing.
+pub fn command_output_cap(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(COMMAND_OUTPUT_CAP);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(text[start..].to_owned())
+}
 
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -996,13 +1082,20 @@ pub enum AgentEvent {
         id: String,
         is_error: bool,
         /// Tool output text, capped by the emitting harness (ACP tool-call
-        /// content; claude/codex adapters never populate it). The doc-side
-        /// fold applies its own byte cap before anything persists.
+        /// content; the claude/codex adapters send a command's output only,
+        /// its last [`COMMAND_OUTPUT_CAP`] bytes). The doc-side fold keeps a
+        /// short redacted tail of a command's output and drops every other
+        /// tool's before anything persists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         /// Inline file diff for edit-shaped tools (ACP `Diff` content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+        /// A command's exit status, when the harness reported one (Claude
+        /// Code's Bash, Codex's command execution). Absent for other tools,
+        /// a command still running in the background, or one that never ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
@@ -1263,6 +1356,7 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: Some("claude update".into()),
+            wait_reason: None,
             compatibility: None,
             held_back: None,
         };

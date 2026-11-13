@@ -23,6 +23,9 @@ use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
 use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
 
+/// The plugins' sends a chat keeps a record of (`SessionDoc::sent_by`).
+pub const SENT_BY_KEPT: usize = 200;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
     #[error("loro: {0}")]
@@ -142,6 +145,17 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    /// A command's exit status (additive; command tools only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    /// `output` is the END of a longer command output (additive; written
+    /// only when true): the UI says earlier output was trimmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_truncated: Option<bool>,
+    /// Lines in the whole command output (additive; only with
+    /// `outputTruncated`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_lines: Option<u64>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -194,6 +208,9 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            exit_code,
+            output_truncated,
+            output_lines,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -217,6 +234,9 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            exit_code: *exit_code,
+            output_truncated: output_truncated.then_some(true),
+            output_lines: *output_lines,
             ..Default::default()
         },
         MessagePart::Input {
@@ -303,6 +323,9 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                exit_code: p.exit_code,
+                output_truncated: p.output_truncated.unwrap_or(false),
+                output_lines: p.output_lines,
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -390,15 +413,229 @@ pub struct ProviderSessionMark {
     pub seen: Option<String>,
 }
 
+/// A list's items as last read, by their containers
+/// ([`SessionDoc::read_entries_cached`]): `None` for one that didn't parse.
+pub struct ListCache<T> {
+    /// Each item, and roughly what it holds in bytes.
+    items: std::collections::HashMap<loro::ContainerID, (Option<T>, usize)>,
+    /// All items' bytes, roughly (the engine's memory budget counts them).
+    bytes: usize,
+    /// The doc's version (state frontiers) the items were read at.
+    read_at: Option<loro::Frontiers>,
+    /// Items read from the doc (not the cache), all told.
+    pub reads: usize,
+}
+
+impl<T> Default for ListCache<T> {
+    fn default() -> Self {
+        Self { items: Default::default(), bytes: 0, read_at: None, reads: 0 }
+    }
+}
+
+impl<T> ListCache<T> {
+    fn clear(&mut self) {
+        self.items.clear();
+        self.bytes = 0;
+        self.read_at = None;
+    }
+}
+
+/// Roughly what a value holds once parsed, in bytes.
+fn json_bytes(value: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => 24 + s.len(),
+        Value::Array(items) => 24 + items.iter().map(json_bytes).sum::<usize>(),
+        Value::Object(fields) => 48 + fields.iter().map(|(k, v)| 24 + k.len() + json_bytes(v)).sum::<usize>(),
+        _ => 16,
+    }
+}
+
+/// Transcript entries as last read ([`SessionDoc::read_entries_cached`]).
+pub type EntryCache = ListCache<std::sync::Arc<SessionMessageEntry>>;
+
+/// The items of a root list (`messages`, `commands`) changed since a cache
+/// was filled, from the doc's change events.
+#[derive(Default, Debug)]
+pub struct EntryChanges {
+    pub ids: std::collections::HashSet<loro::ContainerID>,
+    /// Anything may have changed: read every entry again.
+    pub all: bool,
+    /// The doc's version the latest observed change brought it to: every
+    /// change up to it is in `ids`. Exact for changes made through
+    /// [`SessionDoc::commit`] and its imports, which hold the doc's change
+    /// lock until their events are delivered, so no other change is in
+    /// flight when the callback reads the version. (Loro itself delivers a
+    /// local commit's events after releasing its own lock.)
+    pub at: Option<loro::Frontiers>,
+}
+
+impl EntryChanges {
+    pub fn all() -> Self {
+        Self { ids: Default::default(), all: true, at: None }
+    }
+
+    /// Note the entries `event` touched. A change inside an entry has the
+    /// entry's map second on its path; one to the list itself (an entry
+    /// added, moved or removed) needs nothing: the list is walked on read,
+    /// and an entry the cache hasn't seen is read then.
+    pub fn observe(&mut self, event: &loro::event::DiffEvent<'_>) {
+        self.observe_list(event, "messages");
+    }
+
+    /// [`Self::observe`] for the root list `root`.
+    pub fn observe_list(&mut self, event: &loro::event::DiffEvent<'_>, root: &str) {
+        if self.all {
+            return;
+        }
+        for change in &event.events {
+            let path = change.path;
+            if !matches!(path.first(), Some((_, loro::Index::Key(key))) if key.as_str() == root)
+            {
+                continue;
+            }
+            if let Some((entry, _)) = path.get(1) {
+                self.ids.insert(entry.clone());
+            }
+        }
+    }
+}
+
+/// One change at a time, through to its events: held by every
+/// [`SessionDoc`] commit and import while Loro applies the change and
+/// delivers its events (a local commit delivers them after releasing Loro's
+/// own lock, so Loro alone doesn't keep two changes apart). Reentrant: a
+/// subscriber may write.
+#[derive(Default)]
+struct ChangeLock {
+    owner: std::sync::Mutex<(Option<std::thread::ThreadId>, usize)>,
+    free: std::sync::Condvar,
+}
+
+struct ChangeGuard<'a>(&'a ChangeLock);
+
+thread_local! {
+    /// The docs this thread is importing into (by address): Loro holds a
+    /// doc's transaction lock until its import's events are delivered, so a
+    /// read of THAT doc from one of them mustn't ask Loro for its pending
+    /// transaction (it would wait on that lock, held by this very thread).
+    /// None can be pending then: Loro stops the transaction for the import.
+    /// Any other doc is asked as ever.
+    static IMPORTING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Marks this thread as importing into a doc while it lives.
+struct Importing(usize);
+
+impl Importing {
+    fn start(doc: &SessionDoc) -> Self {
+        let at = doc as *const SessionDoc as usize;
+        IMPORTING.with_borrow_mut(|docs| docs.push(at));
+        Importing(at)
+    }
+
+    fn here(doc: &SessionDoc) -> bool {
+        let at = doc as *const SessionDoc as usize;
+        IMPORTING.with_borrow(|docs| docs.contains(&at))
+    }
+}
+
+impl Drop for Importing {
+    fn drop(&mut self) {
+        IMPORTING.with_borrow_mut(|docs| {
+            if let Some(i) = docs.iter().rposition(|at| *at == self.0) {
+                docs.remove(i);
+            }
+        });
+    }
+}
+
+impl ChangeLock {
+    fn lock(&self) -> ChangeGuard<'_> {
+        let me = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match owner.0 {
+                Some(holder) if holder == me => break,
+                None => {
+                    owner.0 = Some(me);
+                    break;
+                }
+                Some(_) => owner = self.free.wait(owner).unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+        owner.1 += 1;
+        ChangeGuard(self)
+    }
+}
+
+impl Drop for ChangeGuard<'_> {
+    fn drop(&mut self) {
+        let mut owner = self.0.owner.lock().unwrap_or_else(|e| e.into_inner());
+        owner.1 -= 1;
+        if owner.1 == 0 {
+            owner.0 = None;
+            self.0.free.notify_one();
+        }
+    }
+}
+
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    /// See `queue_row_guard` (queue.rs).
+    pub(crate) queue_rows: std::sync::Mutex<()>,
+    /// [`Self::read_entries`]' entries as last read, and the ones the doc's
+    /// change events say changed since: a read costs what changed, not a
+    /// long chat's every entry.
+    entry_cache: std::sync::Mutex<EntryCache>,
+    entry_changes: std::sync::Arc<std::sync::Mutex<EntryChanges>>,
+    /// The same for [`Self::read_commands`] (the drain reads it every pass).
+    command_cache: std::sync::Mutex<ListCache<SessionCommandEntry>>,
+    command_changes: std::sync::Arc<std::sync::Mutex<EntryChanges>>,
+    /// Whether read entries are kept (`set_keep_read_cache`): off, every
+    /// read reads them all and keeps nothing.
+    keep_entries: std::sync::atomic::AtomicBool,
+    /// The kept entries' and commands' bytes, roughly: read without the
+    /// caches' locks (the engine's eviction weighs every open chat).
+    entry_bytes: std::sync::atomic::AtomicUsize,
+    command_bytes: std::sync::atomic::AtomicUsize,
+    change: ChangeLock,
+    _entry_events: loro::Subscription,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        let entry_changes = std::sync::Arc::new(std::sync::Mutex::new(EntryChanges::all()));
+        let command_changes = std::sync::Arc::new(std::sync::Mutex::new(EntryChanges::all()));
+        let (entries, commands) = (entry_changes.clone(), command_changes.clone());
+        // (A clone of the doc in its own subscriber: the subscription is
+        // dropped with this `SessionDoc`, and the clone with it.)
+        let events_doc = doc.clone();
+        let _entry_events = doc.subscribe_root(std::sync::Arc::new(move |event| {
+            let at = events_doc.state_frontiers();
+            let mut seen = entries.lock().unwrap_or_else(|e| e.into_inner());
+            seen.observe_list(&event, "messages");
+            seen.at = Some(at.clone());
+            drop(seen);
+            let mut seen = commands.lock().unwrap_or_else(|e| e.into_inner());
+            seen.observe_list(&event, "commands");
+            seen.at = Some(at);
+        }));
+        Self {
+            doc,
+            queue_rows: std::sync::Mutex::new(()),
+            entry_cache: Default::default(),
+            entry_changes,
+            command_cache: Default::default(),
+            command_changes,
+            keep_entries: std::sync::atomic::AtomicBool::new(true),
+            entry_bytes: Default::default(),
+            command_bytes: Default::default(),
+            change: ChangeLock::default(),
+            _entry_events,
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -408,11 +645,38 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self::from_doc(doc))
     }
 
     pub fn doc(&self) -> &LoroDoc {
         &self.doc
+    }
+
+    /// Commit, holding the change lock until the commit's events are
+    /// delivered (see [`ChangeLock`]). Every write to the doc commits so.
+    pub fn commit(&self) {
+        let _change = self.change.lock();
+        LoroDoc::commit(&self.doc);
+    }
+
+    /// [`LoroDoc::import`], under the change lock.
+    pub fn import(&self, bytes: &[u8]) -> Result<loro::ImportStatus, LoroError> {
+        let _change = self.change.lock();
+        let _importing = Importing::start(self);
+        self.doc.import(bytes)
+    }
+
+    /// [`LoroDoc::import_with`], under the change lock.
+    pub fn import_with(&self, bytes: &[u8], origin: &str) -> Result<loro::ImportStatus, LoroError> {
+        let _change = self.change.lock();
+        let _importing = Importing::start(self);
+        self.doc.import_with(bytes, origin)
+    }
+
+    /// Changes made but not yet committed (none while this thread imports,
+    /// where asking would wait on a lock this thread holds).
+    fn pending_changes(&self) -> usize {
+        if Importing::here(self) { 0 } else { self.doc.get_pending_txn_len() }
     }
 
     /// A single atomic value prevents tokens and capacity from tearing on sync.
@@ -439,14 +703,14 @@ impl SessionDoc {
             self.doc
                 .get_map("meta")
                 .insert("contextUsage", serde_json::to_string(&next)?)?;
-            self.doc.commit();
+            self.commit();
         }
         Ok(())
     }
 
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -464,7 +728,7 @@ impl SessionDoc {
             self.doc
                 .get_map("meta")
                 .insert("forkHistorySession", session_id)?;
-            self.doc.commit();
+            self.commit();
         }
         Ok(())
     }
@@ -480,10 +744,43 @@ impl SessionDoc {
         )
     }
 
+    /// Who sent each message a plugin sent, by the message's (or queued
+    /// row's) id: `{ plugin, name, kind, at }`. Kept beside the transcript,
+    /// never in it (nothing shows it), the newest [`SENT_BY_KEPT`]. One
+    /// atomic value so a synced reader never sees half a record.
+    pub fn sent_by(&self) -> BTreeMap<String, serde_json::Value> {
+        let Some(loro::ValueOrContainer::Value(LoroValue::String(value))) = self.doc.get_map("meta").get("sentBy")
+        else {
+            return BTreeMap::new();
+        };
+        serde_json::from_str(&value).unwrap_or_default()
+    }
+
+    pub fn mark_sent_by(&self, id: &str, by: serde_json::Value) -> Result<(), DocError> {
+        let mut all = self.sent_by();
+        all.insert(id.to_owned(), by);
+        while all.len() > SENT_BY_KEPT {
+            // The oldest (by its `at`) goes first.
+            let oldest = all
+                .iter()
+                .min_by_key(|(_, v)| v.get("at").and_then(serde_json::Value::as_i64).unwrap_or(0))
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => all.remove(&k),
+                None => break,
+            };
+        }
+        self.doc
+            .get_map("meta")
+            .insert("sentBy", serde_json::to_string(&all)?.as_str())?;
+        self.commit();
+        Ok(())
+    }
+
     pub fn mark_provider_switched(&self) -> Result<(), DocError> {
         if !self.provider_switched() {
             self.doc.get_map("meta").insert("providerSwitched", true)?;
-            self.doc.commit();
+            self.commit();
         }
         Ok(())
     }
@@ -519,7 +816,7 @@ impl SessionDoc {
         self.doc
             .get_map("meta")
             .insert("providerSessions", serde_json::to_string(&marks)?)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -540,7 +837,7 @@ impl SessionDoc {
         for part in &entry.parts {
             push_part(&parts, part)?;
         }
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -555,7 +852,7 @@ impl SessionDoc {
         for part in &entry.parts {
             push_part(&parts, part)?;
         }
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -566,7 +863,72 @@ impl SessionDoc {
     /// peer on a newer schema must degrade to a missing row, never blank the
     /// whole transcript — one bad entry took down every publish for the chat
     /// (2026-07-31, "missing field `id`" during a multi-update import).
+    ///
+    /// Only the entries changed since the last read are read from the doc
+    /// ([`Self::read_entries_cached`]); [`Self::read_entries_whole`] reads
+    /// them all.
     pub fn read_entries(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
+        Ok(self.read_entries_shared()?.iter().map(|e| (**e).clone()).collect())
+    }
+
+    /// [`Self::read_entries`], each entry shared with the cache rather than
+    /// copied: what a long chat's every commit reads.
+    pub fn read_entries_shared(
+        &self,
+    ) -> Result<Vec<std::sync::Arc<SessionMessageEntry>>, DocError> {
+        let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let keep = self.keep_entries.load(std::sync::atomic::Ordering::Acquire);
+        let read = self.read_list_cached("messages", &mut cache, &self.entry_changes, keep, |value| {
+            self.parse_entry(value).map(std::sync::Arc::new)
+        });
+        self.entry_bytes.store(cache.bytes, std::sync::atomic::Ordering::Relaxed);
+        Ok(read)
+    }
+
+    /// Whether read entries are kept between reads. The engine keeps them
+    /// for a chat someone is showing (its every commit reads them), and not
+    /// for one nobody is, so its transcript isn't held for nothing.
+    pub fn set_keep_read_cache(&self, keep: bool) {
+        self.keep_entries.store(keep, std::sync::atomic::Ordering::Release);
+        if !keep {
+            self.forget_cached_entries();
+        }
+    }
+
+    /// Lets go of the kept entries: the next read reads them all.
+    pub fn forget_cached_entries(&self) {
+        let mut cache = self.entry_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        self.entry_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.entry_changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
+    }
+
+    /// What the kept entries and commands hold, roughly, in bytes.
+    pub fn cached_bytes(&self) -> usize {
+        self.entry_bytes.load(std::sync::atomic::Ordering::Relaxed)
+            + self.command_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Entries this doc's [`Self::read_entries`] has read from the doc (not
+    /// its cache), all told.
+    pub fn entries_read(&self) -> usize {
+        self.entry_cache.lock().unwrap_or_else(|e| e.into_inner()).reads
+    }
+
+    /// Lets go of the entries [`Self::read_entries`] keeps: the next read
+    /// reads them all again. For a chat nobody is showing, whose reads are
+    /// rare, so its transcript isn't held twice for nothing.
+    pub fn drop_read_cache(&self) {
+        self.forget_cached_entries();
+    }
+
+    /// Entries [`Self::read_entries`] keeps now.
+    pub fn entries_cached(&self) -> usize {
+        self.entry_cache.lock().unwrap_or_else(|e| e.into_inner()).items.len()
+    }
+
+    /// Every entry, read from the doc whole (no cache).
+    pub fn read_entries_whole(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
         let messages = self
@@ -589,6 +951,144 @@ impl SessionDoc {
                 }
             })
             .collect())
+    }
+
+    /// [`Self::read_entries`], paying only for the entries `changed` names
+    /// (and any `cache` hasn't seen): the rest come from `cache`, which this
+    /// leaves holding every entry read. A commit in a long chat then costs
+    /// the entries it touched, not the transcript.
+    ///
+    /// `changed` must name every entry changed since `cache` was filled (see
+    /// [`EntryChanges::observe`]); `changed.all` refills it whole.
+    pub fn read_entries_cached(
+        &self,
+        cache: &mut EntryCache,
+        changed: EntryChanges,
+    ) -> Vec<std::sync::Arc<SessionMessageEntry>> {
+        let changed = std::sync::Mutex::new(changed);
+        self.read_list_cached("messages", cache, &changed, true, |value| {
+            self.parse_entry(value).map(std::sync::Arc::new)
+        })
+    }
+
+    /// Root list `root`'s items, each parsed by `parse` from its deep value:
+    /// those `changes` names, and those `cache` hasn't seen, read from the
+    /// doc; the rest from `cache`, which is left holding them all (`keep`).
+    ///
+    /// The cache is trusted only for a doc whose every change up to now has
+    /// been observed: no transaction pending, and either nothing changed
+    /// since the cache was read or the latest observed change reached the
+    /// doc's present version. A change landing during the read reads again;
+    /// one that keeps landing gets a whole read (Loro's, in one go).
+    fn read_list_cached<T: Clone>(
+        &self,
+        root: &str,
+        cache: &mut ListCache<T>,
+        changes: &std::sync::Mutex<EntryChanges>,
+        keep: bool,
+        parse: impl Fn(serde_json::Value) -> Option<T>,
+    ) -> Vec<T> {
+        for _ in 0..3 {
+            // (Under the change lock: no change is between applying and
+            // delivering its events, so `changes` holds every change up to
+            // `now`.)
+            let (now, changed) = {
+                let _change = self.change.lock();
+                (
+                    self.doc.state_frontiers(),
+                    std::mem::take(&mut *changes.lock().unwrap_or_else(|e| e.into_inner())),
+                )
+            };
+            let trusted = keep
+                && !changed.all
+                && self.pending_changes() == 0
+                && (cache.read_at.as_ref() == Some(&now) || changed.at.as_ref() == Some(&now));
+            if trusted {
+                for id in &changed.ids {
+                    if let Some((_, bytes)) = cache.items.remove(id) {
+                        cache.bytes -= bytes;
+                    }
+                }
+            } else {
+                cache.clear();
+            }
+            let out = self.read_items(root, cache, &parse, keep);
+            if self.pending_changes() == 0 && self.doc.state_frontiers() == now {
+                cache.read_at = keep.then_some(now);
+                return out;
+            }
+            // (It changed while being read: again, all of it.)
+            cache.clear();
+            changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
+        }
+        cache.clear();
+        changes.lock().unwrap_or_else(|e| e.into_inner()).all = true;
+        let LoroValue::List(items) = self.doc.get_list(root).get_deep_value() else {
+            return Vec::new();
+        };
+        items.iter().filter_map(|item| parse(item.to_json_value())).collect()
+    }
+
+    fn read_items<T: Clone>(
+        &self,
+        root: &str,
+        cache: &mut ListCache<T>,
+        parse: &impl Fn(serde_json::Value) -> Option<T>,
+        keep: bool,
+    ) -> Vec<T> {
+        let LoroValue::List(items) = self.doc.get_list(root).get_value() else {
+            return Vec::new();
+        };
+        let mut kept = std::collections::HashMap::with_capacity(if keep { items.len() } else { 0 });
+        let mut bytes = 0;
+        let mut out = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            let parsed = match item {
+                LoroValue::Container(id) => {
+                    let (parsed, size) = match cache.items.remove(id) {
+                        Some(held) => held,
+                        None => {
+                            cache.reads += 1;
+                            match self.doc.get_container(id.clone()) {
+                                Some(loro::Container::Map(map)) => {
+                                    let value = map.get_deep_value().to_json_value();
+                                    let size = json_bytes(&value);
+                                    (parse(value), size)
+                                }
+                                _ => (None, 0),
+                            }
+                        }
+                    };
+                    let copy = parsed.clone();
+                    if keep {
+                        bytes += size;
+                        kept.insert(id.clone(), (parsed, size));
+                    }
+                    copy
+                }
+                // (A plain value, not a container: never written so; read
+                // as the whole read does.)
+                other => parse(other.to_json_value()),
+            };
+            out.extend(parsed);
+        }
+        cache.items = kept;
+        cache.bytes = bytes;
+        out
+    }
+
+    fn parse_entry(&self, value: serde_json::Value) -> Option<SessionMessageEntry> {
+        match entry_from_json(value) {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                tracing::warn!(
+                    chat = %self.chat_id().unwrap_or_default(),
+                    error = %err,
+                    "skipping unsalvageable transcript entry"
+                );
+                None
+            }
+        }
     }
 
     /// Read a bounded suffix directly from the containers, without expanding
@@ -645,6 +1145,24 @@ impl SessionDoc {
     /// here, and one malformed entry must not wedge command draining for the
     /// chat forever (an unparseable command can't be executed anyway).
     pub fn read_commands(&self) -> Result<Vec<SessionCommandEntry>, DocError> {
+        // Each command read from the doc once, then again only when it
+        // changes (`read_entries`' cache, for the ledger).
+        let mut cache = self.command_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let read = self.read_list_cached("commands", &mut cache, &self.command_changes, true, |value| {
+            match serde_json::from_value(value) {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    tracing::warn!(error = %err, "skipping malformed command entry");
+                    None
+                }
+            }
+        });
+        self.command_bytes.store(cache.bytes, std::sync::atomic::Ordering::Relaxed);
+        Ok(read)
+    }
+
+    /// Every command, read from the doc whole (no cache).
+    pub fn read_commands_whole(&self) -> Result<Vec<SessionCommandEntry>, DocError> {
         // Container-scoped for the same reason as `read_entries`: the drain
         // loop runs this per tick and must not pay for the transcript.
         let commands = self
@@ -697,7 +1215,7 @@ impl SessionDoc {
                 .as_str()
                 .ok_or_else(|| DocError::Schema("status not a string".into()))?,
         )?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -727,7 +1245,7 @@ impl SessionDoc {
                     if let Some(r) = resolution {
                         map.insert("resolution", r)?;
                     }
-                    self.doc.commit();
+                    self.commit();
                     return Ok(());
                 }
             }
@@ -754,7 +1272,7 @@ impl SessionDoc {
                 );
                 if id_matches {
                     map.insert("status", status_str(status))?;
-                    self.doc.commit();
+                    self.commit();
                     return Ok(true);
                 }
             }
@@ -809,7 +1327,7 @@ impl SessionDoc {
                     message: message.to_string(),
                 },
             )?;
-            self.doc.commit();
+            self.commit();
             return Ok(true);
         }
         Ok(false)
@@ -858,7 +1376,7 @@ impl SessionDoc {
                         "answers",
                         loro_value_from_json(&serde_json::to_value(answers)?),
                     )?;
-                    self.doc.commit();
+                    self.commit();
                     return Ok(true);
                 }
             }
@@ -894,7 +1412,7 @@ impl SessionDoc {
         if let Some(t) = tail {
             part.insert("subagentTail", t)?;
         }
-        self.doc.commit();
+        self.commit();
         Ok(true)
     }
 
@@ -944,9 +1462,15 @@ impl SessionDoc {
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
-        self.doc
-            .export(ExportMode::Snapshot)
+        self.export(ExportMode::Snapshot)
             .map_err(|e| DocError::Schema(e.to_string()))
+    }
+
+    /// [`LoroDoc::export`], under the change lock: an export commits what's
+    /// pending first, and that commit's events are delivered under it too.
+    pub fn export(&self, mode: ExportMode<'_>) -> Result<Vec<u8>, loro::LoroEncodeError> {
+        let _change = self.change.lock();
+        self.doc.export(mode)
     }
 }
 
@@ -1074,6 +1598,15 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
+    }
+    if let Some(exit_code) = doc_part.exit_code {
+        map.insert("exitCode", exit_code as i64)?;
+    }
+    if let Some(truncated) = doc_part.output_truncated {
+        map.insert("outputTruncated", truncated)?;
+    }
+    if let Some(lines) = doc_part.output_lines {
+        map.insert("outputLines", lines as i64)?;
     }
     Ok(())
 }
@@ -1239,6 +1772,15 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            exit_code: obj
+                .get("exitCode")
+                .and_then(|x| x.as_i64())
+                .and_then(|x| i32::try_from(x).ok()),
+            output_truncated: obj
+                .get("outputTruncated")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            output_lines: obj.get("outputLines").and_then(|x| x.as_u64()),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1248,6 +1790,41 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         });
     }
     None
+}
+
+/// [`join_continuation_entries`] over shared entries: an entry without
+/// continuations stays the same shared entry (nothing copied); a root that
+/// has some is joined into a new one.
+pub fn join_continuation_shared(
+    entries: Vec<std::sync::Arc<SessionMessageEntry>>,
+) -> Vec<std::sync::Arc<SessionMessageEntry>> {
+    use std::sync::Arc;
+    if !entries.iter().any(|e| e.continuation_of.is_some()) {
+        return entries;
+    }
+    let mut out: Vec<Arc<SessionMessageEntry>> = Vec::with_capacity(entries.len());
+    let mut root_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for entry in entries {
+        match &entry.continuation_of {
+            Some(root_id) => {
+                if let Some(&at) = root_index.get(root_id) {
+                    let root = Arc::make_mut(&mut out[at]);
+                    root.parts.extend(entry.parts.iter().cloned());
+                    if entry.duration_ms.is_some() {
+                        root.duration_ms = entry.duration_ms;
+                    }
+                } else {
+                    // Orphan continuation — surface as its own entry rather than dropping.
+                    out.push(entry);
+                }
+            }
+            None => {
+                root_index.insert(entry.id.clone(), out.len());
+                out.push(entry);
+            }
+        }
+    }
+    out
 }
 
 /// Render-time continuation join at the entry level (`joinContinuations` in TS):
@@ -1328,7 +1905,7 @@ impl<'a> SegmentWriter<'a> {
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
-        doc.doc.commit();
+        doc.commit();
         Ok(Self {
             doc,
             entry_index,
@@ -1456,7 +2033,7 @@ impl<'a> SegmentWriter<'a> {
         }
 
         if dirty {
-            self.doc.doc.commit();
+            self.doc.commit();
         }
         Ok(())
     }
@@ -1474,7 +2051,7 @@ impl<'a> SegmentWriter<'a> {
         if self.duration_from > 0 {
             map.insert("durationMs", (now - self.duration_from).max(0))?;
         }
-        self.doc.doc.commit();
+        self.doc.commit();
         Ok(())
     }
 }
@@ -1543,6 +2120,15 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(exit_code) = doc_part.exit_code {
+        map.insert("exitCode", exit_code as i64)?;
+    }
+    if let Some(truncated) = doc_part.output_truncated {
+        map.insert("outputTruncated", truncated)?;
+    }
+    if let Some(lines) = doc_part.output_lines {
+        map.insert("outputLines", lines as i64)?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1602,6 +2188,426 @@ pub fn materialize_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read on one thread while another commits never mixes the new list
+    /// with old cached contents: whenever the doc stood still around a
+    /// cached read and a whole read, they're the same.
+    ///
+    /// The writer works in rounds and waits for the reader between them, so
+    /// every round gives the reader a still moment to compare (no clock
+    /// decides how many), while its reads during the next round's commits
+    /// still land in the window the slow subscriber opens.
+    #[test]
+    fn cached_reads_stay_whole_while_another_thread_commits() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Barrier};
+        const ROUNDS: u64 = 300;
+        // A slow subscriber ahead of the doc's own: each change's events
+        // reach the cache's observer only after the change already shows,
+        // the window a reader on another thread can fall into.
+        let loro = LoroDoc::new();
+        let _slow = loro.subscribe_root(Arc::new(|_| std::thread::sleep(std::time::Duration::from_millis(3))));
+        let doc = Arc::new(SessionDoc::from_doc(loro));
+        let entry = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: "words".into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        for i in 0..200 {
+            doc.push_message(&entry(&format!("row-{i}"))).unwrap();
+        }
+        // The last round the writer finished; it then waits at `next`.
+        let finished = Arc::new(AtomicU64::new(0));
+        let next = Arc::new(Barrier::new(2));
+        let writer = {
+            let (doc, finished, next) = (doc.clone(), finished.clone(), next.clone());
+            std::thread::spawn(move || {
+                for n in 1..=ROUNDS {
+                    // Earlier rows changed in place, and rows added.
+                    let at = format!("row-{}", n % 200);
+                    doc.append_error_part(&at, &format!("{at}-note-{n}"), "again").unwrap();
+                    let status = if n % 2 == 0 { MessageStatus::Aborted } else { MessageStatus::Complete };
+                    doc.set_message_status(&format!("row-{}", (n * 7) % 200), status).unwrap();
+                    if n % 5 == 0 {
+                        doc.push_message(&entry(&format!("new-{n}"))).unwrap();
+                    }
+                    finished.store(n, Ordering::Release);
+                    next.wait();
+                }
+            })
+        };
+        // Comparisons while the writer was still committing: the ones in
+        // the race (the rest check the doc at rest).
+        let mut mid_round = 0;
+        for n in 1..=ROUNDS {
+            loop {
+                // (Seen before the reads: the writer is waiting all through them.)
+                let paused = finished.load(Ordering::Acquire) == n;
+                // A writer that failed never finishes the round: its error,
+                // not a reader spinning forever.
+                if !paused && writer.is_finished() {
+                    writer.join().expect("the writer failed");
+                    panic!("the writer stopped before round {n}");
+                }
+                let before = doc.doc().state_frontiers();
+                let cached = doc.read_entries().unwrap();
+                let whole = doc.read_entries_whole().unwrap();
+                if doc.doc().state_frontiers() == before {
+                    assert_eq!(cached, whole, "a cached read mixed versions (round {n})");
+                    if paused {
+                        break;
+                    }
+                    mid_round += 1;
+                } else {
+                    assert!(!paused, "the doc changed while the writer waited (round {n})");
+                }
+            }
+            next.wait();
+        }
+        writer.join().unwrap();
+        eprintln!("{ROUNDS} rounds compared at rest, {mid_round} comparisons mid-round");
+        assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
+    }
+
+    /// While importing into one doc, a read of ANOTHER doc still sees its
+    /// uncommitted changes (only the importing doc's pending check is
+    /// skipped; this thread doesn't hold the other's lock).
+    #[test]
+    fn a_read_of_another_doc_during_an_import_still_checks_its_pending_changes() {
+        use std::sync::{Arc, Mutex, OnceLock};
+        let entry = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: "words".into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let b = Arc::new(SessionDoc::init("b").unwrap());
+        for i in 0..5 {
+            b.push_message(&entry(&format!("b-{i}"))).unwrap();
+        }
+        assert_eq!(b.read_entries().unwrap().len(), 5);
+        // B changed, not yet committed: shows in a whole read.
+        let row = b.doc().get_list("messages").get(2).unwrap().into_container().unwrap().into_map().unwrap();
+        row.insert("status", "aborted").unwrap();
+        assert!(b.doc().get_pending_txn_len() > 0);
+        // A read of B from inside an import's events into A.
+        let seen: Arc<Mutex<Option<bool>>> = Arc::default();
+        let target: Arc<OnceLock<Arc<SessionDoc>>> = Arc::default();
+        let a_raw = LoroDoc::new();
+        let _probe = {
+            let (seen, target) = (seen.clone(), target.clone());
+            a_raw.subscribe_root(Arc::new(move |event| {
+                if event.triggered_by == loro::EventTriggerKind::Import
+                    && let Some(b) = target.get()
+                {
+                    let cached = b.read_entries().unwrap();
+                    *seen.lock().unwrap() = Some(cached == b.read_entries_whole().unwrap());
+                }
+            }))
+        };
+        let a = SessionDoc::from_doc(a_raw);
+        let _ = target.set(b.clone());
+        let other = SessionDoc::init("a").unwrap();
+        other.push_message(&entry("a-0")).unwrap();
+        a.import(&other.export_snapshot().unwrap()).unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(true), "B's uncommitted change was read");
+        b.commit();
+        assert_eq!(b.read_entries().unwrap(), b.read_entries_whole().unwrap());
+    }
+
+    /// A local commit on one thread overlapping an import on another (the
+    /// harness writing while the room delivers). Loro delivers a local
+    /// commit's events after releasing its own lock, so an import can land
+    /// while they're on their way: its rows already show, its events come
+    /// later. A read in that gap must not trust the cache. Made to happen:
+    /// a subscriber ahead of the cache's own starts the import while the
+    /// commit's events are delivered, and reads when the import's events
+    /// start (before the cache has heard of it).
+    #[test]
+    fn a_read_between_an_overlapping_import_and_its_events_is_whole() {
+        use std::sync::{Arc, Mutex, OnceLock};
+        let entry = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: "words".into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let shared: Arc<OnceLock<Arc<SessionDoc>>> = Arc::default();
+        let update: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
+        let importer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let reader: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let loro = LoroDoc::new();
+        let _probe = {
+            let (shared, update, importer, seen, reader) =
+                (shared.clone(), update.clone(), importer.clone(), seen.clone(), reader.clone());
+            loro.subscribe_root(Arc::new(move |event| {
+                let Some(doc) = shared.get() else { return };
+                match event.triggered_by {
+                    loro::EventTriggerKind::Local => {
+                        if let Some(bytes) = update.lock().unwrap().take() {
+                            let doc = doc.clone();
+                            *importer.lock().unwrap() =
+                                Some(std::thread::spawn(move || drop(doc.import(&bytes).unwrap())));
+                            // (Time for the import to land, if it can.)
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                    }
+                    loro::EventTriggerKind::Import => {
+                        // A reader on another thread, in the gap: the
+                        // import shows, its events aren't through yet.
+                        let (doc, seen) = (doc.clone(), seen.clone());
+                        *reader.lock().unwrap() = Some(std::thread::spawn(move || {
+                            let cached = doc.read_entries().unwrap();
+                            seen.lock().unwrap().push(cached == doc.read_entries_whole().unwrap());
+                        }));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    _ => {}
+                }
+            }))
+        };
+        let doc = Arc::new(SessionDoc::from_doc(loro));
+        for i in 0..20 {
+            doc.push_message(&entry(&format!("row-{i}"))).unwrap();
+        }
+        // Another device's edit to an earlier row, as the room brings it.
+        let remote = SessionDoc::from_doc(LoroDoc::new());
+        remote.doc().set_peer_id(7).unwrap();
+        remote.import(&doc.export_snapshot().unwrap()).unwrap();
+        let before = remote.doc().oplog_vv();
+        remote.append_error_part("row-3", "row-3-remote", "from afar").unwrap();
+        *update.lock().unwrap() = Some(remote.doc().export(ExportMode::updates(&before)).unwrap());
+        assert_eq!(doc.read_entries().unwrap().len(), 20);
+        let _ = shared.set(doc.clone());
+        // The local commit, during whose events the import comes.
+        doc.set_message_status("row-11", MessageStatus::Aborted).unwrap();
+        importer.lock().unwrap().take().unwrap().join().unwrap();
+        reader.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![true], "the read in the gap was whole");
+        assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap());
+    }
+
+    /// The doc's own cached reads never go stale, however the doc moves:
+    /// undo, revert, checkout and back, a fork, queue changes, and two
+    /// devices editing the same earlier entry at once, each importing the
+    /// other's. Checked against a whole read after every step.
+    #[test]
+    fn cached_reads_follow_undo_revert_checkout_fork_and_concurrent_edits() {
+        use crate::queue::QueuedMessage;
+        let same = |doc: &SessionDoc, what: &str| {
+            assert_eq!(doc.read_entries().unwrap(), doc.read_entries_whole().unwrap(), "entries, after {what}");
+            assert_eq!(doc.read_commands().unwrap(), doc.read_commands_whole().unwrap(), "commands, after {what}");
+        };
+        let entry = |id: &str, words: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: words.into() }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let a = SessionDoc::init("moves").unwrap();
+        for i in 0..20 {
+            a.push_message(&entry(&format!("row-{i}"), "words")).unwrap();
+        }
+        same(&a, "first rows");
+
+        // Queue rows come and go; the transcript stays as it was.
+        let row = |id: &str| QueuedMessage {
+            id: id.into(),
+            text: "later".into(),
+            attachments: Vec::new(),
+            hold_for_turn_end: false,
+            issued_by: "dev".into(),
+            issued_at: 1,
+            edited_at: None,
+            delivery_gate: None,
+        };
+        a.push_queued(&row("q1")).unwrap();
+        a.set_queued_text("q1", "later, edited", 2).unwrap();
+        same(&a, "queue changes");
+        a.remove_queued("q1").unwrap();
+        same(&a, "queue row removed");
+
+        // Undo: an earlier entry's change, then a new entry, undone.
+        let mut undo = loro::UndoManager::new(a.doc());
+        a.append_error_part("row-4", "row-4-note", "stopped").unwrap();
+        same(&a, "earlier entry changed");
+        a.push_message(&entry("undone", "soon gone")).unwrap();
+        same(&a, "pushed");
+        undo.undo().unwrap();
+        same(&a, "undo of the push");
+        undo.undo().unwrap();
+        same(&a, "undo of the earlier change");
+        undo.redo().unwrap();
+        same(&a, "redo");
+
+        // Revert to an earlier version, as a new change.
+        let before = a.doc().state_frontiers();
+        a.set_message_status("row-2", MessageStatus::Aborted).unwrap();
+        a.push_message(&entry("reverted", "soon gone")).unwrap();
+        same(&a, "before revert");
+        a.doc().revert_to(&before).unwrap();
+        same(&a, "revert");
+
+        // Checkout to the past and back.
+        let now = a.doc().state_frontiers();
+        a.doc().checkout(&before).unwrap();
+        same(&a, "checkout");
+        a.doc().checkout_to_latest();
+        assert_eq!(a.doc().state_frontiers(), now);
+        same(&a, "back to latest");
+
+        // A fork reads as its source.
+        let fork = SessionDoc::from_doc(a.doc().fork());
+        assert_eq!(fork.read_entries().unwrap(), a.read_entries().unwrap());
+        same(&fork, "fork");
+
+        // Two devices edit the same earlier entry at once, each importing
+        // the other's; both read as whole, and the same.
+        let b = SessionDoc::from_doc(LoroDoc::new());
+        b.doc().import(&a.export_snapshot().unwrap()).unwrap();
+        same(&b, "b joined");
+        let (va, vb) = (a.doc().oplog_vv(), b.doc().oplog_vv());
+        a.append_error_part("row-9", "row-9-a", "from a").unwrap();
+        a.set_message_status("row-9", MessageStatus::Complete).unwrap();
+        b.append_error_part("row-9", "row-9-b", "from b").unwrap();
+        b.set_message_status("row-9", MessageStatus::Aborted).unwrap();
+        b.push_message(&entry("from-b", "b's")).unwrap();
+        same(&a, "a's edit");
+        same(&b, "b's edit");
+        let to_b = a.doc().export(ExportMode::updates(&vb)).unwrap();
+        let to_a = b.doc().export(ExportMode::updates(&va)).unwrap();
+        b.doc().import(&to_b).unwrap();
+        a.doc().import(&to_a).unwrap();
+        same(&a, "a imported b");
+        same(&b, "b imported a");
+        assert_eq!(a.read_entries().unwrap(), b.read_entries().unwrap());
+    }
+
+    /// Every kind of transcript change, local or imported, reads the same
+    /// through the entry cache as whole, and re-reads only what it touched.
+    #[test]
+    fn cached_entries_match_a_whole_read_and_read_only_what_changed() {
+        use std::sync::{Arc, Mutex};
+        let doc = SessionDoc::init("cached").unwrap();
+        let changes = Arc::new(Mutex::new(EntryChanges::all()));
+        let observed = changes.clone();
+        let events_doc = doc.doc().clone();
+        let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
+            let mut seen = observed.lock().unwrap();
+            seen.observe(&event);
+            seen.at = Some(events_doc.state_frontiers());
+        }));
+        let mut cache = EntryCache::default();
+        let mut check = |doc: &SessionDoc, what: &str| -> usize {
+            let before = cache.reads;
+            let changed = std::mem::take(&mut *changes.lock().unwrap());
+            let cached: Vec<_> =
+                doc.read_entries_cached(&mut cache, changed).into_iter().map(|e| (*e).clone()).collect();
+            let whole = doc.read_entries_whole().unwrap();
+            assert_eq!(cached, whole, "after {what}");
+            assert_eq!(doc.read_commands().unwrap(), doc.read_commands_whole().unwrap(), "commands, after {what}");
+            assert_eq!(doc.read_entries().unwrap(), whole, "the doc's own cache, after {what}");
+            let joined: Vec<_> = join_continuation_shared(doc.read_entries_shared().unwrap())
+                .into_iter()
+                .map(|e| (*e).clone())
+                .collect();
+            assert_eq!(joined, join_continuation_entries(whole.clone()), "joined, after {what}");
+            cache.reads - before
+        };
+        let entry = |id: &str, continuation_of: Option<&str>| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { id: format!("{id}-text"), text: format!("{id} words") }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: continuation_of.map(Into::into),
+            duration_ms: None,
+        };
+        for i in 0..50 {
+            doc.push_message(&entry(&format!("row-{i}"), None)).unwrap();
+        }
+        assert_eq!(check(&doc, "first read"), 50);
+        assert_eq!(check(&doc, "nothing"), 0);
+
+        // A reply streaming: text growing, a tool call, then finished.
+        let mut writer = SegmentWriter::begin(&doc, "reply", "dev", 2).unwrap();
+        assert_eq!(check(&doc, "reply begun"), 1);
+        let mut folded = vec![MessagePart::Text { id: "t".into(), text: "Hel".into() }];
+        writer.sync(&folded).unwrap();
+        assert_eq!(check(&doc, "first words"), 1);
+        folded[0] = MessagePart::Text { id: "t".into(), text: "Hello there".into() };
+        writer.sync(&folded).unwrap();
+        assert_eq!(check(&doc, "more words"), 1);
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        assert_eq!(check(&doc, "reply finished"), 1);
+
+        // A continuation, a row put before the last, and an old row changed.
+        doc.push_message(&entry("reply-2", Some("reply"))).unwrap();
+        assert_eq!(check(&doc, "continuation"), 1);
+        doc.push_message(&entry("reply-3", Some("reply"))).unwrap();
+        assert_eq!(check(&doc, "second continuation"), 1);
+        doc.insert_message_before_last(1, &entry("steer", None)).unwrap();
+        assert_eq!(check(&doc, "insert before last"), 1);
+        doc.append_error_part("row-3", "row-3-note", "stopped").unwrap();
+        assert_eq!(check(&doc, "old row changed"), 1);
+        doc.set_message_status("row-7", MessageStatus::Aborted).unwrap();
+        assert_eq!(check(&doc, "old row status"), 1);
+
+        // Another device's edits, imported: one old row, one new.
+        let other = SessionDoc::from_doc(LoroDoc::new());
+        other.doc().import(&doc.export_snapshot().unwrap()).unwrap();
+        let version = doc.doc().oplog_vv();
+        other.append_error_part("row-10", "row-10-note", "elsewhere").unwrap();
+        other.push_message(&entry("remote", None)).unwrap();
+        doc.doc()
+            .import(&other.doc().export(ExportMode::updates(&version)).unwrap())
+            .unwrap();
+        assert_eq!(check(&doc, "import"), 2);
+
+        // Commands queued and settled: the ledger's cache follows them.
+        use crate::commands::{SessionCommandPayload, SessionCommandStatus};
+        for n in 0..3 {
+            doc.queue_command(&SessionCommandEntry {
+                id: format!("c{n}"),
+                payload: SessionCommandPayload::Steer { prompt: "focus".into(), message_id: None },
+                issued_by: "dev".into(),
+                issued_at: n,
+                based_on: None,
+                expires_at: None,
+                status: SessionCommandStatus::Pending,
+                resolution: None,
+            })
+            .unwrap();
+            assert_eq!(check(&doc, "a command"), 0);
+        }
+        doc.set_command_status("c1", SessionCommandStatus::Applied, Some("done")).unwrap();
+        assert_eq!(check(&doc, "a command settled"), 0);
+
+        // A row removed.
+        doc.doc().get_list("messages").delete(5, 1).unwrap();
+        doc.doc().commit();
+        assert_eq!(check(&doc, "removal"), 0);
+        assert_eq!(check(&doc, "nothing again"), 0);
+    }
     use crate::parts::fold_event_into_parts;
 
     #[test]
@@ -1627,6 +2633,23 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn who_sent_a_message_is_kept_beside_the_transcript_never_in_it() {
+        let doc = SessionDoc::init("sent").unwrap();
+        assert!(doc.sent_by().is_empty());
+        let by = serde_json::json!({ "plugin": "relay", "name": "Relay", "kind": "run", "at": 1 });
+        doc.mark_sent_by("m1", by.clone()).unwrap();
+        assert_eq!(doc.sent_by().get("m1"), Some(&by));
+        assert!(doc.read_entries().unwrap().is_empty(), "no entry of its own");
+        // Kept to the newest SENT_BY_KEPT.
+        for i in 0..(SENT_BY_KEPT + 5) {
+            doc.mark_sent_by(&format!("n{i}"), serde_json::json!({ "plugin": "relay", "at": 10 + i })).unwrap();
+        }
+        let all = doc.sent_by();
+        assert_eq!(all.len(), SENT_BY_KEPT);
+        assert!(!all.contains_key("m1") && all.contains_key(&format!("n{}", SENT_BY_KEPT + 4)));
     }
 
     #[test]
@@ -1843,6 +2866,9 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -1907,6 +2933,9 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -1959,6 +2988,9 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
+            output_lines: None,
         };
         let parts = vec![
             tool(
@@ -2167,6 +3199,7 @@ mod tests {
                 is_error: false,
                 output: None,
                 diff: None,
+                exit_code: None,
             },
         );
         writer.sync(&folded).unwrap();
@@ -2267,8 +3300,10 @@ mod tests {
             &mut folded,
             &AgentEvent::ToolCall {
                 id: "t1".into(),
-                call: ToolCall::Exec {
-                    command: "ls".into(),
+                call: ToolCall::EditFile {
+                    path: "/w/a.rs".into(),
+                    old_string: None,
+                    new_string: None,
                 },
             },
         );
@@ -2284,6 +3319,7 @@ mod tests {
                     old_text: Some("old\n".into()),
                     new_text: "new\n".into(),
                 }),
+                exit_code: None,
             },
         );
         crate::parts::apply_sidecar_refs("chat-2", &mut folded);
@@ -2319,6 +3355,74 @@ mod tests {
         }
     }
 
+    /// A command's tail, exit code and trimmed flag land in the doc on its
+    /// result (an in-place update of the part pushed with its call) and read
+    /// back as written.
+    #[test]
+    fn a_command_tail_round_trips_through_the_doc() {
+        let doc = SessionDoc::init("chat-4").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "c1".into(),
+                call: ToolCall::Exec {
+                    command: "cargo test".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        let full: String = (1..=80).map(|i| format!("line {i}\n")).collect();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolResult {
+                id: "c1".into(),
+                is_error: true,
+                output: Some(full.clone()),
+                diff: None,
+                exit_code: Some(101),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool {
+                output: Some(tail),
+                output_bytes,
+                exit_code,
+                output_truncated,
+                output_lines,
+                is_error,
+                ..
+            } => {
+                assert!(*is_error);
+                assert_eq!(*exit_code, Some(101));
+                assert!(*output_truncated);
+                assert_eq!(*output_bytes, Some(full.len() as u64));
+                assert_eq!(tail.lines().count(), crate::parts::COMMAND_TAIL_MAX_LINES);
+                assert_eq!(*output_lines, Some(80));
+                assert!(tail.ends_with("line 80"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // And from a fresh replica of the doc's bytes (what a client reads).
+        let snapshot = doc.export_snapshot().unwrap();
+        let replica = loro::LoroDoc::new();
+        replica.import(&snapshot).unwrap();
+        let entries = SessionDoc::from_doc(replica).read_entries().unwrap();
+        assert!(matches!(
+            &entries[0].parts[0],
+            MessagePart::Tool {
+                exit_code: Some(101),
+                output_truncated: true,
+                output_lines: Some(80),
+                ..
+            }
+        ));
+    }
+
     /// Old pre-strip docs carry inline `output`/`diff` — they must still read
     /// back (schema changes are serde-additive ONLY; old readers, old docs).
     #[test]
@@ -2347,6 +3451,9 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                exit_code: None,
+                output_truncated: false,
+                output_lines: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

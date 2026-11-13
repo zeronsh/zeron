@@ -384,6 +384,47 @@ local function pick_card(a: any): Node?
 	}
 end
 
+-- A review comment's card, as it hovers: who left it (a plugin's), its
+-- note, and the code that goes with it, every line of what's sent (the
+-- host holds it to 40 lines), so nothing reaches the agent unseen.
+local function comment_card(c: any): Node?
+	if type(c) ~= "table" or (type(c.snippet) ~= "string" and type(c.plugin) ~= "string") then
+		return nil
+	end
+	local code: { any } = {}
+	for line in string.gmatch(if type(c.snippet) == "string" then c.snippet .. "\n" else "", "([^\n]*)\n") do
+		table.insert(code, FadeText { line, literal = true, w_full = true, font = "$font.mono", text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.secondary" })
+	end
+	return HoverCard.Card {
+		w = CARD_W,
+		p = 0,
+		gap = 0,
+		ui.column {
+			w_full = true,
+			px = "$space.3",
+			py = "$space.2",
+			gap = "$zeron.space.hair",
+			if type(c.plugin) == "string"
+				then ui.text { locale.t("ds.composer_cargo.comment_from", { plugin = c.plugin }), text_size = "$font.size.xs", color = "$text.tertiary" }
+				else nil,
+			ui.text { c.name or "", literal = true, text_size = "$font.size.sm", weight = "$font.weight.semibold", color = "$text.primary" },
+			if type(c.body) == "string" and c.body ~= ""
+				then ui.text { c.body, literal = true, wrap = true, text_size = "$font.size.sm", color = "$text.primary" }
+				else nil,
+		},
+		if #code > 0
+			then ui.column {
+				w_full = true,
+				px = "$space.3",
+				py = "$space.2",
+				border_sides = { 1, 0, 0, 0 },
+				border_color = "$border.subtle",
+				table.unpack(code),
+			}
+			else nil,
+	}
+end
+
 -- A page's address as a chip names it: no scheme, no "www.", no lone
 -- trailing slash.
 local function page_of(url: any): string?
@@ -444,7 +485,7 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		}
 	elseif item.kind == "chat" then
 		-- Another chat mentioned: its agent's mark, as the sidebar's row.
-		glyph = if item.mark then Mark { name = item.mark, size = glyph_size - 2, bare = true } else Icon { name = "chat-round-line", size = glyph_size - 2 }
+		glyph = if item.mark then Mark { name = item.mark, size = glyph_size - 2, bare = true } else Icon { name = "side-chat", size = glyph_size - 2 }
 	else
 		glyph = Icon { name = "wrap-text", size = glyph_size - 2 }
 	end
@@ -478,7 +519,7 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		end
 		return now.meta or ""
 	end
-	local card: Node? = if pick then pick_card(item.annotation) else nil
+	local card: Node? = if pick then pick_card(item.annotation) elseif item.kind == "comment" then comment_card(item) else nil
 	local function title(): string
 		local now = row:get()
 		if pick then

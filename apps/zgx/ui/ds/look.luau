@@ -4,7 +4,7 @@
 -- for the whole app, kept across launches, as the material is
 -- (ds/material); a window takes it through `theme` (`look.theme()`).
 
-local palettes = require("@self/palettes")
+local material = require("@self/material")
 local locale = require("@self/locale")
 
 local M = {}
@@ -105,34 +105,115 @@ function M.text_theme(size: number?): { [string]: any }?
 	return out
 end
 
--- The palette each scheme wears (ds/palettes; Zeron's own by default):
--- one for light, one for dark, as the shipping app keeps them.
-M.palette = {
-	light = ui.persist("palette_light", "zeron-light"),
-	dark = ui.persist("palette_dark", "zeron-dark"),
-}
+-- The interface's font and code's (Settings → Appearance, as the shipping
+-- app's Interface font and Code font): a family installed on this computer,
+-- by its name, or "" for the theme's own (Geist, Geist Mono). Code's sets
+-- code blocks, the editor, diffs, tool output and terminals. Kept across
+-- launches, for the main window.
+M.interface_font = ui.persist("interface_font", "")
+M.code_font = ui.persist("code_font", "")
 
--- The palette's tokens for the scheme showing.
-function M.palette_theme(): { [string]: any }?
-	local kind = ui.theme.kind()
-	local light = kind == "light" or kind == "high-contrast-light"
-	local p = palettes.find((if light then M.palette.light else M.palette.dark):get())
-	return if p then palettes.tokens(p) else nil
+-- The font tokens a window overrides for the families chosen (each a
+-- family's name, "" for the theme's own; the chosen ones by default).
+-- Nothing for the theme's own. (Quoted, so a name is read as a family
+-- whatever it looks like, "3270 Nerd Font" too, never a number or a colour.)
+function M.font_theme(interface: string?, code: string?): { [string]: any }?
+	local sans = interface or M.interface_font:get()
+	local mono = code or M.code_font:get()
+	if sans == "" and mono == "" then
+		return nil
+	end
+	local out: { [string]: any } = {}
+	if sans ~= "" then
+		out["font.sans"] = `"{sans}"`
+	end
+	if mono ~= "" then
+		out["font.mono"] = `"{mono}"`
+	end
+	return out
 end
 
--- What the main window wears over its template's theme: the text size, and
--- an accent chosen over the theme's own.
+-- Code's family by its name, for what takes a family rather than a token
+-- (a span of inline code): the one chosen, else the theme's own.
+function M.code_family(): string
+	local chosen = M.code_font:get()
+	if chosen ~= "" then
+		return chosen
+	end
+	local own = ui.theme.get("font.mono")
+	return if type(own) == "string" and own ~= "" then own else "mono"
+end
+
+-- "Accent colour throughout" (Settings → Appearance): the accent in more
+-- places, as the shipping app has it: links, the working dot and its icon,
+-- a find's matches, @file tokens in the composer, and the conversation's
+-- list markers, quote rail and inline code. Off, each is the neutral it
+-- was. On by default; kept across launches.
+M.accented = ui.persist("accent_throughout", true)
+
+-- What a window overrides while it's on (ds/tokens' `zeron.accented.*`,
+-- each following the accent worn); nothing while it's off. (Links and
+-- inline code: `accented_ink`.)
+function M.accented_theme(on: boolean?): { [string]: any }?
+	if on == nil then
+		on = M.accented:get()
+	end
+	if not on then
+		return nil
+	end
+	return {
+		["zeron.status.working"] = "$zeron.accented.ink",
+		["zeron.status.dot.working"] = "$zeron.accented.ink",
+		["zeron.editor.match"] = "$zeron.accented.find",
+		["zeron.editor.match_current"] = "$zeron.accented.find_current",
+		["zeron.composer.token.file"] = "$zeron.accented.ink",
+		["zeron.prose.marker"] = "$zeron.accented.ink",
+		["zeron.prose.quote_rail"] = "$zeron.accented.rail",
+		["zeron.prose.code_wash"] = "$zeron.accented.code_wash",
+	}
+end
+
+-- What has no ink of its own (a link, inline code: the text's) takes
+-- while it's on: the accent; off, `own` (nil: the text's), following the
+-- switch. (A token can't say "the text's own", so this isn't one of the
+-- window's overrides.)
+function M.accented_ink(own: any): () -> any
+	return function(): any
+		if M.accented:get() then
+			return "$zeron.accented.ink"
+		end
+		return if type(own) == "function" then own() else own
+	end
+end
+
+-- What the main window wears over its theme (ds/palettes, worn by
+-- ds/tokens): the text size, the fonts chosen, an accent chosen over the
+-- theme's own, and the accent throughout.
 function M.window_theme(): { [string]: any }?
-	-- (No palette over the theme: a template brings its own, so a palette
-	-- chosen before the pickers went never applies.)
-	local palette = nil
 	local out: { [string]: any }? = nil
-	for _, part in { palette, M.text_theme(), M.theme() } do
+	for _, part in { M.text_theme(), M.font_theme(), M.theme(), M.accented_theme() } do
 		if part then
 			out = out or {}
 			for k, v in part do
 				(out :: any)[k] = v
 			end
+		end
+	end
+	-- And its glass's tint where the desktop blurs less than macOS's does
+	-- (ds/material).
+	local glass = material.glass_theme()
+	if glass then
+		out = out or {}
+		for k, v in glass do
+			(out :: any)[k] = v
+		end
+	end
+	-- And its muted text where the window is solid (ds/material).
+	local solid = material.solid_theme()
+	if solid then
+		out = out or {}
+		for k, v in solid do
+			(out :: any)[k] = v
 		end
 	end
 	return out

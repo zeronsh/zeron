@@ -93,7 +93,14 @@ jobs:
           builds="$RUNNER_TEMP/builds.json"
           api "https://api.appstoreconnect.apple.com/v1/builds?filter[app]=$app_id&fields[builds]=version&limit=200" > "$builds"
           latest_build="$(jq -r '[.data[].attributes.version | select(test("^[0-9]+$")) | tonumber] | max // 0' "$builds")"
+          # Apple's list lags an upload by minutes or more, so the next number can't
+          # come from it alone: a rerun, or a run soon after, would reuse one Apple
+          # has already taken. Each run and attempt has a higher floor of its own.
+          build_floor="$((GITHUB_RUN_NUMBER * 10 + GITHUB_RUN_ATTEMPT))"
           build_number="$((latest_build + 1))"
+          if [ "$build_floor" -gt "$build_number" ]; then
+            build_number="$build_floor"
+          fi
 
           # Session notifications need the Push capability on the App ID (so
           # the distribution profile the export makes includes it). Best
@@ -198,6 +205,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A token lasts 20 minutes and the wait can outlast it.
+          mint_token() {
           python - "$AC_KEY_PATH" "$AC_API_KEY_ID" "$AC_API_ISSUER_ID" > "$AC_TOKEN_PATH" <<'PY'
           import sys
           import time
@@ -214,10 +223,15 @@ jobs:
               headers={"kid": key_id, "typ": "JWT"},
           ))
           PY
-
           token="$(cat "$AC_TOKEN_PATH")"
+          }
+          mint_token
+
           builds="$RUNNER_TEMP/processing-builds.json"
-          for attempt in $(seq 1 40); do
+          for attempt in $(seq 1 120); do
+            if [ "$((attempt % 60))" -eq 0 ]; then
+              mint_token
+            fi
             curl --globoff --fail-with-body --silent --show-error \
               -H "Authorization: Bearer $token" \
               -H 'Content-Type: application/json' \
@@ -239,7 +253,7 @@ jobs:
             esac
             sleep 15
           done
-          echo "Build $BUILD_NUMBER did not finish processing within ten minutes." >&2
+          echo "Build $BUILD_NUMBER did not finish processing within thirty minutes." >&2
           exit 5
 
       - name: Distribute to external testers

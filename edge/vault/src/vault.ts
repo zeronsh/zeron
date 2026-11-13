@@ -21,6 +21,7 @@ import {
   type EnrollDeviceRequest,
   type GithubDevicePoll,
   type GithubDeviceStart,
+  type GithubListingView,
   type GithubRepoView,
   type Grant,
   type GrantRequest,
@@ -168,7 +169,9 @@ export class Vault implements VaultRpc {
         request.provider,
         request.deviceId,
         verified.value.parentId,
-        request.repo
+        request.repo,
+        // Only a runner's delegate inherits, and only as the main Worker said.
+        caller.kind === "runner" ? request.inheritFrom : undefined
       );
       await this.audit(userId, {
         event: grant.ok ? "grant" : "grant_denied",
@@ -206,17 +209,30 @@ export class Vault implements VaultRpc {
     });
   }
 
-  /** The repositories the user's GitHub connection reaches (users only), for
-   * the add-project flow. Metadata only — the token stays in the vault. */
+  /** The repositories the user's GitHub logins reach (users only), for the
+   * add-project flow. Metadata only — the tokens stay in the vault. */
   githubRepos(caller: VaultCaller, query?: string): Promise<VaultResult<readonly GithubRepoView[]>> {
     return this.run(caller, {}, async (userId) => {
-      if (query !== undefined && (typeof query !== "string" || query.length > 200)) {
-        return fail("bad_request", "query must be a string of at most 200 characters");
-      }
-      const disabled = await this.userDisabled(userId);
-      if (disabled) return disabled;
+      const refused = await this.listingRefused(userId, query);
+      if (refused) return refused;
       return accountStub(this.env, userId, "github").githubRepos(userId, query);
     });
+  }
+
+  /** `githubRepos`, with the installations and any login that didn't answer. */
+  githubListing(caller: VaultCaller, query?: string): Promise<VaultResult<GithubListingView>> {
+    return this.run(caller, {}, async (userId) => {
+      const refused = await this.listingRefused(userId, query);
+      if (refused) return refused;
+      return accountStub(this.env, userId, "github").githubListing(userId, query);
+    });
+  }
+
+  private async listingRefused(userId: string, query: string | undefined): Promise<VaultFailure | undefined> {
+    if (query !== undefined && (typeof query !== "string" || query.length > 200)) {
+      return fail("bad_request", "query must be a string of at most 200 characters");
+    }
+    return this.userDisabled(userId);
   }
 
   /** Branch names of `repo` (users only), for a new session's base branch. */

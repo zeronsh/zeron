@@ -35,6 +35,7 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local store = require("@app/screens/chat/store")
+local Dock = require("@app/screens/chat/dock")
 local api = require("@app/screens/panel/home_api")
 local Previews = require("@app/screens/panel/previews")
 -- Which finished lanes you've seen (their tabs in front).
@@ -78,6 +79,9 @@ end
 local sidebar_view = ui.shared("sidebar.view", {} :: { [string]: any })
 -- Folded or not, per session and part (open unless folded).
 local folds = ui.persist("panel_home_folds", {} :: { [string]: boolean })
+-- Side chats and subagents at work above the rest (their parts' menus'
+-- "Working first"), kept across launches as the sidebar's view options are.
+local working_first = ui.persist("panel_home_working_first", false)
 -- Shown whole ("Show less") or not, per session and part (its first few
 -- unless shown whole), as the sidebar's groups keep theirs.
 local whole = ui.state("panel_home_whole", {} :: { [string]: boolean })
@@ -114,7 +118,7 @@ local function chat_of(id: string?): sessions.Chat?
 	return nil
 end
 local function device_of(id: string?): sessions.Device?
-	for _, d in sessions.now:get().devices do
+	for _, d in sessions.devices:get() do
 		if d.id == id then
 			return d
 		end
@@ -125,7 +129,7 @@ local function project_of(id: string?): sessions.Project?
 	if not id then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -159,7 +163,8 @@ export type Props = {
 	open_plugin_tab: (session: string, tab: { [string]: any }) -> (),
 	-- An action run in a terminal tab of its own (its name, and what runs it).
 	open_action: (title: string, run: { [string]: any }) -> (),
-	new_side_chat: ((session: string) -> ())?,
+	-- (`at`: where its composer starts instead of the session's place.)
+	new_side_chat: ((session: string, at: { project: string?, device: string? }?) -> ())?,
 	fork: ((session: string) -> ())?,
 	side: ((session: string) -> { any })?,
 	subagents: (() -> { any })?,
@@ -168,6 +173,10 @@ export type Props = {
 	-- A web address in a browser tab of the session's panel (a port's).
 	open_url: ((session: string, url: string) -> ())?,
 	showing: () -> boolean,
+	-- How far its top stands under the panel's (its tab strip): its block
+	-- lines up with a new chat's composer beside it, which stands by the
+	-- panel's whole height.
+	above: number?,
 }
 
 -- ---------------------------------------------------------------------------
@@ -194,15 +203,17 @@ local function info(sid: string): Node
 		return d ~= nil and not d.here and d.online == false
 	end
 
-	-- The branch as plugins read it in its row's slot (`panel_branch`:
-	-- { session, device, cwd, branch }): Git puts what the branch adds over
-	-- its base there. Core says nothing of git past the branch's name.
+	-- The branch as plugins read it in its row's slot (`panel_branch`, and
+	-- `panel_details` under the panel's details): the session, by its id
+	-- alone, while it has a branch. The SDK finds its device, branch and
+	-- folder in the plugin's records, as far as its grants reach
+	-- ("sessions.read", "files.read"): a place gives ids, never records.
+	-- Git puts what the branch adds over its base there. Core says nothing
+	-- of git past the branch's name.
 	local branch_info = ui.state(`panel_home_branch.{sid}`, nil :: any)
 	ui.effect(function()
 		local c = chat()
-		local now = if c and branch() ~= ""
-			then { session = sid, device = c.device, cwd = c.cwd, branch = branch() }
-			else nil
+		local now = if c and branch() ~= "" then { session = sid } else nil
 		local was = branch_info:peek()
 		if ui.json.encode(was) ~= ui.json.encode(now) then
 			branch_info:set(now)
@@ -261,6 +272,7 @@ local function info(sid: string): Node
 						return if l then l.emoji else nil
 					end,
 					size = 16,
+					project = id,
 				},
 				label = function(): string
 					local now = project_of(id)
@@ -908,10 +920,95 @@ local function lanes(props: Props, sid: string): Node
 			sidebar.archive(l.id)
 		end
 	end
+	-- A part of lanes' own menu (side chats', subagents'; ds/panel_home
+	-- `options`): those at work first, a toggle kept for both; every
+	-- finished lane of the session not yet seen marked seen, at once.
+	local function unread(): { any }
+		local out = {}
+		for _, list in { side:get(), subs:get() } do
+			for _, l in list do
+				-- (Their state shows done or failed only while unseen.)
+				if l.status == "done" or l.status == "failed" then
+					table.insert(out, { id = l.id, at = l.at })
+				end
+			end
+		end
+		return out
+	end
+	local function lanes_options(): { any }
+		local waiting = unread()
+		return {
+			{
+				label = locale.s("panel.home.working_first"),
+				icon = "status-working",
+				checked = function(): boolean
+					return working_first:get()
+				end,
+				keep_open = true,
+				on_select = function()
+					working_first:set(not working_first:peek())
+				end,
+			},
+			{ separator = true },
+			{
+				label = locale.s("panel.home.mark_all_read"),
+				icon = "check-circle",
+				disabled = #waiting == 0,
+				on_select = function()
+					lanes_seen.mark_all(waiting)
+				end,
+			},
+		}
+	end
+	-- A side chats' group's "+": a new side chat of the session, its
+	-- composer starting in that group's project and on its device (the
+	-- header's groups: a project's, a device's, or both). A device other
+	-- than the project's takes that device's project of the same name, else
+	-- lets the composer pick one there.
+	local function new_in(groups: { any })
+		local new_side = props.new_side_chat
+		if not new_side then
+			return
+		end
+		local parent = chat_of(sid)
+		local project: string? = if parent then parent.project else nil
+		local device: string? = nil
+		for _, g in groups do
+			if g.kind == "project" then
+				local id = string.match(g.key, "project:([^/]+)$")
+				project = if id == "none" then "none" else id
+			elseif g.kind == "device" then
+				local id = string.match(g.key, "device:([^/]+)$")
+				if id and id ~= "none" then
+					device = id
+				end
+			end
+		end
+		local p = project_of(project)
+		if device and p and p.device ~= device then
+			local same: string? = nil
+			for _, other in sessions.now:peek().projects do
+				if other.device == device and (other.name == p.name or other.path == p.path) then
+					same = other.id
+				end
+			end
+			project = same
+		elseif not device and p then
+			device = p.device
+		end
+		new_side(sid, { project = project, device = device })
+	end
+	local function new_label(g: any): string
+		if g.kind == "device" then
+			return locale.s("panel.home.new_side_on", { name = g.name })
+		end
+		return locale.s("panel.home.new_side_in", { name = g.name })
+	end
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
-	-- corner action.)
-	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?): Node
+	-- corner action. `tooltip`: its rows'. `lanes_part`: side chats' or
+	-- subagents', with their own menu.)
+	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, tooltip: ((any) -> string)?, lanes_part: boolean?): Node
 		return ui.show(
 			function(): boolean
 				return #items() > 0
@@ -930,39 +1027,64 @@ local function lanes(props: Props, sid: string): Node
 				view = view :: any,
 				flat = flat,
 				on_archive = archive,
+				tooltip = tooltip,
 				icon = if extra then extra.icon :: any else nil,
 				menu = menu,
 				items = items,
 				name = name,
 				on_open = on_open,
+				working_first = if lanes_part
+					then function(): boolean
+						return working_first:get()
+					end
+					else nil,
+				options = if lanes_part then lanes_options :: any else nil,
+				-- (Side chats' groups: a new one there.)
+				on_new = if id == "panel-home-side" and props.new_side_chat then new_in :: any else nil,
+				new_label = new_label :: any,
 			}
 		)
 	end
 	-- Its ports: the dev servers running for it (the engine's previews,
 	-- watched while the home shows, screens/panel/previews), as the shipping
 	-- app's session card lists them (shell/session_info.rs `render_session_ports`):
-	-- what serves each and its port, opening it in a browser tab of the
-	-- panel; its menu opens it there or in the default browser, or copies
-	-- its address.
+	-- the process serving each (its command line in its tooltip) and its
+	-- port, opening it in a browser tab of the panel; its menu opens it
+	-- there or in the default browser, or copies its address. Held as
+	-- `Previews.hold` holds them: a test's server, open a moment, never
+	-- shows; one closed stays a while, faded.
 	ui.effect(function()
 		if props.showing() then
 			ui.on_cleanup(Previews.use(sid))
 		end
 	end)
+	local held = Previews.hold(function(): string?
+		return sid
+	end)
 	local ports = ui.computed(function(): { any }
 		local out = {}
-		for _, sv in Previews.services(sid) do
+		for _, sv in held() do
 			local host = string.match(sv.url or "", "^%a+://([^/]+)") or ""
+			local name = if sv.name and sv.name ~= "" then sv.name else host
+			local process = if type(sv.process) == "string" and sv.process ~= "" then sv.process else nil
 			table.insert(out, {
-				id = `port:{sv.id}`,
-				title = if sv.name and sv.name ~= "" then sv.name else host,
+				id = `port:{sv.id}:{sv.port}`,
+				-- (What runs it; else what the engine makes of it, "HTTP server".)
+				title = process or name,
 				corner = `:{sv.port}`,
 				detail = if sv.remote and sv.device and sv.device ~= "" then `{sv.device} · {host}` else host,
 				url = sv.url,
+				faded = sv.closed == true,
+				command = if type(sv.command) == "string" and sv.command ~= "" then sv.command else nil,
+				closed = sv.closed == true,
 			})
 		end
 		return out
 	end)
+	local function port_tip(l: any): string
+		local says = l.command or l.url or l.title
+		return if l.closed then `{locale.s("panel.home.port_closed")}\n{says}` else says
+	end
 	local function port_menu(l: any): { any }?
 		local url = l.url
 		if type(url) ~= "string" or url == "" then
@@ -975,9 +1097,15 @@ local function lanes(props: Props, sid: string): Node
 		end)
 	end
 	-- Local previews that can't open now (the engine's proxy): one plain
-	-- line, its why only in its tooltip.
+	-- line, its why only in its tooltip; only while a port's open (one kept
+	-- a while, closed, has nothing to open).
 	local trouble = ui.computed(function(): string?
-		return if #ports:get() > 0 then Previews.trouble(sid) else nil
+		for _, l in ports:get() do
+			if not l.closed then
+				return Previews.trouble(sid)
+			end
+		end
+		return nil
 	end)
 	return ui.column {
 		id = "panel-home-lanes",
@@ -998,7 +1126,7 @@ local function lanes(props: Props, sid: string): Node
 				icon = function(_l: any): string?
 					return "global"
 				end,
-			}, true),
+			}, true, nil, port_tip),
 			ui.show(function(): boolean
 				return trouble:get() ~= nil
 			end, ui.row {
@@ -1031,7 +1159,7 @@ local function lanes(props: Props, sid: string): Node
 			if props.open_side then
 				props.open_side(sid, l.child)
 			end
-		end, side_menu, nil, false, side_archive),
+		end, side_menu, nil, false, side_archive, nil, true),
 		part("panel-home-subagents", "panel-home-subagent-list", "panel.home.subagents", "subagents", function(): { any }
 			return subs:get()
 		end, function(l: any): string
@@ -1048,7 +1176,7 @@ local function lanes(props: Props, sid: string): Node
 					props.open_subagent(sid, l.sub)
 				end
 			end)
-		end, nil, true),
+		end, nil, true, nil, nil, true),
 	}
 end
 
@@ -1077,7 +1205,7 @@ end
 
 -- A subagent row's menu, on a secondary click: open it.
 function M.subagent_menu(open: () -> ()): { any }
-	return { { label = locale.s("common.open"), icon = "bot", on_select = open } }
+	return { { label = locale.s("common.open"), icon = "side-chat", on_select = open } }
 end
 
 -- ---------------------------------------------------------------------------
@@ -1099,6 +1227,10 @@ M.Page = ui.component(function(props: Props): Node
 			props.open_kind("terminal")
 		end },
 	}
+	-- (A new chat with no project: no folder for a file viewer to show.)
+	if props.key == "no-project" then
+		table.remove(choices, 2)
+	end
 	if sid and props.new_side_chat and props.fork then
 		local new_side, fork = props.new_side_chat, props.fork
 		table.insert(choices, { id = "panel-open-side-chat", icon = "side-chat", label = "panel.empty.side_chat", key = "S", run = function()
@@ -1153,10 +1285,25 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: at its top, level with the transcript's first
-	-- message beside it, so a part opening or closing grows it downward and
-	-- nothing above moves. Taller than the panel, it scrolls.
+	-- Where it stands: in the panel's middle, its rows no wider than a
+	-- list of rows is in ds (`zeron.form.list`: a row's icon, its words and
+	-- the key at its end), each row's whole width still its target; and level with a
+	-- new chat's composer, by the composer's own rule (screens/chat/dock:
+	-- a little over the middle of the room under the title bar, read over
+	-- the panel's whole height). What it's in is at least as tall as the
+	-- scroll's window (measured) and centres it, the lift as room under it,
+	-- never more than the room left: taller than the panel, it starts at the
+	-- top and scrolls, nothing pushed out of reach.
 	local view = ui.ref()
+	local block = ui.ref()
+	local room = ui.use_state(0)
+	-- (Its middle that far over the scroll's: the composer's offset from the
+	-- page's middle, less half the strip over it.)
+	local lift = (props.above or 0) / 2 - Dock.hero_offset()
+	local function under(): number
+		local spare = room:get() - (block.height or 0)
+		return ui.raw(math.clamp(2 * lift, 0, math.max(spare, 0)), "the composer's lift, as room under the block")
+	end
 	return ui.scroll {
 		ref = view,
 		id = "panel-empty",
@@ -1165,7 +1312,6 @@ M.Page = ui.component(function(props: Props): Node
 		w_full = true,
 		grow = 1,
 		min_h = 0,
-		items = "center",
 		overscroll = "contain",
 		-- (Its edges fade where there's more to scroll to, as the sidebar's
 		-- and Settings' lists do.)
@@ -1174,14 +1320,29 @@ M.Page = ui.component(function(props: Props): Node
 		-- (What plugins' rows on it read: the session, and the letters it
 		-- passes on.)
 		provide = { session = sid, panel_key = passed },
+		on_resize = function(size: { w: number, h: number })
+			if room:peek() ~= size.h then
+				room:set(size.h)
+			end
+		end,
 		ui.column {
 			w_full = true,
-			max_w = 380,
-			px = "$space.4",
-			pt = ui.raw(16, "the transcript's own gap over its first message (ds/transcript TURN_GAP), so the two start level"),
-			pb = "$space.6",
-			gap = "$space.5",
-			table.unpack(parts),
+			min_h = function(): number
+				return room:get()
+			end,
+			justify = "center",
+			items = "center",
+			pb = under,
+			ui.column {
+				id = "panel-home-block",
+				ref = block,
+				w_full = true,
+				max_w = ui.theme.get("zeron.form.list") :: number?,
+				px = "$space.4",
+				py = "$space.6",
+				gap = "$space.5",
+				table.unpack(parts),
+			},
 		},
 	}
 end)
