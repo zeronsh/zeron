@@ -322,13 +322,21 @@ M.View = ui.component(function(props: {
 			local angle = if count <= 1 or dx * dx + dy * dy < 1 then -90 else math.deg(math.atan2(dy, dx))
 			-- (Snapped to eight directions, so names line up.)
 			angle = math.floor(angle / 45 + 0.5) * 45
+			-- (Its place is settled after the working threads' names: it
+			-- gives way to them, round its rim.)
+			table.insert(rims, { n = n, x = x, y = y, r = r, angle = angle, w = name_w, h = name_h, nx = 0, ny = 0, from = -90, sweep = 360 })
+		end
+		local function name_box(rim: any, angle: number): (number, number)
 			local ux, uy = math.cos(math.rad(angle)), math.sin(math.rad(angle))
-			local px, py = x + ux * (r + 8), y + uy * (r + 8)
-			-- Its box: beside the rim, growing outward.
-			local x0 = if ux > 0.3 then px elseif ux < -0.3 then px - name_w else px - name_w / 2
-			local y0 = if uy > 0.3 then py elseif uy < -0.3 then py - name_h else py - name_h / 2
-			table.insert(taken, { x0 - 4, y0 - 2, x0 + name_w + 4, y0 + name_h + 2 })
-			table.insert(rims, { n = n, x = x, y = y, r = r, nx = x0, ny = y0 + name_h / 2, from = -90, sweep = 360 })
+			local px, py = rim.x + ux * (rim.r + 8), rim.y + uy * (rim.r + 8)
+			local x0 = if ux > 0.3 then px elseif ux < -0.3 then px - rim.w else px - rim.w / 2
+			local y0 = if uy > 0.3 then py elseif uy < -0.3 then py - rim.h else py - rim.h / 2
+			return x0, y0
+		end
+		-- (Held for the working threads' names till the machine names go.)
+		for _, rim in rims do
+			local x0, y0 = name_box(rim, rim.angle)
+			table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim = rim })
 		end
 
 		local lines: { any } = {}
@@ -356,6 +364,44 @@ M.View = ui.component(function(props: {
 			-- run apart.)
 			local bend = if e.kind == "host" then 0 elseif e.kind == "control" then 0.12 elseif e.kind == "started" then -0.16 else -0.26
 			local mx, my = (ax + bx) / 2, (ay + by) / 2
+			-- (Bowed round any mark it doesn't join: its own bow first, then
+			-- the other way, then wider.)
+			local function hits(k: number): number
+				local qx, qy = mx - (by - ay) * k, my + (bx - ax) * k
+				local n_hit = 0
+				for _, m in graph.nodes do
+					if m.id ~= e.a and m.id ~= e.b then
+						local px, py = at(m)
+						local room = reach(m) + 6
+						for i = 1, 11 do
+							local t = i / 12
+							local u = 1 - t
+							local x = u * u * ax + 2 * u * t * qx + t * t * bx
+							local y = u * u * ay + 2 * u * t * qy + t * t * by
+							if (x - px) ^ 2 + (y - py) ^ 2 < room * room then
+								n_hit += 1
+								break
+							end
+						end
+					end
+				end
+				return n_hit
+			end
+			if e.kind ~= "host" then
+				local best, least = bend, hits(bend)
+				if least > 0 then
+					for _, k in { -bend, bend * 2, -bend * 2 } do
+						local h = hits(k)
+						if h < least then
+							best, least = k, h
+						end
+						if h == 0 then
+							break
+						end
+					end
+				end
+				bend = best
+			end
 			table.insert(lines, { e = e, lit = lit, ax = ax, ay = ay, bx = bx, by = by, cx = mx - (by - ay) * bend, cy = my + (bx - ax) * bend })
 		end
 
@@ -391,6 +437,7 @@ M.View = ui.component(function(props: {
 		end
 		-- Points along every line and rim, which a name would rather not cut.
 		local pts: { { number } } = {}
+		local rim_pts: { { number } } = {}
 		for _, ln in lines do
 			local k = math.max(4, math.floor(math.sqrt((ln.bx - ln.ax) ^ 2 + (ln.by - ln.ay) ^ 2) / 8))
 			for i = 0, k do
@@ -403,20 +450,28 @@ M.View = ui.component(function(props: {
 			local k = math.max(12, math.floor(rim.r * math.rad(rim.sweep) / 8))
 			for i = 0, k do
 				local a = math.rad(rim.from + rim.sweep * i / k)
-				table.insert(pts, { rim.x + math.cos(a) * rim.r, rim.y + math.sin(a) * rim.r })
+				table.insert(rim_pts, { rim.x + math.cos(a) * rim.r, rim.y + math.sin(a) * rim.r })
 			end
 		end
-		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string): number
+		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string, rim_w: number?): number
 			local k = 0
 			for _, p in pts do
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
-					k += 0.1
+					k += 0.15
 				end
 			end
-			k = math.min(k, 0.9)
+			k = math.min(k, 0.6)
+			-- (A rim cut reads worse than a line's.)
+			for _, p in rim_pts do
+				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
+					k += rim_w or 0.6
+					break
+				end
+			end
 			for _, bx in taken do
 				if x0 < bx[3] and x1 > bx[1] and y0 < bx[4] and y1 > bx[2] then
-					k += 1
+					-- (A machine name not yet settled gives way.)
+					k += if (bx :: any).rim then 0.5 else 1
 				end
 			end
 			for _, m in graph.nodes do
@@ -433,65 +488,313 @@ M.View = ui.component(function(props: {
 			end
 			return k
 		end
-		local labels: { any } = {}
-		local function place(n: sim.Node, text: { string }, opts: any, force: boolean)
-			local x, y = at(n)
-			local r = (if n.kind == "thread" then 9 else reach(n)) + 7
-			local tw, lh = 0, 0
-			for _, t in text do
-				local a, b = c:measure_text(t, opts)
-				tw, lh = math.max(tw, a), math.max(lh, b)
-			end
-			local th = lh * #text
-			-- Right, left (centred on the mark), then below, above.
-			local spots = {
-				{ x + r, y - th / 2, "start" },
-				{ x - r - tw, y - th / 2, "end" },
-				{ x - tw / 2, y + r - 3, "center" },
-				{ x - tw / 2, y - r - th + 3, "center" },
-			}
-			local best: { any }, least = spots[1], math.huge
-			for _, sp in spots do
-				local sx, sy = sp[1] :: number, sp[2] :: number
-				local k = crowd(sx - 3, sy - 1, sx + tw + 3, sy + th + 1, n.id)
-				if k < least then
-					best, least = sp, k
+		-- Whether a box sits on a line into `own` (its name over its own
+		-- line in): a place to prefer against, never one that drops it.
+		local own_pts: { [string]: { { number } } } = {}
+		for _, ln in lines do
+			for _, id in { ln.e.a, ln.e.b } do
+				local list = own_pts[id] or {}
+				own_pts[id] = list
+				for i = 0, 12 do
+					local t = i / 12
+					local u = 1 - t
+					table.insert(list, { u * u * ln.ax + 2 * u * t * ln.cx + t * t * ln.bx, u * u * ln.ay + 2 * u * t * ln.cy + t * t * ln.by })
 				end
-				if k == 0 then
+			end
+		end
+		local function on_own(x0: number, y0: number, x1: number, y1: number, own: string): number
+			for _, p in own_pts[own] or {} do
+				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
+					return 0.5
+				end
+			end
+			return 0
+		end
+		local labels: { any } = {}
+		local leaders: { any } = {}
+		-- A name's place: tried in one line, then two, on each side (right,
+		-- left, centred on the mark; then below, above), and for a name that
+		-- must show (a leader's, a working thread's) hanging under or over
+		-- it and at its corners too.
+		local function place(n: sim.Node, forms: { { string } }, opts: any, must: boolean, force: boolean)
+			local x, y = at(n)
+			local base = (if n.kind == "thread" then 9 else reach(n)) + 8
+			local best: any, least, least_rank = nil, math.huge, math.huge
+			-- (And the least crowded, whatever lines it sits on.)
+			local fit: any, fit_k = nil, math.huge
+			-- (Only a working thread's name steps out, a leader tying it back.)
+			for _, far in (if must and n.kind == "thread" then { 0, 10, 24, 38 } else { 0 }) do
+				local r = base + far
+				for _, text in forms do
+					local tw, lh = 0, 0
+					for _, t in text do
+						local a, b = c:measure_text(t, opts)
+						tw, lh = math.max(tw, a), math.max(lh, b)
+					end
+					lh = math.floor(lh * 1.08 + 0.5)
+					local th = lh * #text
+					local spots = {
+						{ x + r, y - th / 2, "start" },
+						{ x - r - tw, y - th / 2, "end" },
+						{ x - tw / 2, y + r - 1, "center" },
+						{ x - tw / 2, y - r - th + 1, "center" },
+					}
+					if must then
+						-- (Then hanging under or over it, either way; then the
+						-- corners, close in.)
+						table.insert(spots, { x - 8, y + r + 1, "start", true })
+						table.insert(spots, { x + 8 - tw, y + r + 1, "end", true })
+						table.insert(spots, { x - 8, y - r - th - 1, "start", true })
+						table.insert(spots, { x + 8 - tw, y - r - th - 1, "end", true })
+						local d = r * 0.72
+						table.insert(spots, { x + d, y + d - th / 2, "start", true })
+						table.insert(spots, { x + d, y - d - th / 2, "start", true })
+						table.insert(spots, { x - d - tw, y + d - th / 2, "end", true })
+						table.insert(spots, { x - d - tw, y - d - th / 2, "end", true })
+					end
+					for _, sp in spots do
+						-- (A working thread's name may cross a rim, if it must.)
+						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id, if must and n.kind == "thread" then 0.35 else nil) + far * 0.03
+						local rank = k + on_own(sp[1] - 2, sp[2] - 2, sp[1] + tw + 2, sp[2] + th + 2, n.id)
+						local here_spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 }
+						if rank < least_rank then
+							best, least, least_rank = here_spot, k, rank
+						end
+						if k < fit_k then
+							fit, fit_k = here_spot, k
+						end
+					end
+					if least_rank < 0.5 then
+						break
+					end
+				end
+				if least_rank < 0.5 then
 					break
 				end
 			end
 			-- (Lines may run under a name, broken round it; marks and other
 			-- names may not: a thread whose name fits nowhere keeps its dot.)
-			if least >= 1 and not force then
+			-- (A name that need not show cuts nothing.)
+			if best and least >= (if must then 1 else 0.05) and not force and fit then
+				-- (Ranked best but not allowed: the least crowded instead.)
+				best, least = fit, fit_k
+			end
+			if not best or (least >= (if must then 1 else 0.05) and not force) then
 				return
 			end
-			table.insert(taken, { best[1] - 3, best[2] - 1, best[1] + tw + 3, best[2] + th + 1 })
-			for i, t in text do
+			table.insert(taken, { best.x - 3, best.y - 1, best.x + best.tw + 3, best.y + best.th + 1 })
+			-- (Set off from its mark: a fine leader ties it back.)
+			local st_n = if n.kind == "thread" then state_of(n.id) else ""
+			local mr = if st_n == "working" or st_n == "waiting" then 9 elseif n.kind == "thread" then n.r * zs else reach(n)
+			local qx = math.clamp(x, best.x, best.x + best.tw)
+			local qy = math.clamp(y, best.y, best.y + best.th)
+			local gx, gy = qx - x, qy - y
+			local gd = math.sqrt(gx * gx + gy * gy)
+			-- (Always for a name hung aside or stepped out; else past 13px.)
+			if gd - mr > (if best.aside then 4 else 13) then
+				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
+			end
+			for i, t in best.text do
 				local o = table.clone(opts)
 				o.baseline = "middle"
-				o.align = best[3]
-				local ax = if best[3] == "start" then best[1] elseif best[3] == "end" then best[1] + tw else best[1] + tw / 2
-				table.insert(labels, { t = t, x = ax, y = best[2] + lh * (i - 0.5), opts = o })
+				o.align = best.align
+				local ax = if best.align == "start" then best.x elseif best.align == "end" then best.x + best.tw else best.x + best.tw / 2
+				table.insert(labels, { t = t, x = ax, y = best.y + best.lh * (i - 0.5), opts = o })
 			end
+		end
+		local function forms_of(t: string, most: number): { { string } }
+			local one = lines_of(t, 40)
+			local two = lines_of(t, most)
+			if #two == 1 then
+				return { two }
+			end
+			return if #one == 1 then { one, two } else { two }
 		end
 		for _, n in graph.nodes do
 			if n.kind == "orchestrator" or n.kind == "brain" then
-				place(n, lines_of(n.title, 24), { size = 13, weight = 600, color = ink(if dark then 0.92 else 0.9, lit_of(n.id)) }, true)
+				place(n, forms_of(n.title, 24), { size = 13, weight = 600, color = ink(if dark then 0.92 else 0.9, lit_of(n.id)) }, true, true)
 			end
 		end
 		for pass = 1, 2 do
+			if pass == 2 then
+				-- The machine names, now: each where it was meant, else the
+				-- nearest free place round its rim.
+				local kept = {}
+				for _, b in taken do
+					if not (b :: any).rim then
+						table.insert(kept, b)
+					end
+				end
+				taken = kept
+				for _, rim in rims do
+					local best_a, least = rim.angle, math.huge
+					for _, off in { 0, 45, -45, 90, -90, 135, -135, 180 } do
+						local x0, y0 = name_box(rim, rim.angle + off)
+						local k = crowd(x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim.n.id)
+						if k < 0.5 then
+							best_a, least = rim.angle + off, k
+							break
+						elseif k < least then
+							best_a, least = rim.angle + off, k
+						end
+					end
+					local x0, y0 = name_box(rim, best_a)
+					rim.nx, rim.ny = x0, y0 + rim.h / 2
+					table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2 })
+				end
+			end
 			for _, n in graph.nodes do
 				if n.kind ~= "thread" then
 					continue
 				end
 				local st = state_of(n.id)
-				local busy = st == "working" or st == "input" or st == "approval" or st == "failed"
+				local busy = st == "working" or st == "waiting" or st == "input" or st == "approval" or st == "failed"
 				local lit_here = near ~= nil and near[n.id] == true
 				if (pass == 1) == (busy or lit_here) then
 					local a = if busy then (if dark then 0.76 else 0.82) else (if dark then 0.52 else 0.64)
-					place(n, lines_of(n.title, 22), { size = 12, color = ink(a, lit_of(n.id)) }, lit_here)
+					place(n, forms_of(n.title, 22), { size = 12, color = ink(a, lit_of(n.id)) }, busy or lit_here, lit_here)
 				end
+			end
+		end
+
+		-- Lines bowed again, now round the names too, where a bow clears
+		-- more (a name still in the way breaks the line round it).
+		local function blocked(ln: any, k: number): number
+			local mx, my = (ln.ax + ln.bx) / 2, (ln.ay + ln.by) / 2
+			local qx, qy = mx - (ln.by - ln.ay) * k, my + (ln.bx - ln.ax) * k
+			local n_hit = 0
+			for i = 1, 15 do
+				local t = i / 16
+				local u = 1 - t
+				local x = u * u * ln.ax + 2 * u * t * qx + t * t * ln.bx
+				local y = u * u * ln.ay + 2 * u * t * qy + t * t * ln.by
+				for _, b in taken do
+					if x > b[1] and x < b[3] and y > b[2] and y < b[4] then
+						n_hit += 1
+					end
+				end
+				for _, m in graph.nodes do
+					if m.id ~= ln.e.a and m.id ~= ln.e.b then
+						local px, py = at(m)
+						local room = reach(m) + 6
+						if (x - px) ^ 2 + (y - py) ^ 2 < room * room then
+							n_hit += 3
+						end
+					end
+				end
+			end
+			return n_hit
+		end
+		for _, ln in lines do
+			if ln.e.kind ~= "host" then
+				local dx, dy = ln.bx - ln.ax, ln.by - ln.ay
+				local len2 = math.max(1, dx * dx + dy * dy)
+				local mx, my = (ln.ax + ln.bx) / 2, (ln.ay + ln.by) / 2
+				local now_k = ((ln.cx - mx) * -dy + (ln.cy - my) * dx) / len2
+				local best, least = now_k, blocked(ln, now_k)
+				if least > 0 then
+					-- (Gently: a line looping wide reads as something else.)
+					for _, k in { -now_k, now_k * 1.8, -now_k * 1.8 } do
+						if math.abs(k) <= 0.26 then
+							local hcount = blocked(ln, k)
+							if hcount < least then
+								best, least = k, hcount
+							end
+						end
+					end
+				end
+				ln.cx, ln.cy = mx - dy * best, my + dx * best
+			end
+		end
+		-- A line a name still sits on goes round it: through a point just
+		-- past a corner of the name, in two joined curves.
+		local function quad_pts(ax: number, ay: number, cx: number, cy: number, bx: number, by: number, out: { { number } })
+			for i = 1, 11 do
+				local t = i / 12
+				local u = 1 - t
+				table.insert(out, { u * u * ax + 2 * u * t * cx + t * t * bx, u * u * ay + 2 * u * t * cy + t * t * by })
+			end
+		end
+		local function cost(list: { { number } }, ln: any): number
+			local k = 0
+			for _, p in list do
+				for _, b in taken do
+					if p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
+						k += 1
+					end
+				end
+				for _, m in graph.nodes do
+					if m.id ~= ln.e.a and m.id ~= ln.e.b then
+						local px, py = at(m)
+						local room = reach(m) + 6
+						if (p[1] - px) ^ 2 + (p[2] - py) ^ 2 < room * room then
+							k += 3
+						end
+					end
+				end
+			end
+			return k
+		end
+		for _, ln in lines do
+			if ln.e.kind == "host" then
+				continue
+			end
+			local here_pts = {}
+			quad_pts(ln.ax, ln.ay, ln.cx, ln.cy, ln.bx, ln.by, here_pts)
+			local now_cost = cost(here_pts, ln)
+			if now_cost == 0 then
+				continue
+			end
+			-- (Every name in its way.)
+			local hits: { { number } } = {}
+			for _, b in taken do
+				for _, p in here_pts do
+					if p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
+						table.insert(hits, b)
+						break
+					end
+				end
+			end
+			if #hits == 0 then
+				continue
+			end
+			local corners = {}
+			for _, hit in hits do
+				for _, cn in { { hit[1] - 10, hit[2] - 10 }, { hit[3] + 10, hit[2] - 10 }, { hit[1] - 10, hit[4] + 10 }, { hit[3] + 10, hit[4] + 10 } } do
+					table.insert(corners, cn)
+				end
+			end
+			local dx, dy = ln.bx - ln.ax, ln.by - ln.ay
+			local len = math.sqrt(dx * dx + dy * dy)
+			local tx, ty = dx / len, dy / len
+			local best_cost, best = now_cost, nil
+			for _, corner in corners do
+				local wx, wy = corner[1], corner[2]
+				-- (Only a point well along the way: no hook back.)
+				local along = ((wx - ln.ax) * tx + (wy - ln.ay) * ty) / len
+				local aside_d = math.abs((wx - ln.ax) * -ty + (wy - ln.ay) * tx)
+				-- (A long dashed route may swing wider round a name.)
+				local wide = if ln.e.kind == "control" then 0.35 else 0.75
+				if along < 0.15 or along > 0.85 or aside_d > len * wide then
+					continue
+				end
+				local l1 = math.sqrt((wx - ln.ax) ^ 2 + (wy - ln.ay) ^ 2)
+				local l2 = math.sqrt((ln.bx - wx) ^ 2 + (ln.by - wy) ^ 2)
+				-- (Smooth through the point: its tangent along the line.)
+				local arm = math.min(l1, l2) * 0.4
+				local c1x, c1y = wx - tx * arm, wy - ty * arm
+				local c2x, c2y = wx + tx * arm, wy + ty * arm
+				local list = {}
+				quad_pts(ln.ax, ln.ay, c1x, c1y, wx, wy, list)
+				quad_pts(wx, wy, c2x, c2y, ln.bx, ln.by, list)
+				-- (A detour costs a little for its length.)
+				local k = cost(list, ln) + (l1 + l2 - len) / (if ln.e.kind == "control" then 35 else 70)
+				if k < best_cost then
+					best_cost, best = k, { wx, wy, c1x, c1y, c2x, c2y }
+				end
+			end
+			if best then
+				ln.via = best
 			end
 		end
 
@@ -516,14 +819,16 @@ M.View = ui.component(function(props: {
 			if f > 0.005 then
 				-- (Neutral, by its length; all of it a muted amber past 80%.)
 				local paint = if f > 0.8
-					then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(if dark then 0.55 else 0.75, lit))
-					else ink(if dark then 0.45 else 0.4, lit)
-				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 2, { cap = "round" })
+					then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(if dark then 0.42 else 0.42, lit))
+					else ink(if dark then 0.42 else 0.38, lit)
+				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 1.5, { cap = "round" })
 			end
 		end
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
-			local p = ui.path():move(ln.ax, ln.ay):quad(ln.cx, ln.cy, ln.bx, ln.by)
+			local p = if ln.via
+				then ui.path():move(ln.ax, ln.ay):quad(ln.via[3], ln.via[4], ln.via[1], ln.via[2]):quad(ln.via[5], ln.via[6], ln.bx, ln.by)
+				else ui.path():move(ln.ax, ln.ay):quad(ln.cx, ln.cy, ln.bx, ln.by)
 			if e.kind == "host" then
 				c:stroke(p, ink(0.32, lit), 1, { dash = { 2, 3 } })
 			elseif e.kind == "control" then
@@ -610,7 +915,10 @@ M.View = ui.component(function(props: {
 			end
 		end
 
-		-- 5. The names.
+		-- 5. The names, and the leaders of those set off.
+		for _, l in leaders do
+			c:line(l[1], l[2], l[3], l[4], ink(if dark then 0.48 else 0.4, l[5]), 1, { cap = "round" })
+		end
 		for _, rim in rims do
 			c:text(rim.n.title, rim.nx, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), baseline = "middle" })
 		end
