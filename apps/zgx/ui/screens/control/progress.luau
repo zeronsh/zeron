@@ -58,10 +58,18 @@ local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } }
 -- A session's status as a progress row's state.
 local STATE: { [string]: string } = { working = "working", waiting = "waiting", input = "awaiting_input", approval = "awaiting_input" }
 
--- When its current stretch began, as far as this app saw: the first of its
--- latest unbroken run of busy entries; else when its activity began; else
--- its last change.
+-- A chat made this recently is taken to be at the task it was made for:
+-- its stretch began when it was made (seconds).
+local FRESH = 3 * 3600
+
+-- When its current stretch began, as best the session says: when it was
+-- made, if that was lately (a crew thread, a task's chat); else the first
+-- of its latest unbroken run of busy entries as this app saw them; else
+-- when its activity began; else its last change.
 local function stretch_start(c: any): number?
+	if type(c.created) == "number" and os.time() - c.created <= FRESH then
+		return c.created
+	end
 	local entries = timeline:get()[c.id]
 	local start: number? = nil
 	if entries then
@@ -74,14 +82,12 @@ local function stretch_start(c: any): number?
 			end
 		end
 	end
-	if start then
-		return start
-	end
 	local a = c.activity
-	if type(a) == "table" and type(a.since) == "number" then
-		return a.since
+	local since = if type(a) == "table" and type(a.since) == "number" then a.since else nil
+	if start and since then
+		return math.min(start, since)
 	end
-	return c.updated
+	return start or since or c.updated
 end
 
 -- Every chat at work now that isn't archived: a row drawn from its session.

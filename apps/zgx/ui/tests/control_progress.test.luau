@@ -26,6 +26,20 @@ local function listed(app: any): { string }
 	return out
 end
 
+-- What a stopwatch shows: its figures at rest on its line.
+local function face(app: any, target: string): string
+	local tree = app:tree(target)
+	local top = tree:match(" %-?%d+,(%-?%d+) ")
+	local out = {}
+	for line in tree:gmatch("[^\n]+") do
+		local t, y = line:match('text "(.-)" %-?%d+,(%-?%d+) ')
+		if t and y == top and not line:find(" hidden") then
+			table.insert(out, t)
+		end
+	end
+	return table.concat(out)
+end
+
 test("control progress: a widget of its own, in the right column", function()
 	local app = open()
 	expect(app:has("#control-right >> #control-widget-progress")).to_be(true)
@@ -126,7 +140,8 @@ test("control progress: a host that writes no progress still shows what works", 
 	local UNIT = "#progress-full-th-engine-state"
 	-- Its state, what it's doing, its clock, where; no steps, no note.
 	expect(app:has(`{UNIT} >> .orch-progress-doing >> ~"cargo test -p zeron-engine"`)).to_be(true)
-	expect(app:has(`{UNIT}-elapsed`)).to_be(true)
+	-- (Made an hour and a half ago for this task: at it since.)
+	expect(string.find(face(app, `{UNIT}-elapsed`), ":30:", 1, true) ~= nil).to_be(true)
 	expect(app:has(`{UNIT} >> ~"Orchestrators · desk"`)).to_be(true)
 	expect(app:has(`{UNIT} >> .orch-progress-cells`)).to_be(false)
 	expect(app:has(`{UNIT} >> .orch-progress-note`)).to_be(false)
