@@ -121,6 +121,8 @@ impl Mirror {
                             changed.insert(id);
                         }
                         Some(NativeChange::Deleted(id)) => self.deleted(&id),
+                        // (The harness's catalogs follow these themselves.)
+                        Some(NativeChange::Catalog) => {}
                     },
                     _ = tick.tick() => {
                         let due: HashSet<String> = changed.drain().chain(running.iter().cloned()).collect();

@@ -89,6 +89,9 @@ pub enum NativeChange {
     /// The feed (re)connected; changes while it was down are lost, so every
     /// session should be read again.
     Resync,
+    /// Agents, commands, skills, models, providers or the configuration
+    /// changed: catalogs read before are out of date.
+    Catalog,
 }
 
 impl OpencodeHarness {
@@ -321,6 +324,23 @@ async fn follow_once(server: &Server, tx: &mpsc::Sender<NativeChange>) -> Result
 /// them say the same, far less often.
 fn change_of(frame: &Value) -> Option<NativeChange> {
     let kind = frame.get("type").and_then(Value::as_str)?;
+    if matches!(
+        kind,
+        "agent.updated"
+            | "command.updated"
+            | "skill.updated"
+            | "config.updated"
+            | "model.updated"
+            | "models-dev.refreshed"
+            | "provider.updated"
+            | "integration.updated"
+            | "credential.updated"
+            | "credential.switched"
+            | "plugin.updated"
+            | "mcp.status.changed"
+    ) {
+        return Some(NativeChange::Catalog);
+    }
     let data = frame.get("data");
     let session = data
         .and_then(|data| data.get("sessionID"))
@@ -639,6 +659,9 @@ mod tests {
         );
         let delta = json!({"type": "session.text.delta", "data": {"sessionID": "ses_a"}});
         assert_eq!(change_of(&delta), None);
+        // (An agent added in the TUI: no session, the catalogs.)
+        let agent = json!({"type": "agent.updated", "data": {}});
+        assert_eq!(change_of(&agent), Some(NativeChange::Catalog));
         let form = json!({"type": "form.created", "data": {"form": {"sessionID": "ses_c"}}});
         assert_eq!(
             change_of(&form),

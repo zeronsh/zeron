@@ -381,7 +381,14 @@ pub struct OpencodeHarness {
     bus_timeouts: BusTimeouts,
     startup_timeout: Duration,
     models_cache: crate::catalog::Catalog,
-    commands_cache: tokio::sync::OnceCell<Vec<SlashCommand>>,
+    /// The global commands, as of the catalog generation they were read at.
+    commands_cache: tokio::sync::Mutex<Option<(u64, Vec<SlashCommand>)>>,
+    /// Bumped whenever the background service says its agents, commands,
+    /// skills, models, providers or configuration changed: a catalog read at
+    /// an older generation is read again ([`Self::watch_catalog`]).
+    catalog_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The watcher behind [`Self::catalog_generation`], started once.
+    catalog_watch: std::sync::OnceLock<()>,
     /// Coalesce concurrent picker/title probes: several cold opencode boots
     /// at once are slower than one.
     probe_lock: tokio::sync::Mutex<()>,
@@ -412,7 +419,9 @@ impl Default for OpencodeHarness {
             bus_timeouts: BusTimeouts::default(),
             startup_timeout: startup_timeout(),
             models_cache: crate::catalog::Catalog::default(),
-            commands_cache: tokio::sync::OnceCell::new(),
+            commands_cache: tokio::sync::Mutex::new(None),
+            catalog_generation: Arc::default(),
+            catalog_watch: std::sync::OnceLock::new(),
             probe_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -563,7 +572,13 @@ impl OpencodeHarness {
             let mut models = models_from_providers(&providers);
             if server.protocol().await == Protocol::V2 {
                 let agents = server.get_json("/api/agent", None).await?;
-                let option = agent_option(&agents);
+                let mut option = agent_option(&agents);
+                // On the service, every project OpenCode knows adds the
+                // agents its own configuration defines, as its TUI lists
+                // them there.
+                if server.shared {
+                    add_project_agents(&server, &agents, &mut option).await;
+                }
                 for model in &mut models {
                     model.options.push(option.clone());
                 }
@@ -575,7 +590,8 @@ impl OpencodeHarness {
                 ));
             }
             if let Ok(commands) = server.commands_wire(None).await {
-                let _ = self.commands_cache.set(commands_from_wire(&commands));
+                *self.commands_cache.lock().await =
+                    Some((self.generation(), commands_from_wire(&commands)));
             }
             Ok(models)
         }
@@ -586,7 +602,10 @@ impl OpencodeHarness {
 
     async fn probe_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        if let Some(commands) = self.commands_cache.get() {
+        let generation = self.generation();
+        if let Some((read_at, commands)) = self.commands_cache.lock().await.as_ref()
+            && *read_at == generation
+        {
             return Ok(commands.clone());
         }
         let mut server = self.server(None, None).await?;
@@ -595,7 +614,105 @@ impl OpencodeHarness {
             .await
             .map(|v| commands_from_wire(&v));
         server.shutdown(self.kill_grace).await;
+        if let Ok(commands) = &result {
+            *self.commands_cache.lock().await = Some((generation, commands.clone()));
+        }
         result
+    }
+
+    /// The catalog generation now, after making sure something bumps it.
+    fn generation(&self) -> u64 {
+        self.watch_catalog();
+        self.catalog_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Follow the background service for catalog changes (an agent or
+    /// command added, a provider signed into, the configuration reloaded),
+    /// bumping [`Self::catalog_generation`] on each. Once per harness, and
+    /// only where there is a service to follow.
+    fn watch_catalog(&self) {
+        if self.private_only || self.base_url.is_some() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self.catalog_watch.set(()).is_err() {
+            return;
+        }
+        let generation = self.catalog_generation.clone();
+        let executable = self.executable.clone();
+        runtime.spawn(async move {
+            let mut follower = OpencodeHarness::new();
+            follower.executable = executable;
+            loop {
+                match follower.follow_native().await {
+                    Ok(mut feed) => {
+                        // (The first connection is the start, not a change:
+                        // bumping on it would void a catalog being read.)
+                        let mut connected = false;
+                        while let Some(change) = feed.recv().await {
+                            let changed = match change {
+                                NativeChange::Catalog => true,
+                                // A reconnect may have missed one.
+                                NativeChange::Resync => std::mem::replace(&mut connected, true),
+                                _ => false,
+                            };
+                            if changed {
+                                generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            }
+                        }
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_secs(30)).await,
+                }
+            }
+        });
+    }
+}
+
+/// Add the agents each project OpenCode knows defines of its own to the
+/// Agent option, named with their project. Best effort: a project folder
+/// that no longer exists (or answers with an error) adds nothing.
+async fn add_project_agents(server: &Server, global: &Value, option: &mut ModelOption) {
+    let known: std::collections::HashSet<String> = unwrap_data(global.clone())
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let Ok(projects) = server.get_json("/api/project", None).await else {
+        return;
+    };
+    let directories: Vec<String> = unwrap_data(projects)
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.get("canonical").and_then(Value::as_str))
+        .filter(|directory| *directory != "/" && std::path::Path::new(directory).is_dir())
+        .map(str::to_owned)
+        .collect();
+    for directory in directories {
+        let Ok(agents) = server.get_json("/api/agent", Some(&directory)).await else {
+            continue;
+        };
+        let project = std::path::Path::new(&directory)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&directory)
+            .to_owned();
+        for choice in agent_option(&agents).choices {
+            if choice.id.is_empty()
+                || known.contains(&choice.id)
+                || option.choices.iter().any(|existing| existing.id == choice.id)
+            {
+                continue;
+            }
+            option.choices.push(ModelOptionChoice {
+                label: format!("{} ({project})", choice.label),
+                id: choice.id,
+            });
+        }
     }
 }
 
@@ -676,14 +793,39 @@ impl Harness for OpencodeHarness {
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
-        self.models_cache
-            .get_with_timeout(
-                force,
-                self.startup_timeout * 3 + Duration::from_secs(1),
-                || self.model_context().map(|c| c.unwrap().key()),
-                || self.probe_models(),
-            )
-            .await
+        let mut attempt = 0;
+        loop {
+            let result = self
+                .models_cache
+                .get_with_timeout(
+                    force,
+                    self.startup_timeout * 3 + Duration::from_secs(1),
+                    // (A catalog change on the service — an agent or provider
+                    // added in the TUI — reads it again on the next ask.)
+                    || {
+                        let generation = self.generation();
+                        self.model_context().map(|c| {
+                            let mut key = c.unwrap().key();
+                            for (byte, salt) in key.iter_mut().zip(generation.to_le_bytes()) {
+                                *byte ^= salt;
+                            }
+                            key
+                        })
+                    },
+                    || self.probe_models(),
+                )
+                .await;
+            // A change that landed mid-read voids the read; the catalog is
+            // simply read again, as of the change.
+            match result {
+                Err(HarnessError::Protocol(message))
+                    if attempt < 2 && message.contains("changed during model discovery") =>
+                {
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.model_catalog(true).await.map(|c| c.models)
@@ -707,10 +849,7 @@ impl Harness for OpencodeHarness {
     }
 
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.commands_cache
-            .get_or_try_init(|| self.probe_commands())
-            .await
-            .cloned()
+        self.probe_commands().await
     }
 
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
