@@ -317,6 +317,7 @@ M.View = ui.component(function(props: {
 		-- Each machine's heading: a tab on its island's rim (its mark, its
 		-- name, its load), the rim broken behind it; at the top, else where
 		-- it clears what's round it.
+		local retab = false
 		local TAB_NAME = { size = 13.5, weight = 600 }
 		local TAB_LOAD = { size = 11, tabular = true }
 		local TAB_H = 24
@@ -338,6 +339,16 @@ M.View = ui.component(function(props: {
 			local name_w = c:measure_text(n.title, TAB_NAME)
 			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
 			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 10 + load_w else 0) + 8
+			-- (The island makes room for it: settled again if it grew.)
+			local was = (n :: any).tab_w or 0
+			;(n :: any).tab_w = tw / z
+			if math.abs(was - tw / z) > 4 and not retab then
+				retab = true
+				ui.after(0, function()
+					graph.alpha = math.max(graph.alpha, 0.3)
+					pump()
+				end)
+			end
 			table.insert(rims, { n = n, d = d, empty = next(isl.members) == nil, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
 		end
 		-- (Centred on its rim at `angle`.)
@@ -348,7 +359,7 @@ M.View = ui.component(function(props: {
 		-- (Held for the working threads' names till the machine names go.)
 		for _, rim in rims do
 			local x0, y0 = name_box(rim, rim.angle)
-			table.insert(taken, { x0 - 8, y0 - 6, x0 + rim.w + 8, y0 + rim.h + 6, rim = rim })
+			table.insert(taken, { x0 - 8, y0 - 10, x0 + rim.w + 8, y0 + rim.h + 10, rim = rim })
 		end
 
 		local lines: { any } = {}
@@ -524,6 +535,23 @@ M.View = ui.component(function(props: {
 			end
 			return 0
 		end
+		-- (A thread's name would rather stay on its own island.)
+		local function outside(n: sim.Node, x0: number, y0: number, x1: number, y1: number): number
+			if n.kind ~= "thread" then
+				return 0
+			end
+			local isl = islands[`dev:{n.device or ""}`]
+			if not isl then
+				return 0
+			end
+			local ix, iy, ir = isl.x * z + v.x, isl.y * z + v.y, isl.r * z - 4
+			for _, p in { { x0, y0 }, { x1, y0 }, { x0, y1 }, { x1, y1 } } do
+				if (p[1] - ix) ^ 2 + (p[2] - iy) ^ 2 > ir * ir then
+					return 0.4
+				end
+			end
+			return 0
+		end
 		local labels: { any } = {}
 		local leaders: { any } = {}
 		-- A name's place: tried in one line, then two, on each side (right,
@@ -569,7 +597,7 @@ M.View = ui.component(function(props: {
 					for _, sp in spots do
 						-- (A working thread's name may cross a rim, if it must.)
 						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id, if must and n.kind == "thread" then 0.35 else nil) + far * 0.03
-						local rank = k + on_own(sp[1] - 2, sp[2] - 2, sp[1] + tw + 2, sp[2] + th + 2, n.id)
+						local rank = k + on_own(sp[1] - 2, sp[2] - 2, sp[1] + tw + 2, sp[2] + th + 2, n.id) + outside(n, sp[1], sp[2], sp[1] + tw, sp[2] + th)
 						local here_spot = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text, aside = sp[4] == true or far > 0 }
 						if rank < least_rank then
 							best, least, least_rank = here_spot, k, rank
@@ -651,11 +679,22 @@ M.View = ui.component(function(props: {
 				tabs = {}
 				for _, rim in rims do
 					local best_a, least = -90, math.huge
-					-- (A heading: always at the top, so every machine reads the
-					-- same way; names round it give way instead.)
-					for _, a in { -90 } do
+					-- (A heading: at the top, or along the top of the rim where
+					-- no line would pass under it; names round it give way.)
+					-- (Lines pass under it; only marks and names move it, and
+					-- then only a little way along the top.)
+					for _, a in { -90, -75, -105, -60, -120 } do
 						local x0, y0 = name_box(rim, a)
-						local k = crowd(x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim.n.id)
+						local k = 0
+						for _, m in graph.nodes do
+							if m.kind ~= "device" then
+								local mx, my = at(m)
+								local mr = reach(m) + 4
+								if mx + mr > x0 and mx - mr < x0 + rim.w and my + mr > y0 and my - mr < y0 + rim.h then
+									k += 1
+								end
+							end
+						end
 						if k < 0.5 then
 							best_a, least = a, k
 							break
@@ -671,7 +710,7 @@ M.View = ui.component(function(props: {
 					local gap = math.deg(math.asin(math.clamp((rim.w / 2 + 8) / math.max(1, rim.r), 0, 0.99)))
 					rim.from, rim.sweep = best_a + gap, 360 - gap * 2
 					tabs[rim.n.id] = { x0, y0, x0 + rim.w, y0 + rim.h }
-					table.insert(taken, { x0 - 8, y0 - 6, x0 + rim.w + 8, y0 + rim.h + 6 })
+					table.insert(taken, { x0 - 8, y0 - 10, x0 + rim.w + 8, y0 + rim.h + 10, tab = true })
 				end
 			end
 			for _, n in graph.nodes do
@@ -915,7 +954,11 @@ M.View = ui.component(function(props: {
 		-- a name (each traced the other way round, so it's left out).
 		local field = ui.path():move(0, 0):line(w, 0):line(w, h):line(0, h):close()
 		for _, bx in taken do
-			field:move(bx[1], bx[2]):line(bx[1], bx[4]):line(bx[3], bx[4]):line(bx[3], bx[2]):close()
+			-- (A heading isn't cut out: lines run on under it, its backing
+			-- laid over them.)
+			if not (bx :: any).tab then
+				field:move(bx[1], bx[2]):line(bx[1], bx[4]):line(bx[3], bx[4]):line(bx[3], bx[2]):close()
+			end
 		end
 		-- (But round every mark a line reaches it whole: added back, traced
 		-- the field's way.)
@@ -924,19 +967,12 @@ M.View = ui.component(function(props: {
 			local rr = reach(n) + 14
 			field:move(x + rr, y):arc(x, y, rr, 0, 360):close()
 		end
-		c:clip(field)
+		-- (The rims whole but for each heading: names lie over them.)
 		for _, rim in rims do
 			local lit = lit_of(rim.n.id)
 			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1, { cap = "round" })
-			local l = (loads :: any)[rim.n.device or ""]
-			local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
-			if f > 0.005 then
-				-- (Neutral, by its length; all of it a muted amber past 80%.)
-				-- (Neutral always: the tab's figure says when it's full.)
-				local paint = ink(if dark then 0.4 else 0.36, lit)
-				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 1.5, { cap = "round" })
-			end
 		end
+		c:clip(field)
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
 			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
@@ -1062,11 +1098,13 @@ M.View = ui.component(function(props: {
 			local lit = lit_of(rim.n.id)
 			local x0, y0, tw, th = rim.nx, rim.ny, rim.w, rim.h
 			local cy = y0 + th / 2
-			-- (No fill: a hairline round it, the rim broken behind it.)
+			-- (A soft backing, the field's own colour, so lines pass under;
+			-- a hairline round it, the rim broken behind it.)
+			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.8 else 0.55, lit)), 6)
 			if over == rim.n.id then
 				c:rect(x0, y0, tw, th, ink(0.06, lit), 6)
 			end
-			c:stroke(ui.path():rect(x0 + 0.5, y0 + 0.5, tw - 1, th - 1, 6), ink(if dark then 0.16 else 0.2, lit), 1)
+			c:stroke(ui.path():rect(x0 + 0.5, y0 + 0.5, tw - 1, th - 1, 6), ink(if dark then 0.12 else 0.16, lit), 1)
 			local gx = x0 + 8 + 7
 			glyph(c, MachineHead.icon(rim.d), gx, cy, ink(if dark then 0.8 else 0.75, lit))
 			if rim.n.device == here or (rim.d and rim.d.here) then
@@ -1084,7 +1122,7 @@ M.View = ui.component(function(props: {
 			end
 			-- A machine with nothing at work says so, quietly, inside.
 			if rim.empty then
-				c:text(locale.s("ds.orch.map.idle"), rim.x, rim.y, { size = 11, color = ink(if dark then 0.38 else 0.45, lit), align = "center", baseline = "middle" })
+				c:text(locale.s("ds.orch.map.idle"), rim.x, rim.y + 6, { size = 11, color = ink(if dark then 0.4 else 0.42, lit), align = "center", baseline = "middle" })
 			end
 		end
 		for _, l in labels do
