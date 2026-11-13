@@ -899,6 +899,7 @@ return {
 	["ds.orch.crew.label"] = "Crew",
 	["ds.orch.crew.empty"] = "No crew yet",
 	["ds.orch.crew.thread"] = "Thread",
+	["ds.orch.crew.unnamed"] = "Crew thread {id}",
 	["ds.orch.crew.open"] = "Open {title}",
 	["ds.orch.crew.idle"] = "Idle",
 	["ds.orch.crew.todo"] = "{done}/{total}",

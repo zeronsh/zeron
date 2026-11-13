@@ -193,6 +193,60 @@ local function map_live()
 	})
 end
 ui.command { id = "map_live", title = "Map: the live shape", run = map_live }
+-- Zeron fixes and its crew as the Map once showed them blank: one named
+-- and done, one just created (its title given, its first turn still
+-- running), one whose chat isn't heard yet (its role names it), one with
+-- no title of its own (the host's placeholder, its item names it), and one
+-- with nothing to go by.
+ui.command { id = "map_crew_names", title = "Map: crew thread names", run = function()
+	local t = os.time()
+	local here = { id = "dev-hp1", name = "honeypot-1", platform = "linux", here = true, online = true }
+	sessions.now:set({
+		state = "ready",
+		here = "dev-hp1",
+		devices = { here },
+		projects = { { id = "p-zeron", name = "zeron", device = "dev-hp1", path = "/home/you/zeron", git = true } },
+		chats = {
+			{ id = "orc-fixes", title = "Zeron fixes", device = "dev-hp1", project = "p-zeron", status = "working", updated = t - 60, created = t - 5000,
+				agent = "claude", activity = { kind = "delegating", label = "", since = t - 30 } },
+		},
+		archived = {},
+		children = {
+			["orc-fixes"] = {
+				{ id = "th-board", parent = "orc-fixes", title = "Board card declutter", name = "Board card declutter", device = "dev-hp1",
+					project = "p-zeron", child_kind = "crew", status = "done", updated = t - 1100, created = t - 4000, agent = "claude" },
+				{ id = "th-asks", parent = "orc-fixes", title = "End-of-turn question asks", name = "End-of-turn question asks", device = "dev-hp1",
+					project = "p-zeron", child_kind = "crew", status = "working", updated = t - 40, created = t - 40, agent = "claude",
+					activity = { kind = "reading", label = "", since = t - 20 } },
+				{ id = "th-untitled", parent = "orc-fixes", title = "New side chat", device = "dev-hp1", project = "p-zeron",
+					child_kind = "crew", status = "working", updated = t - 30, created = t - 30, agent = "claude" },
+			},
+		},
+		places = { pinned = {}, sections = {} },
+		places_ready = true,
+	} :: any)
+	orchestration.now:set({
+		state = "ready",
+		orchestrators = { { id = "orc-fixes", kind = "standard", name = "Zeron fixes", goal = "", rules = "", crew_rules = "", notes = "", hue = 20,
+			crew = { devices = {} }, paused = false, archived = false, created = t - 5000, updated = t - 60, project = "p-zeron" } },
+		crew = {
+			{ chat_id = "th-board", orchestrator_id = "orc-fixes", role = "board cards", item_id = "it-board", released = false, joined = t - 4000 },
+			{ chat_id = "th-asks", orchestrator_id = "orc-fixes", role = "end-of-turn asks", item_id = "it-asks", released = false, joined = t - 40 },
+			{ chat_id = "th-hover", orchestrator_id = "orc-fixes", role = "hover card fix", item_id = "it-hover", released = false, joined = t - 35 },
+			{ chat_id = "th-untitled", orchestrator_id = "orc-fixes", role = "", item_id = "it-sidebar", released = false, joined = t - 30 },
+			{ chat_id = "9f3a1c7e-crew", orchestrator_id = "orc-fixes", role = "", released = false, joined = t - 25 },
+		},
+		items = {
+			{ id = "it-board", title = "Board card declutter", state = "doing", orchestrator_id = "orc-fixes", order = 1 },
+			{ id = "it-asks", title = "Turn-end asks", state = "doing", orchestrator_id = "orc-fixes", order = 2 },
+			{ id = "it-hover", title = "Hover cards", state = "doing", orchestrator_id = "orc-fixes", order = 3 },
+			{ id = "it-sidebar", title = "Crew threads in sidebar", state = "doing", orchestrator_id = "orc-fixes", order = 4 },
+		},
+		asks = {},
+		dumps = {},
+	})
+	orchestration.loads:set({ ["dev-hp1"] = { cpu = 0.3, mem_used = 25e9, mem_total = 67e9, online = true, at = t } })
+end }
 -- The live shape, and Zeron fixes leading crew on M2A and honeypot: its
 -- rail and the Brain dump's both run down past the other machines.
 ui.command { id = "map_cross", title = "Map: two rails down", run = function()

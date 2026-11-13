@@ -23,6 +23,7 @@ local Asks = require("@ds/orch_asks")
 local OrchMap = require("@ds/orch_map")
 local MapMenu = require("@app/screens/control/map_menu")
 local Machines = require("@ds/orch_machines")
+local Name = require("@ds/orch_name")
 local Comms = require("@ds/orch_comms")
 local OrchBoard = require("@ds/orch_board")
 local QA = require("@ds/orch_qa")
@@ -133,6 +134,13 @@ end
 
 local function name_of(id: string?): string?
 	return data.name_of(orchestration.now:get(), chats_now:get(), id)
+end
+-- A thread's name as the Map and the sidebar give it (ds/orch_name).
+local named = ui.computed(function(): any
+	return Name.index(orchestration.now:get())
+end)
+local function thread_name(id: string): string
+	return Name.from(named:get(), chats_now:get(), id)
 end
 local function hue_of(id: string?): number?
 	return data.hue_of(orchestration.now:get(), chats_now:get(), id)
@@ -602,6 +610,7 @@ local function machines(): Node
 		hue_of = function(id: string): number?
 			return hue_of(id)
 		end,
+		name_of = thread_name,
 		on_open_chat = M.open_chat,
 	}
 end

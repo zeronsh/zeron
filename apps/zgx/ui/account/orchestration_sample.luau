@@ -87,6 +87,18 @@ local orchestrators = {
 	},
 }
 
+-- Rows as the host gives them (src/sessions.rs): a side chat's or crew
+-- thread's carries its own title as `name` too (its `title` falls back to
+-- what it last said when it has none).
+local function hosted(list: { any }): { any }
+	for _, c in list do
+		if c.parent and c.name == nil then
+			c.name = c.title
+		end
+	end
+	return list
+end
+
 local chats = {
 	{ id = "orc-orch", title = "Orchestrators", device = "dev-desk", status = "working", updated = ago(20), created = ago(7200), agent = "claude", model = "claude-opus-5-5" },
 	{ id = "orc-vpn", title = "Exnomic VPN", device = "dev-desk", updated = ago(3600), created = ago(259200), agent = "claude", model = "claude-sonnet-5-5" },
@@ -295,7 +307,7 @@ local sample = {
 	loads = loads,
 	comms = comms,
 	devices = devices,
-	chats = chats,
+	chats = hosted(chats),
 }
 
 local TIME_KEYS = {
@@ -597,7 +609,7 @@ do
 		comms = f_comms,
 		devices = f_devices,
 		projects = f_projects,
-		chats = f_chats,
+		chats = hosted(f_chats),
 		timeline = f_timeline,
 	}
 end

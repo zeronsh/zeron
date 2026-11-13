@@ -34,6 +34,7 @@ local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
 local orchestration = require("@account/orchestration")
 local orch_data = require("@ds/orch_data")
+local Name = require("@ds/orch_name")
 local orch_actions = require("@app/screens/orchestrator/actions")
 local ChatMenu = require("@app/screens/shell/chat_menu")
 
@@ -393,23 +394,21 @@ local crew_marks = ui.computed(function(): { [string]: CrewMark }
 	crew_marks_key, crew_marks_last = key, set
 	return set
 end)
--- A crew thread's name where it has no title of its own yet: its role in
--- the crew, else its board item's title (by its chat's id). (The same table
--- while what it says is.)
+-- A crew thread's name where it has no title of its own yet
+-- (ds/orch_name's fallback: its role, else its board item's title), by its
+-- chat's id. (The same table while what it says is.)
 local crew_names_last: { [string]: string } = {}
 local crew_names_key = ""
 local crew_names = ui.computed(function(): { [string]: string }
 	local now = orchestration.now:get()
-	local items: { [string]: string } = {}
+	local items: { [string]: any } = {}
 	for _, it in now.items or {} do
-		if type(it.title) == "string" and it.title ~= "" then
-			items[it.id] = it.title
-		end
+		items[it.id] = it
 	end
 	local set: { [string]: string } = {}
 	local parts: { string } = {}
 	for _, m in now.crew or {} do
-		local name = if type(m.role) == "string" and m.role ~= "" then m.role else (m.item_id and items[m.item_id])
+		local name = Name.fallback(m, m.item_id and items[m.item_id])
 		if name and m.chat_id then
 			set[m.chat_id] = name
 			table.insert(parts, `{m.chat_id}={name}`)
@@ -431,8 +430,8 @@ local NO_MARK: CrewMark = { name = "", hue = nil }
 -- orchestrator started. Those are under the orchestrator's chat (`children`),
 -- which is listed in Orchestrators and never as a session, so here they are
 -- listed as their own, in their project like any chat, each marked with its
--- orchestrator. Its name: its own title, else its role in the crew, else
--- its board item's title, else what the host says of it (what it last said).
+-- orchestrator. Its name is ds/orch_name's: its own title, else its role
+-- in the crew, else its board item's title, else "Crew thread" and its id.
 -- (An archived one isn't among `children`: it shows nowhere, as an archived
 -- side chat.)
 local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [string]: string }): { any }
@@ -442,7 +441,7 @@ local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [s
 			if c.child_kind == "crew" then
 				local row = table.clone(c)
 				row.crew = marks[parent] or NO_MARK
-				row.title = c.name or names[c.id] or c.title
+				row.title = Name.crew(c, names[c.id], c.id)
 				table.insert(out, row)
 			end
 		end

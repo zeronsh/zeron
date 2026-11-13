@@ -33,6 +33,9 @@ export type Props = {
 	here: () -> string?,
 	hue_of: (chat_id: string) -> number?,
 	on_open_chat: (id: string) -> (),
+	-- A thread's name (ds/orch_name's, over the crew and its items); its
+	-- chat's title when left out.
+	name_of: ((chat_id: string) -> string)?,
 }
 
 -- The seconds the line shows.
@@ -69,11 +72,13 @@ local function thread_row(props: Props, _c: any, _j: number, crow: State<any>): 
 		local t = crow:get().todo
 		return if data.todo_fraction(t) ~= nil then t else nil
 	end
+	local function title(): string
+		local c = crow:get()
+		return if props.name_of then props.name_of(c.id) else (c.title or "")
+	end
 	return ui.button {
 		class = "orch-machine-job",
-		label = function(): string
-			return crow:get().title or ""
-		end,
+		label = title,
 		w_full = true,
 		direction = "column",
 		items = "stretch",
@@ -92,9 +97,7 @@ local function thread_row(props: Props, _c: any, _j: number, crow: State<any>): 
 			items = "center",
 			status.StatusIcon { kind = kind, size = 14 },
 			ui.text {
-				function(): string
-					return crow:get().title or ""
-				end,
+				title,
 				grow = 1,
 				min_w = 0,
 				truncate = true,
