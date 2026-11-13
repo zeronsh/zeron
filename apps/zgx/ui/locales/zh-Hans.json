@@ -4039,7 +4039,6 @@
     },
     "page": {
       "needs_you": "Needs you",
-      "nothing_needs_you": "Nothing needs you",
       "board": "Board",
       "crew": "Crew",
       "chat": "Chat",
@@ -4048,10 +4047,6 @@
       "pause": "Pause",
       "resume": "Resume",
       "settings": "Settings",
-      "urgent": "Urgent",
-      "waiting_on_you": "Waiting for your answer",
-      "open_thread": "Open thread",
-      "answer": "Answer",
       "answer_failed": "Couldn't send the answer",
       "working_of": "{working}/{total}",
       "missing": "This orchestrator isn't here",
