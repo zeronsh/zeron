@@ -305,6 +305,27 @@ context menu (`promoteChat`).
   changes (pulses on comms, progress tweening).
 - Minimal copy: no helper text, empty states that invite action ("Nothing needs you").
 
+## Decisions with Jev (optional, bring your own key)
+
+[Jev](https://openrouter.ai/blog/insights/what-is-jev/) is TypeSafe's decision model. It returns typed verdicts (yes/no, a choice, a score) in well under a second and costs fractions of a cent per million input tokens. Orchestration makes many small decisions of this kind. A `Decider` in the engine makes each of them:
+- **Rules** (default, today's behaviour);
+- **Jev**, when the person adds a key in Settings → Orchestration. The model is `jev-latest` (the newest stable release, following TypeSafe's alias; `jev-preview` is opt-in). The key is stored like other provider keys, device-local, never synced.
+
+Every Jev call has a confidence floor. Below it, the decision falls back to the rule or the agent, so a weak verdict can't misroute anything. Each decision is logged with its inputs, verdict and score, and shown on hover where it's used. Text sent to Jev is the fragment or report at hand, never whole transcripts.
+
+| Where | Question | Effect |
+| --- | --- | --- |
+| Brain dump pre-pass | per clause: which target (orchestrators, recent threads, inbox, note) + intent | Receipt in < 1 s; the agent only handles low-confidence fragments (→ `unsure` chips), creation and message rewriting |
+| Report wake gate | "does this report need the orchestrator to act?" | Fewer wakes than the fixed `ReportState::wakes` rule |
+| Ask triage | "needs the person, or can the orchestrator decide under its rules?" + urgency score | Asks the orchestrator can settle go back to it; Needs you is ordered by urgency; notifications only above a threshold |
+| Board state | the thread's last reply: done / blocked / review / still going | Cards move without an orchestrator turn |
+| Route answered? | "does this reply answer the routed question?" | `answered` only when it does |
+| Duplicate item | "is this fragment the same as item X?" | Merge instead of a new card |
+| Stall | "is this thread looping?" on its recent output | Raises a blocker ask |
+| Model tier | "which tier fits this task?" when spawning crew | The "model that fits each thread" choice, within the crew policy |
+
+Phase 1 (after this build lands): the `Decider` seam, the key setting, the Brain dump pre-pass and ask triage. The rest follows once those are measured.
+
 ## Build streams
 
 | Stream | Owns |
