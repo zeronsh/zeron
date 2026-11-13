@@ -1075,6 +1075,50 @@ mod windows_tests {
         });
     }
 
+    /// An engine the app started ignores Ctrl+C (its own process group), as
+    /// this test makes itself: Ctrl+C in its terminal still interrupts what
+    /// the shell runs.
+    #[test]
+    fn ctrl_c_interrupts_a_program_though_the_engine_ignores_it() {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: a null handler with TRUE sets this process's ignore flag,
+        // as CREATE_NEW_PROCESS_GROUP does for a detached engine.
+        unsafe { SetConsoleCtrlHandler(None, 1) };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let terminals = Terminals::new();
+            let terminal = terminals
+                .open_with_shell(
+                    tmp.path().to_str().unwrap(),
+                    80,
+                    24,
+                    Some(powershell().to_str().unwrap()),
+                )
+                .unwrap();
+            wait_for_shell_prompt(&terminals, &terminal.id).await;
+            let mut rx = terminals.subscribe(&terminal.id, None).unwrap();
+            let mut events = Vec::new();
+            write_line(&terminals, &terminal.id, "ping -t localhost");
+            collect_until(&mut rx, &mut events, |events| {
+                decoded(events).contains("Reply from")
+            })
+            .await;
+            terminals
+                .write(&terminal.id, &BASE64.encode("\u{3}"))
+                .unwrap();
+            // Interrupted, ping sums up what it sent; left running, it never does.
+            collect_until(&mut rx, &mut events, |events| {
+                decoded(events).contains("Ping statistics")
+            })
+            .await;
+            terminals.close(&terminal.id).unwrap();
+        });
+    }
+
     fn powershell() -> PathBuf {
         let path = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"))
             .join("System32")
