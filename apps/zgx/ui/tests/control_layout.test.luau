@@ -147,10 +147,10 @@ test("titles and their smaller figures share a baseline", function()
 	local title = baseline(app, "#control-widget-machines >> .orch-block-title", 12)
 	local figure = baseline(app, '#control-widget-machines >> .orch-block-figures >> "3 machines"', 11)
 	expect(math.abs(title - figure) < 1).to_be(true)
-	-- A machine's name and "this one".
+	-- A machine's name and its platform after it.
 	local name = baseline(app, '#control-widget-machines >> .orch-machine >> "desk"', 12)
-	local here = baseline(app, "#control-widget-machines >> .orch-machine-here", 11)
-	expect(math.abs(name - here) < 1).to_be(true)
+	local platform = baseline(app, '#control-widget-machines >> .orch-machine-head "desk" >> .orch-machine-head-platform', 11)
+	expect(math.abs(name - platform) < 1).to_be(true)
 	-- The page's title (lg, 15) and what's going on (sm, 12).
 	local head = baseline(app, '#control-head >> "Control room"', 15)
 	local summary = baseline(app, "#control-summary", 12)
