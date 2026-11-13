@@ -322,13 +322,21 @@ M.View = ui.component(function(props: {
 			local angle = if count <= 1 or dx * dx + dy * dy < 1 then -90 else math.deg(math.atan2(dy, dx))
 			-- (Snapped to eight directions, so names line up.)
 			angle = math.floor(angle / 45 + 0.5) * 45
+			-- (Its place is settled after the working threads' names: it
+			-- gives way to them, round its rim.)
+			table.insert(rims, { n = n, x = x, y = y, r = r, angle = angle, w = name_w, h = name_h, nx = 0, ny = 0, from = -90, sweep = 360 })
+		end
+		local function name_box(rim: any, angle: number): (number, number)
 			local ux, uy = math.cos(math.rad(angle)), math.sin(math.rad(angle))
-			local px, py = x + ux * (r + 8), y + uy * (r + 8)
-			-- Its box: beside the rim, growing outward.
-			local x0 = if ux > 0.3 then px elseif ux < -0.3 then px - name_w else px - name_w / 2
-			local y0 = if uy > 0.3 then py elseif uy < -0.3 then py - name_h else py - name_h / 2
-			table.insert(taken, { x0 - 4, y0 - 2, x0 + name_w + 4, y0 + name_h + 2 })
-			table.insert(rims, { n = n, x = x, y = y, r = r, nx = x0, ny = y0 + name_h / 2, from = -90, sweep = 360 })
+			local px, py = rim.x + ux * (rim.r + 8), rim.y + uy * (rim.r + 8)
+			local x0 = if ux > 0.3 then px elseif ux < -0.3 then px - rim.w else px - rim.w / 2
+			local y0 = if uy > 0.3 then py elseif uy < -0.3 then py - rim.h else py - rim.h / 2
+			return x0, y0
+		end
+		-- (Held for the working threads' names till the machine names go.)
+		for _, rim in rims do
+			local x0, y0 = name_box(rim, rim.angle)
+			table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim = rim })
 		end
 
 		local lines: { any } = {}
@@ -445,24 +453,25 @@ M.View = ui.component(function(props: {
 				table.insert(rim_pts, { rim.x + math.cos(a) * rim.r, rim.y + math.sin(a) * rim.r })
 			end
 		end
-		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string): number
+		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string, rim_w: number?): number
 			local k = 0
 			for _, p in pts do
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
 					k += 0.1
 				end
 			end
-			k = math.min(k, 0.3)
+			k = math.min(k, 0.45)
 			-- (A rim cut reads worse than a line's.)
 			for _, p in rim_pts do
 				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
-					k += 0.6
+					k += rim_w or 0.6
 					break
 				end
 			end
 			for _, bx in taken do
 				if x0 < bx[3] and x1 > bx[1] and y0 < bx[4] and y1 > bx[2] then
-					k += 1
+					-- (A machine name not yet settled gives way.)
+					k += if (bx :: any).rim then 0.5 else 1
 				end
 			end
 			for _, m in graph.nodes do
@@ -490,7 +499,7 @@ M.View = ui.component(function(props: {
 			local base = (if n.kind == "thread" then 9 else reach(n)) + 8
 			local best: any, least = nil, math.huge
 			-- (Only a working thread's name steps out, a leader tying it back.)
-			for _, far in (if must and n.kind == "thread" then { 0, 10, 24 } else { 0 }) do
+			for _, far in (if must and n.kind == "thread" then { 0, 10, 24, 38 } else { 0 }) do
 				local r = base + far
 				for _, text in forms do
 					local tw, lh = 0, 0
@@ -520,7 +529,8 @@ M.View = ui.component(function(props: {
 						table.insert(spots, { x - d - tw, y - d - th / 2, "end" })
 					end
 					for _, sp in spots do
-						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id) + far * 0.03
+						-- (A working thread's name may cross a rim, if it must.)
+						local k = crowd(sp[1] - 4, sp[2] - 4, sp[1] + tw + 4, sp[2] + th + 4, n.id, if must and n.kind == "thread" then 0.35 else nil) + far * 0.03
 						if k < least then
 							best, least = { x = sp[1], y = sp[2], align = sp[3], tw = tw, th = th, lh = lh, text = text }, k
 						end
@@ -541,12 +551,13 @@ M.View = ui.component(function(props: {
 			end
 			table.insert(taken, { best.x - 3, best.y - 1, best.x + best.tw + 3, best.y + best.th + 1 })
 			-- (Set off from its mark: a fine leader ties it back.)
-			local mr = if n.kind == "thread" then 9 else reach(n)
+			local st_n = if n.kind == "thread" then state_of(n.id) else ""
+			local mr = if st_n == "working" or st_n == "waiting" then 9 elseif n.kind == "thread" then n.r * zs else reach(n)
 			local qx = math.clamp(x, best.x, best.x + best.tw)
 			local qy = math.clamp(y, best.y, best.y + best.th)
 			local gx, gy = qx - x, qy - y
 			local gd = math.sqrt(gx * gx + gy * gy)
-			if gd - mr > 20 then
+			if gd - mr > 13 then
 				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
 			end
 			for i, t in best.text do
@@ -571,6 +582,33 @@ M.View = ui.component(function(props: {
 			end
 		end
 		for pass = 1, 2 do
+			if pass == 2 then
+				-- The machine names, now: each where it was meant, else the
+				-- nearest free place round its rim.
+				local kept = {}
+				for _, b in taken do
+					if not (b :: any).rim then
+						table.insert(kept, b)
+					end
+				end
+				taken = kept
+				for _, rim in rims do
+					local best_a, least = rim.angle, math.huge
+					for _, off in { 0, 45, -45, 90, -90, 135, -135, 180 } do
+						local x0, y0 = name_box(rim, rim.angle + off)
+						local k = crowd(x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2, rim.n.id)
+						if k < 0.5 then
+							best_a, least = rim.angle + off, k
+							break
+						elseif k < least then
+							best_a, least = rim.angle + off, k
+						end
+					end
+					local x0, y0 = name_box(rim, best_a)
+					rim.nx, rim.ny = x0, y0 + rim.h / 2
+					table.insert(taken, { x0 - 4, y0 - 2, x0 + rim.w + 4, y0 + rim.h + 2 })
+				end
+			end
 			for _, n in graph.nodes do
 				if n.kind ~= "thread" then
 					continue
@@ -752,7 +790,7 @@ M.View = ui.component(function(props: {
 
 		-- 5. The names, and the leaders of those set off.
 		for _, l in leaders do
-			c:line(l[1], l[2], l[3], l[4], ink(0.32, l[5]), 1, { cap = "round" })
+			c:line(l[1], l[2], l[3], l[4], ink(if dark then 0.48 else 0.4, l[5]), 1, { cap = "round" })
 		end
 		for _, rim in rims do
 			c:text(rim.n.title, rim.nx, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), baseline = "middle" })
