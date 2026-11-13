@@ -445,14 +445,15 @@ impl MessagePart {
 /// The text a [`MessagePart::CrewReports`] message carries beside the part,
 /// for builds that don't know the kind: one line per report.
 pub fn crew_reports_fallback_text(reports: &[zeron_proto::orchestration::Report]) -> String {
+    use zeron_proto::orchestration::prompt_text::{SUMMARY_MAX, one_line};
     let mut out = String::from("Crew updates");
     for r in reports {
-        let state = serde_json::to_value(r.state)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        let from: String = r.from_chat.chars().take(8).collect();
-        out.push_str(&format!("\n- {from} {state}: {}", r.summary));
+        let from: String = one_line(&r.from_chat, 8);
+        out.push_str(&format!(
+            "\n- {from} {}: {}",
+            r.state.as_str(),
+            one_line(&r.summary, SUMMARY_MAX)
+        ));
     }
     out
 }

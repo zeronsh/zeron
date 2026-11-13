@@ -60,6 +60,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod crew_messages;
 mod device_stats;
 mod remote_plugins;
 mod voice_chat;
@@ -3198,6 +3199,11 @@ impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
+        // A crew thread's message to its own orchestrator is a report
+        // (rpc/crew_messages.rs), read before the gate attributes it.
+        if let Some(reply) = self.crew_message_as_report(method, &params).await? {
+            return Ok(reply);
+        }
         let params = self.agent_gate(method, params)?;
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.

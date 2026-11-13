@@ -390,6 +390,8 @@ impl DemoHost {
                         );
                     }
                 }
+                // The demo has no orchestrators.
+                SessionCommandPayload::CrewReport { .. } => {}
             }
         }
         if !lock(&self.turns).contains_key(chat_id) {

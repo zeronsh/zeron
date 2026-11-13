@@ -256,6 +256,8 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
 
 mod relay;
 pub use relay::relay_layer_enabled;
+mod crew_inbox;
+pub use crew_inbox::WAKE_DEBOUNCE as CREW_WAKE_DEBOUNCE;
 
 #[derive(Debug, Clone)]
 pub struct DocHostConfig {
@@ -367,6 +369,8 @@ struct DocHostInner {
     held_status: watch::Sender<Vec<zeron_proto::HeldSendStatus>>,
     /// A Cloud host's looks in the attachment store, by `pending://` ref.
     store_looks: Mutex<HashMap<String, attachment_store::StoreLook>>,
+    /// Crew reports to orchestrators hosted here (doc_host/crew_inbox.rs).
+    crew_inbox: crew_inbox::Inbox,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1304,6 +1308,7 @@ impl DocHost {
                 held_kick: tokio::sync::Notify::new(),
                 held_status: watch::channel(Vec::new()).0,
                 store_looks: Mutex::new(HashMap::new()),
+                crew_inbox: Default::default(),
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
@@ -6626,6 +6631,9 @@ impl DocHost {
                     SessionCommandStatus::Applied,
                     Some("answered as new turn".into()),
                 ))
+            }
+            SessionCommandPayload::CrewReport { report } => {
+                self.file_crew_report(sessions, handle, report)
             }
         }
     }

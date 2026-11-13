@@ -21,6 +21,7 @@ pub enum SessionCommandKind {
     Steer,
     Interrupt,
     RespondInput,
+    CrewReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +55,12 @@ pub enum SessionCommandPayload {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
+    /// A crew thread's report for this chat, an orchestrator (any device
+    /// queues it; the host files it in the transcript and decides whether
+    /// to wake). Hosts that predate it skip the entry.
+    CrewReport {
+        report: zeron_proto::orchestration::Report,
+    },
 }
 
 impl SessionCommandPayload {
@@ -63,6 +70,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::CrewReport { .. } => SessionCommandKind::CrewReport,
         }
     }
 }
