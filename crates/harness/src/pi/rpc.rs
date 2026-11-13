@@ -15,15 +15,17 @@ use tokio::{
 const MAX_FRAME: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
-pub(super) struct Client {
+pub(crate) struct Client {
     writer: mpsc::UnboundedSender<Value>,
     next_id: Arc<AtomicU64>,
+    /// The agent named in transport errors ("Pi stdin closed").
+    agent: &'static str,
 }
 impl Client {
     pub fn send(&self, frame: Value) -> Result<(), HarnessError> {
         self.writer
             .send(frame)
-            .map_err(|_| HarnessError::Protocol("Pi stdin closed".into()))
+            .map_err(|_| HarnessError::Protocol(format!("{} stdin closed", self.agent)))
     }
     pub fn request(&self, mut frame: Value) -> Result<String, HarnessError> {
         let id = format!("zeron-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -33,7 +35,7 @@ impl Client {
     }
 }
 
-pub(super) struct Transport {
+pub(crate) struct Transport {
     pub client: Client,
     pub incoming: mpsc::Receiver<Result<Value, HarnessError>>,
     reader: JoinHandle<()>,
@@ -54,13 +56,24 @@ impl Transport {
         input: impl AsyncWrite + Unpin + Send + 'static,
         output: impl AsyncRead + Unpin + Send + 'static,
     ) -> Self {
-        Self::bounded(input, output, MAX_FRAME)
+        Self::bounded(input, output, MAX_FRAME, "Pi")
+    }
+
+    /// [`Self::new`] for another agent speaking the same JSONL framing (omp,
+    /// whose RPC descends from Pi's), named as `agent` in transport errors.
+    pub fn named(
+        input: impl AsyncWrite + Unpin + Send + 'static,
+        output: impl AsyncRead + Unpin + Send + 'static,
+        agent: &'static str,
+    ) -> Self {
+        Self::bounded(input, output, MAX_FRAME, agent)
     }
 
     fn bounded(
         input: impl AsyncWrite + Unpin + Send + 'static,
         output: impl AsyncRead + Unpin + Send + 'static,
         max_frame: usize,
+        agent: &'static str,
     ) -> Self {
         let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Value>();
         let (tx, incoming) = mpsc::channel(256);
@@ -99,7 +112,9 @@ impl Transport {
                 let chunk = match reader.fill_buf().await {
                     Ok([]) => {
                         let _ = tx
-                            .send(Err(HarnessError::Protocol("Pi stdout closed".into())))
+                            .send(Err(HarnessError::Protocol(format!(
+                                "{agent} stdout closed"
+                            ))))
                             .await;
                         break;
                     }
@@ -124,7 +139,7 @@ impl Transport {
                 if bytes.len() + count > max_frame {
                     tracing::warn!(
                         target: "zeron_harness::pi",
-                        "Pi RPC frame over {} MiB dropped",
+                        "{agent} RPC frame over {} MiB dropped",
                         max_frame / (1024 * 1024)
                     );
                     bytes.clear();
@@ -148,7 +163,7 @@ impl Transport {
                         // reason to end the run.
                         None => tracing::warn!(
                             target: "zeron_harness::pi",
-                            "unparseable Pi RPC line skipped"
+                            "unparseable {agent} RPC line skipped"
                         ),
                     }
                 }
@@ -159,6 +174,7 @@ impl Transport {
             client: Client {
                 writer: writer_tx,
                 next_id: Arc::new(AtomicU64::new(1)),
+                agent,
             },
             incoming,
             reader,
@@ -274,7 +290,7 @@ mod tests {
     async fn noise_lone_surrogates_and_oversized_frames_do_not_end_the_stream() {
         let (host, mut peer) = tokio::io::duplex(4096);
         let (read, write) = tokio::io::split(host);
-        let mut transport = Transport::bounded(write, read, 64);
+        let mut transport = Transport::bounded(write, read, 64, "Pi");
         peer.write_all(b"not json\n").await.unwrap();
         peer.write_all(br#"{"type":"message_update","text":"cut \ud83d here"}"#)
             .await

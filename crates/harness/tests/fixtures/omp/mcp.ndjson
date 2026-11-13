@@ -1,0 +1,11 @@
+{"expect": "set_host_tools", "bind": {"$H": ["id"]}, "equals": {"type": "set_host_tools"}}
+{"emit": {"id": "$H", "type": "response", "command": "set_host_tools", "success": true, "data": {"toolNames": ["zeron_echo"]}}}
+{"expect": "prompt", "bind": {"$P1": ["id"]}}
+{"emit": {"id": "$P1", "type": "response", "command": "prompt", "success": true}}
+{"emit": {"type": "agent_start"}}
+{"emit": {"type": "tool_execution_start", "toolCallId": "t1", "toolName": "zeron_echo", "args": {"text": "hi"}, "intent": "Running requested command"}}
+{"emit": {"type": "host_tool_call", "id": "hc1", "toolCallId": "t1", "toolName": "zeron_echo", "arguments": {"text": "hi"}}}
+{"expect": "host_tool_result", "equals": {"id": "hc1"}}
+{"emit": {"type": "tool_execution_end", "toolCallId": "t1", "toolName": "zeron_echo", "result": {"content": [{"type": "text", "text": "echo:hi"}], "details": {}}}}
+{"emit": {"type": "agent_end", "messages": [], "isTerminal": true, "yielded": true}}
+{"emit": {"type": "prompt_result", "id": "$P1", "agentInvoked": true, "status": "completed", "sessionSettled": true}}

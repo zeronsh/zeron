@@ -2,7 +2,8 @@
 mod catalog;
 mod mcp;
 mod normalize;
-mod rpc;
+// Shared with the omp driver, whose RPC descends from Pi's (same JSONL framing).
+pub(crate) mod rpc;
 mod sessions;
 mod ui;
 

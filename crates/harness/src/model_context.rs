@@ -110,6 +110,15 @@ pub(crate) fn context(
         HarnessId::Grok => &["GROK_", "XAI_"],
         HarnessId::Hermes => &["HERMES_", "OPENAI_", "ANTHROPIC_"],
         HarnessId::Pi => &["PI_", "OPENAI_", "ANTHROPIC_"],
+        // omp reads Pi's variables (it is a Pi fork) beside its own.
+        HarnessId::Omp => &[
+            "OMP_",
+            "PI_",
+            "OPENAI_",
+            "ANTHROPIC_",
+            "GEMINI_",
+            "OPENROUTER_",
+        ],
         HarnessId::Devin => &["DEVIN_"],
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],

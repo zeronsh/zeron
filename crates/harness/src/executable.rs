@@ -456,8 +456,9 @@ fn probe_version(path: &Path, timeout: std::time::Duration) -> Probe {
 }
 
 pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
+    // Words, and the halves of `name/version` (omp prints `omp/18.20.0`).
     String::from_utf8_lossy(bytes)
-        .split_whitespace()
+        .split(|c: char| c.is_whitespace() || c == '/')
         .find_map(|word| {
             semver::Version::parse(
                 word.trim_matches(|c: char| matches!(c, '(' | ')' | ','))
@@ -886,6 +887,10 @@ mod tests {
             parse_version(b"codex-cli 0.100.0-beta.2").unwrap() < semver::Version::new(0, 100, 0)
         );
         assert!(parse_version(b"unknown").is_none());
+        assert_eq!(
+            parse_version(b"omp/18.20.0\n"),
+            Some(semver::Version::new(18, 20, 0))
+        );
     }
     #[cfg(windows)]
     #[test]

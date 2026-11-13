@@ -1,0 +1,25 @@
+{"expect": "prompt", "bind": {"$P1": ["id"]}}
+{"emit": {"id": "$P1", "type": "response", "command": "prompt", "success": true}}
+{"emit": {"type": "agent_start"}}
+{"emit": {"type": "turn_start"}}
+{"emit": {"type": "message_start", "message": {"role": "user", "content": [{"type": "text", "text": "Use bash to run exactly: sleep 4; echo done."}], "attribution": "user", "timestamp": 1794568177194}, "messageId": "msg-1"}}
+{"emit": {"type": "tool_execution_start", "toolCallId": "call_7fecf74cc52d4ad286ff3930acd4f2aa|fc_0f909dd243173c65016af6f19aa15c87d091e94d66647853e5", "toolName": "bash", "args": {"command": "sleep 4; echo done", "timeout": 10, "pty": false, "async": false}, "intent": "Running requested command"}}
+{"expect": "prompt", "bind": {"$P2": ["id"]}, "equals": {"message": "Also include the word banana in your final reply.", "streamingBehavior": "steer"}}
+{"emit": {"type": "queue_update", "steering": ["Also include the word banana in your final reply."], "followUp": [], "liveSteered": 0}}
+{"emit": {"id": "$P2", "type": "response", "command": "prompt", "success": true}}
+{"emit": {"type": "tool_execution_end", "toolCallId": "call_7fecf74cc52d4ad286ff3930acd4f2aa|fc_0f909dd243173c65016af6f19aa15c87d091e94d66647853e5", "toolName": "bash", "result": {"content": [{"type": "text", "text": "done\n\n\nWall time: 4.04 seconds"}], "details": {}}}}
+{"emit": {"type": "turn_end", "message": {"role": "assistant", "content": [], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "toolUse", "timestamp": 1794568177214, "usage": {"input": 6196, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 6201, "cost": {"total": 0.0012}}}, "toolResults": []}}
+{"emit": {"type": "turn_start"}}
+{"emit": {"type": "message_start", "message": {"role": "assistant", "content": [{"type": "text", "text": ""}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "stop", "timestamp": 1794568177214}, "messageId": "msg-4"}}
+{"emit": {"type": "message_update", "message": {"role": "assistant"}, "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "Command completed: `done`."}, "messageId": "msg-2"}}
+{"emit": {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Command completed: `done`."}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "stop", "timestamp": 1794568177214, "usage": {"input": 6196, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 6201, "cost": {"total": 0.0012}}}, "messageId": "msg-4"}}
+{"emit": {"type": "queue_update", "steering": [], "followUp": [], "liveSteered": 0}}
+{"emit": {"type": "turn_start"}}
+{"emit": {"type": "message_start", "message": {"role": "user", "content": [{"type": "text", "text": "Also include the word banana in your final reply."}], "attribution": "user", "timestamp": 1794568177194}, "messageId": "msg-5"}}
+{"emit": {"type": "message_start", "message": {"role": "assistant", "content": [{"type": "text", "text": ""}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "stop", "timestamp": 1794568177214}, "messageId": "msg-6"}}
+{"emit": {"type": "message_update", "message": {"role": "assistant"}, "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "banana"}, "messageId": "msg-2"}}
+{"emit": {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "banana"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "stop", "timestamp": 1794568177214, "usage": {"input": 6196, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 6201, "cost": {"total": 0.0012}}}, "messageId": "msg-6"}}
+{"emit": {"type": "agent_end", "messages": [], "isTerminal": true, "yielded": true}}
+{"emit": {"type": "prompt_result", "id": "$P2", "agentInvoked": true, "status": "completed", "sessionSettled": true}}
+{"emit": {"type": "prompt_result", "id": "$P1", "agentInvoked": true, "status": "completed", "sessionSettled": true}}
+{"emit": {"type": "session_settled"}}

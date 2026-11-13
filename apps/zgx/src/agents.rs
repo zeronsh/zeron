@@ -482,6 +482,7 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
         "devin" => "devin",
         "opencode" => "opencode",
         "pi" => "pi",
+        "omp" => "omp",
         "hermes" => "hermes",
         "antigravity" => "antigravity",
         "muse" => "muse",

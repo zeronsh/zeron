@@ -82,6 +82,9 @@ pub enum HarnessId {
     Fx,
     /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
     Pi,
+    /// omp (oh-my-pi, omp.sh), driven over its native RPC protocol
+    /// (`omp --mode rpc-ui`: newline-delimited JSON on stdio).
+    Omp,
     /// SST's opencode agent, driven natively over its own HTTP/SSE server
     /// protocol (`opencode serve` — the same wire the opencode desktop app
     /// speaks).
@@ -121,6 +124,7 @@ impl<'de> Deserialize<'de> for HarnessId {
                     "hermes",
                     "fx",
                     "pi",
+                    "omp",
                     "opencode",
                     "antigravity",
                     "muse",
@@ -135,7 +139,7 @@ impl<'de> Deserialize<'de> for HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 12] = [
+    pub const ALL: [HarnessId; 13] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -144,6 +148,7 @@ impl HarnessId {
         HarnessId::Hermes,
         HarnessId::Fx,
         HarnessId::Pi,
+        HarnessId::Omp,
         HarnessId::Opencode,
         HarnessId::Antigravity,
         HarnessId::Muse,
@@ -161,6 +166,7 @@ impl HarnessId {
             HarnessId::Hermes => "hermes",
             HarnessId::Fx => "fx",
             HarnessId::Pi => "pi",
+            HarnessId::Omp => "omp",
             HarnessId::Opencode => "opencode",
             HarnessId::Antigravity => "antigravity",
             HarnessId::Muse => "muse",

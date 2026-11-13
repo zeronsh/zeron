@@ -1,0 +1,8 @@
+{"expect": "prompt", "bind": {"$P1": ["id"]}}
+{"emit": {"id": "$P1", "type": "response", "command": "prompt", "success": true}}
+{"emit": {"type": "agent_start"}}
+{"emit": {"type": "message_start", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}], "attribution": "user", "timestamp": 1794568177194}, "messageId": "msg-1"}}
+{"emit": {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 10, "errorMessage": "429"}}
+{"emit": {"type": "message_end", "message": {"role": "assistant", "content": [], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "error", "timestamp": 1794568177214, "errorMessage": "429 Too Many Requests: rate limited"}, "messageId": "msg-2"}}
+{"emit": {"type": "agent_end", "messages": [], "isTerminal": true, "yielded": true}}
+{"emit": {"type": "prompt_result", "id": "$P1", "agentInvoked": true, "status": "error", "sessionSettled": true, "error": {"message": "429 Too Many Requests: rate limited", "retryable": true, "httpStatus": 429}}}
