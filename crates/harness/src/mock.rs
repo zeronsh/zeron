@@ -1236,6 +1236,8 @@ fn long_tool_run(
                         pid.unwrap_or(0)
                     )),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
                 turn.set_background_processes(vec![zeron_proto::BackgroundTask {
@@ -1297,6 +1299,8 @@ fn long_tool_run(
                     String::new()
                 }),
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: (!stopped).then_some(0),
             });
             if stopped {

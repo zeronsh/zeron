@@ -3957,6 +3957,8 @@ async fn a_commands_whole_output_is_read_from_its_hosts_journal() {
                     is_error: false,
                     output: Some(output.clone()),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: Some(0),
                 },
                 AgentEvent::ToolCall {
@@ -3970,6 +3972,8 @@ async fn a_commands_whole_output_is_read_from_its_hosts_journal() {
                     is_error: false,
                     output: Some("fn main() {}".into()),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 },
                 done(DoneStatus::Completed),
