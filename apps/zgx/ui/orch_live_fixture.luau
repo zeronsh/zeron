@@ -1,7 +1,8 @@
 -- The orchestration live pieces alone, for tests/orch_live.test.luau: a
 -- status held by ds/orch_hold (the state `kind`, the held value shown as
 -- `#held`), segmented cells (`#cells` in a row, `#cells-fill` stretched;
--- from `done` of 8) and a sparkline.
+-- from `done` of 8), a label and its rolling figure (`#cpu-label`,
+-- `#counter`, from `cpu`) and a sparkline.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -10,9 +11,11 @@ local status = require("@ds/status")
 local Cells = require("@ds/orch_cells")
 local Spark = require("@ds/orch_spark")
 local hold = require("@ds/orch_hold")
+local Counter = require("@ds/orch_counter")
 
 local kind = ui.state("kind", "working")
 local done = ui.state("done", 3)
+local cpu = ui.state("cpu", 4)
 
 local Held = ui.component(function(): Node
 	local held = hold.value(function(): string
@@ -56,6 +59,15 @@ return ui.column {
 	gap = "$space.4",
 	bg = "$background",
 	Held {},
+	-- A label and its rolling figure, as a machine's head has them.
+	ui.row {
+		gap = "$space.1",
+		items = "center",
+		ui.text { "CPU", id = "cpu-label", text_size = "$font.size.xs" },
+		Counter { id = "counter", value = function(): number
+			return cpu:get()
+		end, suffix = "%", anchor = "end" },
+	},
 	-- (In a row with words before it, as a card's or a thread's are.)
 	ui.row {
 		gap = "$space.2",

@@ -90,3 +90,23 @@ test("orch live: a short line starts at the left and grows; a full one scrolls",
 	expect(p.none_full).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+test("orch live: a rolling figure keeps its width and never runs into its label", function()
+	local app = mount("orch_live_fixture.luau")
+	app:resize(600, 400)
+	app:frames(2)
+	local lx, _, lw = box(app, "#cpu-label")
+	local _, _, w0 = box(app, "#counter")
+	expect(w0 > 0).to_be(true)
+	for _, v in { 33, 100, 4 } do
+		app:set_state("cpu", v)
+		-- Frame by frame through the roll.
+		for _ = 1, 40 do
+			app:frames(1)
+			local x, _, w = box(app, "#counter")
+			expect(math.abs(w - w0) < 0.5).to_be(true)
+			expect(x >= lx + lw).to_be(true)
+		end
+	end
+	expect(app:has('#counter >> "4"')).to_be(true)
+end)
