@@ -287,8 +287,8 @@ class PriorityAndLockTests(unittest.TestCase):
         snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=6)], locked={90})
         d = decide(5, need(linux=3, macos=2), snap, self.BIG)
         self.assertEqual(d.used["macos"], 6 + full["macos"])
-        self.assertFalse(d.admit)  # 6 + 3 locked + 2 > 10
-        snap.holding = [held_(macos=5)]
+        self.assertFalse(d.admit)  # 6 + 4 locked + 2 > 10
+        snap.holding = [held_(macos=4)]
         self.assertTrue(decide(5, need(linux=3, macos=2), snap, self.BIG).admit)
 
     def test_the_locked_pull_request_goes_ahead_of_everyone_into_its_reservation(self):

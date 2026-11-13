@@ -23,6 +23,12 @@
 #ifndef OutputDir
   #define OutputDir "."
 #endif
+; The zgx app (scripts/package-windows.ps1 -ZgxVersion, /DZgx=1) brings its
+; version's folder, beta\<version>, stable or beta. The file version must be
+; numeric; a beta's AppVersion (x.y.z-beta.n) isn't.
+#ifndef FileVersion
+  #define FileVersion AppVersion
+#endif
 
 #if Arch == "aarch64"
   #define ArchAllowed "arm64"
@@ -42,7 +48,7 @@ AppPublisher=Zeron
 AppPublisherURL=https://zeron.sh
 AppSupportURL=https://github.com/zeronsh/zeron/issues
 AppUpdatesURL=https://github.com/zeronsh/zeron/releases
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#FileVersion}
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\Zeron
 DisableProgramGroupPage=yes
@@ -73,6 +79,10 @@ Source: "{#PackageDir}\zeron-update.json"; DestDir: "{app}"; Flags: ignoreversio
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+#ifdef Zgx
+; The zgx app's scripts, plugins and engine, by version.
+Source: "{#PackageDir}\beta\*"; DestDir: "{app}\beta"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{autoprograms}\Zeron"; Filename: "{app}\zeron.exe"
@@ -94,3 +104,7 @@ Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: now
 Type: files; Name: "{app}\zeron.exe.old"
 Type: files; Name: "{app}\.zeron-update-incoming.exe"
 Type: filesandordirs; Name: "{app}\.zeron-update-*"
+Type: files; Name: "{app}\.zeron-completing.lock"
+Type: files; Name: "{app}\zeron-version"
+; The zgx app's folder, whichever versions an update brought.
+Type: filesandordirs; Name: "{app}\beta"

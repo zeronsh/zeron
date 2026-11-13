@@ -65,6 +65,12 @@ end
 
 local RASTER = { png = true, jpg = true, jpeg = true, webp = true, gif = true }
 
+-- Whether `path` is a whole path on its device: a Mac's or Linux's (`/…`)
+-- or Windows' (`C:\…`, `C:/…`).
+function M.whole(path: string): boolean
+	return string.sub(path, 1, 1) == "/" or string.match(path, "^%a:[\\/]") ~= nil
+end
+
 -- The path of a picture a reply names, in a chat whose folder is `cwd`, or
 -- nil when it isn't one to draw.
 function M.path(src: string, cwd: string?): string?
@@ -80,15 +86,17 @@ function M.path(src: string, cwd: string?): string?
 	if not RASTER[ext] then
 		return nil
 	end
-	if string.sub(src, 1, 1) == "/" then
+	if M.whole(src) then
 		return src
 	end
 	-- Relative: in the chat's folder, which must be a path of its own.
-	if not cwd or string.sub(cwd, 1, 1) ~= "/" then
+	if not cwd or not M.whole(cwd) then
 		return nil
 	end
-	local rel = string.gsub(src, "^%./", "")
-	return (string.gsub(cwd, "/+$", "")) .. "/" .. rel
+	-- (A Windows folder's own separator, as its device reads it.)
+	local sep = if string.sub(cwd, 1, 1) == "/" then "/" else "\\"
+	local rel = string.gsub(src, "^%.[\\/]", "")
+	return (string.gsub(cwd, "[\\/]+$", "")) .. sep .. rel
 end
 
 local function key_of(s: Session, path: string): string

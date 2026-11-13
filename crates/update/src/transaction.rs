@@ -181,8 +181,11 @@ impl Layout {
     /// The version this executable is, and the one that's installed. `None` when
     /// it isn't part of this installation (a build started by hand beside it).
     fn whoami(&self, transaction: &Transaction) -> Option<Whoami> {
-        let exe = std::env::current_exe().ok()?;
-        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        self.whoami_of(&std::env::current_exe().ok()?, transaction)
+    }
+
+    fn whoami_of(&self, exe: &Path, transaction: &Transaction) -> Option<Whoami> {
+        let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
         let inside = |dir: &Path| {
             std::fs::canonicalize(dir).is_ok_and(|dir| exe.starts_with(dir))
         };
@@ -198,7 +201,7 @@ impl Layout {
                 let current = crate::bundle_app_version(bundle)?;
                 let me = if inside(incoming) {
                     transaction.target.clone()
-                } else if inside(bundle) {
+                } else if inside(bundle) || became_the_bundle(&exe, bundle, incoming) {
                     current.clone()
                 } else {
                     return None;
@@ -211,9 +214,16 @@ impl Layout {
                 #[cfg(not(windows))]
                 let recorded: Option<String> = None;
                 let current = recorded.unwrap_or_else(|| transaction.from.clone());
-                let me = if inside(incoming) {
+                // The zgx app runs its engine from its version's folder beside
+                // `zeron.exe` (crates/update `windows::version_files`): the new
+                // version's while it's tried, the installed one's after.
+                #[cfg(windows)]
+                let files = |version: &str| inside(&crate::windows::version_files(directory, version));
+                #[cfg(not(windows))]
+                let files = |_: &str| false;
+                let me = if inside(incoming) || files(&transaction.target) {
                     transaction.target.clone()
-                } else if inside(&directory.join("zeron.exe")) {
+                } else if inside(&directory.join("zeron.exe")) || files(&current) {
                     current.clone()
                 } else {
                     return None;
@@ -243,10 +253,14 @@ impl Layout {
 
     /// What's left once the update has settled either way. Nothing in use is
     /// deleted: a process whose image is gone is what AppleSystemPolicy rejects
-    /// (#1037), and Windows refuses anyway.
-    fn tidy(&self) {
+    /// (#1037), and Windows refuses anyway. `abandoned` is the version an update
+    /// gave up on, when it did.
+    fn tidy(&self, abandoned: Option<&str>) {
         match self {
-            Self::Versioned { .. } => {}
+            Self::Versioned { app_root } => {
+                crate::prune_installed_versions(app_root, crate::older_versions_kept(), abandoned);
+                crate::strip_cloud_unused_installed(app_root);
+            }
             Self::MacBundle { bundle, .. } => crate::prune_retired_mac_bundles(bundle),
             Self::WindowsFolder { incoming, .. } => {
                 if let Some(folder) = incoming.parent() {
@@ -278,6 +292,10 @@ pub struct Transaction {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    /// Gone back because the service was stopped mid-trial (a sleep, a restart),
+    /// not because the release failed: it's tried again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 /// An update's state, as `UpdateStatus` reports it.
@@ -328,6 +346,14 @@ impl Transaction {
 
     pub fn in_progress(&self) -> bool {
         !self.phase.finished()
+    }
+
+    /// The version this update gave up on, once it has. Not one it went back from
+    /// only because it was stopped mid-trial: that's tried again, and its files
+    /// spare the download.
+    fn abandoned(&self) -> Option<&str> {
+        (matches!(self.phase, Phase::RolledBack | Phase::Failed) && !self.interrupted)
+            .then_some(self.target.as_str())
     }
 }
 
@@ -717,6 +743,10 @@ fn discard_snapshots(data_dir: &Path) {
 
 /// How long the new version gets, by how much it may have to migrate.
 fn trial_deadline(store_bytes: u64) -> Duration {
+    trial_deadline_from(BASE_DEADLINE, store_bytes)
+}
+
+fn trial_deadline_from(base: Duration, store_bytes: u64) -> Duration {
     if let Some(secs) = std::env::var(DEADLINE_ENV)
         .ok()
         .and_then(|value| value.trim().parse().ok())
@@ -724,7 +754,7 @@ fn trial_deadline(store_bytes: u64) -> Duration {
         return Duration::from_secs(secs);
     }
     let gib = u32::try_from(store_bytes / GIB).unwrap_or(u32::MAX);
-    (BASE_DEADLINE + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
+    (base + DEADLINE_PER_GIB.saturating_mul(gib)).min(MAX_DEADLINE)
 }
 
 pub(crate) fn new_id() -> String {
@@ -750,6 +780,20 @@ pub fn request(
     target: &str,
     restart: RestartMode,
 ) -> anyhow::Result<Transaction> {
+    request_within(data_dir, layout, from, target, restart, BASE_DEADLINE)
+}
+
+/// [`request`], when something is waiting on this update: `base` is the trial's
+/// deadline before the databases' size is counted, so a new version that hangs
+/// gives way sooner.
+pub fn request_within(
+    data_dir: &Path,
+    layout: Layout,
+    from: &str,
+    target: &str,
+    restart: RestartMode,
+    base: Duration,
+) -> anyhow::Result<Transaction> {
     if read(data_dir).is_some_and(|existing| existing.in_progress()) {
         bail!("An update is already in progress on this device.");
     }
@@ -764,11 +808,12 @@ pub fn request(
         phase: Phase::Requested,
         restart,
         requested_at: crate::now_ms(),
-        deadline_secs: trial_deadline(store_bytes(data_dir)).as_secs(),
+        deadline_secs: trial_deadline_from(base, store_bytes(data_dir)).as_secs(),
         trial_started_at: None,
         trial_pid: None,
         reason: None,
         finished_at: None,
+        interrupted: false,
     };
     write(data_dir, &transaction)?;
     crash_point("requested");
@@ -778,6 +823,81 @@ pub fn request(
 // ---------------------------------------------------------------------------
 // Boot: what this start of the engine has to do first
 // ---------------------------------------------------------------------------
+
+/// An engine that was an earlier update's trial runs from that update's
+/// incoming bundle (`.Zeron.app.new-…`, beside the installed one), and its
+/// commit renamed that folder to the installed bundle: macOS goes on naming
+/// the executable by the path it was started from, which no longer exists.
+/// That engine *is* the installed version. Without this it counted as a build
+/// started by hand beside the installation, so an update it was asked for
+/// stopped it and nothing started the new version.
+fn became_the_bundle(exe: &Path, bundle: &Path, incoming: &Path) -> bool {
+    let (Some(parent), Some(name)) = (bundle.parent(), bundle.file_name()) else {
+        return false;
+    };
+    let prefix = format!(".{}.new-", name.to_string_lossy());
+    let parents = [
+        parent.to_path_buf(),
+        std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+    ];
+    parents.iter().any(|parent| {
+        let Ok(rest) = exe.strip_prefix(parent) else {
+            return false;
+        };
+        let Some(folder) = rest.components().next() else {
+            return false;
+        };
+        let earlier = parent.join(folder);
+        folder.as_os_str().to_string_lossy().starts_with(&prefix)
+            && earlier != incoming
+            && rest.starts_with(Path::new(folder.as_os_str()).join("Contents/MacOS"))
+            // Still there: an abandoned download, not the installed bundle.
+            && !earlier.exists()
+    })
+}
+
+/// A path that starts this executable: its own, or — gone because an earlier
+/// update's commit renamed the folder it ran from ([`became_the_bundle`]) —
+/// the same executable in the installation. The watchdog is started through a
+/// shell that can't report a missing program, so a vanished path meant a
+/// trial with no watchdog at all.
+#[cfg(unix)]
+fn runnable_self(layout: &Layout, exe: PathBuf) -> PathBuf {
+    if exe.is_file() {
+        return exe;
+    }
+    match exe.file_name() {
+        Some(name) => layout.installed_binary(name),
+        None => exe,
+    }
+}
+
+/// Whether [`boot`], run by this process once it has stopped, would start the
+/// update recorded in `data_dir` as a trial, rather than leave the record for
+/// another start. A background engine nothing restarts asks this before it
+/// stops for an update: stopping when it wouldn't strands the device.
+pub fn starts_here(data_dir: &Path) -> bool {
+    std::env::current_exe().is_ok_and(|exe| starts_from(data_dir, &exe))
+}
+
+/// [`starts_here`], for the executable at `exe`.
+pub fn starts_from(data_dir: &Path, exe: &Path) -> bool {
+    step_from(data_dir, exe) == Some(Step::StartTrial)
+}
+
+/// A newer version was installed by other means (the app updated itself)
+/// since the update recorded in `data_dir` was asked for, as seen from the
+/// executable at `exe`. The next start's [`boot`] settles that record, so a
+/// restart to follow the newer version needn't wait for it.
+pub fn superseded_from(data_dir: &Path, exe: &Path) -> bool {
+    step_from(data_dir, exe) == Some(Step::Superseded)
+}
+
+fn step_from(data_dir: &Path, exe: &Path) -> Option<Step> {
+    let transaction = read(data_dir)?;
+    let who = transaction.layout.whoami_of(exe, &transaction)?;
+    Some(step_for(&transaction, &who))
+}
 
 /// The version folder this executable runs from, and the one `current` names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -867,6 +987,33 @@ pub fn note_trial_failure(data_dir: &Path, why: &str) {
     let _ = write_durably(&data_dir.join(NOTE_FILE), why.as_bytes());
 }
 
+/// How an interrupted trial's note starts ([`note_trial_interrupted`]).
+const INTERRUPTED_NOTE: &str = "interrupted:";
+
+/// This process, on trial, is being stopped from outside (SIGTERM: the machine
+/// going to sleep, the service restarting, a person). That says nothing about the
+/// release: the old version still goes back, since nothing committed, but says
+/// why, and the release is tried again. Before this, such a stop read as "the new
+/// version stopped before it was ready", and a wake never tried the release again.
+pub fn note_trial_interrupted() {
+    if let Some(trial) = current_trial() {
+        note_trial_failure(&trial.data_dir, INTERRUPTED_NOTE);
+    }
+}
+
+/// This process, on trial, panicked: what it said, for the record (the log alone
+/// may be gone by the time anyone looks).
+pub fn note_trial_panicked(message: &str) {
+    if let Some(trial) = current_trial() {
+        let message = message.trim();
+        let message: String = message.chars().take(300).collect();
+        note_trial_failure(
+            &trial.data_dir,
+            &format!("The new version crashed while starting ({message})."),
+        );
+    }
+}
+
 /// The new version has proved itself: move `current`, which is the commit, then
 /// record it. A crash in between is settled by the next start.
 pub fn commit_trial() -> anyhow::Result<()> {
@@ -889,7 +1036,7 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
     finish(data_dir, transaction, Phase::Updated, None)?;
     crash_point("commit-recorded");
     discard_snapshots(data_dir);
-    layout.tidy();
+    layout.tidy(None);
     Ok(())
 }
 
@@ -898,7 +1045,7 @@ fn settle_committed(data_dir: &Path, id: &str) -> anyhow::Result<()> {
 /// old bundle.
 pub fn tidy_latest(data_dir: &Path) {
     if let Some(latest) = read(data_dir).filter(|update| !update.in_progress()) {
-        latest.layout.tidy();
+        latest.layout.tidy(latest.abandoned());
     }
 }
 
@@ -938,7 +1085,7 @@ pub fn boot<G>(
         // Nothing's in progress, so no backup is needed any more, including
         // one a crash left behind. Cheap when there's none.
         discard_snapshots(data_dir);
-        transaction.layout.tidy();
+        transaction.layout.tidy(transaction.abandoned());
         return Ok(());
     }
     let Some(who) = transaction.layout.whoami(&transaction) else {
@@ -997,10 +1144,9 @@ pub fn boot<G>(
                 "Zeron {} was installed while this update was running, so the update stopped there.",
                 who.me
             );
-            let layout = transaction.layout.clone();
-            finish(data_dir, transaction, Phase::Failed, Some(reason))?;
+            let done = finish(data_dir, transaction, Phase::Failed, Some(reason))?;
             discard_snapshots(data_dir);
-            layout.tidy();
+            done.layout.tidy(done.abandoned());
             Ok(())
         }
         Step::WaitForRestore => {
@@ -1035,10 +1181,9 @@ fn start_trial<G>(
 ) -> anyhow::Result<()> {
     let give_up = |transaction: Transaction, why: String, cause: String| {
         tracing::error!(%cause, "update stopped before the new version ran");
-        let layout = transaction.layout.clone();
-        finish(data_dir, transaction, Phase::Failed, Some(why))?;
+        let done = finish(data_dir, transaction, Phase::Failed, Some(why))?;
         discard_snapshots(data_dir);
-        layout.tidy();
+        done.layout.tidy(done.abandoned());
         Ok(())
     };
     let exe_name = std::env::current_exe()?
@@ -1151,11 +1296,21 @@ fn hand_over(
 }
 
 fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()> {
-    let why = std::fs::read_to_string(data_dir.join(NOTE_FILE))
+    let note = std::fs::read_to_string(data_dir.join(NOTE_FILE))
         .ok()
-        .filter(|note| !note.trim().is_empty())
-        .or_else(|| transaction.reason.clone())
-        .unwrap_or_else(|| "The new version stopped before it was ready.".to_owned());
+        .filter(|note| !note.trim().is_empty());
+    // A restore that was itself interrupted keeps what the first pass decided.
+    if note.as_deref().is_some_and(|note| note.starts_with(INTERRUPTED_NOTE)) {
+        transaction.interrupted = true;
+    }
+    let why = if transaction.interrupted {
+        "Zeron was stopped while it was trying the new version (the machine went to sleep, or \
+         the service restarted)."
+            .to_owned()
+    } else {
+        note.or_else(|| transaction.reason.clone())
+            .unwrap_or_else(|| "The new version stopped before it was ready.".to_owned())
+    };
     tracing::warn!(id = %transaction.id, %why, "update failed; going back");
     if !snapshot_dir(data_dir, &transaction.id).is_dir() {
         // Trial is only recorded once the snapshot is done, so this is someone's
@@ -1171,16 +1326,15 @@ fn roll_back(data_dir: &Path, mut transaction: Transaction) -> anyhow::Result<()
     }
     let from = transaction.from.clone();
     let target = transaction.target.clone();
-    let layout = transaction.layout.clone();
-    finish(
-        data_dir,
-        transaction,
-        Phase::RolledBack,
-        Some(format!("{why} Zeron went back to {from} instead of {target}.")),
-    )?;
+    let outcome = if transaction.interrupted {
+        format!("{why} It's on {from} for now and will try {target} again.")
+    } else {
+        format!("{why} Zeron went back to {from} instead of {target}.")
+    };
+    let done = finish(data_dir, transaction, Phase::RolledBack, Some(outcome))?;
     crash_point("rollback-recorded");
     discard_snapshots(data_dir);
-    layout.tidy();
+    done.layout.tidy(done.abandoned());
     Ok(())
 }
 
@@ -1198,7 +1352,7 @@ fn prepare_watchdog(
     transaction: &Transaction,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt as _;
-    let exe = std::env::current_exe()?;
+    let exe = runnable_self(&transaction.layout, std::env::current_exe()?);
     let args: Vec<String> = options
         .engine_args
         .iter()
@@ -1440,8 +1594,8 @@ fn kill_process(_pid: u32) {}
 /// Whether something asked the service manager to act on this unit: a stop or
 /// restart is a queued job, a unit stopping because its process exited isn't.
 fn unit_has_job(unit: &str) -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "show", unit, "-p", "Job", "--value"])
+    crate::systemctl_query(unit)
+        .args(["show", unit, "-p", "Job", "--value"])
         .output()
         .is_ok_and(|output| {
             let job = String::from_utf8_lossy(&output.stdout);
@@ -1450,8 +1604,8 @@ fn unit_has_job(unit: &str) -> bool {
 }
 
 fn start_unit(unit: &str) {
-    let started = std::process::Command::new("systemctl")
-        .args(["--user", "--no-block", "start", unit])
+    let started = crate::systemctl_action(unit)
+        .args(["--no-block", "start", unit])
         .status();
     if !started.is_ok_and(|status| status.success()) {
         eprintln!("zeron-update: couldn't ask the service manager to start {unit}");
@@ -1527,6 +1681,7 @@ mod tests {
             trial_pid: None,
             reason: None,
             finished_at: None,
+            interrupted: false,
         }
     }
 
@@ -1760,5 +1915,119 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(unknown.state, UpdateState::Unknown);
+    }
+
+    /// `/Applications`-like folder with the installed `Zeron.app` at
+    /// `version`, and an update to 2.0.0 requested into `.Zeron.app.new-next`.
+    fn mac_install(version: &str) -> (tempfile::TempDir, Transaction) {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Zeron.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            format!("<plist><key>ZeronVersion</key><string>{version}</string></plist>"),
+        )
+        .unwrap();
+        std::fs::write(bundle.join("Contents/MacOS/Zeron Engine"), "").unwrap();
+        let incoming = root.path().join(".Zeron.app.new-next");
+        std::fs::create_dir_all(incoming.join("Contents/MacOS")).unwrap();
+        let mut update = transaction(Phase::Requested);
+        update.layout = Layout::MacBundle { bundle, incoming };
+        (root, update)
+    }
+
+    /// m1-laptop, Nov 11: the engine had been the trial of the update before
+    /// (started from `.Zeron.app.new-<id>`, renamed to `Zeron.app` at its
+    /// commit) and was still named by that path. Asked for the next update,
+    /// it didn't recognise its own installation, stopped, and never came back.
+    #[test]
+    fn an_engine_from_an_earlier_update_is_the_installed_version() {
+        let (root, update) = mac_install("1.0.0");
+        let installed = root.path().join("Zeron.app/Contents/MacOS/Zeron Engine");
+        let earlier = root.path().join(".Zeron.app.new-earlier/Contents/MacOS/Zeron Engine");
+        for exe in [&installed, &earlier] {
+            let who = update.layout.whoami_of(exe, &update);
+            assert_eq!(who, Some(self::who("1.0.0", "1.0.0")), "{}", exe.display());
+            assert_eq!(step_for(&update, &who.unwrap()), Step::StartTrial);
+        }
+        // The new version, on trial from the incoming bundle.
+        let trial = root.path().join(".Zeron.app.new-next/Contents/MacOS/Zeron Engine");
+        std::fs::write(&trial, "").unwrap();
+        assert_eq!(update.layout.whoami_of(&trial, &update), Some(who("2.0.0", "1.0.0")));
+    }
+
+    /// The zgx app on Windows runs its engine from its version's folder
+    /// (`app\<version>\engine\zeron.exe`): there it's the new version on
+    /// trial, or the installed one asked for the next update.
+    #[cfg(windows)]
+    #[test]
+    fn a_zgx_engine_in_its_version_s_folder_is_part_of_the_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().to_path_buf();
+        std::fs::write(directory.join("zeron.exe"), "").unwrap();
+        std::fs::write(directory.join("zeron-version"), "1.0.0").unwrap();
+        let incoming = directory.join(".zeron-update-x").join("zeron.exe");
+        std::fs::create_dir_all(incoming.parent().unwrap()).unwrap();
+        std::fs::write(&incoming, "").unwrap();
+        let engine = |version: &str| {
+            let exe = crate::windows::version_files(&directory, version).join("engine").join("zeron.exe");
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, "").unwrap();
+            exe
+        };
+        let mut update = transaction(Phase::Requested);
+        update.layout = Layout::WindowsFolder { directory: directory.clone(), incoming: incoming.clone() };
+        assert_eq!(update.layout.whoami_of(&engine("1.0.0"), &update), Some(who("1.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&directory.join("zeron.exe"), &update), Some(who("1.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&engine("2.0.0"), &update), Some(who("2.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&incoming, &update), Some(who("2.0.0", "1.0.0")));
+        assert_eq!(update.layout.whoami_of(&engine("3.0.0"), &update), None);
+    }
+
+    /// What isn't the installation stays out of its update: a build beside
+    /// it, an incoming bundle that's still there (an abandoned download), and
+    /// a folder that only looks like one.
+    #[test]
+    fn only_the_installation_is_recognised() {
+        let (root, update) = mac_install("1.0.0");
+        let abandoned = root.path().join(".Zeron.app.new-abandoned");
+        std::fs::create_dir_all(abandoned.join("Contents/MacOS")).unwrap();
+        for exe in [
+            root.path().join("build/Zeron Engine"),
+            abandoned.join("Contents/MacOS/Zeron Engine"),
+            root.path().join(".Other.app.new-x/Contents/MacOS/Zeron Engine"),
+            root.path().join(".Zeron.app.new-x/Zeron Engine"),
+        ] {
+            assert_eq!(update.layout.whoami_of(&exe, &update), None, "{}", exe.display());
+        }
+    }
+
+    /// The question a background engine asks before it stops for an update:
+    /// would it start the trial itself once stopped.
+    #[test]
+    fn an_engine_knows_whether_it_carries_out_the_update() {
+        let (root, update) = mac_install("1.0.0");
+        let data = tempfile::tempdir().unwrap();
+        let earlier = root.path().join(".Zeron.app.new-earlier/Contents/MacOS/Zeron Engine");
+        let beside = root.path().join("build/Zeron Engine");
+        assert!(!starts_from(data.path(), &earlier), "no update requested");
+        write(data.path(), &update).unwrap();
+        assert!(starts_from(data.path(), &earlier));
+        assert!(!starts_from(data.path(), &beside), "a build beside the app leaves it alone");
+        assert!(!superseded_from(data.path(), &earlier));
+        // The app installed 3.0.0 by itself meanwhile.
+        let Layout::MacBundle { bundle, .. } = &update.layout else { unreachable!() };
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            "<plist><key>ZeronVersion</key><string>3.0.0</string></plist>",
+        )
+        .unwrap();
+        assert!(!starts_from(data.path(), &earlier));
+        assert!(superseded_from(data.path(), &earlier));
+        assert!(!superseded_from(data.path(), &beside));
+        let mut done = update.clone();
+        done.phase = Phase::Failed;
+        write(data.path(), &done).unwrap();
+        assert!(!starts_from(data.path(), &earlier), "nothing in progress");
     }
 }

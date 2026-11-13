@@ -447,6 +447,7 @@ mod tests {
             display_name: None,
             organization: None,
             plan: Some("Max".into()),
+            avatar_url: None,
             authorized_devices: vec!["cloud-1".into()],
             created_at: 1,
             updated_at: 2,

@@ -146,6 +146,55 @@ fn a_chat_dragged_to_a_chat_s_edge_sits_beside_it_and_is_focused() {
     assert!(near(page.height, alone.height));
 }
 
+/// A chat dropped beside another opens out of the gap at the page's right:
+/// what's in its pane stands where it lands in its pane as the gap opens
+/// (never drifting in) and only fades in a little, from the floor (0.3), a
+/// step at a time (ds/motion `content`); the pane it splits from never
+/// fades.
+#[test]
+fn a_pane_just_added_only_fades_in_a_little_where_it_lands() {
+    let mut app = mount(&scratch("arrive"));
+    open(&mut app, "Fix the build");
+    let page = app.bounds("shell-page");
+    let (sx, sy) = row_at(&mut app, "Tidy the tests");
+    let (x, y) = (page.x + page.width * 0.92, page.y + page.height / 2.);
+    let button = PointerButton::Primary;
+    pointer(&mut app, InputEvent::PointerMove { x: sx, y: sy });
+    pointer(&mut app, InputEvent::PointerDown { x: sx, y: sy, button });
+    for step in 1..=8 {
+        let part = step as f32 / 8.;
+        pointer(&mut app, InputEvent::PointerMove { x: sx + (x - sx) * part, y: sy + (y - sy) * part });
+    }
+    app.frames(4);
+    pointer(&mut app, InputEvent::PointerUp { x, y, button });
+    app.ui.input.forget_clicks();
+    // (Where it's painted in its pane, across.)
+    let off = |app: &mut TestApp| -> f32 {
+        let lane = app.find("#split-lane-a3").expect("its lane");
+        app.ui.prepare_frame();
+        let scene = app.ui.scene.borrow();
+        let pane = scene.parent(lane).expect("its pane");
+        scene.transformed_bounds(lane).x - scene.transformed_bounds(pane).x
+    };
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let seen: Vec<(f32, f32)> = (0..24)
+        .map(|_| {
+            app.frames(1);
+            let at = off(&mut app);
+            (lo, hi) = (lo.min(at), hi.max(at));
+            (app.opacity("split-lane-a3"), app.opacity("split-lane-a1"))
+        })
+        .collect();
+    assert!(hi - lo <= 0.011, "it stands where it lands: {lo} to {hi} in its pane");
+    let between = seen.iter().filter(|s| s.0 > 0.02 && s.0 < 0.98).count();
+    assert!(between >= 3, "fades in: {seen:?}");
+    assert!(seen.iter().all(|s| s.0 >= 0.29), "a little, from the floor: {seen:?}");
+    assert!(seen.windows(2).all(|w| w[1].0 >= w[0].0 - 1e-3), "only in: {seen:?}");
+    assert!(seen.iter().all(|s| (s.1 - 1.).abs() < 1e-3), "the pane beside it stays: {seen:?}");
+    let last = seen.last().unwrap();
+    assert!((last.0 - 1.).abs() < 1e-3, "ends shown: {seen:?}");
+}
+
 #[test]
 fn command_w_closes_the_right_panel_tab_before_the_focused_split_chat() {
     let mut app = mount(&scratch("close-tab-before-chat"));
@@ -369,15 +418,19 @@ fn the_composers_menu_comes_back_with_the_window_and_stays_shut_after_escape() {
     app.click(field);
     app.type_text(field, "@");
     app.frames(20);
+    // (The popover round @'s launcher, and round the other triggers' list:
+    // ds/composer_mentions.)
     let open_now = |app: &mut TestApp| {
-        app.tree().lines().any(|l| l.contains("#mention-panel") && !l.contains(" hidden"))
+        app.tree().lines().any(|l| l.contains("#mention-popover") && !l.contains(" hidden"))
     };
     assert!(open_now(&mut app), "typed: its menu\n{}", app.tree());
-    // Either order of the two, as the platform has them.
+    // Either order of the two, as the platform has them: the popups closed
+    // and then the window at the back in one event (zgx-desktop's
+    // `Focused(false)`, no frame between: ds/composer_mentions tells the
+    // two apart as that event ends), or the window first.
     for popups_first in [true, false] {
         if popups_first {
             app.ui.dismiss_popups();
-            app.frames(2);
             app.ui.set_window_active(false);
         } else {
             app.ui.set_window_active(false);
@@ -859,11 +912,11 @@ fn a_pane_out_of_focus_is_live_and_gaining_focus_changes_nothing() {
     assert!(places.iter().any(|n| n.ends_with("_a1")) && places.iter().any(|n| n.ends_with("_a3")), "{places:?}");
 }
 
-/// In a split, the side opened wins: the panel opened when the panes would go
-/// under their least closes the sidebar, the sidebar opened closes the panel,
-/// and neither is back until it's asked for. Under their least with one side
-/// open, the panes just narrow. (ui/tests/pane_floor.test.luau has the rest,
-/// which CI doesn't run.)
+/// In a split, the side opened wins (three columns at most, Wing's cap): the
+/// panel opened when the panes would go under their least hides the sidebar,
+/// the sidebar opened hides the panel. Hidden by the fit, not closed: each is
+/// back by itself once the other closes. Under their least with one side
+/// open, the panes just narrow. (ui/tests/pane_floor.test.luau has the rest.)
 #[test]
 fn the_side_opened_wins_in_a_split() {
     use zgx_script::Value;
@@ -883,28 +936,32 @@ fn the_side_opened_wins_in_a_split() {
         app.frames(40);
         let when = format!("{} panes at 1100", ids.len());
         let shown = |app: &mut TestApp, what: &str| app.bounds(what).width > 1.;
+        // (Three panes at 1100 have no room for the sidebar even alone: the
+        // fit hides it already.)
+        let had_sidebar = shown(&mut app, "shell-sidebar");
         app.click(PANEL);
         app.frames(60);
         assert_eq!(app.bounds("shell-files").width, 360., "{when}: the panel, at its least");
-        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar closed for it");
+        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar gave way for it");
         for id in ids {
             let w = app.bounds(&format!("#split-pane-{id}")).width;
             assert!(w >= least, "{when}: {id} is {w} wide, beside the panel");
         }
-        // The panel closed: the sidebar isn't back on its own.
+        // The panel closed: the sidebar is back by itself, as it was.
         app.click(PANEL);
         app.frames(60);
-        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar stays closed");
-        // Open both ways: the sidebar closes the panel, for good too.
+        assert_eq!(shown(&mut app, "shell-sidebar"), had_sidebar, "{when}: the sidebar as it was");
+        // Open both ways: the sidebar hides the panel, back as it folds.
         app.click(PANEL);
         app.frames(60);
         app.click(SIDEBAR);
         app.frames(60);
-        assert!(shown(&mut app, "shell-sidebar"), "{when}: the sidebar opened");
-        assert!(!shown(&mut app, "shell-files"), "{when}: the panel closed for it");
+        assert!(shown(&mut app, "shell-sidebar"), "{when}: the sidebar asked for");
+        assert!(!shown(&mut app, "shell-files"), "{when}: the panel gave way for it");
         app.click(SIDEBAR);
         app.frames(60);
-        assert!(!shown(&mut app, "shell-files"), "{when}: the panel stays closed");
+        assert!(!shown(&mut app, "shell-sidebar"), "{when}: the sidebar folded");
+        assert!(shown(&mut app, "shell-files"), "{when}: the panel is back");
     }
 }
 
@@ -1620,6 +1677,64 @@ fn a_window_resized_reflows_the_page_live() {
     assert_eq!(widths.len(), 20, "the transcript took {widths:?}");
 }
 
+/// The divider between two panes: dragged past a pane's least, it bounces
+/// (the pane gives a few points more, at most 5, and comes back) and its
+/// light dims while it's held there; double-clicked, the panes take equal
+/// shares again, easing there, as a pane coming or going does.
+#[test]
+fn a_divider_bounces_at_a_pane_s_least_and_double_clicked_evens_the_panes() {
+    let mut app = mount(&scratch("divider"));
+    split_of(&mut app, &["a1", "a3"]);
+    open(&mut app, "Fix the build");
+    app.frames(30);
+    assert_eq!(panes(&mut app), 2);
+    let divider = "#split-divider-row:/1";
+    let width = |app: &mut TestApp, id: &str| app.bounds(&format!("#split-pane-{id}")).width;
+    let light = |app: &mut TestApp| {
+        let id = app.find(divider).expect("the divider");
+        app.ui.prepare_frame();
+        let scene = app.ui.scene.borrow();
+        scene.effects(*scene.children(id).first().expect("its light")).opacity
+    };
+    let (button, m) = (PointerButton::Primary, Modifiers::default());
+    let (x, y) = middle(app.bounds(divider));
+    // Dragged past the right pane's least, and held there.
+    app.ui.input.forget_clicks();
+    app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x, y }, m);
+    app.ui.dispatch_with_modifiers(InputEvent::PointerDown { x, y, button }, m);
+    let mut seen = Vec::new();
+    for step in 1..=4 {
+        app.ui.dispatch_with_modifiers(InputEvent::PointerMove { x: x + 900. * step as f32 / 4., y }, m);
+        app.frame();
+        seen.push(width(&mut app, "a3"));
+    }
+    for _ in 0..20 {
+        app.frame();
+        seen.push(width(&mut app, "a3"));
+    }
+    let rest = *seen.last().unwrap();
+    let least = seen.iter().copied().fold(f32::MAX, f32::min);
+    assert!(least < rest - 2. && least >= rest - 5.5, "the pane gave a few points past its least and came back: {seen:?}");
+    assert!(light(&mut app) < 0.02, "its light dims, held at the least");
+    app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x: x + 900., y, button }, m);
+    app.ui.input.forget_clicks();
+    app.frames(20);
+    assert!(width(&mut app, "a1") > width(&mut app, "a3") + 200., "dragged apart");
+    // Double-clicked: equal again, easing there.
+    let (x, y) = middle(app.bounds(divider));
+    let before = width(&mut app, "a3");
+    for _ in 0..2 {
+        pointer(&mut app, InputEvent::PointerDown { x, y, button });
+        app.ui.dispatch_with_modifiers(InputEvent::PointerUp { x, y, button }, m);
+    }
+    app.ui.input.forget_clicks();
+    let mid = width(&mut app, "a3");
+    app.frames(40);
+    let (a, b) = (width(&mut app, "a1"), width(&mut app, "a3"));
+    assert!(near(a, b), "equal shares again: {a} and {b}");
+    assert!(mid > before + 0.5 && mid < b - 0.5, "it eases there: {before} → {mid} → {b}");
+}
+
 /// A row in the sidebar follows the column's width: its edge dragged wider,
 /// a row and the words in it are that much wider.
 #[test]
@@ -1659,6 +1774,26 @@ fn the_page_stands_about_as_deep_as_v2_s() {
     let mut v3 = mount(&scratch("depth-v3"));
     let (two, three) = (depth_of(&mut v2, "#shell-page"), depth_of(&mut v3, "#shell-page"));
     assert!(three <= two + 1, "#shell-page under {three} boxes, v2's under {two}");
+}
+
+/// v2's window buttons and title-bar controls stand on glass over a new
+/// chat's wallpaper once its sidebar is closed (v3's top bar took the glass
+/// away from the shared title bar for both); v3's never do.
+#[test]
+fn v2_s_title_bar_island_shows_over_art_with_the_sidebar_closed() {
+    let t = scratch("island").join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let mut v2 = mount_at(&compose(&t, "zeron-v2").join("shell_fixture.luau"), &scratch("island-v2"));
+    let mut v3 = mount(&scratch("island-v3"));
+    for app in [&mut v2, &mut v3] {
+        assert!(app.host.run_command("fixture.wallpaper"));
+        app.frames(30);
+        assert!(app.opacity("#titlebar-island") < 0.01, "the sidebar open: no island");
+        assert!(app.host.run_command("shell.toggle_sidebar"));
+        app.frames(60);
+    }
+    assert!(v2.opacity("#titlebar-island") > 0.99, "v2, closed over a new chat's art: its island");
+    assert!(v3.opacity("#titlebar-island") < 0.01, "v3 has its top bar: no island");
 }
 
 /// Frames' work as a column moves, and where it went: p50/p95 (ms), the

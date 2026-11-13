@@ -59,6 +59,8 @@ export type Session = {
 	time: (number | string)?,
 	agent: Mark.Name?,
 	project: string?,
+	-- Its project's id (its tile then `.project-icon`).
+	project_id: string?,
 	hue: string?,
 	src: string?,
 	emoji: string?,
@@ -84,6 +86,8 @@ export type Item = {
 	hue: string?,
 	src: string?,
 	emoji: string?,
+	-- A project's id, where it is one (its tile then `.project-icon`).
+	project: string?,
 	-- Other words it answers to ("dark" for Appearance), matched as its
 	-- label is but weighing less, and never marked.
 	keywords: string?,
@@ -1626,7 +1630,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				then Mark { name = s.agent, size = 14, bare = true }
 				else ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.disabled" }
 		elseif item.hue or item.src or item.emoji then
-			inner = Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = SLOT }
+			inner = Tile { label = item.label, hue = item.hue, src = item.src, emoji = item.emoji, size = SLOT, project = item.project }
 		elseif item.mark then
 			inner = Mark { name = item.mark, size = 14, bare = true }
 		elseif item.icon then
@@ -1660,7 +1664,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			}
 		end
 		local t = s.time
-		local said = if type(t) == "number" then status.ago(os.time() - t) else t
+		local said = if type(t) == "number" then status.ago(status.since(t)) else t
 		if not said then
 			return nil
 		end
@@ -1804,7 +1808,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					)
 				end
 				if s.project then
-					part(Tile { label = s.project, hue = s.hue, src = s.src, emoji = s.emoji, size = 12 }, "project", s.project, s.branch == nil and s.device == nil)
+					part(Tile { label = s.project, hue = s.hue, src = s.src, emoji = s.emoji, size = 12, project = s.project_id }, "project", s.project, s.branch == nil and s.device == nil)
 				end
 				if s.branch then
 					part(ui.div { color = "$text.tertiary", Icon { name = "git-branch", size = 11 } }, "branch", s.branch, s.device == nil)

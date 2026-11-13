@@ -245,7 +245,10 @@ mod tests {
         "text.primary", "text.secondary", "text.tertiary", "text.disabled", "border", "border.subtle", "border.strong", "zeron.edge",
         "hover", "pressed", "selection", "selection.item", "focus.ring", "accent", "accent.hover", "accent.text", "zeron.accents.default",
         "danger", "warning", "success", "info", "zeron.selected.flat.bg", "zeron.selected.bg", "zeron.menu.tint", "zeron.menu.solid",
-        "zeron.composer.tint", "zeron.composer.solid", "zeron.composer.edge", "zeron.primary.bg", "zeron.primary.text",
+        "zeron.composer.tint", "zeron.composer.solid", "zeron.composer.edge", "zeron.island.tint", "zeron.panel.tint", "zeron.field.glass",
+        "zeron.field.glass_hover",
+        "zeron.sidebar.tint", "zeron.tab.selected", "zeron.tab.hover", "zeron.settings.tint", "zeron.settings.note", "zeron.settings.comment",
+        "zeron.bar.ink", "zeron.bar.hover", "zeron.bar.pressed", "caption.pressed", "zeron.primary.bg", "zeron.primary.text",
         "zeron.destructive.bg", "zeron.destructive.text", "zeron.diff.added", "zeron.diff.removed", "zeron.git.modified",
         "zeron.git.added", "zeron.git.deleted", "zeron.pr.open", "zeron.pr.merged", "zeron.status.approval", "zeron.status.dot.done",
         "zeron.status.failed", "zeron.tone.accent.ink", "zeron.tone.danger.ink", "zeron.tone.success.ink", "zeron.tone.warning.ink",
@@ -488,5 +491,36 @@ mod tests {
             let after = rig.wear(&json!({}), kind);
             assert_eq!(after["asked"], before["asked"], "every role back as Zeron's ({kind})");
         }
+    }
+
+    /// A field or a select on dark glass (Settings' search, its selects):
+    /// a light wash the glass shows through, as Zeron's settings select
+    /// (settings/widgets.rs `select_fill`, wash 0.06, 0.10 under the
+    /// pointer), lifting under the pointer: never the composer's
+    /// near-solid `input_glass_bg` (#343438b8 drew a grey box on blue
+    /// glass). Zeron's own and every palette. Light keeps its white.
+    #[test]
+    fn a_field_on_dark_glass_is_a_wash_the_glass_shows_through() {
+        let rig = Rig::new();
+        let mut worn = vec![("Zeron".to_string(), rig.wear(&json!({}), "dark"))];
+        for theme in builtin().into_iter().filter(|b| b.id != "zeron") {
+            if let Some(v) = theme.variant(true) {
+                worn.push((v.name.clone(), rig.wear(&slots_of(&theme), "dark")));
+            }
+        }
+        for (what, report) in &worn {
+            let rest = color(&report["asked"]["zeron.field.glass"]);
+            let hover = color(&report["asked"]["zeron.field.glass_hover"]);
+            for (state, c) in [("rest", rest), ("hover", hover)] {
+                assert!(c.a <= 0x20, "{what}: a field on glass ({state}) is a wash, not a slab: {c}");
+                let ink = (c.r as u32 + c.g as u32 + c.b as u32) / 3;
+                assert!(ink >= 0x80, "{what}: a field on glass ({state}) is a wash of the light ink: {c}");
+            }
+            assert!(hover.a > rest.a, "{what}: it lifts under the pointer: {rest} → {hover}");
+        }
+        assert!(same(&color(&worn[0].1["asked"]["zeron.field.glass"]).to_string(), "#ebebeb0f"));
+        let light = rig.wear(&json!({}), "light");
+        assert!(same(&color(&light["asked"]["zeron.field.glass"]).to_string(), "#ffffff59"), "light's field on glass as it was");
+        assert!(same(&color(&light["asked"]["zeron.field.glass_hover"]).to_string(), "#ffffffcc"));
     }
 }

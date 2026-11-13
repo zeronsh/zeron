@@ -221,6 +221,7 @@ fn remember(found: impl Iterator<Item = (String, String)>) {
         changed
     });
     if changed {
+        ICONS_SEEN.with(|n| n.set(n.get() + 1));
         let value = icons_value();
         ICONS_SHARED.with(|shared| {
             for s in shared.borrow().iter() {
@@ -247,6 +248,16 @@ async fn learn_icons() {
     {
         remember_listing_icons(list);
     }
+}
+
+thread_local! {
+    static ICONS_SEEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times the registry's icons have changed: a row built with an
+/// icon is built again once this moves.
+pub(crate) fn icons_generation() -> u64 {
+    ICONS_SEEN.with(std::cell::Cell::get)
 }
 
 /// A registry agent's icon, as last listed.

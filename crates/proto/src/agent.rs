@@ -509,6 +509,12 @@ pub struct Model {
     pub reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    /// The harness's own default: what a chat that names no model runs. A
+    /// catalog lists its rows best-first, so the default need not lead it;
+    /// clients pick the marked row and fall back to the first row when none
+    /// is marked (catalogs from older engines mark none).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

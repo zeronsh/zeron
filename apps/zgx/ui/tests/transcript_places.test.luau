@@ -9,7 +9,7 @@ local function shown(app: any): ({ string }, number)
 	local top = 0
 	local ids = {}
 	for line in app:tree("#transcript"):gmatch("[^\n]+") do
-		local y, h = line:match("#transcript scroll %-?%d+,(%-?%d+) %d+x(%d+)")
+		local y, h = line:match("#transcript scroll.- %-?%d+,(%-?%d+) %d+x(%d+)")
 		if y then
 			top = tonumber(y) or 0
 		end

@@ -9,8 +9,10 @@
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
+local TurnGlue = require("@app/screens/chat/turn_glue")
 local store = require("@app/screens/chat/store")
 local prefs = require("@app/screens/settings/prefs")
 local locale = require("@ds/locale")
@@ -18,8 +20,11 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
+local CloudTray = require("@app/screens/chat/cloud_tray")
+local LinkNotice = require("@app/screens/chat/link_notice")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
@@ -52,8 +57,8 @@ function M.title(tab: any): string
 	return locale.s(if tab.kind == "subagent" then "chat.lane_tab.subagent" else "chat.lane_tab.side_chat")
 end
 
-function M.icon(tab: any): string
-	return if tab.kind == "subagent" then "bot" else "side-chat"
+function M.icon(_tab: any): string
+	return "side-chat"
 end
 
 -- A side chat's composer: the chat page's (ds.Composer), its footer the
@@ -95,10 +100,27 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		chosen = ui.state(`chat_lane_chosen_{chat}`, {} :: { [string]: boolean }),
 		asked = ui.state(`chat_split_asked_{chat}`, nil :: any),
+		-- (A steer glides in its own transcript, as its sends do.)
+		name = name,
 	}
 	local tray = ui.state(`chat_split_tray_{chat}`, nil :: any)
 	local session = view.session
 	local notice = ui.use_state(nil :: any)
+	-- Its Cloud machine, on a chat that has one (a side chat shares its
+	-- parent's).
+	local machine = CloudTray.bind {
+		chat = function(): string?
+			return chat
+		end,
+		device = function(): string?
+			local s = session:get()
+			return s and s.device
+		end,
+		running = function(): boolean
+			local s = session:get()
+			return s ~= nil and s.running == true
+		end,
+	}
 	-- A queued message edited in its composer.
 	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string }?)
 	local edits = Asks.queue_edits {
@@ -299,7 +321,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local s = session:get()
 		local function project_row(id: string?): any?
-			for _, p in sessions.now:get().projects do
+			for _, p in sessions.projects:get() do
 				if p.id == id then
 					return p
 				end
@@ -320,7 +342,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local p = project_row(s.project)
 		local on: string? = nil
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == s.device then
 				on = d.name
 			end
@@ -361,8 +383,14 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		return where.plan() :: any
 	end
+	-- (A chat sent already has its host in the session: `device` is only
+	-- seeded while it's unsent.)
 	local accounts = Shared.model_accounts(function(): string?
-		return device:get()
+		if unsent() then
+			return device:get()
+		end
+		local s = session:get()
+		return if s then s.device else nil
 	end)
 	-- A new side chat's composer takes the keys as it's made.
 	if lanes.take_keys:peek()[chat] then
@@ -407,14 +435,24 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				local p = project:peek()
 				return if p and p ~= Where.NO_PROJECT then { space = p, device = device:peek() } else nil
 			end
-			return { chat = chat }
+			local s = session:peek()
+			return { chat = chat, device = if s then s.device else nil }
 		end,
 		in_chat = function(): boolean
 			return not unsent()
 		end,
 		run = run_command,
 	}
+	local dictation = Dictation.bind(draft, function(): string
+		local edit = editing:get()
+		return `{chat}|{name}|{if edit then edit.item else ""}`
+	end, function(): boolean
+		local current = session:get()
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil
+			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
+	end, name)
 	return ds.Composer {
+		dictation = dictation,
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = function(cid: string)
@@ -467,10 +505,22 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_mention = completions.on_mention,
 		mention_enabled = completions.enabled,
 		mention_empty = completions.empty,
-		notice = notice,
+		-- (Its own line first, else its Cloud machine's, on a chat with one.)
+		notice = ui.computed(function(): any
+			local mine = notice:get()
+			if mine then
+				return mine
+			end
+			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			return if link then LinkNotice.of { cloud = link } else nil
+		end),
 		on_dismiss_notice = function()
 			notice:set(nil)
 		end,
+		on_notice_action = machine.wake,
+		alerts = machine.alerts,
+		on_alert_action = machine.on_alert,
+		on_dismiss_alert = machine.dismiss,
 		harnesses = function(): { any }
 			return store.catalog:get().harnesses
 		end,
@@ -539,7 +589,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			local chips = Shared.take_cargo_of(chat)
 			local pack = Carried.pack(chips, words, words)
 			-- (Each command or skill picked: its canonical reference.)
-			local typed = Invocations.encode(pack.typed)
+			-- (And each reference to what it carries, `@` picked: its name.)
+			local typed = Carried.settle(Invocations.encode(pack.typed), chips)
 			local prompt = Carried.text(typed, pack)
 			-- As the chat page sends: the prompt joins its transcript as the
 			-- transcript's send steps clear of the end (it glides to the top,
@@ -703,7 +754,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		if not s then
 			return nil
 		end
-		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
 	end)
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.
@@ -758,6 +809,9 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			Shared.attach_quote(q, chat)
 			focus:add(1)
 		end,
+		turn_state = if tab.kind == "subagent" then nil else TurnGlue.of(function(): any
+			return view.session:get()
+		end),
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
@@ -789,6 +843,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		link_menu = LinkMenu(open_link, function(): any
+			return view.session:peek()
+		end),
+		-- (A reply's link to one of its files or its agent's skills: a chip.)
+		link_chip = LinkChips(function(): any
 			return view.session:peek()
 		end),
 	}

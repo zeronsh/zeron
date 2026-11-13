@@ -1523,6 +1523,7 @@ mod tests {
                         max_awake_sessions: 5,
                         available,
                         credits: [Some(1240.0), Some(0.0), None][ix % 3],
+                        ..Default::default()
                     });
                     page.vault = Loadable::Ready(vault);
                     let days = if ix % 2 == 0 { 7 } else { 90 };

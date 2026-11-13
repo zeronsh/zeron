@@ -77,7 +77,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NEVER_REPLACED: &[&str] = &["@app/screens/plugins", "@app/screens/shell/settings"];
 
 /// Each plugin's own actions (`plugin.<id>.<name>`).
-pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "menu_run", "compose_comment", "file", "block"];
+pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "file", "block"];
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
 pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed"];
 
@@ -243,6 +243,9 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "commands" => {}
             // Banners go through Zeron's own, under its Settings.
             "notifications" => {}
+            // The agents' usage, accounts and models: the engine checks each
+            // ask against what this device allowed (`plugin.<id>.agents`).
+            "usage.read" | "accounts.read" | "accounts.switch" | "accounts.pin" | "models.read" | "models.set" | "messages.send" => {}
             // Its own tabs and pages: Zeron draws a placeholder of each,
             // which only this plugin may fill (replace).
             "panel.tabs" => out.push(Capability::OverrideElement(tab_selector(id))),

@@ -43,6 +43,7 @@ pub struct ViewerPeers {
     peers: Peers,
     wake: Arc<Notify>,
     changes: Arc<watch::Sender<u64>>,
+    resting: Arc<watch::Sender<bool>>,
     stop: CancellationToken,
 }
 
@@ -63,19 +64,22 @@ impl ViewerPeers {
             Peers::new(device_id, Arc::new(Refuse), stop.child_token())
         };
         let wake = Arc::new(Notify::new());
-        runtime.spawn(signaling::run_with_wake(
+        let (resting, rest) = watch::channel(false);
+        runtime.spawn(signaling::run_unless_resting(
             signaling,
             catalog,
             peers.clone(),
             outgoing,
             stop.child_token(),
             wake.clone(),
+            rest,
         ));
         Ok(Self {
             runtime: runtime.clone(),
             peers,
             wake,
             changes: Arc::new(watch::channel(0).0),
+            resting: Arc::new(resting),
             stop,
         })
     }
@@ -102,6 +106,19 @@ impl ViewerPeers {
         });
     }
 
+    /// Nothing is using the connection to `device`: close it, so its ICE keepalives
+    /// stop waking the radio. A later [`Self::open`] pairs again. Left alone if
+    /// another stream (a terminal) still rides it.
+    pub fn release_if_idle(&self, device: &str) {
+        let peers = self.peers.clone();
+        let device = device.to_owned();
+        self.runtime.spawn(async move {
+            if peers.ready(&device).await.is_some_and(|mux| mux.stream_count() == 0) {
+                peers.remove(&device).await;
+            }
+        });
+    }
+
     /// The device's network changed: every connection's path is gone.
     pub fn network_changed(&self) {
         let peers = self.peers.clone();
@@ -118,6 +135,12 @@ impl ViewerPeers {
         }
         self.wake.notify_one();
         self.changes.send_modify(|n| *n += 1);
+    }
+
+    /// Nobody's using this device: close signaling and every connection, and open
+    /// nothing until told otherwise. Each one would otherwise keep the radio up.
+    pub fn rest(&self, rest: bool) {
+        self.resting.send_replace(rest);
     }
 
     /// Resolves at the next network change or return to the foreground.

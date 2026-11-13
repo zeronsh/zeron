@@ -14,6 +14,7 @@ import type {
   EnrollDeviceRequest,
   GithubDevicePoll,
   GithubDeviceStart,
+  GithubListingView,
   GithubRepoView,
   Grant,
   GrantRequest,
@@ -88,6 +89,10 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
 
   githubRepos(caller: VaultCaller, query?: string): Promise<VaultResult<readonly GithubRepoView[]>> {
     return this.vault().githubRepos(caller, query);
+  }
+
+  githubListing(caller: VaultCaller, query?: string): Promise<VaultResult<GithubListingView>> {
+    return this.vault().githubListing(caller, query);
   }
 
   githubBranches(caller: VaultCaller, repo: string): Promise<VaultResult<readonly string[]>> {

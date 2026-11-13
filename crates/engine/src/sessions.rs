@@ -266,6 +266,8 @@ struct Inner {
     /// Per chat: the recovery re-dispatch on its way (see
     /// [`SessionsEngine::recover_stale`]), claimed by its message's dispatch.
     revivals: Mutex<HashMap<String, Revival>>,
+    /// Chats whose revival hasn't returned from its dispatch yet.
+    revivals_starting: Mutex<std::collections::HashSet<String>>,
     /// Per chat: messages a Stop cancelled while they were still on their
     /// way (see [`SessionsEngine::cancel_sent_messages`]).
     cancelled_sends: Mutex<HashMap<String, std::collections::HashSet<String>>>,
@@ -278,6 +280,12 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// Rung as the port is recorded: what a run revived on boot, while the
+    /// engine is still being assembled, waits on ([`SessionsEngine::ipc_port_ready`]).
+    ipc_ready: tokio::sync::Notify,
+    /// Set when this engine will serve no port at all
+    /// ([`SessionsEngine::set_no_ipc_port`]): that wait ends at once.
+    ipc_none: std::sync::atomic::AtomicBool,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
@@ -353,9 +361,12 @@ impl SessionsEngine {
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
+                revivals_starting: Mutex::new(std::collections::HashSet::new()),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_ready: tokio::sync::Notify::new(),
+                ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
                 journal,
                 registry,
@@ -389,7 +400,48 @@ impl SessionsEngine {
     pub fn set_ipc_port(&self, port: u16) {
         self.inner
             .ipc_port
-            .store(port, std::sync::atomic::Ordering::Relaxed);
+            .store(port, std::sync::atomic::Ordering::Release);
+        self.inner.ipc_ready.notify_waiters();
+    }
+
+    /// Record that this engine serves no IPC port (it lost the bind): a run
+    /// revived on boot goes on at once without Zeron tools, rather than
+    /// waiting out [`Self::ipc_port_ready`]'s limit for a port never coming.
+    pub fn set_no_ipc_port(&self) {
+        self.inner
+            .ipc_none
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.ipc_ready.notify_waiters();
+    }
+
+    /// Until the IPC port is recorded (or none is said to be coming), or
+    /// `limit` passes. Boot recovery revives cut-off turns while the engine is
+    /// still being assembled, before it serves its port: dispatched then, a
+    /// revived run went out with no Zeron tools (its agent read them as gone,
+    /// and a parent woken by its children's reports couldn't answer them).
+    async fn ipc_port_ready(&self, limit: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            // (Made before the check: `notify_waiters` reaches a `Notified`
+            // from its making, polled or not.)
+            let rung = self.inner.ipc_ready.notified();
+            // (Acquire: the bearer, recorded before the port, is seen too.)
+            let port = self
+                .inner
+                .ipc_port
+                .load(std::sync::atomic::Ordering::Acquire);
+            if port != 0
+                || self
+                    .inner
+                    .ipc_none
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, rung).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
@@ -441,6 +493,47 @@ impl SessionsEngine {
         let _ = self.inner.titles.set(titles);
     }
 
+    /// End the live run of every chat whose row leaves the workspace (called
+    /// once at engine assembly). Nobody can message a deleted chat, so a run
+    /// parked after its last turn only held its agent process tree — and that
+    /// tree's MCP servers — until the idle reaper, or longer while background
+    /// work held the reaper off. One follower covers every way a row goes:
+    /// Delete on this device or another, a Cloud parent's children, a deleted
+    /// project's chats, the orphan sweep in `spaces`, voice's empty segments.
+    /// It ends the run with [`Self::terminate`], the Stop's teardown, so held
+    /// questions and subagent bookkeeping settle as they do there.
+    ///
+    /// Only a row seen and then gone counts: a run may start before its row
+    /// syncs in, and that is not a deletion. Archiving keeps the row, so an
+    /// archived chat's run goes on (a send revives an archived chat).
+    pub fn follow_chat_deletions(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
+        let weak = Arc::downgrade(&self.inner);
+        let mut known: std::collections::HashSet<String> =
+            chats.borrow_and_update().iter().map(|c| c.id.clone()).collect();
+        tokio::spawn(async move {
+            while chats.changed().await.is_ok() {
+                let now: std::collections::HashSet<String> =
+                    chats.borrow_and_update().iter().map(|c| c.id.clone()).collect();
+                let Some(inner) = weak.upgrade() else { return };
+                let sessions = SessionsEngine { inner };
+                for gone in known.difference(&now) {
+                    if !sessions.has_run(gone) {
+                        continue;
+                    }
+                    tracing::info!(chat = %gone, "chat deleted; ending its run");
+                    let sessions = sessions.clone();
+                    let chat_id = gone.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = sessions.terminate(&chat_id).await {
+                            tracing::warn!(chat = %chat_id, error = %err, "ending a deleted chat's run failed");
+                        }
+                    });
+                }
+                known = now;
+            }
+        });
+    }
+
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
@@ -490,6 +583,15 @@ impl SessionsEngine {
     /// question it is still owed an answer to (see [`is_active`]). A persistent
     /// session parked BETWEEN turns is not: it holds a warm child with nothing
     /// outstanding, and takes the next prompt straight through its mailbox.
+    /// When the turn now running started (epoch millis), while one is.
+    pub fn turn_started_ms(&self, chat_id: &str) -> Option<i64> {
+        lock(&self.inner.statuses)
+            .get(chat_id)
+            .filter(|session| is_active(session))
+            .and_then(|session| session.started_at)
+            .map(|started| started.timestamp_millis())
+    }
+
     pub fn turn_in_flight(&self, chat_id: &str) -> bool {
         lock(&self.inner.statuses)
             .get(chat_id)
@@ -574,6 +676,43 @@ impl SessionsEngine {
                 std::io::Error::other(e.to_string()),
             ))
         })?
+    }
+
+    /// What this engine's runs are doing, for the Cloud runner heartbeat:
+    /// turns in flight, those parked on a question, and runs whose turn ended
+    /// with background work still live. A runaway subagent can't hold the
+    /// machine forever: the idle reaper ends a parked run whose subagents
+    /// fall silent.
+    pub fn run_counts(&self) -> crate::runner::RunCounts {
+        let (active, waiting) = {
+            let statuses = lock(&self.inner.statuses);
+            (
+                statuses.values().filter(|s| is_active(s)).count(),
+                statuses
+                    .values()
+                    .filter(|s| s.status == SessionStatus::AwaitingInput)
+                    .count(),
+            )
+        };
+        crate::runner::RunCounts {
+            active,
+            waiting,
+            background: self.background_count(),
+        }
+    }
+
+    /// Chats whose turn has ended but whose runtime still runs background
+    /// work (subagents, background shells).
+    pub fn background_count(&self) -> usize {
+        let parked: Vec<String> = lock(&self.inner.runs)
+            .iter()
+            .filter(|(_, run)| run.turn.background_live())
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        parked
+            .iter()
+            .filter(|chat| !self.turn_in_flight(chat))
+            .count()
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -1028,7 +1167,7 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self.inner.registry.run_credential(harness_id).await;
+        let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1146,6 +1285,16 @@ impl SessionsEngine {
                 .inner
                 .shutting_down
                 .load(std::sync::atomic::Ordering::Acquire);
+        // A deleted chat takes no turn: a message queued behind the run its
+        // delete ended, or a send that crossed the delete. (Checked under the
+        // run lock: a delete after this finds the run below and ends it, see
+        // `follow_chat_deletions`.)
+        let deleted = self.inner.workspace().is_some_and(|ws| ws.chat_deleted(chat_id));
+        if deleted {
+            drop(runs);
+            tracing::info!(chat = %chat_id, "run not started: the chat was deleted");
+            return Ok(String::new());
+        }
         if moved_on || stopped || shutting_down {
             drop(runs);
             if moved_on {
@@ -1259,7 +1408,7 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self.inner.registry.run_credential(harness_id).await {
+        match self.inner.registry.run_credential(harness_id, Some(chat_id)).await {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
@@ -1506,6 +1655,11 @@ impl SessionsEngine {
     /// under their own ids. Otherwise, or when the stop doesn't settle, it
     /// is an ordinary steer ([`Self::steer_at`]), read at the next step
     /// boundary. Nothing here tears a runtime down.
+    ///
+    /// A message from another chat never stops the turn: Claude Code words
+    /// every interrupt as the person rejecting the tool call and telling the
+    /// agent to stop and wait, so the agent would take the other chat's
+    /// message as an order to stop. It waits for the step boundary instead.
     pub(crate) async fn steer_now(
         &self,
         chat_id: &str,
@@ -1514,7 +1668,11 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
-        if self.steer_stops_tool(chat_id) && self.stop_turn_keeping_runtime(chat_id).await {
+        let from_another_chat = zeron_proto::agent_messages::agent_message_sender(prompt).is_some();
+        if !from_another_chat
+            && self.steer_stops_tool(chat_id)
+            && self.stop_turn_keeping_runtime(chat_id).await
+        {
             let earlier = lock(&self.inner.runs)
                 .get(chat_id)
                 .map(|h| std::mem::take(&mut *lock(&h.redeliver)))
@@ -1727,6 +1885,13 @@ impl SessionsEngine {
         lock(&self.inner.runs).contains_key(chat_id)
     }
 
+    /// Boot recovery means to bring this chat's killed turn back, and hasn't got
+    /// as far as a run holding the chat. (Not `revivals`: dispatch takes its entry
+    /// before the run is in place, and a row sent in that moment overtakes it.)
+    pub(crate) fn revival_pending(&self, chat_id: &str) -> bool {
+        lock(&self.inner.revivals_starting).contains(chat_id)
+    }
+
     /// Fold an engine-made event (a `show_visual` page, a `show_image` image)
     /// into the chat's live run, after whatever the harness streamed so far.
     /// Returns `false` when the chat has no run on this device.
@@ -1763,6 +1928,11 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Boot recovery has a revival of this chat on its way.
+    pub(crate) fn reviving(&self, chat_id: &str) -> bool {
+        lock(&self.inner.revivals).contains_key(chat_id)
+    }
+
     /// Boot recovery: pick back up every turn the engine itself cut off — a
     /// journal whose last event is not `Done` (the engine died mid-stream), or
     /// a chat its graceful shutdown marked (see [`Self::shutdown`]; that
@@ -1783,6 +1953,11 @@ impl SessionsEngine {
     /// carry on), a turn parked on an unanswered question, a turn that had
     /// already finished, and one the user had stopped (its run had not
     /// settled yet when the engine died).
+    ///
+    /// Whatever happens to it, a turn cut off never ends in silence: a reply
+    /// that reached disk carries the note, and one that didn't (the kill came
+    /// before the doc's debounced save, so the transcript ends at the user's
+    /// message) gets an entry of its own, as does a revival that fails to start.
     pub fn recover_stale(&self) -> Result<usize, EngineError> {
         const MAX_AUTO_RESUME: u32 = 3;
         const RESUME_FRESH_MS: i64 = 12 * 60 * 60 * 1000;
@@ -1921,6 +2096,13 @@ impl SessionsEngine {
             // A shutdown already finalized its entry (with its own note); a
             // streaming entry here means the snapshot outran that.
             let stamped = handle.mark_abandoned_streams(&note)?.len();
+            // Nothing to stamp, not going to run, and not the user's doing or
+            // a turn that had finished.
+            if stamped == 0 && pickup != Pickup::Resume && !stopped && !(crashed && tail.finished) {
+                if let Some(last) = entries.last().filter(|e| e.role == MessageRole::User) {
+                    handle.note_turn_failure(&last.id, &note)?;
+                }
+            }
             self.inner.set_status_with_completion(
                 &chat_id,
                 SessionStatus::Idle,
@@ -1962,19 +2144,29 @@ impl SessionsEngine {
                     continuation,
                 },
             );
+            lock(&self.inner.revivals_starting).insert(chat_id.clone());
             request.resume = None; // dispatch re-injects the remembered session
             request.attachments = Vec::new();
             let sessions = self.clone();
             tokio::spawn(async move {
                 let Some(host) = sessions.inner.doc_host() else {
+                    lock(&sessions.inner.revivals_starting).remove(&chat_id);
                     return;
                 };
+                // Its Zeron tools need the port the engine is about to serve.
+                // (One serving none, its in-process transport alone, goes on
+                // without them after a moment, as any run of its does.)
+                sessions
+                    .ipc_port_ready(std::time::Duration::from_secs(10))
+                    .await;
                 // A message sent since boot owns the chat now: reviving the
                 // old turn into it would deliver the old request a second
                 // time (dispatch checks again as the run starts).
                 if sessions.has_run(&chat_id) {
                     sessions.inner.drop_revival(&chat_id, &user_id);
                     tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
+                    lock(&sessions.inner.revivals_starting).remove(&chat_id);
+                    host.kick_drains();
                     return;
                 }
                 match host
@@ -1994,9 +2186,20 @@ impl SessionsEngine {
                     }
                     Err(err) => {
                         sessions.inner.drop_revival(&chat_id, &user_id);
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed");
+                        let note = format!(
+                            "Run interrupted by engine restart, and couldn't be resumed ({err}). \
+                             Send a message to continue."
+                        );
+                        if let Err(err) = handle.note_turn_failure(&user_id, &note) {
+                            tracing::warn!(chat = %chat_id, error = %err, "noting a failed resume failed");
+                        }
                     }
                 }
+                // Whatever waited behind this revival: a turn it started holds it
+                // again until it ends, and one that didn't start doesn't.
+                lock(&sessions.inner.revivals_starting).remove(&chat_id);
+                host.kick_drains();
             });
         }
         Ok(recovered)
@@ -2343,6 +2546,20 @@ impl Inner {
         if matches!(event, AgentEvent::Done { .. }) {
             self.journal.clear_user_stop(chat_id);
         }
+        // A turn's error, for plugins' events: a usage limit hit, a login
+        // expired (`plugins::agents`; told only if it's one of those).
+        let problem = match event {
+            AgentEvent::Error { message } => Some(message.as_str()),
+            AgentEvent::Done { error: Some(error), .. } => Some(error.as_str()),
+            _ => None,
+        };
+        if let (Some(message), Some(plugins)) = (problem, self.plugins.get()) {
+            plugins.agents().observe_problem(chat_id, message);
+        }
+        // Its final reply, told with its `turn.finished` (`messages.read`).
+        if let (AgentEvent::Done { result: Some(reply), .. }, Some(plugins)) = (event, self.plugins.get()) {
+            plugins.agents().observe_reply(chat_id, reply);
+        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,
@@ -2355,20 +2572,19 @@ impl Inner {
     /// Bump the session's freshness on stream activity WITHOUT a status
     /// transition. Long silent-LOOKING stretches (thinking heartbeats, a big
     /// tool input being generated) still carry events — the UI's 45s
-    /// staleness gate must not flip "Working" off mid-run. Throttled: a
-    /// workspace-doc mirror per delta would be far too chatty.
+    /// staleness gate must not flip "Working" off mid-run. Each touch is a
+    /// stored registry write, so it comes only as often as that gate needs
+    /// ([`zeron_proto::view::SESSION_HEARTBEAT_MS`]), and never for a row
+    /// with nothing to expire: a session parked idle after its turn read the
+    /// same with or without one, and touched every 15 s for its 30 minutes.
     fn touch_session(&self, chat_id: &str) {
-        const TOUCH_THROTTLE_MS: i64 = 10_000;
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
                 return;
             };
-            let age = now
-                .signed_duration_since(entry.updated_at)
-                .num_milliseconds();
-            if age < TOUCH_THROTTLE_MS {
+            if !touch_due(entry, now) {
                 return;
             }
             entry.updated_at = now;
@@ -2638,7 +2854,7 @@ impl Inner {
         if port == 0 {
             return None;
         }
-        let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let command = crate::managed::mcp_executable()?.to_str()?.to_owned();
         let mut env: std::collections::BTreeMap<String, String> = [
             ("ZERON_IPC_PORT".to_owned(), port.to_string()),
             (zeron_proto::McpServer::CHAT_ID_ENV.to_owned(), chat_id.to_owned()),
@@ -3520,6 +3736,21 @@ fn is_active(session: &Session) -> bool {
     )
 }
 
+/// How often a live run (and the activity projection) checks whether a
+/// session row is due its heartbeat. A check costs a lock and a compare;
+/// only a due one writes. Bounds a quiet row's restamps to
+/// `SESSION_HEARTBEAT_MS` plus this.
+const HEARTBEAT_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a liveness touch should restamp (and so store) `session` at
+/// `now`: only a row readers would expire, once its last stamp is a
+/// heartbeat old.
+fn touch_due(session: &Session, now: chrono::DateTime<Utc>) -> bool {
+    zeron_proto::view::session_expires(session)
+        && now.signed_duration_since(session.updated_at).num_milliseconds()
+            >= zeron_proto::view::SESSION_HEARTBEAT_MS
+}
+
 // ── subagent docs ───────────────────────────────────────────────────────────
 
 /// The per-subagent doc id: `{chatId}--sub--{suffix}`. Constrained by the
@@ -3555,6 +3786,17 @@ fn is_chat_spawn(id: &str, folded: &[MessagePart], doc: &SessionDoc) -> bool {
         matches!(p, MessagePart::Tool { id: part, call, .. }
             if part == id && call.is_subagent_spawn())
     }) || doc.has_subagent_spawn(id)
+}
+
+/// When to commit what just changed: at once, unless a commit went out less than a
+/// window ago, then a window after it. The same at most one per window as waiting a
+/// window every time, without making the first change after a pause wait.
+fn next_commit(last: Option<tokio::time::Instant>) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    match last {
+        Some(at) => (at + std::time::Duration::from_millis(STREAM_COMMIT_MS)).max(now),
+        None => now,
+    }
 }
 
 /// Test-only instrumentation: how often `drive_run`'s coalesced commit branch
@@ -4156,13 +4398,25 @@ async fn drive_run(
                 );
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
-                match inner
+                let prepared = inner
                     .registry
-                    .prepare_run(harness_id, &mut wire_request)
-                    .await
-                {
+                    .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
+                    .await;
+                if prepared.is_ok() {
+                    // Preparing can decide the chat's account (a plugin's
+                    // `run.preparing` pin): the session parks on what it
+                    // really started with, not on what dispatch read before.
+                    let now = inner.registry.run_credential(harness_id, Some(&chat_id)).await;
+                    if let Some(h) = lock(&inner.runs).get_mut(&chat_id).filter(|h| h.run_id == run_id) {
+                        h.credential = now;
+                    }
+                }
+                match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
-                    Ok(()) => harness.run(wire_request, controls).await,
+                    Ok(()) => {
+                        crate::wake_trace::mark(crate::wake_trace::Stage::AgentSpawn);
+                        harness.run(wire_request, controls).await
+                    }
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
                 }
             } else {
@@ -4363,6 +4617,9 @@ async fn drive_run(
 
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
+    // Commits are at most one per window, but the first after a quiet spell goes at
+    // once: a turn's first token and a steer's echo don't wait out a window.
+    let mut last_flush: Option<tokio::time::Instant> = None;
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
@@ -4377,8 +4634,12 @@ async fn drive_run(
     // timeout here by design (a first port was rejected — agents may
     // legitimately be quiet for >10min): a live child means Working, dying
     // paths each carry their own error, and engine death stops these ticks
-    // so the gate still catches real crashes. touch_session throttles at 10s.
-    let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    // so the gate still catches real crashes. touch_session stores a touch
+    // only for a row that can expire, once its stamp is SESSION_HEARTBEAT_MS
+    // old; this tick only checks, so a quiet live row is restamped within
+    // one tick of that (≤ 30 s apart, inside the 45 s gate). A coarser tick
+    // let a stamp from the last streamed event age 40 s before the next.
+    let mut live_heartbeat = tokio::time::interval(HEARTBEAT_CHECK);
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The runtime's background processes, published on the session row.
     let mut background_processes = turn.watch_background_processes();
@@ -4666,7 +4927,13 @@ async fn drive_run(
                     continue;
                 }
                 next = stream.next() => match next {
-                    Some(Ok(event)) => event,
+                    Some(Ok(event)) => {
+                        crate::wake_trace::note_agent_event(matches!(
+                            event,
+                            AgentEvent::SessionStarted { .. }
+                        ));
+                        event
+                    }
                     // A stream error while PARKED is a post-turn child death —
                     // the turn was already finalized, so the run ends clean
                     // instead of stamping a completed session Errored.
@@ -4703,6 +4970,7 @@ async fn drive_run(
                     FLUSH_TICKS.with(|t| t.set(t.get() + 1));
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
+                    last_flush = Some(tokio::time::Instant::now());
                     if dirty {
                         if let Err(err) = sync_segment(
                             doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
@@ -4874,8 +5142,7 @@ async fn drive_run(
                 zeron_doc::fold_event_into_parts(&mut folded, &event);
                 if !dirty {
                     dirty = true;
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    flush_at = next_commit(last_flush);
                 }
             }
             // Open the sink lazily; an open failure degrades to chip-only.
@@ -4943,8 +5210,7 @@ async fn drive_run(
                 // fire the commit branch on every event instead of once per
                 // STREAM_COMMIT_MS window.
                 if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    flush_at = next_commit(last_flush);
                 }
                 if done {
                     let status = match sub_event.as_ref() {
@@ -5584,8 +5850,7 @@ async fn drive_run(
 
         if !folded.is_empty() && !dirty {
             dirty = true;
-            flush_at =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+            flush_at = next_commit(last_flush);
         }
     };
 
@@ -5700,6 +5965,66 @@ async fn drive_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_at(status: SessionStatus, updated_at: chrono::DateTime<Utc>) -> Session {
+        Session {
+            chat_id: "c".into(),
+            device_id: "d".into(),
+            status,
+            started_at: None,
+            updated_at,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            waiting: None,
+        }
+    }
+
+    /// A live row is restamped often enough for shipped readers' 45 s gate,
+    /// no oftener; a row parked idle with nothing running is never touched.
+    #[test]
+    fn liveness_touches_only_rows_that_expire_once_a_heartbeat_old() {
+        let now = Utc::now();
+        let ms = chrono::Duration::milliseconds;
+        let beat = zeron_proto::view::SESSION_HEARTBEAT_MS;
+        for status in [SessionStatus::Working, SessionStatus::AwaitingInput] {
+            assert!(!touch_due(&session_at(status, now - ms(beat - 1)), now));
+            assert!(touch_due(&session_at(status, now - ms(beat)), now));
+        }
+        // A due row is stored by the next check: at most 30 s apart, which
+        // leaves shipped readers' 45 s gate 15 s for delivery and skew.
+        let check = HEARTBEAT_CHECK.as_millis() as i64;
+        assert!(beat + check <= 30_000);
+        assert!(beat + check + 15_000 <= zeron_proto::view::SESSION_STALE_MS);
+
+        let long_ago = now - chrono::Duration::minutes(20);
+        assert!(!touch_due(&session_at(SessionStatus::Idle, long_ago), now));
+        assert!(!touch_due(&session_at(SessionStatus::Errored, long_ago), now));
+        let mut subagents = session_at(SessionStatus::Idle, long_ago);
+        subagents.running_subagents = 1;
+        assert!(touch_due(&subagents, now));
+        let mut waiting = session_at(SessionStatus::Idle, long_ago);
+        waiting.waiting = Some(zeron_proto::SessionWaiting {
+            on: Vec::new(),
+            since: long_ago,
+        });
+        assert!(touch_due(&waiting, now));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_change_after_a_pause_commits_at_once_and_a_stream_stays_paced() {
+        let window = std::time::Duration::from_millis(STREAM_COMMIT_MS);
+        let start = tokio::time::Instant::now();
+        assert_eq!(next_commit(None), start, "a turn's first token");
+        assert_eq!(next_commit(Some(start)), start + window, "just committed: a window on");
+        tokio::time::advance(window * 3).await;
+        assert_eq!(next_commit(Some(start)), tokio::time::Instant::now(), "quiet since");
+        tokio::time::advance(window / 2).await;
+        let recent = tokio::time::Instant::now() - window / 4;
+        assert_eq!(next_commit(Some(recent)), recent + window);
+    }
 
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {
@@ -5967,7 +6292,9 @@ mod tests {
         let journal =
             serde_json::to_string(&sessions.inner.journal.replay("chat", 0).unwrap()).unwrap();
         assert!(!journal.contains(png_b64));
-        assert!(journal.contains(&preview_paths[0]));
+        // (As the journal's JSON writes it: a Windows path's `\` escaped.)
+        let stored = serde_json::to_string(&preview_paths[0]).unwrap();
+        assert!(journal.contains(stored.trim_matches('"')), "{journal}");
 
         let bad = AgentEvent::ToolResult {
             exit_code: None,
@@ -7221,5 +7548,74 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Idle);
         assert!(s.last_completed_turn.is_some(), "a wait never swallows the finish");
         rig.core.sessions.shutdown().await;
+    }
+
+    /// What a turn revived on boot waits on before it dispatches: the port its
+    /// Zeron tools dial. An engine serving none goes on at the limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_the_port_gives_up_at_its_limit_wakes_as_it_is_recorded_and_is_over_after() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let limit = Duration::from_secs(10);
+
+        // No port, none coming: the whole limit, then on without one.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), limit);
+
+        // The port recorded midway: the wait ends then, not at the limit.
+        let start = Instant::now();
+        let waiting = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.ipc_port_ready(limit).await }
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!waiting.is_finished(), "no port yet: still waiting");
+        sessions.set_ipc_port(27699);
+        waiting.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+
+        // Recorded already: no wait at all.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    /// An engine that knows it serves no port says so, and the wait for one
+    /// ends then rather than at its limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_the_port_ends_when_none_is_coming() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let limit = Duration::from_secs(10);
+
+        // Said midway: the wait ends then.
+        let start = Instant::now();
+        let waiting = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.ipc_port_ready(limit).await }
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!waiting.is_finished(), "not said yet: still waiting");
+        sessions.set_no_ipc_port();
+        waiting.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(2));
+
+        // Said already: no wait at all.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }

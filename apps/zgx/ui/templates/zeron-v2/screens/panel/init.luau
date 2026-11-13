@@ -66,6 +66,7 @@ local state = require("@app/screens/panel/state")
 -- Lanes seen as their tabs come to the front (the panel home's done checks).
 require("@app/screens/panel/lanes_seen")
 local Files = require("@app/screens/files")
+local FilePaths = require("@app/screens/files/paths")
 -- The shell's layout (whether a session's panel is expanded), if it's there
 -- (a fixture mounts the panel alone).
 local shell_view: any = nil
@@ -661,8 +662,8 @@ M.Panel = ui.component(function(props: Props): Node
 		end
 		-- Its last tab gone, the panel closes for this session (as the
 		-- shipping app's `collapse_surfaces_if_empty`), leaving expanded with
-		-- it; opened again, it shows its empty page. Only if Settings →
-		-- General says so (off by default: it stays open on its home).
+		-- it; opened again, it shows its empty page. Settings → General can
+		-- keep it open on its home instead (on by default).
 		local close_with_last = require("@app/screens/settings/prefs").close_panel_with_last_tab:peek() == true
 		if tab and close_with_last and #state.of(k).tabs == 0 then
 			local on_last = props.on_last_closed
@@ -868,7 +869,20 @@ M.Panel = ui.component(function(props: Props): Node
 				-- the one left behind faint until it lands.
 				on_drag = function(): any
 					dragging:set(true)
-					return { panel_tab = id }
+					-- Keep the strip's identity while carrying context to a composer.
+					local payload: any = { panel_tab = id }
+					if tab.kind == "files" then
+						local path = Files.tab_file(id) or tab.path
+						if path then
+							local target = FilePaths.target_of(project, session)
+							payload.paths = { path }
+							payload.root = if target then target.root else nil
+						end
+					elseif tab.kind == "side_chat" and tab.chat and lanes_card
+						and lanes_card.unsent:peek()[tab.chat] == nil and lanes_card.forks:peek()[tab.chat] == nil then
+						payload.session = tab.chat
+					end
+					return payload
 				end,
 				drag_preview = function()
 					local card: { [any]: any } = {

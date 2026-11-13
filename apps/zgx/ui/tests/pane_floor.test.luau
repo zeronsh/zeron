@@ -1,8 +1,10 @@
 -- A split's panes and the two sides: opening one side when the panes wouldn't
--- have their least with both open closes the other, which stays closed until
--- it's asked for. A window too narrow: the panel's width goes first, then the
--- sidebar hides, then the panes narrow. The panel never grows by itself beside
--- them, and nothing covers them. On the shell in
+-- have their least with both open hides the other, three columns at most
+-- (Wing's cap); hidden by the fit, not closed, it's back by itself once
+-- there's room again (the side opened closed). What the person closed stays
+-- closed. A window too narrow: the panel's width goes first, then the
+-- sidebar hides, then the panes narrow. The panel never grows by itself
+-- beside them, and nothing covers them. On the shell in
 -- ui/shell_fixture.luau.
 
 local PANE_MIN = require("../screens/shell/fit_policy").PANE_MIN
@@ -65,36 +67,46 @@ local function expect_panes_keep_their_least(app: any, ids: { string }, when: st
 end
 local PAIR, TRIO = { "a1", "a2" }, { "a1", "a2", "a3" }
 
-test("the panel opened when the panes would go under their least: the sidebar closes, and stays closed", function()
+test("the panel opened when the panes would go under their least: the sidebar gives way, and is back as it closes", function()
 	local app = split(1100, row(PAIR))
 	expect(sidebar_shows(app)).to_be(true)
 	toggle(app)
 	expect(panel_w(app)).to_be(360)
 	expect_panes_keep_their_least(app, PAIR, "1100")
 	expect(sidebar_shows(app)).to_be(false)
-	expect(app:state("shell_collapsed")).to_be(true)
-	-- The panel closed: the sidebar isn't back until it's asked for.
+	-- Hidden for room, not closed by the person.
+	expect(app:state("shell_collapsed")).to_be(false)
+	-- The panel closed: the sidebar is back by itself.
 	toggle(app)
 	expect(panel_w(app) <= 1).to_be(true)
-	expect(sidebar_shows(app)).to_be(false)
-	toggle_sidebar(app)
 	expect(sidebar_shows(app)).to_be(true)
+	-- The sidebar folded by the person, the panel opened and closed: it
+	-- stays folded.
+	toggle_sidebar(app)
+	expect(sidebar_shows(app)).to_be(false)
+	toggle(app)
+	toggle(app)
+	expect(sidebar_shows(app)).to_be(false)
+	expect(app:state("shell_collapsed")).to_be(true)
 end)
 
-test("the sidebar opened when the panes would go under their least: the panel closes, and stays closed", function()
+test("the sidebar opened when the panes would go under their least: the panel gives way, and is back as it folds", function()
 	local app = split(1100, row(PAIR))
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(false)
 	toggle_sidebar(app)
 	expect(sidebar_shows(app)).to_be(true)
 	expect(panel_w(app) <= 1).to_be(true)
-	-- The sidebar closed: the panel isn't back until it's asked for.
+	-- The sidebar folded: the panel is back by itself, at its least.
 	toggle_sidebar(app)
 	expect(sidebar_shows(app)).to_be(false)
-	expect(panel_w(app) <= 1).to_be(true)
-	-- Asked for, it's back, and the sidebar's closed already: nothing else.
-	toggle(app)
 	expect(panel_w(app)).to_be(360)
+	-- The panel closed by the person, the sidebar opened and folded: it
+	-- stays closed.
+	toggle(app)
+	toggle_sidebar(app)
+	toggle_sidebar(app)
+	expect(panel_w(app) <= 1).to_be(true)
 end)
 
 test("with room for both, panes at their least, nothing closes either way", function()
@@ -137,16 +149,18 @@ test("the sidebar opened beside panes under their least with the panel closed: t
 	expect(pane_w(app, "a1") < PANE_MIN).to_be(true)
 end)
 
+-- (The panel's share: half of what the sidebar and the window's gaps round
+-- the cards leave, 18 beside the sidebar, 14 without: chat and panel equal.)
 test("a chat alone goes as it always has: the sidebar stays, or hides for room and comes back", function()
 	local app = split(1100)
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(true)
-	expect(panel_w(app)).to_be(422)
+	expect(panel_w(app)).to_be(405)
 	toggle(app)
 	app:resize(880, 800)
 	app:frames(30)
 	toggle(app)
-	expect(panel_w(app)).to_be(440)
+	expect(panel_w(app)).to_be(433)
 	expect(sidebar_shows(app)).to_be(false)
 	expect(app:state("shell_collapsed")).to_be(false)
 	toggle(app)
@@ -160,7 +174,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	expect(sidebar_shows(app)).to_be(true)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
-	expect(panel_w(app)).to_be(440)
+	expect(panel_w(app)).to_be(433)
 	expect(sidebar_shows(app)).to_be(false)
 	-- Closed by its toggle, the sidebar's back, as ever.
 	toggle(app)
@@ -171,7 +185,7 @@ test("a chat alone in a narrow window: anything opening its panel shows it, as i
 	app:frames(30)
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
-	expect(panel_w(app)).to_be(372)
+	expect(panel_w(app)).to_be(360)
 	expect(sidebar_shows(app)).to_be(true)
 end)
 
@@ -179,7 +193,7 @@ test("panes stacked are as wide as the page: one across, as a chat alone", funct
 	local app = split(1100, { kind = "col", children = { leaf("a1"), leaf("a2") } })
 	toggle(app)
 	expect(sidebar_shows(app)).to_be(true)
-	expect(panel_w(app)).to_be(422)
+	expect(panel_w(app)).to_be(405)
 end)
 
 test("the window narrowed: the panel gives its width, then the sidebar hides, then the panes narrow; widened, the sidebar's back", function()
@@ -326,23 +340,28 @@ test("beside a split its tree floats, however wide the window: the panel never g
 	expect_panes_keep_their_least(app, PAIR, "wide")
 end)
 
-test("opened by anything else: Files' key closes the sidebar too", function()
+test("opened by anything else: Files' key hides the sidebar too, and it's back as the panel closes", function()
 	local app = split(1100, row(PAIR))
 	app:command("shell.toggle_files_tab")
 	app:frames(60)
 	expect(panel_w(app)).to_be(360)
 	expect(sidebar_shows(app)).to_be(false)
+	toggle(app)
+	expect(sidebar_shows(app)).to_be(true)
 end)
 
-test("Expand is only ever the person's, and the sidebar opened over it closes nothing", function()
+test("Expand is only ever the person's: the sidebar that gave way is back over it, and folding it closes nothing", function()
 	local app = split(1100, row(TRIO))
 	toggle(app)
+	expect(sidebar_shows(app)).to_be(false)
 	expect(expanded(app, "a1")).to_be(false)
 	app:click("#panel-expand")
 	app:frames(60)
 	expect(expanded(app, "a1")).to_be(true)
-	toggle_sidebar(app)
+	-- (Expanded over the panes, there's room for it again.)
 	expect(sidebar_shows(app)).to_be(true)
+	toggle_sidebar(app)
+	expect(sidebar_shows(app)).to_be(false)
 	expect(expanded(app, "a1")).to_be(true)
 	expect(panel_w(app) > 500).to_be(true)
 end)

@@ -2232,6 +2232,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5373,6 +5379,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
+ "cty",
 ]
 
 [[package]]
@@ -13340,7 +13347,7 @@ dependencies = [
 
 [[package]]
 name = "zatex"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "tiny-skia",
  "ttf-parser",
@@ -13591,12 +13598,13 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
  "embed-resource",
  "libc",
+ "libmimalloc-sys",
  "mimalloc",
  "serde_json",
  "tempfile",
@@ -13615,7 +13623,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-audio"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "base64 0.22.1",
  "cpal 0.18.2",
@@ -13627,7 +13635,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-cli"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -13643,7 +13651,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-client"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13674,12 +13682,13 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "chrono",
  "loro",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "thiserror 2.0.20",
  "tracing",
@@ -13688,13 +13697,15 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
+ "core-foundation 0.10.1",
  "dunce",
  "fff-search",
  "flate2",
@@ -13715,6 +13726,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sysinfo",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
@@ -13745,7 +13757,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13779,7 +13791,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-launch"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "libc",
  "tempfile",
@@ -13788,14 +13800,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-markdown"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "zeron-mcp"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13817,7 +13829,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "serde",
@@ -13844,14 +13856,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile-bindgen"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "zeron-notify"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "objc",
  "sha2",
@@ -13860,11 +13872,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-orb"
-version = "0.2.138"
+version = "0.3.4"
 
 [[package]]
 name = "zeron-plugin-guard"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -13872,7 +13884,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13902,11 +13914,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-preview-label"
-version = "0.2.138"
+version = "0.3.4"
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -13917,7 +13929,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13938,8 +13950,9 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
+ "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
  "futures",
@@ -13949,10 +13962,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "uuid",
  "zeron-doc",
@@ -13961,7 +13976,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -13996,14 +14011,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-term"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "alacritty_terminal",
 ]
 
 [[package]]
 name = "zeron-term-link"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14020,7 +14035,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-text"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
@@ -14037,7 +14052,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -14052,7 +14067,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -14135,7 +14150,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "futures",
@@ -14152,11 +14167,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-veil"
-version = "0.2.138"
+version = "0.3.4"
 
 [[package]]
 name = "zeron-visual"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "base64 0.22.1",
  "gltf",
@@ -14168,7 +14183,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual-gpu"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "image",
  "pollster 0.4.0",
@@ -14179,11 +14194,13 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "cpal 0.17.3",
  "hound",
+ "ort",
+ "ort-sys",
  "parakeet-rs",
  "reqwest",
  "rubato",
@@ -14196,7 +14213,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice-media"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "semver",
@@ -14211,7 +14228,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice-session"
-version = "0.2.138"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "futures",

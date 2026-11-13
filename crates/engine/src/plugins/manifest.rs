@@ -42,6 +42,17 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // each device that allowed it, called by its windows and agents from
     // this device or another (plugins/service).
     "service",
+    // The agents' accounts, usage and models (plugins/agents): reading
+    // them, and the two controls (switching an account, setting a model).
+    "usage.read",
+    "accounts.read",
+    "accounts.switch",
+    "accounts.pin",
+    "models.read",
+    "models.set",
+    // Sending messages in your chats, starting chats and answering their
+    // questions, as you would from the composer (plugins/agents).
+    "messages.send",
 ];
 
 /// Ids the app keeps for itself.

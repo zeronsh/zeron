@@ -133,10 +133,14 @@ impl Client {
             )
             .await
         {
-            Ok(sessions) => Ok(CloudSessions {
-                available: true,
-                ..sessions
-            }),
+            Ok(sessions) => {
+                // Any read says which machines are updating (`cloud_stage`).
+                self.inner.note_cloud_sessions(&sessions);
+                Ok(CloudSessions {
+                    available: true,
+                    ..sessions
+                })
+            }
             Err(Failure::Missing(_)) => Ok(CloudSessions::default()),
             Err(Failure::Error(error)) => Err(error),
         }
@@ -296,6 +300,7 @@ impl Client {
             return Ok(GithubConnectProgress {
                 state: zeron_proto::GithubConnectState::Connected,
                 account: Some("octocat".into()),
+                already_connected: false,
                 error: None,
             });
         }
@@ -787,7 +792,10 @@ impl Client {
         }
         let is_read = method == reqwest::Method::GET;
         let token = self.inner.tokens.bearer().await.map_err(Failure::Error)?;
-        let mut request = crate::auth::http().request(method, url).bearer_auth(token);
+        let mut request = crate::auth::http()
+            .request(method, url)
+            .bearer_auth(token)
+            .header(zeron_proto::CLOUD_STATES_HEADER, zeron_proto::CLOUD_STATES_UNDERSTOOD);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -904,6 +912,7 @@ mod demo {
                 private,
                 description: (!description.is_empty()).then(|| description.into()),
                 pushed_at: pushed,
+                ..Default::default()
             })
             .collect()
     }
@@ -941,6 +950,7 @@ mod demo {
                 display_name: Some("You".into()),
                 organization: None,
                 plan: Some("Max 20×".into()),
+                avatar_url: None,
                 authorized_devices: vec![CLOUD_DEVICE.into()],
                 created_at: 0,
                 updated_at: 0,

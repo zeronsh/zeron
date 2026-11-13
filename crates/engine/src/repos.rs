@@ -367,6 +367,21 @@ impl Repos {
         Some(format!("{owner}/{name}"))
     }
 
+    /// [`Self::github_repo`], telling "no GitHub origin" (`Ok(None)`) from
+    /// a git call that failed (`Err`).
+    pub async fn github_repo_checked(&self, path: &Path) -> Result<Option<String>, EngineError> {
+        // Exit 1 with nothing said: no `origin` configured.
+        if self
+            .git_probe(&["config", "--get", "remote.origin.url"], Some(path))
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let remote = self.git(&["remote", "get-url", "origin"], Some(path)).await?;
+        Ok(parse_github_remote(&remote).map(|(owner, name)| format!("{owner}/{name}")))
+    }
+
     pub async fn is_repo(&self, path: &Path) -> bool {
         matches!(
             self.git(&["rev-parse", "--is-inside-work-tree"], Some(path)).await,

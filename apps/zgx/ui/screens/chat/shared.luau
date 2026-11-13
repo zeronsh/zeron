@@ -41,15 +41,107 @@ M.shown = ui.shared("chat.transcript.session", nil :: string?)
 -- Where in it the reader was (ds/transcript's `keep`), for a page made
 -- again; nil at the end.
 M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
--- The transcript's "Scroll to end" pill: its width while it shows (the
--- composer's folded trays' pill moves aside for it).
-M.jump_width = ui.shared("chat.transcript.jump_width", nil :: number?)
--- The composer's folded trays' pill: its width while it shows (the two
--- pills, both showing, centre together).
-M.pill_width = ui.shared("chat.composer.pill_width", nil :: number?)
+-- The two pills over a composer, a centred pair: its transcript's "Jump to
+-- latest" (`"jump"`) and the composer's folded trays' pill (`"waiting"`),
+-- each's width while it shows, nil while it doesn't. Every pane has its
+-- own pair, by its key: the chat page's transcript `"page"`, a lane's (a
+-- split's pane, a panel tab) `lane.<slot>`, its composer the same; the
+-- window's composer `"window"`. Each says only its own width; what stands
+-- beside it reads the other's: the window's composer the transcript at its
+-- foot (`at_foot`), a split's focused pane the window's composer, any
+-- other pane its own composer. (One width for the whole window had every
+-- pane's pills reading the one the chat page last said.)
+local pill_widths: { [string]: State<number?> } = {}
+function M.pill_width_of(kind: "jump" | "waiting", key: string): State<number?>
+	local k = `{kind}|{key}`
+	local s = pill_widths[k]
+	if not s then
+		s = ui.shared(`chat.pills.{k}`, nil :: number?)
+		pill_widths[k] = s
+	end
+	return s :: State<number?>
+end
+-- The pill whose width it says, as one said by one pill alone: nil from a
+-- pill made again after another took its key (a chat page made anew, its
+-- old transcript going after) clears only its own.
+local pill_owner: { [string]: any } = {}
+function M.pill_teller(kind: "jump" | "waiting", key: string): (w: number?) -> ()
+	local me = {}
+	local s = M.pill_width_of(kind, key)
+	local k = `{kind}|{key}`
+	return function(w: number?)
+		if w == nil and pill_owner[k] ~= me then
+			return
+		end
+		pill_owner[k] = if w == nil then nil else me
+		if s:peek() ~= w then
+			s:set(w)
+		end
+	end
+end
+-- The transcript at the window's composer's foot (its pair's key): the
+-- chat page's, or in a split the focused pane's (screens/shell/page).
+M.at_foot = ui.shared("chat.pills.at_foot", "page")
+-- (The chat page's pair, by its old names.)
+M.jump_width = M.pill_width_of("jump", "page")
+M.pill_width = M.pill_width_of("waiting", "window")
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
+-- The same across launches: each chat's place as last read, the chat shown
+-- with its place as it is read, each with when (os.time), the most recent
+-- `KEPT_PLACES` of them. A launch starts from them, so the chat it opens,
+-- and any other gone back to, opens where it was read.
+local KEPT_PLACES = 200
+local saved_places = ui.persist("chat_places", {} :: { [string]: any })
+do
+	local saved = saved_places:peek()
+	if next(M.places:peek()) == nil and type(saved) == "table" and next(saved) ~= nil then
+		local all: { [string]: any } = {}
+		for id, kept in saved do
+			if type(kept) == "table" and type(kept.place) == "table" then
+				all[id] = kept.place
+			end
+		end
+		M.places:set(all)
+	end
+end
+ui.effect(function()
+	local places = M.places:get()
+	local shown = M.shown:get()
+	local reading = M.anchor:get()
+	local before = saved_places:peek()
+	local now = os.time()
+	local all: { [string]: any } = {}
+	local count = 0
+	for id, place in places do
+		if id ~= shown then
+			local was = if type(before) == "table" then before[id] else nil
+			-- (When it was read: kept while its place is as it was.)
+			local at = if type(was) == "table" and was.at and was.place and was.place.id == place.id and was.place.dy == place.dy then was.at else now
+			all[id] = { place = place, at = at }
+			count += 1
+		end
+	end
+	if shown and reading ~= nil then
+		all[shown] = { place = reading, at = now }
+		count += 1
+	end
+	-- The most recent kept.
+	if count > KEPT_PLACES then
+		local order: { { id: string, at: number } } = {}
+		for id, kept in all do
+			table.insert(order, { id = id, at = tonumber(kept.at) or 0 })
+		end
+		table.sort(order, function(a: { id: string, at: number }, b: { id: string, at: number }): boolean
+			return a.at > b.at
+		end)
+		for i = KEPT_PLACES + 1, #order do
+			all[order[i].id] = nil
+		end
+	end
+	saved_places:set(all)
+end)
 -- Every other chat's draft, by key (a session's id; "" a new chat's), and
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
@@ -66,6 +158,53 @@ local function chip_id(kind: string): string
 	made:set(n)
 	return `{kind}{n}`
 end
+
+-- The new-chat page's draft (its words, what it carries, the passages
+-- quoted into it), kept across launches as its settings are
+-- (screens/chat/composer's `chat_new_defaults`); a chat's isn't.
+local saved_new = ui.persist("chat_new_draft", nil :: any)
+do
+	-- A launch (nothing out yet, nothing put away for a new chat): the new
+	-- page's draft as it was left, out as the new chat's (put away under
+	-- "" if a chat shows first, as any move does).
+	local all = kept:peek()
+	local was = saved_new:peek()
+	if type(was) == "table" and all[""] == nil and here:peek() == "" and M.text:peek() == "" and #M.cargo:peek() == 0 then
+		ui.batch(function()
+			M.text:set(if type(was.text) == "string" then was.text else "")
+			M.cargo:set(if type(was.cargo) == "table" then was.cargo else {})
+			M.quotes:set(if type(was.quotes) == "table" then was.quotes else {})
+			-- (Its chips' ids taken: one made from here never repeats one.)
+			local top = made:peek()
+			for _, c in M.cargo:peek() do
+				local n = tonumber(string.match(tostring(c.id or ""), "(%d+)$"))
+				if n and n > top then
+					top = n
+				end
+			end
+			if top ~= made:peek() then
+				made:set(top)
+			end
+		end)
+	end
+end
+ui.effect(function()
+	local now: any = nil
+	if here:get() == "" then
+		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+		if text ~= "" or #cargo > 0 then
+			now = { text = text, cargo = cargo, quotes = quotes }
+		end
+	else
+		local put = kept:get()[""]
+		if put then
+			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
+		end
+	end
+	if now ~= nil or saved_new:peek() ~= nil then
+		saved_new:set(now)
+	end
+end)
 
 -- Whether a file's name is a picture the window can draw. (zgx decodes
 -- no GIF or HEIC yet: those are file chips, so a thumbnail never fails.)
@@ -228,6 +367,17 @@ function M.set_cargo_of(key: string, list: { any })
 end
 
 function M.push_cargo(key: string?, item: any)
+	-- A file or a picture: its number in the draft, the next after any
+	-- there (an `@` mention of it names it by that: ds/attachment_mentions).
+	if item.path and item.mention == nil then
+		local top = 0
+		for _, other in M.peek_cargo(key) do
+			if type(other.mention) == "number" and other.mention > top then
+				top = other.mention
+			end
+		end
+		item.mention = top + 1
+	end
 	if key == nil or here:peek() == key then
 		M.cargo:push(item)
 		return
@@ -326,11 +476,26 @@ end
 
 -- The composer's model picker, opened from elsewhere (the shell's ⌘/):
 -- bumped, it opens. `open_model_picker` says whether there was a composer
--- to open it in.
+-- to open it in. `composer_shown` counts the composers mounted now
+-- (screens/chat/composer: a swapped one mounts before the old one goes):
+-- `composer_mounted`/`composer_gone` change it. A template's composer
+-- written before it counted sets true or false, read as one or none (its
+-- `false` on cleanup clears the count whole: a limit of mixing the two,
+-- only while such a composer and a counted one swap).
 M.open_model = ui.shared("chat.composer.open_model", 0)
-M.composer_shown = ui.shared("chat.composer.shown", false)
+M.composer_shown = ui.shared("chat.composer.shown", 0)
+local function composers(): number
+	local n: any = M.composer_shown:peek()
+	return if type(n) == "number" then n elseif n then 1 else 0
+end
+function M.composer_mounted()
+	M.composer_shown:set(composers() + 1)
+end
+function M.composer_gone()
+	M.composer_shown:set(math.max(0, composers() - 1))
+end
 function M.open_model_picker(): boolean
-	if not M.composer_shown:peek() then
+	if composers() <= 0 then
 		return false
 	end
 	M.open_model:set(M.open_model:peek() + 1)
@@ -465,6 +630,15 @@ function M.mention_chat(id: string, key: string?)
 			title, mark = c.title, c.agent
 		end
 	end
+	if title == nil then
+		for _, list in sessions.now:peek().children or {} do
+			for _, c in list do
+				if c.id == id then
+					title, mark = c.title, c.agent
+				end
+			end
+		end
+	end
 	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
@@ -513,7 +687,7 @@ function M.chat_link(title: string, id: string): string
 end
 
 -- A drag from inside the window that drops here: the files pane's files
--- (their paths). Other drags (a session, a tab, a section) aren't ours.
+-- (their paths, also carried by file tabs). Other drags aren't file context.
 local function workspace_paths(payload: any): { string }?
 	if type(payload) == "table" and type(payload.paths) == "table" and #payload.paths > 0 then
 		return payload.paths
@@ -786,7 +960,7 @@ end
 
 -- Which of `sessions`' devices is this one.
 local here_device = ui.computed(function(): string?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.here then
 			return d.id
 		end

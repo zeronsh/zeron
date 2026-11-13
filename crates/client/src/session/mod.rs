@@ -22,6 +22,7 @@ use zeron_doc::{
     SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionDoc,
     SessionMessageEntry,
 };
+use zeron_sync::attachment_store::{HeldBody, HeldPayload, HeldSend, HeldUpload};
 use zeron_proto::{
     ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, WorktreeSpec,
 };
@@ -29,18 +30,21 @@ use zeron_proto::{
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    SnapshotDelta, TranscriptLoad,
 };
 use transcript::{Dirty, Tracker};
 
 use crate::attachments;
 use crate::client::ClientInner;
-use crate::connectivity::{SendState, send_state};
+use crate::connectivity::{ConnectivityState, SendState, send_state};
 use crate::error::{ClientError, Result};
 use crate::{lock, now_ms, read, write};
 
 /// Coalescing window for remote-import republishes (one display frame).
 const REFRESH_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// How long an empty transcript on screen says it's syncing. Past this, saying so
+/// would be an endless spinner, so it says what it's waiting for instead.
+const LOAD_PATIENCE_MS: i64 = 20_000;
 
 impl Drop for SessionCore {
     fn drop(&mut self) {
@@ -163,6 +167,12 @@ struct CoreState {
     tracker: Tracker,
     queue: Vec<QueuedMessage>,
     commands: Vec<SessionCommandEntry>,
+    /// Own sends waiting for their bytes to reach the edge's store. Not in
+    /// the doc yet, so they show from here.
+    held: Vec<HeldSend>,
+    /// Files kept for a retry, by the message they were sent with; let go
+    /// once that message is in the transcript.
+    kept: HashMap<String, Vec<String>>,
     context_usage: Option<ContextUsage>,
     /// Stable echo entries by message id.
     echoes: HashMap<String, Arc<Entry>>,
@@ -188,6 +198,10 @@ pub(crate) struct SessionCore {
     room: Mutex<Option<Arc<crate::live::room::Room>>>,
     /// Verified cursor restored with the local snapshot (room join cursor).
     initial_cursor: u64,
+    /// Newest relay journal row replayed with that snapshot.
+    journaled: std::sync::atomic::AtomicI64,
+    /// When a view last attached (ms): the idle clock's and the load's starting point.
+    attached_at_ms: std::sync::atomic::AtomicI64,
     refresh_wake: Arc<tokio::sync::Notify>,
     tasks: tokio_util::sync::CancellationToken,
     doc: Arc<SessionDoc>,
@@ -230,6 +244,8 @@ impl SessionCore {
             client: Arc::downgrade(client),
             room: Mutex::new(None),
             initial_cursor: cursor,
+            journaled: std::sync::atomic::AtomicI64::new(0),
+            attached_at_ms: std::sync::atomic::AtomicI64::new(0),
             refresh_wake: refresh_wake.clone(),
             tasks: tasks.clone(),
             doc,
@@ -240,6 +256,19 @@ impl SessionCore {
                 tracker: Tracker::new(),
                 queue: Vec::new(),
                 commands: Vec::new(),
+                held: client
+                    .live()
+                    .and_then(|live| live.store.held_sends_for(chat_id).ok())
+                    .unwrap_or_default(),
+                kept: client
+                    .live()
+                    .map(|live| live.escorts.kept_for_chat(chat_id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .fold(HashMap::new(), |mut kept, (message, upload)| {
+                        kept.entry(message).or_insert_with(Vec::new).push(upload);
+                        kept
+                    }),
                 context_usage: None,
                 echoes: HashMap::new(),
                 setup_placeholder: None,
@@ -347,17 +376,56 @@ impl SessionCore {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
                 device_id: client.config.device_id.clone(),
-                host_device_id: chat.device_id.clone(),
                 store: live.store.clone(),
                 on_applied,
                 on_status,
                 cancel: client.cancel.clone(),
+                relay_layer: client.config.relay_layer,
+                route: self.relay_route(client, &chat),
+                journaled: self.journaled.load(Ordering::Acquire),
+                path: client.path_gate(),
             },
         );
         let mut slot = lock(&self.room);
         if slot.is_none() {
             *slot = Some(room);
         }
+    }
+
+    /// Note the relay journal rows the local load replayed.
+    pub(crate) fn set_journaled(&self, ordinal: i64) {
+        self.journaled.store(ordinal, Ordering::Release);
+    }
+
+    /// Where this chat stands for the relay layer, right now.
+    fn relay_route(
+        &self,
+        client: &Arc<ClientInner>,
+        chat: &zeron_proto::Chat,
+    ) -> crate::live::room::RelayRoute {
+        use zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY;
+        let workspace = client.workspace.snapshot();
+        let device = workspace.device(&chat.device_id);
+        let host_online = device.is_some_and(|d| d.online);
+        let on_screen = self.view_attached();
+        let generation = chat.room_gen.unwrap_or(1);
+        crate::live::room::RelayRoute {
+            generation,
+            host: chat.device_id.clone(),
+            host_reads_queue: device
+                .is_some_and(|d| d.capabilities.iter().any(|c| c == CHAT_RELAY_CAPABILITY)),
+            on_screen,
+            host_online,
+        }
+    }
+
+    /// The chat's row, this screen or the app's state may have changed.
+    pub(crate) fn refresh_relay(&self, client: &Arc<ClientInner>) {
+        let Some(room) = self.room() else { return };
+        let Some(chat) = client.workspace.chat(&self.chat_id) else {
+            return;
+        };
+        room.set_route(&self.relay_route(client, &chat));
     }
 
     /// Persist the doc now (backgrounding).
@@ -422,6 +490,11 @@ impl SessionCore {
         oldest_state(&lock(&self.state).pending)
     }
 
+    /// When this device's oldest unadopted send was made, if one waits.
+    pub(crate) fn oldest_pending_send_ms(&self) -> Option<i64> {
+        lock(&self.state).pending.iter().map(|p| p.sent_at_ms).min()
+    }
+
     pub(crate) fn has_pending_sends(&self) -> bool {
         !lock(&self.state).pending.is_empty()
             || self.room().is_some_and(|room| room.has_pending_pushes())
@@ -443,15 +516,32 @@ impl SessionCore {
                 )
             });
         // A Cloud chat whose machine isn't up yet: it is being started (or
-        // woken) for the latest message.
-        let cloud_booting = workspace.session(&self.chat_id).is_some_and(|row| {
-            zeron_proto::is_cloud_device(&row.device_id, "")
-                && !workspace.device(&row.device_id).is_some_and(|d| d.online)
-        });
+        // woken) for the latest message. Or it is up, and installs a release
+        // before it answers (its edge says so: `cloud_stage`).
+        let machine = workspace
+            .session(&self.chat_id)
+            .filter(|row| zeron_proto::is_cloud_device(&row.device_id, ""))
+            .map_or(MachineWait::Up, |row| {
+                if client.cloud_machine_updating(&row.device_id) {
+                    MachineWait::Updating
+                } else if client.cloud_machine_slow(&row.device_id) {
+                    MachineWait::Slow
+                } else if !workspace.device(&row.device_id).is_some_and(|d| d.online) {
+                    MachineWait::Booting
+                } else {
+                    MachineWait::Up
+                }
+            });
+        let cloud_booting = machine == MachineWait::Booting;
+        let restored_at_ms = workspace
+            .session(&self.chat_id)
+            .filter(|row| zeron_proto::is_cloud_device(&row.device_id, ""))
+            .and_then(|row| client.cloud_store_restored(&row.device_id, now));
         drop(workspace);
         let mut transcript_event = None;
         let send_before;
         let send_after;
+        let mut ran_uploads: Vec<String> = Vec::new();
         {
             let mut st = lock(&self.state);
             send_before = oldest_state(&st.pending);
@@ -465,7 +555,21 @@ impl SessionCore {
             if dirty.meta {
                 st.context_usage = self.doc.context_usage();
             }
-            let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
+            // A send its machine is updating for isn't late: it gets there.
+            let held = matches!(machine, MachineWait::Updating | MachineWait::Slow);
+            let echoes_changed =
+                derive_pending(&mut st, &client.config.device_id, degraded, held, now);
+            if !st.kept.is_empty() {
+                let ran: Vec<String> = st
+                    .kept
+                    .keys()
+                    .filter(|message| st.tracker.contains_id(message))
+                    .cloned()
+                    .collect();
+                for message in ran {
+                    ran_uploads.extend(st.kept.remove(&message).unwrap_or_default());
+                }
+            }
             send_after = oldest_state(&st.pending);
             let previous = self.snapshot();
             let streaming = st
@@ -474,14 +578,19 @@ impl SessionCore {
                 .last()
                 .is_some_and(|e| e.is_streaming());
             let live = LiveFlags {
-                working: indicator_working || streaming,
+                // Saved mid-turn and with no way to hear the rest, a streaming tail
+                // is only a copy of what was. "Writing…" with a clock running would
+                // read as stuck, for as long as the host stays away.
+                working: (indicator_working || streaming) && !degraded,
                 working_since_ms,
                 cloud_booting,
+                restored_at_ms,
             };
-            let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
+            let placeholder_changed = refresh_setup_placeholder(&mut st, machine);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated
+                || previous.restored_at_ms != live.restored_at_ms
                 || placeholder_changed;
             if change.is_some()
                 || echoes_changed
@@ -497,6 +606,12 @@ impl SessionCore {
         }
         if let Some(revision) = transcript_event {
             client.events.session(&self.chat_id, revision);
+        }
+        // Files kept for a retry are let go once their message has run.
+        if let Some(live) = client.live() {
+            for upload_id in ran_uploads {
+                live.escorts.remove_stored(&upload_id);
+            }
         }
         self.recompute_composer(&client);
         if send_before != send_after {
@@ -529,6 +644,7 @@ impl SessionCore {
             ChatIndicator::Working | ChatIndicator::AwaitingInput
         );
         let turn_running = host_indicator == ChatIndicator::Working || snapshot.streaming;
+        let transcript_load = self.transcript_load(client, &snapshot, row.as_deref(), device);
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
@@ -546,7 +662,8 @@ impl SessionCore {
                 turn_running,
                 working_since_ms: row.as_ref().and_then(|r| r.working_since_ms),
                 streaming: snapshot.streaming,
-                can_interrupt: busy || snapshot.streaming,
+                // Unreachable, a stop would wait in the doc and could land on a later turn.
+                can_interrupt: (busy || snapshot.streaming) && !degraded,
             },
             queue: st
                 .queue
@@ -562,6 +679,7 @@ impl SessionCore {
             queue_error: st.queue_error.clone(),
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
+            transcript_load,
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -574,6 +692,37 @@ impl SessionCore {
         let revision = next.revision;
         *write(&self.composer) = Arc::new(next);
         client.events.composer(&self.chat_id, revision);
+    }
+
+    /// Why the transcript is empty, if it is. Anything held here shows at once, so
+    /// the row is only read for a chat this device has nothing of.
+    fn transcript_load(
+        &self,
+        client: &Arc<ClientInner>,
+        snapshot: &SessionSnapshot,
+        row: Option<&crate::workspace::SessionRow>,
+        device: Option<&crate::workspace::DeviceView>,
+    ) -> TranscriptLoad {
+        if client.is_demo() || !snapshot.entries.is_empty() {
+            return TranscriptLoad::Ready;
+        }
+        let attached_at = self.attached_at_ms.load(Ordering::Acquire);
+        let room = self.room();
+        snapshot::transcript_load(snapshot::LoadInputs {
+            has_content: false,
+            has_messages: client
+                .workspace
+                .chat(&self.chat_id)
+                .is_some_and(|chat| chat.last_message_at.is_some()),
+            network: client.network_online()
+                && client.connectivity().state != ConnectivityState::Offline,
+            generation: row.map_or(1, |r| r.room_gen),
+            room_answered: room.is_some_and(|room| room.answered()),
+            host_online: device.is_some_and(|d| d.online),
+            waited_too_long: self.view_attached()
+                && attached_at > 0
+                && now_ms() - attached_at >= LOAD_PATIENCE_MS,
+        })
     }
 
     fn update_state(&self, f: impl FnOnce(&mut CoreState)) {
@@ -597,9 +746,24 @@ impl SessionCore {
     }
 
     fn queue_command(&self, device_id: &str, payload: SessionCommandPayload) -> Result<String> {
+        self.queue_command_as(crate::new_id(), device_id, payload)
+    }
+
+    fn queue_command_as(
+        &self,
+        id: String,
+        device_id: &str,
+        payload: SessionCommandPayload,
+    ) -> Result<String> {
         let now = now_ms();
+        // A Cloud machine may be asleep for days: its messages wait a week.
+        let cloud = self
+            .client()
+            .ok()
+            .and_then(|client| client.workspace.chat(&self.chat_id))
+            .is_some_and(|chat| zeron_proto::is_cloud_device(&chat.device_id, ""));
         let entry = SessionCommandEntry {
-            id: crate::new_id(),
+            id,
             payload,
             issued_by: device_id.to_owned(),
             issued_at: now,
@@ -607,13 +771,52 @@ impl SessionCore {
                 turn_id: Some(turn_id),
                 frontier: None,
             }),
-            expires_at: Some(now + zeron_doc::COMMAND_DEFAULT_TTL_MS),
+            expires_at: Some(now + zeron_doc::command_ttl_ms(cloud)),
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
         let id = entry.id.clone();
         self.write(|doc| doc.queue_command(&entry))?;
         Ok(id)
+    }
+
+    /// A held send's bytes are safe: it enters the chat under the id it was
+    /// held with, its clocks starting now. Repeatable after a crash.
+    pub(crate) fn release_held(&self, send: &HeldSend, device_id: &str) -> Result<()> {
+        match &send.payload.body {
+            HeldBody::Command { payload } => {
+                let present = self
+                    .doc
+                    .read_commands()
+                    .is_ok_and(|commands| commands.iter().any(|c| c.id == send.id));
+                if !present {
+                    self.queue_command_as(send.id.clone(), device_id, payload.clone())?;
+                }
+            }
+            HeldBody::Row { item } => {
+                let present = self
+                    .doc
+                    .read_queue()
+                    .is_ok_and(|queue| queue.iter().any(|q| q.id == item.id));
+                if !present {
+                    let mut item = item.clone();
+                    item.issued_at = now_ms();
+                    self.write(|doc| doc.push_queued(&item))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The outbox changed: show it.
+    pub(crate) fn reload_held(&self) {
+        let Ok(client) = self.client() else { return };
+        let held = client
+            .live()
+            .and_then(|live| live.store.held_sends_for(&self.chat_id).ok())
+            .unwrap_or_default();
+        lock(&self.state).held = held;
+        self.refresh();
     }
 
     pub(crate) fn view_attached(&self) -> bool {
@@ -657,6 +860,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         queue_error: None,
         last_submitted_message_id: None,
         context_usage: None,
+        transcript_load: TranscriptLoad::Ready,
     }
 }
 
@@ -724,9 +928,34 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
     None
 }
 
+/// The `pending://` upload ids a command names.
+fn command_uploads(payload: &SessionCommandPayload) -> Vec<String> {
+    let refs: Vec<String> = match payload {
+        SessionCommandPayload::Run { request, .. } => request.attachments.clone(),
+        SessionCommandPayload::Steer { prompt, .. } => attachments::parse_user_message(prompt)
+            .images
+            .into_iter()
+            .map(|image| image.path)
+            .collect(),
+        _ => Vec::new(),
+    };
+    refs.iter()
+        .filter_map(|r| attachments::parse_pending_ref(r))
+        .map(|(upload_id, _)| upload_id.to_owned())
+        .collect()
+}
+
 /// Own run/steer commands whose message hasn't landed = pending echoes.
 /// Returns whether the echo set/states changed.
-fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64) -> bool {
+/// `held`: the chat's Cloud machine is updating before it answers, so a send
+/// waiting on it isn't failed for its age (one that was refused still is).
+fn derive_pending(
+    st: &mut CoreState,
+    device_id: &str,
+    degraded: bool,
+    held: bool,
+    now: i64,
+) -> bool {
     struct Attempt {
         text: String,
         kind: PendingKind,
@@ -776,23 +1005,64 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
         attempt.live |= live;
         attempt.dead |= dead;
     }
-    let mut next = Vec::with_capacity(order.len());
+    let mut next = Vec::with_capacity(order.len() + st.held.len());
     for message_id in order {
         let attempt = &attempts[&message_id];
+        // No path, or no host: this send is saved and goes when one's back, so that
+        // doesn't count against it. "Not delivered" is for a path that's up and failing.
+        if degraded && attempt.live {
+            st.grace_started.insert(message_id.clone(), now);
+        }
         let started = st
             .grace_started
             .get(&message_id)
             .copied()
             .unwrap_or(attempt.first_issued);
         let parsed = attachments::parse_user_message(&attempt.text);
+        let dead = attempt.dead && !attempt.live;
+        let mut state = send_state(started, degraded, dead, now);
+        if held && !dead && state == SendState::Failed {
+            state = send_state(now, degraded, false, now);
+        }
         next.push(PendingSend {
-            state: send_state(started, degraded, attempt.dead && !attempt.live, now),
+            state,
             message_id,
             text: attempt.text.clone(),
             visible_text: parsed.text,
             images: parsed.images.into_iter().map(|i| i.path).collect(),
             kind: attempt.kind,
             sent_at_ms: attempt.first_issued,
+            removable: false,
+        });
+    }
+    // Held sends aren't on the delivery clock: they're still on their way to
+    // the store, for as long as that takes. Only a real failure reads as one.
+    for send in &st.held {
+        let message_id = send.payload.message_id().unwrap_or(&send.id);
+        if st.tracker.contains_id(message_id) || next.iter().any(|p| p.message_id == message_id) {
+            continue;
+        }
+        let parsed = attachments::parse_user_message(send.payload.prompt());
+        next.push(PendingSend {
+            state: if send.failure.is_some() {
+                SendState::Failed
+            } else if degraded {
+                SendState::Queued
+            } else {
+                SendState::Sending
+            },
+            message_id: message_id.to_owned(),
+            text: send.payload.prompt().to_owned(),
+            visible_text: parsed.text,
+            images: parsed.images.into_iter().map(|i| i.path).collect(),
+            kind: match &send.payload.body {
+                HeldBody::Command {
+                    payload: SessionCommandPayload::Steer { .. },
+                } => PendingKind::Steer,
+                _ => PendingKind::Run,
+            },
+            sent_at_ms: send.created_at,
+            removable: true,
         });
     }
     let live_ids: HashSet<&str> = next.iter().map(|p| p.message_id.as_str()).collect();
@@ -843,6 +1113,19 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     changed
 }
 
+/// Where a Cloud chat's machine is with the latest message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MachineWait {
+    /// Up (or not a Cloud chat): nothing to show.
+    Up,
+    /// Being started or woken.
+    Booting,
+    /// Up, and installing a release before it answers.
+    Updating,
+    /// Its wake is taking far longer than normal (the edge kicks it meanwhile).
+    Slow,
+}
+
 #[derive(Clone, Copy)]
 struct LiveFlags {
     working: bool,
@@ -850,15 +1133,18 @@ struct LiveFlags {
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
+    /// Its Cloud machine rebuilt its chat store then (a note until dismissed).
+    restored_at_ms: Option<i64>,
 }
 
 /// While a Cloud chat's machine is being started or woken for the latest
 /// message, that message gets the machine's first setup step right away —
 /// "Starting a machine" (a new chat) or "Waking the machine" — as the
-/// desktop shows it. The entry has the id the machine's own setup entry will
+/// desktop shows it, and "Updating the machine" while it installs a release
+/// before it answers. The entry has the id the machine's own setup entry will
 /// have (`cloud_setup_entry_id`), so the real steps replace it in place; it
 /// goes as soon as anything follows the message. Returns whether it changed.
-fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
+fn refresh_setup_placeholder(st: &mut CoreState, machine: MachineWait) -> bool {
     // Decide first (reading the transcript), then build (minting a rev).
     let wanted = {
         let transcript = st.tracker.entries();
@@ -868,7 +1154,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
             .rev()
             .find_map(|p| st.echoes.get(&p.message_id))
             .or_else(|| transcript.iter().rev().find(|e| e.role() == MessageRole::User));
-        latest_user.filter(|_| cloud_booting).and_then(|message| {
+        latest_user.filter(|_| machine != MachineWait::Up).and_then(|message| {
             let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
             // Nothing after the message in the doc, and no setup entry yet.
             let answered = transcript.iter().any(|e| e.id == setup_id)
@@ -877,7 +1163,15 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
                     .position(|e| e.id == message.id)
                     .is_some_and(|ix| ix + 1 < transcript.len());
             let waking = transcript.iter().any(|e| e.role() == MessageRole::Assistant);
-            let name = if waking { "Waking the machine" } else { "Starting a machine" };
+            let name = if machine == MachineWait::Updating {
+                "Updating the machine"
+            } else if machine == MachineWait::Slow {
+                "Waking the machine is taking longer than usual"
+            } else if waking {
+                "Waking the machine"
+            } else {
+                "Starting a machine"
+            };
             (!answered).then(|| (message.id.clone(), setup_id, name, message.message.created_at))
         })
     };
@@ -964,6 +1258,7 @@ fn build_snapshot(
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
+        restored_at_ms: live.restored_at_ms,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
     };
@@ -1014,6 +1309,21 @@ impl SessionHandle {
         self.core.snapshot()
     }
 
+    /// Stop showing that the chat's Cloud machine rebuilt its chat store
+    /// ([`SessionSnapshot::restored_at_ms`]), for every chat on it, until it
+    /// rebuilds again. Kept across launches.
+    pub fn dismiss_restored_note(&self) {
+        let Ok(client) = self.core.client() else { return };
+        let device_id = client
+            .workspace
+            .snapshot()
+            .session(&self.core.chat_id)
+            .map(|row| row.device_id.clone());
+        if let Some(device_id) = device_id {
+            client.dismiss_cloud_store_restored(&device_id);
+        }
+    }
+
     /// Transcript subscription for Rust consumers (the layout engine). The
     /// watch coalesces: after `changed()`, diff with
     /// [`SessionSnapshot::changes_since`] against the last snapshot you
@@ -1054,6 +1364,9 @@ impl SessionHandle {
     pub fn set_view_attached(&self, attached: bool) {
         let was = self.core.view_attached.swap(attached, Ordering::AcqRel);
         self.core.touch();
+        if attached && !was {
+            self.core.attached_at_ms.store(now_ms(), Ordering::Release);
+        }
         if attached
             && !was
             && let Some(room) = self.core.room()
@@ -1062,6 +1375,13 @@ impl SessionHandle {
             // quiet socket (the 15-min quiet probe is far too slow for a
             // chat someone is looking at).
             room.kick();
+        }
+        if attached != was
+            && let Ok(client) = self.core.client()
+        {
+            // On screen or not decides what the room may read while the host is away.
+            self.core.refresh_relay(&client);
+            self.core.recompute_composer(&client);
         }
         if attached && !was {
             self.mark_seen();
@@ -1103,8 +1423,18 @@ impl SessionHandle {
                 "the host is too old for image attachments — update Zeron on it".into(),
             ));
         }
-        let refs =
-            client.stage_attachments(&self.core.chat_id, &chat.device_id, &request.attachments)?;
+        // A Cloud machine may be asleep: the bytes go to the edge's store, and
+        // the message waits until they're there.
+        let via_store = !request.attachments.is_empty()
+            && client.live().is_some()
+            && zeron_proto::is_cloud_device(&chat.device_id, "")
+            && composer.host.capabilities.attachment_store;
+        let refs = client.stage_attachments(
+            &self.core.chat_id,
+            &chat.device_id,
+            &request.attachments,
+            via_store,
+        )?;
         let prompt_text = request.text.trim_end().to_owned();
         let device_id = client.config.device_id.clone();
 
@@ -1141,12 +1471,15 @@ impl SessionHandle {
             let content = attachments::with_attachments(&prompt_text, &refs);
             let message_id = crate::new_id();
             if busy {
-                self.core.queue_command(
+                self.send_command(
+                    &client,
                     &device_id,
                     SessionCommandPayload::Steer {
                         prompt: content,
                         message_id: Some(message_id.clone()),
                     },
+                    &refs,
+                    via_store,
                 )?;
                 SendOutcome::Steered { message_id }
             } else {
@@ -1169,12 +1502,15 @@ impl SessionHandle {
                     env: Default::default(),
                     extra_mcp: Vec::new(),
                 };
-                self.core.queue_command(
+                self.send_command(
+                    &client,
                     &device_id,
                     SessionCommandPayload::Run {
                         request,
                         message_id: message_id.clone(),
                     },
+                    &refs,
+                    via_store,
                 )?;
                 SendOutcome::Started { message_id }
             }
@@ -1186,6 +1522,110 @@ impl SessionHandle {
         }
         client.after_command(&self.core, !refs.is_empty());
         Ok(outcome)
+    }
+
+    /// Into the chat now, or into the outbox while its bytes go up (or while
+    /// an earlier send of this chat is still there: nothing overtakes it).
+    fn send_command(
+        &self,
+        client: &Arc<ClientInner>,
+        device_id: &str,
+        payload: SessionCommandPayload,
+        refs: &[String],
+        via_store: bool,
+    ) -> Result<()> {
+        if via_store || self.behind_held(client) {
+            let id = crate::new_id();
+            self.hold(client, &id, HeldBody::Command { payload }, refs)
+        } else {
+            self.core.queue_command(device_id, payload).map(|_| ())
+        }
+    }
+
+    fn behind_held(&self, client: &Arc<ClientInner>) -> bool {
+        client.live().is_some_and(|live| {
+            live.store
+                .has_active_held_send(&self.core.chat_id)
+                .unwrap_or(false)
+        })
+    }
+
+    fn hold(
+        &self,
+        client: &Arc<ClientInner>,
+        id: &str,
+        body: HeldBody,
+        refs: &[String],
+    ) -> Result<()> {
+        let Some(live) = client.live() else {
+            return Err(ClientError::Storage("signed out".into()));
+        };
+        let payload = HeldPayload {
+            body,
+            uploads: refs
+                .iter()
+                .filter_map(|r| attachments::parse_pending_ref(r))
+                .map(|(upload_id, file_name)| HeldUpload {
+                    upload_id: upload_id.to_owned(),
+                    file_name: file_name.to_owned(),
+                })
+                // Only what's stashed for the store (a later send's refs may
+                // be going over the peer link).
+                .filter(|upload| {
+                    live.escorts
+                        .load(&upload.upload_id)
+                        .is_some_and(|(meta, _)| meta.via_store)
+                })
+                .collect(),
+            also_peer: false,
+        };
+        // Kept here until the message has run: a retry after it expired
+        // uploads them again.
+        let message_id = match &payload.body {
+            HeldBody::Row { item } => Some(item.id.clone()),
+            HeldBody::Command { .. } => payload.message_id().map(str::to_owned),
+        };
+        if let Some(message_id) = message_id {
+            for upload in &payload.uploads {
+                live.escorts.keep_for(&upload.upload_id, &message_id);
+            }
+            if !payload.uploads.is_empty() {
+                lock(&self.core.state)
+                    .kept
+                    .entry(message_id)
+                    .or_default()
+                    .extend(payload.uploads.iter().map(|u| u.upload_id.clone()));
+            }
+        }
+        live.store
+            .hold_send(id, &self.core.chat_id, &payload, now_ms())
+            .map_err(|err| ClientError::Storage(err.to_string()))?;
+        self.core.reload_held();
+        live.held.spawn(client, &self.core.chat_id);
+        Ok(())
+    }
+
+    /// Remove a send still in this device's outbox, failed or uploading (a
+    /// pending send with `removable`): it never goes out. `false` when it
+    /// already went out, or isn't one of those.
+    pub fn remove_send(&self, message_id: &str) -> Result<bool> {
+        let client = self.core.client()?;
+        let Some(live) = client.live() else {
+            return Ok(false);
+        };
+        let held = live
+            .store
+            .held_sends_for(&self.core.chat_id)
+            .map_err(|err| ClientError::Storage(err.to_string()))?;
+        let Some(send) = held
+            .iter()
+            .find(|send| send.payload.message_id() == Some(message_id) || send.id == message_id)
+        else {
+            return Ok(false);
+        };
+        let removed = live.held.remove(&client, &send.id)?;
+        self.core.reload_held();
+        Ok(removed)
     }
 
     /// Stop the live turn.
@@ -1225,7 +1665,23 @@ impl SessionHandle {
         item.hold_for_turn_end = hold_for_turn_end;
         item.issued_at = now_ms();
         let id = item.id.clone();
-        self.core.write(|doc| doc.push_queued(&item))?;
+        let client = self.core.client()?;
+        let stored = client.live().is_some_and(|live| {
+            item.attachments
+                .iter()
+                .filter_map(|r| attachments::parse_pending_ref(r))
+                .any(|(upload_id, _)| {
+                    live.escorts
+                        .load(upload_id)
+                        .is_some_and(|(meta, _)| meta.via_store)
+                })
+        });
+        if stored || self.behind_held(&client) {
+            let refs = item.attachments.clone();
+            self.hold(&client, &id, HeldBody::Row { item }, &refs)?;
+        } else {
+            self.core.write(|doc| doc.push_queued(&item))?;
+        }
         Ok(id)
     }
 
@@ -1498,6 +1954,14 @@ impl SessionHandle {
         let client = self.core.client()?;
         let now = now_ms();
         let device_id = client.config.device_id.clone();
+        if let Some(live) = client.live() {
+            live.store
+                .retry_held_sends(&self.core.chat_id, now)
+                .map_err(|err| ClientError::Storage(err.to_string()))?;
+            self.core.reload_held();
+            live.held.kick();
+            live.held.spawn(&client, &self.core.chat_id);
+        }
         let (commands, pending_ids) = {
             let mut st = lock(&self.core.state);
             let ids: Vec<String> = st.pending.iter().map(|p| p.message_id.clone()).collect();
@@ -1550,8 +2014,37 @@ impl SessionHandle {
                 continue;
             }
             tracing::info!(chat = %self.core.chat_id, old = %attempt.id, "retry re-issues a dead send attempt");
-            self.core
-                .queue_command(&device_id, attempt.payload.clone())?;
+            // Its files were kept here: they go up again first, since the
+            // edge's copy may be gone by now.
+            let uploads = command_uploads(&attempt.payload);
+            let kept = !uploads.is_empty()
+                && client
+                    .live()
+                    .is_some_and(|live| uploads.iter().all(|id| live.escorts.stored(id)));
+            if kept {
+                let refs: Vec<String> = match &attempt.payload {
+                    SessionCommandPayload::Run { request, .. } => request.attachments.clone(),
+                    SessionCommandPayload::Steer { prompt, .. } => {
+                        attachments::parse_user_message(prompt)
+                            .images
+                            .into_iter()
+                            .map(|image| image.path)
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                self.hold(
+                    &client,
+                    &crate::new_id(),
+                    HeldBody::Command {
+                        payload: attempt.payload.clone(),
+                    },
+                    &refs,
+                )?;
+            } else {
+                self.core
+                    .queue_command(&device_id, attempt.payload.clone())?;
+            }
         }
         self.core.refresh();
         client.after_command(&self.core, true);
@@ -1569,6 +2062,8 @@ mod setup_placeholder_tests {
             tracker: Tracker::new(),
             queue: Vec::new(),
             commands: Vec::new(),
+            held: Vec::new(),
+            kept: HashMap::new(),
             context_usage: None,
             echoes: HashMap::new(),
             setup_placeholder: None,
@@ -1590,6 +2085,7 @@ mod setup_placeholder_tests {
             kind: PendingKind::Run,
             sent_at_ms: 1_000,
             state: crate::connectivity::SendState::Sending,
+            removable: false,
         };
         st.echoes.insert(
             "m1".into(),
@@ -1617,7 +2113,7 @@ mod setup_placeholder_tests {
     #[test]
     fn a_new_cloud_chat_shows_its_machine_starting_until_the_machine_is_up() {
         let mut st = state_with_pending_send();
-        assert!(refresh_setup_placeholder(&mut st, true));
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Booting));
         let placeholder = st.setup_placeholder.clone().expect("placeholder under the message");
         assert_eq!(placeholder.id, zeron_proto::cloud_setup_entry_id("m1"));
         assert!(placeholder.is_streaming());
@@ -1626,17 +2122,83 @@ mod setup_placeholder_tests {
             Some(MessagePart::Tool { call: zeron_proto::ToolCall::Unknown { name, .. }, .. }) if name == "Starting a machine"
         ));
         // Unchanged: the same entry (row reuse), no change reported.
-        assert!(!refresh_setup_placeholder(&mut st, true));
+        assert!(!refresh_setup_placeholder(&mut st, MachineWait::Booting));
         assert!(Arc::ptr_eq(&placeholder, st.setup_placeholder.as_ref().unwrap()));
         // The machine is up: the placeholder goes (its own entry takes over).
-        assert!(refresh_setup_placeholder(&mut st, false));
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
         assert!(st.setup_placeholder.is_none());
     }
 
     #[test]
     fn a_chat_on_a_machine_that_is_up_shows_no_placeholder() {
         let mut st = state_with_pending_send();
-        assert!(!refresh_setup_placeholder(&mut st, false));
+        assert!(!refresh_setup_placeholder(&mut st, MachineWait::Up));
         assert!(st.setup_placeholder.is_none());
+    }
+
+    fn step_name(st: &CoreState) -> Option<String> {
+        match st.setup_placeholder.as_ref()?.message.parts.first() {
+            Some(MessagePart::Tool { call: zeron_proto::ToolCall::Unknown { name, .. }, .. }) => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_woken_machine_that_updates_before_it_answers_says_so() {
+        let mut st = state_with_pending_send();
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Booting));
+        assert_eq!(step_name(&st).as_deref(), Some("Starting a machine"));
+        // Its heartbeat is back, and it installs a release: the same step,
+        // saying what it waits on now.
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Updating));
+        assert_eq!(st.setup_placeholder.as_ref().unwrap().id, zeron_proto::cloud_setup_entry_id("m1"));
+        assert_eq!(step_name(&st).as_deref(), Some("Updating the machine"));
+        assert!(!refresh_setup_placeholder(&mut st, MachineWait::Updating));
+        // Done: the machine's own steps take over.
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
+        assert!(st.setup_placeholder.is_none());
+    }
+
+    #[test]
+    fn a_wake_taking_longer_than_usual_says_so() {
+        let mut st = state_with_pending_send();
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Slow));
+        assert_eq!(
+            step_name(&st).as_deref(),
+            Some("Waking the machine is taking longer than usual")
+        );
+        assert!(refresh_setup_placeholder(&mut st, MachineWait::Up));
+        assert!(st.setup_placeholder.is_none());
+    }
+
+    #[test]
+    fn a_send_its_machine_updates_for_is_not_failed_for_its_age() {
+        let mut st = state_with_pending_send();
+        st.pending.clear();
+        st.echoes.clear();
+        st.commands = vec![zeron_doc::SessionCommandEntry {
+            id: "cmd1".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "read the readme".into(),
+                message_id: Some("m1".into()),
+            },
+            issued_by: "phone".into(),
+            issued_at: 1_000,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        }];
+        let late = 1_000 + crate::connectivity::UNDELIVERED_GRACE_MS + 1;
+        derive_pending(&mut st, "phone", false, false, late);
+        assert_eq!(st.pending[0].state, SendState::Failed, "late, nothing holds it");
+        derive_pending(&mut st, "phone", false, true, late);
+        assert_eq!(st.pending[0].state, SendState::Sending, "its machine updates first");
+        // A send that was refused failed, update or not.
+        st.commands[0].status = SessionCommandStatus::Rejected;
+        derive_pending(&mut st, "phone", false, true, late);
+        assert_eq!(st.pending[0].state, SendState::Failed);
     }
 }

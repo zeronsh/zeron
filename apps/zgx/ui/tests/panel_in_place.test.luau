@@ -738,8 +738,9 @@ test("Escape in a file's editor takes the keyboard to the file's tab (Tab indent
 	end)).to_be(true)
 end)
 
--- A tab dragged along the strip takes another's place as it crosses that
--- one's middle, the strip making room as it goes; let go, it stays there.
+-- A tab dragged along the strip takes another's place as its leading edge
+-- passes that one's middle, the strip making room as it goes; let go, it
+-- stays there.
 test("a tab dragged over another takes its place, and stays when dropped", function()
 	local app = open_panel()
 	open_files(app)
@@ -754,8 +755,10 @@ test("a tab dragged over another takes its place, and stays when dropped", funct
 	expect(app:error()).to_be_nil()
 end)
 
-test("by default the panel stays open on its home when its last tab closes", function()
+test("with its setting off, the panel stays open on its home when its last tab closes", function()
 	local app = open_panel()
+	-- (Settings → General's "Close the panel with its last tab", off.)
+	app:set_state("settings_close_panel_with_last_tab", false)
 	open_files(app)
 	expect(tab_titles(app)).to_be("Files")
 	app:click('#panel-strip >> role:tab "Files"')
@@ -764,7 +767,6 @@ test("by default the panel stays open on its home when its last tab closes", fun
 		return app:has("#panel-empty")
 	end)).to_be(true)
 	app:frames(30)
-	-- (Settings → General's "Close the panel with its last tab" is off.)
 	expect(app:state("test_panel_closed")).to_be(0)
 end)
 

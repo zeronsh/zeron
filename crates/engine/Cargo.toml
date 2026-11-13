@@ -47,6 +47,8 @@ gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
+# A large chat2 checkpoint sent in parts, sliced from one buffer.
+bytes = "1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
@@ -57,10 +59,18 @@ tempfile.workspace = true
 # `show_image` reads a shown image's size from its header (already in the
 # tree with these decoders via zeron-ui).
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# `DeviceStats` (device_stats.rs): OS, CPU, memory and volumes from OS APIs.
+# Already in the tree (zed-scap, through the app); only its system and disk
+# parts here, no threads pool.
+sysinfo = { version = "0.31.4", default-features = false, features = ["system", "disk"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The battery's IOKit power-source dictionary (device_stats.rs); already in the tree.
+core-foundation = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

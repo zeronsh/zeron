@@ -34,6 +34,9 @@ pub const ELEMENTS: &[Element] = &[
     e(".session-row", "a sidebar row", "A session's row in the sidebar.", &["session"]),
     e(".session-title", "a sidebar row", "A session row's title.", &[]),
     e(".section-header", "the sidebar", "A project's, device's or section's header in the sidebar.", &["project"]),
+    // A project's tile wherever it's drawn (ui/ds/tile.luau's `project`): its
+    // box gives `project`, so a replacement draws each project's own.
+    e(".project-icon", "a project's icon", "A project's icon, wherever one shows: the sidebar's groups and rows, tabs, the composer's and pickers' project, the panel, the palette. Replace it (`ui.change`) to draw your own; `project` is its project (`{ id }`, and with \"sessions.read\" its name, device and `icon`).", &["project"]),
     e("#sidebar-actions", "the sidebar", "New chat and Search, at the sidebar's top.", &[]),
     e("#titlebar", "the title bar", "The title bar.", &[]),
     e("#titlebar-actions", "the title bar", "The title bar's actions, at its end.", &[]),
@@ -76,6 +79,7 @@ pub const ELEMENTS: &[Element] = &[
 pub const STABLE: &[&str] = &[
     "#sidebar",
     ".session-row",
+    ".project-icon",
     "#session-header",
     ".message",
     "#chat-composer",
@@ -258,6 +262,8 @@ mod tests {
         assert_eq!(row["present"], false);
         assert_eq!(row["provides"], serde_json::json!(["session"]));
         assert_eq!((row["stable"].as_bool(), bar["stable"].as_bool()), (Some(true), Some(false)));
+        let icon = els.iter().find(|e| e["selector"] == ".project-icon").unwrap();
+        assert_eq!((icon["stable"].as_bool(), &icon["provides"]), (Some(true), &serde_json::json!(["project"])));
         for s in STABLE {
             assert!(ELEMENTS.iter().any(|e| e.selector == *s), "{s} is stable but not an element");
         }

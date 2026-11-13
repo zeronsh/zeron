@@ -14,6 +14,11 @@
 -- runs one of Zeron's commands.
 
 local files = require("@app/screens/files/api")
+local sessions = require("@account/sessions")
+local Carried = require("@app/screens/chat/carried")
+local ChatLinks = require("@app/screens/chat/chat_links")
+local locale = require("@ds/locale")
+local route = require("@app/screens/shell/route")
 local mentions = require("@ds/composer_mentions")
 local prefs = require("@app/screens/settings/prefs")
 local Invocations = require("@app/screens/chat/invocations")
@@ -29,7 +34,27 @@ export type Bind = {
 	files: () -> any?,
 	in_chat: () -> boolean,
 	run: (name: string) -> (),
+	-- What the draft carries (its chips: `@` lists them), and the chat it's
+	-- in (not listed among the chats `@` offers).
+	cargo: (() -> { any })?,
+	chat: (() -> string?)?,
 }
+
+-- `@`'s sections, in their order: the chat's files, other chats, what the
+-- draft carries.
+local SECTIONS = {
+	{ id = "files", key = "chat.composer.mention_sections.files" },
+	{ id = "chats", key = "chat.composer.mention_sections.chats" },
+	{ id = "attachments", key = "chat.composer.mention_sections.attachments" },
+}
+
+-- A name as a token's word (`@Long-chat`): the characters a token takes,
+-- the rest a dash.
+local function word(name: string): string
+	local w = string.gsub(string.gsub(name, "[^%w%._:%-]+", "-"), "^%-+", "")
+	w = string.gsub(w, "%-+$", "")
+	return if w ~= "" then w else "item"
+end
 
 function M.bind(b: Bind): { [string]: any }
 	-- What `@` offers: the files of where it works, searched as the mention is
@@ -38,8 +63,88 @@ function M.bind(b: Bind): { [string]: any }
 	local function invocation_key(): string?
 		return Invocations.key(b.agent(), b.target())
 	end
+	-- `@`'s other chats: each by its title, its project under it, when it
+	-- last moved at its end; picked, Zeron's chat mention.
+	local function chats(): { any }
+		local here = if b.chat then b.chat() else nil
+		local now = sessions.now:get()
+		local names: { [string]: string } = {}
+		for _, p in now.projects or {} do
+			names[p.id] = p.name
+		end
+		local out = {}
+		for _, c in now.chats or {} do
+			if c.id ~= here and ChatLinks.valid(c.id) then
+				local title = ChatLinks.title(c.title)
+				table.insert(out, {
+					section = "chats",
+					value = word(title),
+					label = title,
+					-- (When it last moved: "5m", "3d".)
+					side = if type(c.updated) == "number" then locale.ago_short(os.time() - c.updated) else nil,
+					-- (Where it is: its project; and its project's tile, as the
+					-- sidebar draws it. None: the side chat's glyph.)
+					detail = if c.project then names[c.project] else nil,
+					tile = if c.project and names[c.project]
+						then (function(): any
+							local l: any = route.look(c.project) or { hue = route.hue(c.project) }
+							return { label = names[c.project], hue = l.hue, src = l.src, emoji = l.emoji, project = c.project }
+						end)()
+						else nil,
+					icon = "side-chat",
+					link = ChatLinks.link(title, c.id),
+				})
+			end
+		end
+		return out
+	end
+	-- What the draft carries: each by its name, what it is at its end;
+	-- picked, a reference to it (screens/chat/carried `refs`).
+	local function attachments(): { any }
+		local out = {}
+		local carried: { any } = if b.cargo then b.cargo() else {}
+		for _, item in carried do
+			local name = Carried.label(item)
+			-- (What has a link of its own to go as: a picture or a file by
+			-- its number, an attached chat, a browser pick. Not a quote or a
+			-- review comment.)
+			local link = Carried.mention(item)
+			if name and link then
+				local what, icon = Carried.kind(item)
+				local picture = what == "image" or what == "appshot"
+				table.insert(out, {
+					section = "attachments",
+					-- (Its token in the draft: a picture's its number's.)
+					value = if picture and type(item.mention) == "number" then `Image-{item.mention}` else word(name),
+					label = name,
+					-- (What it is: a picture, a file…)
+					detail = ui.t(`chat.composer.attachment_kind.{what}`):get(),
+					icon = icon,
+					-- (A file's icon by its name; not a file of the chat's to
+					-- mention: a pick refers to what's attached.)
+					file_icon = if what == "file" then name else nil,
+					link = link,
+				})
+			end
+		end
+		return out
+	end
 	local lists = ui.computed(function(): any
 		local given = table.clone(sources:get())
+		-- `@`: the files found, then the other chats, then what's carried.
+		local at = {}
+		for _, f in given["@"] or {} do
+			local item = table.clone(f)
+			item.section = "files"
+			table.insert(at, item)
+		end
+		for _, c in chats() do
+			table.insert(at, c)
+		end
+		for _, a in attachments() do
+			table.insert(at, a)
+		end
+		given["@"] = at
 		-- `/` the agent's commands, `$` its skills (nil while they come).
 		local catalog = Invocations.catalog(invocation_key())
 		given["/"] = Invocations.items(catalog, "command")
@@ -97,7 +202,7 @@ function M.bind(b: Bind): { [string]: any }
 		if not target then
 			return
 		end
-		local key = `{target.chat or target.space or ""}:{t.query}`
+		local key = `{target.device or ""}:{target.chat or target.space or ""}:{t.query}`
 		if key == searched:peek() then
 			return
 		end
@@ -130,8 +235,14 @@ function M.bind(b: Bind): { [string]: any }
 			end)
 		end)
 	end)
+	local sections = {}
+	for _, s in SECTIONS do
+		table.insert(sections, { id = s.id, label = ui.t(s.key) })
+	end
 	return {
 		lists = lists,
+		-- `@` is a launcher with these sections (ds/composer_mentions).
+		sections = { ["@"] = sections },
 		-- A command, skill or file picked: what its token stands for; one of
 		-- Zeron's own runs (its token gone).
 		on_mention = function(item: any, trigger: string, token: string)
