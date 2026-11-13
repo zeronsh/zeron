@@ -169,6 +169,7 @@ pub fn harness_label(id: &str) -> String {
         "grok" => "Grok",
         "hermes" => "Hermes",
         "pi" => "Pi",
+        "omp" => "omp",
         "cursor" => "Cursor",
         "opencode" => "OpenCode",
         "antigravity" => "Antigravity",
@@ -248,6 +249,13 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
             "pi default",
             "Runs the model configured in pi (`pi` settings)",
             &["minimal", "low", "medium", "high", "xhigh", "max"],
+            vec![],
+        )],
+        "omp" => vec![model(
+            "default",
+            "omp default",
+            "Runs the model configured in omp",
+            &[],
             vec![],
         )],
         "opencode" => vec![

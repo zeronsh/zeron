@@ -1,0 +1,4 @@
+{"expect": "prompt", "bind": {"$P1": ["id"]}, "equals": {"message": "/drop"}}
+{"emit": {"id": "$P1", "type": "response", "command": "prompt", "success": true, "data": {"agentInvoked": false}}}
+{"expect": "get_state", "bind": {"$S": ["id"]}}
+{"emit": {"id": "$S", "type": "response", "command": "get_state", "success": true, "data": {"sessionId": "01a1d49f-0000-7000-8000-000000000002", "model": {"id": "gpt-5.6-luna", "provider": "openai-codex"}, "isSettled": true}}}

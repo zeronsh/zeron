@@ -16,6 +16,7 @@ export type Name =
 	| "opencode"
 	| "antigravity"
 	| "pi"
+	| "omp"
 	| "hermes"
 	| "muse"
 
@@ -28,13 +29,15 @@ local FILES: { [Name]: string } = {
 	opencode = "opencode-mark-dark",
 	antigravity = "antigravity-mark.png",
 	pi = "pi-mark",
+	-- omp's name in plain letters (no artwork of omp's own is bundled).
+	omp = "omp-mark",
 	hermes = "hermes-mark",
 	muse = "muse-mark",
 }
 
 -- Marks drawn in one ink (black, for the white tile): bare, they take the
 -- colour of the text around them instead, or they vanish on dark.
-local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true }
+local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true, omp = true }
 
 local RegistryMark = require("@self/registry_mark")
 

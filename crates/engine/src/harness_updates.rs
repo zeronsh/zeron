@@ -508,6 +508,15 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update", "--self"]),
             manual_command: "pi update --self",
         },
+        // omp's installer keeps its own binary up to date (or a manager
+        // such as Tern does, which `omp update` defers to): never applied
+        // from here, only reported against the published package.
+        HarnessId::Omp => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Npm("@oh-my-pi/pi-coding-agent"),
+            update_args: None,
+            manual_command: "omp update",
+        },
         HarnessId::Opencode => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Opencode,

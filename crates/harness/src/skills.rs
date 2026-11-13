@@ -59,6 +59,12 @@ pub(crate) fn is_shared_skill(path: &str) -> bool {
     })
 }
 
+/// Agents that advertise each skill as a `skill:<name>` command (Pi, and
+/// omp, its fork): their catalog classifies skills explicitly.
+fn namespaced_skills(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::Pi | HarnessId::Omp)
+}
+
 /// ACP has no standard skill catalog. Pi labels its skill commands explicitly;
 /// other agents can bind a discovered skill only to a command they advertised.
 pub(crate) fn attach_advertised_commands(
@@ -71,7 +77,7 @@ pub(crate) fn attach_advertised_commands(
         if !zeron_proto::invocation::valid_skill_command_name(&command.name) {
             continue;
         }
-        let name = if harness == HarnessId::Pi {
+        let name = if namespaced_skills(harness) {
             let Some(name) = command.name.strip_prefix("skill:") else {
                 continue;
             };
@@ -83,17 +89,17 @@ pub(crate) fn attach_advertised_commands(
             // A shared skill named `compact` is not evidence that the
             // provider's built-in /compact invokes that file. Pi's explicit
             // skill: namespace supplies the classification other ACP catalogs lack.
-            if harness != HarnessId::Pi && is_shared_skill(&skill.path) {
+            if !namespaced_skills(harness) && is_shared_skill(&skill.path) {
                 continue;
             }
             skill.command = Some(SkillCommand {
                 name: command.name.clone(),
                 harness,
             });
-        } else if harness == HarnessId::Pi && !name.is_empty() {
+        } else if namespaced_skills(harness) && !name.is_empty() {
             skills.push(Skill {
                 name: name.into(),
-                path: format!("harness-skill:pi:{name}"),
+                path: format!("harness-skill:{}:{name}", harness.as_str()),
                 description: command.description.clone(),
                 enabled: true,
                 command: Some(SkillCommand {
@@ -119,6 +125,9 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
         HarnessId::Hermes => &[".agents/skills"],
         HarnessId::Fx => &[".agents/skills", ".claude/skills", ".fx/skills"],
         HarnessId::Pi => &[".agents/skills", ".pi/skills"],
+        // omp also loads other agents' skill folders; it advertises every
+        // skill it loaded, so the catalog fills in what these miss.
+        HarnessId::Omp => &[".agents/skills", ".claude/skills", ".omp/skills"],
         HarnessId::Devin => &[".agents/skills"],
         HarnessId::Antigravity => &[".agents/skills", ".gemini/skills"],
         HarnessId::Codex => &[".agents/skills", ".codex/skills"],
@@ -147,6 +156,13 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
             std::env::var_os("PI_CODING_AGENT_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".pi/agent"))
+                .join("skills"),
+            String::new(),
+        )),
+        HarnessId::Omp => roots.push((
+            std::env::var_os("PI_CODING_AGENT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".omp/agent"))
                 .join("skills"),
             String::new(),
         )),
@@ -292,7 +308,10 @@ fn scan_root(
             }
             let legacy_commands = root.file_name().is_some_and(|name| name == "commands");
             let flat = legacy_commands
-                || (matches!(harness, HarnessId::Opencode | HarnessId::Pi) && depth == 0);
+                || (matches!(
+                    harness,
+                    HarnessId::Opencode | HarnessId::Pi | HarnessId::Omp
+                ) && depth == 0);
             if entry.file_name() != "SKILL.md"
                 && !(flat && path.extension().is_some_and(|ext| ext == "md"))
             {
@@ -530,6 +549,37 @@ mod tests {
         assert_eq!(
             found.keys().map(String::as_str).collect::<Vec<_>>(),
             ["linked", "valid"]
+        );
+    }
+
+    #[test]
+    fn omp_skill_commands_are_skills_under_omps_own_name() {
+        // As omp 18.20.0 advertises them (`source: "skill"`).
+        let commands = vec![
+            zeron_proto::SlashCommand {
+                name: "skill:frontend-design".into(),
+                description: "Design".into(),
+                input_hint: None,
+            },
+            zeron_proto::SlashCommand {
+                name: "compact".into(),
+                description: String::new(),
+                input_hint: None,
+            },
+        ];
+        let mut skills = vec![];
+        attach_advertised_commands(HarnessId::Omp, &mut skills, &commands);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "frontend-design");
+        assert_eq!(skills[0].path, "harness-skill:omp:frontend-design");
+        let invocation = zeron_proto::invocation::Invocation::Skill {
+            name: skills[0].name.clone(),
+            path: skills[0].path.clone(),
+            command: skills[0].command.clone(),
+        };
+        assert_eq!(
+            zeron_proto::invocation::harness_prompt(&invocation.link(), HarnessId::Omp),
+            "/skill:frontend-design"
         );
     }
 

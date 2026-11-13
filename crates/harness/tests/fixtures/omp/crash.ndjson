@@ -1,0 +1,5 @@
+{"expect": "prompt", "bind": {"$P1": ["id"]}}
+{"emit": {"id": "$P1", "type": "response", "command": "prompt", "success": true}}
+{"emit": {"type": "agent_start"}}
+{"stderr": "fatal: omp lost its session store"}
+{"exit": 3}

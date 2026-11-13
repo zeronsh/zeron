@@ -110,6 +110,13 @@ fn default_true() -> bool {
     true
 }
 
+/// Whether `ListAgentAccounts` can say if `harness` is signed in: the agents
+/// Zeron signs in to (Settings → Providers) and the registry's. Another agent
+/// keeps its login to itself (omp, fx): unknown, never held against it.
+fn logins_tracked(harness: HarnessId) -> bool {
+    zeron_proto::providers::signs_in(harness) || harness.registry().is_some()
+}
+
 fn default_steering_mode() -> SteeringMode {
     SteeringMode::TurnBoundary
 }
@@ -358,7 +365,7 @@ impl Zeron {
             .ok()
             .and_then(|v| serde_json::from_value::<zeron_proto::AgentAccountsSnapshot>(v).ok());
         if let Some(snapshot) = accounts {
-            for harness in &mut harnesses {
+            for harness in harnesses.iter_mut().filter(|h| logins_tracked(h.id)) {
                 harness.signed_in = Some(
                     snapshot
                         .accounts
@@ -926,6 +933,18 @@ pub fn short(id: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_agents_whose_logins_zeron_tracks_are_judged_by_the_accounts() {
+        use super::logins_tracked;
+        use zeron_proto::HarnessId;
+        for tracked in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Pi, HarnessId::Muse] {
+            assert!(logins_tracked(tracked), "{tracked:?}");
+        }
+        assert!(logins_tracked(HarnessId::from_slug("acp.gemini").unwrap()));
+        assert!(!logins_tracked(HarnessId::Omp));
+        assert!(!logins_tracked(HarnessId::Fx));
+    }
+
     use super::*;
     use chrono::Utc;
 

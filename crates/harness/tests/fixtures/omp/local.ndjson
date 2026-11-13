@@ -1,0 +1,3 @@
+{"expect": "prompt", "bind": {"$P1": ["id"]}, "equals": {"message": "/session info"}}
+{"emit": {"type": "command_output", "text": "Session: 01a1d49f-be6e-72f8-b068-12a6d1bc8460\nTitle: undefined"}}
+{"emit": {"id": "$P1", "type": "response", "command": "prompt", "success": true, "data": {"agentInvoked": false}}}

@@ -7,7 +7,8 @@
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
 //! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
-//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
+//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]), and omp its own
+//! RPC mode, which descends from Pi's ([`OmpHarness`]).
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -436,6 +437,7 @@ pub(crate) mod lossy_lines;
 pub mod mock;
 pub mod muse;
 mod model_context;
+pub mod omp;
 pub mod opencode;
 pub mod pi;
 pub mod process;
@@ -741,6 +743,7 @@ pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
 pub use muse::MuseHarness;
+pub use omp::OmpHarness;
 pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
