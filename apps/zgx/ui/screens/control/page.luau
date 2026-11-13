@@ -2,8 +2,8 @@
 -- that shows everything orchestration is doing. Its widgets, in order:
 -- Capture (dump anything; the newest dump's receipt under it, older ones
 -- folded), Needs you, the Map, the Board, Machines and Comms. Two columns
--- from 1100 points (Capture, the Map and the Board on the left; Needs you,
--- Machines and Comms on the right), one below that. Each widget can be
+-- from 1100 points (Capture and the Map on the left; Needs you, Machines and
+-- Comms on the right; the Board across both, under them), one below that. Each widget can be
 -- hidden and moved; that's this device's (`control_widgets`). Plugins add
 -- widgets of their own at `slot:zeron.orchestration.widgets`.
 --
@@ -37,7 +37,8 @@ local SIDE_W = 400
 
 -- The widgets: each one's column when wide.
 M.WIDGETS = { "capture", "needs", "map", "board", "machines", "comms" }
-local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "left", needs = "right", machines = "right", comms = "right" }
+-- (The Board spans both, under them: its columns want the room.)
+local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "full", needs = "right", machines = "right", comms = "right" }
 
 -- Shown and in what order, on this device.
 export type Widgets = { order: { string }, hidden: { [string]: boolean } }
@@ -609,14 +610,19 @@ local function layout(kind: string): Node
 		end, { key = by_id, w_full = true, gap = "$space.7" })
 	end
 	if wide then
-		return ui.row {
+		return ui.column {
 			id = "control-columns",
 			class = "control-wide",
 			w_full = true,
 			gap = "$space.7",
-			items = "start",
-			ui.column { id = "control-left", grow = 1, basis = 0, min_w = 0, gap = "$space.7", list("left") },
-			ui.column { id = "control-right", w = SIDE_W, shrink = 0, gap = "$space.7", list("right"), slot() },
+			ui.row {
+				w_full = true,
+				gap = "$space.7",
+				items = "start",
+				ui.column { id = "control-left", grow = 1, basis = 0, min_w = 0, gap = "$space.7", list("left") },
+				ui.column { id = "control-right", w = SIDE_W, shrink = 0, gap = "$space.7", list("right"), slot() },
+			},
+			ui.column { id = "control-full", w_full = true, gap = "$space.7", list("full") },
 		}
 	end
 	return ui.column {

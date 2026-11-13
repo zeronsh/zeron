@@ -18,10 +18,11 @@ local function left(app: any, target: string): number?
 	return line and tonumber(line:match(" (%-?%d+),%-?%d+ "))
 end
 
-test("wide, two columns: Capture, the Map and the Board left; Needs you, Machines and Comms right", function()
+test("wide, two columns: Capture and the Map left; Needs you, Machines and Comms right; the Board across both", function()
 	local app = open(1440, 900)
 	expect(app:has("#control-left")).to_be(true)
 	expect(app:has("#control-left >> #control-widget-map")).to_be(true)
+	expect(app:has("#control-full >> #control-widget-board")).to_be(true)
 	expect(app:has("#control-right >> #control-widget-needs")).to_be(true)
 	expect(app:has("#control-right >> #control-widget-comms")).to_be(true)
 	expect((left(app, "#control-widget-needs") :: number) > (left(app, "#control-widget-capture") :: number)).to_be(true)
@@ -59,13 +60,13 @@ end)
 
 test("a widget moved up stays in its column, and the order is kept", function()
 	local app = open(1440, 2400)
-	app:click('#control-widget-board >> role:button "Widget menu"')
+	app:click('#control-widget-map >> role:button "Widget menu"')
 	app:frames(10)
 	app:click('"Move up"')
 	app:frames(20)
-	expect((top(app, "#control-widget-board") :: number) < (top(app, "#control-widget-map") :: number)).to_be(true)
+	expect((top(app, "#control-widget-map") :: number) < (top(app, "#control-widget-capture") :: number)).to_be(true)
 	local order = app:state("control_widgets").order
-	expect(table.find(order, "board") < table.find(order, "map")).to_be(true)
+	expect(table.find(order, "map") < table.find(order, "capture")).to_be(true)
 end)
 
 test("the widgets' menu lists every widget", function()

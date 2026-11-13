@@ -95,7 +95,7 @@ local RANK: { [string]: number } = { urgent = 0, high = 1, normal = 2, low = 3 }
 local PRIORITIES = { "urgent", "high", "normal", "low" }
 
 -- The least a column takes side by side; under that for them all, they stack.
-local COLUMN_MIN = 188
+local COLUMN_MIN = 168
 -- A card's corner, and the stripe's room inside it.
 local CARD_RADIUS = "$radius.lg"
 local DRAG_TAG = "orch-item"
