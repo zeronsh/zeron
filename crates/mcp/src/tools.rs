@@ -156,6 +156,8 @@ fn catalog() -> Vec<ToolDef> {
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
                     "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
+                    "item": { "type": "string", "description": "Crew threads: the board item it works on (one item per thread)." },
+                    "role": { "type": "string", "description": "Crew threads: a short role, e.g. \"auth PR\"." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -671,6 +673,9 @@ struct PendingTurn {
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
     kind: Option<ChatKind>,
+    /// Crew threads: the board item it works on, and its short role.
+    item: Option<String>,
+    role: Option<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -1160,7 +1165,7 @@ impl Tools {
             .unwrap_or_default()
     }
 
-    async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
+    async fn create_chat(&self, mut args: CreateChatArgs) -> anyhow::Result<Value> {
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
         let explicit_parent = args
@@ -1216,6 +1221,14 @@ impl Tools {
             }
             (_, true) => ChatKind::Subagent,
         };
+        // A crew thread starts as its orchestrator's crew policy says.
+        let crew_of = match (kind, parent_chat_id.as_deref()) {
+            (ChatKind::Crew, Some(orchestrator)) => Some(orchestrator.to_owned()),
+            _ => None,
+        };
+        if let Some(orchestrator) = crew_of.as_deref() {
+            self.apply_crew_policy(orchestrator, &mut args).await?;
+        }
 
         // Delegation depth: a top-level chat (an orchestrator too) creates
         // chats, and so does a crew thread (its own subagents); any other
@@ -1397,6 +1410,20 @@ impl Tools {
             mutate["cloud"] = json!(true);
         }
         let created = self.zeron.mutate(mutate).await?;
+        // Its role and item in the crew, before its first turn reads them.
+        if let Some(orchestrator) = crew_of.as_deref()
+            && (args.role.is_some() || args.item.is_some())
+        {
+            self.zeron
+                .call(
+                    zeron_rpc::methods::ORCHESTRATE,
+                    json!({
+                        "op": "addToCrew", "orchestratorId": orchestrator, "chatId": chat_id,
+                        "role": args.role.clone().unwrap_or_default(), "itemId": args.item,
+                    }),
+                )
+                .await?;
+        }
         // A Cloud chat's machine and checkout come back from the engine.
         let (device_id, cwd) = if args.cloud {
             (
@@ -1538,6 +1565,25 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        // To its own orchestrator, a crew thread reports.
+        if let Role::Crew { orchestrator_id } = self.role()
+            && orchestrator_id == chat.id
+        {
+            let summary = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Message");
+            let filed = self
+                .zeron
+                .call(
+                    zeron_rpc::methods::ORCHESTRATE,
+                    json!({ "op": "report", "state": "message", "summary": summary, "detail": text }),
+                )
+                .await?;
+            return Ok(json!({
+                "chatId": chat.id,
+                "title": chat.title,
+                "sent": { "delivery": "report", "id": filed["id"] },
+                "note": "Your orchestrator is sent this as a report (use the report tool next time). It wakes on it; there's no reply to wait for.",
+            }));
+        }
         if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
             anyhow::bail!(
                 "refusing to send a message to your own chat ({})",

@@ -516,7 +516,92 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
     }
 }
 
+/// Why a new crew thread can't start now, or `None`: its orchestrator is
+/// paused, or `running` of its threads already work and that's its limit.
+pub(super) fn crew_refusal(orchestrator: &zeron_proto::orchestration::Orchestrator, running: usize, starts: bool) -> Option<String> {
+    if orchestrator.paused {
+        return Some(format!("{} is paused: no new crew work starts until the person resumes it.", orchestrator.name));
+    }
+    match orchestrator.crew.max_running {
+        Some(max) if starts && running >= max as usize => Some(format!(
+            "{}'s crew is full: {running} of {max} threads are working. Wait for one to report done (or release one with crew_release), then start the next.",
+            orchestrator.name
+        )),
+        _ => None,
+    }
+}
+
+/// Crew threads of `orchestrator` that are working (or waiting on the
+/// person) now.
+pub(super) fn crew_running(
+    state: &OrchestrationState,
+    orchestrator: &str,
+    chats: &[zeron_proto::Chat],
+    sessions: &[zeron_proto::Session],
+) -> usize {
+    state
+        .crew
+        .iter()
+        .filter(|m| m.orchestrator_id == orchestrator && !m.released)
+        .filter(|m| {
+            chats.iter().find(|c| c.id == m.chat_id).is_some_and(|chat| {
+                session_for(sessions, chat).is_some_and(|s| {
+                    matches!(s.status, zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput)
+                })
+            })
+        })
+        .count()
+}
+
 impl Tools {
+    /// A new crew thread of `orchestrator` as its crew policy says: where it
+    /// may run (the first allowed device when none is named), its default
+    /// harness and model, its item (on this board only), and no start past
+    /// `maxRunning` (a clear refusal instead).
+    pub(super) async fn apply_crew_policy(&self, orchestrator: &str, args: &mut super::CreateChatArgs) -> anyhow::Result<()> {
+        let Ok(state) = self.orchestration_state().await else {
+            return Ok(()); // an engine without orchestration has no policy
+        };
+        let Some(row) = state.orchestrators.iter().find(|o| o.id == orchestrator) else {
+            return Ok(());
+        };
+        let policy = &row.crew;
+        let starts = args.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
+        let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
+        if let Some(refusal) = crew_refusal(row, crew_running(&state, orchestrator, &chats, &sessions), starts) {
+            anyhow::bail!(refusal);
+        }
+        if let Some(item) = args.item.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+            anyhow::ensure!(
+                state.items.iter().any(|i| i.id == item && i.orchestrator_id.as_deref() == Some(orchestrator)),
+                "No item {item} on {}'s board (see board)",
+                row.name
+            );
+        }
+        if !policy.devices.is_empty() && !args.cloud {
+            if args.device.is_none() && args.project.is_none() {
+                args.device = Some(policy.devices[0].clone());
+            } else {
+                let (_, device) = self.zeron.resolve_target(args.project.as_deref(), args.device.as_deref()).await?;
+                anyhow::ensure!(
+                    policy.devices.contains(&device),
+                    "{}'s crew runs on {} only (its crew policy)",
+                    row.name,
+                    policy.devices.join(", ")
+                );
+            }
+        }
+        if args.harness.is_none() {
+            args.harness = policy.harness.clone();
+            if args.model.is_none() {
+                args.model = policy.model.clone();
+            }
+        } else if args.model.is_none() && args.harness == policy.harness {
+            args.model = policy.model.clone();
+        }
+        Ok(())
+    }
+
     /// Read the caller's role from the orchestration rows (plain when the
     /// engine predates them or the server speaks for no chat).
     pub async fn resolve_role(&self) -> Role {
@@ -753,6 +838,19 @@ mod tests {
             released,
             joined_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn a_full_or_paused_crew_refuses_new_work_clearly() {
+        let mut o = orchestrator("o1", OrchestratorKind::Standard);
+        assert_eq!(crew_refusal(&o, 9, true), None, "no limit");
+        o.crew.max_running = Some(2);
+        assert_eq!(crew_refusal(&o, 1, true), None);
+        let full = crew_refusal(&o, 2, true).unwrap();
+        assert!(full.contains("2 of 2 threads are working"), "{full}");
+        assert_eq!(crew_refusal(&o, 2, false), None, "a thread that doesn't start yet is fine");
+        o.paused = true;
+        assert!(crew_refusal(&o, 0, false).unwrap().contains("paused"));
     }
 
     #[test]
