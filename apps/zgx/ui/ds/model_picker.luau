@@ -301,31 +301,13 @@ return ui.component(function(props: Props): Node
 	end)
 
 	-- The models as the dropdown's items, each in its agent's mark. A model
-	-- with a provider has its name as the row's hint, shown where it tells
-	-- the model from a namesake (its agent lists the same name from another
-	-- provider: Pi's GPT-5.5 through Codex and through OpenCode), and on a
-	-- row a search found by it ("codex"); elsewhere it would only repeat.
+	-- with a provider (Pi's, OpenCode's, Hermes's: agents that reach models
+	-- through providers) has its name as the row's hint, always: which GPT-6
+	-- Luna is which, and where one comes from even when it's the only one.
 	local items = ui.computed(function(): { Dropdown.Item }
 		local out: { Dropdown.Item } = {}
 		local by_agent = agents:get()
 		local models = read(props.models) :: { Model }
-		-- The providers each agent's name comes from ("": none named).
-		local sources: { [string]: { [string]: boolean } } = {}
-		local function key(m: Model): string
-			return `{m.harness}\0{string.lower(m.label)}`
-		end
-		for _, m in models do
-			local k = key(m)
-			sources[k] = sources[k] or {}
-			sources[k][if m.provider then m.provider.id else ""] = true
-		end
-		local function namesake(m: Model): boolean
-			local n = 0
-			for _ in sources[key(m)] do
-				n += 1
-			end
-			return n > 1
-		end
 		for _, m in models do
 			local agent = by_agent[m.harness]
 			table.insert(out, {
@@ -335,7 +317,8 @@ return ui.component(function(props: Props): Node
 				svg = if agent then agent.icon else nil,
 				svg_seed = m.harness,
 				hint = if m.provider then m.provider.name else nil,
-				hint_when_found = if m.provider then not namesake(m) else nil,
+				-- (Always: where a model comes from is part of which it is.)
+				hint_when_found = nil,
 			})
 		end
 		return out

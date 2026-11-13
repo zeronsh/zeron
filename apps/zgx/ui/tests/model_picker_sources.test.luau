@@ -1,9 +1,8 @@
--- A model's provider beside its name, where it tells namesakes apart: Pi
--- signed in to Codex and OpenCode lists GPT-5.5 from each, so those rows
--- say which (quiet, on the name's line, the name fading first when the row
--- runs short); a name only one provider has says nothing more, unless a
--- search found it by its provider ("codex"). On the picker in
--- ui/picker_sources_fixture.luau.
+-- A model's provider beside its name, on every row of an agent that names
+-- one (Pi signed in to Codex and OpenCode lists GPT-5.5 from each; Pi with
+-- Codex alone still says Codex): quiet, on the name's line, the name fading
+-- first when the row runs short. An agent that names no providers says
+-- nothing more. On the picker in ui/picker_sources_fixture.luau.
 
 local function settle(app: any)
 	app:frames(30)
@@ -44,7 +43,7 @@ end
 
 local LONG = "GPT-5.5 Codex Max Preview Extended Context"
 
-test("the provider shows only where two rows share a name", function()
+test("every model an agent names a provider for says it, and only those", function()
 	local app = mount("picker_sources_fixture.luau")
 	app:resize(600, 700)
 	settle(app)
@@ -52,11 +51,9 @@ test("the provider shows only where two rows share a name", function()
 	-- Pi's GPT-5.5 from each provider: each says which.
 	expect(app:has('role:option "GPT-5.5 Codex" >> "Codex"')).to_be(true)
 	expect(app:has('role:option "GPT-5.5 OpenCode" >> "OpenCode"')).to_be(true)
-	-- A name one provider has: just its name.
-	expect(app:has('role:option "GPT-5.5 mini"')).to_be(true)
-	expect(app:has('role:option "Big Pickle"')).to_be(true)
-	expect(app:has('role:option ~"GPT-5.5 mini" >> "Codex"')).to_be(false)
-	expect(app:has('role:option ~"Big Pickle" >> "OpenCode"')).to_be(false)
+	-- A name one provider has says its provider too: Pi reaches several.
+	expect(app:has('role:option "GPT-5.5 mini Codex" >> "Codex"')).to_be(true)
+	expect(app:has('role:option "Big Pickle OpenCode" >> "OpenCode"')).to_be(true)
 	-- Quiet words of the name's size, on its line, the row's gap after it.
 	local name = box(app, "GPT-5.5 Codex", "GPT-5.5") :: any
 	local hint = box(app, "GPT-5.5 Codex", "Codex") :: any
@@ -78,10 +75,10 @@ test("the provider shows only where two rows share a name", function()
 	app:click('role:tab "Starred"')
 	settle(app)
 	expect(app:has('role:option "GPT-5.5 Codex" >> "Codex"')).to_be(true)
-	expect(app:has('role:option "Big Pickle"')).to_be(true)
+	expect(app:has('role:option "Big Pickle OpenCode" >> "OpenCode"')).to_be(true)
 
-	-- OpenCode signed out (its models gone from the catalog), in place: the
-	-- Codex row has no namesake now, so it says just its name.
+	-- OpenCode signed out (its models gone from the catalog), in place: Pi
+	-- has one provider now, and its rows still say it.
 	local models = app:state("test_picker_models") :: { any }
 	local kept = {}
 	for _, m in models do
@@ -91,8 +88,8 @@ test("the provider shows only where two rows share a name", function()
 	end
 	app:set_state("test_picker_models", kept)
 	settle(app)
-	expect(app:has('role:option "GPT-5.5"')).to_be(true)
-	expect(app:has('role:option ~"GPT-5.5" >> "Codex"')).to_be(false)
+	expect(app:has('role:option "GPT-5.5 Codex" >> "Codex"')).to_be(true)
+	expect(app:has('role:option ~"OpenCode"')).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 
@@ -118,11 +115,11 @@ test("a search finds models by their provider, and says it on each row", functio
 	expect(app:has('role:option "GPT-5.5 Codex"')).to_be(true)
 	expect(app:has('role:option "GPT-5.5 OpenCode"')).to_be(false)
 
-	-- Found by its name, a row says no more than it did.
+	-- Found by its name, a row says what it did: its provider, as every
+	-- row of an agent with several does.
 	app:fill('role:textbox "Search"', "pickle")
 	settle(app)
-	expect(app:has('role:option "Big Pickle"')).to_be(true)
-	expect(app:has('role:option ~"Big Pickle" >> "OpenCode"')).to_be(false)
+	expect(app:has('role:option "Big Pickle OpenCode" >> "OpenCode"')).to_be(true)
 
 	-- A provider is found from a word's start, not inside one ("pen" is
 	-- in OpenCode, but starts none of its words); "code" starts its second.
@@ -208,11 +205,11 @@ test("a row gains its provider in place as the catalog names it", function()
 	open(app)
 	expect(app:has('role:option "GPT-5.5"')).to_be(true)
 	expect(app:has('role:option ~"GPT-5.5" >> "Codex"')).to_be(false)
-	-- Then one naming them, the panel open: the namesakes say which.
+	-- Then one naming them, the panel open: every row says its provider.
 	app:set_state("test_picker_models", models)
 	settle(app)
 	expect(app:has('role:option "GPT-5.5 Codex" >> "Codex"')).to_be(true)
 	expect(app:has('role:option "GPT-5.5 OpenCode" >> "OpenCode"')).to_be(true)
-	expect(app:has('role:option "Big Pickle"')).to_be(true)
+	expect(app:has('role:option "Big Pickle OpenCode" >> "OpenCode"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)

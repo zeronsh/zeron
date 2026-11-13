@@ -53,7 +53,7 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
 /// A Pi provider's name as people say it. Pi reports only its id
 /// (`openai-codex`); a provider not listed here reads as its id in words
 /// (`foo-bar` → `Foo Bar`).
-fn provider_name(id: &str) -> String {
+pub(crate) fn provider_name(id: &str) -> String {
     let known = match id {
         "openai-codex" => "Codex",
         "opencode" => "OpenCode",

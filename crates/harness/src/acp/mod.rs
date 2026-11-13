@@ -2900,6 +2900,56 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
 /// unmatched models keep fast mode etc.; the catalog only enriches matched
 /// ids with label/description/per-model ladders.
 fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
+    let mut models = models_from_session_wire(session_response, catalog);
+    for model in &mut models {
+        split_provider_label(model);
+    }
+    models
+}
+
+/// A model an agent names `<provider>:<model>` and labels
+/// `<Provider> · <model>` (Hermes: `anthropic:claude-fable-5.1`, "Anthropic ·
+/// claude-fable-5.1"): its label is the model, and its provider rides on
+/// `provider`, named as people say it (`openai-codex` → Codex, as for Pi and
+/// OpenCode), else as the agent wrote it. The picker shows it beside the
+/// name, like every agent that reaches models through several providers.
+fn split_provider_label(model: &mut Model) {
+    if model.provider.is_some() {
+        return;
+    }
+    let Some((pid, _)) = model.id.split_once(':') else {
+        return;
+    };
+    let Some((written, name)) = model.label.split_once(" \u{b7} ") else {
+        return;
+    };
+    let (pid, written, name) = (pid.trim(), written.trim(), name.trim());
+    if pid.is_empty() || written.is_empty() || name.is_empty() {
+        return;
+    }
+    let known = crate::pi::provider_name(pid);
+    // (A name the map only spelled out from the id reads worse than the
+    // agent's own: keep the agent's then.)
+    let spelled = pid
+        .split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let provider_name = if known == spelled { written.to_owned() } else { known };
+    model.label = name.to_owned();
+    model.provider = Some(zeron_proto::ModelProvider {
+        id: pid.to_owned(),
+        name: provider_name,
+    });
+}
+
+fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
     let config_options = session_response
         .get("configOptions")
         .and_then(Value::as_array)
@@ -7625,6 +7675,44 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// Hermes names a model `<provider>:<model>` and labels it `<Provider> ·
+    /// <model>`: the picker gets the model as its name and the provider
+    /// apart, named as people say it; a provider the map doesn't know keeps
+    /// the agent's own wording. A label without the shape stays as it is.
+    #[test]
+    fn a_provider_glued_to_a_models_label_rides_apart() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "anthropic:claude-fable-5.1",
+                    "options": [
+                        { "value": "anthropic:claude-fable-5.1", "name": "Anthropic \u{b7} claude-fable-5.1" },
+                        { "value": "openai-codex:gpt-6-luna", "name": "ChatGPT or Codex Subscription \u{b7} gpt-6-luna" },
+                        { "value": "nous-portal:hermes-4-405b", "name": "Nous Portal Plus \u{b7} hermes-4-405b" },
+                        { "value": "local-model", "name": "Local Model" },
+                    ],
+                },
+            ],
+        });
+        let models = models_from_session(&response, &[]);
+        let row = |id: &str| models.iter().find(|m| m.id == id).unwrap_or_else(|| panic!("{id}"));
+        let fable = row("anthropic:claude-fable-5.1");
+        assert_eq!(fable.label, "claude-fable-5.1");
+        assert_eq!(fable.provider.as_ref().map(|p| (p.id.as_str(), p.name.as_str())), Some(("anthropic", "Anthropic")));
+        let luna = row("openai-codex:gpt-6-luna");
+        assert_eq!(luna.label, "gpt-6-luna");
+        assert_eq!(luna.provider.as_ref().map(|p| p.name.as_str()), Some("Codex"));
+        let nous = row("nous-portal:hermes-4-405b");
+        assert_eq!(nous.provider.as_ref().map(|p| p.name.as_str()), Some("Nous Portal Plus"));
+        let plain = row("local-model");
+        assert_eq!(plain.label, "Local Model");
+        assert!(plain.provider.is_none());
     }
 
     #[test]
