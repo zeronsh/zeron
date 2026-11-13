@@ -1239,6 +1239,25 @@
         "refreshing": "Writing a fresh note",
         "pinned": "Pinned",
         "under_minute": "<1m"
+      },
+      "qa": {
+        "empty": "No questions yet",
+        "unread": "Unread",
+        "waiting": "Waiting",
+        "answering": "Answering",
+        "asked": "asked {ago}",
+        "answered": "answered {ago}",
+        "answered_now": "answered",
+        "open_in": "Go to {name}",
+        "open_thread": "Open thread",
+        "mark_read": "Mark read",
+        "mark_unread": "Mark unread",
+        "dismiss": "Dismiss",
+        "dismissed": "Question dismissed",
+        "undo": "Undo",
+        "actions": "Question actions",
+        "more": "{n} more",
+        "fewer": "Show fewer"
       }
     }
   },
@@ -4168,7 +4187,8 @@
       "board": "Board",
       "machines": "Machines",
       "comms": "Comms",
-      "progress": "Progress"
+      "progress": "Progress",
+      "qa": "Q&A"
     },
     "widgets": {
       "title": "Widgets",
@@ -4199,7 +4219,9 @@
       "online": "{n, plural, one {# machine} other {# machines}}",
       "running": "{n} running",
       "stalled": "{n} stalled",
-      "pinned": "{n} pinned"
+      "pinned": "{n} pinned",
+      "new": "{n} new",
+      "waiting": "{n} waiting"
     },
     "progress": {
       "empty": "Nothing working",

@@ -334,7 +334,8 @@ end)
 
 test("orch board: in the Control room, a card's dump is brought into view", function()
 	local app = mount("control_page_fixture.luau")
-	app:resize(1440, 2600)
+	-- (Tall enough for the Board under both columns, Q&A's in the right.)
+	app:resize(1440, 3000)
 	app:frames(30)
 	-- The loose item the newest dump made, in the Inbox: its menu's Show dump.
 	app:right_click("#control-board-inbox >> .orch-card")
