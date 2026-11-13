@@ -759,6 +759,17 @@ impl SessionsEngine {
     }
 
     /// The harness of the chat's live run, while one is in flight.
+    /// The harness of the chat's run on this device, between turns too.
+    pub(crate) fn run_harness(&self, chat_id: &str) -> Option<HarnessId> {
+        lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
+    }
+
+    /// Whether `prompt` to `harness` is a message of the person's: not one
+    /// of OpenCode's TUI actions, whose transcript shows what they did.
+    fn is_message(harness: HarnessId, prompt: &str) -> bool {
+        harness != HarnessId::Opencode || crate::opencode_sync::tui_action(prompt).is_none()
+    }
+
     pub fn live_harness(&self, chat_id: &str) -> Option<HarnessId> {
         if !self.turn_in_flight(chat_id) {
             return None;
@@ -1090,7 +1101,9 @@ impl SessionsEngine {
                     lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
                 }
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                if Self::is_message(harness_id, &request.prompt) {
+                    handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                }
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -1165,7 +1178,9 @@ impl SessionsEngine {
             // the resume lookup below turns the foreign session id away.
             self.inner
                 .note_provider_switch(chat_id, harness_id, &handle);
-            handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+            if Self::is_message(harness_id, &request.prompt) {
+                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+            }
         }
         let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
         let binary = {
@@ -1596,7 +1611,12 @@ impl SessionsEngine {
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        if self
+            .run_harness(chat_id)
+            .is_none_or(|harness| Self::is_message(harness, prompt))
+        {
+            handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        }
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {

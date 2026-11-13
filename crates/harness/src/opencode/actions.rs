@@ -99,7 +99,7 @@ impl TuiAction {
                     .get_json(&format!("/api/session/{session_id}/message?limit=200"), dir)
                     .await?;
                 let Some((id, text)) = last_prompt(&unwrap_data(messages)) else {
-                    return Ok(note("Nothing to undo."));
+                    return Ok(self.chip("Nothing to undo."));
                 };
                 server
                     .post_json(
@@ -121,7 +121,7 @@ impl TuiAction {
                         .await?,
                 );
                 if info.get("revert").is_none_or(Value::is_null) {
-                    return Ok(note("Nothing to redo."));
+                    return Ok(self.chip("Nothing to redo."));
                 }
                 let path = format!("/api/session/{session_id}/revert");
                 let request = server.request(reqwest::Method::DELETE, &path);
@@ -155,14 +155,38 @@ impl TuiAction {
                 }
             }
         };
-        Ok(vec![AgentEvent::TextDelta { text: note }])
+        Ok(self.chip(&note))
     }
-}
 
-fn note(text: &str) -> Vec<AgentEvent> {
-    vec![AgentEvent::TextDelta {
-        text: text.to_owned(),
-    }]
+    /// What it did, as a chip of its own (named for the action, its note
+    /// the chip's output) rather than words of the agent's.
+    fn chip(self, note: &str) -> Vec<AgentEvent> {
+        let id = format!("action-{}", uuid::Uuid::new_v4());
+        let name = match self {
+            TuiAction::Compact => "Compact",
+            TuiAction::Undo => "Undo",
+            TuiAction::Redo => "Redo",
+            TuiAction::Fork => "Fork",
+        };
+        vec![
+            AgentEvent::ToolCall {
+                id: id.clone(),
+                call: ToolCall::Unknown {
+                    name: name.to_owned(),
+                    input: None,
+                },
+            },
+            AgentEvent::ToolResult {
+                id,
+                is_error: false,
+                output: Some(note.to_owned()),
+                diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
+                exit_code: None,
+            },
+        ]
+    }
 }
 
 /// The newest prompt in a session's message list (newest first or not).

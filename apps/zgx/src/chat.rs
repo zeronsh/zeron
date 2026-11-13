@@ -1684,6 +1684,14 @@ pub(crate) fn made(params: &Json) {
 /// `chat.catalog`: the agents with models listed, each model as the picker
 /// takes it; ready once any agent's models are in (more may follow), or all
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
+/// One of OpenCode's TUI actions, as the engine takes them for an OpenCode
+/// chat (`/compact`, `/undo`, `/redo`, `/fork`, `!command`): no message.
+fn opencode_action(words: &str) -> bool {
+    let words = words.trim();
+    matches!(words, "/compact" | "/undo" | "/redo" | "/fork")
+        || words.strip_prefix('!').is_some_and(|command| !command.trim().is_empty())
+}
+
 /// The access modes a listed harness honours (`accessModes`), as the
 /// composer's values: `supervised`, `edits`, `full`.
 fn access_values(harness: &Json) -> Vec<Value> {
@@ -2487,22 +2495,29 @@ impl View {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(new_id);
         // Shown until the transcript has it (the page's own copy kept in
-        // step as the list is published again meanwhile), sending.
+        // step as the list is published again meanwhile), sending. An
+        // OpenCode action (`/compact`, `/undo`, `!command`, …) is no message:
+        // the transcript shows what it did instead.
         let mut pending = self.pending.borrow_mut();
         let prompts = pending.entry(id.clone()).or_default();
         // (Shown already while its chat was being made: `chat.creating`.)
         prompts.retain(|p| p.id != message_id);
-        prompts.push(Pending {
-            id: message_id.clone(),
-            words: words.clone(),
-            paths: local_paths(&req),
-            waiting: "sending",
-            retry: None,
-            at: stamp(now_seconds()),
-            held: false,
-            row: false,
-            transfers: Vec::new(),
-        });
+        if !(chat["config"]["harness"].as_str() == Some("opencode") && opencode_action(&words)) {
+            prompts.push(Pending {
+                id: message_id.clone(),
+                words: words.clone(),
+                paths: local_paths(&req),
+                waiting: "sending",
+                retry: None,
+                at: stamp(now_seconds()),
+                held: false,
+                row: false,
+                transfers: Vec::new(),
+            });
+        }
+        if prompts.is_empty() {
+            pending.remove(&id);
+        }
         drop(pending);
         self.publish_messages();
         // To a chat Cloud is still making: after its first message, which

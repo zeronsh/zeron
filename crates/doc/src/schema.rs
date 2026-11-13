@@ -867,6 +867,21 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Insert `entry` at `index` (appended past the end): an entry an undo
+    /// took out, put back where it was by a redo.
+    pub fn insert_message(&self, index: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        let at = index.min(messages.len());
+        let map = messages.insert_container(at, LoroMap::new())?;
+        write_entry_scalar_fields(&map, entry)?;
+        let parts = map.insert_container("parts", LoroList::new())?;
+        for part in &entry.parts {
+            push_part(&parts, part)?;
+        }
+        self.commit();
+        Ok(())
+    }
+
     /// Remove the entry at `index` (nothing past the end). For entries kept
     /// in step with another source whose message is gone — an OpenCode
     /// session's message undone there.
@@ -2755,6 +2770,10 @@ mod tests {
         doc.remove_message(9).unwrap();
         let ids: Vec<String> = doc.read_entries().unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(ids, ["a", "c", "d"]);
+        doc.insert_message(1, &entry("b", "back")).unwrap();
+        doc.insert_message(9, &entry("e", "last")).unwrap();
+        let ids: Vec<String> = doc.read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["a", "b", "c", "d", "e"]);
     }
 
     #[test]

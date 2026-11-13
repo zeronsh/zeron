@@ -6318,6 +6318,37 @@ impl DocHost {
         }
     }
 
+    /// `prompt` to an OpenCode chat is one of OpenCode's TUI actions
+    /// (`/compact`, `/undo`, `/redo`, `/fork`, `!command`): no message of the
+    /// person's, so none is written, and an undo or redo changes the
+    /// transcript as it changes OpenCode's session. Any other prompt there
+    /// makes earlier undos final, as it does in OpenCode.
+    fn apply_opencode_action(
+        &self,
+        chat_id: &str,
+        harness: zeron_proto::HarnessId,
+        handle: &ChatDocHandle,
+        prompt: &str,
+    ) -> bool {
+        use crate::opencode_sync::{self, TuiAction};
+        if harness != zeron_proto::HarnessId::Opencode {
+            return false;
+        }
+        let Some(action) = opencode_sync::tui_action(prompt) else {
+            opencode_sync::forget_undone(chat_id);
+            return false;
+        };
+        let result = match action {
+            TuiAction::Undo => opencode_sync::undo_in_transcript(chat_id, handle.doc()),
+            TuiAction::Redo => opencode_sync::redo_in_transcript(chat_id, handle.doc()),
+            TuiAction::Compact | TuiAction::Fork | TuiAction::Shell => Ok(()),
+        };
+        if let Err(error) = result {
+            tracing::warn!(chat = %chat_id, %error, "opencode undo/redo in the transcript failed");
+        }
+        true
+    }
+
     /// `entry` is a prompt sent before the Stop that has already acted on
     /// this chat: the Stop cancelled it. Returns its message id.
     fn cancelled_by_stop(
@@ -6488,11 +6519,16 @@ impl DocHost {
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op. A provider switch's seam lands with it, above.
                 sessions.note_provider_switch(chat_id, harness, handle);
-                if let Err(err) = handle.write_user_message(
-                    message_id,
-                    &request.prompt,
-                    entry.issued_at.min(now_ms()),
-                ) {
+                // OpenCode's TUI actions are no message of the person's: the
+                // transcript shows what they did (and an undo takes its turn
+                // out of it, as OpenCode's session does).
+                if !self.apply_opencode_action(chat_id, harness, handle, &request.prompt)
+                    && let Err(err) = handle.write_user_message(
+                        message_id,
+                        &request.prompt,
+                        entry.issued_at.min(now_ms()),
+                    )
+                {
                     tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
                 }
                 self.dispatch_with_source_context(
@@ -6754,7 +6790,11 @@ impl DocHost {
         // The transcript shows the send while mailbox backpressure holds it.
         // A pending agent update instead holds it in the queue below, where a
         // transcript copy would duplicate it until the update finishes.
-        if !sessions.live_run_update_pending(chat_id)
+        let action = sessions
+            .run_harness(chat_id)
+            .is_some_and(|harness| self.apply_opencode_action(chat_id, harness, handle, &prompt));
+        if !action
+            && !sessions.live_run_update_pending(chat_id)
             && let Some(message_id) = message_id.as_deref()
             && let Err(err) =
                 handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))
@@ -6772,7 +6812,7 @@ impl DocHost {
                 Ok((SessionCommandStatus::Applied, None))
             }
             SteerOutcome::NotSteerable => {
-                if let Some(message_id) = message_id.as_deref() {
+                if !action && let Some(message_id) = message_id.as_deref() {
                     handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))?;
                 }
                 let request = sessions

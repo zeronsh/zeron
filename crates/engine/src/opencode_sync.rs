@@ -499,6 +499,104 @@ fn write_history(
     Ok(written)
 }
 
+/// One of OpenCode's TUI actions, as typed in Zeron's composer for an
+/// OpenCode chat. The driver does them (`zeron_harness`'s OpenCode actions);
+/// the transcript shows what they did, never the typed command as a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TuiAction {
+    Compact,
+    Undo,
+    Redo,
+    Fork,
+    /// `!command`, the TUI's shell mode: its command chip says what ran.
+    Shell,
+}
+
+/// The action `prompt` is, if it is one.
+pub(crate) fn tui_action(prompt: &str) -> Option<TuiAction> {
+    let prompt = prompt.trim();
+    match prompt {
+        "/compact" => Some(TuiAction::Compact),
+        "/undo" => Some(TuiAction::Undo),
+        "/redo" => Some(TuiAction::Redo),
+        "/fork" => Some(TuiAction::Fork),
+        _ => prompt
+            .strip_prefix('!')
+            .is_some_and(|command| !command.trim().is_empty())
+            .then_some(TuiAction::Shell),
+    }
+}
+
+/// What an undo took out of a chat's transcript, and where it was: a redo
+/// puts it back there. Per chat, newest last; kept for the engine's life
+/// (after a restart a redo still restores OpenCode's session, and an
+/// imported chat's entries with it, through the sync).
+struct Undone {
+    at: usize,
+    entries: Vec<SessionMessageEntry>,
+}
+
+static UNDONE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<Undone>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn undone() -> std::sync::MutexGuard<'static, HashMap<String, Vec<Undone>>> {
+    UNDONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `/undo` in the transcript, as OpenCode's session takes it back: the last
+/// prompt and everything after it go, kept for a redo.
+pub(crate) fn undo_in_transcript(
+    chat_id: &str,
+    doc: &zeron_doc::SessionDoc,
+) -> Result<(), zeron_doc::DocError> {
+    let entries = doc.read_entries()?;
+    let Some(at) = entries
+        .iter()
+        .rposition(|entry| entry.role == MessageRole::User)
+    else {
+        return Ok(());
+    };
+    for index in (at..entries.len()).rev() {
+        doc.remove_message(index)?;
+    }
+    undone()
+        .entry(chat_id.to_owned())
+        .or_default()
+        .push(Undone {
+            at,
+            entries: entries[at..].to_vec(),
+        });
+    Ok(())
+}
+
+/// `/redo` in the transcript: what the last undo took goes back where it
+/// was (entries back already, by the sync, are left as they are).
+pub(crate) fn redo_in_transcript(
+    chat_id: &str,
+    doc: &zeron_doc::SessionDoc,
+) -> Result<(), zeron_doc::DocError> {
+    let Some(undo) = undone().get_mut(chat_id).and_then(Vec::pop) else {
+        return Ok(());
+    };
+    let present: HashSet<String> = doc.read_entries()?.into_iter().map(|e| e.id).collect();
+    let mut at = undo.at;
+    for entry in undo.entries {
+        if present.contains(&entry.id) {
+            continue;
+        }
+        doc.insert_message(at, &entry)?;
+        at += 1;
+    }
+    Ok(())
+}
+
+/// A new prompt makes the chat's undos final, as it does in OpenCode.
+pub(crate) fn forget_undone(chat_id: &str) {
+    undone().remove(chat_id);
+}
+
 /// Entry ids of the questions a session is waiting on.
 const QUESTION_PREFIX: &str = "oc-form:";
 
@@ -806,6 +904,67 @@ mod tests {
         write_questions(&doc, &[], "dev").unwrap();
         assert!(!open(&doc));
         assert_eq!(doc.read_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_tui_actions_are_known_by_what_is_typed() {
+        assert_eq!(tui_action(" /compact "), Some(TuiAction::Compact));
+        assert_eq!(tui_action("/undo"), Some(TuiAction::Undo));
+        assert_eq!(tui_action("/redo"), Some(TuiAction::Redo));
+        assert_eq!(tui_action("/fork"), Some(TuiAction::Fork));
+        assert_eq!(tui_action("!git status"), Some(TuiAction::Shell));
+        assert_eq!(tui_action("!"), None);
+        assert_eq!(tui_action("/undo this please"), None);
+        assert_eq!(tui_action("please /compact"), None);
+    }
+
+    #[test]
+    fn undo_takes_the_last_turn_out_and_redo_puts_it_back_in_place() {
+        let doc = zeron_doc::SessionDoc::init("undo-visual").unwrap();
+        let entry = |id: &str, role: MessageRole| SessionMessageEntry {
+            duration_ms: None,
+            id: id.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: id.into(),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        for (id, role) in [
+            ("p1", MessageRole::User),
+            ("r1", MessageRole::Assistant),
+            ("p2", MessageRole::User),
+            ("r2", MessageRole::Assistant),
+        ] {
+            doc.push_message(&entry(id, role)).unwrap();
+        }
+        let ids = |doc: &zeron_doc::SessionDoc| -> Vec<String> {
+            doc.read_entries()
+                .unwrap()
+                .into_iter()
+                .map(|e| e.id)
+                .collect()
+        };
+        let chat = "undo-visual-chat";
+        undo_in_transcript(chat, &doc).unwrap();
+        assert_eq!(ids(&doc), ["p1", "r1"]);
+        // The action's own chip lands after it.
+        doc.push_message(&entry("undo-chip", MessageRole::Assistant))
+            .unwrap();
+        redo_in_transcript(chat, &doc).unwrap();
+        assert_eq!(ids(&doc), ["p1", "r1", "p2", "r2", "undo-chip"]);
+        // Nothing left to redo: nothing changes.
+        redo_in_transcript(chat, &doc).unwrap();
+        assert_eq!(ids(&doc).len(), 5);
+        // An undo made final by a new prompt can't be redone.
+        undo_in_transcript(chat, &doc).unwrap();
+        forget_undone(chat);
+        redo_in_transcript(chat, &doc).unwrap();
+        assert_eq!(ids(&doc), ["p1", "r1"]);
     }
 
     #[test]
