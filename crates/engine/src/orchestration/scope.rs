@@ -88,6 +88,7 @@ pub(crate) fn scoped(state: &OrchestrationState, chat: Option<&str>) -> Orchestr
                     .collect(),
                 crew,
                 dumps: Vec::new(),
+                settings: state.settings.clone(),
             }
         }
         Seen::Crew { orchestrator, item } => OrchestrationState {
@@ -101,6 +102,7 @@ pub(crate) fn scoped(state: &OrchestrationState, chat: Option<&str>) -> Orchestr
             items: state.items.iter().filter(|i| Some(i.id.as_str()) == item).cloned().collect(),
             asks: Vec::new(),
             dumps: Vec::new(),
+            settings: state.settings.clone(),
         },
         Seen::BrainDump(id) => OrchestrationState {
             orchestrators: state
@@ -209,6 +211,8 @@ mod tests {
             last_report: None,
             released: false,
             joined_at: Utc::now(),
+            archived_seen_at: None,
+            revived_at: None,
         }
     }
 
@@ -285,6 +289,7 @@ mod tests {
                 updated_at: Utc::now(),
                 attachments: Default::default(),
             }],
+            settings: Default::default(),
         }
     }
 

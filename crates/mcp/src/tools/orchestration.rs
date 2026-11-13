@@ -1136,6 +1136,8 @@ mod tests {
             last_report: None,
             released,
             joined_at: Utc::now(),
+            archived_seen_at: None,
+            revived_at: None,
         }
     }
 

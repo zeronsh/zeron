@@ -23,6 +23,7 @@ use zeron_proto::orchestration::{
 use crate::workspace_host::WorkspaceHost;
 
 pub(crate) mod brain;
+pub(crate) mod crew_archive;
 pub(crate) mod incoming;
 pub mod comms;
 pub(crate) mod loads;
