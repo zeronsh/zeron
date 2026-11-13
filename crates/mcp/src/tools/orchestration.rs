@@ -652,6 +652,11 @@ impl Tools {
         self.role_prompt.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// See [`crew_wait_note`].
+    pub(super) fn crew_wait_note(&self, chat: &zeron_proto::Chat) -> Option<Value> {
+        crew_wait_note(&self.role(), chat)
+    }
+
     /// The role as last read.
     pub(super) fn role(&self) -> Role {
         self.role.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
@@ -838,6 +843,22 @@ impl Tools {
     }
 }
 
+/// An orchestrator doesn't sit waiting on its own crew: their reports wake it,
+/// all at once, and a turn spent waiting is one in which it can't answer the
+/// person. Waiting on a crew thread returns this at once instead of the
+/// thread's turn.
+pub(super) fn crew_wait_note(role: &Role, chat: &zeron_proto::Chat) -> Option<Value> {
+    let Role::Orchestrator { id } = role else { return None };
+    let crew = chat.parent_chat_id.as_deref() == Some(id.as_str())
+        && chat.child_kind == Some(zeron_proto::ChildKind::Crew);
+    crew.then(|| {
+        json!({
+            "outcome": "notWaited",
+            "note": "Crew threads report back on their own. End your turn now: their reports wake you together, as Crew updates.",
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +894,27 @@ mod tests {
             released,
             joined_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn an_orchestrator_never_waits_on_its_crew() {
+        let chat = |parent: Option<&str>, kind: Option<zeron_proto::ChildKind>| zeron_proto::Chat {
+            parent_chat_id: parent.map(str::to_owned),
+            child_kind: kind,
+            ..serde_json::from_value(json!({
+                "id": "c1", "deviceId": "d", "title": null, "archived": false, "cwd": null,
+                "branch": null, "checkoutId": null, "config": null, "lastMessagePreview": null,
+                "lastMessageAt": null, "createdAt": "2026-11-12T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let orch = Role::Orchestrator { id: "o1".into() };
+        let crew = chat(Some("o1"), Some(zeron_proto::ChildKind::Crew));
+        assert_eq!(crew_wait_note(&orch, &crew).unwrap()["outcome"], "notWaited");
+        // Another orchestrator's crew, a plain subagent, or a plain caller: waits as ever.
+        assert!(crew_wait_note(&orch, &chat(Some("o2"), Some(zeron_proto::ChildKind::Crew))).is_none());
+        assert!(crew_wait_note(&orch, &chat(Some("o1"), Some(zeron_proto::ChildKind::Subagent))).is_none());
+        assert!(crew_wait_note(&Role::Plain, &crew).is_none());
     }
 
     #[test]

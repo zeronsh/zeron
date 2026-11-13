@@ -800,7 +800,7 @@ pub mod role_prompts {
             "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n\
 - Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
 - Keep item states true; put results in `outcome`.\n\
-- Crew reports arrive as 'Crew updates': act on them, don't echo them.\n\
+- After starting or messaging crew, end your turn: don't wait on crew threads (`wait_for_turn`, `wait`). Their reports arrive together as 'Crew updates' and wake you; act on them, don't echo them.\n\
 - Ask the person only via `ask`, only for real decisions.\n\
 - When the person asks you something, answer in your reply, briefly, and record the answer as the item's outcome.\n\
 - Keep `notes` as your plan.",

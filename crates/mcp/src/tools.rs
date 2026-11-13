@@ -1518,7 +1518,9 @@ impl Tools {
                 .lock()
                 .await
                 .insert(chat.id.clone(), pending.clone());
-            if args.wait {
+            if let Some(note) = args.wait.then(|| self.crew_wait_note(&chat)).flatten() {
+                result["turn"] = note;
+            } else if args.wait {
                 result["turn"] = self
                     .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
                     .await?;
@@ -1626,7 +1628,9 @@ impl Tools {
             .lock()
             .await
             .insert(chat.id.clone(), pending.clone());
-        if args.wait {
+        if let Some(note) = args.wait.then(|| self.crew_wait_note(&chat)).flatten() {
+            result["turn"] = note;
+        } else if args.wait {
             // The message is on its way: not being able to watch the turn
             // must not read as not having sent it.
             result["turn"] = self
@@ -1645,6 +1649,9 @@ impl Tools {
 
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        if let Some(note) = self.crew_wait_note(&chat) {
+            return Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": note }));
+        }
         let pending = self.pending_turns.lock().await.get(&chat.id).cloned();
         let turn = match pending {
             Some(pending) => {
