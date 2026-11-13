@@ -213,7 +213,7 @@ function M.step(g: Graph): boolean
 				b.vx += fx
 				b.vy += fy
 				-- (Room for a name beside a node that always shows one.)
-				local room = a.r + b.r + 16 + (if a.kind ~= "thread" then 24 else 0) + (if b.kind ~= "thread" then 24 else 0)
+				local room = a.r + b.r + 22 + (if a.kind ~= "thread" then 24 else 0) + (if b.kind ~= "thread" then 24 else 0)
 				if d < room then
 					local push = (room - d) / d * 0.5
 					a.vx -= dx * push * 0.5
@@ -235,6 +235,16 @@ function M.step(g: Graph): boolean
 			a.vy *= FRICTION
 			a.x += a.vx
 			a.y += a.vy
+		end
+	end
+	-- Each machine drawn to the middle of what it runs (its island's
+	-- anchor), unless dropped.
+	local pre = M.islands(g)
+	for id, i in pre do
+		local d = nodes[g.index[id]]
+		if not d.fixed and next(i.members) then
+			d.x += (i.x - d.x) * 0.3
+			d.y += (i.y - d.y) * 0.3
 		end
 	end
 	-- Islands apart, rim to rim, each moved whole (a dropped node stays).

@@ -366,8 +366,31 @@ M.View = ui.component(function(props: {
 			end
 			return t
 		end
+		-- Points along every line and rim, which a name would rather not cut.
+		local pts: { { number } } = {}
+		for _, ln in lines do
+			local k = math.max(4, math.floor(math.sqrt((ln.bx - ln.ax) ^ 2 + (ln.by - ln.ay) ^ 2) / 8))
+			for i = 0, k do
+				local t = i / k
+				local u = 1 - t
+				table.insert(pts, { u * u * ln.ax + 2 * u * t * ln.cx + t * t * ln.bx, u * u * ln.ay + 2 * u * t * ln.cy + t * t * ln.by })
+			end
+		end
+		for _, rim in rims do
+			local k = math.max(12, math.floor(rim.r * math.rad(rim.sweep) / 8))
+			for i = 0, k do
+				local a = math.rad(rim.from + rim.sweep * i / k)
+				table.insert(pts, { rim.x + math.cos(a) * rim.r, rim.y + math.sin(a) * rim.r })
+			end
+		end
 		local function crowd(x0: number, y0: number, x1: number, y1: number, own: string): number
 			local k = 0
+			for _, p in pts do
+				if p[1] > x0 and p[1] < x1 and p[2] > y0 and p[2] < y1 then
+					k += 0.1
+				end
+			end
+			k = math.min(k, 0.9)
 			for _, bx in taken do
 				if x0 < bx[3] and x1 > bx[1] and y0 < bx[4] and y1 > bx[2] then
 					k += 1
@@ -390,7 +413,7 @@ M.View = ui.component(function(props: {
 		local labels: { any } = {}
 		local function place(n: sim.Node, t: string, opts: any, force: boolean)
 			local x, y = at(n)
-			local r = reach(n) + 6
+			local r = (if n.kind == "thread" then 9 else reach(n)) + 6
 			local tw, th = c:measure_text(t, opts)
 			local spots = {
 				{ x + r, y - th / 2 },
@@ -412,7 +435,9 @@ M.View = ui.component(function(props: {
 					break
 				end
 			end
-			if least > 0 and not force then
+			-- (Lines may run under a name, broken round it; marks and other
+			-- names may not.)
+			if least >= 1 and not force then
 				return
 			end
 			table.insert(taken, { best[1] - 3, best[2] - 1, best[1] + tw + 3, best[2] + th + 1 })
@@ -421,7 +446,7 @@ M.View = ui.component(function(props: {
 		end
 		for _, n in graph.nodes do
 			if n.kind == "orchestrator" or n.kind == "brain" then
-				place(n, short(n.title, 28), { size = 13, weight = 600, color = ink(0.92, lit_of(n.id)) }, true)
+				place(n, short(n.title, 28), { size = 13, weight = 600, color = ink(if dark then 0.92 else 0.9, lit_of(n.id)) }, true)
 			end
 		end
 		for pass = 1, 2 do
@@ -433,7 +458,8 @@ M.View = ui.component(function(props: {
 				local busy = st == "working" or st == "input" or st == "approval" or st == "failed"
 				local lit_here = near ~= nil and near[n.id] == true
 				if (pass == 1) == (busy or lit_here) then
-					place(n, short(n.title, 26), { size = 12, color = ink(if busy then 0.74 else 0.5, lit_of(n.id)) }, lit_here)
+					local a = if busy then (if dark then 0.76 else 0.82) else (if dark then 0.52 else 0.64)
+					place(n, short(n.title, 26), { size = 12, color = ink(a, lit_of(n.id)) }, lit_here)
 				end
 			end
 		end
@@ -453,15 +479,16 @@ M.View = ui.component(function(props: {
 		c:clip(field)
 		for _, rim in rims do
 			local lit = lit_of(rim.n.id)
-			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.18, lit), 1)
+			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1)
 			local l = (loads :: any)[rim.n.device or ""]
 			local f = if l and l.cpu then math.clamp(l.cpu, 0, 1) else 0
 			if f > 0.005 then
-				-- (Neutral; amber only when the machine is near full.)
-				local paint = if f >= 0.85
-					then kit.ink(string.sub(ContextUsage.ink(f), 2), dim(0.6, lit))
-					else ink(if dark then 0.5 else 0.42, lit)
-				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * f), paint, 2, { cap = "round" })
+				-- (Neutral, by its length; past 80% the rest in amber.)
+				local calm = math.min(f, 0.8)
+				c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep * calm), ink(if dark then 0.45 else 0.4, lit), 2, { cap = "round" })
+				if f > 0.8 then
+					c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from + rim.sweep * 0.8, rim.sweep * (f - 0.8)), kit.ink(string.sub(ContextUsage.ink(f), 2), dim(if dark then 0.8 else 0.9, lit)), 2, { cap = "round" })
+				end
 			end
 		end
 		for _, ln in lines do
@@ -472,9 +499,9 @@ M.View = ui.component(function(props: {
 			elseif e.kind == "control" then
 				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.95 else 0.6, lit)), if lit then 2 else 1.5, { cap = "round" })
 			elseif e.kind == "started" then
-				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.85 else 0.45, lit)), 1.25, { cap = "round", dash = { 5, 3 } })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.85 else 0.4, lit)), 1, { cap = "round", dash = { 4, 3 } })
 			else
-				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.7 else 0.3, lit)), 1.25, { cap = "round", dash = { 0.5, 3.5 } })
+				c:stroke(p, hue.canvas(e.hue, dim(if lit then 0.7 else 0.35, lit)), 1.25, { cap = "round", dash = { 0.5, 3 } })
 			end
 		end
 		-- Pulses along them.
@@ -501,8 +528,10 @@ M.View = ui.component(function(props: {
 			if n.kind == "device" then
 				-- The machine itself: a square plate (hardware), its mark.
 				local rad = 6 * zs
-				c:rect(x - r, y - r, r * 2, r * 2, kit.ink("background", dim(0.96, lit)), rad)
-				c:rect(x - r, y - r, r * 2, r * 2, ink(0.05, lit), rad)
+				if dark then
+					c:rect(x - r, y - r, r * 2, r * 2, kit.ink("background", dim(0.96, lit)), rad)
+				end
+				c:rect(x - r, y - r, r * 2, r * 2, ink(if dark then 0.05 else 0.07, lit), rad)
 				c:stroke(ui.path():rect(x - r + 0.5, y - r + 0.5, r * 2 - 1, r * 2 - 1, rad), ink(if dark then 0.22 else 0.24, lit), 1)
 				local d = nil
 				for _, dev in world.devices or {} do
@@ -553,7 +582,7 @@ M.View = ui.component(function(props: {
 
 		-- 5. The names.
 		for _, rim in rims do
-			c:text(rim.n.title, rim.x, rim.ny, { size = 12, weight = 500, color = ink(0.72, lit_of(rim.n.id)), align = "center", baseline = "middle" })
+			c:text(rim.n.title, rim.x, rim.ny, { size = 12, weight = 500, color = ink(if dark then 0.78 else 0.75, lit_of(rim.n.id)), align = "center", baseline = "middle" })
 		end
 		for _, l in labels do
 			c:text(l.t, l.x, l.y, l.opts)
@@ -655,7 +684,7 @@ M.View = ui.component(function(props: {
 					end
 					return 1
 				end,
-				status.StatusIcon { kind = "working", size = 16 },
+				status.StatusIcon { kind = "working", size = 18 },
 			}),
 		}
 	end
