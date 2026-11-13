@@ -192,6 +192,9 @@ end
 local function row_of(id: string): any
 	return M.rows:get()[id]
 end
+-- A chat's progress row (nil while it has none): what a board card's
+-- clocks read.
+M.row = row_of
 
 -- Whose work it is and where it runs: its orchestrator (or project) and
 -- its machine.

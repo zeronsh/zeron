@@ -390,9 +390,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					end,
 					on_remove = orchestration.remove_item,
 					on_restore = orchestration.restore_item,
-					progress = function(chat: string): Node
-						return Progress.strip(chat, { lean = true })
-					end,
+					progress_of = Progress.row,
 					on_link = function(link: any)
 						if link.kind == "chat" then
 							route.open_session(link.target)
