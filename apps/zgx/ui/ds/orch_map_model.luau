@@ -128,9 +128,15 @@ function M.fleet(world: any): Fleet
 			local device = (c and c.device) or home.device
 			local name, pid = project_of(c, if device == home.device then home.project_id else nil)
 			local it = items[m.item_id or ""]
+			-- (Its name: the chat's, else its board card's, else its role,
+			-- so no crew row is ever blank.)
+			local title = c and c.title
+			if not title or title == "" then
+				title = (it and it.title) or (if m.role and m.role ~= "" then m.role else nil) or ""
+			end
 			threads[m.chat_id] = {
 				id = m.chat_id,
-				title = (c and c.title) or "",
+				title = title,
 				device = device,
 				project = name,
 				project_id = pid,

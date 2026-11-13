@@ -90,20 +90,33 @@ local function bar(c: any, x0: number, x1: number, mid: number, texture: string)
 	end
 end
 
+-- A tick: a stem, its head the kind's own shape (a report and an ask a
+-- square, finished a round head, a merge a diamond, a failure a cross).
 local function tick(c: any, x: number, mid: number, kind: string)
 	local ink = kit.ink(TICK_INK[kind] or "text.primary", if kind == "report" then 0.6 else 1)
-	c:line(x, mid - 8, x, mid + 6, ink, 1.25)
-	c:rect(x - 1.5, mid - 10, 3, 3, ink, 0.5)
+	c:line(x, mid - 7, x, mid + 6, ink, 1.25)
+	local hy = mid - 9
+	if kind == "done" then
+		c:circle(x, hy, 2.25, ink)
+	elseif kind == "merged" then
+		c:fill(ui.path():move(x, hy - 3):line(x + 3, hy):line(x, hy + 3):line(x - 3, hy):close(), ink)
+	elseif kind == "failed" then
+		c:line(x - 2.5, hy - 2.5, x + 2.5, hy + 2.5, ink, 1.5, { cap = "round" })
+		c:line(x - 2.5, hy + 2.5, x + 2.5, hy - 2.5, ink, 1.5, { cap = "round" })
+	else
+		c:rect(x - 1.75, hy - 1.75, 3.5, 3.5, ink, 0.5)
+	end
 end
 
--- The legend's entries: the textures, then the ticks.
+-- The legend's entries: what a thread was doing (the textures), then what
+-- happened (the ticks), each only where one is drawn.
 local LEGEND = {
 	{ kind = "thinking", texture = "stipple" },
 	{ kind = "editing", texture = "mid" },
 	{ kind = "testing", texture = "cells" },
 	{ kind = "building", texture = "solid" },
 }
-local LEGEND_TICKS = { "report", "ask", "failed", "merged" }
+local LEGEND_TICKS = { "report", "ask", "done", "failed", "merged" }
 
 M.View = ui.component(function(props: {
 	world: () -> any,
@@ -368,8 +381,10 @@ M.View = ui.component(function(props: {
 					end, size = 6 }),
 				},
 				ui.text {
+					-- (The chat's own name first, as the other views have it.)
 					function(): string
-						return t().title or ""
+						local live = c().title
+						return if live and live ~= "" then live else (t().title or "")
 					end,
 					min_w = 0,
 					truncate = true,
@@ -460,14 +475,14 @@ M.View = ui.component(function(props: {
 
 	local function swatch(texture: string?, tick_kind: string?): Node
 		return ui.canvas {
-			w = if texture then 18 else 6,
-			h = 14,
+			w = if texture then 22 else 10,
+			h = 20,
 			shrink = 0,
 			draw = function(c: any, w: number, h: number)
 				if texture then
 					bar(c, 0, w, h / 2, texture)
 				else
-					tick(c, w / 2, h / 2 + 2, tick_kind :: string)
+					tick(c, w / 2, h / 2 + 3, tick_kind :: string)
 				end
 			end,
 		}
@@ -485,9 +500,25 @@ M.View = ui.component(function(props: {
 	for _, e in LEGEND do
 		table.insert(legend, legend_item(locale.t(`ds.orch.activity.{e.kind}`), e.texture, nil))
 	end
-	local ticks_legend: any = { gap = "$space.3", items = "center", shrink = 0 }
+	-- (What happened, after a divider: each tick's own mark, listed only
+	-- when one shows in the window.)
+	local function shows(kind: string): () -> boolean
+		return function(): boolean
+			for _, r in built:get().rows do
+				for _, k in r.ticks or {} do
+					if k.kind == kind then
+						return true
+					end
+				end
+			end
+			return false
+		end
+	end
+	local ticks_legend: any = { gap = "$space.3", items = "center", shrink = 0,
+		ui.div { w = 1, h = 14, bg = "$border.subtle", shrink = 0 } }
 	for _, k in LEGEND_TICKS do
-		table.insert(ticks_legend, legend_item(locale.t(`ds.orch.map.tick.{k}`), nil, k))
+		local item = legend_item(locale.t(`ds.orch.map.tick.{k}`), nil, k)
+		table.insert(ticks_legend, ui.show(shows(k), item))
 	end
 
 	local function span_button(mins: number): Node
@@ -533,14 +564,20 @@ M.View = ui.component(function(props: {
 		ui.row {
 			class = "orch-tl-top",
 			w_full = true,
-			h = TOP_H,
+			min_h = TOP_H,
 			gap = "$space.4",
 			items = "center",
-			ui.row(legend),
-			ui.show(function(): boolean
-				return width:get() >= 820
-			end, ui.row(ticks_legend)),
-			ui.div { grow = 1 },
+			-- (Both groups, wrapping onto a second line when narrow: what
+			-- each mark means is never hidden.)
+			ui.row {
+				grow = 1,
+				min_w = 0,
+				flex_wrap = true,
+				gap = "$space.4",
+				items = "center",
+				ui.row(legend),
+				ui.row(ticks_legend),
+			},
 			ui.row { gap = 2, items = "center", shrink = 0, span_button(15), span_button(60) },
 		},
 		-- A secondary click on a lane (a machine's head): its menu.

@@ -1209,6 +1209,7 @@
         "tick": {
           "report": "Report",
           "ask": "Ask",
+          "done": "Done",
           "failed": "Failed",
           "merged": "Merged"
         }
