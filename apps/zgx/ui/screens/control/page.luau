@@ -623,6 +623,35 @@ local function working_now(): number
 	return working
 end
 
+-- What the page's head counts, from what its blocks show, so the two never
+-- disagree: the orchestrators (each one of yours, not archived; the Brain
+-- dump isn't one), those working (the Progress block's count), those that
+-- need you (Needs you's list; `urgent`, those of it that are).
+local tally = {}
+function tally.orchestrators(): number
+	local n = 0
+	for _, o in orchestration.now:get().orchestrators or {} do
+		if (o.kind == nil or o.kind == "standard") and not o.archived then
+			n += 1
+		end
+	end
+	return n
+end
+function tally.working(): number
+	local w = Progress.counts()
+	return w
+end
+function tally.needs(urgent: boolean?): number
+	local k = 0
+	for _, need in data.needs(orchestration.now:get(), sessions.now:get()) do
+		if not urgent or need.urgent then
+			k += 1
+		end
+	end
+	return k
+end
+M.tally = tally
+
 -- A figure that shows only while it has something to say.
 local function figure_if(text: () -> string, tone: string?): Node
 	return ui.show(function(): boolean
@@ -646,15 +675,7 @@ end
 -- What a widget's head says beside its title: its live figures.
 local function figures_of(id: string): Node?
 	if id == "needs" then
-		local function n(urgent: boolean): number
-			local k = 0
-			for _, need in data.needs(orchestration.now:get(), sessions.now:get()) do
-				if not urgent or need.urgent then
-					k += 1
-				end
-			end
-			return k
-		end
+		local n = tally.needs
 		return ui.row {
 			gap = "$space.2",
 			items = "center",
@@ -875,23 +896,6 @@ local function head(): Node
 		end })
 		return out
 	end
-	local function summary(): string
-		local now = orchestration.now:get()
-		local n, working = 0, 0
-		for _, o in now.orchestrators or {} do
-			if o.kind ~= "brain_dump" and not o.archived then
-				n += 1
-			end
-		end
-		for _, m in now.crew or {} do
-			local c = chats_now:get()[m.chat_id]
-			if not m.released and c and c.status == "working" then
-				working += 1
-			end
-		end
-		local needing = #data.needs(now, sessions.now:get())
-		return locale.s("control.summary", { orchestrators = n, working = working, needs = needing })
-	end
 	return ContextMenu {
 		items = entries,
 		hook = hook,
@@ -903,16 +907,43 @@ local function head(): Node
 			gap = "$space.3",
 			items = "center",
 			ds.Text { locale.t("control.title"), style = "heading" },
-			ui.text {
-				summary,
+			-- What's going on: the counts the blocks show, set apart by room,
+			-- not a glyph; those that need you in their own tone when any do.
+			ui.row {
 				id = "control-summary",
-				tabular = true,
-				text_size = "$font.size.sm",
-				color = "$text.tertiary",
-				truncate = true,
+				gap = "$space.3",
+				items = "center",
 				min_w = 0,
 				-- (On the title's baseline.)
 				y = Block.baseline("$font.size.lg", "$font.size.sm"),
+				ui.text {
+					function(): string
+						return locale.s("control.head.orchestrators", { n = tally.orchestrators() })
+					end,
+					tabular = true,
+					text_size = "$font.size.sm",
+					color = "$text.tertiary",
+				},
+				ui.text {
+					function(): string
+						return locale.s("control.head.working", { n = tally.working() })
+					end,
+					tabular = true,
+					text_size = "$font.size.sm",
+					color = function(): string
+						return if tally.working() > 0 then "$text.secondary" else "$text.tertiary"
+					end,
+				},
+				ui.text {
+					function(): string
+						return locale.s("control.head.needs", { n = tally.needs() })
+					end,
+					tabular = true,
+					text_size = "$font.size.sm",
+					color = function(): string
+						return if tally.needs() > 0 then "$zeron.status.input" else "$text.tertiary"
+					end,
+				},
 			},
 			ui.div { grow = 1 },
 			ui.div {

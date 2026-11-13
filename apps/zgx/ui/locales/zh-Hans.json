@@ -4196,6 +4196,11 @@
       "empty": "Nothing working",
       "failed": "Couldn't check on it",
       "no_details": "No details yet"
+    },
+    "head": {
+      "orchestrators": "{n} 个编排者",
+      "working": "{n} 个在运行",
+      "needs": "{n} 项需要你"
     }
   }
 }

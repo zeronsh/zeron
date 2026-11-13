@@ -17,6 +17,7 @@
 --   progress.Header(id)          a working session's line, in its head
 --   progress.pin(chat, on), progress.pinned(chat), progress.check(chat)
 --   progress.figures()           the widget's live figures
+--   progress.counts()            how many work now, how many stalled
 
 local ds = require("@ds")
 local Unit = require("@ds/orch_progress")
@@ -308,7 +309,9 @@ M.listed = ui.computed(function(): { { id: string } }
 	return out
 end)
 
--- How many work now, and how many of those are stalled.
+-- How many work now, and how many of those are stalled: the widget's
+-- figures, and the Control room's head (`progress.counts`), so the two
+-- never disagree.
 local function counts(): (number, number)
 	local working, stalled = 0, 0
 	for _, r in M.rows:get() do
@@ -321,6 +324,8 @@ local function counts(): (number, number)
 	end
 	return working, stalled
 end
+
+M.counts = counts
 
 function M.figures(): Node
 	local function figure_if(text: () -> string, tone: string?): Node

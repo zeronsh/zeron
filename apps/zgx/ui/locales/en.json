@@ -4196,6 +4196,11 @@
       "empty": "Nothing working",
       "failed": "Couldn't check on it",
       "no_details": "No details yet"
+    },
+    "head": {
+      "orchestrators": "{n, plural, one {# orchestrator} other {# orchestrators}}",
+      "working": "{n} working",
+      "needs": "{n} need you"
     }
   }
 }

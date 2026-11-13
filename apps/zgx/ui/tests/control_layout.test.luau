@@ -157,3 +157,17 @@ test("titles and their smaller figures share a baseline", function()
 	-- (Three sizes apart, the nudge is past the rounding: it shows.)
 	expect(math.abs(head - summary) < 0.5).to_be(true)
 end)
+
+test("the head counts what the blocks show, no glyphs between", function()
+	local app = open(1440, 900)
+	local head = app:tree("#control-summary")
+	-- Working: the Progress block's figure; needing you: Needs you's.
+	local working = string.match(app:tree("#control-widget-progress >> .orch-block-head"), '"(%d+) working"')
+	expect(working ~= nil).to_be(true)
+	expect(head).to_contain(`"{working} working"`)
+	expect(head).to_contain('"2 need you"')
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	-- Orchestrators: each of yours not archived (the Brain dump isn't one).
+	expect(head).to_contain('"3 orchestrators"')
+	expect(head).never.to_contain("·")
+end)
