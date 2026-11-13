@@ -208,6 +208,15 @@ pub mod methods {
     /// (coalesced ≤ 4/s); clients tick the clocks. Agents see the chats they
     /// may check (`Orchestrate{op: progressCheck}`).
     pub const WATCH_PROGRESS: &str = "WatchProgress";
+    /// The Control Room's Scratchpad: one `scratchpad::ScratchpadOp` per
+    /// call. Never routes, never makes work. The person may do every op; an
+    /// agent: the Brain dump reads, writes and appends, an orchestrator and
+    /// its crew only read (the engine checks the calling chat's role).
+    pub const SCRATCHPAD: &str = "Scratchpad";
+    /// `scratchpad::ScratchpadState`: the Scratchpad and its history, whole
+    /// on subscribe and on every change. Not open to agents (they read with
+    /// `Scratchpad{op: read}`).
+    pub const WATCH_SCRATCHPAD: &str = "WatchScratchpad";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -822,6 +831,9 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::WATCH_ORCHESTRATION
             | methods::ORCHESTRATE
             | methods::WATCH_COMMS
+            // The Scratchpad: read (and, for the Brain dump, write), the
+            // engine checks the role.
+            | methods::SCRATCHPAD
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their

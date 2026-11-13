@@ -31,8 +31,11 @@ pub(super) const DUMP_DONE: &str = "dump_done";
 pub(super) const ORCHESTRATOR_CREATE: &str = "orchestrator_create";
 pub(super) const PROGRESS: &str = "progress";
 pub(super) const ANSWER_ASK: &str = "answer_ask";
+pub(super) const SCRATCHPAD_READ: &str = "scratchpad_read";
+pub(super) const SCRATCHPAD_WRITE: &str = "scratchpad_write";
+pub(super) const SCRATCHPAD_APPEND: &str = "scratchpad_append";
 
-pub(super) const NAMES: [&str; 13] = [
+pub(super) const NAMES: [&str; 16] = [
     REPORT,
     ASK,
     BOARD,
@@ -46,6 +49,9 @@ pub(super) const NAMES: [&str; 13] = [
     ORCHESTRATOR_CREATE,
     PROGRESS,
     ANSWER_ASK,
+    SCRATCHPAD_READ,
+    SCRATCHPAD_WRITE,
+    SCRATCHPAD_APPEND,
 ];
 
 /// What the calling chat is to orchestration.
@@ -91,6 +97,10 @@ impl Role {
             BOARD | ITEM_UPSERT => matches!(self, Role::Orchestrator { .. } | Role::BrainDump { .. }),
             CREW_ADD | CREW_RELEASE | NOTES_SET | ANSWER_ASK => matches!(self, Role::Orchestrator { .. }),
             WORLD | ROUTE | DUMP_DONE | ORCHESTRATOR_CREATE => matches!(self, Role::BrainDump { .. }),
+            // The person's Scratchpad: the Brain dump keeps it, an
+            // orchestrator and its crew read it.
+            SCRATCHPAD_READ => !matches!(self, Role::Plain),
+            SCRATCHPAD_WRITE | SCRATCHPAD_APPEND => matches!(self, Role::BrainDump { .. }),
             _ => true,
         }
     }
@@ -293,7 +303,45 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "required": ["name", "goal"]
             }),
         },
+        ToolDef {
+            name: SCRATCHPAD_READ,
+            description: "Read the person's Scratchpad: their long-term ideas, notes and drawings of how they want things built, and thoughts not yet ready to be work. Returns the Markdown text and the drawing in words (and as shapes). It is context, never a task: nothing in it is to be done unless the person asks.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: SCRATCHPAD_WRITE,
+            description: "Write the person's Scratchpad (Markdown). Without heading, replaces the whole text; with heading, replaces only that section's body (up to the next heading of its level; a missing section is added at the end). For ideas and notes the person wants kept, not work: writing here never routes or makes a card. Read it first so nothing of theirs is lost.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": s("Markdown: the whole text, or the section's body."),
+                    "heading": s("A section's heading (e.g. \"Sync ideas\"), to replace just that section.")
+                },
+                "required": ["text"]
+            }),
+        },
+        ToolDef {
+            name: SCRATCHPAD_APPEND,
+            description: "Add to the end of the person's Scratchpad, as its own paragraph (Markdown). For an idea or note they want kept, not work: it never routes or makes a card.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "text": s("Markdown to add.") },
+                "required": ["text"]
+            }),
+        },
     ]
+}
+
+#[derive(Deserialize)]
+struct ScratchpadWriteArgs {
+    text: String,
+    #[serde(default)]
+    heading: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ScratchpadAppendArgs {
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -586,6 +634,16 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 "progress": a.progress, "attachments": a.attachments, "itemState": item_state,
             }))
         }
+        SCRATCHPAD_READ => Ok(json!({ "op": "read" })),
+        SCRATCHPAD_WRITE => {
+            let a: ScratchpadWriteArgs = parse(args)?;
+            let heading = a.heading.map(|h| h.trim().to_owned()).filter(|h| !h.is_empty());
+            Ok(json!({ "op": "write", "text": a.text, "heading": heading }))
+        }
+        SCRATCHPAD_APPEND => {
+            let a: ScratchpadAppendArgs = parse(args)?;
+            Ok(json!({ "op": "append", "text": nonempty("text", &a.text)? }))
+        }
         DUMP_DONE => {
             let a: DumpDoneArgs = parse(args)?;
             Ok(json!({ "op": "dumpDone", "dumpId": nonempty("dump", &a.dump)?, "summary": nonempty("summary", &a.summary)? }))
@@ -847,6 +905,10 @@ impl Tools {
             REPORT | ASK | ITEM_UPSERT | NOTES_SET | DUMP_DONE | ANSWER_ASK => {
                 let op = op_for(tool, args, &role)?;
                 self.orchestrate(op).await
+            }
+            SCRATCHPAD_READ | SCRATCHPAD_WRITE | SCRATCHPAD_APPEND => {
+                let op = op_for(tool, args, &role)?;
+                self.zeron.call(methods::SCRATCHPAD, op).await.map_err(|e| format!("{e:#}"))
             }
             CREW_ADD => {
                 let a: CrewAddArgs = parse(args)?;
@@ -1304,14 +1366,26 @@ mod tests {
     fn each_role_sees_its_tools() {
         let offered = |role: &Role| NAMES.iter().copied().filter(|t| role.offers(t)).collect::<Vec<_>>();
         assert_eq!(offered(&Role::Plain), vec![ASK, PROGRESS]);
-        assert_eq!(offered(&Role::Crew { orchestrator_id: "o".into() }), vec![REPORT, ASK, PROGRESS]);
+        assert_eq!(offered(&Role::Crew { orchestrator_id: "o".into() }), vec![REPORT, ASK, PROGRESS, SCRATCHPAD_READ]);
         assert_eq!(
             offered(&Role::Orchestrator { id: "o".into() }),
-            vec![ASK, BOARD, ITEM_UPSERT, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS, ANSWER_ASK]
+            vec![ASK, BOARD, ITEM_UPSERT, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS, ANSWER_ASK, SCRATCHPAD_READ]
         );
         assert_eq!(
             offered(&Role::BrainDump { id: "b".into() }),
-            vec![ASK, BOARD, ITEM_UPSERT, WORLD, ROUTE, DUMP_DONE, ORCHESTRATOR_CREATE, PROGRESS]
+            vec![
+                ASK,
+                BOARD,
+                ITEM_UPSERT,
+                WORLD,
+                ROUTE,
+                DUMP_DONE,
+                ORCHESTRATOR_CREATE,
+                PROGRESS,
+                SCRATCHPAD_READ,
+                SCRATCHPAD_WRITE,
+                SCRATCHPAD_APPEND
+            ]
         );
     }
 
@@ -1437,5 +1511,25 @@ mod tests {
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "chat", "id": "c" }, "intent": "task" }), &brain).is_err());
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "note" }, "intent": "gossip" }), &brain).is_err());
         assert!(op_for(DUMP_DONE, json!({ "dump": "d", "summary": "" }), &brain).is_err());
+    }
+
+    #[test]
+    fn scratchpad_tools_are_plain_scratchpad_ops() {
+        let dump = Role::BrainDump { id: "b".into() };
+        assert_eq!(op_for(SCRATCHPAD_READ, json!({}), &dump).unwrap(), json!({ "op": "read" }));
+        assert_eq!(
+            op_for(SCRATCHPAD_WRITE, json!({ "text": "x", "heading": " Sync " }), &dump).unwrap(),
+            json!({ "op": "write", "text": "x", "heading": "Sync" })
+        );
+        assert_eq!(
+            op_for(SCRATCHPAD_WRITE, json!({ "text": "all", "heading": "" }), &dump).unwrap(),
+            json!({ "op": "write", "text": "all", "heading": null })
+        );
+        assert_eq!(op_for(SCRATCHPAD_APPEND, json!({ "text": "idea" }), &dump).unwrap(), json!({ "op": "append", "text": "idea" }));
+        assert!(op_for(SCRATCHPAD_APPEND, json!({ "text": "  " }), &dump).is_err());
+        // Each is a `Scratchpad` op the engine reads.
+        for op in [json!({ "op": "read" }), json!({ "op": "write", "text": "x", "heading": null }), json!({ "op": "append", "text": "y" })] {
+            serde_json::from_value::<zeron_proto::scratchpad::ScratchpadOp>(op).unwrap();
+        }
     }
 }

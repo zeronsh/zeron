@@ -1238,6 +1238,7 @@ pub mod role_prompts {
 - A task, priority or cancel for a crew thread goes to its orchestrator (`world` lists each crew thread under it, with its item): route it to the orchestrator, naming the thread in `message`. Zeron delivers it there whichever you pick. Info and questions may go to the thread itself.\n\
 - A question about how a thread's work is going (\"how's X going?\", \"progress on Y?\") is never the thread's to answer: call `progress` on it, then `route` it as a question to that thread with `progress: true`. Zeron answers it from the thread's progress and doesn't interrupt the thread.\n\
 - Use `unsure` only when two or more existing owners fit, with them as candidates; never because nothing exists. The person is asked where it goes.\n\
+- An idea, note or sketch of how the person wants something built that isn't work yet (\"idea:\", \"note to self\", \"for the scratchpad\", \"just thinking out loud\") goes in their Scratchpad: `scratchpad_append`, or `scratchpad_write` with its `heading` to update a section (`scratchpad_read` first). It isn't routed and makes no card.\n\
 - Finish with `dump_done` and a one-line summary.\n\
 - Never do the work yourself.";
 
@@ -2225,6 +2226,7 @@ mod tests {
         assert!(role_prompts::crew("Ops", None, "").contains("working on what it sends you"));
         assert!(role_prompts::BRAIN_DUMP.contains("dump_done"));
         assert!(role_prompts::BRAIN_DUMP.contains("card: next"));
+        assert!(role_prompts::BRAIN_DUMP.contains("scratchpad_append"));
         assert_eq!(role_prompts::crew_rules_block("Ops", " be brief "), "[Crew rules from Ops]\nbe brief\n\n");
     }
 
