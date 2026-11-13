@@ -14,7 +14,7 @@ use zeron_proto::Model;
 /// and an agent's `<Provider> · <model>` label is split into the two; a
 /// catalog an older engine saved has neither, so it's fetched again rather
 /// than shown as it was.
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
