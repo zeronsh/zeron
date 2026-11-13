@@ -1315,7 +1315,9 @@
           "green": "Green",
           "blue": "Blue",
           "purple": "Purple"
-        }
+        },
+        "needs_engine": "Scratchpad needs the engine update; your text isn't saved.",
+        "needs_app": "Scratchpad needs the app update; your text isn't saved."
       },
       "decide": {
         "label": "Decision",

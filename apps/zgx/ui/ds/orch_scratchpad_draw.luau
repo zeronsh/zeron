@@ -6,8 +6,10 @@
 -- elbow: its `points` are start, elbow?, end) and text. A double click on
 -- a box, an ellipse, an arrow or a text edits its words. Colours are theme
 -- tokens. Undo and redo are this session's, over the engine's history.
--- Pan with a scroll, zoom with ⌘/Ctrl and a scroll or a pinch: the view is
--- this one's, never saved.
+-- As the Map's web: a scroll over it is the page's, zoom with ⌘/Ctrl and a
+-- scroll or a pinch. Pressed into, it takes the scroll (a plain one pans)
+-- until Escape, a press elsewhere or the pointer leaving lets it go. The view is this one's,
+-- never saved.
 --
 --   Draw.Board { id?, shapes = channel, h = number? | grow }  -- the board
 --   Draw.channel()        the drawing's autosave (ds/orch_scratchpad_sync)
@@ -513,6 +515,10 @@ M.Board = ui.component(function(props: BoardProps): Node
 	local view = ui.use_state({ x = 0, y = 0, zoom = 1 } :: View)
 	-- (Panned or zoomed by the person: no longer fitted to the drawing.)
 	local touched = ui.use_state(false)
+	-- Pressed into: a plain wheel pans it, until Escape or a press elsewhere.
+	-- Otherwise a plain wheel over it is the page's (scrolling past it).
+	local active = ui.use_state(false)
+	local board_el: any = nil
 	-- What a gesture draws before it's a shape (its own canvas, in screen
 	-- points), and the marquee.
 	local draft = ui.use_state(nil :: Shape?)
@@ -698,6 +704,7 @@ M.Board = ui.component(function(props: BoardProps): Node
 	end
 
 	local function press(e: any)
+		active:set(true)
 		local lx, ly = e.local_x, e.local_y
 		-- (A press in the words being written is theirs.)
 		if in_words(lx, ly) then
@@ -871,12 +878,15 @@ M.Board = ui.component(function(props: BoardProps): Node
 			return true
 		end
 		if e.key == "Escape" then
-			if next(selected:peek()) ~= nil or tool:peek() ~= "select" then
-				selected:set({})
-				tool:set("select")
-				return true
+			-- Lets go: what's chosen, the tool, and the scroll (back to the
+			-- page).
+			selected:set({})
+			tool:set("select")
+			active:set(false)
+			if board_el then
+				board_el:blur()
 			end
-			return false
+			return true
 		end
 		if e.shift and (e.key == "!" or e.code == "Digit1") then
 			touched:set(false)
@@ -1058,7 +1068,24 @@ M.Board = ui.component(function(props: BoardProps): Node
 				write_at(p, nil)
 			end
 		end,
-		on_wheel = function(e: any): boolean
+		on_mount = function(el: any)
+			board_el = el
+		end,
+		on_blur = function()
+			active:set(false)
+		end,
+		-- (A press elsewhere takes the pointer out first: it lets go then,
+		-- focus staying for the tool keys. zgx has no press-outside event,
+		-- and a press on a plain part of the page moves no focus.)
+		on_hover = function(inside: boolean)
+			if not inside then
+				active:set(false)
+			end
+		end,
+		on_wheel = function(e: any): boolean?
+			if not active:peek() and not (e.cmd or e.ctrl) then
+				return nil
+			end
 			if e.cmd or e.ctrl then
 				zoom_about(e.local_x, e.local_y, math.exp(-e.dy * 0.01))
 			else
@@ -1068,7 +1095,7 @@ M.Board = ui.component(function(props: BoardProps): Node
 			end
 			return true
 		end,
-		on_pinch = function(e: any): boolean
+		on_pinch = function(e: any): boolean?
 			zoom_about(e.local_x, e.local_y, 1 + e.scale)
 			return true
 		end,

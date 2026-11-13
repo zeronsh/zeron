@@ -22,8 +22,17 @@
 --
 -- `on_resize` goes on the scroll's one child (what it holds); a page that
 -- wants its size too calls it from its own.
+--
+--   KeptScroll.scroll_by(place, dy)   -- a wheel something in the page took
+--
+-- moves the page as the person's wheel would (a field that keeps the wheel
+-- only while it's being worked in hands it to the page this way).
 
 local M = {}
+
+-- Each place's `touch`, while its page is up: what `scroll_by` marks the
+-- move the person's with.
+local touches: { [any]: () -> () } = setmetatable({}, { __mode = "k" }) :: any
 
 -- How long after the person's last input, or the last move that was
 -- theirs, the view's moves are still theirs: a wheel's smooth glide and a
@@ -83,6 +92,7 @@ function M.use(place: any): Kept
 	local function touch()
 		touched = ui.now()
 	end
+	touches[place] = touch
 	return {
 		offset = shown,
 		on_wheel = function(_e: any): boolean?
@@ -107,6 +117,16 @@ function M.use(place: any): Kept
 			end
 		end,
 	}
+end
+
+-- Move the page `dy` points (down positive), as the person's wheel: the
+-- view goes as far as it can and the place follows it.
+function M.scroll_by(place: any, dy: number)
+	local touch = touches[place]
+	if touch then
+		touch()
+	end
+	place:set(math.max(0, place:peek() + dy))
 end
 
 return M

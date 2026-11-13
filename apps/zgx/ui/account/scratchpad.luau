@@ -3,7 +3,7 @@
 -- (`WatchScratchpad`, whole on every change). Nothing written here is work.
 -- account/orchestration_sample.luau's `scratchpad` is a whole one.
 --
---   scratchpad.now:get()   { loaded, text, rev, updated_at?, updated_by,
+--   scratchpad.now:get()   { host, missing?, loaded, text, rev, updated_at?, updated_by,
 --                            device_id?, shapes, history }
 --                          `updated_by`, a revision's `by`: "person",
 --                          "brain_dump" or "other"; history newest first,
@@ -22,7 +22,11 @@
 
 local M = {}
 
+-- (`host` false: an app without the Scratchpad's host module, so this
+-- default is all it ever has. The host's own says true, and `missing =
+-- "engine"` while the engine refuses its watch.)
 M.now = ui.shared("scratchpad", {
+	host = false,
 	loaded = false,
 	text = "",
 	rev = "",

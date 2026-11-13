@@ -6,11 +6,14 @@
 //!
 //! What scripts see, `scratchpad` (snake_case keys, times in Unix seconds, a
 //! field that isn't there is nil):
-//!   { loaded, text, rev, updated_at?, updated_by, device_id?,
+//!   { host, missing?, loaded, text, rev, updated_at?, updated_by, device_id?,
 //!     shapes = { { id, kind, x, y, w, h, points = { { x, y } }, text,
 //!                  color, stroke?, z, ... } },
 //!     history = { { id, at, edited_at, by, device_id?, restored_from?,
 //!                   chars, shape_count, preview } } }
+//! `host`: always true (the scripts' own default has it false: an app
+//! without this module). `missing`: "engine" when the engine refused the
+//! watch (one without the Scratchpad), until a frame comes.
 //! `loaded`: false until the engine's first frame. `updated_by` and `by`:
 //! "person", "brain_dump" or "other". History is newest first; its first is
 //! the document as it is now. A shape's fields this build doesn't know ride
@@ -53,6 +56,8 @@ struct Tracker {
     state: RefCell<Option<ScratchpadState>>,
     /// Whether something the engine sent couldn't be read, said once.
     complained: Cell<bool>,
+    /// The engine refused the watch: it has no Scratchpad.
+    missing: Cell<bool>,
     watch: RefCell<Option<Watch>>,
 }
 
@@ -76,11 +81,21 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         engine::get().on_connect(move |rpc| {
             let Some(t) = weak.upgrade() else { return };
             let heard = Rc::downgrade(&t);
-            let watch = rpc.watch("WatchScratchpad", json!({}), move |item| {
-                if let Some(t) = heard.upgrade() {
-                    t.heard(&item);
-                }
-            });
+            let ended = Rc::downgrade(&t);
+            let watch = rpc.watch_ending(
+                "WatchScratchpad",
+                json!({}),
+                move |item| {
+                    if let Some(t) = heard.upgrade() {
+                        t.heard(&item);
+                    }
+                },
+                move |why| {
+                    if let Some(t) = ended.upgrade() {
+                        t.ended(&why);
+                    }
+                },
+            );
             *t.watch.borrow_mut() = Some(watch);
         });
     }
@@ -131,15 +146,26 @@ impl Tracker {
             Ok(state) => state,
             Err(e) => return self.complain(&e),
         };
-        if self.state.borrow().as_ref() == Some(&state) {
+        let found = self.missing.replace(false);
+        if self.state.borrow().as_ref() == Some(&state) && !found {
             return;
         }
         *self.state.borrow_mut() = Some(state);
         self.publish();
     }
 
+    /// The watch ended before its handle dropped: refused (an engine
+    /// without the Scratchpad), or the connection gone (the next one
+    /// watches again).
+    fn ended(&self, why: &str) {
+        if is_refusal(why) && !self.missing.replace(true) {
+            eprintln!("zeron-zgx: scratchpad: the engine has no Scratchpad ({why}); edits stay unsaved");
+            self.publish();
+        }
+    }
+
     fn value(&self) -> Value {
-        state_value(self.state.borrow().as_ref())
+        state_value(self.state.borrow().as_ref(), self.missing.get())
     }
 
     fn publish(&self) {
@@ -180,11 +206,20 @@ fn text_or_nil(s: Option<&str>) -> Value {
     s.map_or(Value::Nil, Value::from)
 }
 
+/// Whether a watch's end is the engine refusing it, not the connection
+/// going ("closed") or the stream ending ("done").
+fn is_refusal(why: &str) -> bool {
+    !matches!(why, "closed" | "done")
+}
+
 /// What scripts see: the document and its history (`loaded` false before
-/// the first frame).
-fn state_value(state: Option<&ScratchpadState>) -> Value {
+/// the first frame; `missing` while the engine has no Scratchpad).
+fn state_value(state: Option<&ScratchpadState>, missing: bool) -> Value {
+    let missing = if missing { Value::from("engine") } else { Value::Nil };
     let Some(state) = state else {
         return Value::record([
+            ("host", Value::Bool(true)),
+            ("missing", missing),
             ("loaded", Value::Bool(false)),
             ("text", Value::from("")),
             ("rev", Value::from("")),
@@ -195,6 +230,8 @@ fn state_value(state: Option<&ScratchpadState>) -> Value {
     };
     let pad = &state.pad;
     Value::record([
+        ("host", Value::Bool(true)),
+        ("missing", missing),
         ("loaded", Value::Bool(true)),
         ("text", Value::from(pad.text.as_str())),
         ("rev", Value::from(pad.rev.as_str())),
@@ -331,7 +368,7 @@ mod tests {
     #[test]
     fn a_frame_reads_in_snake_case_and_seconds() {
         let state = ScratchpadState::deserialize(&frame()).unwrap();
-        let v = state_value(Some(&state));
+        let v = state_value(Some(&state), false);
         assert_eq!(v.field("loaded"), Some(&Value::Bool(true)));
         assert_eq!(text(v.field("text")).as_deref(), Some("# Sync\n\n- one"));
         assert_eq!(text(v.field("rev")).as_deref(), Some("r7"));
@@ -366,12 +403,34 @@ mod tests {
 
     #[test]
     fn before_the_first_frame_it_is_empty_and_not_loaded() {
-        let v = state_value(None);
+        let v = state_value(None, false);
         assert_eq!(v.field("loaded"), Some(&Value::Bool(false)));
         assert_eq!(text(v.field("text")).as_deref(), Some(""));
         assert!(v.field("shapes").unwrap().list().is_empty());
         assert!(v.field("history").unwrap().list().is_empty());
         assert!(nil(v.field("updated_at")));
+        assert_eq!(v.field("host"), Some(&Value::Bool(true)));
+        assert!(nil(v.field("missing")));
+    }
+
+    #[test]
+    fn an_engine_without_the_scratchpad_is_said() {
+        let v = state_value(None, true);
+        assert_eq!(text(v.field("missing")).as_deref(), Some("engine"));
+        assert_eq!(v.field("loaded"), Some(&Value::Bool(false)));
+        // A refusal, not the connection going or the stream ending.
+        assert!(is_refusal("unknown method: WatchScratchpad"));
+        assert!(!is_refusal("closed") && !is_refusal("done"));
+        // A frame clears it.
+        let t = Tracker::default();
+        t.ended("unknown method: WatchScratchpad");
+        assert!(t.missing.get());
+        t.heard(&serde_json::to_value(ScratchpadState::default()).unwrap());
+        assert!(!t.missing.get());
+        assert!(nil(t.value().field("missing")));
+        // The connection going doesn't make it missing.
+        t.ended("closed");
+        assert!(!t.missing.get());
     }
 
     #[test]
@@ -400,7 +459,7 @@ mod tests {
     #[test]
     fn shapes_go_back_as_the_wire_has_them_unknown_fields_kept() {
         let state = ScratchpadState::deserialize(&frame()).unwrap();
-        let v = state_value(Some(&state));
+        let v = state_value(Some(&state), false);
         let back = shapes_json(v.field("shapes").unwrap()).unwrap();
         assert_eq!(back, state.pad.shapes);
         let wire = serde_json::to_value(&back).unwrap();

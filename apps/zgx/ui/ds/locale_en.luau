@@ -1064,6 +1064,8 @@ return {
 	["ds.orch.scratchpad.color.green"] = "Green",
 	["ds.orch.scratchpad.color.blue"] = "Blue",
 	["ds.orch.scratchpad.color.purple"] = "Purple",
+	["ds.orch.scratchpad.needs_engine"] = "Scratchpad needs the engine update; your text isn't saved.",
+	["ds.orch.scratchpad.needs_app"] = "Scratchpad needs the app update; your text isn't saved.",
 	["ds.orch.decide.label"] = "Decision",
 	["ds.orch.decide.recommended"] = "Recommended",
 	["ds.orch.decide.recommended_named"] = "{label}, recommended",
