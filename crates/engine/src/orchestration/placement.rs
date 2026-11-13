@@ -246,7 +246,14 @@ impl EngineRpc {
             chat_id: by.to_owned(),
             dump_id: dump_id.map(str::to_owned),
             route_id: route_id.map(str::to_owned),
+            item_id: None,
         };
+        self.mark_started(chat, &started);
+    }
+
+    /// Record `started` as who started `chat`.
+    pub(crate) fn mark_started(&self, chat: &str, started: &zeron_proto::StartedBy) {
+        let started = started.clone();
         let marked = self
             .orchestration()
             .workspace()

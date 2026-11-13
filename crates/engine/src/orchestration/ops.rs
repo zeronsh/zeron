@@ -260,9 +260,23 @@ impl EngineRpc {
                 {
                     item.orchestrator_id = Some(Some(id.clone()));
                 }
+                // Into Now from Inbox or Next (or made there).
+                let was = item.id.as_deref().and_then(|id| orch.item(id)).map(|i| i.state);
+                let to_now = item.state == Some(zeron_proto::orchestration::WorkState::Active)
+                    && was.is_none_or(|s| {
+                        matches!(s, zeron_proto::orchestration::WorkState::Inbox | zeron_proto::orchestration::WorkState::Planned)
+                    });
                 let id = orch.patch_item(item).map_err(RpcError::Failed)?;
+                // The person moving a card with no thread to Now starts it.
+                if to_now
+                    && *who == Who::Person
+                    && orch.item(&id).is_some_and(|i| i.threads.is_empty())
+                {
+                    return self.start_item(&id, true);
+                }
                 Ok(json!({ "id": id }))
             }
+            OrchestrateOp::StartItem { id } => self.start_item(&id, *who == Who::Person),
             OrchestrateOp::Report {
                 state,
                 summary,
@@ -390,9 +404,23 @@ impl EngineRpc {
                 space_id,
                 device_id,
                 attachments,
+                item_state,
             } => {
                 let id = self
-                    .route(&dump_id, excerpt, target, intent, message, title, candidates, progress, space_id, device_id, attachments)
+                    .route(
+                        &dump_id,
+                        excerpt,
+                        target,
+                        intent,
+                        message,
+                        title,
+                        candidates,
+                        progress,
+                        space_id,
+                        device_id,
+                        attachments,
+                        item_state,
+                    )
                     .await?;
                 Ok(json!({ "id": id }))
             }
@@ -681,6 +709,10 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             _ => refuse("Only an orchestrator releases threads, from its own crew"),
         },
         OrchestrateOp::UpsertItem { item } => upsert_permitted(role, item, rpc),
+        OrchestrateOp::StartItem { id } => match (role, orch.item(id)) {
+            (ChatRole::Orchestrator { id: mine }, Some(card)) if card.orchestrator_id.as_deref() == Some(mine.as_str()) => Ok(()),
+            _ => refuse("An orchestrator starts only its own cards: the person starts the rest"),
+        },
         OrchestrateOp::Report { .. } => match role {
             ChatRole::Crew { .. } => Ok(()),
             _ => refuse("Only a crew thread reports"),

@@ -229,7 +229,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ROUTE,
-            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a loose board item: create it with item_upsert); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes)",
+            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a board card: with an id, that card; with no id, a new card for what should wait, Inbox by default or Next with `card: next`, in `project`; the person starts it from the board); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes)",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -241,8 +241,9 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "title": s("For a task: its board card's title, 3 to 6 words naming the work (\"Delete cards from the Board\"), never the message's opening words."),
                     "candidates": { "type": "array", "items": target_schema("A likely place."), "description": "For unsure: the likely places, best first." },
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "The dump's files this fragment is about (their paths or names, as the dump lists them). Omit to send all of them with a task or info, and none otherwise." },
-                    "project": s("For newThread/newOrchestrator: the project it is about (id, name or path, from world)."),
-                    "device": s("For newThread/newOrchestrator: the device (id or name); with a project, that project's own."),
+                    "project": s("For newThread/newOrchestrator/a new item: the project it is about (id, name or path, from world)."),
+                    "device": s("For newThread/newOrchestrator/a new item: the device (id or name); with a project, that project's own."),
+                    "card": { "type": "string", "enum": ["inbox", "next"], "description": "For a new item: inbox (captured for later; the default) or next (queued after something else)." },
                     "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." }
                 },
                 "required": ["dump", "excerpt", "target", "intent"]
@@ -370,6 +371,9 @@ struct RouteArgs {
     #[serde(default)]
     progress: bool,
     attachments: Option<Vec<String>>,
+    /// For a new card: `inbox` (for later) or `next` (after something else).
+    #[serde(default)]
+    card: Option<String>,
     /// Resolved before the op (see `orchestration_tool`).
     #[serde(default)]
     #[allow(dead_code)]
@@ -499,6 +503,7 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 outcome: a.outcome,
                 source: None,
                 order: a.order.filter(|o| o.is_finite()),
+                ..Default::default()
             };
             Ok(json!({ "op": "upsertItem", "item": item }))
         }
@@ -515,7 +520,8 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             }
             // A new thread or orchestrator may come without an id: Zeron
             // starts it, in `project`.
-            let needs_id = matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. } | RouteTarget::Item { .. });
+            // So may an item: a new card.
+            let needs_id = matches!(a.target, RouteTarget::Orchestrator { .. } | RouteTarget::Chat { .. });
             let has_id = match &a.target {
                 RouteTarget::Orchestrator { id }
                 | RouteTarget::Chat { id }
@@ -529,6 +535,15 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             }
             if a.target == RouteTarget::Unsure && a.candidates.len() < 2 {
                 return Err("unsure is for two or more existing owners that fit (as candidates). With one, route it there; with none, it's a newThread in the project it is about".into());
+            }
+            let item_state = match a.card.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                None => None,
+                Some("inbox") => Some(WorkState::Inbox),
+                Some("next" | "planned") => Some(WorkState::Planned),
+                Some(other) => return Err(format!("card is inbox or next, not {other:?}")),
+            };
+            if item_state.is_some() && !matches!(&a.target, RouteTarget::Item { id } | RouteTarget::NewThread { id } if id.trim().is_empty()) {
+                return Err("card is for a new item".into());
             }
             if a.progress && intent != RouteIntent::Question {
                 return Err("progress is for a question about how a thread is going".into());
@@ -544,7 +559,7 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             Ok(json!({
                 "op": "route", "dumpId": nonempty("dump", &a.dump)?, "excerpt": nonempty("excerpt", &a.excerpt)?,
                 "target": a.target, "intent": intent, "message": a.message, "title": title, "candidates": a.candidates,
-                "progress": a.progress, "attachments": a.attachments,
+                "progress": a.progress, "attachments": a.attachments, "itemState": item_state,
             }))
         }
         DUMP_DONE => {
@@ -595,6 +610,26 @@ pub(super) fn crew_refusal(orchestrator: &zeron_proto::orchestration::Orchestrat
     }
 }
 
+/// Why a new crew thread waits in Next instead of starting, or `None`: its
+/// crew already runs `running` threads, its limit.
+pub(super) fn crew_queues(orchestrator: &zeron_proto::orchestration::Orchestrator, running: usize, starts: bool) -> Option<String> {
+    match orchestrator.crew.max_running {
+        Some(max) if starts && !orchestrator.paused && running >= max as usize => {
+            Some(format!("{}'s crew is full: {running} of {max} working", orchestrator.name))
+        }
+        _ => None,
+    }
+}
+
+/// A queued card's title from its prompt: the first line, cut short.
+fn queued_title(prompt: &str) -> String {
+    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Queued work");
+    match line.char_indices().nth(60) {
+        Some((cut, _)) => format!("{}…", line[..cut].trim_end()),
+        None => line.to_owned(),
+    }
+}
+
 /// Crew threads of `orchestrator` that are working (or waiting on the
 /// person) now.
 pub(super) fn crew_running(
@@ -621,26 +656,31 @@ impl Tools {
     /// A new crew thread of `orchestrator` as its crew policy says: where it
     /// may run (the first allowed device when none is named), its default
     /// harness and model, its item (on this board only), and no start past
-    /// `maxRunning` (a clear refusal instead).
-    pub(super) async fn apply_crew_policy(&self, orchestrator: &str, args: &mut super::CreateChatArgs) -> anyhow::Result<()> {
+    /// `maxRunning`: then `Some(why)`, and the work waits in Next
+    /// ([`Self::queue_crew_card`]). Paused: a clear refusal.
+    pub(super) async fn apply_crew_policy(&self, orchestrator: &str, args: &mut super::CreateChatArgs) -> anyhow::Result<Option<String>> {
         let Ok(state) = self.orchestration_state().await else {
-            return Ok(()); // an engine without orchestration has no policy
+            return Ok(None); // an engine without orchestration has no policy
         };
         let Some(row) = state.orchestrators.iter().find(|o| o.id == orchestrator) else {
-            return Ok(());
+            return Ok(None);
         };
         let policy = &row.crew;
-        let starts = args.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
-        let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
-        if let Some(refusal) = crew_refusal(row, crew_running(&state, orchestrator, &chats, &sessions), starts) {
-            anyhow::bail!(refusal);
-        }
         if let Some(item) = args.item.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
             anyhow::ensure!(
                 state.items.iter().any(|i| i.id == item && i.orchestrator_id.as_deref() == Some(orchestrator)),
                 "No item {item} on {}'s board (see board)",
                 row.name
             );
+        }
+        let starts = args.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
+        let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
+        let running = crew_running(&state, orchestrator, &chats, &sessions);
+        if let Some(waiting) = crew_queues(row, running, starts) {
+            return Ok(Some(waiting));
+        }
+        if let Some(refusal) = crew_refusal(row, running, starts) {
+            anyhow::bail!(refusal);
         }
         if !policy.devices.is_empty() && !args.cloud {
             if args.device.is_none() && args.project.is_none() {
@@ -663,7 +703,48 @@ impl Tools {
         } else if args.model.is_none() && args.harness == policy.harness {
             args.model = policy.model.clone();
         }
-        Ok(())
+        Ok(None)
+    }
+
+    /// A crew thread that can't start yet, as a Next card on `orchestrator`'s
+    /// board (its `item`, else a new one with the prompt): it starts on its
+    /// own when a slot frees.
+    pub(super) async fn queue_crew_card(&self, args: &super::CreateChatArgs, waiting: String) -> anyhow::Result<Value> {
+        let prompt = args.prompt.as_deref().unwrap_or("").trim().to_owned();
+        let (space, device) = if args.project.is_some() || args.device.is_some() {
+            let (space, device) = self.zeron.resolve_target(args.project.as_deref(), args.device.as_deref()).await?;
+            (Some(space.map(|s| s.id)), Some(Some(device)))
+        } else {
+            (None, None)
+        };
+        let item = args.item.as_deref().map(str::trim).filter(|i| !i.is_empty()).map(str::to_owned);
+        let title = args
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| queued_title(&prompt));
+        let patch = WorkItemPatch {
+            title: item.is_none().then_some(title),
+            detail: item.is_none().then(|| prompt.clone()),
+            id: item,
+            state: Some(WorkState::Planned),
+            waiting: Some(Some(waiting.clone())),
+            space_id: space,
+            device_id: device,
+            ..Default::default()
+        };
+        let reply = self
+            .orchestrate(json!({ "op": "upsertItem", "item": patch }))
+            .await
+            .map_err(anyhow::Error::msg)?;
+        Ok(json!({
+            "queued": true,
+            "item": reply["id"],
+            "waiting": waiting,
+            "note": format!("Not started: {waiting}. It waits in Next and starts on its own when a thread frees up."),
+        }))
     }
 
     /// Read the caller's role from the orchestration rows (plain when the
@@ -1080,6 +1161,9 @@ mod tests {
             done_at: None,
             removed: Default::default(),
             removed_at: Default::default(),
+            space_id: None,
+            device_id: None,
+            waiting: None,
         };
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],
@@ -1107,6 +1191,21 @@ mod tests {
         assert_eq!(crew_refusal(&o, 2, false), None, "a thread that doesn't start yet is fine");
         o.paused = true;
         assert!(crew_refusal(&o, 0, false).unwrap().contains("paused"));
+    }
+
+    #[test]
+    fn a_full_crew_queues_new_work_in_next() {
+        let mut o = orchestrator("o1", OrchestratorKind::Standard);
+        o.name = "Ops".into();
+        assert_eq!(crew_queues(&o, 9, true), None, "no limit");
+        o.crew.max_running = Some(2);
+        assert_eq!(crew_queues(&o, 1, true), None);
+        assert_eq!(crew_queues(&o, 2, true).as_deref(), Some("Ops's crew is full: 2 of 2 working"));
+        assert_eq!(crew_queues(&o, 2, false), None, "a thread that doesn't start yet is fine");
+        o.paused = true;
+        assert_eq!(crew_queues(&o, 2, true), None, "paused refuses instead");
+        assert_eq!(queued_title("\n  Bump the SDK\nthen test"), "Bump the SDK");
+        assert_eq!(queued_title(&"x".repeat(80)), format!("{}…", "x".repeat(60)));
     }
 
     #[test]
@@ -1282,6 +1381,27 @@ mod tests {
             &brain,
         );
         assert!(untitled.unwrap_err().contains("title"), "a task's card needs a short title");
+        // What should wait is a new card: Inbox by default, Next on asking.
+        let later = op_for(
+            ROUTE,
+            json!({ "dump": "d", "excerpt": "later: docs", "target": { "kind": "item" }, "intent": "task", "message": "Tidy the docs", "title": "Tidy the docs" }),
+            &brain,
+        )
+        .unwrap();
+        assert_eq!(later["target"], json!({ "kind": "item", "id": "" }));
+        assert!(later.get("itemState").is_none_or(Value::is_null));
+        let next = op_for(
+            ROUTE,
+            json!({ "dump": "d", "excerpt": "after auth, bump", "target": { "kind": "item" }, "intent": "task", "message": "Bump", "title": "Bump the SDK", "card": "next" }),
+            &brain,
+        )
+        .unwrap();
+        assert_eq!(next["itemState"], "planned");
+        assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "item" }, "intent": "task", "card": "soon" }), &brain).is_err());
+        assert!(
+            op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "orchestrator", "id": "o" }, "intent": "task", "message": "m", "title": "Do the thing", "card": "next" }), &brain).is_err(),
+            "card is for a new card"
+        );
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "note" }, "intent": "note" }), &brain).is_ok(), "a note needs none");
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "chat" }, "intent": "task", "message": "m" }), &brain).is_err());
         assert!(op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "unsure" }, "intent": "task" }), &brain).is_err());

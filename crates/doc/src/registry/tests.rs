@@ -350,7 +350,7 @@ fn who_started_a_chat_replicates_and_a_bad_value_costs_only_itself() {
     let mut viewer = RegistryDoc::new("viewer");
     let row = chat("c1", "host");
     host.upsert_chat(&row).unwrap();
-    let started = zeron_proto::StartedBy { chat_id: "brain".into(), dump_id: Some("d".into()), route_id: Some("r".into()) };
+    let started = zeron_proto::StartedBy { chat_id: "brain".into(), dump_id: Some("d".into()), route_id: Some("r".into()), item_id: None };
     assert!(host.set_chat_started_by("c1", &started).unwrap());
     assert!(!host.set_chat_started_by("nope", &started).unwrap());
     // A full upsert of the row (older code) keeps it.

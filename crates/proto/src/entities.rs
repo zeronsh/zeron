@@ -361,6 +361,9 @@ pub struct StartedBy {
     pub dump_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_id: Option<String>,
+    /// The board card it was started for (`startItem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 /// [`Chat::started_by`], leniently.

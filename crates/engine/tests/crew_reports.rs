@@ -1044,3 +1044,198 @@ async fn a_card_taken_off_the_board_stays_off() {
     );
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_should_wait_lands_in_inbox_or_next_not_a_thread() {
+    use zeron_proto::orchestration::{RouteState, RouteTarget, WorkState};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let (space, _) = projects(&core);
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    let chats_before = core.workspace.read_chats().unwrap().len();
+    let route = |target: Value, excerpt: &str, title: &str, extra: Value| {
+        let (rpc, brain, dump_id, space) = (&rpc, brain.clone(), dump_id.clone(), space.clone());
+        let (excerpt, title) = (excerpt.to_owned(), title.to_owned());
+        async move {
+            let mut op = json!({ "op": "route", "dumpId": dump_id, "excerpt": excerpt, "target": target, "intent": "task",
+                "message": excerpt, "title": title, "spaceId": space });
+            op.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            call(rpc, Caller::Agent { chat: Some(brain) }, methods::ORCHESTRATE, op).await["id"].as_str().unwrap().to_owned()
+        }
+    };
+    // The Brain dump picked a new thread, but the words say later / after.
+    let later = route(json!({ "kind": "newThread" }), "Remind me to renew the cert next week", "Renew the cert", json!({})).await;
+    let after = route(json!({ "kind": "newThread" }), "After the auth PR is merged, bump the SDK", "Bump the SDK", json!({})).await;
+    // Or it asked for a card itself.
+    let asked = route(json!({ "kind": "item" }), "Tidy the docs", "Tidy the docs", json!({ "itemState": "planned" })).await;
+    let inbox = route(json!({ "kind": "item" }), "Tidy the tests", "Tidy the tests", json!({})).await;
+    let routes = core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes;
+    let card_of = |route: &str| {
+        let r = routes.iter().find(|r| r.id == route).unwrap();
+        assert_eq!(r.state, RouteState::Delivered);
+        let RouteTarget::Item { id } = &r.target else { panic!("not a card: {r:?}") };
+        assert_eq!(r.item_id.as_ref(), Some(id));
+        core.orchestration.item(id).unwrap()
+    };
+    for (route, state, title) in [
+        (&later, WorkState::Inbox, "Renew the cert"),
+        (&after, WorkState::Planned, "Bump the SDK"),
+        (&asked, WorkState::Planned, "Tidy the docs"),
+        (&inbox, WorkState::Inbox, "Tidy the tests"),
+    ] {
+        let card = card_of(route);
+        assert_eq!((card.state, card.title.as_str()), (state, title));
+        assert!(card.threads.is_empty(), "not started");
+        assert_eq!(card.space_id.as_deref(), Some(space.as_str()), "keeps the project to start in");
+        assert_eq!(card.device_id.as_deref(), Some(core.device_id.as_str()));
+    }
+    assert_eq!(core.workspace.read_chats().unwrap().len(), chats_before, "no thread started");
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starting_a_card_gives_it_one_thread_with_its_text() {
+    use zeron_proto::orchestration::WorkState;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let (space, _) = projects(&core);
+    let orchestrate = |caller: Caller, op: Value| {
+        let rpc = rpc.clone();
+        async move { try_call(&rpc, caller, methods::ORCHESTRATE, op).await }
+    };
+    let card = orchestrate(
+        Caller::Local,
+        json!({ "op": "upsertItem", "item": { "title": "Fix login", "detail": "The redirect loops on Safari.", "state": "inbox", "spaceId": space } }),
+    )
+    .await
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A loose card: no agent starts it.
+    for agent in [ORCH, CREW] {
+        let refused = orchestrate(Caller::Agent { chat: Some(agent.into()) }, json!({ "op": "startItem", "id": card })).await;
+        assert!(refused.is_err(), "{agent} started it");
+    }
+    assert!(core.orchestration.item(&card).unwrap().threads.is_empty());
+    let started = orchestrate(Caller::Local, json!({ "op": "startItem", "id": card })).await.unwrap();
+    let thread = started["threadId"].as_str().expect("a thread").to_owned();
+    let row = core.orchestration.item(&card).unwrap();
+    assert_eq!((row.state, row.threads.clone()), (WorkState::Active, vec![thread.clone()]));
+    let chat = core.workspace.chat(&thread).unwrap().unwrap();
+    assert_eq!(chat.space_id.as_deref(), Some(space.as_str()), "in the card's project");
+    assert_eq!(chat.title.as_deref(), Some("Fix login"));
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p.contains("Fix login\n\nThe redirect loops on Safari.")),
+        "its first prompt: the title, then the detail",
+    )
+    .await;
+    // Again: the same thread.
+    let chats = core.workspace.read_chats().unwrap().len();
+    let again = orchestrate(Caller::Local, json!({ "op": "startItem", "id": card })).await.unwrap();
+    assert_eq!(again["threadId"].as_str(), Some(thread.as_str()));
+    assert_eq!(core.workspace.read_chats().unwrap().len(), chats);
+
+    // Dragging a Next card to Now starts it the same way.
+    let next = orchestrate(Caller::Local, json!({ "op": "upsertItem", "item": { "title": "Bump the SDK", "state": "planned" } }))
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let moved = orchestrate(Caller::Local, json!({ "op": "upsertItem", "item": { "id": next, "state": "active" } })).await.unwrap();
+    let row = core.orchestration.item(&next).unwrap();
+    assert_eq!(row.state, WorkState::Active);
+    assert_eq!(row.threads.len(), 1);
+    assert_eq!(moved["threadId"].as_str(), Some(row.threads[0].as_str()));
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Bump the SDK")), "its first prompt").await;
+    // Edits that keep it in Now start nothing more.
+    orchestrate(Caller::Local, json!({ "op": "upsertItem", "item": { "id": next, "state": "active", "title": "Bump the SDK to 2" } }))
+        .await
+        .unwrap();
+    assert_eq!(core.orchestration.item(&next).unwrap().threads.len(), 1);
+    // An agent moving its own card to Now only moves it.
+    let own = orchestrate(Caller::Agent { chat: Some(ORCH.into()) }, json!({ "op": "upsertItem", "item": { "title": "Plan", "state": "planned" } }))
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    orchestrate(Caller::Agent { chat: Some(ORCH.into()) }, json!({ "op": "upsertItem", "item": { "id": own, "state": "active" } }))
+        .await
+        .unwrap();
+    assert!(core.orchestration.item(&own).unwrap().threads.is_empty());
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_crew_keeps_work_in_next_and_starts_it_when_a_slot_frees() {
+    use zeron_proto::orchestration::WorkState;
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let orchestrate = |caller: Caller, op: Value| {
+        let rpc = rpc.clone();
+        async move { try_call(&rpc, caller, methods::ORCHESTRATE, op).await }
+    };
+    let ops = Caller::Agent { chat: Some(ORCH.into()) };
+    orchestrate(Caller::Local, json!({ "op": "updateOrchestrator", "id": ORCH, "crew": { "maxRunning": 1 } }))
+        .await
+        .unwrap();
+    let new_card = |title: &str, priority: &str| {
+        let (orchestrate, ops) = (&orchestrate, ops.clone());
+        let (title, priority) = (title.to_owned(), priority.to_owned());
+        async move {
+            orchestrate(ops, json!({ "op": "upsertItem", "item": { "title": title, "state": "planned", "priority": priority } }))
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    // Its one slot is taken (the crew thread just joined): the start waits.
+    let low = new_card("Tidy the docs", "low").await;
+    let high = new_card("Bump the SDK", "high").await;
+    for card in [&low, &high] {
+        let reply = orchestrate(ops.clone(), json!({ "op": "startItem", "id": card })).await.unwrap();
+        assert_eq!(reply["queued"], true, "{reply}");
+        assert_eq!(reply["waiting"], "Ops's crew is full: 1 of 1 working");
+        let row = core.orchestration.item(card).unwrap();
+        assert_eq!((row.state, row.waiting.as_deref()), (WorkState::Planned, Some("Ops's crew is full: 1 of 1 working")));
+        assert!(row.threads.is_empty());
+    }
+    // Another orchestrator's card isn't Ops's to start.
+    let loose = orchestrate(Caller::Local, json!({ "op": "upsertItem", "item": { "title": "Loose", "state": "inbox" } }))
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(orchestrate(ops.clone(), json!({ "op": "startItem", "id": loose })).await.is_err());
+    // The slot frees: the most urgent waiting card starts, and only it.
+    orchestrate(ops.clone(), json!({ "op": "releaseFromCrew", "chatId": CREW })).await.unwrap();
+    wait_for(|| !core.orchestration.item(&high).unwrap().threads.is_empty(), "the urgent card to start").await;
+    let row = core.orchestration.item(&high).unwrap();
+    assert_eq!((row.state, row.waiting.clone()), (WorkState::Active, None));
+    let thread = row.threads[0].clone();
+    let chat = core.workspace.chat(&thread).unwrap().unwrap();
+    assert_eq!(chat.parent_chat_id.as_deref(), Some(ORCH), "a crew thread of Ops");
+    let started = chat.started_by.expect("started_by");
+    assert_eq!((started.chat_id.as_str(), started.item_id.as_deref()), (ORCH, Some(high.as_str())));
+    let member = core.orchestration.state().crew.into_iter().find(|m| m.chat_id == thread).expect("in the crew");
+    assert_eq!(member.item_id.as_deref(), Some(high.as_str()));
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Bump the SDK")), "its first prompt").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let row = core.orchestration.item(&low).unwrap();
+    assert_eq!(row.state, WorkState::Planned, "the crew is full again");
+    assert!(row.threads.is_empty());
+    // The person starts it anyway.
+    let forced = orchestrate(Caller::Local, json!({ "op": "startItem", "id": low })).await.unwrap();
+    assert!(forced["threadId"].is_string(), "{forced}");
+    assert_eq!(core.orchestration.item(&low).unwrap().state, WorkState::Active);
+    let _ = finish.send(());
+    core.shutdown().await;
+}
