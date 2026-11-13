@@ -1,263 +1,336 @@
--- Where the Map (ds/orch_map) puts everything: lanes, stations, pills and
--- the lines between them, for a world and a width. Pure, so it can be
--- worked out and checked apart from drawing.
+-- Where the Map's Topology (ds/orch_map_topology) puts everything, for a
+-- world and a width. Pure, so it can be worked out and checked apart from
+-- drawing.
 --
---   orch_map_layout.layout(world, width)  { h, lanes, nodes, pills, more,
---                                           edges, anchors, routes }
+-- Every machine is a lane across the width, its name and load in a column
+-- of their own at its left (`lane_w`); in the lane, its projects, and in
+-- each the orchestrators and threads at work there, one row each, all
+-- starting at one left edge (`content_x`). Between the two run the rails:
+-- one for each orchestrator with crew, in its hue, from its own row to its
+-- last crew row, wherever that is, across the lines between machines for
+-- crew on another. From the rail a branch runs to each of its rows and
+-- ends `GAP` short of the row, at its middle, whatever the width. Rails
+-- that never overlap share a column; a branch that crosses another
+-- orchestrator's rail leaves a gap in that rail. On a machine a rail
+-- arrives at, its rows come first; on one it leaves, last.
+--
+--   layout.layout(world, width)  Layout (below)
+--   layout.lines(rail)           its solid and dashed polylines
+
+local model = require("@ds/orch_map_model")
 
 local M = {}
 
--- Geometry (points): each lane's head, the station column, the pills.
-M.LANE_HEAD = 30
-M.ORCH_W = 150
-M.NODE_H = 28
-M.LANE_PAD = 8
-M.PILL_H = 30
-local LANE_HEAD, ORCH_W, NODE_H, LANE_PAD, PILL_H = M.LANE_HEAD, M.ORCH_W, M.NODE_H, M.LANE_PAD, M.PILL_H
-local GUTTER, PAD = 0, 0
-local PILL_MAX, PILL_MIN = 380, 160
--- A crew row's height, the most rows a block shows (the rest a count),
--- room between two orchestrators' blocks, and how far left of the pills
--- the trunk runs.
-local ROW_H = 38
-local MAX_ROWS = 5
-local BLOCK_GAP = 6
-local TRUNK_IN = 18
-local SPINE_STEP = 8
-local CORNER = 8
+-- Geometry (points).
+M.LANE_TOP = 10
+M.LANE_MIN = 76
+M.PROJECT_H = 24
+M.ROW_H = 30
+M.NODE_H = 32
+M.LANE_PAD = 10
+M.RAIL_PAD = 10
+M.RAIL_STEP = 14
+M.CORNER = 7
+M.GAP = 3
+-- How far a branch runs past the rightmost rail, before its gap.
+M.REACH = 16
 
-export type Pill = { id: string, lane: string, x: number, y: number, w: number, orchestrator: string, hue: number? }
-export type Node_ = { id: string, lane: string, x: number, y: number, hue: number?, paused: boolean }
-export type Lane = { id: string, name: string, y: number, h: number, online: boolean, here: boolean }
--- An orchestrator's lines: polylines (x, y, …), drawn as one shape with
--- round corners.
-export type Edge = { orchestrator: string, hue: number?, paused: boolean, lines: { { number } } }
+local LANE_TOP, LANE_MIN, PROJECT_H, ROW_H, NODE_H, LANE_PAD = M.LANE_TOP, M.LANE_MIN, M.PROJECT_H, M.ROW_H, M.NODE_H, M.LANE_PAD
+local RAIL_PAD, RAIL_STEP, CORNER, GAP, REACH = M.RAIL_PAD, M.RAIL_STEP, M.CORNER, M.GAP, M.REACH
+
+export type Lane = { id: string, name: string, y: number, h: number, online: boolean, here: boolean, platform: string?, cloud: boolean, device: any, count: number }
+export type Label = { id: string, lane: string, name: string, y: number }
+-- A row: an orchestrator's (`kind` "orchestrator"), a crew thread's or a
+-- thread of the person's own. `mid` its middle's y.
+export type Row = { id: string, lane: string, kind: string, x: number, y: number, w: number, h: number, mid: number, orchestrator: string?, hue: number?, paused: boolean }
+export type Branch = { y: number, to: number, node: boolean }
+-- A rail's way: its column's x, from `top` to `bottom`, with `gaps` (y
+-- ranges left out where another's branch crosses) and `dashed` (y ranges
+-- across another machine's head).
+export type Rail = {
+	orchestrator: string,
+	hue: number?,
+	paused: boolean,
+	x: number,
+	top: number,
+	bottom: number,
+	branches: { Branch },
+	gaps: { { number } },
+	dashed: { { number } },
+}
 export type Layout = {
 	h: number,
+	width: number,
+	-- The machines' column, and where the rows start.
+	lane_w: number,
+	content_x: number,
 	lanes: { Lane },
-	nodes: { Node_ },
-	pills: { Pill },
-	more: { { id: string, x: number, y: number, n: number } },
-	edges: { Edge },
+	labels: { Label },
+	rows: { Row },
+	rails: { Rail },
 	-- Where a pulse starts or ends for a chat id: { x, y }.
 	anchors: { [string]: { number } },
-	-- The line from a crew pill to its station, as points (x, y, …).
+	-- The way from a crew row to its orchestrator's row, as points (x, y, …).
 	routes: { [string]: { number } },
 }
 
-
-local function items_of(now: any): { [string]: any }
-	local out = {}
-	for _, it in (now and now.items) or {} do
-		out[it.id] = it
-	end
-	return out
-end
-
-local function device_order(devices: { any }, here: string?): { any }
-	local list = table.clone(devices or {})
-	table.sort(list, function(a: any, b: any): boolean
-		local ah, bh = a.id == here or a.here, b.id == here or b.here
-		if ah ~= bh then
-			return ah == true
-		end
-		local ac, bc = a.cloud == true or a.platform == "cloud", b.cloud == true or b.platform == "cloud"
-		if ac ~= bc then
-			return bc
-		end
-		return (a.name or "") < (b.name or "")
-	end)
-	return list
-end
-
--- Where everything sits: lanes, stations, pills and the lines between
--- them, for a world and a width. Pure.
 function M.layout(world: any, width: number): Layout
-	local now = world.now or {}
-	local chats = world.chats or {}
-	local here = world.here
-	local out: Layout = { h = 0, lanes = {}, nodes = {}, pills = {}, more = {}, edges = {}, anchors = {}, routes = {} }
+	local fleet = model.fleet(world)
+	local lane_w = math.clamp(math.floor(width * 0.13), 100, 150)
+	local out: Layout = { h = 0, width = width, lane_w = lane_w, content_x = 0, lanes = {}, labels = {}, rows = {}, rails = {}, anchors = {}, routes = {} }
 
-	-- The orchestrators shown, in their order; each one's home and crew.
-	local orchs = {}
-	for _, o in now.orchestrators or {} do
-		if not o.archived then
-			table.insert(orchs, o)
-		end
+	-- Which machine each orchestrator lives on, and the last its crew are on.
+	local lane_index: { [string]: number } = {}
+	for i, m in fleet.machines do
+		lane_index[m.id] = i
 	end
-	local crew_of: { [string]: { any } } = {}
-	for _, m in now.crew or {} do
-		if not m.released then
-			crew_of[m.orchestrator_id] = crew_of[m.orchestrator_id] or {}
-			table.insert(crew_of[m.orchestrator_id], m)
-		end
-	end
-	local items = items_of(now)
-	local function home_of(o: any): string?
-		local c = chats[o.id]
-		return (c and c.device) or here
-	end
-
-	-- The lanes: devices online, and any offline one a thread still runs on.
-	local used: { [string]: boolean } = {}
-	for _, o in orchs do
-		local h = home_of(o)
-		if h then
-			used[h] = true
-		end
-		for _, m in crew_of[o.id] or {} do
-			local c = chats[m.chat_id]
-			if c and c.device then
-				used[c.device] = true
+	local home: { [string]: number } = {}
+	local first: { [string]: number } = {}
+	local last: { [string]: number } = {}
+	local crew_count: { [string]: number } = {}
+	for _, t in fleet.threads do
+		local li = lane_index[t.device or ""]
+		if li and t.orchestrator then
+			if t.kind == "orchestrator" then
+				home[t.orchestrator] = li
+			else
+				crew_count[t.orchestrator] = (crew_count[t.orchestrator] or 0) + 1
 			end
+			first[t.orchestrator] = math.min(first[t.orchestrator] or li, li)
+			last[t.orchestrator] = math.max(last[t.orchestrator] or li, li)
 		end
 	end
-	local lanes: { any } = {}
-	for _, d in device_order(world.devices or {}, here) do
-		local online = d.online ~= false or d.id == here or d.here == true
-		if online or used[d.id] then
-			table.insert(lanes, { id = d.id, name = d.name or "", online = online, here = d.id == here or d.here == true })
+	-- -1: its rail arrives here from above; 1: it leaves for below.
+	local function block_score(t: any, li: number): number
+		local o = t.orchestrator
+		if not o or not crew_count[o] then
+			return 0
 		end
+		if (first[o] or li) < li then
+			return -1
+		end
+		if (last[o] or li) > li then
+			return 1
+		end
+		return 0
 	end
 
-	-- Which orchestrators drop a line to another lane: each takes a spine.
-	local spine: { [string]: number } = {}
-	local spines = 0
-	for _, o in orchs do
-		local h = home_of(o)
-		for _, m in crew_of[o.id] or {} do
-			local c = chats[m.chat_id]
-			if c and c.device and c.device ~= h and not spine[o.id] then
-				spines += 1
-				spine[o.id] = spines
-			end
-		end
-	end
-	local spine_x0 = GUTTER + PAD + ORCH_W + 12
-	local pills_x = spine_x0 + spines * SPINE_STEP + 14 + TRUNK_IN
-
-	-- Each orchestrator's block in each lane: its station (home) or where
-	-- its line arrives (another lane), and its crew under it, one row each,
-	-- a trunk down beside them with an arm to each.
-	local trunk_x = pills_x - TRUNK_IN
-	local pill_w = math.clamp(width - pills_x, PILL_MIN, PILL_MAX)
-	-- Per orchestrator, per lane: { top, rows = { y } }.
-	local blocks: { [string]: { [string]: { top: number, rows: { number } } } } = {}
 	local y = 0
-	for _, lane in lanes do
-		local h = LANE_HEAD
-		local any = false
-		for _, o in orchs do
-			local home = home_of(o) == lane.id
-			local members = {}
-			for _, m in crew_of[o.id] or {} do
-				local c = chats[m.chat_id]
-				local dev = (c and c.device) or home_of(o)
-				if dev == lane.id then
-					table.insert(members, m)
-				end
+	local by_orch: { [string]: { Row } } = {}
+	for li, m in fleet.machines do
+		local lane: Lane = { id = m.id, name = m.name, y = y, h = 0, online = m.online, here = m.here, platform = m.platform, cloud = m.cloud, device = m.device, count = m.count }
+		local top = y
+		y += LANE_TOP
+		local groups = table.clone(m.groups)
+		local score: { [string]: number } = {}
+		for _, g in groups do
+			local lo, hi = 0, 0
+			for _, t in g.threads do
+				local s = block_score(t, li)
+				lo, hi = math.min(lo, s), math.max(hi, s)
 			end
-			if home or #members > 0 then
-				any = true
-				table.sort(members, function(a: any, b: any): boolean
-					local ia, ib = items[a.item_id or ""], items[b.item_id or ""]
-					local oa, ob = (ia and ia.order) or 0, (ib and ib.order) or 0
-					if oa ~= ob then
-						return oa < ob
-					end
-					return a.chat_id < b.chat_id
-				end)
-				local top = y + h
-				local ty = top + ROW_H / 2
-				if home then
-					table.insert(out.nodes, { id = o.id, lane = lane.id, x = GUTTER + PAD, y = ty - NODE_H / 2, hue = o.hue :: number?, paused = o.paused == true })
-					out.anchors[o.id] = { GUTTER + PAD + 9, ty }
+			score[g.key] = if lo < 0 then -1 else hi
+		end
+		table.sort(groups, function(a: any, b: any): boolean
+			if score[a.key] ~= score[b.key] then
+				return score[a.key] < score[b.key]
+			end
+			-- (None last.)
+			if (a.key == "") ~= (b.key == "") then
+				return b.key == ""
+			end
+			return a.key < b.key
+		end)
+		for _, g in groups do
+			if g.project then
+				table.insert(out.labels, { id = `{m.id}/{g.key}`, lane = m.id, name = g.project :: string, y = y })
+				y += PROJECT_H
+			end
+			local list = table.clone(g.threads)
+			local pos: { [string]: number } = {}
+			for i, t in list do
+				pos[t.id] = i
+			end
+			table.sort(list, function(a: any, b: any): boolean
+				local sa, sb = block_score(a, li), block_score(b, li)
+				if sa ~= sb then
+					return sa < sb
 				end
-				local n = #members
-				local shown = if n > MAX_ROWS then MAX_ROWS - 1 else n
-				local rows = {}
-				for i = 1, shown do
-					local m = members[i]
-					local ry = top + (i - 0.5) * ROW_H
-					table.insert(rows, ry)
-					table.insert(out.pills, { id = m.chat_id, lane = lane.id, x = pills_x, y = ry - PILL_H / 2, w = pill_w, orchestrator = o.id, hue = o.hue :: number? })
-					out.anchors[m.chat_id] = { pills_x + 10, ry }
+				return pos[a.id] < pos[b.id]
+			end)
+			for _, t in list do
+				local h = if t.kind == "orchestrator" then NODE_H else ROW_H
+				local row: Row = { id = t.id, lane = m.id, kind = t.kind, x = 0, y = y, w = 0, h = h, mid = y + h / 2, orchestrator = t.orchestrator, hue = t.hue, paused = t.paused }
+				table.insert(out.rows, row)
+				if t.orchestrator then
+					by_orch[t.orchestrator] = by_orch[t.orchestrator] or {}
+					table.insert(by_orch[t.orchestrator], row)
 				end
-				if shown < n then
-					local ry = top + (shown + 0.5) * ROW_H
-					table.insert(rows, ry)
-					table.insert(out.more, { id = `{o.id}@{lane.id}`, x = pills_x, y = ry - PILL_H / 2, n = n - shown })
-				end
-				blocks[o.id] = blocks[o.id] or {}
-				blocks[o.id][lane.id] = { top = top, rows = rows }
-				h += math.max(1, #rows) * ROW_H + BLOCK_GAP
+				y += h
 			end
 		end
-		if not any then
-			h += ROW_H
-		end
-		h += LANE_PAD
-		table.insert(out.lanes, { id = lane.id, name = lane.name, y = y, h = h, online = lane.online, here = lane.here })
-		y += h
+		y += LANE_PAD
+		y = math.max(y, top + LANE_MIN)
+		lane.h = y - top
+		table.insert(out.lanes, lane)
 	end
 	out.h = y
 
-	-- The lines, one shape for each orchestrator: from its station out to
-	-- its trunk, down past each of its crew with an arm to each (they're
-	-- parallel work, not a sequence), and for crew on another machine, along
-	-- its spine to that lane and the same there.
-	local station_x = GUTTER + PAD + ORCH_W
-	for _, o in orchs do
-		local mine = blocks[o.id]
-		local home = home_of(o)
-		local hb = mine and home and mine[home]
-		if not (mine and hb) then
-			continue
+	-- The rails: each orchestrator with crew shown, in the first free
+	-- column (rails that never overlap share one).
+	local spans = {}
+	for o, rows in by_orch do
+		local has_crew = false
+		local top_, bottom = math.huge, -math.huge
+		for _, r in rows do
+			has_crew = has_crew or r.kind ~= "orchestrator"
+			top_ = math.min(top_, r.mid)
+			bottom = math.max(bottom, r.mid)
 		end
-		local hy = hb.top + ROW_H / 2
-		local sx = if spine[o.id] then spine_x0 + (spine[o.id] - 1) * SPINE_STEP else nil
-		local lines: { { number } } = {}
-		local function fan(arrive_y: number, rows: { number }, from_x: number)
-			if #rows == 0 then
-				return
-			end
-			-- In to the trunk at the first row, down it to the last.
-			table.insert(lines, { from_x, arrive_y, trunk_x, arrive_y, trunk_x, rows[#rows] })
-			for i, ry in rows do
-				if i == 1 and math.abs(ry - arrive_y) < 0.5 then
-					table.insert(lines, { trunk_x, ry, pills_x - 2, ry })
-				else
-					table.insert(lines, { trunk_x, ry - ROW_H / 2, trunk_x, ry, pills_x - 2, ry })
-				end
-			end
+		if has_crew then
+			table.insert(spans, { o = o, top = top_, bottom = bottom, rows = rows, col = 0 })
 		end
-		fan(hy, hb.rows, station_x)
-		for lane_id, blk in mine do
-			if lane_id ~= home and sx then
-				local ay = blk.top + ROW_H / 2
-				table.insert(lines, { station_x, hy, sx, hy, sx, ay, sx + CORNER * 2, ay })
-				fan(ay, blk.rows, sx + CORNER * 2)
+	end
+	table.sort(spans, function(a: any, b: any): boolean
+		if a.top ~= b.top then
+			return a.top < b.top
+		end
+		return a.o < b.o
+	end)
+	local columns: { number } = {}
+	for _, s in spans do
+		local col = 0
+		for c, bottom in columns do
+			if bottom < s.top - CORNER * 2 then
+				col = c
+				break
 			end
 		end
-		if #lines > 0 then
-			table.insert(out.edges, { orchestrator = o.id, hue = o.hue :: number?, paused = o.paused == true, lines = lines })
+		if col == 0 then
+			table.insert(columns, 0)
+			col = #columns
 		end
-		-- Each pill's way back to its station, for a pulse.
-		for lane_id, blk in mine do
-			for _, p in out.pills do
-				if p.orchestrator == o.id and p.lane == lane_id then
-					local py = p.y + PILL_H / 2
-					local ay = blk.top + ROW_H / 2
-					if lane_id == home then
-						out.routes[p.id] = { p.x + 10, py, trunk_x, py, trunk_x, hy, GUTTER + PAD + 9, hy }
-					elseif sx then
-						out.routes[p.id] = { p.x + 10, py, trunk_x, py, trunk_x, ay, sx :: number, ay, sx :: number, hy, GUTTER + PAD + 9, hy }
+		columns[col] = s.bottom
+		s.col = col
+	end
+	local ncols = #columns
+	local rails_x = lane_w + RAIL_PAD
+	local content_x = if ncols > 0 then rails_x + (ncols - 1) * RAIL_STEP + REACH + GAP else lane_w + RAIL_PAD
+	out.content_x = content_x
+	for _, r in out.rows do
+		r.x = content_x
+		r.w = math.max(0, width - content_x)
+		out.anchors[r.id] = { content_x - GAP, r.mid }
+	end
+
+	for _, s in spans do
+		local branches: { Branch } = {}
+		for _, r in s.rows do
+			table.insert(branches, { y = r.mid, to = content_x - GAP, node = r.kind == "orchestrator" })
+		end
+		table.sort(branches, function(a: Branch, b: Branch): boolean
+			return a.y < b.y
+		end)
+		local o = fleet.orchestrators[s.o] or {}
+		table.insert(out.rails, {
+			orchestrator = s.o,
+			hue = o.hue,
+			paused = o.paused == true,
+			x = rails_x + (s.col - 1) * RAIL_STEP,
+			top = s.top,
+			bottom = s.bottom,
+			branches = branches,
+			gaps = {},
+			dashed = {},
+		})
+	end
+
+	-- Where another's branch crosses a rail, the rail breaks.
+	for _, rail in out.rails do
+		for _, other in out.rails do
+			if other ~= rail and other.x < rail.x then
+				for _, b in other.branches do
+					if b.y > rail.top and b.y < rail.bottom then
+						table.insert(rail.gaps, { b.y - 5, b.y + 5 })
 					end
 				end
 			end
 		end
 	end
+
+	-- Each crew row's way back to its orchestrator's row, for a pulse.
+	for _, rail in out.rails do
+		local node_y: number? = nil
+		for _, b in rail.branches do
+			if b.node then
+				node_y = b.y
+			end
+		end
+		for _, r in by_orch[rail.orchestrator] or {} do
+			if r.kind ~= "orchestrator" then
+				local way = { content_x - GAP, r.mid, rail.x, r.mid }
+				if node_y then
+					table.insert(way, rail.x)
+					table.insert(way, node_y :: number)
+					table.insert(way, content_x - GAP)
+					table.insert(way, node_y :: number)
+				end
+				out.routes[r.id] = way
+			end
+		end
+	end
 	return out
+end
+
+-- A rail's lines as polylines (x, y, …): the rail in its solid runs (gaps
+-- and dashed runs left out) and each branch from the rail to its end, the
+-- first and last rounding off the rail's ends (their corner point in the
+-- middle: drawn as a curve); and the dashed runs.
+function M.lines(rail: Rail): ({ { number } }, { { number } })
+	local solid: { { number } } = {}
+	local dashed: { { number } } = {}
+	local n = #rail.branches
+	if n == 1 then
+		local b = rail.branches[1]
+		table.insert(solid, { rail.x, b.y, b.to, b.y })
+		return solid, dashed
+	end
+	local cuts = {}
+	for _, g in rail.gaps do
+		table.insert(cuts, { g[1], g[2], false })
+	end
+	for _, d in rail.dashed do
+		table.insert(cuts, { d[1], d[2], true })
+	end
+	table.sort(cuts, function(a: any, b: any): boolean
+		return a[1] < b[1]
+	end)
+	local at = rail.top + CORNER
+	local stop = rail.bottom - CORNER
+	for _, c in cuts do
+		local a, b = math.max(c[1], at), math.min(c[2], stop)
+		if b > a then
+			if a > at then
+				table.insert(solid, { rail.x, at, rail.x, a })
+			end
+			if c[3] then
+				table.insert(dashed, { rail.x, a, rail.x, b })
+			end
+			at = b
+		end
+	end
+	if stop > at then
+		table.insert(solid, { rail.x, at, rail.x, stop })
+	end
+	for i, b in rail.branches do
+		if i == 1 or i == n then
+			local dy = if i == 1 then CORNER else -CORNER
+			table.insert(solid, { rail.x, b.y + dy, rail.x, b.y, rail.x + CORNER, b.y, b.to, b.y })
+		else
+			table.insert(solid, { rail.x, b.y, b.to, b.y })
+		end
+	end
+	return solid, dashed
 end
 
 return M

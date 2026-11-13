@@ -320,6 +320,250 @@ function sample.at(t: number)
 	local copy = shifted(sample, t - NOW)
 	copy.NOW = t
 	copy.at = sample.at
+	copy.fleet_at = sample.fleet_at
+	return copy
+end
+
+-- A busier world, for the Map's three views: four machines (this desk, a
+-- macbook, a Windows box and a Cloud machine), four projects, five
+-- orchestrators and their crews across them, one plain thread working on
+-- its own, and the last hour of what each thread did
+-- (`orchestration.timeline`). Shaped as the sample is, plus:
+--
+--   sample.fleet.projects     sessions.now projects
+--   sample.fleet.timeline     what orchestration.timeline:get() returns
+--   sample.fleet_at(t)        a copy with every time shifted so "now" is `t`
+do
+	local function crew_chat(id: string, title: string, device: string, project: string, parent: string, status: string?, activity: any, todo: any, extra: any?): any
+		local c: any = {
+			id = id, title = title, device = device, project = project, parent = parent, child_kind = "crew",
+			status = status, updated = ago(30), created = ago(5400), agent = "claude", model = "claude-opus-5-5",
+		}
+		if activity then
+			c.activity = { kind = activity[1], label = activity[2], since = ago(activity[3]) }
+		end
+		if todo then
+			c.todo = { done = todo[1], total = todo[2], current = todo[3] }
+		end
+		for k, v in extra or {} do
+			c[k] = v
+		end
+		return c
+	end
+	local function orch(id: string, name: string, hue: number, project: string?, goal: string, extra: any?): any
+		local o: any = {
+			id = id, kind = "standard", name = name, goal = goal, rules = "", crew_rules = "", notes = "", hue = hue,
+			crew = { devices = {} }, paused = false, archived = false, created = ago(86400), updated = ago(60), project = project,
+		}
+		for k, v in extra or {} do
+			o[k] = v
+		end
+		return o
+	end
+
+	local f_devices = {
+		{ id = "dev-desk", name = "desk", platform = "linux", here = true, online = true },
+		{ id = "dev-mac", name = "macbook", platform = "macos", here = false, online = true },
+		{ id = "dev-forge", name = "forge", platform = "windows", here = false, online = true },
+		{ id = "dev-cloud", name = "Cloud", platform = "linux", here = false, online = true, cloud = true },
+	}
+	local f_projects = {
+		{ id = "p-zeron-desk", name = "zeron", device = "dev-desk", path = "/home/you/zeron", git = true },
+		{ id = "p-exnomic-desk", name = "exnomic", device = "dev-desk", path = "/home/you/exnomic", git = true },
+		{ id = "p-zeron-mac", name = "zeron", device = "dev-mac", path = "/Users/you/zeron", git = true },
+		{ id = "p-reins-mac", name = "reins", device = "dev-mac", path = "/Users/you/reins", git = true },
+		{ id = "p-reins-forge", name = "reins", device = "dev-forge", path = "C:\\src\\reins", git = true },
+		{ id = "p-exnomic-cloud", name = "exnomic", device = "dev-cloud", path = "/work/exnomic", git = true },
+		{ id = "p-tally-cloud", name = "tally", device = "dev-cloud", path = "/work/tally", git = true },
+	}
+	local f_orchestrators = {
+		orch("orc-brain", "Brain dump", 262, nil, "Route everything I say to the right place.", { kind = "brain_dump" }),
+		orch("orc-orch", "Orchestrators", 196, "p-zeron-desk", "Ship Orchestrators and the Control room in zgx."),
+		orch("orc-vpn", "Exnomic VPN", 32, "p-exnomic-desk", "Phase 2 migration, safely."),
+		orch("orc-reins", "Reins release", 318, "p-reins-mac", "Ship Reins 2.4 on macOS and Windows."),
+		orch("orc-tally", "Tally", 100, "p-tally-cloud", "Line counts that never lie."),
+	}
+	local f_chats = {
+		{ id = "orc-brain", title = "Brain dump", device = "dev-desk", updated = ago(40), created = ago(518400), agent = "claude", model = "claude-haiku-5-5" },
+		{ id = "orc-orch", title = "Orchestrators", device = "dev-desk", project = "p-zeron-desk", status = "working", updated = ago(20), created = ago(7200), agent = "claude", model = "claude-opus-5-5",
+			activity = { kind = "delegating", label = "Message Engine: reports + MCP tools", since = ago(25) } },
+		{ id = "orc-vpn", title = "Exnomic VPN", device = "dev-desk", project = "p-exnomic-desk", updated = ago(900), created = ago(259200), agent = "claude", model = "claude-sonnet-5-5" },
+		{ id = "orc-reins", title = "Reins release", device = "dev-mac", project = "p-reins-mac", updated = ago(300), created = ago(90000), agent = "claude", model = "claude-opus-5-5" },
+		{ id = "orc-tally", title = "Tally", device = "dev-cloud", project = "p-tally-cloud", updated = ago(340), created = ago(180000), agent = "codex", model = "gpt-5.5" },
+		crew_chat("th-engine-state", "Engine: orchestration state", "dev-desk", "p-zeron-desk", "orc-orch", "working",
+			{ "testing", "cargo test -p zeron-engine --lib orchestration", 48 }, { 5, 8, "WatchOrchestration stream" }),
+		crew_chat("th-engine-flow", "Engine: reports + MCP tools", "dev-desk", "p-zeron-desk", "orc-orch", "working",
+			{ "merging", "git merge orch/engine-state", 9 }, { 7, 9, "Merge engine-state" }),
+		crew_chat("th-ui-control", "Control room UI", "dev-mac", "p-zeron-mac", "orc-orch", "working",
+			{ "testing", "zgx test ui control_", 95 }, { 2, 7, "Map widget" }),
+		crew_chat("th-ui-orch", "Orchestrator screen", "dev-mac", "p-zeron-mac", "orc-orch", "input",
+			nil, { 4, 6, "Crew updates card" }, { updated = ago(200) }),
+		crew_chat("th-vpn-moscow", "Moscow node reboot plan", "dev-desk", "p-exnomic-desk", "orc-vpn", nil,
+			nil, { 3, 3 }, { updated = ago(2100) }),
+		crew_chat("th-vpn-exporter", "Exporter image", "dev-cloud", "p-exnomic-cloud", "orc-vpn", "working",
+			{ "building", "docker build -t exnomic/exporter .", 260 }, { 2, 5, "Image builds" }),
+		crew_chat("th-reins-win", "Windows installer", "dev-forge", "p-reins-forge", "orc-reins", "working",
+			{ "building", "cargo build --release --target x86_64-pc-windows-msvc", 410 }, { 3, 5, "MSI bundle" }),
+		crew_chat("th-reins-notes", "Release notes", "dev-mac", "p-reins-mac", "orc-reins", "working",
+			{ "editing", "Edit CHANGELOG.md", 30 }, { 1, 3, "2.4 highlights" }),
+		crew_chat("th-reins-sign", "Code signing", "dev-forge", "p-reins-forge", "orc-reins", nil,
+			nil, { 2, 2 }, { updated = ago(1400) }),
+		crew_chat("th-tally-ci", "pytest on 3.13", "dev-cloud", "p-tally-cloud", "orc-tally", "failed",
+			nil, { 4, 6, "Fix empty input" }, { agent = "codex", model = "gpt-5.5", updated = ago(340) }),
+		crew_chat("th-tally-lines", "--lines flag", "dev-cloud", "p-tally-cloud", "orc-tally", "working",
+			{ "thinking", "", 70 }, { 2, 4, "-l alias" }, { agent = "codex", model = "gpt-5.5" }),
+		crew_chat("th-tally-docs", "README usage", "dev-cloud", "p-tally-cloud", "orc-tally", "done",
+			nil, { 2, 2 }, { agent = "codex", model = "gpt-5.5", updated = ago(2600) }),
+		-- A thread of the person's own, working, under no orchestrator.
+		{ id = "th-zgx-mem", title = "zgx memory after tabs", device = "dev-desk", project = "p-zeron-desk", status = "working",
+			updated = ago(10), created = ago(1600), agent = "claude", model = "claude-opus-5-5",
+			activity = { kind = "thinking", label = "", since = ago(120) } },
+		{ id = "th-titlebar", title = "Linux titlebar toggle", device = "dev-desk", project = "p-zeron-desk", status = "done", updated = ago(26000), created = ago(30000), agent = "claude", model = "claude-opus-5-5" },
+	}
+	local function member(chat: string, o: string, item: string, extra: any?): any
+		local m: any = { chat_id = chat, orchestrator_id = o, item_id = item, role = "", released = false, joined = ago(5000) }
+		for k, v in extra or {} do
+			m[k] = v
+		end
+		return m
+	end
+	local f_crew = {
+		member("th-engine-state", "orc-orch", "it-engine"),
+		member("th-engine-flow", "orc-orch", "it-flow"),
+		member("th-ui-control", "orc-orch", "it-control"),
+		member("th-ui-orch", "orc-orch", "it-orch-screen"),
+		member("th-vpn-moscow", "orc-vpn", "it-moscow"),
+		member("th-vpn-exporter", "orc-vpn", "it-exporter"),
+		member("th-reins-notes", "orc-reins", "it-notes"),
+		member("th-reins-win", "orc-reins", "it-win"),
+		member("th-reins-sign", "orc-reins", "it-sign"),
+		member("th-tally-lines", "orc-tally", "it-lines"),
+		member("th-tally-ci", "orc-tally", "it-ci"),
+		member("th-tally-docs", "orc-tally", "it-docs"),
+	}
+	local function item(id: string, o: string, title: string, state: string, order: number, threads: { string }): any
+		return { id = id, orchestrator_id = o, title = title, detail = "", state = state, priority = "normal", threads = threads, links = {}, order = order, created = ago(5000), updated = ago(300) }
+	end
+	local f_items = {
+		item("it-engine", "orc-orch", "Engine: orchestration state", "active", 1, { "th-engine-state" }),
+		item("it-flow", "orc-orch", "Reports, asks, MCP tools", "active", 2, { "th-engine-flow" }),
+		item("it-control", "orc-orch", "Control room", "active", 3, { "th-ui-control" }),
+		item("it-orch-screen", "orc-orch", "Orchestrator screen", "blocked", 4, { "th-ui-orch" }),
+		item("it-moscow", "orc-vpn", "Reboot Moscow node", "review", 1, { "th-vpn-moscow" }),
+		item("it-exporter", "orc-vpn", "Exporter image", "active", 2, { "th-vpn-exporter" }),
+		item("it-notes", "orc-reins", "Release notes", "active", 1, { "th-reins-notes" }),
+		item("it-win", "orc-reins", "Windows installer", "active", 2, { "th-reins-win" }),
+		item("it-sign", "orc-reins", "Code signing", "done", 3, { "th-reins-sign" }),
+		item("it-lines", "orc-tally", "--lines flag", "active", 1, { "th-tally-lines" }),
+		item("it-ci", "orc-tally", "CI on 3.13", "blocked", 2, { "th-tally-ci" }),
+		item("it-docs", "orc-tally", "README usage", "done", 3, { "th-tally-docs" }),
+	}
+	local f_asks = {
+		{ id = "ak-f1", from_chat = "th-ui-orch", orchestrator_id = "orc-orch", item_id = "it-orch-screen", kind = "decision",
+			question = "Orchestrator page: side by side, or tabs?", options = { { label = "Side by side" }, { label = "Tabs" } },
+			urgent = false, state = "open", created = ago(200) },
+	}
+	local f_loads = {
+		["dev-desk"] = { cpu = 0.71, mem_used = 41.2e9, mem_total = 62.0e9, load1 = 11.4, cores = 16, online = true, at = NOW },
+		["dev-mac"] = { cpu = 0.46, mem_used = 22.1e9, mem_total = 36.0e9, load1 = 5.2, cores = 12, online = true, at = NOW },
+		["dev-forge"] = { cpu = 0.88, mem_used = 25.7e9, mem_total = 32.0e9, load1 = 14.1, cores = 16, online = true, at = NOW },
+		["dev-cloud"] = { cpu = 0.34, mem_used = 5.9e9, mem_total = 16.0e9, load1 = 1.6, cores = 8, online = true, at = NOW },
+	}
+	-- What passed between them in the last hour (the Timeline's ticks, the
+	-- Map's pulses).
+	local f_comms = {
+		{ id = "cf-1", kind = "spawn", from = "orc-vpn", to = "th-vpn-exporter", summary = "Exporter image", at = ago(1500) },
+		{ id = "cf-2", kind = "report", from = "th-engine-state", to = "orc-orch", summary = "Registry kinds in", at = ago(1500) },
+		{ id = "cf-3", kind = "report", from = "th-reins-win", to = "orc-reins", summary = "MSVC link error, retrying", at = ago(1700) },
+		{ id = "cf-4", kind = "report", from = "th-ui-control", to = "orc-orch", summary = "2 tests fail at 900 wide", at = ago(1250) },
+		{ id = "cf-5", kind = "report", from = "th-vpn-moscow", to = "orc-vpn", summary = "Reboot plan ready", at = ago(2100) },
+		{ id = "cf-6", kind = "report", from = "th-tally-docs", to = "orc-tally", summary = "README pushed", at = ago(2600) },
+		{ id = "cf-7", kind = "report", from = "th-engine-flow", to = "orc-orch", summary = "Coalesced wake works", at = ago(300) },
+		{ id = "cf-8", kind = "report", from = "th-reins-notes", to = "orc-reins", summary = "Draft up", at = ago(300) },
+		{ id = "cf-9", kind = "ask", from = "th-ui-orch", to = "you", summary = "Side by side or tabs?", at = ago(200) },
+		{ id = "cf-10", kind = "report", from = "th-tally-ci", to = "orc-tally", summary = "pytest: 3 failed", at = ago(340) },
+		{ id = "cf-11", kind = "message", from = "orc-orch", to = "th-engine-flow", summary = "Merge engine-state first", at = ago(25) },
+	}
+	-- Each thread's last hour: from `at` on, its state and what it did.
+	local function lane(list: { any }): { any }
+		local out = {}
+		for _, e in list do
+			table.insert(out, { at = ago(e[1]), status = e[2], kind = e[3] })
+		end
+		return out
+	end
+	local f_timeline = {
+		["orc-orch"] = lane { { 3600, "working", "delegating" }, { 3420, "idle" }, { 1260, "working", "thinking" }, { 1190, "idle" }, { 25, "working", "delegating" } },
+		["orc-reins"] = lane { { 3150, "working", "delegating" }, { 3020, "idle" }, { 1700, "working", "thinking" }, { 1640, "idle" } },
+		["orc-tally"] = lane { { 2100, "working", "delegating" }, { 2000, "idle" }, { 340, "working", "thinking" }, { 300, "idle" } },
+		["th-engine-state"] = lane {
+			{ 3300, "working", "thinking" }, { 3050, "working", "editing" }, { 2500, "working", "building" }, { 2300, "working", "testing" },
+			{ 2050, "working", "editing" }, { 1500, "idle" }, { 1380, "working", "thinking" }, { 1200, "working", "editing" },
+			{ 700, "working", "building" }, { 560, "working", "editing" }, { 48, "working", "testing" },
+		},
+		["th-engine-flow"] = lane {
+			{ 3500, "working", "thinking" }, { 3200, "working", "editing" }, { 2200, "working", "testing" }, { 2000, "working", "editing" },
+			{ 1000, "working", "testing" }, { 820, "working", "merging" }, { 760, "working", "editing" }, { 300, "working", "testing" }, { 140, "working", "editing" },
+			{ 9, "working", "merging" },
+		},
+		["th-ui-control"] = lane {
+			{ 2800, "working", "thinking" }, { 2600, "working", "editing" }, { 1600, "working", "building" }, { 1400, "working", "testing" },
+			{ 1250, "failed" }, { 1180, "working", "editing" }, { 600, "working", "building" }, { 420, "working", "editing" },
+			{ 95, "working", "testing" },
+		},
+		["th-ui-orch"] = lane {
+			{ 3000, "working", "thinking" }, { 2700, "working", "editing" }, { 1800, "working", "testing" }, { 1650, "working", "editing" },
+			{ 900, "working", "reading" }, { 620, "working", "editing" }, { 200, "input" },
+		},
+		["th-vpn-moscow"] = lane { { 3550, "working", "reading" }, { 2900, "working", "editing" }, { 2100, "done" } },
+		["th-vpn-exporter"] = lane { { 1500, "working", "thinking" }, { 1300, "working", "editing" }, { 700, "working", "installing" }, { 520, "working", "editing" }, { 260, "working", "building" } },
+		["th-reins-win"] = lane {
+			{ 3100, "working", "thinking" }, { 2900, "working", "installing" }, { 2300, "working", "building" }, { 1700, "failed" },
+			{ 1500, "working", "editing" }, { 1100, "working", "building" }, { 800, "working", "testing" }, { 410, "working", "building" },
+		},
+		["th-reins-notes"] = lane { { 900, "working", "reading" }, { 600, "working", "editing" }, { 300, "working", "reviewing" }, { 30, "working", "editing" } },
+		["th-reins-sign"] = lane { { 2600, "working", "running" }, { 2200, "working", "pushing" }, { 2000, "done" }, { 1400, "idle" } },
+		["th-tally-ci"] = lane { { 2000, "working", "thinking" }, { 1800, "working", "editing" }, { 900, "working", "testing" }, { 340, "failed" } },
+		["th-tally-lines"] = lane { { 1000, "working", "reading" }, { 700, "working", "editing" }, { 450, "working", "testing" }, { 380, "working", "editing" }, { 70, "working", "thinking" } },
+		["th-tally-docs"] = lane { { 3400, "working", "editing" }, { 2700, "working", "pushing" }, { 2600, "done" } },
+		["th-zgx-mem"] = lane { { 1500, "working", "reading" }, { 1100, "working", "running" }, { 600, "working", "reading" }, { 120, "working", "thinking" } },
+	}
+	-- Each device's CPU, a sample every five seconds for the last four minutes.
+	local function wave(base: number, swing: number, n: number, seed: number): { number }
+		local out = {}
+		for i = 1, n do
+			local v = base + swing * math.sin((i + seed) * 0.37) * math.cos((i + seed * 2) * 0.11) + swing * 0.35 * math.sin(i * 1.7 + seed)
+			table.insert(out, math.clamp(v, 0.02, 0.99))
+		end
+		return out
+	end
+	-- (As the bridge keeps it: `history`, oldest first, ending on `cpu`.)
+	local swings: { [string]: { number } } = { ["dev-desk"] = { 0.18, 1 }, ["dev-mac"] = { 0.14, 4 }, ["dev-forge"] = { 0.12, 7 }, ["dev-cloud"] = { 0.14, 2 } }
+	for id, w in swings do
+		local l: any = (f_loads :: any)[id]
+		local line = wave(l.cpu, w[1], 60, w[2])
+		local off = l.cpu - line[#line]
+		local history = {}
+		for i, v in line do
+			table.insert(history, { at = NOW - (#line - i) * 5, cpu = math.clamp(v + off, 0.02, 0.99) })
+		end
+		l.history = history
+	end
+	(sample :: any).fleet = {
+		NOW = NOW,
+		now = { state = "ready", orchestrators = f_orchestrators, crew = f_crew, items = f_items, asks = f_asks, dumps = {} },
+		loads = f_loads,
+		comms = f_comms,
+		devices = f_devices,
+		projects = f_projects,
+		chats = f_chats,
+		timeline = f_timeline,
+	}
+end
+
+function sample.fleet_at(t: number)
+	local copy = shifted((sample :: any).fleet, t - NOW)
+	copy.NOW = t
 	return copy
 end
 

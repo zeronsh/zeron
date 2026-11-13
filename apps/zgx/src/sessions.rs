@@ -1106,6 +1106,7 @@ impl Sessions {
             shared.set(value.clone());
         }
         self.look_again();
+        crate::orchestration_timeline::heard_sessions(&value);
     }
 
     /// Publishes again as the soonest live state showing goes stale, or a
