@@ -175,6 +175,8 @@ impl Harness for StepAgent {
                     is_error: stopped,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 })
                 .await;
