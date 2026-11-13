@@ -103,6 +103,7 @@ pub const BLOCKED: &[&str] = &[
     // the machines are asked.)
     "orchestration.op",
     "orchestration.loads_wanted",
+    "orchestration.progress_check",
 ];
 
 pub fn blocked(action: &str) -> bool {

@@ -28,6 +28,18 @@
 --
 -- Chats come from `sessions.now` (account/sessions); their rows carry
 -- `activity = { kind, label, since }` and `todo = { done, total, current? }`.
+--
+-- How far each chat's work has got (`WatchProgress`,
+-- src/orchestration_progress.rs), read and never asked of the agent:
+--
+--   orchestration.progress:get() { [chat id] = { state, device_id, started?,
+--                                  last_step?, step?, steps? = { done, total },
+--                                  note?, note_at?, stalled, tool?,
+--                                  tool_since?, refreshing, eta_secs?,
+--                                  updated } }
+--   orchestration.check(chat)    its note made fresh now: a promise of its
+--                                row (`refreshing` while the note is on its
+--                                way)
 
 local M = {}
 
@@ -97,6 +109,13 @@ end
 
 function M.set_priority(id: string, priority: string): any
 	return M.op({ op = "upsertItem", item = { id = id, priority = priority } })
+end
+
+-- How far each chat's work has got, by chat id.
+M.progress = ui.shared("orchestration.progress", {} :: { [string]: any })
+
+function M.check(chat_id: string): any
+	return ui.call("orchestration.progress_check", chat_id)
 end
 
 return M

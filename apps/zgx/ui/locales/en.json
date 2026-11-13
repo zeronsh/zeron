@@ -1216,6 +1216,20 @@
       "comms": {
         "you": "You",
         "none": "Quiet"
+      },
+      "progress": {
+        "of": "Progress of {title}",
+        "last_step": "last step {ago} ago",
+        "steps": "{done}/{total}",
+        "left": "~{t} left",
+        "stalled": "Stalled",
+        "elapsed": "Time at it",
+        "whats_up": "What's up?",
+        "open": "Open",
+        "pin": "Pin to Progress",
+        "unpin": "Unpin from Progress",
+        "menu": "Progress actions",
+        "refreshing": "Writing a fresh note"
       }
     }
   },
@@ -4132,7 +4146,8 @@
       "map": "Map",
       "board": "Board",
       "machines": "Machines",
-      "comms": "Comms"
+      "comms": "Comms",
+      "progress": "Progress"
     },
     "widgets": {
       "title": "Widgets",
@@ -4152,7 +4167,13 @@
       "review": "{n} in review",
       "done": "{n} done today",
       "online": "{n, plural, one {# machine} other {# machines}}",
-      "running": "{n} running"
+      "running": "{n} running",
+      "stalled": "{n} stalled",
+      "pinned": "{n} pinned"
+    },
+    "progress": {
+      "empty": "Nothing working",
+      "failed": "Couldn't check on it"
     }
   }
 }

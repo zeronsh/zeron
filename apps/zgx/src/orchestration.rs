@@ -179,6 +179,8 @@ const PERSON_OPS: &[&str] = &[
     "dismissAsk",
     "dump",
     "reroute",
+    // (The chat's note made fresh; never sent to the chat itself.)
+    "progressCheck",
 ];
 
 /// Whether `params` is one of the person's ops: else refused, unsent.
