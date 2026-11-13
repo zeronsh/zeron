@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::api_keys::key_rows;
 use super::stores::*;
 use super::usage::*;
 use super::*;
@@ -89,7 +90,12 @@ impl MockServer {
                     let mut first = head.lines().next().unwrap_or("").split_whitespace();
                     let method = first.next().unwrap_or("").to_string();
                     let path = first.next().unwrap_or("").to_string();
-                    lock(&hits).push(format!("{method} {path}"));
+                    // (A preview scan elsewhere in the test process probes
+                    // every local listener with `HEAD /`: not a request any
+                    // code here made, so not recorded.)
+                    if method != "HEAD" {
+                        lock(&hits).push(format!("{method} {path}"));
+                    }
                     let (status, reply) = handler(&method, &path, &body);
                     let response = http_response(
                         &format!("{status} X"),
@@ -748,7 +754,7 @@ async fn opencode_swaps_one_provider_entry_and_leaves_the_rest() {
         .iter()
         .find(|a| a.provider.as_deref() == Some("anthropic"))
         .unwrap();
-    assert_eq!(key.email.as_deref(), Some("Anthropic ···keep"));
+    assert_eq!(key.email.as_deref(), Some("API key ···keep"));
     assert_eq!(key.auth_kind, Some(AgentAuthKind::ApiKey));
     accounts.activate(HarnessId::Opencode, &a_id).await.unwrap();
     let written: serde_json::Value =
@@ -2452,9 +2458,9 @@ async fn a_pi_api_key_is_checked_then_stored_as_pi_stores_it_and_never_shown_or_
         .into_iter()
         .find(|a| a.provider.as_deref() == Some("openrouter"))
         .unwrap();
-    // Named by default for its provider and last four; its line says whose.
-    assert_eq!(key_row.email.as_deref(), Some("OpenRouter ···WXYZ"));
-    assert_eq!(key_row.plan_label.as_deref(), Some("OpenRouter · API key ···WXYZ"));
+    // Unnamed: "API key" and its last four, over its provider.
+    assert_eq!(key_row.email.as_deref(), Some("API key ···WXYZ"));
+    assert_eq!(key_row.plan_label.as_deref(), Some("OpenRouter"));
     assert_eq!(key_row.auth_kind, Some(AgentAuthKind::ApiKey));
     assert!(key_row.active && key_row.switchable);
     // Never in what the UI gets, never logged, never in its slot's id.
@@ -2594,8 +2600,9 @@ echo 'Added openrouter credential #1: "api-key-1"'
     assert_eq!(std::fs::read_to_string(&seen).unwrap(), OR_KEY, "read from stdin");
     let hermes = rows(&snapshot, HarnessId::Hermes);
     assert_eq!(hermes.len(), 1);
-    assert_eq!(hermes[0].email.as_deref(), Some("api-key-1"));
-    assert_eq!(hermes[0].plan_label.as_deref(), Some("OpenRouter · API key ···WXYZ"));
+    // (Hermes' "api-key-1" is no name: it reads as an unnamed key.)
+    assert_eq!(hermes[0].email.as_deref(), Some("API key ···WXYZ"));
+    assert_eq!(hermes[0].plan_label.as_deref(), Some("OpenRouter"));
     assert!(!hermes[0].switchable);
     let wire = serde_json::to_string(&snapshot).unwrap();
     assert!(!wire.contains(OR_KEY), "{wire}");
@@ -2772,9 +2779,11 @@ async fn keys_are_named_by_default_or_as_asked_renamed_and_two_keys_stay_two_row
         .filter(|a| a.provider.as_deref() == Some("openrouter"))
         .collect();
     assert_eq!(keys.len(), 2, "two keys of one provider are two rows");
-    let first = keys.iter().find(|a| a.email.as_deref() == Some("OpenRouter ···WXYZ")).unwrap();
+    let first = keys.iter().find(|a| a.email.as_deref() == Some("API key ···WXYZ")).unwrap();
+    assert_eq!(first.plan_label.as_deref(), Some("OpenRouter"));
     let work = keys.iter().find(|a| a.email.as_deref() == Some("Work")).unwrap();
-    assert_eq!(work.plan_label.as_deref(), Some("OpenRouter · API key ···A1B2"));
+    // Named: the last four nowhere (the name tells it apart).
+    assert_eq!(work.plan_label.as_deref(), Some("OpenRouter · API key"));
     // One in use for the provider (the first: the second came beside it).
     assert!(first.active && !work.active);
     // Live, the second is still the first's (the name changes nothing live).
@@ -2796,7 +2805,9 @@ async fn keys_are_named_by_default_or_as_asked_renamed_and_two_keys_stay_two_row
     assert!(accounts.add_api_key(HarnessId::Pi, "openrouter", OR_KEY, Some("v1-0123456789")).await.is_err());
     // Emptied: its default name again.
     let reset = accounts.rename_account(HarnessId::Pi, &first.id, "  ").await.unwrap();
-    assert!(rows(&reset, HarnessId::Pi).iter().any(|a| a.id == first.id && a.email.as_deref() == Some("OpenRouter ···WXYZ")));
+    assert!(rows(&reset, HarnessId::Pi).iter().any(|a| a.id == first.id
+        && a.email.as_deref() == Some("API key ···WXYZ")
+        && a.plan_label.as_deref() == Some("OpenRouter")));
     // A login isn't renamed (it goes by its own address); a stranger's id
     // is no path.
     write(
@@ -2877,4 +2888,39 @@ async fn hermes_lists_only_what_hermes_itself_would_use() {
     assert_eq!(providers, ["openai-codex", "deepseek"]);
     // One per provider, each in use for its provider's models; none switchable.
     assert!(hermes.iter().all(|a| a.active && !a.switchable));
+}
+
+#[test]
+fn a_keys_last_four_show_once_and_an_environment_variable_never() {
+    let key = "sk-or-v1-0123456789abcdefWXYZ";
+    assert_eq!(
+        key_rows("OpenRouter", Some(key), None, false),
+        ("API key ···WXYZ".to_string(), "OpenRouter".to_string())
+    );
+    assert_eq!(
+        key_rows("OpenRouter", Some(key), Some("Work"), false),
+        ("Work".to_string(), "OpenRouter · API key".to_string())
+    );
+    assert_eq!(
+        key_rows("OpenRouter", Some(key), Some("OPENROUTER_API_KEY"), true),
+        ("API key ···WXYZ".to_string(), "OpenRouter · from environment".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_hermes_key_from_the_environment_never_shows_its_variable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    write(
+        &config.hermes_home.join("auth.json"),
+        &serde_json::json!({ "credential_pool": { "openrouter": [
+            { "id": "e1", "label": "OPENROUTER_API_KEY", "auth_type": "api_key", "priority": 0,
+              "source": "env:OPENROUTER_API_KEY", "access_token": "sk-or-v1-envKEY0000ab12" },
+        ]}})
+        .to_string(),
+    );
+    write(&config.hermes_home.join(".env"), "OPENROUTER_API_KEY=sk-or-v1-envKEY0000ab12\n");
+    let hermes = rows(&accounts.list(false).await.unwrap(), HarnessId::Hermes);
+    assert_eq!(hermes[0].email.as_deref(), Some("API key ···ab12"));
+    assert_eq!(hermes[0].plan_label.as_deref(), Some("OpenRouter · from environment"));
 }

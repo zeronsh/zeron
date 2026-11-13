@@ -122,18 +122,42 @@ pub(super) fn masked(key: &str) -> String {
     format!("···{tail}")
 }
 
-/// A key's name when it's given none: its provider and its last four
-/// characters ("OpenRouter ···a1b2"), so two keys never read alike.
-pub(super) fn default_key_name(provider: &str, key: &str) -> String {
-    format!("{provider} {}", masked(key))
+/// How a key's row reads — its last four characters said exactly once:
+/// named, "Work" over "OpenRouter · API key"; unnamed, "API key ···a1b2"
+/// over "OpenRouter"; seeded from an environment variable (Hermes), never
+/// that variable's name: "API key ···a1b2" over "OpenRouter · from
+/// environment". `key`: the key, when it's a plain one (none: a command or
+/// variable Pi resolves, of which nothing is shown).
+pub(super) fn key_rows(
+    provider: &str,
+    key: Option<&str>,
+    name: Option<&str>,
+    from_env: bool,
+) -> (String, String) {
+    let unnamed = match key {
+        Some(key) => format!("API key {}", masked(key)),
+        None => "API key".to_string(),
+    };
+    match (name, from_env) {
+        (_, true) => (unnamed, format!("{provider} · from environment")),
+        (Some(name), false) => (name.to_string(), format!("{provider} · API key")),
+        (None, false) => (unnamed, provider.to_string()),
+    }
 }
 
-/// What a key's row says under its name: "OpenRouter · API key ···a1b2".
-pub(super) fn key_line(provider: &str, key: Option<&str>) -> String {
-    match key {
-        Some(key) => format!("{provider} · API key {}", masked(key)),
-        None => format!("{provider} · API key"),
-    }
+/// `profile` as a key's, named `name` (none: unnamed). The name, when set,
+/// is also kept apart (`display_name`), so it's never mistaken for the
+/// derived title.
+pub(super) fn name_key_profile(
+    profile: &mut SlotProfile,
+    provider: &str,
+    key: Option<&str>,
+    name: Option<&str>,
+) {
+    let (title, line) = key_rows(provider, key, name, false);
+    profile.email = title;
+    profile.plan = Some(line);
+    profile.display_name = name.map(str::to_string);
 }
 
 /// A name for a key as given, or why not: one line of at most 48
@@ -189,22 +213,17 @@ pub(super) fn key_detected(
     // (A Pi key that's really a command or a variable shows none of it.)
     let plain = valid_key(&key).then_some(key.as_str());
     let digest = crate::repos::hex(&Sha256::digest(key.as_bytes()))[..16].to_string();
-    let mut detected = Detected::known(
-        format!("{store_key}:key:{digest}"),
-        SlotProfile {
-            // Its name until it's given one ([`AgentAccounts::rename_account`]).
-            email: match plain {
-                Some(key) => default_key_name(&provider, key),
-                None => format!("{provider} API key"),
-            },
-            display_name: None,
-            organization: None,
-            plan: Some(key_line(&provider, plain)),
-            auth_kind: AgentAuthKind::ApiKey,
-        },
-        entry.clone(),
-    )
-    .keyed(store_key);
+    // Unnamed until it's given a name ([`AgentAccounts::rename_account`]).
+    let mut profile = SlotProfile {
+        email: String::new(),
+        display_name: None,
+        organization: None,
+        plan: None,
+        auth_kind: AgentAuthKind::ApiKey,
+    };
+    name_key_profile(&mut profile, &provider, plain, None);
+    let mut detected = Detected::known(format!("{store_key}:key:{digest}"), profile, entry.clone())
+        .keyed(store_key);
     // A key carries no name of its own: the one its slot keeps (given when
     // it was added, or since) wins over the default.
     detected.identity_known = false;
@@ -299,18 +318,17 @@ impl AgentAccounts {
                 let entry = key_entry(harness, key);
                 let mut detected = key_detected(harness, provider, &entry)
                     .ok_or_else(|| EngineError::Other("That key couldn't be stored.".into()))?;
-                if let Some(name) = &name {
-                    detected.profile.email = name.clone();
-                }
+                let group = zeron_proto::providers::account_group_label(harness, provider);
+                name_key_profile(&mut detected.profile, &group, Some(key), name.as_deref());
                 self.save_new_login(harness, &detected).await?;
                 let _ops = self.inner.ops.lock().await;
                 // (Added again under a new name: the new name.)
                 if let Some(name) = name
                     && let Some(mut slot) =
                         self.read_slot(harness, &slot_id_for(harness, &detected.account_key))
-                    && slot.profile.email != name
+                    && slot.profile.display_name.as_deref() != Some(name.as_str())
                 {
-                    slot.profile.email = name;
+                    name_key_profile(&mut slot.profile, &group, Some(key), Some(&name));
                     self.write_slot(&slot)?;
                 }
                 self.list_locked(false).await
@@ -497,13 +515,9 @@ impl AgentAccounts {
             harness,
             slot.store_key.as_deref().unwrap_or_default(),
         );
-        slot.profile.email = match key_name(name, key.as_deref())? {
-            Some(name) => name,
-            None => match key.as_deref().filter(|k| valid_key(k)) {
-                Some(key) => default_key_name(&provider, key),
-                None => format!("{provider} API key"),
-            },
-        };
+        let name = key_name(name, key.as_deref())?;
+        let plain = key.as_deref().filter(|k| valid_key(k));
+        name_key_profile(&mut slot.profile, &provider, plain, name.as_deref());
         self.write_slot(&slot)?;
         self.list_locked(false).await
     }

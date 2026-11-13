@@ -92,6 +92,9 @@ local PROVIDERS: { [string]: { Provider } } = {
 	},
 }
 
+-- (Who each provider is, as the host names it in a row.)
+local VENDOR_NAME = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google Gemini", gemini = "Google Gemini", xai = "xAI", deepseek = "DeepSeek" }
+
 local model: { any } = {
 	agent("claude-code", "Claude Code", "claude", {
 		account("cl1", "bo@example.com", "Max", nil, true),
@@ -110,7 +113,8 @@ local model: { any } = {
 	agent("hermes", "Hermes", "hermes", {
 		account("h1", "first@chatgpt.test", "ChatGPT Pro", "openai-codex", true, false),
 		account("h2", "second@chatgpt.test", "ChatGPT Plus", "openai-codex", false, false),
-		key_account(account("h3", "OPENROUTER_API_KEY", "OpenRouter · API key ···k-or", "openrouter", true, false)),
+		-- (Seeded from OPENROUTER_API_KEY: never titled by that variable.)
+		key_account(account("h3", "API key ···9f3e", "OpenRouter · from environment", "openrouter", true, false)),
 	}),
 }
 
@@ -240,7 +244,13 @@ stub.rename = function(id: string, account_id: string, name: string): any
 	if not refused then
 		for _, acc in find(id).accounts do
 			if acc.id == account_id then
-				acc.email = if name == "" then string.match(acc.plan, "^(.-) ·") .. " ···" .. string.sub(acc.plan, -4) else name
+				local who = VENDOR_NAME[acc.provider] or acc.provider
+				local tail = string.sub(acc.id, -4)
+				if name == "" then
+					acc.email, acc.plan, acc.named = `API key ···{tail}`, who, false
+				else
+					acc.email, acc.plan, acc.named = name, `{who} · API key`, true
+				end
 			end
 		end
 		publish()
@@ -263,8 +273,6 @@ stub.set_enabled = function() end
 -- starting "sk-slow" is still being checked (for as long as the test
 -- likes); anything else is refused in the provider's words. What was typed
 -- is never noted: only that a key was added, and for which provider.
--- (Who each provider is, as the host names it in a row.)
-local VENDOR_NAME = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google Gemini", gemini = "Google Gemini", xai = "xAI", deepseek = "DeepSeek" }
 local VENDOR = { anthropic = "Anthropic", openai = "OpenAI", ["openai-api"] = "OpenAI", openrouter = "OpenRouter", google = "Google", gemini = "Google", xai = "xAI", deepseek = "DeepSeek" }
 stub.add_key = function(id: string, provider: string, key: string, name: string?): any
 	if string.sub(key, 1, 7) == "sk-slow" then
@@ -283,7 +291,11 @@ stub.add_key = function(id: string, provider: string, key: string, name: string?
 		end
 		local who = VENDOR_NAME[provider] or provider
 		local tail = string.sub(key, -4)
-		table.insert(a.accounts, key_account(account(`key-{provider}-{tail}`, name or `{who} ···{tail}`, `{who} · API key ···{tail}`, provider, live)))
+		-- As the host words a key: its name over "<Provider> · API key", or
+		-- "API key ···<last4>" over its provider.
+		local row = key_account(account(`key-{provider}-{tail}`, name or `API key ···{tail}`, if name then `{who} · API key` else who, provider, live))
+		row.named = name ~= nil
+		table.insert(a.accounts, row)
 		publish()
 	end
 	return {

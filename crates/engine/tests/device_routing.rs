@@ -2927,7 +2927,7 @@ async fn per_provider_accounts_are_managed_on_the_device_that_runs_the_agent() {
             .collect()
     };
     assert_eq!(in_use(&pi, "openai-codex"), ["b@example.com"]);
-    assert_eq!(in_use(&pi, "anthropic"), ["Anthropic ···keep"]);
+    assert_eq!(in_use(&pi, "anthropic"), ["API key ···keep"]);
     assert!(!listed.to_string().contains("keepKEEPkeep"), "a key's secret never leaves B");
 
     // Switch B's ChatGPT account from A: B's ChatGPT entry alone changes.
@@ -2944,7 +2944,7 @@ async fn per_provider_accounts_are_managed_on_the_device_that_runs_the_agent() {
     assert_eq!(live["anthropic"], anthropic_key);
     let pi: Vec<serde_json::Value> = switched["accounts"].as_array().unwrap().iter().filter(|a| a["harness"] == "pi").cloned().collect();
     assert_eq!(in_use(&pi, "openai-codex"), ["a@example.com"]);
-    assert_eq!(in_use(&pi, "anthropic"), ["Anthropic ···keep"]);
+    assert_eq!(in_use(&pi, "anthropic"), ["API key ···keep"]);
 
     // A sign-in for one provider of B's agent, from A: the provider rides
     // along to B's own handler (B answers for that provider: OpenCode has

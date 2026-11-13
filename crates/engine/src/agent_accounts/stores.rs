@@ -1504,6 +1504,13 @@ fn hermes_env_secret(var: &str, hermes_home: &Path) -> bool {
     std::env::var(var).is_ok_and(|value| usable(&value))
 }
 
+/// The label `hermes auth add` gives a key nobody named ("api-key-2").
+fn is_hermes_default_key_label(label: &str) -> bool {
+    label
+        .strip_prefix("api-key-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// A Hermes pool entry's secret (`access_token`, an API key's too).
 fn access_key(entry: &serde_json::Value) -> Option<String> {
     str_field(entry, "access_token")
@@ -1526,17 +1533,25 @@ fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotP
         other => title_words(other),
     };
     let api_key = str_field(entry, "auth_type").as_deref() == Some("api_key");
-    // A key goes by its label (Hermes' own name for it); its line says
-    // whose it is and its last four characters, never more.
-    let plan = if api_key {
-        Some(api_keys::key_line(
+    // A key reads as Zeron's own do ([`api_keys::key_rows`]): its label
+    // only when someone named it — never Hermes' "api-key-N", never the
+    // variable an env-seeded one came from.
+    let (label, plan) = if api_key {
+        let source = str_field(entry, "source").unwrap_or_default();
+        let from_env = source.trim().to_ascii_lowercase().starts_with("env:");
+        let named = str_field(entry, "label")
+            .filter(|label| !from_env && !is_hermes_default_key_label(label));
+        let key = access_key(entry).filter(|key| api_keys::valid_key(key));
+        let (title, line) = api_keys::key_rows(
             &zeron_proto::providers::account_group_label(HarnessId::Hermes, provider),
-            access_key(entry).as_deref(),
-        ))
+            key.as_deref(),
+            named.as_deref(),
+            from_env,
+        );
+        (Some(title), Some(line))
     } else {
-        plan
+        (str_field(entry, "label"), plan)
     };
-    let label = str_field(entry, "label");
     SlotProfile {
         email: label
             .or_else(|| {

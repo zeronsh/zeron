@@ -801,6 +801,7 @@ return {
 	["ds.provider_card.rename"] = "Rename",
 	["ds.provider_card.rename_title"] = "Rename API key",
 	["ds.provider_card.rename_hint"] = "Leave it blank for its default name.",
+	["ds.provider_card.key_name_optional"] = "Name (optional)",
 	["ds.command_palette.scope.all"] = "All",
 	["ds.command_palette.scope.sessions"] = "Sessions",
 	["ds.command_palette.scope.commands"] = "Commands",

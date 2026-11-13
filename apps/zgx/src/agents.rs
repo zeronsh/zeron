@@ -1744,8 +1744,13 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
         ("switchable", Value::Bool(can_switch(account))),
         ("provider", account["provider"].as_str().map_or(Value::Nil, Value::from)),
-        // An API key: no plan, so no windows to show.
+        // An API key: no plan, so no windows to show; named by someone, or
+        // going by its last four.
         ("key", Value::Bool(account["authKind"].as_str() == Some("api-key"))),
+        (
+            "named",
+            Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),
+        ),
     ];
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);

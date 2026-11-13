@@ -6234,7 +6234,11 @@ mod login_tests {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = vec![0u8; 16 * 1024];
                 let _ = socket.read(&mut request).await;
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // (A preview scan elsewhere in the test process probes every
+                // local listener with `HEAD /`: not counted.)
+                if !request.starts_with(b"HEAD ") {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let _ = socket
                     .write_all(
                         http_response(status, &[("Content-Type", "application/json")], body)

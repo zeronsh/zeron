@@ -168,9 +168,13 @@ test("a key that's taken closes the dialog and lists by its default name, the ke
 	expect(app:state("groups_calls")).to_contain("add_key:pi:openrouter:ok")
 	expect(key_dialog_open(app)).to_be(false)
 	local row = "#account-row-key-openrouter-WXYZ"
-	-- Named for its provider and last four; its line says whose.
-	expect(shows(app, row, "OpenRouter ···WXYZ")).to_be(true)
-	expect(shows(app, row, "OpenRouter · API key ···WXYZ")).to_be(true)
+	-- Unnamed: "API key" and its last four, over its provider.
+	expect(shows(app, row, "API key ···WXYZ")).to_be(true)
+	expect(shows(app, row, "OpenRouter")).to_be(true)
+	expect(shows(app, row, "OpenRouter · API key")).to_be(false)
+	-- Its face is its provider's mark, not a person's: logins keep theirs.
+	expect(shows(app, row, '"Account"')).to_be(false)
+	expect(shows(app, "#account-row-o1", '"Account"')).to_be(true)
 	expect(in_use(app, "key-openrouter-WXYZ")).to_be(true)
 	-- (A key has no plan: no meters on its row.)
 	expect(shows(app, row, "Session")).to_be(false)
@@ -193,16 +197,19 @@ test("a key named as it's added, a second of one provider its own row, and a ren
 		settle(app)
 		app:type('#key-dialog-pi >> role:textbox "API key"', key)
 		if name then
-			app:type('#key-dialog-pi >> role:textbox "Name"', name)
+			app:type('#key-dialog-pi >> role:textbox "Name (optional)"', name)
 		end
 		app:click('role:button "Save"')
 		app:frames(60)
 	end
 	add("sk-good-one-AAAA", "Work")
 	add("sk-good-two-BBBB", nil)
+	-- Named: its name over "OpenRouter · API key", the last four nowhere.
 	expect(shows(app, "#account-row-key-openrouter-AAAA", "Work")).to_be(true)
-	expect(shows(app, "#account-row-key-openrouter-AAAA", "OpenRouter · API key ···AAAA")).to_be(true)
-	expect(shows(app, "#account-row-key-openrouter-BBBB", "OpenRouter ···BBBB")).to_be(true)
+	expect(shows(app, "#account-row-key-openrouter-AAAA", "OpenRouter · API key")).to_be(true)
+	expect(shows(app, "#account-row-key-openrouter-AAAA", "···AAAA")).to_be(false)
+	-- Unnamed: "API key ···BBBB" over its provider.
+	expect(shows(app, "#account-row-key-openrouter-BBBB", "API key ···BBBB")).to_be(true)
 	-- Two keys of one provider: two rows, one in use.
 	expect(in_use(app, "key-openrouter-AAAA")).to_be(true)
 	expect(in_use(app, "key-openrouter-BBBB")).to_be(false)
@@ -274,8 +281,10 @@ test("Hermes' own pool is read-only, its add rows Hermes' own sign-ins and keys"
 	local app = open()
 	expect(in_use(app, "h1")).to_be(true)
 	expect(app:has('#account-row-h1 >> role:button "Account actions"')).to_be(false)
-	expect(shows(app, "#account-row-h3", "OPENROUTER_API_KEY")).to_be(true)
-	expect(shows(app, "#account-row-h3", "OpenRouter · API key ···k-or")).to_be(true)
+	-- From the environment: never titled by its variable.
+	expect(shows(app, "#account-row-h3", "API key ···9f3e")).to_be(true)
+	expect(shows(app, "#account-row-h3", "OpenRouter · from environment")).to_be(true)
+	expect(shows(app, "#account-row-h3", "OPENROUTER_API_KEY")).to_be(false)
 	expect(app:has('#account-add-hermes-nous >> role:button "Add Nous Portal account"')).to_be(true)
 	expect(app:has('#account-add-hermes-xai-oauth >> role:button "Add xAI account"')).to_be(true)
 	expect(app:has('#account-add-key-hermes >> role:button "Add API key"')).to_be(true)

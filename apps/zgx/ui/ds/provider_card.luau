@@ -74,8 +74,10 @@ export type Account = {
 	-- whether it can be put in use.
 	active: boolean?,
 	switchable: boolean?,
-	-- An API key, not an account: no plan, no meters.
+	-- An API key, not an account: no plan, no meters, its provider's mark
+	-- for a face (`provider`, the agent's id for it).
 	key: boolean?,
+	provider: string?,
 }
 
 -- One model provider's accounts of an agent that keeps a login per
@@ -179,6 +181,20 @@ function M.disc(inside: Node, tone: string?): Node
 		inside,
 	}
 end
+
+-- What the card knows of a provider an API key is for, by the agent's own
+-- id for the provider: its mark (one set, one ink) and the shape its keys start
+-- with (the field's placeholder).
+local KEY_PROVIDERS: { [string]: { mark: string, shape: string } } = {
+	anthropic = { mark = "provider-anthropic", shape = "sk-ant-…" },
+	openai = { mark = "provider-openai", shape = "sk-…" },
+	["openai-api"] = { mark = "provider-openai", shape = "sk-…" },
+	openrouter = { mark = "provider-openrouter", shape = "sk-or-…" },
+	google = { mark = "provider-gemini", shape = "AIza…" },
+	gemini = { mark = "provider-gemini", shape = "AIza…" },
+	xai = { mark = "provider-xai", shape = "xai-…" },
+	deepseek = { mark = "provider-deepseek", shape = "sk-…" },
+}
 
 -- What a card's page does with it (setup's step and Settings share the
 -- card): `settings`, whether the agent's settings open from it (Settings
@@ -450,10 +466,17 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		-- (A key's name is no address: shown as it is.)
 		private_label = row:peek().key ~= true,
 		description = detail,
-		-- (The face is the address's: a new one only if the address changes.)
-		lead = ui.presence(email, function(e: string): Node
-			return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
-		end),
+		-- (The face is the address's: a new one only if the address changes.
+		-- An API key has no face: its provider's mark, in the add rows' well.)
+		lead = if row:peek().key == true
+			then M.disc(
+				if KEY_PROVIDERS[row:peek().provider or ""]
+					then Mark { name = KEY_PROVIDERS[row:peek().provider or ""].mark :: any, size = 16, bare = true }
+					else Icon { name = "keyboard", size = 16 }
+			)
+			else ui.presence(email, function(e: string): Node
+				return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
+			end),
 		-- (In a group, the one in use there: each group has its own.)
 		badge = ui.show(function()
 			if group then
@@ -1025,19 +1048,6 @@ local function login_row(c: CardProps, group: State<AccountGroup>, kind: () -> s
 	}
 end
 
--- What a provider's API key dialog knows of it, by the agent's own id for
--- the provider: its mark (one set, one ink) and the shape its keys start
--- with (the field's placeholder).
-local KEY_PROVIDERS: { [string]: { mark: string, shape: string } } = {
-	anthropic = { mark = "provider-anthropic", shape = "sk-ant-…" },
-	openai = { mark = "provider-openai", shape = "sk-…" },
-	["openai-api"] = { mark = "provider-openai", shape = "sk-…" },
-	openrouter = { mark = "provider-openrouter", shape = "sk-or-…" },
-	google = { mark = "provider-gemini", shape = "AIza…" },
-	gemini = { mark = "provider-gemini", shape = "AIza…" },
-	xai = { mark = "provider-xai", shape = "xai-…" },
-	deepseek = { mark = "provider-deepseek", shape = "sk-…" },
-}
 
 -- Adding an API key, in a dialog, as the app's other dialogs ask: its title,
 -- one quiet line, the provider (a select, each with its mark), the key
@@ -1186,7 +1196,7 @@ local function key_dialog(c: CardProps, open: State<boolean>, choice: State<stri
 					-- blank, its provider and last four.
 					TextField {
 						value = name,
-						label = locale.t("ds.provider_card.key_name_label"),
+						label = locale.t("ds.provider_card.key_name_optional"),
 						placeholder = locale.t("ds.provider_card.key_name_placeholder"),
 						size = "md",
 						w_full = true,
@@ -1217,8 +1227,9 @@ local function rename_dialog(c: CardProps, open: State<boolean>, target: State<A
 		local why = ui.use_state("")
 		ui.effect(function()
 			if open:get() then
-				local a = target:peek()
-				name:set(if a then a.email else "")
+				-- (Its name, if it has one: an unnamed key's title is no name.)
+				local a = target:peek() :: any
+				name:set(if a and a.named then a.email else "")
 				why:set("")
 			else
 				busy:set(false)
@@ -1243,9 +1254,13 @@ local function rename_dialog(c: CardProps, open: State<boolean>, target: State<A
 		return Dialog {
 			open = open,
 			title = locale.t("ds.provider_card.rename_title"),
+			-- Which key: its provider, and its last four where its title has them.
 			body = function(): string
-				local a = target:get()
-				return if a then a.plan else ""
+				local a = target:get() :: any
+				if not a then
+					return ""
+				end
+				return if a.named then a.plan else `{a.plan} · {a.email}`
 			end,
 			size = "sm",
 			confirm = {

@@ -987,7 +987,8 @@
       "key_name_placeholder": "Work, Personal…",
       "rename": "Rename",
       "rename_title": "Rename API key",
-      "rename_hint": "Leave it blank for its default name."
+      "rename_hint": "Leave it blank for its default name.",
+      "key_name_optional": "Name (optional)"
     },
     "command_palette": {
       "scope": {

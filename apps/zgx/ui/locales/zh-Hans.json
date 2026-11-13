@@ -987,7 +987,8 @@
       "key_name_placeholder": "工作、个人…",
       "rename": "重命名",
       "rename_title": "重命名 API 密钥",
-      "rename_hint": "留空则使用默认名称。"
+      "rename_hint": "留空则使用默认名称。",
+      "key_name_optional": "名称（可选）"
     },
     "command_palette": {
       "scope": {
