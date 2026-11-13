@@ -4161,7 +4161,10 @@
       "show_less": "收起",
       "clear_done": "清除所有已完成",
       "clear": "清除",
-      "cleared": "已清除 {n} 张已完成卡片"
+      "cleared": "已清除 {n} 张已完成卡片",
+      "approve": "批准",
+      "request_changes": "请求修改…",
+      "changes_placeholder": "要改什么"
     },
     "reports": {
       "title": "Crew updates",

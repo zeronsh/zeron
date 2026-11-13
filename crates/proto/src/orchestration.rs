@@ -405,6 +405,12 @@ pub mod prompt_text {
         )
     }
 
+    /// What a card's thread is sent when the person asks for changes on it
+    /// from Review.
+    pub fn changes_requested(title: &str, text: &str) -> String {
+        format!("[Changes requested on \"{}\"] {}", one_line(title, 80), one_line(text, BLOCK_MAX))
+    }
+
     /// What a route's old target is sent when the person moves it.
     pub fn retraction(excerpt: &str) -> String {
         format!(
@@ -529,6 +535,9 @@ pub struct WorkItem {
     /// Its route's state when it was moved (none for a card with no route).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_route_state: Option<RouteState>,
+    /// When the person approved it from Review (`approveItem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -816,6 +825,11 @@ pub struct Route {
     /// The target's whole reply, as it came (markdown, capped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_full: Option<String>,
+    /// A task finished with something for the person: what to review, one
+    /// line (an open PR, a decision, a result to check). Its card is in
+    /// Review then, this first in its outcome; finished without it, Done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
     /// When its first answer came (the Control room's Q&A says it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_at: Option<DateTime<Utc>>,
@@ -1794,6 +1808,13 @@ pub enum OrchestrateOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crew_idle_hours: Option<u32>,
     },
+    /// The person approves a card in Review: it is Done, its approval
+    /// recorded (`approvedAt`). Replies `{ id }`.
+    ApproveItem { id: String },
+    /// The person asks for changes on a card in Review: `text` goes to its
+    /// thread (else its orchestrator) as a message, and the card is back in
+    /// Now. Replies `{ id }`.
+    RequestChanges { id: String, text: String },
     /// The person takes a card off the board (done or not): it is kept,
     /// marked `removed`, and gone for every reader. Its chat is untouched.
     /// Replies `{ id }`.

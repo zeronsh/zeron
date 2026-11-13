@@ -1,9 +1,11 @@
 //! Routed tasks land on the board. Every task the Brain dump delivers to a
 //! thread (or to an orchestrator) gets one card, linked to the thread and
-//! the route, and the card follows the route: Now while the work goes on,
-//! Review once an outcome lands with work left, Done when the route is done,
-//! Blocked when it failed or its thread asks the person something. Its
-//! outcome is the route's answer.
+//! the route, and the card follows the route: Now while the work goes on
+//! (outcomes so far included), Review once it finished leaving the person
+//! something (an open PR, a decision, a result to check), Done when it
+//! finished with nothing for them, Blocked when it failed. Its outcome is
+//! the route's answer, after "Review: …" in Review. A card moved by hand
+//! keeps its column until its route's state changes.
 
 use zeron_proto::orchestration::{
     Dump, Priority, Route, RouteIntent, RouteRef, RouteState, RouteTarget, WorkItemPatch, WorkState,
@@ -60,18 +62,38 @@ pub(crate) fn priority_of(text: &str) -> Priority {
     }
 }
 
-/// The card's state for its route. Only a failed route is Blocked: a
-/// question its thread asks the person is a word on one card ("Waiting on
-/// you", the card of the asking turn's own route: the ask's `itemId`), never
-/// a column, and a finished task stays Done or Review whatever its thread
-/// asks later.
+/// The card's state for its route. Review holds only what waits on the
+/// person: a finished task that left them something (`review`: an open PR,
+/// a decision, a result to check). Finished with nothing for them, Done;
+/// still going (delivered, or an outcome so far while its thread works),
+/// Now; failed, Blocked. A question its thread asks is a word on one card
+/// ("Waiting on you"), never a column.
 pub(crate) fn card_state(route: &Route) -> WorkState {
     match route.state {
-        RouteState::Done => WorkState::Done,
         RouteState::Failed => WorkState::Blocked,
-        RouteState::Answered => WorkState::Review,
+        RouteState::Done if route.review.is_some() => WorkState::Review,
+        RouteState::Done => WorkState::Done,
         _ => WorkState::Active,
     }
+}
+
+/// A card's outcome: what to review first ("Review: …"), then its route's.
+pub(crate) fn card_outcome(route: &Route) -> Option<String> {
+    match (&route.review, &route.answer) {
+        (Some(review), Some(answer)) => Some(format!("Review: {review}\n\n{answer}")),
+        (Some(review), None) => Some(format!("Review: {review}")),
+        (None, answer) => answer.clone(),
+    }
+}
+
+/// Every route's message to `chat` (what it was sent), across `dumps`.
+fn dump_messages_to(dumps: &[Dump], chat: &str) -> Vec<String> {
+    dumps
+        .iter()
+        .flat_map(|d| &d.routes)
+        .filter(|r| super::watchers::target_chat(&r.target) == Some(chat))
+        .map(|r| if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() })
+        .collect()
 }
 
 /// The thread a route's work runs in, and the orchestrator that owns it.
@@ -188,7 +210,7 @@ impl EngineRpc {
             self.clear_moved(item);
         }
         let state = if kept { card.state } else { card_state(route) };
-        let outcome = route.answer.clone();
+        let outcome = card_outcome(route);
         if card.state == state && (outcome.is_none() || card.outcome == outcome) {
             return;
         }
@@ -233,6 +255,15 @@ impl EngineRpc {
                 if card.moved_at.is_some() {
                     continue;
                 }
+                // In Review under the old rule (an outcome so far, or
+                // finished): what waits on the person, if anything, from its
+                // thread now and what it said.
+                if card.state == WorkState::Review && route.review.is_none() && route.state != RouteState::Failed {
+                    if self.restate_review(dump, route, card) {
+                        restated.push(item.to_owned());
+                    }
+                    continue;
+                }
                 let derived = card_state(route);
                 if card.state == derived {
                     continue;
@@ -249,6 +280,92 @@ impl EngineRpc {
         (restated, kept)
     }
 
+    /// A routed card left in Review by the old rule (Review meant "an
+    /// outcome so far"), never moved by hand, re-stated by the new one:
+    /// - its thread at work: Now;
+    /// - waiting on a decision or answer from the person (its thread's
+    ///   latest reply to it, its route's outcome, or its own outcome text,
+    ///   say so): Now, and its question raised as an ask if it has none;
+    /// - something left to evaluate (an open PR, a result to check,
+    ///   screenshots): Review, that first in its outcome;
+    /// - else Done (a route still going whose thread isn't known: Now).
+    /// Its route takes the same. `true` when the card changed.
+    fn restate_review(
+        &self,
+        dump: &Dump,
+        route: &Route,
+        card: &zeron_proto::orchestration::WorkItem,
+    ) -> bool {
+        use zeron_proto::turn_question::{Verdict, detect, review_of};
+        let chat = super::watchers::target_chat(&route.target).map(str::to_owned);
+        // Its thread's session: hosted here, else its host's synced row.
+        let session = chat.as_deref().and_then(|c| {
+            self.sessions_ref()
+                .watch_sessions()
+                .borrow()
+                .iter()
+                .find(|s| s.chat_id == c)
+                .cloned()
+                .or_else(|| {
+                    self.orchestration().workspace().watch_session_rows().borrow().iter().find(|s| s.chat_id == c).cloned()
+                })
+        });
+        // (Only a route still going asks whether its thread works: a done
+        // one stays done whatever its thread does now.)
+        let busy = session.as_ref().filter(|_| route.state != RouteState::Done).map(|s| {
+            s.status == zeron_proto::SessionStatus::Working || super::watchers::task_state(s) == RouteState::Answered
+        });
+        let latest = chat.as_deref().and_then(|c| {
+            let entries = self.doc_host_ref().open(c).ok()?.doc().read_entries().ok()?;
+            let others: Vec<String> = dump_messages_to(&self.orchestration().state().dumps, c);
+            let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
+            super::watchers::latest_reply_until(&entries, sent, &others)
+        });
+        let marked = card
+            .outcome
+            .as_deref()
+            .and_then(|o| o.lines().next())
+            .and_then(|l| l.strip_prefix("Review: "))
+            .map(|l| l.trim_matches('*').trim().to_owned())
+            .filter(|l| !l.is_empty());
+        let evidence: Vec<&str> =
+            [latest.as_deref(), route.answer_full.as_deref(), card.outcome.as_deref()].into_iter().flatten().collect();
+        let decision = evidence.iter().find_map(|t| match detect(t) {
+            Verdict::Ask(found) => Some(found),
+            _ => None,
+        });
+        let (state, review) = if busy == Some(true) {
+            (RouteState::Answered, None)
+        } else if decision.is_some() {
+            (RouteState::Answered, None)
+        } else {
+            let review = marked.or_else(|| evidence.iter().find_map(|t| review_of(t)).map(|r| r.line()));
+            match (busy, route.state, &review) {
+                (_, RouteState::Done, _) | (Some(false), _, _) | (None, _, Some(_)) => (RouteState::Done, review),
+                _ => (route.state, None),
+            }
+        };
+        let updated = self.orchestration().workspace().write_orchestration(|doc| {
+            let Some(mut d) = doc.dump(&dump.id) else { return None };
+            let r = d.routes.iter_mut().find(|r| r.id == route.id)?;
+            r.state = state;
+            r.review = review.clone();
+            let r = r.clone();
+            doc.upsert_dump(&d);
+            Some(r)
+        });
+        let Some(route) = updated else { return false };
+        // Waiting on a decision: its ask (one per question; none raised
+        // twice), on this card.
+        if let (Some(found), Some(chat)) = (&decision, chat.as_deref())
+            && busy != Some(true)
+        {
+            self.ask_for(chat, found, Some((&dump.id, &route.id)));
+        }
+        self.sync_card(&card.id, &route);
+        self.orchestration().item(&card.id).is_some_and(|c| c.state != WorkState::Review || c.outcome != card.outcome)
+    }
+
     /// The routed cards `chat` works on, brought up to date (it raised or
     /// answered an ask).
     pub(crate) fn sync_cards_of(&self, chat: &str) {
@@ -262,6 +379,66 @@ impl EngineRpc {
                 }
             }
         }
+    }
+
+    /// The person approves card `id` (from Review): Done, its approval
+    /// recorded, kept Done (a move by hand) while its route stays as it is.
+    pub(crate) fn approve_item(&self, id: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(), RpcError> {
+        let orch = self.orchestration();
+        let card = orch.item(id).ok_or_else(|| RpcError::Failed(format!("No board item {id}")))?;
+        orch.patch_item(WorkItemPatch { id: Some(id.to_owned()), state: Some(WorkState::Done), ..Default::default() })
+            .map_err(RpcError::Failed)?;
+        orch.workspace().write_orchestration(|doc| {
+            if let Some(mut c) = doc.work_item(id) {
+                c.approved_at = Some(at);
+                doc.upsert_work_item(&c);
+            }
+        });
+        self.mark_moved(id, at);
+        let to = card.threads.first().cloned().or(card.orchestrator_id.clone()).unwrap_or_else(|| id.to_owned());
+        orch.comms().say(zeron_proto::orchestration::CommKind::Answer, super::comms::YOU, &to, &format!("Approved: {}", one_line(&card.title, 80)));
+        Ok(())
+    }
+
+    /// The person asks for changes on card `id`: `text` to its thread (else
+    /// its orchestrator) as a message, the card back in Now (its route going
+    /// again, nothing left to review).
+    pub(crate) fn request_changes(&self, id: &str, text: &str) -> Result<(), RpcError> {
+        let orch = self.orchestration();
+        let card = orch.item(id).ok_or_else(|| RpcError::Failed(format!("No board item {id}")))?;
+        let to = card
+            .threads
+            .first()
+            .cloned()
+            .or(card.orchestrator_id.clone())
+            .ok_or_else(|| RpcError::Failed("That card has no thread to send it to".into()))?;
+        let message = zeron_proto::orchestration::prompt_text::changes_requested(&card.title, text);
+        super::ops::deliver(self, &to, &message, None, super::ops::When::Next)?;
+        orch.comms().say(zeron_proto::orchestration::CommKind::Message, super::comms::YOU, &to, &one_line(text, 140));
+        let route = self.route_of_card(&card);
+        match route {
+            Some(route) => {
+                let source = card.source.clone().expect("a routed card has its source");
+                let updated = orch.workspace().write_orchestration(|doc| {
+                    let mut d = doc.dump(&source.dump_id)?;
+                    let r = d.routes.iter_mut().find(|r| r.id == route.id)?;
+                    r.state = RouteState::Answered;
+                    r.review = None;
+                    let r = r.clone();
+                    doc.upsert_dump(&d);
+                    Some(r)
+                });
+                if let Some(route) = updated {
+                    self.sync_card(id, &route);
+                }
+            }
+            None => {
+                orch.patch_item(WorkItemPatch { id: Some(id.to_owned()), state: Some(WorkState::Active), ..Default::default() })
+                    .map_err(RpcError::Failed)?;
+                self.mark_moved(id, chrono::Utc::now());
+            }
+        }
+        Ok(())
     }
 
     /// The person takes card `id` off the board: kept, marked removed.
@@ -352,10 +529,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(card_state(&route), WorkState::Active);
+        // An outcome so far, its thread still at work: Now, never Review.
         route.state = RouteState::Answered;
-        assert_eq!(card_state(&route), WorkState::Review);
+        assert_eq!(card_state(&route), WorkState::Active);
         route.state = RouteState::Done;
         assert_eq!(card_state(&route), WorkState::Done);
+        // Finished, with something for the person: Review, that first.
+        route.review = Some("PR https://github.com/zeronsh/zeron/pull/1403".into());
+        route.answer = Some("Opened the PR.".into());
+        assert_eq!(card_state(&route), WorkState::Review);
+        assert_eq!(card_outcome(&route).as_deref(), Some("Review: PR https://github.com/zeronsh/zeron/pull/1403\n\nOpened the PR."));
+        route.review = None;
         // Only a real failure is Blocked.
         route.state = RouteState::Failed;
         assert_eq!(card_state(&route), WorkState::Blocked);

@@ -165,6 +165,14 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 				note(`move:{id}:{state}:{order}`)
 				update(id, { state = state, order = order })
 			end,
+			on_approve = function(id: string)
+				note(`approve:{id}`)
+				update(id, { state = "done" })
+			end,
+			on_request_changes = function(id: string, text: string)
+				note(`changes:{id}:{text}`)
+				update(id, { state = "active" })
+			end,
 			on_priority = function(id: string, p: string)
 				note(`priority:{id}:{p}`)
 				update(id, { priority = p })

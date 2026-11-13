@@ -219,6 +219,10 @@ const PERSON_OPS: &[&str] = &[
     "removeItem",
     // (An Inbox or Next card started: its thread made.)
     "startItem",
+    // (A card in Review: approved, Done; or changes asked for, its thread
+    // told and the card back in Now.)
+    "approveItem",
+    "requestChanges",
     "upsertItem",
     "answerAsk",
     "dismissAsk",

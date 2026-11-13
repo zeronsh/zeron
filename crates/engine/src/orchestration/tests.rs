@@ -1600,7 +1600,7 @@ async fn a_thread_with_finished_cards_that_asks_waits_on_its_newest_card_and_non
     let map = "9ad131f1-map";
     let (dump, _, routes) = routed_thread(&core, map, &["Fix the Nothing running line", "Fix the Timeline legend", "New Topology variants"]).await;
     let rpc = core.rpc_service();
-    // The first two are finished: one done, one answered (in review).
+    // The first is finished; the second has an outcome so far (at work).
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Fixed the line.".into(), Some(RouteState::Done)).await;
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[1].0, "x", "Legend fixed.".into(), Some(RouteState::Answered)).await;
     // A quiet chase from the restart is open from the thread too (what
@@ -1627,8 +1627,8 @@ async fn a_thread_with_finished_cards_that_asks_waits_on_its_newest_card_and_non
     assert_eq!(asks[0].item_id.as_deref(), Some(routes[2].1.as_str()));
     assert_eq!(
         [card(&core, &routes[0].1), card(&core, &routes[1].1), card(&core, &routes[2].1)],
-        [WorkState::Done, WorkState::Review, WorkState::Active],
-        "finished ones stay finished, none Blocked"
+        [WorkState::Done, WorkState::Active, WorkState::Active],
+        "finished stays finished, an outcome so far stays at work, none Blocked"
     );
     // A real failure is still Blocked.
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[2].0, "x", "The build broke.".into(), Some(RouteState::Failed)).await;
@@ -1688,9 +1688,10 @@ async fn a_card_the_person_moves_stays_until_its_work_changes() {
     assert_eq!(rpc.settle_card_states(), (vec![], vec![]));
     assert_eq!(card(&core, &legend.1), WorkState::Done);
 
-    // Another card, in Review, moved to Done; then its work really fails.
-    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &rebuild.0, "x", "Rebuilt; check it.".into(), Some(RouteState::Answered)).await;
-    assert_eq!(card(&core, &rebuild.1), WorkState::Review);
+    // Another card, at work (an outcome so far), moved to Done; then its
+    // work really fails.
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &rebuild.0, "x", "Rebuilding; tests next.".into(), Some(RouteState::Answered)).await;
+    assert_eq!(card(&core, &rebuild.1), WorkState::Active);
     op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":rebuild.1,"state":"done"}})).await.unwrap();
     rpc.sync_cards_of(map);
     assert_eq!(card(&core, &rebuild.1), WorkState::Done, "kept while nothing new happens");
@@ -1707,14 +1708,15 @@ async fn a_card_set_by_hand_before_the_mark_existed_is_kept_at_start() {
     let (dump, _, routes) = routed_thread(&core, map, &["Feedback on the Timeline legend"]).await;
     let rpc = core.rpc_service();
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Fixed.".into(), Some(RouteState::Done)).await;
-    // As the Brain dump left the live card: Review by hand, no mark (an
-    // older engine).
+    // Set by hand on an older engine (no mark): back in Now though its
+    // route is done. (One left in Review is re-judged instead: the Review
+    // test below.)
     core.orchestration
-        .patch_item(WorkItemPatch { id: Some(routes[0].1.clone()), state: Some(WorkState::Review), ..Default::default() })
+        .patch_item(WorkItemPatch { id: Some(routes[0].1.clone()), state: Some(WorkState::Active), ..Default::default() })
         .unwrap();
     assert_eq!(rpc.settle_card_states(), (vec![], vec![routes[0].1.clone()]));
     rpc.sync_cards_of(map);
-    assert_eq!(card(&core, &routes[0].1), WorkState::Review, "a later sync keeps it");
+    assert_eq!(card(&core, &routes[0].1), WorkState::Active, "a later sync keeps it");
     assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "once");
     core.sessions.shutdown().await;
 }
@@ -1786,4 +1788,175 @@ async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
     // The setting off: nothing archived, however idle.
     op(&core, Caller::Local, json!({"op":"updateSettings","crewAutoArchive":false})).await.ok();
     assert!(plan(revive_at + chrono::Duration::hours(100), REMOTE, &chats(), &st(), |_| None).is_empty());
+}
+
+// ── Review means the person ─────────────────────────────────────────────────
+
+async fn outcome(core: &crate::EngineCore, chat: &str, dump: &str, route: &str, text: &str, state: RouteState) {
+    super::watchers::record_outcome(&core.orchestration, &core.rpc_service(), chat, dump, route, "x", text.into(), Some(state)).await;
+}
+
+fn card_outcome_of(core: &crate::EngineCore, item: &str) -> String {
+    core.orchestration.item(item).unwrap().outcome.unwrap_or_default()
+}
+
+#[tokio::test]
+async fn review_holds_only_what_waits_on_the_person() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, r) = routed_thread(
+        &core,
+        map,
+        &["Map device rename not reflected", "Graph map: stop zoom reflow jitter", "Open a PR for the slash fix", "Topology variants", "Graph map: curved lines", "Rebuild the app"],
+    )
+    .await;
+    // A turn ends while the thread still works (background build, todo
+    // left): Now, never Review.
+    outcome(&core, map, &dump, &r[0].0, "Renamed in the heading; now wiring Topology and the hover card.", RouteState::Answered).await;
+    assert_eq!(card(&core, &r[0].1), WorkState::Active);
+    // A mid-work progress message to the Brain dump: Now.
+    core.rpc_service().file_with_brain(map, "Working on the zoom jitter: the reflow comes from the fit pass; testing a fix.");
+    for _ in 0..100 {
+        if core.workspace.read_orchestration_with(|d| d.dump(&dump)).unwrap().routes.iter().any(|x| x.state == RouteState::Answered && x.id != r[0].0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(r[..2].iter().all(|(_, item)| card(&core, item) == WorkState::Active), "mid-work: Now");
+    // Finished with an open PR: Review, the PR first.
+    outcome(&core, map, &dump, &r[2].0, "I opened the PR against `zeron/zgx`: https://github.com/zeronsh/zeron/pull/1403\n\nNot merged yet.", RouteState::Done).await;
+    assert_eq!(card(&core, &r[2].1), WorkState::Review);
+    assert!(card_outcome_of(&core, &r[2].1).starts_with("Review: PR https://github.com/zeronsh/zeron/pull/1403\n\n"), "{}", card_outcome_of(&core, &r[2].1));
+    // Finished on a decision for the person: not finished; Now, and the
+    // question is one ask, on this card.
+    outcome(&core, map, &dump, &r[3].0, "Four variants are built and scored.\n\nWhich do you want: the inline tag, or the coloured edge?", RouteState::Done).await;
+    assert_eq!(card(&core, &r[3].1), WorkState::Active);
+    let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.state == AskState::Open).collect();
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    assert_eq!(asks[0].item_id.as_deref(), Some(r[3].1.as_str()));
+    assert_eq!(asks[0].options.len(), 2);
+    // Finished with nothing for the person: Done.
+    outcome(&core, map, &dump, &r[4].0, "Messages now follow the curved lines; the 31 map tests pass. Committed as a1b2c3d.", RouteState::Done).await;
+    assert_eq!(card(&core, &r[4].1), WorkState::Done);
+    // (A design that landed, with its screenshots: Review, where they are.)
+    let (dump2, _, s) = routed_thread(&core, "packed-map", &["Graph map: area scales with content"]).await;
+    outcome(&core, "packed-map", &dump2, &s[0].0, "Packed layout is in behind a switch.\n\nScreenshots are in `~/Documents/dev/tmp/orch/ui-map/shots/`.", RouteState::Done).await;
+    assert_eq!(card(&core, &s[0].1), WorkState::Review);
+    assert!(card_outcome_of(&core, &s[0].1).starts_with("Review: Screenshots: ~/Documents/dev/tmp/orch/ui-map/shots/"));
+    // Failed: Blocked.
+    outcome(&core, map, &dump, &r[5].0, "The build failed: linker error.", RouteState::Failed).await;
+    assert_eq!(card(&core, &r[5].1), WorkState::Blocked);
+    // A card the person moves stays: the PR one to Done.
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":r[2].1,"state":"done"}})).await.unwrap();
+    core.rpc_service().sync_cards_of(map);
+    assert_eq!(card(&core, &r[2].1), WorkState::Done);
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_start_restates_cards_the_old_rule_left_in_review() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, r) = routed_thread(&core, map, &["Map device rename", "Changes panel diff scroll", "Timeline legend", "Topology variants", "Mine to keep"]).await;
+    let rpc = core.rpc_service();
+    // As the old rule left them: an outcome so far (thread state unknown
+    // here), a finished PR, a finished nothing, a finished decision the
+    // Brain dump put in Review by hand, and one the person moved there.
+    outcome(&core, map, &dump, &r[0].0, "Renamed in the heading; now wiring Topology.", RouteState::Answered).await;
+    outcome(&core, map, &dump, &r[1].0, "**PR #1402 is open** and waiting for review/merge: https://github.com/zeronsh/zgx/pull/1402", RouteState::Done).await;
+    outcome(&core, map, &dump, &r[2].0, "Legend fixed; tests pass.", RouteState::Done).await;
+    outcome(&core, map, &dump, &r[3].0, "Variants built.", RouteState::Done).await;
+    outcome(&core, map, &dump, &r[4].0, "Done.", RouteState::Done).await;
+    // (Old routes carried no review: the PR one's is cleared to match.)
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut d = doc.dump(&dump).unwrap();
+        for route in &mut d.routes {
+            route.review = None;
+        }
+        doc.upsert_dump(&d);
+    });
+    for (_, item) in &r[..4] {
+        core.orchestration.patch_item(WorkItemPatch { id: Some(item.clone()), state: Some(WorkState::Review), ..Default::default() }).unwrap();
+    }
+    core.orchestration
+        .patch_item(WorkItemPatch { id: Some(r[3].1.clone()), outcome: Some(Some("Waiting on your pick (built on orch/topo-variants). Recommend (a).".into())), ..Default::default() })
+        .unwrap();
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":r[4].1,"state":"review"}})).await.unwrap();
+
+    let (restated, _) = rpc.settle_card_states();
+    assert_eq!(
+        [card(&core, &r[0].1), card(&core, &r[1].1), card(&core, &r[2].1), card(&core, &r[3].1), card(&core, &r[4].1)],
+        [WorkState::Active, WorkState::Review, WorkState::Done, WorkState::Active, WorkState::Review],
+        "working → Now; PR stays Review; a decision → Now with its ask; nothing → Done; moved by hand kept"
+    );
+    assert!(card_outcome_of(&core, &r[1].1).starts_with("Review: PR https://github.com/zeronsh/zgx/pull/1402"));
+    // The card waiting on a decision got the ask it never had, on it.
+    let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.state == AskState::Open).collect();
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    assert_eq!(asks[0].item_id.as_deref(), Some(r[3].1.as_str()));
+    assert!(asks[0].question.contains("Waiting on your pick"));
+    assert!(restated.contains(&r[0].1) && restated.contains(&r[2].1));
+    assert_eq!(rpc.settle_card_states(), (vec![], vec![]), "once");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn approve_closes_a_review_and_request_changes_sends_it_back_to_work() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, r) = routed_thread(&core, map, &["Open a PR for the slash fix", "Graph map: area scales with content"]).await;
+    outcome(&core, map, &dump, &r[0].0, "Opened https://github.com/zeronsh/zeron/pull/1403, not merged yet.", RouteState::Done).await;
+    outcome(&core, map, &dump, &r[1].0, "Packed layout landed.\n\nScreenshots are in `~/x/shots/`.", RouteState::Done).await;
+    assert_eq!([card(&core, &r[0].1), card(&core, &r[1].1)], [WorkState::Review, WorkState::Review]);
+    // Only the person.
+    let brain = core.orchestration.state().orchestrators.into_iter().find(|o| o.kind == OrchestratorKind::BrainDump).unwrap().id;
+    assert!(op(&core, agent(&brain), json!({"op":"approveItem","id":r[0].1})).await.is_err());
+    assert!(op(&core, agent(&brain), json!({"op":"requestChanges","id":r[1].1,"text":"x"})).await.is_err());
+    // Approve: Done, recorded, and it stays Done.
+    op(&core, Caller::Local, json!({"op":"approveItem","id":r[0].1})).await.unwrap();
+    let approved = core.orchestration.item(&r[0].1).unwrap();
+    assert_eq!(approved.state, WorkState::Done);
+    assert!(approved.approved_at.is_some());
+    core.rpc_service().sync_cards_of(map);
+    assert_eq!(rpc_settle(&core), (vec![], vec![]));
+    assert_eq!(card(&core, &r[0].1), WorkState::Done);
+    // Request changes: an empty one is refused; the text goes to the
+    // thread, and the card is back in Now.
+    assert!(op(&core, Caller::Local, json!({"op":"requestChanges","id":r[1].1,"text":"  "})).await.is_err());
+    op(&core, Caller::Local, json!({"op":"requestChanges","id":r[1].1,"text":"Islands still overlap at 900px; give empty machines a corner strip."})).await.unwrap();
+    assert_eq!(card(&core, &r[1].1), WorkState::Active);
+    assert!(
+        sent(&core, map).iter().any(|m| m == "[Changes requested on \"Graph map: area scales with content\"] Islands still overlap at 900px; give empty machines a corner strip."),
+        "{:?}",
+        sent(&core, map)
+    );
+    // Its next finished turn is judged afresh.
+    outcome(&core, map, &dump, &r[1].0, "Fixed the overlap; committed.", RouteState::Done).await;
+    assert_eq!(card(&core, &r[1].1), WorkState::Done);
+    core.sessions.shutdown().await;
+}
+
+fn rpc_settle(core: &crate::EngineCore) -> (Vec<String>, Vec<String>) {
+    core.rpc_service().settle_card_states()
+}
+
+#[tokio::test]
+async fn a_thread_on_an_older_host_is_asked_for_by_the_engine_that_launched_it() {
+    let (_temp, core) = core().await;
+    // 9ad131f1 lives on another engine (a 0.3.2 host with no turn-end
+    // asks): a dump of this engine routed to it, so this one raises its
+    // questions; a chat nothing here launched is left alone.
+    let (_dump, _, _) = routed_thread(&core, "9ad131f1-map", &["Map machine headings: decide R9"]).await;
+    chat(&core, "someone-else", "Elsewhere", None).await;
+    let dumps = core.orchestration.state().dumps;
+    assert!(super::watchers::launched_here(&core.orchestration, &dumps, "9ad131f1-map"));
+    assert!(!super::watchers::launched_here(&core.orchestration, &dumps, "someone-else"));
+    // Its turn ends there on a decision; raised here once, however often
+    // it is seen (the ask's id is the chat and the asking message).
+    push(&core, "9ad131f1-map", "u1", zeron_doc::MessageRole::User, "Map machine headings");
+    push(&core, "9ad131f1-map", "a1", zeron_doc::MessageRole::Assistant, "Round 9 is merged locally.\n\nThe graph-label decision (accept round 9 or keep iterating) is still waiting on you.");
+    turn_ended(&core, "9ad131f1-map").await;
+    turn_ended(&core, "9ad131f1-map").await;
+    assert_eq!(asks_from(&core, "9ad131f1-map").len(), 1);
+    core.sessions.shutdown().await;
 }

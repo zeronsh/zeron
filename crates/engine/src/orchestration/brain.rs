@@ -267,6 +267,7 @@ impl EngineRpc {
             candidates,
             answer: None,
             answer_full: None,
+            review: None,
             answered_at: None,
             item_id: None,
             space_id,

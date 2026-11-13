@@ -43,6 +43,11 @@
 -- pressed and moved a few points, from anywhere on it and however fast, it
 -- lifts and follows the pointer, the cards where it would land making room;
 -- let go over the board it lands there, elsewhere (or Escape) it goes back.
+-- A card in Review (finished work for the person to evaluate) has its end
+-- under its status line and atop its menu: Approve (Done), or Request
+-- changes… (a small box for what to change, sent to its thread; the card
+-- back in Now).
+--
 -- A click opens its thread. A secondary click opens its menu: Start now
 -- (a Queued card with no thread yet), its thread, Move to (Up next, Later,
 -- Now, Blocked, Review, Done), its priority, the dump it came from, and
@@ -68,6 +73,9 @@
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
 --     on_open_thread = fn(chat), on_link = fn(link),
 --     on_source = fn({ dump_id, route_id }),  -- a card's dump, shown
+--     on_approve = fn(id),           -- a card in Review approved: Done
+--     on_request_changes = fn(id, text),  -- changes asked for on a card in
+--                                      -- Review: to its thread, back to Now
 --     on_remove = fn(id) -> promise?,  -- a card taken off the board (its
 --                                      -- chat untouched); Undo puts it
 --     on_restore = fn(item) -> promise?,  -- back as it was
@@ -108,6 +116,8 @@ local Card = require("@self/orch_card")
 local Tooltip = require("@self/tooltip")
 local data = require("@self/orch_data")
 local toast = require("@self/toast")
+local Button = require("@self/button")
+local TextField = require("@self/text_field")
 
 export type Link = { kind: string, label: string, target: string }
 export type Item = {
@@ -156,6 +166,8 @@ export type Props = {
 	on_link: ((link: Link) -> ())?,
 	on_source: ((source: { dump_id: string?, route_id: string? }) -> ())?,
 	on_remove: ((id: string) -> any)?,
+	on_approve: ((id: string) -> ())?,
+	on_request_changes: ((id: string, text: string) -> ())?,
 	on_restore: ((item: Item) -> any)?,
 	on_start: ((id: string, order: number?) -> any)?,
 	space_name: ((space_id: string) -> string?)?,
@@ -965,10 +977,41 @@ local OrchBoard = ui.component(function(props: Props): Node
 		;(props.on_move :: any)(it.id, place.state, order)
 	end
 
-	-- A card's menu: its thread, Move to, its priority, its dump; Delete.
+	-- The Review cards whose "Request changes…" box is open, by id.
+	local changing = ui.use_state({} :: { [string]: boolean })
+	local function set_changing(id: string, on: boolean)
+		local now = table.clone(changing:peek())
+		now[id] = if on then true else nil
+		changing:set(now)
+	end
+	-- A card in Review: finished, waiting on the person's evaluation.
+	local function reviewable(it: Item): boolean
+		return it.state == "review" and (props.on_approve ~= nil or props.on_request_changes ~= nil)
+	end
+
+	-- A card's menu: Approve and Request changes (in Review), its thread,
+	-- Move to, its priority, its dump; Delete.
 	local function menu(item: () -> Item): { any }?
 		local it = item()
 		local entries: { any } = {}
+		if it.state == "review" and props.on_approve then
+			table.insert(entries, {
+				label = locale.s("orch.board.approve"),
+				icon = "check",
+				on_select = function()
+					(props.on_approve :: any)(item().id)
+				end,
+			})
+		end
+		if it.state == "review" and props.on_request_changes then
+			table.insert(entries, {
+				label = locale.s("orch.board.request_changes"),
+				icon = "pen",
+				on_select = function()
+					set_changing(item().id, true)
+				end,
+			})
+		end
 		if startable(it) and not starting:peek()[it.id] then
 			table.insert(entries, {
 				label = locale.s("orch.board.start_now"),
@@ -1104,6 +1147,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 		local id = first.id
 		local hovered = ui.use_state(false)
+		local change_text = ui.use_state("")
 		local slot = ui.ref()
 		slot_refs[id] = slot
 		ui.on_cleanup(function()
@@ -1513,6 +1557,70 @@ local OrchBoard = ui.component(function(props: Props): Node
 				title_text,
 				outcome_text,
 				ui.show(has_status, status_line),
+				-- In Review: its end, Approve or Request changes (a box for
+				-- what to change, sent to its thread).
+				ui.show(function(): boolean
+					return reviewable(item()) and not changing:get()[id]
+				end, ui.row {
+					class = "orch-card-review",
+					gap = "$space.1",
+					items = "center",
+					pt = "$zeron.space.hair",
+					ui.show(function(): boolean
+						return props.on_approve ~= nil
+					end, Button {
+						tone = "secondary",
+						size = "xs",
+						on_click = function()
+							(props.on_approve :: any)(id)
+						end,
+						locale.t("orch.board.approve"),
+					}),
+					ui.show(function(): boolean
+						return props.on_request_changes ~= nil
+					end, Button {
+						tone = "ghost",
+						size = "xs",
+						on_click = function()
+							set_changing(id, true)
+						end,
+						locale.t("orch.board.request_changes"),
+					}),
+				}),
+				ui.show(function(): boolean
+					return changing:get()[id] == true
+				end, TextField {
+					class = "orch-card-changes",
+					value = change_text,
+					size = "sm",
+					w_full = true,
+					autofocus = true,
+					name = locale.t("orch.board.request_changes"),
+					placeholder = locale.t("orch.board.changes_placeholder"),
+					on_commit = function(text: string)
+						local t = string.gsub(text, "^%s+", "")
+						t = string.gsub(t, "%s+$", "")
+						if t ~= "" and props.on_request_changes then
+							(props.on_request_changes :: any)(id, t)
+						end
+						change_text:set("")
+						set_changing(id, false)
+					end,
+					-- (Left empty: put away.)
+					on_focus_change = function(focused: boolean)
+						if not focused and change_text:peek() == "" then
+							set_changing(id, false)
+						end
+					end,
+					on_key = function(e: any): boolean?
+						if e.key == "Escape" then
+							change_text:set("")
+							set_changing(id, false)
+							return true
+						end
+						return nil
+					end,
+				}),
 			},
 			-- Where plugins decorate it (the github plugin: its checks).
 			-- (Outside the steps' gaps: empty, it takes no room.)

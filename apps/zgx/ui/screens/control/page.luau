@@ -553,6 +553,12 @@ local function board(): Node
 		on_move = function(id: string, state: string, order: number)
 			orchestration.move_item(id, state, order):after(function() end, said("control.board.failed"))
 		end,
+		on_approve = function(id: string)
+			orchestration.approve_item(id):after(function() end, said("control.board.failed"))
+		end,
+		on_request_changes = function(id: string, text: string)
+			orchestration.request_changes(id, text):after(function() end, said("control.board.failed"))
+		end,
 		on_priority = function(id: string, p: string)
 			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
 		end,

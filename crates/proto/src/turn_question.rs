@@ -102,7 +102,7 @@ const SAY_WHICH: &[&str] = &[
 /// After a question, a statement that keeps it open (a lean, a default).
 const KEEPS_OPEN: &[&str] = &[
     "say which", "pick one", "pick which", "your call", "let me know", "tell me",
-    "i'd", "i would", "i lean", "i recommend", "i suggest", "my pick", "my vote", "my recommendation",
+    "i'd", "i would", "i lean", "i recommend", "recommend", "recommended:", "i suggest", "my pick", "my vote", "my recommendation",
     "either works", "either is fine", "either way", "both work", "both are", "if you don't", "if you do not",
     "if i don't hear", "otherwise", "until then", "i'll wait", "i will wait", "i can also", "default", "no rush",
     "recommended", "the first", "the second", "option a", "option b",
@@ -322,10 +322,13 @@ pub fn detect(text: &str) -> Verdict {
             continue;
         }
         let after = &all[i + 1..];
-        let answered = after
-            .iter()
-            .filter(|a| !a.item && !a.question)
-            .any(|a| answers(&a.text) || (a.para == s.para && !keeps_open(&a.text)));
+        // (Only a question is answered in place; "Waiting on your decision."
+        // isn't, whatever its paragraph goes on to say.)
+        let answered = s.question
+            && after
+                .iter()
+                .filter(|a| !a.item && !a.question)
+                .any(|a| answers(&a.text) || (a.para == s.para && !keeps_open(&a.text)));
         // A later paragraph of plain statements: it moved on.
         let moved_on = after.iter().any(|a| a.para > s.para && !a.item && !a.question && !keeps_open(&a.text));
         if answered || moved_on {
@@ -613,6 +616,126 @@ pub fn acted_on(options: &[String], later: &str) -> Option<usize> {
     None
 }
 
+/// What a finished turn leaves the person to evaluate (Review). A decision
+/// or question is not one: that work isn't finished, and its question is an
+/// ask ([`detect`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Review {
+    /// A pull request it opened, not merged: its link (or "#N").
+    Pr(String),
+    /// A result it asks the person to check (the sentence that asks).
+    Check(String),
+    /// Screenshots it made of what landed: where they are.
+    Screens(String),
+}
+
+impl Review {
+    /// One line: what to evaluate ("PR https://…", what to check, where the
+    /// screenshots are).
+    pub fn line(&self) -> String {
+        let s = match self {
+            Review::Pr(pr) => format!("PR {pr}"),
+            Review::Check(what) => what.clone(),
+            Review::Screens(at) => format!("Screenshots: {at}"),
+        };
+        let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        cap(&one, 200)
+    }
+}
+
+/// Asks the person to look at a result.
+const CHECKS: &[&str] = &[
+    "please check", "please verify", "please review", "please test", "please try", "please take a look",
+    "please have a look", "can you check", "can you verify", "could you check", "could you verify",
+    "can you review", "could you review", "can you test", "could you test", "worth a look", "take a look at",
+    "have a look at", "give it a try", "give it a spin", "check it out", "verify it", "test it yourself",
+];
+
+/// Said of a pull request that is no longer the person's to merge.
+fn merged(sentence: &str) -> bool {
+    let l = lower(sentence);
+    (l.contains("merged") || l.contains("closed"))
+        && !["not merged", "unmerged", "not yet merged", "not been merged", "to merge", "before merg", "isn't merged", "hasn't been merged"]
+            .iter()
+            .any(|n| l.contains(n))
+}
+
+/// An open pull request `text` names: its first GitHub pull link, or "#N"
+/// in a sentence that opened "PR #N", where that sentence doesn't say it
+/// was merged or closed.
+fn open_pr(text: &str) -> Option<String> {
+    let paras = paragraphs(text);
+    for s in sentences(&paras) {
+        let mut rest = s.text.as_str();
+        while let Some(at) = rest.find("/pull/") {
+            let head = &rest[..at];
+            let start = head.rfind("https://").or_else(|| head.rfind("http://"));
+            let digits: String = rest[at + 6..].chars().take_while(char::is_ascii_digit).collect();
+            if let Some(start) = start
+                && !digits.is_empty()
+                && head[start..].contains("github.com/")
+            {
+                if !merged(&s.text) {
+                    return Some(format!("{}/pull/{digits}", &head[start..]));
+                }
+                break;
+            }
+            rest = &rest[at + 6..];
+        }
+        let l = lower(&s.text);
+        if let Some(at) = l.find("pr #") {
+            let digits: String = l[at + 4..].chars().take_while(char::is_ascii_digit).collect();
+            let opened = ["opened", "open ", "created", "ready for review", "up for review", "filed"].iter().any(|o| l.contains(o));
+            if !digits.is_empty() && opened && !merged(&s.text) {
+                return Some(format!("#{digits}"));
+            }
+        }
+    }
+    None
+}
+
+/// Where screenshots `sentence` points to: a backticked path, else a path
+/// word with "shots" or ".png" in it.
+fn screens_at(sentence: &str) -> Option<String> {
+    let l = lower(sentence);
+    if !(l.contains("screenshot") || l.contains("shots/")) {
+        return None;
+    }
+    let ticked: Vec<&str> = sentence.split('`').skip(1).step_by(2).collect();
+    ticked
+        .iter()
+        .find(|t| t.contains('/') || t.ends_with(".png"))
+        .map(|t| t.to_string())
+        .or_else(|| {
+            sentence
+                .split_whitespace()
+                .map(|w| w.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ';' | '.' | ':')))
+                .find(|w| w.contains('/') && (w.contains("shots") || w.ends_with(".png")))
+                .map(str::to_owned)
+        })
+}
+
+/// What a finished turn's final message leaves the person to evaluate: an
+/// open PR first, then a result they are asked to check, then screenshots
+/// of what landed. `None`: nothing to evaluate (done, or a decision, which
+/// is [`detect`]'s).
+pub fn review_of(text: &str) -> Option<Review> {
+    let body = prose(text);
+    if let Some(pr) = open_pr(&body) {
+        return Some(Review::Pr(pr));
+    }
+    let paras = paragraphs(&body);
+    let from = paras.len().saturating_sub(2);
+    let end = sentences(&paras[from..]);
+    if let Some(s) = end.iter().find(|s| {
+        let l = lower(&s.text);
+        !s.question && CHECKS.iter().any(|c| l.contains(c))
+    }) {
+        return Some(Review::Check(plain(&s.text)));
+    }
+    sentences(&paras).iter().rev().find_map(|s| screens_at(&s.text)).map(Review::Screens)
+}
+
 /// What the small model is told, for a borderline turn end.
 pub const CLASSIFY_INSTRUCTIONS: &str = "You read the end of a coding agent's reply and decide whether the agent is now waiting on a decision or an answer from the person it works for (or the agent that started it) before it can go on.\n\
 Reply with JSON only: {\"pending\": true or false, \"question\": \"the question, self-contained, one or two sentences\", \"options\": [\"a short choice in the imperative\", ...]}.\n\
@@ -746,6 +869,32 @@ mod tests {
         assert!(ask(ended).question.contains("Topology variation pick"));
         let before = "I recommend (a) with all three. Tell me which version you want and I'll polish it and merge it.\n\nScreenshots are in `~/x/shots/`.\n\nThe graph label decision (accept round 9, or keep iterating) is also still yours to make.";
         assert!(ask(before).question.contains("graph label decision"));
+    }
+
+    #[test]
+    fn a_finished_turn_leaves_a_pr_a_check_screenshots_or_nothing() {
+        // An open PR (the Codex thread's last turn).
+        let pr = "I opened the PR against `zeron/zgx`: https://github.com/zeronsh/zeron/pull/1403\n\n- **Not merged yet**, and the running app won't have the fix until it's rebuilt.";
+        assert_eq!(review_of(pr), Some(Review::Pr("https://github.com/zeronsh/zeron/pull/1403".into())));
+        assert_eq!(review_of(pr).unwrap().line(), "PR https://github.com/zeronsh/zeron/pull/1403");
+        assert_eq!(review_of("Opened PR #412 for the mesh runbook.").map(|r| r.line()).as_deref(), Some("PR #412"));
+        // Merged already: nothing to evaluate.
+        assert_eq!(review_of("Merged https://github.com/zeronsh/zeron/pull/1403 into main. All green."), None);
+        // A result to check.
+        let check = "The rename now shows on the map heading and in Topology.\n\nPlease check it on the M2A after the rebuild.";
+        assert_eq!(review_of(check).map(|r| r.line()).as_deref(), Some("Please check it on the M2A after the rebuild."));
+        // A design that landed, with its screenshots.
+        let shots = "The new screenshots look right in dark and light.\n\nScreenshots are in `~/Documents/dev/tmp/orch/ui-map/shots/` as `orch_map-graph-*-s2.png`.";
+        assert_eq!(review_of(shots).map(|r| r.line()).as_deref(), Some("Screenshots: ~/Documents/dev/tmp/orch/ui-map/shots/"));
+        // A decision is not a review: it's an ask, the work not finished.
+        assert_eq!(review_of(CODEX), None);
+        assert!(matches!(detect(CODEX), Verdict::Ask(_)));
+        // The Brain dump's own words on two live cards: decisions.
+        assert!(matches!(detect("Waiting on your decision. Round 9 is merged locally (e357a3876); final screenshots are in shots/."), Verdict::Ask(_)));
+        assert!(matches!(detect("Waiting on your pick (built on orch/topo-variants, c1e090c7e). Recommend (a)."), Verdict::Ask(_)));
+        // Done, nothing for the person.
+        assert_eq!(review_of("Fixed the zoom jitter; the 31 map tests pass. Committed on zeron/orchestrators as a1b2c3d."), None);
+        assert_eq!(review_of("The screenshots caught a regression, now fixed and committed."), None, "no path: nothing to look at");
     }
 
     #[test]
