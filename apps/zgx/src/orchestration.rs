@@ -170,7 +170,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     });
 }
 
-/// A dump's files (`attachments`, as the composer packs a message's) sent
+/// A dump's picks (`picks`: the composer's model, effort…) as `config`, and
+/// its files (`attachments`, as the composer packs a message's) sent
 /// on as a chat message's are (chat.rs `carry`): uploaded toward the Brain
 /// dump's chat (`chat`, its id), and the op given what the engine reads, as
 /// `QueueMessage` has them: `attachments` (each file's path where the run
@@ -178,6 +179,13 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
 /// was, its words alone.
 async fn carry_dump(op: &Value, params: &mut Json) -> Result<(), &'static str> {
     params.as_object_mut().map(|o| o.remove("chat"));
+    // The composer's picks, made the engine's config for the Brain dump's
+    // chat (as a send to it sets it: chat.rs `config_with`), applied
+    // before the run.
+    params.as_object_mut().map(|o| o.remove("picks"));
+    if let (Some(picks), Some(chat)) = (op.field("picks"), op.field("chat").map(crate::auth::text)) {
+        params["config"] = crate::chat::config_with(&chat, picks);
+    }
     if op.field("attachments").map(Value::list).unwrap_or_default().is_empty() {
         params.as_object_mut().map(|o| o.remove("attachments"));
         return Ok(());
@@ -1031,6 +1039,15 @@ mod tests {
         assert_eq!(text(route.field("state")).as_deref(), Some("done"));
         assert_eq!(text(route.field("answer_full")).as_deref(), Some("Fixed.\n\nAll green."));
         assert_eq!(text(Some(&route.field("attachments").unwrap().list()[0])).as_deref(), Some("/srv/a.png"));
+    }
+
+    #[test]
+    fn a_dumps_picks_become_the_brain_dumps_config() {
+        let picks = Value::record([("model", Value::from("claude-code/claude-opus-5-5")), ("effort", Value::from("high"))]);
+        let config = crate::chat::config_with("orc-unknown", &picks);
+        assert_eq!(config["harness"], "claude-code");
+        assert_eq!(config["model"], "claude-opus-5-5");
+        assert_eq!(config["reasoning"], "high");
     }
 
     #[test]

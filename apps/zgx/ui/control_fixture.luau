@@ -19,7 +19,11 @@ store.load_catalog = function() end
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
-	models = { { value = "opus", label = "Opus", harness = "claude-code" } },
+	complete = true,
+	models = {
+		{ value = "claude-code/claude-opus-5-5", label = "Opus 5.5", harness = "claude-code" },
+		{ value = "claude-code/claude-haiku-5-5", label = "Haiku 5.5", harness = "claude-code" },
+	},
 })
 local route = require("@app/screens/shell/route")
 local shell = require("@app/screens/shell")

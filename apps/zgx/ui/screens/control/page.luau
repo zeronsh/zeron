@@ -160,9 +160,10 @@ local function brain_dump(): string?
 	return nil
 end
 
--- A send from Capture: the words and the files they carry, a dump.
-function M.take(text: string, attachments: { any }): any
-	return orchestration.dump(text, attachments, brain_dump())
+-- A send from Capture: the words, the files they carry, and the Brain
+-- dump's model as the composer has it picked, a dump.
+function M.take(text: string, attachments: { any }, picks: { [string]: any }?): any
+	return orchestration.dump(text, attachments, brain_dump(), picks)
 end
 
 -- A dump's receipt (ds/orch_receipt): the newest one's, or an earlier

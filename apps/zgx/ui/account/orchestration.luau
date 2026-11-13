@@ -76,12 +76,19 @@ end
 
 -- A dump: its words, and the files they carry (as the chat composer packs
 -- a message's: `{ kind, path, name, on_host }`), sent on toward the Brain
--- dump's chat (`chat`, its id) as a message's are (src/orchestration.rs).
-function M.dump(text: string, attachments: { any }?, chat: string?): any
+-- dump's chat (`chat`, its id) as a message's are (src/orchestration.rs);
+-- `picks`, the composer's (as a chat send's), become the op's `config`.
+function M.dump(text: string, attachments: { any }?, chat: string?, picks: { [string]: any }?): any
 	local op: { [string]: any } = { op = "dump", text = text }
+	op.chat = chat
 	if attachments and #attachments > 0 then
 		op.attachments = attachments
-		op.chat = chat
+	end
+	-- The Brain dump's config as the composer has it picked (its model,
+	-- agent, effort, Fast and options), applied to its chat before the run:
+	-- the chat send's shape, made the engine's by the bridge.
+	if picks and picks.model then
+		op.picks = picks
 	end
 	return M.op(op)
 end

@@ -3350,6 +3350,15 @@ pub(crate) async fn carry(req: &Value, target: Option<&str>) -> Result<Carried, 
     Ok(Carried { paths, images, sent_as, transfers })
 }
 
+/// Chat `id`'s config with `picks` (a composer's: `model` as
+/// `harness/model`, `effort`, `access`, `fast`, `options`, `plan`) laid
+/// over it, as a send to it would set it (`merged_config`).
+pub(crate) fn config_with(id: &str, picks: &Value) -> Json {
+    let chats = CHATS.with(Rc::clone);
+    let config = chats.chat(id).map(|c| c["config"].clone()).unwrap_or(Json::Null);
+    merged_config(&config, picks)
+}
+
 /// Where chat `id` runs, as a send uploads toward it (none: this device).
 pub(crate) fn target_of(id: &str) -> Option<String> {
     let chats = CHATS.with(Rc::clone);
