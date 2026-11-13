@@ -86,6 +86,84 @@ test("an unsure part is placed from its likely places", function()
 	expect(app:has('#control-capture >> .orch-candidate')).to_be(false)
 end)
 
+-- The open menu's items, as the tree shows them (a closed menu's leave
+-- hidden).
+local function menu_items(app: any): { string }
+	local out = {}
+	for line in app:tree():gmatch("[^\n]+") do
+		local name = line:match(' menuitem "([^"]*)"')
+		if name and not line:find("hidden", 1, true) then
+			table.insert(out, name)
+		end
+	end
+	return out
+end
+
+-- A box as the tree shows it (whole points): x, y, w, h; the first line
+-- holding `pattern`.
+local function box_of(app: any, pattern: string): (number, number, number, number)
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(pattern) and not line:find("hidden", 1, true) then
+			local x, y, w, h = line:match(" (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+			return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
+		end
+	end
+	return 0, 0, 0, 0
+end
+
+test("each chip's menu opens under it, from a box of its own, with places to move it", function()
+	local app = open()
+	-- An odd width: the column centred, a chip starts between points.
+	app:resize(2023, 1102)
+	app:frames(30)
+	local n = app:count("#control-capture >> .orch-chip")
+	expect(n).to_be(5)
+	for i = 1, n do
+		local chip = `#control-capture >> .orch-chip [{i}]`
+		local name = string.match(app:tree(chip), 'button "([^"]*)"') or ""
+		local _, cy, _, ch = box_of(app, `button "{name}"`)
+		app:click(chip)
+		app:frames(5)
+		expect(app:error()).to_be_nil()
+		local items = menu_items(app)
+		expect(#items > 0).to_be(true)
+		expect(table.concat(items, ",")).to_contain("New thread")
+		-- Its panel a size, 4 under the chip.
+		local _, my, mw, mh = box_of(app, ' menu "')
+		expect(mw > 0 and mh > 0).to_be(true)
+		expect(my).to_be(cy + ch + 4)
+		app:key("Escape")
+		app:frames(5)
+	end
+	-- An unsure part's chip too.
+	app = open()
+	app:resize(2023, 1102)
+	app:frames(30)
+	app:click("#control-history-toggle")
+	app:frames(10)
+	app:click(".control-history-row")
+	app:frames(20)
+	app:click('#control-capture >> role:button "Unsure, Task, Unsure"')
+	app:frames(5)
+	expect(table.concat(menu_items(app), ",")).to_contain("Note")
+	expect(app:error()).to_be_nil()
+end)
+
+test("a context menu hangs on whole points and opens only with something to choose", function()
+	local menu_point = require("@ds/menu_point")
+	-- A chip at 288.5 (a centred column of an odd width), the menu 4 under
+	-- it: on 289, in its box at 280.25.
+	local x, y = menu_point.at(288.5, 353, 280.25, 300)
+	expect(x + 280.25).to_be(289)
+	expect(y + 300).to_be(353)
+	expect(menu_point.whole(514.3)).to_be(514)
+	expect(menu_point.whole(-0.5)).to_be(0)
+	expect(menu_point.has_items(nil)).to_be(false)
+	expect(menu_point.has_items({})).to_be(false)
+	expect(menu_point.has_items({ { heading = "Move to" }, { separator = true } })).to_be(false)
+	expect(menu_point.has_items({ { heading = "Move to" }, { label = "Note" } })).to_be(true)
+end)
+
 test("the page draws and resizes without a slip", function()
 	local app = open()
 	for _, size in { { 900, 700 }, { 1440, 900 }, { 700, 900 }, { 1800, 1100 } } do

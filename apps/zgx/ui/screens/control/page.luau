@@ -704,9 +704,10 @@ local function opens_under(): (((x: number, y: number) -> boolean) -> (), (_v: b
 	end, function(_v, el)
 		at = el
 	end, function()
+		-- (Not while it has no box: ds/context_menu keeps the point whole.)
 		local el = at
-		if opener and el and el.x and el.y then
-			(opener :: any)(el.x, el.y + (el.height or 22) + 4)
+		if opener and el and el.mounted and el.x and el.y and (el.height or 0) > 0 then
+			(opener :: any)(el.x, el.y + (el.height :: number) + 4)
 		end
 	end
 end
