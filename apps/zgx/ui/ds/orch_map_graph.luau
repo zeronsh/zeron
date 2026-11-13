@@ -673,6 +673,82 @@ M.View = ui.component(function(props: {
 				ln.cx, ln.cy = mx - dy * best, my + dx * best
 			end
 		end
+		-- A line a name still sits on goes round it: through a point just
+		-- past a corner of the name, in two joined curves.
+		local function quad_pts(ax: number, ay: number, cx: number, cy: number, bx: number, by: number, out: { { number } })
+			for i = 1, 11 do
+				local t = i / 12
+				local u = 1 - t
+				table.insert(out, { u * u * ax + 2 * u * t * cx + t * t * bx, u * u * ay + 2 * u * t * cy + t * t * by })
+			end
+		end
+		local function cost(list: { { number } }, ln: any): number
+			local k = 0
+			for _, p in list do
+				for _, b in taken do
+					if p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
+						k += 1
+					end
+				end
+				for _, m in graph.nodes do
+					if m.id ~= ln.e.a and m.id ~= ln.e.b then
+						local px, py = at(m)
+						local room = reach(m) + 6
+						if (p[1] - px) ^ 2 + (p[2] - py) ^ 2 < room * room then
+							k += 3
+						end
+					end
+				end
+			end
+			return k
+		end
+		for _, ln in lines do
+			if ln.e.kind == "host" then
+				continue
+			end
+			local here_pts = {}
+			quad_pts(ln.ax, ln.ay, ln.cx, ln.cy, ln.bx, ln.by, here_pts)
+			local now_cost = cost(here_pts, ln)
+			if now_cost == 0 then
+				continue
+			end
+			-- (The first name in its way.)
+			local hit: { number }? = nil
+			for _, p in here_pts do
+				for _, b in taken do
+					if not hit and p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
+						hit = b
+					end
+				end
+			end
+			if not hit then
+				continue
+			end
+			local dx, dy = ln.bx - ln.ax, ln.by - ln.ay
+			local len = math.sqrt(dx * dx + dy * dy)
+			local tx, ty = dx / len, dy / len
+			local best_cost, best = now_cost, nil
+			for _, corner in { { hit[1] - 10, hit[2] - 10 }, { hit[3] + 10, hit[2] - 10 }, { hit[1] - 10, hit[4] + 10 }, { hit[3] + 10, hit[4] + 10 } } do
+				local wx, wy = corner[1], corner[2]
+				local l1 = math.sqrt((wx - ln.ax) ^ 2 + (wy - ln.ay) ^ 2)
+				local l2 = math.sqrt((ln.bx - wx) ^ 2 + (ln.by - wy) ^ 2)
+				-- (Smooth through the point: its tangent along the line.)
+				local arm = math.min(l1, l2) * 0.4
+				local c1x, c1y = wx - tx * arm, wy - ty * arm
+				local c2x, c2y = wx + tx * arm, wy + ty * arm
+				local list = {}
+				quad_pts(ln.ax, ln.ay, c1x, c1y, wx, wy, list)
+				quad_pts(wx, wy, c2x, c2y, ln.bx, ln.by, list)
+				-- (A detour costs a little for its length.)
+				local k = cost(list, ln) + (l1 + l2 - len) / 35
+				if k < best_cost then
+					best_cost, best = k, { wx, wy, c1x, c1y, c2x, c2y }
+				end
+			end
+			if best then
+				ln.via = best
+			end
+		end
 
 		-- 2. Island grounds.
 		for _, rim in rims do
@@ -702,7 +778,9 @@ M.View = ui.component(function(props: {
 		end
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
-			local p = ui.path():move(ln.ax, ln.ay):quad(ln.cx, ln.cy, ln.bx, ln.by)
+			local p = if ln.via
+				then ui.path():move(ln.ax, ln.ay):quad(ln.via[3], ln.via[4], ln.via[1], ln.via[2]):quad(ln.via[5], ln.via[6], ln.bx, ln.by)
+				else ui.path():move(ln.ax, ln.ay):quad(ln.cx, ln.cy, ln.bx, ln.by)
 			if e.kind == "host" then
 				c:stroke(p, ink(0.32, lit), 1, { dash = { 2, 3 } })
 			elseif e.kind == "control" then
