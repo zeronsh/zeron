@@ -108,12 +108,27 @@ local function conversation(rich: boolean): { any }
 	end
 	return out
 end
+local function vpn_conversation(): { any }
+	return {
+		{ id = "v-1", role = "user", text = "Phase 2 migration, safely. Nothing touches prod without asking me.", at = "Nov 9, 10:02 AM" },
+		{
+			id = "v-2",
+			role = "crew_reports",
+			text = "",
+			at = "Nov 12, 5:42 PM",
+			reports = {
+				report("rp-4", "th-vpn-moscow", "done", "Reboot plan ready; needs your OK for 02:00 MSK", ago(3500)),
+				report("rp-7", "th-vpn-merge", "progress", "#412 green; merging", ago(40)),
+			},
+		},
+	}
+end
 local fixture_chats = ui.shared("fixture.chats", {} :: { [string]: any })
 local function show(rich: boolean)
 	local c: { [string]: any } = {}
 	for _, id in { "orc-orch", "orc-vpn" } do
 		c[id] = {
-			messages = conversation(rich),
+			messages = if id == "orc-vpn" then vpn_conversation() else conversation(rich),
 			session = { id = id, state = "ready", title = id, device = "dev-desk", harness = "claude-code", model = "claude-code/opus-5.5" },
 		}
 	end

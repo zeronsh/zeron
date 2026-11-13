@@ -488,9 +488,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 					return ui.button {
 						label = l.label,
 						shrink = 0,
+						grow = 0,
+						p = 0,
+						h = "auto",
 						rounded = "$radius.full",
-						hover = {},
-						active = {},
+						bg = "#00000000",
+						hover = { bg = "#00000000" },
+						active = { bg = "#00000000" },
 						on_click = if props.on_link
 							then function()
 								(props.on_link :: any)(l)
@@ -531,8 +535,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 					label = locale.t("orch.board.outcome"),
 					w_full = true,
 					items = "start",
-					hover = {},
-					active = {},
+					p = 0,
+					h = "auto",
+					bg = "#00000000",
+					hover = { bg = "#00000000" },
+					active = { bg = "#00000000" },
 					on_click = function()
 						open:set(not open:peek())
 					end,
@@ -709,6 +716,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 			basis = if stacked then nil else 0,
 			min_w = if stacked then nil else COLUMN_MIN,
 			min_h = if stacked then nil else 64,
+			-- (Stacked in a page's side pane, an empty column stands aside
+			-- until a card is dragged: then it's somewhere to put one.)
+			hidden = if stacked and compact
+				then function(): boolean
+					return #list() == 0 and dragging:get() == nil
+				end
+				else nil,
 			gap = "$space.1",
 			relative = true,
 			-- Dropped past its cards (or into none): at its end.
