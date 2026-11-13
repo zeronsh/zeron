@@ -472,7 +472,20 @@ local List = ui.component(function(props: ListProps): Node
 						backdrop_blur = function(): any
 							return if pinned() and material.see_through() then "$zeron.diff.sticky.blur" else 0
 						end,
-						node,
+						-- Keep the row's original width and text column; inset only
+						-- the glass and its clip, not the content's geometry.
+						ui.div {
+							absolute = true,
+							top = 0,
+							h = M.FILE,
+							left = function(): any
+								return ui.raw(-((ui.theme.get("space.1") :: number?) or 4), "cancel the glass inset so the file text keeps its column")
+							end,
+							right = function(): any
+								return ui.raw(-((ui.theme.get("space.1") :: number?) or 4), "keep the original row width inside the inset glass")
+							end,
+							node,
+						},
 					},
 				}
 			end
