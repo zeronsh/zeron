@@ -8,9 +8,9 @@
 
 use chrono::Utc;
 use zeron_proto::orchestration::{
-    CommKind, CrewPolicy, Dump, DumpState, Orchestrator, OrchestratorKind, Route, RouteIntent,
-    RouteRef, RouteState, RouteTarget, WorkItemPatch, WorkState, BRAIN_DUMP_CHAT_PREFIX,
-    BRAIN_DUMP_TITLE, new_brain_dump_chat_id, seed_hue,
+    BRAIN_DUMP_CHAT_PREFIX, BRAIN_DUMP_TITLE, CommKind, CrewPolicy, Dump, DumpState, Orchestrator,
+    OrchestratorKind, Route, RouteIntent, RouteRef, RouteState, RouteTarget, WorkItemPatch,
+    WorkState, new_brain_dump_chat_id, seed_hue,
 };
 use zeron_rpc::RpcError;
 
@@ -183,10 +183,13 @@ impl EngineRpc {
             item_id: None,
         };
         let brain = self.brain_of(&dump);
-        self.deliver_route(&dump, &mut route, brain.as_deref()).await?;
+        self.deliver_route(&dump, &mut route, brain.as_deref())
+            .await?;
         let to = target_chat(&route.target).unwrap_or("").to_owned();
         orch.workspace().write_orchestration(|doc| {
-            let Some(mut current) = doc.dump(dump_id) else { return };
+            let Some(mut current) = doc.dump(dump_id) else {
+                return;
+            };
             current.routes.push(route.clone());
             if route.target == RouteTarget::Unsure {
                 current.state = DumpState::NeedsYou;
@@ -206,7 +209,9 @@ impl EngineRpc {
     /// The Brain dump: done routing `dump_id`.
     pub(crate) fn dump_done(&self, dump_id: &str, summary: String) -> Result<(), RpcError> {
         self.orchestration().workspace().write_orchestration(|doc| {
-            let mut dump = doc.dump(dump_id).ok_or_else(|| failed(format!("No dump {dump_id}")))?;
+            let mut dump = doc
+                .dump(dump_id)
+                .ok_or_else(|| failed(format!("No dump {dump_id}")))?;
             let summary = excerpt(&summary, 200);
             dump.summary = (!summary.is_empty()).then_some(summary);
             dump.state = settled_state(&dump);
@@ -255,10 +260,13 @@ impl EngineRpc {
         route.target = target;
         route.state = RouteState::Pending;
         route.answer = None;
-        self.deliver_route(&dump, &mut route, brain.as_deref()).await?;
+        self.deliver_route(&dump, &mut route, brain.as_deref())
+            .await?;
         let to = target_chat(&route.target).unwrap_or("").to_owned();
         orch.workspace().write_orchestration(|doc| {
-            let Some(mut current) = doc.dump(dump_id) else { return };
+            let Some(mut current) = doc.dump(dump_id) else {
+                return;
+            };
             if let Some(slot) = current.routes.iter_mut().find(|r| r.id == route.id) {
                 *slot = route.clone();
             }
@@ -268,7 +276,8 @@ impl EngineRpc {
             current.updated_at = Utc::now();
             doc.upsert_dump(&current);
         });
-        orch.comms().say(CommKind::Route, super::comms::YOU, &to, &route.excerpt);
+        orch.comms()
+            .say(CommKind::Route, super::comms::YOU, &to, &route.excerpt);
         Ok(route.id)
     }
 
@@ -285,7 +294,11 @@ impl EngineRpc {
             .collect();
         brains
             .iter()
-            .find(|o| chats.iter().any(|c| c.id == o.id && c.device_id == dump.device_id))
+            .find(|o| {
+                chats
+                    .iter()
+                    .any(|c| c.id == o.id && c.device_id == dump.device_id)
+            })
             .or(brains.first())
             .map(|o| o.id.clone())
     }
@@ -322,7 +335,11 @@ impl EngineRpc {
                     id
                 } else {
                     self.create_orchestrator_chat(NewOrchestrator {
-                        name: if title.is_empty() { "New orchestrator".into() } else { title.clone() },
+                        name: if title.is_empty() {
+                            "New orchestrator".into()
+                        } else {
+                            title.clone()
+                        },
                         goal: message.clone(),
                         rules: String::new(),
                         crew_rules: String::new(),
@@ -339,7 +356,8 @@ impl EngineRpc {
                 route.state = RouteState::Delivered;
             }
             RouteTarget::NewThread { id } => {
-                let exists = !id.is_empty() && self.workspace_host().chat(&id).ok().flatten().is_some();
+                let exists =
+                    !id.is_empty() && self.workspace_host().chat(&id).ok().flatten().is_some();
                 let id = if exists {
                     id
                 } else {
@@ -362,7 +380,11 @@ impl EngineRpc {
                     Some(item) => item.id,
                     None => orch
                         .patch_item(WorkItemPatch {
-                            title: Some(if title.is_empty() { "Untitled".into() } else { title.clone() }),
+                            title: Some(if title.is_empty() {
+                                "Untitled".into()
+                            } else {
+                                title.clone()
+                            }),
                             detail: Some(message.clone()),
                             state: Some(WorkState::Inbox),
                             source: Some(RouteRef {

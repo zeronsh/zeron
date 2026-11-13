@@ -75,7 +75,8 @@ trait Entity: Serialize + DeserializeOwned + Clone + Send + std::fmt::Debug + 's
 
 impl Entity for Orchestrator {
     const KIND: &'static str = KIND_ORCHESTRATORS;
-    const REQUIRED: &'static [&'static str] = &["id", "kind", "name", "hue", "createdAt", "updatedAt"];
+    const REQUIRED: &'static [&'static str] =
+        &["id", "kind", "name", "hue", "createdAt", "updatedAt"];
     fn row_id(&self) -> &str {
         &self.id
     }
@@ -146,14 +147,27 @@ impl Entity for Dump {
     }
 
     fn from_fields(mut fields: Map<String, Value>) -> Map<String, Value> {
-        let keys: Vec<String> = fields.keys().filter(|k| is_route_field(k)).cloned().collect();
+        let keys: Vec<String> = fields
+            .keys()
+            .filter(|k| is_route_field(k))
+            .cloned()
+            .collect();
         let mut routes: Vec<(u64, String, Value)> = Vec::new();
         for key in keys {
-            let Some(value) = fields.remove(&key) else { continue };
-            let order = value.get(ROUTE_ORDER).and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let Some(value) = fields.remove(&key) else {
+                continue;
+            };
+            let order = value
+                .get(ROUTE_ORDER)
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
             // (A route this build can't read is passed over, never the dump.)
             if let Ok(route) = serde_json::from_value::<Route>(value) {
-                routes.push((order, route.id.clone(), serde_json::to_value(route).unwrap_or(Value::Null)));
+                routes.push((
+                    order,
+                    route.id.clone(),
+                    serde_json::to_value(route).unwrap_or(Value::Null),
+                ));
             }
         }
         routes.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -324,7 +338,11 @@ impl RegistryDoc {
     /// Oldest first.
     pub fn read_orchestrators(&self) -> Vec<Orchestrator> {
         let mut all: Vec<Orchestrator> = self.read_entities();
-        all.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        all.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         all
     }
 
@@ -342,7 +360,11 @@ impl RegistryDoc {
     /// By join time.
     pub fn read_crew(&self) -> Vec<CrewMember> {
         let mut all: Vec<CrewMember> = self.read_entities();
-        all.sort_by(|a, b| a.joined_at.cmp(&b.joined_at).then_with(|| a.chat_id.cmp(&b.chat_id)));
+        all.sort_by(|a, b| {
+            a.joined_at
+                .cmp(&b.joined_at)
+                .then_with(|| a.chat_id.cmp(&b.chat_id))
+        });
         all
     }
 
@@ -381,7 +403,11 @@ impl RegistryDoc {
     /// Oldest first.
     pub fn read_asks(&self) -> Vec<Ask> {
         let mut all: Vec<Ask> = self.read_entities();
-        all.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        all.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         all
     }
 
@@ -399,7 +425,11 @@ impl RegistryDoc {
     /// Every dump, newest first.
     pub fn read_dumps(&self) -> Vec<Dump> {
         let mut all: Vec<Dump> = self.read_entities();
-        all.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        all.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         all
     }
 
@@ -518,7 +548,10 @@ mod tests {
             item_id: None,
             kind: AskKind::Decision,
             question: "Merge?".into(),
-            options: vec![AskOption { label: "Yes".into(), detail: String::new() }],
+            options: vec![AskOption {
+                label: "Yes".into(),
+                detail: String::new(),
+            }],
             urgent: true,
             state: AskState::Open,
             answer: None,
@@ -644,7 +677,10 @@ mod tests {
         assert_eq!((o.notes.as_str(), o.paused), ("plan", true));
         let d = &sa.dumps[0];
         assert_eq!(d.state, DumpState::Routed);
-        assert_eq!(d.routes.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["r1", "r2"]);
+        assert_eq!(
+            d.routes.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["r1", "r2"]
+        );
         assert_eq!(d.routes[0].target, RouteTarget::Chat { id: "c9".into() });
     }
 
@@ -657,7 +693,11 @@ mod tests {
         o.crew_rules = "c".repeat(9_000);
         doc.upsert_orchestrator(&o);
         for op in doc.pending_ops() {
-            assert!(fits_op_budget(op), "{} bytes", serde_json::to_vec(op).unwrap().len());
+            assert!(
+                fits_op_budget(op),
+                "{} bytes",
+                serde_json::to_vec(op).unwrap().len()
+            );
         }
         let read = doc.orchestrator("o1").unwrap();
         assert_eq!(read.notes.len(), MAX_TEXT_FIELD_BYTES);

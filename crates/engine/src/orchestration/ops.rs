@@ -11,8 +11,8 @@
 use chrono::Utc;
 use serde_json::{Value, json};
 use zeron_proto::orchestration::{
-    Ask, AskState, CommKind, CrewMember, CrewPolicy, OrchestrateOp, Orchestrator,
-    OrchestratorKind, WorkItemPatch, seed_hue,
+    Ask, AskState, CommKind, CrewMember, CrewPolicy, OrchestrateOp, Orchestrator, OrchestratorKind,
+    WorkItemPatch, seed_hue,
 };
 use zeron_proto::{ChatConfig, ChildKind, SandboxLevel, SessionStatus, agent_messages};
 use zeron_rpc::{Caller, RpcError};
@@ -73,7 +73,9 @@ impl EngineRpc {
                 Who::Agent { chat, role }
             }
             Caller::Agent { chat: None } => {
-                return Err(failed("Only an agent running in a Zeron chat takes part in orchestration"));
+                return Err(failed(
+                    "Only an agent running in a Zeron chat takes part in orchestration",
+                ));
             }
             Caller::Local | Caller::Peer { .. } => Who::Person,
         })
@@ -159,7 +161,8 @@ impl EngineRpc {
                     created_at: now,
                     updated_at: now,
                 };
-                orch.workspace().write_orchestration(|doc| doc.upsert_orchestrator(&row));
+                orch.workspace()
+                    .write_orchestration(|doc| doc.upsert_orchestrator(&row));
                 Ok(json!({ "id": chat_id }))
             }
             OrchestrateOp::UpdateOrchestrator {
@@ -178,7 +181,8 @@ impl EngineRpc {
                     let mut row = doc
                         .orchestrator(&id)
                         .ok_or_else(|| failed(format!("No orchestrator {id}")))?;
-                    if let Some(name) = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()) {
+                    if let Some(name) = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty())
+                    {
                         row.name = name;
                     }
                     if let Some(goal) = goal {
@@ -241,7 +245,10 @@ impl EngineRpc {
                 // An orchestrator's new item is its own unless it says.
                 if item.id.is_none()
                     && item.orchestrator_id.is_none()
-                    && let Who::Agent { role: ChatRole::Orchestrator { id }, .. } = who
+                    && let Who::Agent {
+                        role: ChatRole::Orchestrator { id },
+                        ..
+                    } = who
                 {
                     item.orchestrator_id = Some(Some(id.clone()));
                 }
@@ -304,7 +311,8 @@ impl EngineRpc {
                     created_at: now,
                     answered_at: None,
                 };
-                orch.workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
+                orch.workspace()
+                    .write_orchestration(|doc| doc.upsert_ask(&ask));
                 let title = self
                     .workspace_host()
                     .chat(chat)
@@ -338,7 +346,8 @@ impl EngineRpc {
                     answer
                 );
                 deliver(self, &ask.from_chat, &text, None, When::Now)?;
-                orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+                orch.comms()
+                    .say(CommKind::Answer, YOU, &ask.from_chat, &answer);
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::DismissAsk { id } => {
@@ -405,7 +414,10 @@ impl EngineRpc {
         if chat_id == orchestrator_id {
             return Err(failed("An orchestrator isn't in its own crew"));
         }
-        if !matches!(orch.role_of(chat_id), ChatRole::Plain | ChatRole::Crew { .. }) {
+        if !matches!(
+            orch.role_of(chat_id),
+            ChatRole::Plain | ChatRole::Crew { .. }
+        ) {
             return Err(failed("An orchestrator isn't in a crew"));
         }
         let chat = self
@@ -434,7 +446,10 @@ impl EngineRpc {
                 chat_id: chat_id.to_owned(),
                 orchestrator_id: orchestrator_id.to_owned(),
                 item_id: item_id.clone().or_else(|| {
-                    previous.as_ref().filter(|_| same_crew).and_then(|m| m.item_id.clone())
+                    previous
+                        .as_ref()
+                        .filter(|_| same_crew)
+                        .and_then(|m| m.item_id.clone())
                 }),
                 role: if role.trim().is_empty() {
                     previous
@@ -480,14 +495,26 @@ impl EngineRpc {
 
     /// A new orchestrator: its chat, created as `createChat` creates any,
     /// named, and its row. The id (the chat's).
-    pub(crate) async fn create_orchestrator_chat(&self, new: NewOrchestrator) -> Result<String, RpcError> {
+    pub(crate) async fn create_orchestrator_chat(
+        &self,
+        new: NewOrchestrator,
+    ) -> Result<String, RpcError> {
         let name = new.name.trim().to_owned();
         if name.is_empty() {
             return Err(RpcError::BadParams("An orchestrator needs a name".into()));
         }
         let id = uuid::Uuid::new_v4().to_string();
-        self.create_chat_for(&id, new.space_id.as_deref(), new.device_id.as_deref(), new.harness, new.model, None)?;
-        self.workspace_host().rename_chat(&id, &name).map_err(engine_failed)?;
+        self.create_chat_for(
+            &id,
+            new.space_id.as_deref(),
+            new.device_id.as_deref(),
+            new.harness,
+            new.model,
+            None,
+        )?;
+        self.workspace_host()
+            .rename_chat(&id, &name)
+            .map_err(engine_failed)?;
         let now = Utc::now();
         let row = Orchestrator {
             id: id.clone(),
@@ -541,7 +568,10 @@ impl EngineRpc {
             "chatId": chat_id,
             "config": config,
         });
-        match (space_id.filter(|s| !s.is_empty()), device_id.filter(|d| !d.is_empty())) {
+        match (
+            space_id.filter(|s| !s.is_empty()),
+            device_id.filter(|d| !d.is_empty()),
+        ) {
             (Some(space), device) => {
                 params["spaceId"] = json!(space);
                 if let Some(device) = device {
@@ -671,7 +701,11 @@ fn item_is_of(rpc: &EngineRpc, item: Option<&str>, orchestrator: &str) -> bool {
 
 /// An orchestrator keeps its own board: its items, and loose ones it
 /// claims, with its own crew as their threads. The Brain dump keeps any.
-fn upsert_permitted(role: &ChatRole, item: &WorkItemPatch, rpc: &EngineRpc) -> Result<(), RpcError> {
+fn upsert_permitted(
+    role: &ChatRole,
+    item: &WorkItemPatch,
+    rpc: &EngineRpc,
+) -> Result<(), RpcError> {
     let refuse = || Err(failed("An orchestrator keeps only its own board"));
     match role {
         ChatRole::BrainDump { .. } => Ok(()),
@@ -687,7 +721,9 @@ fn upsert_permitted(role: &ChatRole, item: &WorkItemPatch, rpc: &EngineRpc) -> R
             };
             let allowed = match &current {
                 // Its own: kept its own.
-                Some(current) if current.orchestrator_id.as_deref() == mine => claims != Some(false),
+                Some(current) if current.orchestrator_id.as_deref() == mine => {
+                    claims != Some(false)
+                }
                 // Loose: only by claiming it.
                 Some(current) if current.orchestrator_id.is_none() => claims == Some(true),
                 Some(_) => false,
@@ -698,10 +734,16 @@ fn upsert_permitted(role: &ChatRole, item: &WorkItemPatch, rpc: &EngineRpc) -> R
                 return refuse();
             }
             if let Some(threads) = &item.threads {
-                let known = current.as_ref().map(|c| c.threads.clone()).unwrap_or_default();
+                let known = current
+                    .as_ref()
+                    .map(|c| c.threads.clone())
+                    .unwrap_or_default();
                 let all_crew = threads.iter().all(|t| {
                     known.contains(t)
-                        || rpc.orchestration().crew_of(t).is_some_and(|m| m.orchestrator_id == *id)
+                        || rpc
+                            .orchestration()
+                            .crew_of(t)
+                            .is_some_and(|m| m.orchestrator_id == *id)
                 });
                 if !all_crew {
                     return Err(failed("An item's threads are its orchestrator's crew"));
@@ -709,7 +751,9 @@ fn upsert_permitted(role: &ChatRole, item: &WorkItemPatch, rpc: &EngineRpc) -> R
             }
             Ok(())
         }
-        _ => Err(failed("Only orchestrators and the Brain dump keep the board")),
+        _ => Err(failed(
+            "Only orchestrators and the Brain dump keep the board",
+        )),
     }
 }
 

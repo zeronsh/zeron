@@ -45,9 +45,9 @@ pub async fn file_report(
     // An item it names counts only when it's on its own orchestrator's
     // board; otherwise its own item.
     let named = params.item_id.clone().filter(|id| {
-        orchestration
-            .item(id)
-            .is_some_and(|item| item.orchestrator_id.as_deref() == Some(member.orchestrator_id.as_str()))
+        orchestration.item(id).is_some_and(|item| {
+            item.orchestrator_id.as_deref() == Some(member.orchestrator_id.as_str())
+        })
     });
     let report = Report {
         id: uuid::Uuid::new_v4().simple().to_string(),
@@ -75,7 +75,9 @@ pub async fn file_report(
         let progress = report.progress;
         let chat = caller_chat.to_owned();
         orchestration.workspace().write_orchestration(|doc| {
-            let Some(mut item) = doc.work_item(item_id) else { return };
+            let Some(mut item) = doc.work_item(item_id) else {
+                return;
+            };
             if let Some(progress) = progress {
                 item.progress = Some(progress);
             }

@@ -91,25 +91,28 @@ pub(crate) fn stream(bus: &CommBus) -> futures::stream::BoxStream<'static, serde
     use tokio::sync::broadcast::error::RecvError;
     let (backlog, rx) = bus.subscribe_with_recent();
     let bus = bus.clone();
-    futures::stream::unfold((Some(backlog), rx, bus), |(backlog, mut rx, bus)| async move {
-        if let Some(backlog) = backlog {
-            let value = serde_json::to_value(&backlog).ok()?;
-            return Some((value, (None, rx, bus)));
-        }
-        let events = match rx.recv().await {
-            Ok(event) => {
-                let mut events = vec![event];
-                while let Ok(more) = rx.try_recv() {
-                    events.push(more);
-                }
-                events
+    futures::stream::unfold(
+        (Some(backlog), rx, bus),
+        |(backlog, mut rx, bus)| async move {
+            if let Some(backlog) = backlog {
+                let value = serde_json::to_value(&backlog).ok()?;
+                return Some((value, (None, rx, bus)));
             }
-            Err(RecvError::Lagged(_)) => bus.recent(),
-            Err(RecvError::Closed) => return None,
-        };
-        let value = serde_json::to_value(&events).ok()?;
-        Some((value, (None, rx, bus)))
-    })
+            let events = match rx.recv().await {
+                Ok(event) => {
+                    let mut events = vec![event];
+                    while let Ok(more) = rx.try_recv() {
+                        events.push(more);
+                    }
+                    events
+                }
+                Err(RecvError::Lagged(_)) => bus.recent(),
+                Err(RecvError::Closed) => return None,
+            };
+            let value = serde_json::to_value(&events).ok()?;
+            Some((value, (None, rx, bus)))
+        },
+    )
     .boxed()
 }
 
