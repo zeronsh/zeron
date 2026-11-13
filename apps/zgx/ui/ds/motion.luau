@@ -39,17 +39,51 @@ function M.ms(ms: number): number
 	return if M.reduced_now() then 0 else ms
 end
 
+-- Where a tween or spring of `target` ends, at once: `target` itself, or,
+-- for a boolean with `from` and `to` (a switch's knob: off at `from`, on at
+-- `to`), the end it says. As `target` itself, a switch's knob stood at `x =
+-- true`, the left, whatever it said, while its tweened track said on.
+local function landed(target: any, opts: { from: any?, to: any? }): any
+	if opts.from == nil or opts.to == nil then
+		return target
+	end
+	-- (A state or a computed, tracked; a function's answer.)
+	local function now(): any
+		if type(target) == "function" then
+			return target()
+		elseif type(target) == "userdata" or type(target) == "table" then
+			local ok, getter = pcall(function()
+				return (target :: any).get
+			end)
+			if ok and type(getter) == "function" then
+				return (target :: any):get()
+			end
+		end
+		return target
+	end
+	if type(target) == "boolean" then
+		return if target then opts.to else opts.from
+	end
+	return ui.computed(function(): any
+		local v = now()
+		if type(v) == "boolean" then
+			return if v then opts.to else opts.from
+		end
+		return v
+	end)
+end
+
 -- A value that moves to where `target` goes (`ui.tween`), or, with motion
--- reduced, `target` itself, so it lands at once: for a prop. Decided as
+-- reduced, where it ends (`landed`), there at once: for a prop. Decided as
 -- the part is built (a tween's options are fixed when it's made), so the
 -- setting changed reaches what's built after it.
 function M.tween(target: any, opts: TweenOptions): any
-	return if M.reduced_now() then target else ui.tween(target, opts)
+	return if M.reduced_now() then landed(target, opts :: any) else ui.tween(target, opts)
 end
 
 -- The same for `ui.spring`.
 function M.spring(target: any, opts: SpringOptions): any
-	return if M.reduced_now() then target else ui.spring(target, opts)
+	return if M.reduced_now() then landed(target, opts :: any) else ui.spring(target, opts)
 end
 
 -- What of an animation is movement (it travels or grows), as opposed to a
