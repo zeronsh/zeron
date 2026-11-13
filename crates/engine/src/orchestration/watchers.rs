@@ -49,7 +49,7 @@ pub(crate) fn start(orchestration: Orchestration) {
                 tracing::info!(dumps = settled.len(), "brain dump: dumps left routing now need the person");
             }
             // Cards an open ask made Blocked under the old rule: from their route.
-            let (restated, kept) = rpc.settle_card_states();
+            let (restated, kept) = rpc.settle_card_states().await;
             if !restated.is_empty() || !kept.is_empty() {
                 tracing::info!(?restated, ?kept, "board: cards an ask had blocked re-stated; cards moved by hand kept");
             }
@@ -697,7 +697,8 @@ async fn route_answers(orchestration: Orchestration) {
                     now.iter().filter(|s| started(seen.get(&s.chat_id), s)).map(|s| s.chat_id.clone()).collect();
                 if let Some(rpc) = orchestration.rpc() {
                     for chat in replied {
-                        super::turn_asks::on_reply(&orchestration, &rpc, &chat);
+                        let (o, r) = (orchestration.clone(), rpc.clone());
+                        tokio::spawn(async move { super::turn_asks::on_reply(&o, &r, &chat).await });
                     }
                 }
                 seen = now.into_iter().map(|s| (s.chat_id.clone(), s)).collect();
