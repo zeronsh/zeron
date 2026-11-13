@@ -336,7 +336,12 @@ M.View = ui.component(function(props: {
 			end
 			local l = (loads :: any)[n.device or ""]
 			local load = if l and l.cpu then `{math.floor(math.clamp(l.cpu, 0, 1) * 100 + 0.5)}%` else ""
-			local name_w = c:measure_text(n.title, TAB_NAME)
+			-- (A long name shortened: the heading never outgrows its island.)
+			local title = n.title
+			if (utf8.len(title) or #title) > 18 then
+				title = string.sub(title, 1, (utf8.offset(title, 18) :: number) - 1) .. "…"
+			end
+			local name_w = c:measure_text(title, TAB_NAME)
 			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
 			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 10 + load_w else 0) + 8
 			-- (The island makes room for it: settled again if it grew.)
@@ -349,7 +354,7 @@ M.View = ui.component(function(props: {
 					pump()
 				end)
 			end
-			table.insert(rims, { n = n, d = d, empty = next(isl.members) == nil, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
+			table.insert(rims, { n = n, d = d, title = title, empty = next(isl.members) == nil, x = x, y = y, r = r, angle = -90, w = tw, h = TAB_H, name_w = name_w, load = load, nx = 0, ny = 0, from = -90, sweep = 360 })
 		end
 		-- (Centred on its rim at `angle`.)
 		local function name_box(rim: any, angle: number): (number, number)
@@ -547,7 +552,7 @@ M.View = ui.component(function(props: {
 			local ix, iy, ir = isl.x * z + v.x, isl.y * z + v.y, isl.r * z - 4
 			for _, p in { { x0, y0 }, { x1, y0 }, { x0, y1 }, { x1, y1 } } do
 				if (p[1] - ix) ^ 2 + (p[2] - iy) ^ 2 > ir * ir then
-					return 0.4
+					return 0.7
 				end
 			end
 			return 0
@@ -640,7 +645,7 @@ M.View = ui.component(function(props: {
 			local gx, gy = qx - x, qy - y
 			local gd = math.sqrt(gx * gx + gy * gy)
 			-- (Always for a name hung aside or stepped out; else past 13px.)
-			if gd - mr > (if best.aside then 4 else 13) then
+			if gd - mr > 13 then
 				table.insert(leaders, { x + gx / gd * (mr + 3), y + gy / gd * (mr + 3), qx - gx / gd * 3, qy - gy / gd * 3, lit_of(n.id) })
 			end
 			for i, t in best.text do
@@ -683,9 +688,26 @@ M.View = ui.component(function(props: {
 					-- no line would pass under it; names round it give way.)
 					-- (Lines pass under it; only marks and names move it, and
 					-- then only a little way along the top.)
-					for _, a in { -90, -75, -105, -60, -120 } do
+					-- (At the top where nothing crosses it, else along the top;
+					-- if lines must, they pass under its backing.)
+					for _, a in { -90, -70, -110, -50, -130 } do
 						local x0, y0 = name_box(rim, a)
 						local k = 0
+						for _, p in pts do
+							if p[1] > x0 - 8 and p[1] < x0 + rim.w + 8 and p[2] > y0 - 8 and p[2] < y0 + rim.h + 8 then
+								k += 1
+								break
+							end
+						end
+						for _, o in rims do
+							if o ~= rim then
+								local nx = math.clamp(o.x, x0, x0 + rim.w)
+								local ny = math.clamp(o.y, y0, y0 + rim.h)
+								if math.abs(math.sqrt((nx - o.x) ^ 2 + (ny - o.y) ^ 2) - o.r) < 12 or (nx - o.x) ^ 2 + (ny - o.y) ^ 2 < o.r * o.r then
+									k += 1
+								end
+							end
+						end
 						for _, m in graph.nodes do
 							if m.kind ~= "device" then
 								local mx, my = at(m)
@@ -845,7 +867,7 @@ M.View = ui.component(function(props: {
 				local aside_d = math.abs((wx - ln.ax) * -ty + (wy - ln.ay) * tx)
 				-- (A long dashed route may swing wider round a name.)
 				local wide = if ln.e.kind == "control" then 0.35 else 0.45
-				if along < 0.15 or along > 0.85 or aside_d > len * wide then
+				if along < 0.08 or along > 0.92 or aside_d > len * wide then
 					continue
 				end
 				local l1 = math.sqrt((wx - ln.ax) ^ 2 + (wy - ln.ay) ^ 2)
@@ -1100,7 +1122,7 @@ M.View = ui.component(function(props: {
 			local cy = y0 + th / 2
 			-- (A soft backing, the field's own colour, so lines pass under;
 			-- a hairline round it, the rim broken behind it.)
-			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.8 else 0.55, lit)), 6)
+			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.8 else 0.32, lit)), 6)
 			if over == rim.n.id then
 				c:rect(x0, y0, tw, th, ink(0.06, lit), 6)
 			end
@@ -1112,7 +1134,7 @@ M.View = ui.component(function(props: {
 				c:circle(gx + 7, cy - 6, 2.5, kit.ink("zeron.tone.info.ink", dim(1, lit)))
 			end
 			local nx = x0 + 8 + 14 + 6
-			c:text(rim.n.title, nx, cy, { size = 13.5, weight = 600, color = ink(if dark then 0.95 else 0.9, lit), baseline = "middle" })
+			c:text(rim.title, nx, cy, { size = 13.5, weight = 600, color = ink(if dark then 0.95 else 0.9, lit), baseline = "middle" })
 			if rim.load ~= "" then
 				local l = (loads :: any)[rim.n.device or ""]
 				local f = if l and l.cpu then l.cpu else 0
@@ -1122,7 +1144,17 @@ M.View = ui.component(function(props: {
 			end
 			-- A machine with nothing at work says so, quietly, inside.
 			if rim.empty then
-				c:text(locale.s("ds.orch.map.idle"), rim.x, rim.y + 6, { size = 11, color = ink(if dark then 0.4 else 0.42, lit), align = "center", baseline = "middle" })
+				local word = locale.s("ds.orch.map.idle")
+				local o = { size = 11, color = ink(if dark then 0.4 else 0.42, lit), align = "center", baseline = "middle" }
+				local ww = c:measure_text(word, o)
+				local sp = string.find(word, " ")
+				if ww > rim.r * 2 - 28 and sp then
+					-- (Two lines, kept clear of the rim.)
+					c:text(string.sub(word, 1, sp - 1), rim.x, rim.y, o)
+					c:text(string.sub(word, sp + 1), rim.x, rim.y + 14, o)
+				else
+					c:text(word, rim.x, rim.y + 6, o)
+				end
 			end
 		end
 		for _, l in labels do

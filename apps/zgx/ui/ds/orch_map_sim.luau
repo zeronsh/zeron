@@ -53,7 +53,7 @@ export type Graph = {
 M.R = { device = 8, orchestrator = 10, brain = 9, thread = 5 }
 -- An island (a machine's room) reaches PAD past its farthest member;
 -- islands keep GAP apart, rim to rim.
-M.ISLAND_PAD, M.ISLAND_GAP = 36, 72
+M.ISLAND_PAD, M.ISLAND_GAP = 36, 84
 M.ALPHA_MIN = 0.004
 local DECAY = 0.028
 local FRICTION = 0.58
@@ -330,7 +330,7 @@ function M.islands(g: Graph): { [string]: Island }
 		-- (Never smaller than its heading on top needs.)
 		-- (Never narrower than its heading on top, and a little more.)
 		local dev = list[id][1] :: any
-		isl.r = math.max(r + M.ISLAND_PAD, (dev.tab_w or 0) / 2 + 14, if next(isl.members) then 44 else 112)
+		isl.r = math.max(r + M.ISLAND_PAD, (dev.tab_w or 0) * 0.375, if next(isl.members) then 44 else 80)
 	end
 	return out
 end
