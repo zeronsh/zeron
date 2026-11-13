@@ -89,6 +89,20 @@ pub(crate) fn start(orchestration: Orchestration) {
     tokio::spawn(async move { route_answers(orchestration).await });
 }
 
+/// Whether a condensed answer came back as a title ("Board Inbox And Next
+/// Columns"), not a sentence: no closing stop, and every word capitalised.
+/// The one-shot runs on the harnesses' title path, whose system prompt asks
+/// for titles; such a line is dropped and the reply's own first sentence
+/// stands.
+pub(crate) fn reads_as_title(answer: &str) -> bool {
+    let text = answer.trim();
+    if text.ends_with(['.', '!', '?', ')', '`']) {
+        return false;
+    }
+    let words: Vec<&str> = text.split_whitespace().filter(|w| w.chars().next().is_some_and(char::is_alphabetic)).collect();
+    words.len() >= 2 && words.iter().all(|w| w.chars().next().is_some_and(char::is_uppercase))
+}
+
 /// How often questions still waiting are looked for in their transcripts.
 const SWEEP_QUESTIONS_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -111,11 +125,13 @@ pub(crate) async fn sweep_questions(orchestration: &Orchestration, rpc: &crate::
                 .push((d.id.clone(), r.id.clone(), message, r.excerpt.clone(), r.intent));
         }
     }
+    let checked: usize = by_chat.values().map(Vec::len).sum();
     let mut taken = 0;
     for (chat, waiting) in by_chat {
         let asked = waiting.len();
         taken += asked - take_outcomes(orchestration, rpc, &chat, None, waiting).await.len();
     }
+    tracing::info!(checked, filled = taken, "q&a: questions still waiting looked for in their transcripts");
     taken
 }
 
@@ -503,7 +519,7 @@ pub(crate) async fn record_outcome_at(
     let condensed = orchestration.progress().one_shot(rpc)(harness, prompt)
         .await
         .map(|raw| model_answer(&raw))
-        .filter(|a| !a.is_empty());
+        .filter(|a| !a.is_empty() && !reads_as_title(a));
     if let Some(condensed) = condensed {
         orchestration.workspace().write_orchestration(|doc| {
             let Some(mut dump) = doc.dump(dump_id) else { return };
@@ -571,6 +587,15 @@ async fn route_answers(orchestration: Orchestration) {
             .collect();
         let (here, older): (Vec<_>, Vec<_>) =
             idle.into_iter().partition(|(_, s)| s.device_id == orchestration.device_id());
+        let dumps = orchestration.state().dumps;
+        let open = |chats: &[(String, Session)]| -> usize {
+            chats.iter().map(|(chat, _)| waiting_on(&dumps, chat).len()).sum()
+        };
+        tracing::info!(
+            chats = here.len() + older.len(),
+            routes = open(&here) + open(&older),
+            "q&a: startup pass over turns that ended while this engine wasn't running"
+        );
         turns_ended(&orchestration, &rpc, here, Hosted::Here, false);
         turns_ended(&orchestration, &rpc, older, Hosted::Older, false);
     }
@@ -853,6 +878,16 @@ mod tests {
 
     fn one_line_of(text: &str, max: usize) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max).collect()
+    }
+
+    #[test]
+    fn a_title_is_not_an_answer() {
+        assert!(reads_as_title("Board Inbox And Next Columns"));
+        assert!(reads_as_title("Xeron Org Lines Count"));
+        assert!(!reads_as_title("Essentially never: cards land in Now."));
+        assert!(!reads_as_title("The Map reads that same setting, so it's correct"));
+        assert!(!reads_as_title("Friday."));
+        assert!(!reads_as_title("Yes"));
     }
 
     #[test]
