@@ -141,7 +141,15 @@ local answers: { [string]: (arg: any) -> any } = {
 		return settled(table.clone(me))
 	end,
 	["dictation.call"] = function(arg: any)
-		return settled(if arg.op == "status" then { installed = false, size = 670479942 } elseif arg.op == "inputs" then {} else nil)
+		return settled(if arg.op == "status"
+			then {
+				models = {
+					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, installed = true, languages = table.create(25, "") },
+					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, installed = false, slow = true, languages = table.create(14, "") },
+				},
+			}
+			elseif arg.op == "inputs" then {}
+			else nil)
 	end,
 	["account.rename"] = function(name: string)
 		local r = change(nil)

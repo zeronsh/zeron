@@ -80,8 +80,8 @@ impl Drop for DownloadJob {
 }
 
 struct Service {
-    /// The model's folder (none: the data folder isn't known).
-    dir: Option<PathBuf>,
+    /// `<data>/models`, a folder a model (none: the data folder isn't known).
+    models: Option<PathBuf>,
     session: Option<Box<dyn Recording>>,
     download: Option<DownloadJob>,
     deadline: Option<Instant>,
@@ -93,9 +93,9 @@ struct Service {
     levels_changed: bool,
 }
 impl Service {
-    fn new(dir: Option<PathBuf>) -> Self {
+    fn new(models: Option<PathBuf>) -> Self {
         Self {
-            dir,
+            models,
             session: None,
             download: None,
             deadline: None,
@@ -144,10 +144,12 @@ impl Service {
             self.state["phase"] = json!("finalizing");
         }
     }
-    fn dir(&self) -> Result<PathBuf, String> {
-        self.dir
-            .clone()
-            .ok_or_else(|| "Zeron's data folder isn't known".to_string())
+    /// The folder of the model `args` names (`model`, an id), else the default's.
+    fn dir(&self, args: &Json) -> Result<PathBuf, String> {
+        let models = zeron_voice::models();
+        let id = args["model"].as_str().filter(|id| models.iter().any(|m| m.id == *id));
+        let models_dir = self.models.as_ref().ok_or("Zeron's data folder isn't known")?;
+        Ok(models_dir.join(id.unwrap_or(&models[0].id)))
     }
     fn idle(&self) -> Result<(), String> {
         if self.needs_poll() || zeron_voice::busy() || DOWNLOADING.load(Ordering::Acquire) {
@@ -155,15 +157,21 @@ impl Service {
         }
         Ok(())
     }
+    /// The models on offer, the default first, and which are here.
     fn status(&self) -> Result<Json, String> {
-        Ok(json!({
-            "installed": zeron_voice::installed(&self.dir()?),
-            "name": zeron_voice::manifest().name,
-            "size": zeron_voice::download_size(),
-        }))
+        let models = self.models.as_ref().ok_or("Zeron's data folder isn't known")?;
+        let list: Vec<Json> = zeron_voice::models()
+            .into_iter()
+            .map(|m| {
+                json!({"id":m.id, "name":m.name, "size":m.size(), "languages":m.languages,
+                    "installed":m.installed(&models.join(&m.id)),
+                    "slow":m.cpu_slow && cfg!(not(target_os = "macos"))})
+            })
+            .collect();
+        Ok(json!({ "models": list }))
     }
     fn start(&mut self, args: &Json) -> Result<Json, String> {
-        let dir = self.dir()?;
+        let dir = self.dir(args)?;
         self.idle()?;
         // (The page says what to do about it: no words for the composer.)
         if !zeron_voice::installed(&dir) {
@@ -181,8 +189,9 @@ impl Service {
         self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
         Ok(self.state.clone())
     }
-    fn download(&mut self) -> Result<Json, String> {
-        let dir = self.dir()?;
+    fn download(&mut self, args: &Json) -> Result<Json, String> {
+        let dir = self.dir(args)?;
+        let total = zeron_voice::model_for(&dir).size();
         self.idle()?;
         if DOWNLOADING.swap(true, Ordering::AcqRel) {
             return Err("Another window is downloading the model".into());
@@ -200,11 +209,11 @@ impl Service {
         });
         self.download = Some(DownloadJob { cancel, events });
         self.state =
-            json!({"phase":"downloading", "bytes":0, "total":zeron_voice::download_size()});
+            json!({"phase":"downloading", "bytes":0, "total":total});
         Ok(self.state.clone())
     }
-    fn remove(&mut self) -> Result<(), String> {
-        let dir = self.dir()?;
+    fn remove(&mut self, args: &Json) -> Result<(), String> {
+        let dir = self.dir(args)?;
         self.idle()?;
         zeron_voice::unload();
         if dir.exists() {
@@ -283,38 +292,21 @@ impl Service {
     }
 }
 
-/// The draft a recording belongs to, as it was when it began. Catches an edit
-/// changed back before a script's effect runs, and IME composition.
+/// The draft a recording belongs to. Typing on in it is fine (the words
+/// land at the caret); it ends as the editor can't take them any more.
 struct EditorLease {
     editor: zgx::widgets::EditorHandle,
-    revision: u64,
-    selection: (usize, usize),
 }
 impl EditorLease {
+    /// None mid-composition (an IME's): a recording starts on settled text.
     fn new(editor: zgx::widgets::EditorHandle) -> Option<Self> {
-        if editor.is_read_only() {
+        if editor.is_read_only() || editor.editor.borrow().preedit().is_some() {
             return None;
         }
-        let revision = {
-            let model = editor.editor.borrow();
-            if model.preedit().is_some() {
-                return None;
-            }
-            model.revision()
-        };
-        let selection = editor.selection();
-        Some(Self {
-            editor,
-            revision,
-            selection,
-        })
+        Some(Self { editor })
     }
     fn valid(&self) -> bool {
-        let model = self.editor.editor.borrow();
         !self.editor.is_read_only()
-            && model.revision() == self.revision
-            && model.preedit().is_none()
-            && self.editor.selection() == self.selection
     }
 }
 
@@ -360,11 +352,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             std::thread::spawn(move || zeron_voice::retire_old_models(&models));
         });
     }
-    let dir = models.map(|m| m.join(zeron_voice::manifest().id));
+
     let me = Rc::new(Dictation {
         shared: host.shared("dictation", json_value(&json!({"phase":"idle"}))),
         levels: host.shared("dictation_levels", json_value(&json!([]))),
-        service: RefCell::new(Service::new(dir)),
+        service: RefCell::new(Service::new(models)),
         lease: RefCell::default(),
         wake,
     });
@@ -387,9 +379,9 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 }
                 Some("status") => me.service.borrow().status()?,
                 Some("start") => me.service.borrow_mut().start(&args)?,
-                Some("download") => me.service.borrow_mut().download()?,
+                Some("download") => me.service.borrow_mut().download(&args)?,
                 Some("remove") => {
-                    me.service.borrow_mut().remove()?;
+                    me.service.borrow_mut().remove(&args)?;
                     Json::Null
                 }
                 Some("stop") => {
@@ -575,21 +567,20 @@ mod tests {
         let mut s = Service::new(None);
         assert!(s.status().is_err());
         assert!(s.start(&json!({})).is_err());
-        assert!(s.download().is_err());
-        assert!(s.remove().is_err());
+        assert!(s.download(&json!({})).is_err());
+        assert!(s.remove(&json!({})).is_err());
     }
     #[test]
     fn dictation_without_the_model_asks_for_it_before_touching_the_microphone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Service::new(Some(dir.path().join(zeron_voice::manifest().id)));
-        assert_eq!(s.status().unwrap()["installed"], false);
+        let mut s = Service::new(Some(dir.path().to_owned()));
+        assert_eq!(s.status().unwrap()["models"][0]["installed"], false);
         assert_eq!(s.start(&json!({})).unwrap_err(), "no_model");
         assert!(s.session.is_none());
     }
-    #[test]
-    fn dictation_shortcut_key_held_past_its_modifier_never_types_over_the_words() {
-        use zgx::input::{InputEvent, Modifiers};
-        // Ops the scripts ask of the host: start answers as the host does.
+    /// The composer of ui/dictation_fixture.luau, with the host's dictation
+    /// played: the ops the scripts ask for, start answering as the host does.
+    fn fixture() -> (zgx_script::testing::TestApp, Rc<RefCell<Vec<String>>>) {
         let ops = Rc::new(RefCell::new(Vec::<String>::new()));
         let asked = ops.clone();
         let mut app = zgx_script::testing::TestApp::new(move |r| {
@@ -615,6 +606,12 @@ mod tests {
         });
         app.ui.scene.borrow_mut().resize(960., 700.);
         app.frames(30);
+        (app, ops)
+    }
+    #[test]
+    fn dictation_shortcut_key_held_past_its_modifier_never_types_over_the_words() {
+        use zgx::input::{InputEvent, Modifiers};
+        let (mut app, ops) = fixture();
         app.click("role:textbox \"Message\"");
         let (d, chord) = zgx_script::driver::parse_keys("cmd+d").unwrap();
         // A key as the window delivers it: the shortcut runs its command;
@@ -661,29 +658,41 @@ mod tests {
         assert_eq!(editor.editor.borrow().text().as_ref(), "你好 🌎d");
     }
     #[test]
-    fn dictation_lease_rejects_ime_and_edits_changed_back() {
-        let mut app = zgx_script::testing::TestApp::new(|r| {
-            zgx_script::ScriptHost::new(
-                r,
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dictation_fixture.luau"),
-            )
-        });
-        app.ui.scene.borrow_mut().resize(960., 700.);
-        app.frames(30);
-        assert_eq!(app.error(), None);
-        app.click("role:textbox \"Message\"");
+    fn dictation_typing_on_puts_the_words_at_the_caret_and_another_chat_drops_them() {
+        let (mut app, _) = fixture();
+        app.type_text("role:textbox \"Message\"", "Hello ");
         let editor = app.ui.focused_editor().unwrap();
         let lease = EditorLease::new(editor.clone()).unwrap();
+        let text = |e: &zgx::widgets::EditorHandle| e.editor.borrow().text().to_string();
+        // Listening, then typed on, an IME's composition included.
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.ui.dispatch(zgx::input::InputEvent::Text("there".into()));
         editor.set_composition("正在", None, &[]);
-        assert!(!lease.valid());
-        assert!(EditorLease::new(editor.clone()).is_none());
         editor.set_composition("", None, &[]);
-        let lease = EditorLease::new(editor.clone()).unwrap();
-        editor.paste("x");
-        editor.set_selection(0, 1);
-        editor.paste("");
-        assert_eq!(editor.editor.borrow().text().as_ref(), "");
-        assert!(!lease.valid(), "revision protects against edit-and-revert");
+        app.settle();
+        assert!(lease.valid());
+        editor.set_selection(5, 5);
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        assert_eq!(app.error(), None);
+        assert_eq!(text(&editor), "Hello你好 🌎 there");
+        // One undo takes the words back out, and only them.
+        app.keys("cmd+z");
+        assert_eq!(text(&editor), "Hello there");
+        // Another chat's draft: the words aren't for it.
+        assert!(app.host.run_command("begin"));
+        app.settle();
+        app.host.run_command("move");
+        app.settle();
+        app.host.run_command("final");
+        app.settle();
+        app.frames(3);
+        assert_eq!(text(&editor), "Hello there");
+        // Nor mid-composition does one start.
+        editor.set_composition("正在", None, &[]);
+        assert!(EditorLease::new(editor.clone()).is_none());
     }
 }
 

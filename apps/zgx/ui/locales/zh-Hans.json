@@ -2298,16 +2298,22 @@
       "dictation": {
         "label": "听写",
         "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
-        "needs_download": "开启后将下载 {total} MB 的语音模型。",
-        "downloading": "正在下载 · {done} / {total} MB。关闭以取消。"
+        "needs_download": "开启后将下载 {total} 的语音模型。",
+        "downloading": "正在下载 · {done} / {total}。关闭以取消。"
       },
       "shortcut": {
         "label": "快捷键",
         "description": "按住说话,松开转写。"
       },
       "model": {
-        "label": "语音模型",
-        "description": "{name} · {total} MB",
+        "title": "语音模型",
+        "about": "{size} · {n} 种语言",
+        "about_slow": "{size} · {n} 种语言 · 在这台电脑上较慢",
+        "mb": "{n} MB",
+        "gb": "{n} GB",
+        "download": "下载",
+        "use": "使用",
+        "in_use": "使用中",
         "remove": "移除"
       }
     }

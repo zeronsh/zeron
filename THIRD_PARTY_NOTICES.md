@@ -162,6 +162,8 @@ Attribution is retained in the pinned Zui dependency’s `NOTICE`.
 
 Parakeet Ultra model weights are by Moondream (post-trained from NVIDIA Parakeet TDT 0.6B v3) under CC BY 4.0. The optional download is handy-computer's Q8_0 GGUF conversion, pinned to revision `a1539be1b849ea7463b88343e5277b373d0c4ea9`, with SHA-256 verification. Original: https://huggingface.co/moondream/parakeet-ultra. Conversion: https://huggingface.co/handy-computer/parakeet-ultra-gguf. License: https://creativecommons.org/licenses/by/4.0/.
 
+Cohere Transcribe 03-2026 model weights are by Cohere under the Apache License 2.0. The optional download is handy-computer's Q5_K_M GGUF conversion, pinned to revision `7353b6040bdc1be9e5a3823d99d5fe12afe88264`, with SHA-256 verification. Original: https://huggingface.co/CohereLabs/cohere-transcribe-03-2026. Conversion: https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf. License: https://www.apache.org/licenses/LICENSE-2.0.
+
 Native runtime dependencies: transcribe.cpp 0.4.2 via transcribe-cpp/transcribe-cpp-sys (MIT), with the ggml, miniz and Silero VAD code it vendors (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for conversion provenance, changes, runtime and supported languages. Models are not included in the application bundle.
 
 ## Bezel thinking orbs

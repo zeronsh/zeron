@@ -21,6 +21,15 @@ pub struct Artifact {
     pub name: String,
     pub size: u64,
     pub sha256: String,
+    /// "language": the language-ID model a model that can't tell the
+    /// language itself is given. (None: the weights.)
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Where it comes from when not the model's own repository.
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
 }
 /// One model Zeron can download: pinned bytes, where they come from, what they speak.
 #[derive(serde::Deserialize, Clone)]
@@ -33,8 +42,11 @@ pub struct Manifest {
     pub source: String,
     pub license: String,
     pub languages: Vec<String>,
-    /// The first is the weights transcribe.cpp loads.
+    /// The weights (the first file) and what they need beside them.
     pub files: Vec<Artifact>,
+    /// Much slower where it runs on the CPU (Linux, Windows).
+    #[serde(default)]
+    pub cpu_slow: bool,
 }
 /// The models on offer, the default first.
 pub fn models() -> Vec<Manifest> {
@@ -44,14 +56,25 @@ pub fn models() -> Vec<Manifest> {
 pub fn manifest() -> Manifest {
     models().swap_remove(0)
 }
+/// The model a folder holds: the one its name is the id of (each lives in
+/// `<data>/models/<id>`), else the default.
+pub fn model_for(dir: &Path) -> Manifest {
+    let id = dir.file_name().and_then(|n| n.to_str());
+    let mut all = models();
+    let at = all
+        .iter()
+        .position(|m| Some(m.id.as_str()) == id)
+        .unwrap_or(0);
+    all.swap_remove(at)
+}
 pub fn download_size() -> u64 {
     manifest().size()
 }
 pub fn installed(dir: &Path) -> bool {
-    manifest().installed(dir)
+    model_for(dir).installed(dir)
 }
 pub fn download(dir: &Path, cancel: &AtomicBool, progress: impl FnMut(u64)) -> Result<()> {
-    manifest().download(dir, cancel, progress)
+    model_for(dir).download(dir, cancel, progress)
 }
 
 /// Models Zeron no longer offers, by folder.
@@ -96,7 +119,7 @@ impl Manifest {
             let result=async {
                 let mut response=tokio::select! {
                     _=cancelled(cancel)=>bail!("Download cancelled"),
-                    response=tokio::time::timeout(std::time::Duration::from_secs(30),client.get(format!("https://huggingface.co/{}/resolve/{}/{}",m.repository,m.revision,file.name)).send())=>response??.error_for_status()?,
+                    response=tokio::time::timeout(std::time::Duration::from_secs(30),client.get(format!("https://huggingface.co/{}/resolve/{}/{}",file.repository.as_ref().unwrap_or(&m.repository),file.revision.as_ref().unwrap_or(&m.revision),file.name)).send())=>response??.error_for_status()?,
                 };
                 let mut out=std::fs::File::create(&staging)?;let mut hash=Sha256::new();let mut size=0;
                 loop {
@@ -124,20 +147,39 @@ async fn cancelled(cancel: &AtomicBool) {
     }
 }
 
-pub struct Recognizer(transcribe_cpp::Session);
+pub struct Recognizer {
+    session: transcribe_cpp::Session,
+    /// For a model that can't tell the language itself: who tells it, and
+    /// the languages to choose from, the likeliest first.
+    language: Option<(transcribe_cpp::LangIdSession, Vec<String>)>,
+}
 impl Recognizer {
     pub fn load(dir: &Path) -> Result<Self> {
-        let m = manifest();
+        let m = model_for(dir);
         // Hashed once, at download: a load reads only what it needs.
         if !m.installed(dir) {
             bail!("Model is damaged. Remove it in Settings and download again.")
         }
         static LOGS: std::sync::Once = std::sync::Once::new();
         LOGS.call_once(transcribe_cpp::init_logging);
-        let model = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
+        let failed = |e: transcribe_cpp::Error| anyhow::anyhow!("Could not load {}: {e}", m.name);
+        let session = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
             .and_then(|model| model.session())
-            .map_err(|e| anyhow::anyhow!("Could not load {}: {e}", m.name))?;
-        Ok(Self(model))
+            .map_err(failed)?;
+        let language = match m
+            .files
+            .iter()
+            .find(|f| f.role.as_deref() == Some("language"))
+        {
+            Some(f) => Some((
+                transcribe_cpp::Model::load(dir.join(&f.name))
+                    .and_then(|model| model.langid_session())
+                    .map_err(failed)?,
+                spoken(sys_locale::get_locales(), &m.languages),
+            )),
+            None => None,
+        };
+        Ok(Self { session, language })
     }
     pub fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
         if !(8_000..=192_000).contains(&rate) {
@@ -150,11 +192,62 @@ impl Recognizer {
             return Ok(String::new());
         }
         let samples = resample::for_model(samples, rate)?;
-        self.0
-            .run(&samples, &transcribe_cpp::RunOptions::default())
+        let language = self.language(&samples);
+        self.session
+            .run(
+                &samples,
+                &transcribe_cpp::RunOptions {
+                    language,
+                    ..Default::default()
+                },
+            )
             .map(|r| r.text.trim().to_owned())
             .map_err(|_| anyhow::anyhow!("Could not transcribe this recording"))
     }
+    /// The language of the whole recording, among the person's own (their
+    /// system's, in its order) the model speaks: the first of them when
+    /// the recording doesn't say, or says another. (None: the model tells.)
+    fn language(&mut self, pcm: &[f32]) -> Option<String> {
+        let (detect, choices) = self.language.as_mut()?;
+        if choices.len() > 1 {
+            let allowed = transcribe_cpp::LangIdOptions {
+                allowed: Some(choices.clone()),
+            };
+            if let Ok(heard) = detect.run(pcm, &allowed)
+                && heard.allowed_mass >= 0.5
+                && let Some(code) = heard.code()
+            {
+                return Some(code.to_owned());
+            }
+        }
+        choices.first().cloned()
+    }
+    #[cfg(test)]
+    fn speaks(&mut self, languages: &[&str]) {
+        if let Some((_, choices)) = &mut self.language {
+            *choices = languages.iter().map(|l| l.to_string()).collect();
+        }
+    }
+}
+
+/// The languages of `locales` (BCP 47, preferred first) that `supported`
+/// has, once each; English when none.
+fn spoken(locales: impl IntoIterator<Item = String>, supported: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for locale in locales {
+        let code = locale
+            .split(['-', '_', '.'])
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if supported.contains(&code) && !out.contains(&code) {
+            out.push(code);
+        }
+    }
+    if out.is_empty() {
+        out.push("en".into());
+    }
+    out
 }
 
 /// Below this, a sample is silence: no microphone is that quiet while it hears a room.
@@ -544,6 +637,8 @@ impl Session {
                         || Capture::start(job.device.as_deref(), job.level.clone()),
                         || {
                             if cached.as_ref().is_none_or(|(path, _)| *path != job.dir) {
+                                // One model in memory at a time: the other goes first.
+                                cached = None;
                                 let model = Recognizer::load(&job.dir).context(
                                     "Could not load the model. Remove it in Settings and download again.",
                                 )?;
@@ -680,6 +775,17 @@ mod tests {
         }
         assert_eq!(manifest().name, "Parakeet Ultra");
         assert_eq!(download_size(), 740363168);
+        let dir = Path::new("models/cohere-transcribe-q5");
+        assert_eq!(model_for(dir).name, "Cohere Transcribe");
+        assert_eq!(
+            model_for(Path::new("models/elsewhere")).name,
+            "Parakeet Ultra"
+        );
+        // A model that can't tell the language hears the person's own.
+        let cohere = model_for(dir).languages;
+        let locales = ["fr-FR", "en_GB.UTF-8", "fr-CA", "uk-UA"].map(String::from);
+        assert_eq!(spoken(locales, &cohere), ["fr", "en"]);
+        assert_eq!(spoken(["uk-UA".to_string()], &cohere), ["en"]);
     }
     #[test]
     fn cancelled_download_never_establishes_readiness() {

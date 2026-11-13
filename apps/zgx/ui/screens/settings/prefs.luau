@@ -35,6 +35,8 @@ M.send_with = ui.persist("settings_send_with", "enter")
 -- by default), and the microphone it hears ("system" for the system's).
 M.dictation = ui.persist("settings_dictation", false)
 M.dictation_input = ui.persist("settings_dictation_input", "system")
+-- The speech model dictation uses, by id ("" for the default, the first).
+M.dictation_model = ui.persist("settings_dictation_model", "")
 M.escape_stops = ui.persist("settings_escape_stops", false)
 -- Whether closing a panel's last tab closes the panel too (off: it stays
 -- open on its home). On by default: an empty panel is one nobody's using.

@@ -1,7 +1,8 @@
 -- Dictation: hold the microphone or its shortcut, speak, let go, and the words
 -- land in the draft you can still edit (src/dictation.rs records and
--- transcribes; Settings → Voice turns it on). Anything that changes the draft
--- while it's listening throws the recording away, and Send waits for the words.
+-- transcribes; Settings → Voice turns it on). Typing on meanwhile is fine: the
+-- words land where the caret is when they arrive. Only another chat, or the
+-- draft sent or cleared, throws them away; Send waits for them.
 --
 --   local dictation = Dictation.bind(draft, key, blocked, "main")
 --   ds.Composer { dictation = dictation, … }
@@ -50,11 +51,9 @@ local send_pressed = false
 
 local function valid(p: any): boolean
 	if binding == nil or p.binding ~= binding or binding.key() ~= p.key or binding.blocked() then return false end
-	if binding.value:peek() ~= p.text then return false end
-	local el = binding.editor:peek()
-	if el == nil then return false end
-	local a, b = el:selection_bytes()
-	return a == p.a and b == p.b
+	-- (Sent, or cleared: not the draft the words were for.)
+	if p.text ~= "" and binding.value:peek() == "" then return false end
+	return binding.editor:peek() ~= nil
 end
 function M.cancel()
 	local capturing = pending ~= nil or M.active:peek()
@@ -121,7 +120,7 @@ local function start(combo: string?, target: string?)
 	from_shortcut:set(chord)
 	chord_key = if chord then string.lower(string.match(combo :: string, "([^+]+)$") or "") else nil
 	local device = prefs.dictation_input:peek()
-	ui.call("dictation.call", { op = "start", device = if device == "system" then nil else device, hold = combo, target = target }):after(function(r: any)
+	ui.call("dictation.call", { op = "start", device = if device == "system" then nil else device, model = prefs.dictation_model:peek(), hold = combo, target = target }):after(function(r: any)
 		starting = false
 		M.begin(r.serial, target)
 		if not held then op(if ui.now() - since < TAP then "cancel" else "stop") end
@@ -188,7 +187,7 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 			return ui.t(if p == "finalizing" then "chat.dictation.transcribing" elseif p == "starting" then "chat.dictation.starting" else "ds.composer.listening"):get()
 		end,
 		cancel = M.cancel,
-		on_change = function() if pending then M.cancel() end end,
+		on_change = function() if pending and not valid(pending) then M.cancel() end end,
 		on_caret = function() if pending and not valid(pending) then M.cancel() end end,
 		-- (Pressing Send takes the focus; that's no reason to stop.)
 		on_blur = function() if not send_pressed and pending then M.cancel() end end,
@@ -256,14 +255,18 @@ ui.effect(function()
 			op("cancel")
 			return
 		end
-		-- One paste is one native undo operation, selection replaced included.
-		local applied = p.binding.editor:peek():replace_selection(text)
+		-- At the caret as the draft stands now (typing on was fine). One
+		-- paste is one native undo operation, selection replaced included.
+		local el = p.binding.editor:peek()
+		local now = p.binding.value:peek()
+		local a, b = el:selection_bytes()
+		a, b = math.min(a or #now, b or #now), math.max(a or #now, b or #now)
+		local applied = el:replace_selection(text)
 		if applied and p.send then
 			-- (The paste reaches the draft's state after this effect. Retiring
 			-- the words waits too: it runs this effect again, which would stop
 			-- the timer.)
-			local a, b = math.min(p.a, p.b), math.max(p.a, p.b)
-			local expected = string.sub(p.text, 1, a) .. text .. string.sub(p.text, b + 1)
+			local expected = string.sub(now, 1, a) .. text .. string.sub(now, b + 1)
 			ui.after(0, function()
 				if binding == p.binding and binding.key() == p.key and not binding.blocked() and binding.value:peek() == expected then
 					binding.send()

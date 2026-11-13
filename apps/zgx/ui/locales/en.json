@@ -2298,16 +2298,22 @@
       "dictation": {
         "label": "Dictation",
         "description": "Hold the microphone, speak, and let go. You edit the words before sending.",
-        "needs_download": "Turning this on downloads a {total} MB speech model.",
-        "downloading": "Downloading · {done} of {total} MB. Turn off to cancel."
+        "needs_download": "Turning this on downloads a {total} speech model.",
+        "downloading": "Downloading · {done} of {total}. Turn off to cancel."
       },
       "shortcut": {
         "label": "Shortcut",
         "description": "Hold to talk, release to transcribe."
       },
       "model": {
-        "label": "Speech model",
-        "description": "{name} · {total} MB",
+        "title": "Speech models",
+        "about": "{size} · {n, plural, one {# language} other {# languages}}",
+        "about_slow": "{size} · {n, plural, one {# language} other {# languages}} · Slower on this computer",
+        "mb": "{n} MB",
+        "gb": "{n} GB",
+        "download": "Download",
+        "use": "Use",
+        "in_use": "In use",
         "remove": "Remove"
       }
     }
