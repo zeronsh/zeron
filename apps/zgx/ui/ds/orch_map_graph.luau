@@ -745,29 +745,36 @@ M.View = ui.component(function(props: {
 			if now_cost == 0 then
 				continue
 			end
-			-- (The first name in its way.)
-			local hit: { number }? = nil
-			for _, p in here_pts do
-				for _, b in taken do
-					if not hit and p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
-						hit = b
+			-- (Every name in its way.)
+			local hits: { { number } } = {}
+			for _, b in taken do
+				for _, p in here_pts do
+					if p[1] > b[1] - 4 and p[1] < b[3] + 4 and p[2] > b[2] - 4 and p[2] < b[4] + 4 then
+						table.insert(hits, b)
+						break
 					end
 				end
 			end
-			if not hit then
+			if #hits == 0 then
 				continue
+			end
+			local corners = {}
+			for _, hit in hits do
+				for _, cn in { { hit[1] - 10, hit[2] - 10 }, { hit[3] + 10, hit[2] - 10 }, { hit[1] - 10, hit[4] + 10 }, { hit[3] + 10, hit[4] + 10 } } do
+					table.insert(corners, cn)
+				end
 			end
 			local dx, dy = ln.bx - ln.ax, ln.by - ln.ay
 			local len = math.sqrt(dx * dx + dy * dy)
 			local tx, ty = dx / len, dy / len
 			local best_cost, best = now_cost, nil
-			for _, corner in { { hit[1] - 10, hit[2] - 10 }, { hit[3] + 10, hit[2] - 10 }, { hit[1] - 10, hit[4] + 10 }, { hit[3] + 10, hit[4] + 10 } } do
+			for _, corner in corners do
 				local wx, wy = corner[1], corner[2]
 				-- (Only a point well along the way: no hook back.)
 				local along = ((wx - ln.ax) * tx + (wy - ln.ay) * ty) / len
 				local aside_d = math.abs((wx - ln.ax) * -ty + (wy - ln.ay) * tx)
 				-- (A long dashed route may swing wider round a name.)
-				local wide = if ln.e.kind == "control" then 0.35 else 0.6
+				local wide = if ln.e.kind == "control" then 0.35 else 0.75
 				if along < 0.15 or along > 0.85 or aside_d > len * wide then
 					continue
 				end
@@ -781,7 +788,7 @@ M.View = ui.component(function(props: {
 				quad_pts(ln.ax, ln.ay, c1x, c1y, wx, wy, list)
 				quad_pts(wx, wy, c2x, c2y, ln.bx, ln.by, list)
 				-- (A detour costs a little for its length.)
-				local k = cost(list, ln) + (l1 + l2 - len) / 35
+				local k = cost(list, ln) + (l1 + l2 - len) / (if ln.e.kind == "control" then 35 else 70)
 				if k < best_cost then
 					best_cost, best = k, { wx, wy, c1x, c1y, c2x, c2y }
 				end
