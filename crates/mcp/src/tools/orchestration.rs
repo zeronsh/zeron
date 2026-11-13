@@ -325,7 +325,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: SCRATCHPAD_WRITE,
-            description: "Write the person's Scratchpad (Markdown). Without heading, replaces the whole text; with heading, replaces only that section's body (up to the next heading of its level; a missing section is added at the end). For ideas and notes the person wants kept, not work: writing here never routes or makes a card. Read it first so nothing of theirs is lost.",
+            description: "Write the person's Scratchpad (Markdown). Without heading, replaces the whole text; with heading, replaces only that section's body (up to the next heading of its level; a missing section is added at the end). Only when the person explicitly asks for something to go in their Scratchpad; writing here never routes or makes a card. Read it first so nothing of theirs is lost.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -337,7 +337,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: SCRATCHPAD_APPEND,
-            description: "Add to the end of the person's Scratchpad, as its own paragraph (Markdown). For an idea or note they want kept, not work: it never routes or makes a card.",
+            description: "Add to the end of the person's Scratchpad, as its own paragraph (Markdown). Only when the person explicitly asks for something to go in their Scratchpad; it never routes or makes a card.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "text": s("Markdown to add.") },
