@@ -1,5 +1,6 @@
--- Machines: each device as it works. Its head (its platform's mark, its
--- name, "this one", its CPU now as a rolling figure); its CPU over the last
+-- Machines: each device as it works. Its head (ds/orch_machine_head, as
+-- the Map shows it: its mark, name, platform, "this one", its CPU as a
+-- meter and a rolling figure); its CPU over the last
 -- six minutes as a live line (the bridge keeps the samples, `history`),
 -- marked where a thread on it started tests, a build, a merge or a push, or
 -- failed; its memory as a slim meter; and the threads running there, a
@@ -21,10 +22,9 @@ local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
 local Spark = require("@self/orch_spark")
-local Counter = require("@self/orch_counter")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
-local Block = require("@self/orch_block")
+local MachineHead = require("@self/orch_machine_head")
 
 export type Props = {
 	devices: () -> { any },
@@ -54,10 +54,6 @@ local function gb(bytes: number?): string
 	end
 	local g = bytes / 1e9
 	return if g >= 10 then string.format("%.0f", g) else string.format("%.1f", g)
-end
-
-local function platform_icon(p: string?): Icon.Name
-	return if p == "linux" then "remote-server" elseif p == "ios" or p == "android" then "smartphone" else "laptop"
 end
 
 -- A thread's row under its machine.
@@ -252,66 +248,15 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		return if l and l.cpu then l.cpu * 100 else nil
 	end
 
-	local head = ui.row {
-		w_full = true,
-		gap = "$space.2",
-		items = "center",
-		ui.div {
-			w = 24,
-			h = 24,
-			shrink = 0,
-			rounded = "$radius.md",
-			bg = "$hover",
-			items = "center",
-			justify = "center",
-			color = "$text.secondary",
-			Icon {
-				name = function(): Icon.Name
-					return platform_icon(row:get().platform)
-				end,
-				size = 14,
-			},
-		},
-		ui.text {
-			function(): string
-				return row:get().name or ""
-			end,
-			text_size = "$font.size.sm",
-			weight = "$font.weight.medium",
-			color = "$text.primary",
-			truncate = true,
-			min_w = 0,
-		},
-		ui.show(function(): boolean
+	-- Its head, as the Map's views have it (ds/orch_machine_head).
+	local head = MachineHead.MachineHead {
+		device = function(): any
+			return row:get()
+		end,
+		here = function(): boolean
 			return id() == props.here()
-		end, ui.text {
-			locale.t("ds.orch.map.here"),
-			class = "orch-machine-here",
-			shrink = 0,
-			text_size = "$font.size.xs",
-			color = "$text.tertiary",
-			-- (On the name's baseline.)
-			y = Block.baseline("$font.size.sm", "$font.size.xs"),
-		}),
-		ui.div { grow = 1 },
-		ui.switch(function(): string
-			return if online() then "on" else "off"
-		end, {
-			on = ui.row {
-				gap = "$space.1",
-				items = "baseline",
-				shrink = 0,
-				ui.text { locale.t("ds.orch.machines.cpu"), text_size = "$font.size.xs", color = "$text.tertiary", y = Block.baseline("$font.size.sm", "$font.size.xs") },
-				Counter {
-					value = cpu,
-					suffix = "%",
-					anchor = "end",
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-				},
-			},
-			off = ui.text { locale.t("ds.orch.map.offline"), text_size = "$font.size.xs", color = "$text.tertiary" },
-		}),
+		end,
+		load = load,
 	}
 
 	local line = Spark.Spark {

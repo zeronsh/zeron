@@ -17,7 +17,7 @@ local RollText = require("@self/roll_text")
 local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
 local Cells = require("@self/orch_cells")
-local Counter = require("@self/orch_counter")
+local MachineHead = require("@self/orch_machine_head")
 local Spark = require("@self/orch_spark")
 local Block = require("@self/orch_block")
 local model = require("@self/orch_map_model")
@@ -331,78 +331,22 @@ M.View = ui.component(function(props: {
 			opacity = function(): number
 				return if m().online == false then 0.55 else 1
 			end,
-			-- Its head.
-			ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "center",
-				ui.div {
-					w = 30,
-					h = 30,
-					shrink = 0,
-					rounded = "$radius.md",
-					bg = "$hover",
-					items = "center",
-					justify = "center",
-					color = "$text.secondary",
-					Icon { name = function(): any
-						return kit.platform_icon(m().device)
-					end, size = 16 },
-				},
-				ui.column {
-					grow = 1,
-					min_w = 0,
-					gap = 1,
-					ui.text {
-						function(): string
-							return m().name or ""
-						end,
-						truncate = true,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.semibold",
-						color = "$text.primary",
-					},
-					ui.text {
-						function(): string
-							local word = kit.platform_word(m().device)
-							return if m().here then `{word} · {locale.s("ds.orch.map.here")}` else word
-						end,
-						truncate = true,
-						text_size = "$font.size.xs",
-						color = "$text.tertiary",
-					},
-				},
-				ui.column {
-					shrink = 0,
-					items = "end",
-					gap = 1,
-					Counter {
-						value = function(): number?
-							local l = load()
-							return if m().online ~= false and l and l.cpu then l.cpu * 100 else nil
-						end,
-						suffix = "%",
-						text_size = "$font.size.md",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
-						anchor = "end",
-					},
-					ui.text {
-						function(): string
-							local l = load()
-							if not l or not l.mem_total then
-								return ""
-							end
-							return locale.s("ds.orch.machines.memory", { used = gb(l.mem_used), total = gb(l.mem_total) })
-						end,
-						tabular = true,
-						text_size = "$font.size.xs",
-						color = "$text.tertiary",
-					},
-				},
+			-- Its head, as every view has it.
+			MachineHead.MachineHead {
+				device = function(): any
+					return m().device
+				end,
+				here = function(): boolean
+					return m().here == true
+				end,
+				load = load,
 			},
-			-- Its CPU over the last minutes, as the host keeps it.
-			Spark.Spark {
+			-- Its CPU over the last minutes, as the host keeps it (once
+			-- there's a line to draw).
+			ui.show(function(): boolean
+				local l = load()
+				return l ~= nil and l.history ~= nil and #l.history > 1
+			end, Spark.Spark {
 				-- (In its own range, a little room round it: the figure above
 				-- says how much, the line how it moves.)
 				samples = function(): { Spark.Sample }
@@ -420,7 +364,14 @@ M.View = ui.component(function(props: {
 				end,
 				span = 300,
 				height = 30,
-			},
+				caption_end = function(): string
+					local l = load()
+					if not l or not l.mem_total then
+						return ""
+					end
+					return locale.s("ds.orch.machines.memory", { used = gb(l.mem_used), total = gb(l.mem_total) })
+				end,
+			}),
 			ui.show(function(): boolean
 				return (m().count or 0) == 0
 			end, ui.text { locale.t("ds.orch.map.idle"), text_size = "$font.size.xs", color = "$text.tertiary", pl = 4 }),

@@ -10,7 +10,9 @@ local model = require("@ds/orch_map_model")
 
 local M = {}
 
-M.MACHINE_H = 32
+-- (A machine's head: as the Topology's, ds/orch_map_layout HEAD_H.)
+M.MACHINE_H = 40
+M.MACHINE_Y = 6
 M.PROJECT_H = 22
 M.LANE_H = 26
 local MACHINE_H, PROJECT_H, LANE_H = M.MACHINE_H, M.PROJECT_H, M.LANE_H
