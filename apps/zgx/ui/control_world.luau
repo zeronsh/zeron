@@ -299,6 +299,56 @@ return function()
 		n.children = kids
 		sessions.now:set(n)
 	end }
+	-- A crew thread that ended its turn with a plain question for the person
+	-- (the engine raises it as an ask, `origin = "turn_end"`), idle since; its
+	-- card on the board. (The real case.)
+	ui.command { id = "fixture.turn_end_ask", title = "Fixture: a thread asks at its turn's end", run = function()
+		local t = os.time()
+		local n: any = table.clone(sessions.now:peek())
+		local kids: any = table.clone(n.children or {})
+		local list = table.clone(kids["orc-orch"] or {})
+		table.insert(list, {
+			id = "th-codex-slash", title = "Codex Slash Commands Missing", device = "dev-desk", parent = "orc-orch",
+			child_kind = "crew", updated = t - 720, created = t - 3000, agent = "openai", model = "gpt-5.5",
+		})
+		kids["orc-orch"] = list
+		n.children = kids
+		sessions.now:set(n)
+		republish(function(o)
+			local crew = table.clone(o.crew)
+			table.insert(crew, { chat_id = "th-codex-slash", orchestrator_id = "orc-orch", item_id = "it-codex-slash", role = "slash commands", released = false, joined = t - 3000 })
+			o.crew = crew
+			local items = table.clone(o.items)
+			table.insert(items, {
+				id = "it-codex-slash", orchestrator_id = "orc-orch", title = "Codex slash commands missing", detail = "", state = "active",
+				priority = "normal", threads = { "th-codex-slash" }, links = {}, order = 9, created = t - 3000, updated = t - 720,
+			})
+			o.items = items
+			local asks = table.clone(o.asks)
+			table.insert(asks, {
+				id = "ak-turn", from_chat = "th-codex-slash", orchestrator_id = "orc-orch", item_id = "it-codex-slash", kind = "question",
+				question = "Should I commit and open a PR against `zeron/zgx`, or merge it into `zeron/orchestrators`?",
+				options = { { label = "Commit and open a PR against zeron/zgx" }, { label = "Merge into zeron/orchestrators" } },
+				urgent = false, state = "open", created = t - 150, origin = "turn_end", turn_id = "msg-turn-1",
+			})
+			o.asks = asks
+		end)
+	end }
+	-- That ask gone stale unanswered: escalated, urgent.
+	ui.command { id = "fixture.turn_end_escalate", title = "Fixture: the thread's ask goes stale", run = function()
+		republish(function(o)
+			local asks = {}
+			for _, a in o.asks do
+				if a.id == "ak-turn" then
+					a = table.clone(a)
+					a.escalated = os.time()
+					a.urgent = true
+				end
+				table.insert(asks, a)
+			end
+			o.asks = asks
+		end)
+	end }
 	ui.command { id = "theme_light", title = "Light theme", run = function()
 		ui.theme.follow_system(false)
 		ui.theme.current:set("zeron-light")

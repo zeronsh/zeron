@@ -30,8 +30,9 @@ pub(super) const ROUTE: &str = "route";
 pub(super) const DUMP_DONE: &str = "dump_done";
 pub(super) const ORCHESTRATOR_CREATE: &str = "orchestrator_create";
 pub(super) const PROGRESS: &str = "progress";
+pub(super) const ANSWER_ASK: &str = "answer_ask";
 
-pub(super) const NAMES: [&str; 12] = [
+pub(super) const NAMES: [&str; 13] = [
     REPORT,
     ASK,
     BOARD,
@@ -44,6 +45,7 @@ pub(super) const NAMES: [&str; 12] = [
     DUMP_DONE,
     ORCHESTRATOR_CREATE,
     PROGRESS,
+    ANSWER_ASK,
 ];
 
 /// What the calling chat is to orchestration.
@@ -87,7 +89,7 @@ impl Role {
             ASK | PROGRESS => true,
             REPORT => matches!(self, Role::Crew { .. }),
             BOARD | ITEM_UPSERT => matches!(self, Role::Orchestrator { .. } | Role::BrainDump { .. }),
-            CREW_ADD | CREW_RELEASE | NOTES_SET => matches!(self, Role::Orchestrator { .. }),
+            CREW_ADD | CREW_RELEASE | NOTES_SET | ANSWER_ASK => matches!(self, Role::Orchestrator { .. }),
             WORLD | ROUTE | DUMP_DONE | ORCHESTRATOR_CREATE => matches!(self, Role::BrainDump { .. }),
             _ => true,
         }
@@ -171,6 +173,18 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "item": s("The board item it is about.")
                 },
                 "required": ["question"]
+            }),
+        },
+        ToolDef {
+            name: ANSWER_ASK,
+            description: "Answer an open ask of a thread in your crew ([Crew ask] gives its id) when your goal, rules and the person's earlier decisions settle it. Your answer goes to the thread as a message and the ask closes for the person. Leave anything that is really the person's call.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": s("The ask's id."),
+                    "answer": s("The answer: an option's words, or a short reply.")
+                },
+                "required": ["id", "answer"]
             }),
         },
         ToolDef {
@@ -352,6 +366,12 @@ struct ChatOnly {
 }
 
 #[derive(Deserialize)]
+struct AnswerArgs {
+    id: String,
+    answer: String,
+}
+
+#[derive(Deserialize)]
 struct NotesArgs {
     text: String,
 }
@@ -461,6 +481,10 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 "op": "ask", "kind": kind, "question": nonempty("question", &a.question)?,
                 "options": options, "urgent": a.urgent, "itemId": a.item,
             }))
+        }
+        ANSWER_ASK => {
+            let a: AnswerArgs = parse(args)?;
+            Ok(json!({ "op": "answerAsk", "id": nonempty("id", &a.id)?, "answer": nonempty("answer", &a.answer)? }))
         }
         ITEM_UPSERT => {
             let a: ItemArgs = parse(args)?;
@@ -820,7 +844,7 @@ impl Tools {
                 }
                 self.orchestrate(op).await
             }
-            REPORT | ASK | ITEM_UPSERT | NOTES_SET | DUMP_DONE => {
+            REPORT | ASK | ITEM_UPSERT | NOTES_SET | DUMP_DONE | ANSWER_ASK => {
                 let op = op_for(tool, args, &role)?;
                 self.orchestrate(op).await
             }
@@ -1279,7 +1303,7 @@ mod tests {
         assert_eq!(offered(&Role::Crew { orchestrator_id: "o".into() }), vec![REPORT, ASK, PROGRESS]);
         assert_eq!(
             offered(&Role::Orchestrator { id: "o".into() }),
-            vec![ASK, BOARD, ITEM_UPSERT, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS]
+            vec![ASK, BOARD, ITEM_UPSERT, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS, ANSWER_ASK]
         );
         assert_eq!(
             offered(&Role::BrainDump { id: "b".into() }),

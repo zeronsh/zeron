@@ -17,6 +17,8 @@ use zeron_proto::orchestration::{
 };
 use zeron_rpc::RpcError;
 
+use zeron_proto::turn_question::{Found, Verdict};
+
 use super::{ChatRole, Orchestration};
 use crate::rpc::EngineRpc;
 
@@ -26,39 +28,14 @@ pub(crate) const UNANSWERED_AFTER: TimeDelta = TimeDelta::minutes(20);
 pub(crate) const ASK_AGAIN: &str = "Ask again";
 pub(crate) const DISMISS: &str = "Dismiss";
 
-/// The question `text` ends on for the person, if it does: its last
-/// paragraph's question sentence, or a closing "say which / let me know".
-/// (A stand-in for `turn_question::detect` until that lands.)
-pub(crate) fn ends_on_question(text: &str) -> Option<String> {
-    let last = text
-        .trim()
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .last()?;
-    let line = last.lines().map(str::trim).filter(|l| !l.is_empty()).last()?;
-    let lower = line.to_lowercase();
-    let asks = line.trim_end_matches(['*', '_', '`', ')', ' ']).ends_with('?')
-        || ["say which", "let me know", "tell me which", "your call", "which do you want", "should i "]
-            .iter()
-            .any(|m| lower.contains(m));
-    if !asks {
-        return None;
+/// The question `text` ends on for the person, if it does
+/// ([`zeron_proto::turn_question::detect`]: a plain one or a borderline one;
+/// a message is read once, with no model run).
+pub(crate) fn ends_on_question(text: &str) -> Option<Found> {
+    match zeron_proto::turn_question::detect(text) {
+        Verdict::Ask(found) | Verdict::Borderline(found) => Some(found),
+        Verdict::None => None,
     }
-    // The sentence that asks, as the person reads it.
-    let sentences: Vec<&str> = line
-        .split_inclusive(['.', '!', '?'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    let question = sentences
-        .iter()
-        .rev()
-        .find(|s| s.contains('?'))
-        .or_else(|| sentences.last())
-        .copied()
-        .unwrap_or(line);
-    Some(one_line(question, 300))
 }
 
 /// The open route of the newest dump that targets `chat`: `(dump, route,
@@ -146,46 +123,26 @@ impl EngineRpc {
     pub(crate) fn brain_update(&self, sender: &str, body: &str) -> String {
         let orchestration = self.orchestration();
         orchestration.comms().say(CommKind::Message, sender, super::comms::YOU, &one_line(body, 140));
-        if let Some(question) = ends_on_question(body) {
-            self.ask_for(sender, &question, None);
+        if let Some(found) = ends_on_question(body) {
+            self.ask_for(sender, &found, None);
         }
         uuid::Uuid::new_v4().simple().to_string()
     }
 
-    /// Raise an ask from `chat` (answering it goes back to it), once per
-    /// question (an open one with the same words is reused). Linked to a
-    /// dump's route when it is that route's outcome.
-    pub(crate) fn ask_for(&self, chat: &str, question: &str, route: Option<(&str, &str)>) -> String {
+    /// Raise an ask from `chat` (answering it goes back to it) for `found`,
+    /// the way a turn's end does ([`super::turn_asks::raise`]): one per
+    /// question, an open one asked again updated, its crew's orchestrator
+    /// told. Linked to a dump's route when it is that route's outcome. Its id.
+    pub(crate) fn ask_for(&self, chat: &str, found: &Found, route: Option<(&str, &str)>) -> Option<String> {
         let orchestration = self.orchestration();
-        if let Some(open) = orchestration
-            .state()
-            .asks
-            .into_iter()
-            .find(|a| a.state == AskState::Open && a.from_chat == chat && a.question == question)
-        {
-            return open.id;
-        }
-        let ask = Ask {
-            id: uuid::Uuid::new_v4().simple().to_string(),
-            from_chat: chat.to_owned(),
+        let launch = super::turn_asks::launch_of_chat(orchestration, self, chat).unwrap_or_else(|| super::turn_asks::Launch {
             orchestrator_id: orchestration.crew_of(chat).map(|m| m.orchestrator_id),
-            item_id: None,
-            kind: AskKind::Question,
-            question: question.to_owned(),
-            options: Vec::new(),
-            urgent: false,
-            state: AskState::Open,
-            answer: None,
-            created_at: Utc::now(),
-            answered_at: None,
-            dump_id: route.map(|(d, _)| d.to_owned()),
-            route_id: route.map(|(_, r)| r.to_owned()),
-            quiet: false,
-        };
-        orchestration.workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
-        orchestration.comms().say(CommKind::Ask, chat, super::comms::YOU, question);
-        self.sync_cards_of(chat);
-        ask.id
+            ..Default::default()
+        });
+        match super::turn_asks::raise(orchestration, self, chat, None, found, &launch, route, Utc::now()) {
+            super::turn_asks::Plan::Create(ask) | super::turn_asks::Plan::Update(ask) => Some(ask.id),
+            super::turn_asks::Plan::Nothing => None,
+        }
     }
 
     /// An answer to an ask tied to a route: "Where should this go?" moves
@@ -348,6 +305,11 @@ pub(crate) fn chase_unanswered(orchestration: &Orchestration, rpc: &EngineRpc, n
                 dump_id: Some(dump.id.clone()),
                 route_id: Some(route.id.clone()),
                 quiet: true,
+                origin: Default::default(),
+                turn_id: None,
+                updated_at: None,
+                escalated_at: None,
+                answered_via: None,
             };
             orchestration.workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
             raised.push(ask.id);
@@ -396,13 +358,16 @@ mod tests {
 
     #[test]
     fn a_closing_question_is_found_and_a_statement_is_not() {
+        let q = |text: &str| ends_on_question(text).map(|f| f.question);
         let reply = "Inbox and Next are never written by anything.\n\nThey're dead columns. Wire them up or remove them? Say which.";
-        assert_eq!(ends_on_question(reply).as_deref(), Some("Wire them up or remove them?"));
-        assert_eq!(ends_on_question("All checks pass. Names get -1, -2.").as_deref(), None);
-        assert_eq!(ends_on_question("Should I also rename the old ones?").as_deref(), Some("Should I also rename the old ones?"));
-        assert_eq!(ends_on_question("Done. Let me know if you want the tests too").as_deref(), Some("Let me know if you want the tests too"));
+        let found = ends_on_question(reply).unwrap();
+        assert!(found.question.contains("Wire them up or remove them?"), "{}", found.question);
+        assert_eq!(found.options, ["Wire them up", "Remove them"]);
+        assert_eq!(q("All checks pass. Names get -1, -2."), None);
+        assert_eq!(q("Should I also rename the old ones?").as_deref(), Some("Should I also rename the old ones?"));
+        assert!(q("Done. Let me know if you want the tests too").is_some_and(|q| q.contains("Let me know if you want the tests too")));
         // A question in the middle, answered after, isn't the ending.
-        assert_eq!(ends_on_question("Why did it fail? The cache was stale.\n\nFixed it."), None);
-        assert_eq!(ends_on_question(""), None);
+        assert_eq!(q("Why did it fail? The cache was stale.\n\nFixed it."), None);
+        assert_eq!(q(""), None);
     }
 }

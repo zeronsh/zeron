@@ -563,5 +563,52 @@ test("orch board: in the Control room, an Inbox card carried into Now starts", f
 	app:frames(10)
 	expect(app:has('#control-board-now >> role:button "Rerun omarchy-update (needs sudo)"')).to_be(true)
 	expect(app:has('#control-board-now >> role:button "Rerun omarchy-update (needs sudo)" >> "Starting…"')).to_be(false)
+end)
+
+-- A thread that ended its turn asking the person (an open ask from it,
+-- control_world's `fixture.turn_end_ask`): idle, yet its card waits on them.
+test("orch board: a card whose thread asked the person says Waiting on you, until it's answered", function()
+	local app = mount("control_page_fixture.luau")
+	app:resize(1440, 2400)
+	app:frames(30)
+	app:command("fixture.turn_end_ask")
+	app:frames(20)
+	local card = '#control-board-now >> role:button "Codex slash commands missing"'
+	expect(app:has(`{card} >> .orch-card-word >> "Waiting on you"`)).to_be(true)
+	-- (Waiting since it asked.)
+	expect(app:has(`{card} >> .orch-card-clock >> "2m"`)).to_be(true)
+	-- Answered: its thread is at it again, or at rest; no word for the person.
+	app:click('#control-widget-needs >> role:button "Merge into zeron/orchestrators"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("answer:ak-turn:Merge into zeron/orchestrators")
+	expect(app:wait(`{card} >> .orch-card-word`, { gone = true, timeout_ms = 3000 })).to_be(true)
+	expect(app:has(`{card} >> "Waiting on you"`)).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("orch board cards: a thread's open ask outranks working and stalled, and goes once answered", function()
+	local app = cards()
+	local slash = '#cards-now >> role:button "Fix slash menu in Codex chats"'
+	local scroll = '#cards-now >> role:button "Scroll position resets on live re-renders"'
+	expect(app:has(`{slash} >> .orch-card-word >> "Stalled"`)).to_be(true)
+	expect(app:has(`{scroll} >> .orch-card-word >> "Working"`)).to_be(true)
+	local ask = { id = "ak-x", from_chat = "th-slash", kind = "question", question = "Commit, or merge?", options = {}, state = "open", origin = "turn_end", created = 1_800_040_000 - 60 }
+	local stale = table.clone(ask)
+	stale.id = "ak-y"
+	stale.from_chat = "th-scroll"
+	stale.escalated = 1_800_040_000
+	stale.urgent = true
+	app:set_state("cards_asks", { ["th-slash"] = ask, ["th-scroll"] = stale })
+	app:frames(10)
+	expect(app:has(`{slash} >> .orch-card-word >> "Waiting on you"`)).to_be(true)
+	expect(app:has(`{slash} >> "Stalled"`)).to_be(false)
+	expect(app:has(`{scroll} >> .orch-card-word >> "Waiting on you"`)).to_be(true)
+	-- Answered: back to how its thread stands.
+	local answered = table.clone(ask)
+	answered.state = "answered"
+	app:set_state("cards_asks", { ["th-slash"] = answered })
+	app:frames(10)
+	expect(app:has(`{slash} >> .orch-card-word >> "Stalled"`)).to_be(true)
+	expect(app:has(`{scroll} >> .orch-card-word >> "Working"`)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)

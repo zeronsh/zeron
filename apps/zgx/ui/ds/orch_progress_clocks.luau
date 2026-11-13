@@ -9,7 +9,9 @@ local M = {}
 
 export type Row = { [string]: any }
 
--- A row's state in Zeron's status words ("idle": none to show).
+-- A row's state in Zeron's status words ("idle": none to show). A thread
+-- that asked the person and waits on the answer (`asking`) awaits input,
+-- however its turn ended.
 local KIND: { [string]: string } = {
 	working = "working",
 	waiting = "waiting",
@@ -21,6 +23,9 @@ local KIND: { [string]: string } = {
 M.ACTIVE = { working = true, waiting = true, awaiting_input = true } :: { [string]: boolean }
 
 function M.kind(r: Row?): string
+	if r and r.asking == true then
+		return "input"
+	end
 	return (r and KIND[r.state or ""]) or "idle"
 end
 

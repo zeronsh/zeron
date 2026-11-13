@@ -72,3 +72,90 @@ test("an ask is dismissed from its row", function()
 	app:frames(5)
 	expect(calls(app)).to_contain("dismiss:ak-2")
 end)
+
+-- A thread that ended its turn with a plain question (an ask the engine
+-- raised from its turn's end, control_world's `fixture.turn_end_ask`).
+local PR = "Commit and open a PR against zeron/zgx"
+local MERGE = "Merge into zeron/orchestrators"
+
+local function asked(): any
+	local app = open()
+	app:command("fixture.turn_end_ask")
+	app:frames(20)
+	return app
+end
+
+test("a thread's question from its turn's end: the question, both options, a reply, whose and how long", function()
+	local app = asked()
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
+	-- (Its code spans drawn as code, their ticks gone.)
+	expect(app:has('#control-widget-needs >> ~"Should I commit and open a PR against zeron/zgx, or merge it"')).to_be(true)
+	expect(app:has('#control-widget-needs >> ~"`zeron/zgx`"')).to_be(false)
+	expect(app:has(`#control-widget-needs >> role:button "{PR}"`)).to_be(true)
+	expect(app:has(`#control-widget-needs >> role:button "{MERGE}"`)).to_be(true)
+	expect(app:has('#control-widget-needs >> role:textbox "Reply"')).to_be(true)
+	-- Which thread asked, how long it has waited, and a way into it.
+	expect(app:has('#control-widget-needs >> "Codex Slash Commands Missing"')).to_be(true)
+	expect(app:has('#control-widget-needs >> "2m"')).to_be(true)
+	expect(app:count('#control-widget-needs >> role:button "Open"')).to_be(2)
+	-- (An ask by the tool, with options: no reply line of its own.)
+	expect(app:count('#control-widget-needs >> role:textbox "Reply"')).to_be(1)
+	expect(app:error()).to_be_nil()
+end)
+
+test("a thread's turn-end ask: an option answers it with its words", function()
+	local app = asked()
+	app:click(`#control-widget-needs >> role:button "{MERGE}"`)
+	app:frames(2)
+	expect(calls(app)).to_contain(`answer:ak-turn:{MERGE}`)
+	expect(app:wait(`#control-widget-needs >> role:button "{MERGE}"`, { gone = true, timeout_ms = 3000 })).to_be(true)
+	expect(app:has('#control-widget-needs >> role:textbox "Reply"')).to_be(false)
+end)
+
+test("a thread's turn-end ask: a quick reply answers it", function()
+	local app = asked()
+	app:type('#control-widget-needs >> role:textbox "Reply"', "  Neither yet, run the tests first  ")
+	app:key("Enter")
+	app:frames(2)
+	expect(calls(app)).to_contain("answer:ak-turn:Neither yet, run the tests first")
+	expect(calls(app)).never.to_contain(`answer:ak-turn:{PR}`)
+	expect(app:wait('#control-widget-needs >> role:textbox "Reply"', { gone = true, timeout_ms = 3000 })).to_be(true)
+end)
+
+test("a thread's turn-end ask gone stale comes first, urgent", function()
+	local app = asked()
+	-- Asked after the decision was: under it, while neither is urgent.
+	local before, decision = top(app, `"{PR}"`), top(app, '"Side by side"')
+	expect(before ~= nil and decision ~= nil and decision < before).to_be(true)
+	expect(app:count('#control-widget-needs >> "Urgent"')).to_be(1)
+	app:command("fixture.turn_end_escalate")
+	app:frames(30)
+	-- Urgent now: over the decision, under the Moscow reboot (urgent, and
+	-- waiting longer).
+	local after, decision2, approve = top(app, `"{PR}"`), top(app, '"Side by side"'), top(app, '"Approve"')
+	expect(after ~= nil and decision2 ~= nil and after < decision2).to_be(true)
+	expect(approve ~= nil and after ~= nil and (approve :: number) < (after :: number)).to_be(true)
+	expect(app:count('#control-widget-needs >> "Urgent"')).to_be(2)
+end)
+
+test("waiting for you counts open asks, chats awaiting input and unread Q&A answers once", function()
+	local data = require("@ds/orch_data")
+	local now = {
+		orchestrators = {},
+		crew = {},
+		items = {},
+		dumps = {},
+		asks = {
+			{ id = "a1", from_chat = "c1", kind = "decision", question = "A or B?", options = {}, urgent = false, state = "open", created = 10, origin = "turn_end" },
+			{ id = "a2", from_chat = "c2", kind = "question", question = "?", options = {}, urgent = false, state = "open", created = 20, escalated = 40 },
+			{ id = "a3", from_chat = "c3", kind = "question", question = "?", options = {}, urgent = false, state = "answered", created = 5 },
+		},
+	}
+	local w = data.waiting_for_you(now, {})
+	expect(w.count).to_be(2)
+	expect(w.urgent).to_be(1)
+	expect(w.qa_unread).to_be(0)
+	local with_qa = data.waiting_for_you(now, {}, { unread = 3, waiting = 1 })
+	expect(with_qa.count).to_be(5)
+	expect(#with_qa.needs).to_be(2)
+end)

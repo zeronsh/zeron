@@ -2,6 +2,8 @@
 -- tests/orch_board.test.luau and pictures: a long title from before cards
 -- had short ones, short titles, todo progress real and none yet, urgent,
 -- high and normal, and cards working, stalled, blocked, in review and done.
+-- The open asks their threads raised are the state `cards_asks` (by chat),
+-- none at first.
 -- What it's asked noted in `calls`; a delete applied as the engine would.
 
 ui.theme.strict("warn")
@@ -52,6 +54,8 @@ local progress: { [string]: any } = {
 	["th-slash"] = { state = "working", started = ago(1020), last_step = ago(900), stalled = true, steps = { done = 0, total = 5 } },
 	["th-mig"] = { state = "awaiting_input", started = ago(4000), last_step = ago(600) },
 }
+
+local asks = ui.state("cards_asks", {} :: { [string]: any })
 
 local items = ui.state("cards_items", {
 	{
@@ -126,6 +130,9 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 			end,
 			thread_of = function(chat: string): any
 				return chats[chat]
+			end,
+			ask_of = function(chat: string): any
+				return asks:get()[chat]
 			end,
 			project_of = function(_chat: string): string?
 				return "zeron"

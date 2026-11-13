@@ -11,7 +11,7 @@
 use chrono::Utc;
 use serde_json::{Value, json};
 use zeron_proto::orchestration::{
-    Ask, AskState, CommKind, CrewMember, CrewPolicy, OrchestrateOp, Orchestrator, OrchestratorKind,
+    AnswerVia, Ask, AskOrigin, AskState, CommKind, CrewMember, CrewPolicy, OrchestrateOp, Orchestrator, OrchestratorKind,
     WorkItemPatch, seed_hue,
 };
 use zeron_proto::{ChatConfig, ChildKind, SandboxLevel, SessionStatus, agent_messages};
@@ -335,6 +335,11 @@ impl EngineRpc {
                     dump_id: None,
                     route_id: None,
                     quiet: Default::default(),
+                    origin: Default::default(),
+                    turn_id: None,
+                    updated_at: None,
+                    escalated_at: None,
+                    answered_via: None,
                 };
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
@@ -355,12 +360,26 @@ impl EngineRpc {
                     if ask.state != AskState::Open {
                         return Err(failed("That ask was already answered or dismissed"));
                     }
+                    if let Who::Agent { role: ChatRole::Orchestrator { id: mine }, .. } = who
+                        && !orchestrator_may_answer(&ask, mine, doc.crew_member(&ask.from_chat).as_ref())
+                    {
+                        return Err(failed("Only the person answers that ask"));
+                    }
                     ask.state = AskState::Answered;
                     ask.answer = Some(answer.clone());
                     ask.answered_at = Some(now);
+                    ask.answered_via = Some(match who {
+                        Who::Agent { .. } => AnswerVia::Orchestrator,
+                        _ => AnswerVia::Person,
+                    });
                     doc.upsert_ask(&ask);
                     Ok(ask)
                 })?;
+                // Who answered: the person, or (its crew's ask) an orchestrator.
+                let answerer = match who {
+                    Who::Agent { chat, .. } => chat.as_str(),
+                    _ => YOU,
+                };
                 // "Where should this go?" moves its route to the pick; "hasn't
                 // answered" asks again or lets it be. A thread's own question
                 // on a route goes back to it, below.
@@ -371,9 +390,13 @@ impl EngineRpc {
                 // One line each: an ask's text can't pass for another message.
                 let text =
                     zeron_proto::orchestration::prompt_text::answer_delivery(&ask.question, &answer);
+                let text = match who {
+                    Who::Agent { .. } => text.replacen("[Answer from you]", "[Answer from your orchestrator]", 1),
+                    _ => text,
+                };
                 deliver(self, &ask.from_chat, &text, None, When::Now)?;
                 orch.comms()
-                    .say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+                    .say(CommKind::Answer, answerer, &ask.from_chat, &answer);
                 self.sync_cards_of(&ask.from_chat);
                 Ok(json!({ "id": id }))
             }
@@ -733,9 +756,21 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             (Some(item), Some(owner)) if item_is_of(rpc, Some(item), owner) => Ok(()),
             _ => refuse("An ask names only a board item of your own orchestrator"),
         },
-        OrchestrateOp::AnswerAsk { .. } | OrchestrateOp::DismissAsk { .. } => {
-            refuse("Only the person answers an ask")
+        // An orchestrator answers its own crew's open turn-end asks (a
+        // [Crew ask]); an `ask` a thread raised itself is the person's.
+        // (Checked again where the answer is written.)
+        OrchestrateOp::AnswerAsk { id, .. } => {
+            let ask = orch.workspace().read_orchestration_with(|doc| doc.ask(id));
+            match (role, ask) {
+                (ChatRole::Orchestrator { id: mine }, Some(ask))
+                    if orchestrator_may_answer(&ask, mine, orch.crew_of(&ask.from_chat).as_ref()) =>
+                {
+                    Ok(())
+                }
+                _ => refuse("Only the person answers an ask (an orchestrator: its own crew's open turn-end ones)"),
+            }
         }
+        OrchestrateOp::DismissAsk { .. } => refuse("Only the person dismisses an ask"),
         OrchestrateOp::Dump { .. } => refuse("Only the person dumps"),
         OrchestrateOp::Route { .. } | OrchestrateOp::DumpDone { .. } => match role {
             ChatRole::BrainDump { .. } => Ok(()),
@@ -754,6 +789,16 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         tracing::info!(chat = %chat, %e, "orchestrate: an agent's op refused");
         e
     })
+}
+
+/// Whether orchestrator `mine` may answer `ask`: open, raised from a turn's
+/// end (not the `ask` tool), by a thread still in its crew (`member`).
+pub(crate) fn orchestrator_may_answer(ask: &Ask, mine: &str, member: Option<&CrewMember>) -> bool {
+    ask.state == AskState::Open
+        && ask.origin == AskOrigin::TurnEnd
+        && ask.orchestrator_id.as_deref() == Some(mine)
+        && ask.from_chat != mine
+        && member.is_some_and(|m| !m.released && m.orchestrator_id == mine)
 }
 
 /// Whether `who` may put `chat_id` in `orchestrator_id`'s crew. The person

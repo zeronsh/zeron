@@ -120,6 +120,11 @@ local history_opened = ui.state("control_history_opened", {} :: { [string]: bool
 local chats_now = ui.computed(function(): { [string]: any }
 	return data.chats(sessions.now:get())
 end)
+-- The open asks, by the chat that asked: a card whose thread asked waits on
+-- the person.
+local asks_now = ui.computed(function(): { [string]: any }
+	return data.open_asks(orchestration.now:get())
+end)
 
 local function world(): any
 	return {
@@ -510,6 +515,9 @@ local function board(): Node
 		thread_of = function(chat: string): any
 			return chats_now:get()[chat]
 		end,
+		ask_of = function(chat: string): any
+			return asks_now:get()[chat]
+		end,
 		-- (Whose a card is: the project its thread or orchestrator works in.)
 		project_of = function(chat: string): string?
 			local c = chats_now:get()[chat]
@@ -702,14 +710,17 @@ function tally.working(): number
 	local w = Progress.counts()
 	return w
 end
+-- What waits on the person (data.waiting_for_you): Needs you's rows alone
+-- (`needs`), or with the Q&A answers not read yet (`waiting`).
+local function waiting(): data.Waiting
+	return data.waiting_for_you(orchestration.now:get(), sessions.now:get(), QA.counts(qa_entries:get()))
+end
 function tally.needs(urgent: boolean?): number
-	local k = 0
-	for _, need in data.needs(orchestration.now:get(), sessions.now:get()) do
-		if not urgent or need.urgent then
-			k += 1
-		end
-	end
-	return k
+	local w = waiting()
+	return if urgent then w.urgent else #w.needs
+end
+function tally.waiting(): number
+	return waiting().count
 end
 M.tally = tally
 
@@ -1023,12 +1034,12 @@ local function head(): Node
 				},
 				ui.text {
 					function(): string
-						return locale.s("control.head.needs", { n = tally.needs() })
+						return locale.s("control.head.needs", { n = tally.waiting() })
 					end,
 					tabular = true,
 					text_size = "$font.size.sm",
 					color = function(): string
-						return if tally.needs() > 0 then "$zeron.status.input" else "$text.tertiary"
+						return if tally.waiting() > 0 then "$zeron.status.input" else "$text.tertiary"
 					end,
 				},
 			},

@@ -23,7 +23,8 @@
 //!                   space_id?, device_id?, waiting? } },
 //!       asks = { { id, from_chat, orchestrator_id?, item_id?, kind, question,
 //!                  options = { { label, detail? } }, urgent, state, answer?,
-//!                  created, answered? } },
+//!                  created, answered?, origin = "tool" | "turn_end", turn_id?,
+//!                  updated?, escalated?, answered_via? } },
 //!       dumps = { { id, text, state, routes = { { id, excerpt, span? = { from, to },
 //!                   target = { kind, id? }, intent, message, state,
 //!                   candidates = { target }, answer?, answer_full?, answered?,
@@ -562,6 +563,12 @@ fn ask_value(a: &Ask) -> Value {
         ("answer", opt_str(a.answer.as_deref())),
         ("created", secs(&a.created_at)),
         ("answered", opt(a.answered_at.as_ref(), secs)),
+        // A thread's question from its turn's end, not its `ask` tool.
+        ("origin", word(&a.origin)),
+        ("turn_id", opt_str(a.turn_id.as_deref())),
+        ("updated", opt(a.updated_at.as_ref(), secs)),
+        ("escalated", opt(a.escalated_at.as_ref(), secs)),
+        ("answered_via", opt(a.answered_via.as_ref(), word)),
     ])
 }
 
@@ -986,6 +993,30 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(text(item_value(&item).field("state")).as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn a_turn_end_ask_reads_with_its_origin_and_how_it_closed() {
+        let ask: Ask = serde_json::from_value(json!({
+            "id": "turn-c-m", "fromChat": "c", "kind": "decision", "question": "Should I A, or B?", "state": "answered",
+            "createdAt": iso(NOW - 3600), "origin": "turnEnd", "turnId": "m", "escalatedAt": iso(NOW - 1800),
+            "answeredAt": iso(NOW), "answeredVia": "thread",
+        }))
+        .unwrap();
+        let v = ask_value(&ask);
+        assert_eq!(text(v.field("origin")).as_deref(), Some("turn_end"));
+        assert_eq!(text(v.field("turn_id")).as_deref(), Some("m"));
+        assert_eq!(num(v.field("escalated")), Some((NOW - 1800) as f64));
+        assert_eq!(text(v.field("answered_via")).as_deref(), Some("thread"));
+        assert!(nil(v.field("updated")));
+        // One the `ask` tool raised: "tool", nothing else.
+        let tool: Ask = serde_json::from_value(json!({
+            "id": "a", "fromChat": "c", "kind": "question", "question": "?", "state": "open", "createdAt": iso(NOW),
+        }))
+        .unwrap();
+        let v = ask_value(&tool);
+        assert_eq!(text(v.field("origin")).as_deref(), Some("tool"));
+        assert!(nil(v.field("escalated")) && nil(v.field("answered_via")));
     }
 
     #[test]

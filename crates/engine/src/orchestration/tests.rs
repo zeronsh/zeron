@@ -1241,3 +1241,332 @@ async fn an_agents_crew_is_only_threads_it_started() {
     }
     core.sessions.shutdown().await;
 }
+
+// ── Turn-end asks ───────────────────────────────────────────────────────────
+
+/// The final message of thread f3d1b425 ("Codex Slash Commands Missing"),
+/// as it ended its turn: work done, then a decision for the person in plain
+/// text. It went back to the Brain dump as an ordinary message; nothing
+/// raised an ask.
+const CODEX_FINAL: &str = "The test helper `text()` turns nil into `\"\"`. The field really is nil, and the Luau side ignores `\"\"` either way. Fixing the assertion:\n\nAll green. Cleaning up the scratch build dir, then replying to Brain dump.\n\nI fixed the Codex `/` menu: a Codex chat now lists `/compact`, `/review` and Codex's skills, then Zeron's own commands. The change is tested but not committed, and the running app needs a rebuild to pick it up. I sent the same summary to Brain dump.\n\n**Cause.** The engine and Codex were fine. Queried live, the engine returns Codex's two commands and all its skills. The problem was in the zgx composer, in two places:\n1. **Wrong agent lookup.** The composer worked out which agent to ask only by finding the chat's model in the local model catalog. That lookup finds nothing for a Codex chat on the default model (no model set) or one hosted on another device. The result was \"no agent\", which means Zeron's commands only. Claude chats usually name a model the catalog lists, so they worked.\n2. **Skills kept out of `/`.** The \"Separate / commands\" setting is on by default for every agent, so Codex's skills appeared only under `$`. Claude Code doesn't hit this because it reports its skills as slash commands.\n\n**Fix.** It's on branch `fix/codex-slash-commands`, based on `zeron/zgx`, in the worktree `~/Documents/dev/zeron-wt-codex-slash`. Your local `main` is 423 commits behind upstream and isn't what the app runs, so I didn't base it there.\n- Each chat now also reports the agent its own settings record (`apps/zgx/src/chat.rs`). All four composers fall back to that agent when the catalog doesn't list the chat's model. The four are the chat page, the side lanes, and the same two in the zeron-v2 template.\n- Codex now lists its skills in `/` by default (`prefs.luau`). `$` still works, and the per-agent setting can turn this back off.\n\n**Tests:**\n- The new UI test fails without the fix and passes with it.\n- The full UI suite: 1358 passed, 1 failed. The failure (\"long messages open folded\") fails the same way without my changes.\n- The related Rust tests pass and lint is clean on the changed files.\n\n`/compact` and `/review` are the only Codex slash commands that work through Zeron. Codex's other built-in commands, like `/model` and `/status`, aren't available through `codex app-server`, and you have no custom prompts in `~/.codex/prompts`.\n\nShould I commit and open a PR against `zeron/zgx`, or merge it into `zeron/orchestrators`?";
+
+const CODEX_THREAD: &str = "f3d1b425-0de7-4b32-a511-b18ab99e7300";
+const CODEX_OPTIONS: [&str; 2] = ["Commit and open a PR against zeron/zgx", "Merge into zeron/orchestrators"];
+
+fn said(id: &str, role: zeron_doc::MessageRole, text: &str) -> zeron_doc::SessionMessageEntry {
+    zeron_doc::SessionMessageEntry {
+        id: id.into(),
+        role,
+        parts: vec![zeron_doc::MessagePart::Text { id: format!("{id}-t"), text: text.into() }],
+        created_at: chrono::Utc::now().timestamp_millis(),
+        device_id: REMOTE.into(),
+        status: Some(zeron_doc::MessageStatus::Complete),
+        continuation_of: None,
+        duration_ms: None,
+    }
+}
+
+fn push(core: &crate::EngineCore, chat: &str, id: &str, role: zeron_doc::MessageRole, text: &str) {
+    core.doc_host.open(chat).unwrap().doc().push_message(&said(id, role, text)).unwrap();
+}
+
+fn idle(chat: &str) -> zeron_proto::Session {
+    zeron_proto::Session {
+        last_completed_turn: Some("t".into()),
+        chat_id: chat.into(),
+        device_id: REMOTE.into(),
+        status: zeron_proto::SessionStatus::Idle,
+        started_at: None,
+        updated_at: chrono::Utc::now(),
+        last_turn_outcome: None,
+        terminal_activity: None,
+        running_subagents: 0,
+        background_tasks: vec![],
+        waiting: None,
+        activity: None,
+        todo: None,
+    }
+}
+
+async fn turn_ended(core: &crate::EngineCore, chat: &str) {
+    super::turn_asks::after_turn(&core.orchestration, &core.rpc_service(), chat, &idle(chat)).await;
+}
+
+fn asks_from(core: &crate::EngineCore, chat: &str) -> Vec<Ask> {
+    core.orchestration.state().asks.into_iter().filter(|a| a.from_chat == chat).collect()
+}
+
+/// The Codex thread in "Zeron fixes"'s crew, its turn just ended on its
+/// question. The orchestrator's id.
+async fn codex_thread(core: &crate::EngineCore) -> String {
+    let fixes = orchestrator(core, "Zeron fixes").await;
+    chat(core, CODEX_THREAD, "Codex Slash Commands Missing", None).await;
+    op(core, Caller::Local, json!({"op":"addToCrew","orchestratorId":fixes,"chatId":CODEX_THREAD}))
+        .await
+        .unwrap();
+    push(core, CODEX_THREAD, "u1", zeron_doc::MessageRole::User, "Codex chats show no slash commands. Fix it.");
+    push(core, CODEX_THREAD, "ba10a88f", zeron_doc::MessageRole::Assistant, CODEX_FINAL);
+    fixes
+}
+
+#[tokio::test]
+async fn the_codex_question_becomes_one_ask_and_the_quick_reply_closes_it() {
+    let (_temp, core) = core().await;
+    let fixes = codex_thread(&core).await;
+    turn_ended(&core, CODEX_THREAD).await;
+    // The same turn seen again: still one.
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    let ask = &asks[0];
+    assert_eq!((ask.state, ask.origin, ask.kind), (AskState::Open, AskOrigin::TurnEnd, AskKind::Decision));
+    assert_eq!(ask.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), CODEX_OPTIONS);
+    assert!(ask.question.starts_with("Should I commit and open a PR"), "{}", ask.question);
+    assert_eq!((ask.orchestrator_id.as_deref(), ask.turn_id.as_deref()), (Some(fixes.as_str()), Some("ba10a88f")));
+    // Its orchestrator got one turn with it, the question as data.
+    let told: Vec<_> = sent(&core, &fixes).into_iter().filter(|m| m.starts_with("[Crew ask]")).collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains(&ask.id) && told[0].contains("Merge into zeron/orchestrators"), "{}", told[0]);
+
+    // The person picks an option under Needs you.
+    op(&core, Caller::Local, json!({"op":"answerAsk","id":ask.id,"answer":CODEX_OPTIONS[0]})).await.unwrap();
+    let ask = &asks_from(&core, CODEX_THREAD)[0];
+    assert_eq!((ask.state, ask.answered_via), (AskState::Answered, Some(AnswerVia::Person)));
+    assert!(
+        sent(&core, CODEX_THREAD).iter().any(|m| m.starts_with("[Answer from you] Should I commit") && m.ends_with(CODEX_OPTIONS[0])),
+        "{:?}",
+        sent(&core, CODEX_THREAD)
+    );
+    // The thread's next turn does it: no new ask, nothing reopened.
+    push(&core, CODEX_THREAD, "u2", zeron_doc::MessageRole::User, "[Answer from you] … → Commit and open a PR against zeron/zgx");
+    push(&core, CODEX_THREAD, "a2", zeron_doc::MessageRole::Assistant, "Opened https://github.com/zeronsh/zeron/pull/1403 against `zeron/zgx`.");
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!((asks.len(), asks[0].state), (1, AskState::Answered));
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_reply_in_the_thread_closes_the_codex_ask() {
+    let (_temp, core) = core().await;
+    codex_thread(&core).await;
+    turn_ended(&core, CODEX_THREAD).await;
+    // The person answers in the thread itself (as they did).
+    push(&core, CODEX_THREAD, "804423c1", zeron_doc::MessageRole::User, "yes, please open a PR");
+    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD);
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!(asks.len(), 1);
+    assert_eq!(
+        (asks[0].state, asks[0].answered_via, asks[0].answer.as_deref()),
+        (AskState::Answered, Some(AnswerVia::Thread), Some("yes, please open a PR"))
+    );
+    // Its next turn ends without a question: still the one, answered.
+    push(&core, CODEX_THREAD, "65e388ba", zeron_doc::MessageRole::Assistant, "I opened the PR against `zeron/zgx`: https://github.com/zeronsh/zeron/pull/1403");
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!((asks.len(), asks[0].state), (1, AskState::Answered));
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_question_asked_again_updates_its_ask() {
+    let (_temp, core) = core().await;
+    codex_thread(&core).await;
+    turn_ended(&core, CODEX_THREAD).await;
+    let first = asks_from(&core, CODEX_THREAD)[0].clone();
+    // Woken by its build, it asks again in other words: the same ask.
+    push(&core, CODEX_THREAD, "a3", zeron_doc::MessageRole::Assistant, "The rebuild finished.\n\nStill need your call: should I open a PR against `zeron/zgx`, or merge into `zeron/orchestrators`?");
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    assert_eq!((asks[0].id.as_str(), asks[0].turn_id.as_deref()), (first.id.as_str(), Some("a3")));
+    assert!(asks[0].updated_at.is_some() && asks[0].question.starts_with("Still need your call"));
+    // A reply that didn't settle it, then the same question: reopened.
+    push(&core, CODEX_THREAD, "u4", zeron_doc::MessageRole::User, "what's the difference?");
+    super::turn_asks::on_reply(&core.orchestration, &core.rpc_service(), CODEX_THREAD);
+    assert_eq!(asks_from(&core, CODEX_THREAD)[0].state, AskState::Answered);
+    push(&core, CODEX_THREAD, "a4", zeron_doc::MessageRole::Assistant, "A PR goes to review first; a merge lands it now.\n\nShould I commit and open a PR against `zeron/zgx`, or merge it into `zeron/orchestrators`?");
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!((asks.len(), asks[0].state, asks[0].answered_via), (1, AskState::Open, None));
+    // Another question is another ask.
+    push(&core, CODEX_THREAD, "u5", zeron_doc::MessageRole::User, "open a PR");
+    push(&core, CODEX_THREAD, "a5", zeron_doc::MessageRole::Assistant, "Opened PR #1403.\n\nWant me to also delete the old worktree?");
+    turn_ended(&core, CODEX_THREAD).await;
+    assert_eq!(asks_from(&core, CODEX_THREAD).len(), 2);
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_later_turn_that_acts_on_the_ask_closes_it() {
+    let (_temp, core) = core().await;
+    codex_thread(&core).await;
+    turn_ended(&core, CODEX_THREAD).await;
+    // No reply, yet its next turn (a background build woke it) merged.
+    push(&core, CODEX_THREAD, "a6", zeron_doc::MessageRole::Assistant, "Nobody objected, so I merged it into `zeron/orchestrators` and rebuilt the app.");
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!(asks.len(), 1);
+    assert_eq!(
+        (asks[0].state, asks[0].answered_via, asks[0].answer.as_deref()),
+        (AskState::Answered, Some(AnswerVia::Action), Some(CODEX_OPTIONS[1]))
+    );
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_orchestrator_answers_only_its_own_crews_ask() {
+    let (_temp, core) = core().await;
+    let fixes = codex_thread(&core).await;
+    let other = orchestrator(&core, "Billing").await;
+    turn_ended(&core, CODEX_THREAD).await;
+    let id = asks_from(&core, CODEX_THREAD)[0].id.clone();
+    let answer = |who: &str| op(&core, agent(who), json!({"op":"answerAsk","id":id,"answer":CODEX_OPTIONS[1]}));
+    assert!(answer(&other).await.is_err(), "not its crew");
+    assert!(answer(CODEX_THREAD).await.is_err(), "not the asker");
+    assert!(op(&core, agent(&fixes), json!({"op":"dismissAsk","id":id})).await.is_err(), "only the person dismisses");
+    // "Control Room work stays local": within its goal, it answers.
+    answer(&fixes).await.unwrap();
+    let ask = &asks_from(&core, CODEX_THREAD)[0];
+    assert_eq!((ask.state, ask.answered_via), (AskState::Answered, Some(AnswerVia::Orchestrator)));
+    assert!(
+        sent(&core, CODEX_THREAD).iter().any(|m| m.starts_with("[Answer from your orchestrator]") && m.ends_with(CODEX_OPTIONS[1])),
+        "{:?}",
+        sent(&core, CODEX_THREAD)
+    );
+    assert!(answer(&fixes).await.is_err(), "once");
+    // An ask the thread raised itself is the person's, and so is a turn-end
+    // one once the thread left the crew.
+    let own = op(&core, agent(CODEX_THREAD), json!({"op":"ask","kind":"decision","question":"Deploy?"})).await.unwrap();
+    assert!(op(&core, agent(&fixes), json!({"op":"answerAsk","id":own,"answer":"yes"})).await.is_err(), "its ask tool's");
+    op(&core, Caller::Local, json!({"op":"dismissAsk","id":own})).await.unwrap();
+    push(&core, CODEX_THREAD, "u9", zeron_doc::MessageRole::User, "next");
+    push(&core, CODEX_THREAD, "a9", zeron_doc::MessageRole::Assistant, "Done. Want me to delete the old worktree?");
+    turn_ended(&core, CODEX_THREAD).await;
+    let late = asks_from(&core, CODEX_THREAD).into_iter().find(|a| a.turn_id.as_deref() == Some("a9")).unwrap().id;
+    op(&core, Caller::Local, json!({"op":"releaseFromCrew","chatId":CODEX_THREAD})).await.ok();
+    core.orchestration.workspace().write_orchestration(|doc| {
+        if let Some(mut m) = doc.crew_member(CODEX_THREAD) {
+            m.released = true;
+            doc.upsert_crew_member(&m);
+        }
+    });
+    assert!(op(&core, agent(&fixes), json!({"op":"answerAsk","id":late,"answer":"yes"})).await.is_err(), "released");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stale_ask_is_raised_once() {
+    let (_temp, core) = core().await;
+    codex_thread(&core).await;
+    turn_ended(&core, CODEX_THREAD).await;
+    let rpc = core.rpc_service();
+    let here = |_: &str| true;
+    let now = chrono::Utc::now();
+    assert!(super::turn_asks::escalate_with(&core.orchestration, &rpc, now, &here).is_empty(), "fresh");
+    let later = now + super::turn_asks::STALE_AFTER + chrono::Duration::minutes(1);
+    let elsewhere = |_: &str| false;
+    assert!(super::turn_asks::escalate_with(&core.orchestration, &rpc, later, &elsewhere).is_empty(), "its host raises it");
+    let raised = super::turn_asks::escalate_with(&core.orchestration, &rpc, later, &here);
+    assert_eq!(raised.len(), 1);
+    let ask = &asks_from(&core, CODEX_THREAD)[0];
+    assert!(ask.urgent && ask.escalated_at == Some(later) && ask.state == AskState::Open);
+    let much_later = later + chrono::Duration::hours(3);
+    assert!(super::turn_asks::escalate_with(&core.orchestration, &rpc, much_later, &here).is_empty(), "once");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_launched_threads_and_only_real_questions_raise_asks() {
+    let (_temp, core) = core().await;
+    // The person's own chat: theirs to read.
+    chat(&core, "plain", "Plain", None).await;
+    push(&core, "plain", "a", zeron_doc::MessageRole::Assistant, "Should I open a PR or merge it?");
+    turn_ended(&core, "plain").await;
+    assert!(asks_from(&core, "plain").is_empty());
+    // A thread the Brain dump started: its asks go to the person only.
+    op(&core, Caller::Local, json!({"op":"dump","text":"x"})).await.unwrap();
+    let brain = core.orchestration.state().orchestrators.into_iter().find(|o| o.kind == OrchestratorKind::BrainDump).unwrap().id;
+    chat(&core, "routed", "Routed", None).await;
+    core.rpc_service().mark_started_by("routed", &brain, None, None);
+    push(&core, "routed", "u", zeron_doc::MessageRole::User, "fix it");
+    push(&core, "routed", "a", zeron_doc::MessageRole::Assistant, "Fixed. Want me to open a PR?");
+    turn_ended(&core, "routed").await;
+    let asks = asks_from(&core, "routed");
+    assert_eq!(asks.len(), 1);
+    assert_eq!((asks[0].orchestrator_id.as_deref(), asks[0].options.len()), (None, 2));
+    assert!(!sent(&core, &brain).iter().any(|m| m.starts_with("[Crew ask]")));
+    // Nothing pending: a closer, or a question it answered itself.
+    push(&core, "routed", "u2", zeron_doc::MessageRole::User, "ok");
+    push(&core, "routed", "a2", zeron_doc::MessageRole::Assistant, "Pushed. Anything else?");
+    turn_ended(&core, "routed").await;
+    push(&core, "routed", "u3", zeron_doc::MessageRole::User, "why did CI fail?");
+    push(&core, "routed", "a3", zeron_doc::MessageRole::Assistant, "Why did it fail? The cache key ignored the target triple. Fixed.");
+    turn_ended(&core, "routed").await;
+    assert_eq!(asks_from(&core, "routed").len(), 1);
+    // A turn that asked through `ask` itself raises nothing more.
+    push(&core, "routed", "u4", zeron_doc::MessageRole::User, "next");
+    op(&core, agent("routed"), json!({"op":"ask","kind":"decision","question":"Deploy now?","options":[{"label":"Yes"},{"label":"No"}]}))
+        .await
+        .unwrap();
+    push(&core, "routed", "a4", zeron_doc::MessageRole::Assistant, "Ready. Should I deploy now?");
+    turn_ended(&core, "routed").await;
+    let asks = asks_from(&core, "routed");
+    assert_eq!(asks.iter().filter(|a| a.origin == AskOrigin::TurnEnd).count(), 1, "{asks:#?}");
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_borderline_end_goes_to_the_small_model() {
+    let (_temp, core) = core().await;
+    let fixes = orchestrator(&core, "Ops").await;
+    chat(&core, "crew", "Crew", None).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":fixes,"chatId":"crew"})).await.unwrap();
+    let says = std::sync::Arc::new(std::sync::Mutex::new(Some("{\"pending\": false}".to_owned())));
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let (says, calls) = (says.clone(), calls.clone());
+        core.orchestration.progress().set_note_fn(std::sync::Arc::new(move |_, _| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let said = says.lock().unwrap().clone();
+            Box::pin(async move { said })
+        }));
+    }
+    push(&core, "crew", "u", zeron_doc::MessageRole::User, "check the logs");
+    push(&core, "crew", "a", zeron_doc::MessageRole::Assistant, "Two restarts at 03:10. Is that the window you meant?");
+    turn_ended(&core, "crew").await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(asks_from(&core, "crew").is_empty(), "the model said nothing is pending");
+    // The model can't be reached: raised anyway, never lost.
+    *says.lock().unwrap() = None;
+    push(&core, "crew", "u2", zeron_doc::MessageRole::User, "and now?");
+    push(&core, "crew", "a2", zeron_doc::MessageRole::Assistant, "One more at 04:00. Is that the window you meant?");
+    turn_ended(&core, "crew").await;
+    assert_eq!(asks_from(&core, "crew").len(), 1);
+    // A plain decision never needs the model.
+    push(&core, "crew", "u3", zeron_doc::MessageRole::User, "ok");
+    push(&core, "crew", "a3", zeron_doc::MessageRole::Assistant, "Go/no-go on the restart?");
+    turn_ended(&core, "crew").await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_question_sent_to_the_brain_dump_and_ended_on_is_one_ask() {
+    let (_temp, core) = core().await;
+    codex_thread(&core).await;
+    // The thread sends its summary to the Brain dump (no route asked for
+    // it), then ends its turn on the same words, as f3d1b425 did.
+    core.rpc_service().brain_update(CODEX_THREAD, CODEX_FINAL);
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    assert_eq!(asks[0].options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), CODEX_OPTIONS);
+    turn_ended(&core, CODEX_THREAD).await;
+    let asks = asks_from(&core, CODEX_THREAD);
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    assert_eq!((asks[0].state, asks[0].turn_id.as_deref()), (AskState::Open, Some("ba10a88f")));
+    // The same message again: nothing new.
+    core.rpc_service().brain_update(CODEX_THREAD, CODEX_FINAL);
+    assert_eq!(asks_from(&core, CODEX_THREAD).len(), 1);
+    core.sessions.shutdown().await;
+}

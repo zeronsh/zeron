@@ -16,9 +16,10 @@
 -- quiet line under it. That line leads with whose it is (its
 -- orchestrator's hue, named in its tooltip) where cards say so, then only
 -- what adds something: its priority's word when urgent or high, how its
--- threads stand when that's worth a look (working, stalled, needs you,
--- failed), its todo's cells and figure once a step of it is done, and one
--- clock (how long it has worked, how long stalled, or how long since it
+-- threads stand when that's worth a look (waiting on you, where one of
+-- them asked the person and waits on the answer; working, stalled, needs
+-- you, failed), its todo's cells and figure once a step of it is done, and
+-- one clock (how long it has worked, how long stalled, or how long since it
 -- last moved while it waits), then its pull request. Its menu's "…" shows
 -- where the pointer rests. A card in Review or Done carries its outcome,
 -- two lines of it, all of it in a hover card. Each card is a plugin slot
@@ -45,6 +46,7 @@
 --     orchestrators = function() return state.orchestrators end,
 --     todo_of = fn(chat) -> { done, total, current? }?,
 --     thread_of = fn(chat) -> { title, status?, agent? }?,
+--     ask_of = fn(chat) -> Ask?, -- the open ask a thread raised, if any
 --     filter = state_or_fn,      -- an orchestrator's id: its items alone
 --     show_filter = true,        -- its chips over the board (the Control room)
 --     inbox = true,              -- an Inbox column first
@@ -123,6 +125,7 @@ export type Props = {
 	orchestrators: control.Live<{ Orchestrator }>?,
 	todo_of: ((chat: string) -> Todo?)?,
 	thread_of: ((chat: string) -> Thread?)?,
+	ask_of: ((chat: string) -> { [string]: any }?)?,
 	progress_of: ((chat: string) -> { [string]: any }?)?,
 	filter: control.Live<string?>?,
 	show_filter: boolean?,
@@ -271,6 +274,28 @@ local STARTING = { key = "orch.board.starting", ink = "$text.secondary" }
 local QUEUED = { key = "orch.board.queued", ink = "$text.tertiary" }
 -- Captured or queued, not started: Inbox's and Next's.
 local WAITING: { [string]: boolean } = { inbox = true, planned = true }
+-- One of its threads asked the person and waits on the answer (gone stale
+-- unanswered: in the warning's ink).
+local ASKED = { key = "orch.board.waiting_on_you", ink = "$zeron.status.input" }
+local ASKED_LONG = { key = "orch.board.waiting_on_you", ink = "$zeron.tone.warning.ink" }
+
+-- The open ask one of its threads raised (an escalated one first), if any.
+local function asked(item: Item, ask_of: ((string) -> { [string]: any }?)?): { [string]: any }?
+	if not ask_of then
+		return nil
+	end
+	local found: { [string]: any }? = nil
+	for _, chat in item.threads or {} do
+		local a = ask_of(chat)
+		if a and a.state == "open" then
+			if a.escalated ~= nil then
+				return a
+			end
+			found = found or a
+		end
+	end
+	return found
+end
 -- Its priority's word, where it says something.
 local PRIORITY_INK: { [string]: string } = { urgent = "$zeron.tone.danger.ink", high = "$zeron.tone.warning.ink" }
 
@@ -982,6 +1007,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return nil
 			elseif WAITING[it.state] and (it.waiting or "") ~= "" then
 				return QUEUED
+			end
+			local a = asked(it, props.ask_of)
+			if a then
+				return if a.escalated ~= nil then ASKED_LONG else ASKED
 			elseif stalled() then
 				return STALLED
 			end
