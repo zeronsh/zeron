@@ -271,6 +271,29 @@ M.ACTIVITY = {
 	delegating = "users-group-rounded",
 }
 
+-- A route's answer as one line: the engine's own (`answer`, condensed,
+-- with `answer_full` beside it), or, from an engine that sends the reply
+-- whole, its first sentence, its blocks' marks (headings, lists, quotes)
+-- left out; at most 160 characters.
+function M.answer_line(route: any): string
+	local a = route and route.answer
+	if type(a) ~= "string" or a == "" then
+		return ""
+	end
+	if type(route.answer_full) == "string" and route.answer_full ~= "" then
+		return a
+	end
+	local s = string.gsub(a, "\n%s*[#>*%-]+%s*", " ")
+	s = string.gsub(s, "^%s*[#>*%-]+%s*", "")
+	s = string.gsub(s, "%s+", " ")
+	-- (A sentence ends at its stop, and any marks closing round it.)
+	local first = string.match(s, "^(.-[%.!?][%*_`]*)%s") or s
+	if #first > 160 then
+		first = string.sub(first, 1, 157) .. "…"
+	end
+	return first
+end
+
 -- A todo's fraction, or nil.
 function M.todo_fraction(todo: any): number?
 	if type(todo) ~= "table" or type(todo.total) ~= "number" or todo.total <= 0 then

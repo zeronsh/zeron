@@ -16,6 +16,7 @@ local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
 local HoverCard = require("@self/hover_card")
+local Markdown = require("@self/markdown")
 
 export type Props = {
 	route: () -> any,
@@ -142,32 +143,28 @@ return function(props: Props): Node
 			line_height = "$font.line.sm",
 			color = "$text.secondary",
 		}),
+		-- The reply, whole, as the thread has it (rendered), scrolling past
+		-- its room.
 		ui.show(function(): boolean
-			local a = r().answer
+			local a = r().answer_full or r().answer
 			return type(a) == "string" and a ~= ""
-		end, ui.row {
+		end, ui.scroll {
+			class = "orch-part-answer",
 			w_full = true,
-			gap = "$space.2",
-			items = "start",
-			ui.div {
-				w = 2,
-				self = "stretch",
-				shrink = 0,
-				rounded = "$radius.full",
-				bg = "$border.strong",
-			},
-			ui.text {
-				function(): string
-					return r().answer or ""
-				end,
-				class = "orch-part-answer",
-				literal = true,
-				wrap = true,
-				grow = 1,
-				min_w = 0,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.primary",
+			max_h = ui.raw(220, "a hover card's room for a reply"),
+			fade = { 8, 8 },
+			fade_overflow = true,
+			ui.column {
+				w_full = true,
+				gap = "$space.2",
+				ui.div { w_full = true, h = 1, bg = "$border.subtle" },
+				Markdown {
+					text = function(): string
+						local rr = r()
+						return rr.answer_full or rr.answer or ""
+					end,
+					small = true,
+				},
 			},
 		}),
 		ui.show(function(): boolean

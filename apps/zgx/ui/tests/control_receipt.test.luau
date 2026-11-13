@@ -35,6 +35,8 @@ test("a question's answer comes back as a reply line, with a way into its thread
 	-- There without a click: the answer, quiet, under the chips.
 	expect(app:has('#control-capture >> .orch-answer >> ~"waiting on your approval"')).to_be(true)
 	expect(app:count("#control-capture >> .orch-answer")).to_be(1)
+	-- One line: the condensed answer, never the whole reply.
+	expect(app:has('#control-capture >> .orch-answer >> ~"wg show"')).to_be(false)
 	app:click('#control-capture >> .orch-answer-open')
 	app:frames(5)
 	expect(app:error()).to_be_nil()
@@ -184,11 +186,34 @@ test("a part's hover card: where it went, how it stands, what was sent, the answ
 	expect(app:has('#card-answered >> "Question"')).to_be(true)
 	expect(app:has('#card-answered >> "Answered"')).to_be(true)
 	expect(app:has('#card-answered >> ~"Did the Moscow node reboot cleanly?"')).to_be(true)
-	expect(app:has('#card-answered >> ~"waiting on your approval"')).to_be(true)
+	-- The whole reply, its markdown drawn (no raw marks).
+	expect(app:has('#card-answered >> .orch-part-answer >> ~"scheduled for 02:00 MSK"')).to_be(true)
+	expect(app:has('#card-answered >> .orch-part-answer >> ~"wg show"')).to_be(true)
+	expect(app:has('#card-answered >> .orch-part-answer >> ~"**"')).to_be(false)
 	app:click("#card-answered >> .orch-part-open")
 	app:frames(2)
 	expect(app:state("opened")).to_be("orchestrator:orc-vpn")
 	-- Unsure: no way in, its state said.
 	expect(app:has('#card-unsure >> "Unsure"')).to_be(true)
 	expect(app:has("#card-unsure >> .orch-part-open")).to_be(false)
+end)
+
+test("an answer's one line: the engine's own, or a whole reply's first sentence", function()
+	local data = require("@ds/orch_data")
+	expect(data.answer_line({ answer = "Short and `done`.", answer_full = "# Long\n\nall of it" })).to_be("Short and `done`.")
+	expect(data.answer_line({ answer = "## Status\n- **Yes.** It ran `cargo test` fine. More after." })).to_be("Status **Yes.**")
+	expect(data.answer_line({})).to_be("")
+end)
+
+test("the history: a row an earlier dump, opened in place", function()
+	local app = open()
+	app:click("#control-history-toggle")
+	app:frames(10)
+	expect(app:count(".control-history-row")).to_be(1)
+	expect(app:has(".control-history-receipt")).to_be(false)
+	app:click(".control-history-row")
+	app:frames(10)
+	expect(app:has('.control-history-receipt >> role:button "Unsure, Task, Unsure"')).to_be(true)
+	-- The newest stays where it was, above.
+	expect(app:has('#control-capture >> role:button "Exnomic VPN, Question, Answered"')).to_be(true)
 end)

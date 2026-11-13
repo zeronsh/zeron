@@ -31,6 +31,8 @@ local hue = require("@self/orch_hue")
 local data = require("@self/orch_data")
 local hold = require("@self/orch_hold")
 local PartCard = require("@self/orch_part_card")
+local IconButton = require("@self/icon_button").IconButton
+local Markdown = require("@self/markdown")
 
 export type Props = {
 	dump: () -> any,
@@ -585,15 +587,15 @@ return ui.component(function(props: Props): Node
 			return target_of(row:get())
 		end
 		local index = 0
-		for i, r in routes:peek() do
-			if r.id == row:peek().id then
+		for i, rr in routes:peek() do
+			if rr.id == row:peek().id then
 				index = i
 			end
 		end
 		return ui.row {
 			class = "orch-answer",
 			w_full = true,
-			h = 22,
+			h = 24,
 			gap = "$space.2",
 			items = "center",
 			tooltip = card(index),
@@ -617,45 +619,39 @@ return ui.component(function(props: Props): Node
 				min_w = 0,
 				max_w = 180,
 				shrink = 0,
-				text_size = "$font.size.xs",
+				text_size = "$font.size.sm",
 				weight = "$font.weight.medium",
 				color = "$text.secondary",
 			},
-			ui.text {
-				function(): string
-					return row:get().answer or ""
-				end,
-				class = "orch-answer-text",
-				literal = true,
-				truncate = true,
-				grow = 1,
-				min_w = 0,
-				text_size = "$font.size.sm",
-				color = "$text.primary",
-			},
+			-- Into its thread, beside its name.
 			ui.show(function(): boolean
 				local tg = t()
 				return tg.id ~= nil and tg.kind ~= "unsure"
-			end, ui.button {
+			end, IconButton {
 				class = "orch-answer-open",
+				icon = "arrow-up-right",
 				label = function(): string
 					return locale.s("ds.orch.receipt.open", { name = t().label })
 				end,
-				h = 20,
-				px = "$space.1",
-				gap = "$zeron.space.hair",
-				items = "center",
-				rounded = "$radius.sm",
-				shrink = 0,
-				bg = "#00000000",
-				hover = { bg = "$hover" },
+				size = "sm",
+				tone = "quiet",
 				on_click = function()
 					local tg = t()
 					props.on_open({ kind = tg.kind, id = tg.id })
 				end,
-				ui.text { locale.t("ds.orch.receipt.open_short"), text_size = "$font.size.xs", color = "$text.secondary" },
-				ui.div { color = "$text.tertiary", Icon { name = "arrow-up-right", size = 11 } },
 			}),
+			ui.column {
+				class = "orch-answer-text",
+				grow = 1,
+				min_w = 0,
+				Markdown {
+					text = function(): string
+						return data.answer_line(row:get())
+					end,
+					inline = true,
+					small = true,
+				},
+			},
 		}
 	end
 
