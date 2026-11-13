@@ -50,10 +50,6 @@ stub.op = function(_op: any): any
 		end
 	end }
 end
-local Machines = require("@ds/orch_map_machines")
-for id, line in sample.cpu do
-	Machines.seed(id, line)
-end
 
 local page = require("@app/screens/control/page")
 local OrchMap = require("@ds/orch_map")

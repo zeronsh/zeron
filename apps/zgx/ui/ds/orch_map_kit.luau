@@ -7,8 +7,12 @@
 --   kit.platform_icon(d)     a device's glyph
 --   kit.platform_word(d)     its platform, as the Map names it
 --   kit.since(t)             seconds since `t`, moving on with the clock
+--   kit.held(chat)           a thread's state and activity as shown, each
+--                            held 300 ms at least (ds/orch_hold; in a build)
 
 local status = require("@self/status")
+local hold = require("@self/orch_hold")
+local model = require("@self/orch_map_model")
 
 local M = {}
 
@@ -56,5 +60,29 @@ function M.platform_word(d: any): string
 end
 
 M.since = status.since
+
+-- A thread's state word and its activity (while it works) as shown: what
+-- it is, and what it does, each held 300 ms at least; the activity's label
+-- and time read live while its kind stands.
+function M.held(chat: () -> any): (() -> string, () -> any)
+	local shown = hold.value(function(): any
+		local c = chat()
+		local s = model.status_of(c)
+		local a = c and c.activity
+		return { status = s, kind = if s == "working" and a then a.kind else nil }
+	end)
+	local function st(): string
+		return shown().status
+	end
+	local function activity(): any
+		local k = shown().kind
+		if not k then
+			return nil
+		end
+		local a = (chat() or {}).activity
+		return if a and a.kind == k then a else { kind = k }
+	end
+	return st, activity
+end
 
 return M

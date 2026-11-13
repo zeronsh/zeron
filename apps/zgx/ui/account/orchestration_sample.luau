@@ -332,11 +332,10 @@ end
 --
 --   sample.fleet.projects     sessions.now projects
 --   sample.fleet.timeline     what orchestration.timeline:get() returns
---   sample.fleet.cpu          each device's recent CPU samples (oldest first)
 --   sample.fleet_at(t)        a copy with every time shifted so "now" is `t`
 do
-	local function crew_chat(id, title, device, project, parent, status, activity, todo, extra)
-		local c = {
+	local function crew_chat(id: string, title: string, device: string, project: string, parent: string, status: string?, activity: any, todo: any, extra: any?): any
+		local c: any = {
 			id = id, title = title, device = device, project = project, parent = parent, child_kind = "crew",
 			status = status, updated = ago(30), created = ago(5400), agent = "claude", model = "claude-opus-5-5",
 		}
@@ -351,8 +350,8 @@ do
 		end
 		return c
 	end
-	local function orch(id, name, hue, project, goal, extra)
-		local o = {
+	local function orch(id: string, name: string, hue: number, project: string?, goal: string, extra: any?): any
+		local o: any = {
 			id = id, kind = "standard", name = name, goal = goal, rules = "", crew_rules = "", notes = "", hue = hue,
 			crew = { devices = {} }, paused = false, archived = false, created = ago(86400), updated = ago(60), project = project,
 		}
@@ -421,8 +420,8 @@ do
 			activity = { kind = "thinking", label = "", since = ago(120) } },
 		{ id = "th-titlebar", title = "Linux titlebar toggle", device = "dev-desk", project = "p-zeron-desk", status = "done", updated = ago(26000), created = ago(30000), agent = "claude", model = "claude-opus-5-5" },
 	}
-	local function member(chat, o, item, extra)
-		local m = { chat_id = chat, orchestrator_id = o, item_id = item, role = "", released = false, joined = ago(5000) }
+	local function member(chat: string, o: string, item: string, extra: any?): any
+		local m: any = { chat_id = chat, orchestrator_id = o, item_id = item, role = "", released = false, joined = ago(5000) }
 		for k, v in extra or {} do
 			m[k] = v
 		end
@@ -442,7 +441,7 @@ do
 		member("th-tally-ci", "orc-tally", "it-ci"),
 		member("th-tally-docs", "orc-tally", "it-docs"),
 	}
-	local function item(id, o, title, state, order, threads)
+	local function item(id: string, o: string, title: string, state: string, order: number, threads: { string }): any
 		return { id = id, orchestrator_id = o, title = title, detail = "", state = state, priority = "normal", threads = threads, links = {}, order = order, created = ago(5000), updated = ago(300) }
 	end
 	local f_items = {
@@ -486,7 +485,7 @@ do
 		{ id = "cf-11", kind = "message", from = "orc-orch", to = "th-engine-flow", summary = "Merge engine-state first", at = ago(25) },
 	}
 	-- Each thread's last hour: from `at` on, its state and what it did.
-	local function lane(list)
+	local function lane(list: { any }): { any }
 		local out = {}
 		for _, e in list do
 			table.insert(out, { at = ago(e[1]), status = e[2], kind = e[3] })
@@ -504,7 +503,7 @@ do
 		},
 		["th-engine-flow"] = lane {
 			{ 3500, "working", "thinking" }, { 3200, "working", "editing" }, { 2200, "working", "testing" }, { 2000, "working", "editing" },
-			{ 1000, "working", "testing" }, { 820, "working", "editing" }, { 300, "working", "testing" }, { 140, "working", "editing" },
+			{ 1000, "working", "testing" }, { 820, "working", "merging" }, { 760, "working", "editing" }, { 300, "working", "testing" }, { 140, "working", "editing" },
 			{ 9, "working", "merging" },
 		},
 		["th-ui-control"] = lane {
@@ -530,7 +529,7 @@ do
 		["th-zgx-mem"] = lane { { 1500, "working", "reading" }, { 1100, "working", "running" }, { 600, "working", "reading" }, { 120, "working", "thinking" } },
 	}
 	-- Each device's CPU, a sample every five seconds for the last four minutes.
-	local function wave(base, swing, n, seed)
+	local function wave(base: number, swing: number, n: number, seed: number): { number }
 		local out = {}
 		for i = 1, n do
 			local v = base + swing * math.sin((i + seed) * 0.37) * math.cos((i + seed * 2) * 0.11) + swing * 0.35 * math.sin(i * 1.7 + seed)
@@ -538,7 +537,19 @@ do
 		end
 		return out
 	end
-	sample.fleet = {
+	-- (As the bridge keeps it: `history`, oldest first, ending on `cpu`.)
+	local swings: { [string]: { number } } = { ["dev-desk"] = { 0.18, 1 }, ["dev-mac"] = { 0.14, 4 }, ["dev-forge"] = { 0.12, 7 }, ["dev-cloud"] = { 0.14, 2 } }
+	for id, w in swings do
+		local l: any = (f_loads :: any)[id]
+		local line = wave(l.cpu, w[1], 60, w[2])
+		local off = l.cpu - line[#line]
+		local history = {}
+		for i, v in line do
+			table.insert(history, { at = NOW - (#line - i) * 5, cpu = math.clamp(v + off, 0.02, 0.99) })
+		end
+		l.history = history
+	end
+	(sample :: any).fleet = {
 		NOW = NOW,
 		now = { state = "ready", orchestrators = f_orchestrators, crew = f_crew, items = f_items, asks = f_asks, dumps = {} },
 		loads = f_loads,
@@ -547,17 +558,11 @@ do
 		projects = f_projects,
 		chats = f_chats,
 		timeline = f_timeline,
-		cpu = {
-			["dev-desk"] = wave(0.62, 0.18, 48, 1),
-			["dev-mac"] = wave(0.4, 0.14, 48, 4),
-			["dev-forge"] = wave(0.78, 0.12, 48, 7),
-			["dev-cloud"] = wave(0.28, 0.12, 48, 2),
-		},
 	}
 end
 
 function sample.fleet_at(t: number)
-	local copy = shifted(sample.fleet, t - NOW)
+	local copy = shifted((sample :: any).fleet, t - NOW)
 	copy.NOW = t
 	return copy
 end

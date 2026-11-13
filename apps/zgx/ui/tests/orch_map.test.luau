@@ -39,7 +39,7 @@ end
 
 -- The fleet as the page hands it to the Map.
 local function world(): any
-	local f = sample.fleet
+	local f = (sample :: any).fleet
 	local sessions_now = { chats = {}, children = {} }
 	for _, c in f.chats do
 		table.insert(sessions_now.chats, c)
@@ -48,7 +48,7 @@ local function world(): any
 end
 
 local function title_of(id: string): string
-	for _, c in sample.fleet.chats do
+	for _, c in (sample :: any).fleet.chats do
 		if c.id == id then
 			return c.title
 		end
@@ -298,14 +298,18 @@ test("a thread's activity shows 300 ms at least, then the latest", function()
 	local app = open()
 	local building = '#control-widget-map >> .orch-pill "Engine: orchestration state, Building"'
 	local merging = '#control-widget-map >> .orch-pill "Engine: orchestration state, Merging"'
-	-- (Testing has shown long enough.)
+	-- (Testing has shown long enough; then a frame is a 60th of a second.)
 	app:wait("#never-there", { timeout_ms = 400 })
 	app:command("fixture.flicker")
-	expect(app:wait(building, { timeout_ms = 1000 })).to_be(true)
-	-- Merging came 60 ms after: held behind Building, then shown.
-	expect(app:wait(merging, { timeout_ms = 180 })).to_be(false)
+	app:frames(2)
 	expect(app:has(building)).to_be(true)
-	expect(app:wait(merging, { timeout_ms = 2000 })).to_be(true)
+	-- Merging came 60 ms after: held behind Building for its 300 ms…
+	app:frames(12)
+	expect(app:has(building)).to_be(true)
+	expect(app:has(merging)).to_be(false)
+	-- …then shown.
+	app:frames(12)
+	expect(app:has(merging)).to_be(true)
 end)
 
 test("the model puts each thread on its machine, by project", function()

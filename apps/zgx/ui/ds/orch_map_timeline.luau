@@ -20,8 +20,7 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
-local parts = require("@self/orch_map_parts")
-local model = require("@self/orch_map_model")
+local Counter = require("@self/orch_counter")
 
 local TOP_H = 34
 local AXIS_H = 34
@@ -261,13 +260,15 @@ M.View = ui.component(function(props: {
 				min_w = 0,
 			},
 			ui.div { grow = 1 },
-			parts.Counter {
-				value = function(): any
+			Counter {
+				value = function(): number?
 					local l = load()
-					return if l and l.cpu then `{math.floor(l.cpu * 100 + 0.5)}%` else nil
+					return if l and l.cpu then l.cpu * 100 else nil
 				end,
+				suffix = "%",
 				text_size = "$font.size.xs",
 				color = "$text.secondary",
+				anchor = "end",
 			},
 		}
 	end
@@ -302,13 +303,8 @@ M.View = ui.component(function(props: {
 		local function c(): any
 			return props.chat(row:get().id) or {}
 		end
-		local function st(): string
-			return model.status_of(c())
-		end
-		local function activity(): any
-			local a = c().activity
-			return if st() == "working" and a then a else nil
-		end
+		-- (Its state and activity held 300 ms at least.)
+		local st, activity = kit.held(c)
 		return ui.button {
 			class = if (row:peek().thread or {}).kind == "crew" then "orch-tl-lane orch-pill" else "orch-tl-lane",
 			label = function(): string

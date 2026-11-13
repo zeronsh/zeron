@@ -11,8 +11,8 @@
 --   Machines   a block a machine: its load, and the threads it runs, by
 --              project and orchestrator (ds/orch_map_machines)
 --
--- A thread's state and activity show for 300 ms at least: one that
--- changes sooner is held, then the latest wins.
+-- A thread's state and activity show for 300 ms at least (ds/orch_hold):
+-- one that changes sooner is held, then the latest wins.
 --
 --   Map {
 --     world = function() return { now, chats, devices, projects?, loads, here } end,
@@ -29,7 +29,6 @@
 -- device's id.
 
 local locale = require("@self/locale")
-local parts = require("@self/orch_map_parts")
 local Topology = require("@self/orch_map_topology")
 local Timeline = require("@self/orch_map_timeline")
 local Machines = require("@self/orch_map_machines")
@@ -101,24 +100,7 @@ end
 M.Map = ui.component(function(props: Props): Node
 	local view = props.view or ui.use_state(M.DEFAULT)
 
-	-- Each chat as shown: its state and activity held 300 ms at least.
-	local holder = parts.Hold(300)
-	local held = ui.use_state({} :: { [string]: any })
-	ui.effect(function()
-		holder.wake:get()
-		local chats = props.world().chats or {}
-		local out = {}
-		for id, c in chats do
-			local a = c.activity
-			out[id] = holder(id, `{c.status or ""}|{(a and a.kind) or ""}`, c)
-		end
-		held:set(out)
-	end)
 	local function chat(id: string): any
-		local h = held:get()[id]
-		if h then
-			return h
-		end
 		return (props.world().chats or {})[id]
 	end
 	local function timeline(): { [string]: { any } }

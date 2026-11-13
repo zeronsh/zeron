@@ -8,7 +8,6 @@
 -- shortest column taking the next.
 --
 --   Machines { world, chat, on_open_chat, on_open_orchestrator }
---   Machines.seed(device_id, cpu_samples)   (fixtures: a line to start from)
 
 local Icon = require("@self/icon")
 local status = require("@self/status")
@@ -17,24 +16,30 @@ local material = require("@self/material")
 local RollText = require("@self/roll_text")
 local hue = require("@self/orch_hue")
 local kit = require("@self/orch_map_kit")
-local parts = require("@self/orch_map_parts")
+local Cells = require("@self/orch_cells")
+local Counter = require("@self/orch_counter")
+local Spark = require("@self/orch_spark")
 local model = require("@self/orch_map_model")
 
 local M = {}
 
--- Each device's CPU, kept from the samples as they come (the last four
--- minutes at one every five seconds), for every Map shown.
-local KEEP = 48
-local history = ui.state("orch_map_cpu", {} :: { [string]: { number } })
-local last_at: { [string]: number } = {}
-
-function M.seed(id: string, samples: { number })
-	history:set_key({ id }, table.clone(samples))
-end
-
 local MIN_W = 300
 local GAP = 16
 local ROW_H = 28
+
+-- A CPU line's range to draw it in: its own, padded, a fifth at least.
+local function range_of(l: any): (number, number)
+	local low, high = 1, 0
+	for _, s in (l and l.history) or {} do
+		low = math.min(low, s.cpu)
+		high = math.max(high, s.cpu)
+	end
+	if high < low then
+		return 0, 1
+	end
+	local lo = math.max(0, low - 0.08)
+	return lo, math.min(1, math.max(high + 0.08, lo + 0.2))
+end
 
 local function gb(bytes: number?): string
 	if not bytes then
@@ -75,22 +80,6 @@ M.View = ui.component(function(props: {
 	on_open_orchestrator: (id: string) -> (),
 }): Node
 	local width = ui.use_state(720)
-	-- Each new sample onto its device's line.
-	ui.effect(function()
-		local loads = props.world().loads or {}
-		for id, l in loads do
-			if l.cpu and l.at and last_at[id] ~= l.at then
-				last_at[id] = l.at
-				local line = table.clone(history:peek()[id] or {})
-				table.insert(line, l.cpu)
-				while #line > KEEP do
-					table.remove(line, 1)
-				end
-				history:set_key({ id }, line)
-			end
-		end
-	end)
-
 	local fleet = ui.computed(function(): model.Fleet
 		return model.fleet(props.world())
 	end)
@@ -134,13 +123,8 @@ M.View = ui.component(function(props: {
 		local function c(): any
 			return props.chat(line:get().id) or {}
 		end
-		local function st(): string
-			return model.status_of(c())
-		end
-		local function activity(): any
-			local a = c().activity
-			return if st() == "working" and a then a else nil
-		end
+		-- (Its state and activity held 300 ms at least.)
+		local st, activity = kit.held(c)
 		local is_orch = line:peek().kind == "orchestrator"
 		return ui.button {
 			class = if line:peek().kind == "crew" then "orch-mc-row orch-pill" elseif is_orch then "orch-mc-row orch-node" else "orch-mc-row",
@@ -241,7 +225,7 @@ M.View = ui.component(function(props: {
 			ui.show(function(): boolean
 				local td = c().todo
 				return td ~= nil and (td.total or 0) > 0
-			end, parts.Cells {
+			end, Cells {
 				done = function(): number
 					return (c().todo or {}).done or 0
 				end,
@@ -254,6 +238,7 @@ M.View = ui.component(function(props: {
 				current = function(): boolean
 					return st() == "working"
 				end,
+				cell = 3,
 				h = 9,
 			}),
 			ui.text {
@@ -387,20 +372,16 @@ M.View = ui.component(function(props: {
 					shrink = 0,
 					items = "end",
 					gap = 1,
-					parts.Counter {
-						value = function(): any
-							if m().online == false then
-								return locale.s("ds.orch.map.offline")
-							end
+					Counter {
+						value = function(): number?
 							local l = load()
-							return if l and l.cpu then `{math.floor(l.cpu * 100 + 0.5)}%` else nil
+							return if m().online ~= false and l and l.cpu then l.cpu * 100 else nil
 						end,
+						suffix = "%",
 						text_size = "$font.size.md",
 						weight = "$font.weight.medium",
-						color = function(): string
-							local l = load()
-							return if l and l.cpu and l.cpu > 0.85 then "$warning" else "$text.primary"
-						end,
+						color = "$text.primary",
+						anchor = "end",
 					},
 					ui.text {
 						function(): string
@@ -416,11 +397,25 @@ M.View = ui.component(function(props: {
 					},
 				},
 			},
-			parts.Spark {
-				values = function(): { number }
-					return history:get()[id] or {}
+			-- Its CPU over the last minutes, as the host keeps it.
+			Spark.Spark {
+				-- (In its own range, a little room round it: the figure above
+				-- says how much, the line how it moves.)
+				samples = function(): { Spark.Sample }
+					local l = load()
+					local lo, hi = range_of(l)
+					local out = {}
+					for _, s in (l or {}).history or {} do
+						table.insert(out, { at = s.at, v = (s.cpu - lo) / (hi - lo) })
+					end
+					return out
 				end,
-				h = 30,
+				now = function(): number
+					local l = load()
+					return (l and l.at) or os.time()
+				end,
+				span = 300,
+				height = 30,
 			},
 			ui.show(function(): boolean
 				return (m().count or 0) == 0
