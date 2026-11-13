@@ -206,3 +206,115 @@ fn orchestration_board_drop_in_the_gutter_lands_in_the_nearer_column() {
     gesture(&mut app, start, &[end], true);
     assert!(calls(&app).contains("move:it-live:blocked:"), "{}", calls(&app));
 }
+
+/// Carried over a column, the cards from where it would land move down by
+/// its height (their transforms; their layout stays), a dashed slot where
+/// it would go; let go, every card is where it's laid out, nothing moved.
+#[test]
+fn orchestration_board_cards_make_room_and_settle() {
+    let mut app = mount(1400., 900.);
+    let from = card(&mut app, "next", LIVE);
+    let first = "#orch-col-blocked >> role:button \"Orchestrator screen\"";
+    let second = "#orch-col-blocked >> role:button \"sccache for iOS\"";
+    let id2 = app.target(second).unwrap();
+    let shown = |app: &mut TestApp, id| {
+        app.ui.prepare_frame();
+        app.ui.scene.borrow().transformed_bounds(id).y
+    };
+    let rest = shown(&mut app, id2);
+    let one = rect(&mut app, first);
+    let (x, y) = (from.x + 30., from.y + from.height / 2.);
+    send(&mut app, InputEvent::PointerMove { x, y });
+    send(&mut app, InputEvent::PointerDown { x, y, button: P });
+    // Between the two cards: past the first's middle, above the second's.
+    let (tx, ty) = (one.x + one.width / 2., one.y + one.height - 4.);
+    for i in 1..=6 {
+        let t = i as f32 / 6.;
+        send(&mut app, InputEvent::PointerMove { x: x + (tx - x) * t, y: y + (ty - y) * t });
+        app.frames(2);
+    }
+    app.frames(60);
+    assert!(has(&mut app, "#orch-col-blocked >> .orch-column-drop"), "a slot where it would land");
+    let room = from.height + 4.;
+    let moved = shown(&mut app, id2);
+    assert!((moved - rest - room).abs() < 1.5, "moved down by the carried card's height: {moved} vs {rest}, {room}");
+    // (The first stays: it lands after it.)
+    let id1 = app.target(first).unwrap();
+    assert!((shown(&mut app, id1) - one.y).abs() < 0.5);
+    send(&mut app, InputEvent::PointerUp { x: tx, y: ty, button: P });
+    app.ui.input.forget_clicks();
+    app.settle();
+    // Let go: the card comes in where the room was, the second where it
+    // stood aside, from the first frame (no spring back over the newcomer).
+    app.frame();
+    let landed = shown(&mut app, id2);
+    assert!((landed - moved).abs() < 0.5, "it stays where it stood aside: {landed} vs {moved}");
+    app.frames(60);
+    assert!((shown(&mut app, id2) - moved).abs() < 0.5);
+    let came = card(&mut app, "blocked", LIVE);
+    assert!((came.y - (one.y + one.height + 4.)).abs() < 1.5, "the card is where the room was: {} vs {}", came.y, one.y + one.height + 4.);
+    assert!(calls(&app).contains("move:it-live:blocked:"), "{}", calls(&app));
+    assert!(!has(&mut app, ".orch-column-drop"));
+}
+
+/// Pictures of a drag under way (run on purpose, BOARD_SHOTS=<dir>): a card
+/// carried among Blocked's, and one over an empty column.
+#[test]
+#[ignore = "run on purpose: writes pictures of a drag under way"]
+fn orchestration_board_drag_pictures() {
+    use zgx_gpu::GpuRenderer;
+    let out = std::path::PathBuf::from(std::env::var("BOARD_SHOTS").expect("BOARD_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    for (name, theme, filter, col, low) in [
+        ("drag-among-dark", "zeron-dark", None, "blocked", false),
+        ("drag-empty-light", "zeron-light", Some("orc-orch"), "review", true),
+    ] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_board_fixture.luau");
+        let mut app = TestApp::new(|runtime| crate::plugins::lend_design_system(ScriptHost::new(runtime, path.clone()), &path));
+        let (w, h, scale) = (1400f32, 640f32, 2f32);
+        app.ui.scene.borrow_mut().resize(w, h);
+        let mut gpu = GpuRenderer::new((w * scale) as u32, (h * scale) as u32).unwrap();
+        gpu.set_scale_factor(scale);
+        for font in crate::fonts() {
+            font.unwrap().install(&mut gpu.text_system().borrow_mut());
+        }
+        gpu.install_text(&mut app.ui.scene.borrow_mut());
+        app.ui.refresh_text_geometry();
+        assert!(app.host.run_command(if theme.ends_with("dark") { "theme_dark" } else { "theme_light" }));
+        if let Some(f) = filter {
+            app.host.set_state("filter", Value::Str(f.into())).unwrap();
+        }
+        app.frames(30);
+        let from = card(&mut app, "next", LIVE);
+        let lane = rect(&mut app, &format!("#orch-col-{col}"));
+        let (x, y) = (from.x + 30., from.y + from.height / 2.);
+        send(&mut app, InputEvent::PointerMove { x, y });
+        send(&mut app, InputEvent::PointerDown { x, y, button: P });
+        let (tx, ty) = (lane.x + 40., if low { lane.y + 60. } else { lane.y + 130. });
+        for i in 1..=8 {
+            let t = i as f32 / 8.;
+            send(&mut app, InputEvent::PointerMove { x: x + (tx - x) * t, y: y + (ty - y) * t });
+            app.frames(2);
+        }
+        app.frames(60);
+        app.ui.prepare_frame();
+        let _ = app.ui.scene.borrow_mut().flush();
+        let all = [zgx::scene::Rect { x: 0., y: 0., width: w, height: h }];
+        gpu.render(&app.ui.scene.borrow(), &all).unwrap();
+        let mut rgba = gpu.readback().unwrap();
+        let back: [u8; 3] = if theme.ends_with("dark") { [0x1d, 0x1d, 0x22] } else { [0xe9, 0xe9, 0xee] };
+        for px in rgba.chunks_exact_mut(4) {
+            let a = px[3] as u32;
+            for c in 0..3 {
+                px[c] = (px[c] as u32 + back[c] as u32 * (255 - a) / 255).min(255) as u8;
+            }
+            px[3] = 255;
+        }
+        let file = std::fs::File::create(out.join(format!("{name}.png"))).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), (w * scale) as u32, (h * scale) as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&rgba).unwrap();
+        send(&mut app, InputEvent::PointerUp { x: tx, y: ty, button: P });
+    }
+}
