@@ -637,8 +637,8 @@ M.Progress = ui.component(function(props: Props): Node
 				color = "$text.tertiary",
 			}),
 		},
-		-- Its live figures: the time it has taken; under it, its steps and
-		-- the time left, or that it's stalled.
+		-- Its live figures: the time it has taken; under it, the time left
+		-- (or that it's stalled) and since its last step.
 		ui.column {
 			shrink = 0,
 			items = "end",
@@ -667,13 +667,13 @@ M.Progress = ui.component(function(props: Props): Node
 					size = "sm",
 				}),
 				ui.show(function(): boolean
-					return not stalled() and steps() ~= nil
-				end, small(steps_text, { class = "orch-progress-steps", color = "$text.secondary" })),
-				ui.show(function(): boolean
 					return not stalled() and left_text() ~= ""
 				end, small(function(): string
-					return `· {left_text()}`
+					return if since_text() ~= "" then `{left_text()} ·` else left_text()
 				end, { class = "orch-progress-left" })),
+				ui.show(function(): boolean
+					return since_text() ~= ""
+				end, small(since_text, { class = "orch-progress-since", color = since_ink })),
 			},
 		},
 	}
@@ -715,8 +715,11 @@ M.Progress = ui.component(function(props: Props): Node
 			cell = 7,
 			gap = 2,
 			h = 10,
-			max = 24,
+			max = 12,
 		}),
+		ui.show(function(): boolean
+			return steps() ~= nil
+		end, small(steps_text, { class = "orch-progress-steps", color = "$text.secondary" })),
 		ui.row {
 			grow = 1,
 			min_w = 0,
@@ -746,9 +749,6 @@ M.Progress = ui.component(function(props: Props): Node
 				return `· {tool_text()}`
 			end, { class = "orch-progress-tool-time" })),
 		},
-		ui.show(function(): boolean
-			return since_text() ~= ""
-		end, small(since_text, { class = "orch-progress-since", color = since_ink })),
 		-- What's up? and the menu (open, pin), at its end.
 		ui.row {
 			class = "orch-progress-actions",
