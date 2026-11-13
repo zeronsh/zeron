@@ -1659,6 +1659,7 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                 levels.sort();
                 levels.dedup();
                 Model {
+                    default: false,
                     id: format!("{provider_id}/{model_id}"),
                     label,
                     description: Some(provider_name.to_owned()),
@@ -4550,6 +4551,8 @@ fn part_snapshot_events(
                     is_error: status == "error",
                     output,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
             }

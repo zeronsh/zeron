@@ -32,7 +32,7 @@ local function home(app: any)
 end
 
 local function panel(app: any)
-	if not showing(app, 'role:button "Device"') then
+	if not showing(app, 'role:menuitem "Device"') then
 		app:click('role:button "Branch"')
 		settle(app)
 	end
@@ -40,7 +40,7 @@ end
 
 local function pick_in(app: any, row: string, option: string)
 	panel(app)
-	app:click(`role:button "{row}"`)
+	app:click(`role:menuitem "{row}"`)
 	settle(app)
 	app:click(`role:option ~"{option}"`)
 	settle(app)
@@ -51,7 +51,7 @@ local function chosen(app: any, row: string): string
 	rested(app)
 	-- (Its whole line: a project's tile letter, then its name.)
 	local words = {}
-	for line in app:tree(`role:button "{row}"`):gmatch("[^\n]+") do
+	for line in app:tree(`role:menuitem "{row}"`):gmatch("[^\n]+") do
 		local t = line:match('text "([^"]*)"')
 		if t then
 			table.insert(words, t)
@@ -107,7 +107,7 @@ test("another device brings its projects and their branches", function()
 	expect(chip(app)).to_be("trunk")
 	-- Its projects are the box's alone.
 	panel(app)
-	app:click('role:button "Project"')
+	app:click('role:menuitem "Project"')
 	settle(app)
 	expect(app:has('role:option ~"Borealis"')).to_be(true)
 	expect(app:has('role:option ~"Atlas"')).to_be(false)
@@ -123,7 +123,7 @@ test("a device out of reach shows why, and can't be picked", function()
 	local app = mount("chat_fixture.luau")
 	home(app)
 	panel(app)
-	app:click('role:button "Device"')
+	app:click('role:menuitem "Device"')
 	settle(app)
 	expect(app:has('role:option ~"Old laptop" >> ~"Offline · last seen"')).to_be(true)
 	app:click('role:option ~"Old laptop"')
@@ -162,7 +162,7 @@ test("a folder with no git runs in place, though a worktree was picked", functio
 	home(app)
 	pick_in(app, "Checkout", "Worktree An isolated")
 	pick_in(app, "Project", "Notes")
-	expect(showing(app, 'role:button "Checkout"')).to_be(false)
+	expect(showing(app, 'role:menuitem "Checkout"')).to_be(false)
 	expect(app:has("#composer-place-lead >> .place-lead-folder")).to_be(true)
 	expect(app:has("#composer-place-lead >> .place-lead-worktree")).to_be(false)
 	send(app, "Tidy the notes")
@@ -178,7 +178,7 @@ test("a worktree picked waits out a folder with no git for the next repository",
 	pick_in(app, "Project", "Notes")
 	pick_in(app, "Project", "Atlas")
 	panel(app)
-	expect(showing(app, 'role:button "Checkout"')).to_be(true)
+	expect(showing(app, 'role:menuitem "Checkout"')).to_be(true)
 	expect(app:has("#composer-place-lead >> .place-lead-worktree")).to_be(true)
 	send(app, "Cut the release")
 	local calls = app:state("calls")
@@ -213,7 +213,7 @@ test("no project: made on the device chosen, no ref", function()
 	local app = mount("chat_fixture.luau")
 	home(app)
 	panel(app)
-	app:click('role:button "Project"')
+	app:click('role:menuitem "Project"')
 	settle(app)
 	app:click('~"Don\'t work in a project"')
 	settle(app)
@@ -230,12 +230,12 @@ test("picking a device leaves the panel open, on to its project", function()
 	pick_in(app, "Device", "Build box")
 	expect(chosen(app, "Device")).to_contain("Build box")
 	-- Still there: its list gone, the rows to go on from.
-	expect(showing(app, 'role:button "Device"')).to_be(true)
-	expect(showing(app, 'role:button "Project"')).to_be(true)
+	expect(showing(app, 'role:menuitem "Device"')).to_be(true)
+	expect(showing(app, 'role:menuitem "Project"')).to_be(true)
 	expect(showing(app, 'role:option ~"Build box"')).to_be(false)
-	app:click('role:button "Project"')
+	app:click('role:menuitem "Project"')
 	settle(app)
-	expect(showing(app, 'role:button "Project"')).to_be(true)
+	expect(showing(app, 'role:menuitem "Project"')).to_be(true)
 end)
 
 test("the device comes first: on top of the panel, and first on the chip", function()
@@ -247,7 +247,7 @@ test("the device comes first: on top of the panel, and first on the chip", funct
 		local first = string.match(app:tree(sel), "[^\n]+") or ""
 		return tonumber(string.match(first, " %-?%d+,(%-?%d+) ")) or 0
 	end
-	expect(top('role:button "Device"') < top('role:button "Project"')).to_be(true)
+	expect(top('role:menuitem "Device"') < top('role:menuitem "Project"')).to_be(true)
 	pick_in(app, "Device", "Build box")
 	-- (Its name rolls in, a letter at a time: wait for it.)
 	app:wait('#composer-place-device >> ~"Build"', { timeout_ms = 2000 })

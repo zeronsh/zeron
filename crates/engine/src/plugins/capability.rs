@@ -39,7 +39,22 @@ const VERSION: u64 = 1;
 /// granted on install, even to your own plugins; always asked. (A
 /// `ui.replace` module runs as the app's own code, every app grant with it:
 /// zgx's `require` of `@app/…` loads the replacement in the app's VM.)
-pub const OUTSIDE_SANDBOX: &[&str] = &["native", "commands", "service", "devices", "ui.replace"];
+/// The agent controls (switching an account, setting a model) are here
+/// too: not code, but changes to what your agents run as, so each plugin
+/// is allowed them by the person, never by being yours.
+pub const OUTSIDE_SANDBOX: &[&str] = &[
+    "native",
+    "commands",
+    "service",
+    "devices",
+    "ui.replace",
+    "accounts.switch",
+    // Running one chat on another saved account: what it runs as.
+    "accounts.pin",
+    "models.set",
+    // Sending messages as you, to your agents: what they then do is theirs.
+    "messages.send",
+];
 
 /// The hosts of a plugin with "network" that names none: any public one.
 pub const ANY_HOST: &str = "*";
@@ -264,13 +279,15 @@ pub fn diff(before: &Value, after: &Value) -> Diff {
         service_changed: changed("service"),
         // Unknown before (a legacy decision): not asked about.
         entry_changed: if before["entry"].is_null() { None } else { changed("entry") },
-        // Any public host (`*`) allowed covers a public one named now; a
-        // private or local one is reachable only when named, so it asks.
+        // Any public host (`*`) allowed covers what only reaches public
+        // ones: a `*.` name, which never reaches a private address. A host
+        // named exactly may be on this computer or your network, whatever it
+        // reads as (it reaches where it resolves), so it asks.
         network_added: {
             let any = strings(&before["network"]).iter().any(|h| h == ANY_HOST);
             added(&before["network"], &after["network"])
                 .into_iter()
-                .filter(|h| !any || h == ANY_HOST || zeron_plugin_guard::net::risky(h))
+                .filter(|h| !any || h == ANY_HOST || zeron_plugin_guard::net::names_exactly(h) || zeron_plugin_guard::net::risky(h))
                 .collect()
         },
         settings_changed,
@@ -352,7 +369,18 @@ mod tests {
         assert!(!diff(&two, &one).grew(), "a host dropped doesn't");
         assert!(diff(&before, &named).grew(), "the network permission itself asks");
         assert!(diff(&one, &named).grew() && diff(&one, &named).network_added == ["*"], "naming none is any host");
-        assert!(!diff(&named, &one).grew(), "narrowing to named hosts doesn't ask");
+        // Over any public host: a host named exactly may resolve to this
+        // computer, so it asks, however public it reads (a rebind). A `*.`
+        // name never reaches a private address, so it doesn't.
+        let d = diff(&named, &one);
+        assert!(d.grew() && d.network_added == ["api.example.com"], "a host named exactly asks: {d:?}");
+        let mut wild = base.raw.clone();
+        wild["permissions"] = json!(["commands", "native", "tools", "ui.change", "ui.replace", "service", "network"]);
+        wild["network"] = json!({ "hosts": ["*.example.org"] });
+        let wild = record(&Manifest::from_value(wild).unwrap());
+        assert!(!diff(&named, &wild).grew(), "narrowing to a wildcard doesn't ask");
+        // Allowed as it is, nothing grows: it isn't asked again.
+        assert!(!diff(&one, &one).grew());
         let mut local = base.raw.clone();
         local["permissions"] = json!(["commands", "native", "tools", "ui.change", "ui.replace", "service", "network"]);
         local["network"] = json!({ "hosts": ["192.168.1.1"] });

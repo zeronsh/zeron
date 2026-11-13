@@ -23,7 +23,8 @@
 --   never wrap (a long one scrolls sideways, fading at the edge it runs
 --   past).
 -- - A table sits in a hairline frame, its header quieter than its cells,
---   its columns as wide as their widest cell; wide, it scrolls sideways.
+--   fitted to the reply's width with its prose wrapping; only what can't fit
+--   scrolls sideways (`table_block`).
 -- - A quote is set back by a soft bar, in the secondary ink.
 --
 -- The text is selectable through whatever holds it (a transcript puts
@@ -41,6 +42,7 @@ local Syntax = require("@self/syntax")
 -- path, and the opener the shell sets must be the one markdown reads.)
 local Motion = require("@self/motion")
 local Links = require("@ds/links")
+local Rail = require("@self/rail")
 local FileIcon = require("@self/file_icons")
 -- LaTeX math: `$$…$$` and `$…$` read before markdown is (ds/math).
 local Math = require("@self/math")
@@ -79,6 +81,15 @@ export type Props = {
 	-- the kind's own (a web link's: Open, the other place, Copy link; any
 	-- other: Open with `open`, Copy link).
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	-- What a link is drawn as, rather than as a link: one of the chat's
+	-- files (`file`: the chip a prompt's mention is), or one of its agent's
+	-- skills (`skill`, its name: the chip a picked skill is). Nil: a link.
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	-- What the message carries, by name (a sent prompt's: its files,
+	-- pictures, quotes, chats…): an "(attachment: <name>)" in its words
+	-- naming one of them is drawn as that one's chip. (Only a prompt's:
+	-- words that say so of nothing it carries stay words.)
+	attached: { [string]: { kind: string, icon: string? } }?,
 	-- A task list's box ticked or cleared: the `k`th task in the text (in
 	-- the order they're written, from 1), and whether it's done now. With
 	-- it, tasks are boxes; without, their ☐ and ☑.
@@ -203,10 +214,26 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 		if v.ticking then
 			v.ticking:cancel()
 		end
-		v.ticking = anime.animate(tick, { value = tick:peek() + 1, duration = longest, ease = "linear" })
+		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
+		-- By number: a callback holding its own clip would keep both for good.)
+		local clock = (v.clocks or 0) + 1
+		v.clocks = clock
+		v.ticking = anime.animate(tick, {
+			value = tick:peek() + 1,
+			duration = longest,
+			ease = "linear",
+			onComplete = function()
+				if v.clocks == clock then
+					v.ticking = nil
+				end
+			end,
+		})
 	end
 	return going
 end
+-- A link's or inline code's ink (ds/look).
+local accented_ink = look.accented_ink
+
 -- `color` (a token, or as written) at a chunk's fade now: as it is once it's done.
 local function veil_color(v: Veil, color: any, c: VeilChunk): any
 	local shown = if type(color) == "function" then color() else color
@@ -219,7 +246,9 @@ local function veil_color(v: Veil, color: any, c: VeilChunk): any
 	return function(): any
 		local p = (ui.now() - c.started) * c.boost / c.ms
 		if p >= 1 then
-			return color
+			-- (A colour that is itself a function, a link's or inline
+			-- code's accented ink, is read: a binding gives a colour.)
+			return if type(color) == "function" then color() else color
 		end
 		if v.tick then
 			v.tick:get()
@@ -254,6 +283,8 @@ type Ctx = {
 	image_size: ((src: string) -> (number?, number?))?,
 	open: ((target: string) -> ())?,
 	link_menu: ((target: string) -> { Links.Entry }?)?,
+	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	attached: { [string]: { kind: string, icon: string? } }?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
 	pictures: ReplyPicture.Pictures?,
@@ -369,6 +400,23 @@ local function opens(a: string): boolean
 	return string.match(a, "^https?://") ~= nil or string.match(a, "^mailto:") ~= nil
 end
 
+-- A chip's look, as Zeron's shipping app paints it (composer/chip.rs
+-- `paint_chip`): its pill hugs its name, 2 points above and below, corner
+-- 5; its icon (14) on a well of its own 2 points round it, corner 4
+-- (`zeron.chip.*`), a point in from the pill's start and 2 before the
+-- name; 7 points after the name (Zeron's room: a no-break space of Geist
+-- is a quarter em, its well and name 6 of them in, 2 after, at 14).
+local CHIP_PADDING = { 1, 7, 2 }
+local CHIP_RADIUS = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+local function chip_icon(icon: { [string]: any }): { [string]: any }
+	icon.size = 14
+	icon.gap = 2
+	icon.bg = "$zeron.chip.well"
+	icon.radius = 4
+	icon.pad = 2
+	return icon
+end
+
 -- A mention in a prompt (Zeron's `[name](zeron-file:path)`, a chat's
 -- `zeron-chat:`): a chip in the line, as Zeron's sent bubble draws it
 -- (transcript.rs `user_bubble_text`, composer/chip.rs `paint_chip`): its
@@ -377,20 +425,123 @@ end
 local function mention_chip(span: { [any]: any }, target: string, name: string)
 	local chat = string.match(target, "^zeron%-chat:") ~= nil
 	local dir = string.sub(target, -1) == "/"
+	-- (Its icon by its file's own name: a reply's link may say it in other
+	-- words, `[the config](src/config.rs:12)`.)
+	local file = string.match(string.match(target, "^[^#]*") or target, "([^/]+)/?$") or name
+	file = string.match(file, "^(.-):%d") or file
+	-- (In the body's ink, whatever a link's is.)
+	span.color = nil
 	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
 	-- (One pill, zgx d6582b32: icon, gap, name and padding on one wash,
 	-- not underlined at rest; its text is the name alone, so a selection
 	-- across it copies the name.)
 	span.underline = false
 	span.underline_offset = nil
-	span.hover = nil
-	span.bg = "$zeron.composer.chip.bg"
+	-- (A hover of its own, which changes nothing: without one, a link's
+	-- pointer draws the focus ring round its words.)
+	span.hover = {}
+	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = { 2, 2 }
-	span.radius = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
 	span.icon = if chat
-		then { src = "assets/icons/ui/chat-round-line.svg", size = 14, gap = 3, tint = "currentColor" }
-		else { src = `assets/icons/files/{set}/{FileIcon.of(name, dir)}.svg`, size = 14, gap = 3 }
+		then chip_icon { src = "assets/icons/ui/side-chat.svg", tint = "$zeron.chip.glyph" }
+		else chip_icon { src = `assets/icons/files/{set}/{FileIcon.of(if string.find(file, ".", 1, true) or dir then file else name, dir)}.svg` }
+end
+
+-- a command or skill picked in the composer has nothing to open, but reads
+-- as the same pill a mention does, as zeron's sent bubble and mobile draw it
+-- What a prompt carries, named in its words: "(attachment: <name>)", the
+-- words the send writes for an `@` reference (screens/chat/carried
+-- `refs`). Drawn as that one's chip (its kind's icon, its name), where it
+-- carries one by that name.
+local ATTACHED = "%(attachment: ([^%)\n]+)%)"
+local function attached_runs(list: { MarkdownRun }, ctx: Ctx?): { MarkdownRun }
+	local carried = if ctx then ctx.attached else nil
+	if not carried then
+		return list
+	end
+	local out: { MarkdownRun }? = nil
+	for i, r in list do
+		local pieces: { MarkdownRun }? = nil
+		if not r.a and not r.c and not r.img and type(r.x) == "string" and string.find(r.x, "(attachment: ", 1, true) then
+			-- (`at`: where the search goes on; `copied`: the words before it
+			-- already in a piece.)
+			local at, copied = 1, 1
+			while true do
+				local s, e, name = string.find(r.x, ATTACHED, at)
+				if not s or not e then
+					break
+				end
+				if carried[name] then
+					pieces = pieces or {}
+					if s > copied then
+						local before = table.clone(r)
+						before.x = string.sub(r.x, copied, s - 1)
+						table.insert(pieces :: any, before)
+					end
+					local chip = table.clone(r) :: any
+					chip.x = string.sub(r.x, s, e)
+					chip.attached = name
+					table.insert(pieces :: any, chip)
+					copied = e + 1
+				end
+				at = e + 1
+			end
+			if pieces and copied <= #r.x then
+				local rest = table.clone(r)
+				rest.x = string.sub(r.x, copied)
+				table.insert(pieces :: any, rest)
+			end
+		end
+		if pieces and not out then
+			out = table.move(list, 1, i - 1, 1, {})
+		end
+		if out then
+			for _, p in pieces or { r } do
+				table.insert(out :: any, p)
+			end
+		end
+	end
+	return out or list
+end
+
+-- An attached item's chip, named in the words: its kind's icon (a file's
+-- by its name; a chat's, a picture's, a quote's glyph), its name.
+local function attachment_chip(span: { [any]: any }, name: string, item: { kind: string, icon: string? })
+	local set = if string.find(ui.theme.kind(), "dark", 1, true) then "dark" else "light"
+	span.underline = false
+	span.underline_offset = nil
+	span.hover = {}
+	span.color = nil
+	span.bg = "$zeron.chip.bg"
+	span[1] = name
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
+	local glyph = if item.kind == "chat" then "side-chat" elseif item.kind == "image" then "gallery" else item.icon
+	span.icon = if glyph
+		then chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
+		else chip_icon { src = `assets/icons/files/{set}/{FileIcon.of(name, false)}.svg` }
+end
+
+local function invocation_chip(span: { [any]: any }, name: string)
+	local glyph = if string.sub(name, 1, 1) == "/" then "command" else "magic-stick"
+	-- (A skill by its name alone, `frontend-design`, its icon saying it's
+	-- one; a command keeps its `/`.)
+	if string.sub(name, 1, 1) == "$" then
+		name = string.sub(name, 2)
+	end
+	span.color = nil
+	span.underline = false
+	span.underline_offset = nil
+	-- (A hover of its own, which changes nothing: without one, a link's
+	-- pointer draws the focus ring round its words.)
+	span.hover = {}
+	span.bg = "$zeron.chip.bg"
+	span[1] = name
+	span.padding = CHIP_PADDING
+	span.radius = CHIP_RADIUS
+	span.icon = chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
 end
 
 -- A web address written bare in a run's words (not in code, not a link
@@ -465,8 +616,8 @@ end
 
 -- A paragraph's runs as one paragraph of spans; `style` sets the
 -- paragraph's own (a heading's size, a quote's ink).
-local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
-	list = autolinked(list)
+local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+	list = attached_runs(autolinked(list), ctx)
 	local size, line = size_of(ctx)
 	local props: { [any]: any } = {
 		wrap = true,
@@ -503,6 +654,17 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 	local function emit(span: { [any]: any }, text: string)
 		local from, to = pos + 1, pos + #text
 		pos = to
+		-- A chip (its icon before its name) is one piece, one wash: never cut
+		-- by a fade or a find. A match in it washes the whole chip.
+		if span.icon then
+			for i, m in marks do
+				if m[1] <= to and m[2] >= from then
+					span.bg = if base + i == cur then "$zeron.editor.match_current" else "$zeron.editor.match"
+				end
+			end
+			table.insert(props, ui.span(span))
+			return
+		end
 		-- Cut where a fading chunk starts and ends; its words' colour fading.
 		if #fading > 0 and #marks == 0 and span[1] == text and veil then
 			veil_pieces(fading, from, to, function(s: number, e: number, c: VeilChunk?)
@@ -567,18 +729,46 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 			-- In code's font (Settings → Appearance; a span takes a family,
 			-- not a token), as code blocks are.
 			span.font = look.code_family()
-			span.bg = "$zeron.code.wash"
+			span.bg = "$zeron.prose.code_wash"
+			-- (Its ink the accent with "Accent colour throughout", as the
+			-- shipping app's; else the text's own.)
+			span.color = accented_ink(span.color)
 			span.padding = { 4, 1 }
 			-- Zeron's inline code corner (markdown/render.rs's 4.5), each
 			-- line's piece of a wrapped span rounded on its own.
 			span.radius = ui.raw(4.5, "Zeron's inline code corner")
 			span.text_size = inline
 		end
-		if r.a then
+		-- (What the page says a link is: one of the chat's files, or one of
+		-- its agent's skills.)
+		local chip = if r.a and ctx and ctx.link_chip and not opens(r.a) then ctx.link_chip(r.a) else nil
+		local named = (r :: any).attached
+		if named and ctx and ctx.attached and ctx.attached[named] then
+			attachment_chip(span, named, ctx.attached[named])
+		elseif r.a and string.match(r.a, "^zeron%-invoke:") then
+			invocation_chip(span, r.x)
+		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
+			-- What it carries, mentioned by its number (ds/attachment_mentions):
+			-- its chip, a picture's glyph or a file's icon, by its name.
+			attachment_chip(span, r.x, { kind = if string.match(r.a, "^zeron%-image:") then "image" else "file" })
+		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
+			-- A browser pick, mentioned (its token): its chip.
+			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })
+		elseif chip and chip.skill then
+			-- A skill's chip, by its name (opening nothing, as a picked one).
+			invocation_chip(span, "$" .. chip.skill)
+		elseif r.a then
+			-- (Its ink the accent with "Accent colour throughout", as the
+			-- shipping app's; else the text's own.)
+			span.color = accented_ink(span.color)
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }
-			if string.match(r.a, "^zeron%-file:") or string.match(r.a, "^zeron%-chat:") then
+			if
+				string.match(r.a, "^zeron%-file:")
+				or string.match(r.a, "^zeron%-chat:")
+				or (chip and chip.file)
+			then
 				mention_chip(span, r.a, r.x)
 			end
 			local target = r.a
@@ -621,6 +811,210 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?)
 	end
 	return ui.rich(props)
 end
+
+-- A table: as wide as the reply, with each column sized by what it holds, as
+-- a CSS grid's `auto` tracks share room: each starts at the least it can be,
+-- and what's left goes evenly to those that still want more. So short
+-- columns are whole first and a long one takes the rest, its prose wrapping.
+--
+-- - A short column (`TABLE_SHORT`) never wraps: a label broken in two reads
+--   worse than the prose beside it being a line longer.
+-- - A long one is never narrower than `TABLE_FLOOR`, or than its longest
+--   word: past that, a word a line helps nobody, and the table scrolls.
+-- - Numbers sit on their right edge, as the source says (`---:`) or, as
+--   replies rarely say, when every cell in a column is one.
+--
+-- It scrolls only when those minimums can't fit (many columns, code that
+-- can't break). `wheel_across`: a mouse wheel moves it then; the page keeps
+-- its own scrolling otherwise (zgx's `View::wheel_across` has the rules).
+local TABLE_SHORT = 20
+local TABLE_FLOOR = 144
+-- The most characters a long column counts for when the room is shared.
+local TABLE_SHARE = 40
+
+-- A run of words, its links that the page may draw as chips (a reply's
+-- link to a file of the chat's, to one of its agent's skills: `link_chip`)
+-- built again when what the page says of them changes (the chat's skills
+-- read after it showed), so it's the same as if they'd been known first.
+-- Words with none of those links: built once.
+local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?): Node
+	local asked = if ctx then ctx.link_chip else nil
+	if not asked then
+		return runs_now(list, style, ctx)
+	end
+	local targets: { string } = {}
+	for _, r in list do
+		if r.a and not opens(r.a) and not string.match(r.a, "^zeron%-") then
+			table.insert(targets, r.a)
+		end
+	end
+	if #targets == 0 then
+		return runs_now(list, style, ctx)
+	end
+	return ui.presence(function(): string
+		local says: { string } = {}
+		for _, target in targets do
+			local chip = asked(target)
+			table.insert(says, if chip == nil then "-" elseif chip.skill then `s:{chip.skill}` else "f")
+		end
+		return table.concat(says, "|")
+	end, function(): Node
+		return runs_now(list, style, ctx)
+	end)
+end
+
+local function cell_text(cell: { MarkdownRun }): string
+	local flat: { string } = {}
+	for _, run in cell do
+		table.insert(flat, run.x)
+	end
+	return table.concat(flat)
+end
+
+-- A number, with a sign or currency before it and a short unit after it.
+local function is_number(text: string): boolean
+	local body = string.match(text, "^%s*[~≈<>+%-−$€£]*([%d.,]*%d[%d.,]*)%s*[%a%%/°]*%s*$")
+	if not body then
+		return false
+	end
+	local unit = string.match(text, "([%a%%/°]*)%s*$") :: string
+	return #unit <= 4
+end
+
+local TableBlock = ui.component(function(props: { b: any, ctx: Ctx? }): Node
+	local b, ctx = props.b, props.ctx
+	local count = #b.head
+	local tracks: { string } = {}
+	local aligns: { string } = {}
+	local any_long = false
+	local long: { boolean } = {}
+	for c, head in b.head do
+		local longest = #cell_text(head)
+		local numbers, filled = true, 0
+		for _, row in b.rows do
+			local text = cell_text(row[c] or {})
+			longest = math.max(longest, #text)
+			if text ~= "" then
+				filled += 1
+				numbers = numbers and is_number(text)
+			end
+		end
+		local said = if b.align then b.align[c] else nil
+		aligns[c] = if said and said ~= "" then said elseif numbers and filled > 0 then "end" else "start"
+		if longest <= TABLE_SHORT or (numbers and filled > 0) then
+			tracks[c] = "max-content"
+		else
+			-- A share of the view by what the column says (up to
+			-- `TABLE_SHARE` characters' worth), never less than its
+			-- words need: `auto` tracks let a wide column's wrapped
+			-- text size the grid past the view.
+			tracks[c] = `minmax(min-content, {math.clamp(longest, TABLE_SHORT, TABLE_SHARE)}fr)`
+			long[c] = true
+			any_long = true
+		end
+	end
+	-- All short: the last takes what's left, so the hairlines reach the edge.
+	if not any_long then
+		tracks[count] = "minmax(max-content, 1fr)"
+	end
+	local function cell(content: { MarkdownRun }, c: number, head: boolean, last_row: boolean): Node
+		local text: { [string]: any } = {
+			class = "md-text",
+			-- (Not wrapping by a rounding, a short column's track being as wide
+			-- as its words.)
+			wrap = long[c] == true,
+			text_size = "$zeron.prose.small.size",
+			line_height = "$zeron.prose.small.line",
+		}
+		if head then
+			text.weight = "$font.weight.medium"
+			text.color = "$text.secondary"
+		end
+		return ui.column {
+			class = "md-cell",
+			-- (A column's floor, held by its header: the others' longest words
+			-- still count.)
+			min_w = if head and long[c] then ui.raw(TABLE_FLOOR, "a long column's least width") else nil,
+			items = aligns[c],
+			pl = if c == 1 then "$space.4" else "$space.3",
+			pr = if c == count then "$space.4" else "$space.3",
+			py = "$space.2",
+			border_sides = { 0, 0, if last_row then 0 else 1, 0 },
+			border_color = if head then "$border" else "$border.subtle",
+			runs(content, text, ctx),
+		}
+	end
+	local cells: { Node } = {}
+	for c, head in b.head do
+		table.insert(cells, cell(head, c, true, #b.rows == 0))
+	end
+	for r, row in b.rows do
+		for c = 1, count do
+			table.insert(cells, cell(row[c] or {}, c, false, r == #b.rows))
+		end
+	end
+	-- (As wide as the view, or what the grid's minimums need if that's more:
+	-- a view lays its content out with no limit, so the width to share has
+	-- to come from here.)
+	local box, content = ui.ref(), ui.ref()
+	local offset = ui.use_state(0)
+	local over = ui.use_state(false)
+	return ui.column {
+		relative = true,
+		w_full = true,
+		on_hover = function(inside: boolean)
+			over:set(inside)
+		end,
+		ui.scroll_x {
+			class = "md-table",
+			ref = box,
+			offset = offset,
+			w_full = true,
+			wheel_across = true,
+			rounded = "$radius.xl",
+			border = 1,
+			border_color = "$border",
+			-- Each edge fades as far as there's more past it, up to its width:
+			-- nothing at rest on a table that fits.
+			fade_x = function(): { number }
+				local at = offset:get()
+				local more = (content.width or 0) - math.max(0, (box.width or 0) - 2) - at
+				return { math.clamp(at, 0, 24), math.clamp(more, 0, 40) }
+			end,
+			ui.div {
+				ref = content,
+				grid = true,
+				cols = function(): string
+					-- (Inside its border. Before it's been laid out, its widest.)
+					local width = box.width
+					return if width and width > 2 then `minmax(min-content, {width - 2})` else "max-content"
+				end,
+				ui.div {
+					class = "md-table-grid",
+					grid = true,
+					-- (Its `auto` columns share what's left past their words, as
+					-- CSS's grid stretches them: the rules reach the frame.)
+					justify = "stretch",
+					cols = table.concat(tracks, " "),
+					cells,
+				},
+			},
+		},
+		Rail {
+			horizontal = true,
+			offset = offset,
+			extent = function(): number
+				return content.width or 0
+			end,
+			view = function(): number
+				return math.max(0, (box.width or 0) - 2)
+			end,
+			hint = function(): boolean
+				return over:get()
+			end,
+		},
+	}
+end)
 
 -- A code block's lines, coloured by the design system's highlighter
 -- (`ds/syntax`, as Files colours a file) when its fence names a language it
@@ -908,7 +1302,7 @@ local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
 			tabular = true,
 			text_size = size,
 			line_height = line,
-			color = "$text.tertiary",
+			color = "$zeron.prose.marker",
 		}
 	end
 	return ui.row {
@@ -918,7 +1312,7 @@ local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
 		shrink = 0,
 		items = "center",
 		pl = "$space.1",
-		ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$text.tertiary" },
+		ui.div { w = 5, h = 5, rounded = "$radius.full", bg = "$zeron.prose.marker" },
 	}
 end
 
@@ -1137,55 +1531,13 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			class = "md-quote",
 			w_full = true,
 			gap = "$space.4",
-			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$border.strong" },
+			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
 			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx) },
 		}
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
 	elseif b.t == "table" then
-		-- Column by column, so each is as wide as its widest cell; cells keep
-		-- to one line (one height a row), and the last column takes what's
-		-- left of the frame.
-		local box = ui.ref()
-		local cell = {
-			wrap = false,
-			h = 36,
-			px = "$space.4",
-			text_size = "$zeron.prose.small.size",
-			line_height = 36,
-		}
-		local cols: { Node } = {}
-		for c, head in b.head do
-			local head_style = table.clone(cell) :: { [string]: any }
-			head_style.weight = "$font.weight.medium"
-			head_style.color = "$text.secondary"
-			head_style.border_sides = { 0, 0, 1, 0 }
-			head_style.border_color = "$border"
-			local cells: { Node } = { runs(head, head_style, ctx) }
-			for r, row in b.rows do
-				local style = table.clone(cell) :: { [string]: any }
-				style.border_sides = { 0, 0, if r < #b.rows then 1 else 0, 0 }
-				style.border_color = "$border.subtle"
-				table.insert(cells, runs(row[c] or {}, style, ctx))
-			end
-			table.insert(cols, ui.column { shrink = 0, grow = if c == #b.head then 1 else 0, cells })
-		end
-		return ui.scroll_x {
-			class = "md-table",
-			ref = box,
-			w_full = true,
-			rounded = "$radius.xl",
-			border = 1,
-			border_color = "$border",
-			fade_x = { 16, 32 },
-			fade_overflow = true,
-			ui.row {
-				min_w = function(): number
-					return math.max(0, (box.width or 0) - 2)
-				end,
-				cols,
-			},
-		}
+		return TableBlock { b = b, ctx = ctx }
 	elseif (b.t == "img" or b.t == "pics") and ctx and ctx.pictures then
 		-- A reply's pictures (ds/reply_picture): one alone, or several that
 		-- follow one another together on a tray. One it won't draw (a URL, a
@@ -1371,7 +1723,17 @@ local function estimate(b: any): number
 		end
 		return math.max(h, 22)
 	elseif t == "table" then
-		return (#(b.rows or {}) + 1) * 36
+		-- (A line for each 64 characters its longest cell runs to, about
+		-- what a share of the reply's width holds.)
+		local h = 37
+		for _, row in b.rows or {} do
+			local longest = 0
+			for _, cell in row do
+				longest = math.max(longest, #cell_text(cell))
+			end
+			h += 17 + 20 * math.max(1, math.ceil(longest / 64))
+		end
+		return h
 	elseif t == "img" then
 		-- (A picture held at its placeholder's height: the column at 16:10.)
 		return 412
@@ -1381,11 +1743,28 @@ local function estimate(b: any): number
 	return 24
 end
 
+-- A list state of a text's own: a component's, or, built at a script's top
+-- level (where there is none), the script's under a name of its own, emptied
+-- as it's made (a reload makes the same names again).
+local top_lists = 0
+local function own_list(): State<{ any }>
+	local ok, made = pcall(function(): State<{ any }>
+		return ui.use_state({} :: { any })
+	end)
+	if ok then
+		return made
+	end
+	top_lists += 1
+	local list = ui.state(`markdown_blocks_{top_lists}`, {} :: { any })
+	list:set({})
+	return list
+end
+
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
-		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small
+		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).
@@ -1518,27 +1897,12 @@ return function(props: Props): Node
 	-- box of its last height. Inside a run each block is drawn once and kept
 	-- while its table is the same, so the one being written rebuilds alone.
 	local window = props.window
-	-- Each run's judge, by its place (registered as it's made): a scroll
-	-- runs them in order, once, rather than a timer for every run. Each
-	-- says whether its box starts past the view's foot (and the overscan),
-	-- and whether it's built now. (A run past the foot that isn't built
-	-- needs no judging until the view comes near.)
-	local judges: { [number]: () -> (boolean, boolean) } = {}
-	-- Its runs judged a tick on (once laid out), all at once: as runs mount
-	-- and resize, one timer for the text, not one a run.
-	local looking = false
-	local function look_soon()
-		if looking then
-			return
-		end
-		looking = true
-		ui.after(0, function()
-			looking = false
-			for _, j in judges do
-				j()
-			end
-		end)
-	end
+	-- Each run's judge, by its place (registered as it's made): the text's
+	-- runs judged again all at once when what holds one built changes (a
+	-- find's current match, the text's writing, its runs), and each judging
+	-- itself as it comes near the view or goes. Each says whether it's
+	-- built now.
+	local judges: { [number]: () -> boolean } = {}
 	local function windowed(run: State<{ MarkdownBlock }>, at: number, after: () -> number): Node
 		local w = window :: {
 			key: string,
@@ -1573,25 +1937,23 @@ return function(props: Props): Node
 		-- Only then does the scroll make up the difference; a rewrap of a
 		-- run already built is the reading place's to keep (ds/transcript).
 		local returning = false
-		-- Near the view: its box within OVERSCAN of the view's, judged as the
-		-- view scrolls (a tick on, once the scroll has laid out) and as it's
-		-- laid out. (zgx's visibility event looks again only when layout
-		-- changes, not as a scroll alone moves what shows.)
-		local function judge(): (boolean, boolean)
-			local el, view = r:peek(), w.view:peek()
-			if not el or not view or el.y == nil or view.y == nil or el.height == nil or view.height == nil then
-				return false, near:peek()
+		-- Near the view: its box within OVERSCAN of the view's, as zgx tells
+		-- it (`on_visible`, its box grown by `visible_margin`): heard only as
+		-- it comes near or goes, at its first layout and as layout or a
+		-- scroll moves it across, so a scroll's frames run nothing here.
+		-- Nil until then.
+		local seen: boolean? = nil
+		local function judge(): boolean
+			if seen == nil then
+				return near:peek()
 			end
-			local y, top = el.y :: number, view.y :: number
 			-- (While the text is written its last run is always built: where
 			-- the words arrive, and the end the view holds to.)
 			local live = w.live
 			-- (And the run holding a find's current match, so it can show.)
 			local c = if find then find.current() else nil
 			local holds = c ~= nil and find ~= nil and c.key == w.key and (c.block - 1) // CHUNK + 1 == at
-			local shows = (live ~= nil and live() and last())
-				or holds
-				or (y < top + (view.height :: number) + OVERSCAN and y + (el.height :: number) > top - OVERSCAN)
+			local shows = (live ~= nil and live() and last()) or holds or seen :: boolean
 			if NEAR.get(k) ~= shows then
 				NEAR.set(k, shows)
 			end
@@ -1599,17 +1961,19 @@ return function(props: Props): Node
 				returning = shows
 				near:set(shows)
 			end
-			return y >= top + (view.height :: number) + OVERSCAN, shows
+			return shows
 		end
 		judges[at] = judge
-		local look = look_soon
 		return ui.div {
 			ref = r,
 			w_full = true,
 			min_w = 0,
-			on_mount = look,
+			visible_margin = OVERSCAN,
+			on_visible = function(visible: boolean)
+				seen = visible
+				judge()
+			end,
 			on_resize = function(size: { w: number, h: number })
-				look()
 				-- (Heard even when it was just judged away: it was laid out
 				-- built, and this is the height to hold it at. Held, it's the
 				-- height it already has.)
@@ -1685,8 +2049,17 @@ return function(props: Props): Node
 	end
 	if type(text) == "function" then
 		-- A text that changes: its blocks as a state, each drawn once and kept
-		-- while its table is the same (all but the one being written).
-		local parsed = ui.computed(function(): { MarkdownBlock }
+		-- while its table is the same (all but the one being written). The
+		-- state is written a block at a time, only where the parse changed:
+		-- a whole list handed back each time (a computed's) is converted
+		-- whole, so a reply streaming in cost each chunk all its blocks. A
+		-- windowed text holds its runs of CHUNK blocks the same way, each run
+		-- a row of its own.
+		local items = own_list()
+		-- What the state holds, as written (blocks, or runs `{ at, blocks }`).
+		local shown: { any } = {}
+		local shown_blocks: { MarkdownBlock } = {}
+		ui.effect(function()
 			if window and find then
 				local c = find.current()
 				opts.first = if c and c.key == window.key then c.block else nil
@@ -1696,77 +2069,82 @@ return function(props: Props): Node
 				ctx.tasks = {}
 				number_tasks(list, ctx.tasks)
 			end
-			return list
-		end)
-		if window then
-			-- The blocks in runs of CHUNK, each run a row of its own.
-			local runs = ui.computed(function(): { { at: number, blocks: { MarkdownBlock } } }
-				local out = {}
-				for n, b in parsed:get() do
-					local at = (n - 1) // CHUNK + 1
-					if not out[at] then
-						out[at] = { at = at, blocks = {} }
+			-- The first block that may differ from those shown: past those
+			-- the parse kept from the last (its very tables), the rest looked at.
+			local from = math.min(MarkdownFind.settled(list), #shown_blocks) + 1
+			if from > 1 and shown_blocks[from - 1] ~= list[from - 1] then
+				from = 1
+			end
+			while from <= #list and shown_blocks[from] == list[from] do
+				from += 1
+			end
+			local wanted: { any } = if window then {} else list
+			local first = from
+			if window then
+				-- (The runs from the one holding the first block changed.)
+				local at = (from - 1) // CHUNK + 1
+				first = at
+				for n = (at - 1) * CHUNK + 1, #list do
+					local r = (n - 1) // CHUNK + 1
+					if not wanted[r] then
+						wanted[r] = { at = r, blocks = {} }
 					end
-					table.insert(out[at].blocks, b)
-				end
-				return out
-			end)
-			-- As the view scrolls (a tick on, once the scroll has laid out): the
-			-- runs judged from the top, stopping at the first past the view's
-			-- foot once none further on is built.
-			local w = window :: { offset: State<number> }
-			-- All the runs judged, from the top, stopping at the first past the
-			-- view's foot once none further on is built.
-			local judged_at = -math.huge
-			local function judge_all()
-				judged_at = ui.now()
-				local count = #runs:peek()
-				-- (A find's current match further on: its run is judged,
-				-- so it's built, however far past the view it is.)
-				local c = if find then find.current() else nil
-				local target = if c and c.key == (window :: any).key then (c.block - 1) // CHUNK + 1 else 0
-				for at = 1, count do
-					local j = judges[at]
-					if j then
-						local below = j()
-						if below and at >= target then
-							local more = false
-							for later = at + 1, count do
-								if NEAR.get(`{(window :: any).key}:{later}`) ~= false then
-									more = true
-									break
-								end
-							end
-							if not more then
-								break
-							end
-						end
-					end
+					table.insert(wanted[r].blocks, list[n])
 				end
 			end
+			local count = if window then (#list + CHUNK - 1) // CHUNK else #list
+			if first > count and #shown == count then
+				shown_blocks = list
+				return
+			end
+			ui.batch(function()
+				for i = first, count do
+					local item = wanted[i]
+					if i <= #shown then
+						if shown[i] ~= item then
+							items:set_key(i, item)
+						end
+					else
+						items:push(item)
+					end
+					shown[i] = item
+				end
+				for i = #shown, count + 1, -1 do
+					items:remove(i)
+					shown[i] = nil
+				end
+			end)
+			shown_blocks = list
+		end)
+		if window then
+			local runs = items
+			-- The runs judged again, all of them, as what holds one built
+			-- changes: a find stepping to another match (its run is built,
+			-- however far from the view), the text's writing ending (its last
+			-- run let go if away), its runs coming or going. Not as the view
+			-- scrolls: each run hears itself come near or go (`on_visible`),
+			-- so a scroll runs nothing here. (What it hears read here, not
+			-- left to the judges: a run not laid out yet reads none of it.)
+			local live = (window :: any).live :: (() -> boolean)?
 			ui.effect(function()
-				w.offset:get()
-				-- (A find stepping to another match: its run may need building.)
 				if find then
 					find.current()
 				end
-				-- While the view moves every frame (a wheel's fling, its momentum),
-				-- each move runs this again before the tick below comes, and that
-				-- tick goes with it: judged only once the view stopped, the runs
-				-- coming in stayed held and the transcript showed blank through a
-				-- fling. So a pass now as well, a frame apart at most (the boxes as
-				-- last laid out, a frame behind: well within OVERSCAN), and the tick
-				-- for where the view comes to rest.
-				if ui.now() - judged_at >= 8 then
-					judge_all()
+				if live then
+					live()
 				end
-				ui.after(0, judge_all)
+				for at = 1, runs:len() do
+					local j = judges[at]
+					if j then
+						j()
+					end
+				end
 			end)
 			column[1] = ui.each(runs, function(run: any, _i: any, row: State<any>)
 				return windowed(ui.computed(function(): { MarkdownBlock }
 					return row:get().blocks
 				end) :: any, run.at, function(): number
-					return #runs:peek() - run.at
+					return runs:len() - run.at
 				end)
 			end, {
 				key = function(run: any): string
@@ -1774,7 +2152,7 @@ return function(props: Props): Node
 				end,
 			})
 		else
-			column[1] = ui.each(parsed, function(b: MarkdownBlock, i: number)
+			column[1] = ui.each(items, function(b: MarkdownBlock, i: number)
 				return top(b, i)
 			end)
 		end

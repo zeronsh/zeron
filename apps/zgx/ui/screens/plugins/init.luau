@@ -148,11 +148,10 @@ ui.effect(function()
 	put(out.project, if p then { id = p.id, name = p.name or "" } else nil)
 end)
 ui.effect(function()
-	local now = sessions.now:get()
 	local id = route.device:get()
 	local list = {}
 	local here: any = nil
-	for _, d in now.devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		table.insert(list, { id = d.id, name = d.name, here = d.here })
 		if d.id == id then
 			here = { id = d.id, name = d.name }

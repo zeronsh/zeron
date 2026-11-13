@@ -45,6 +45,11 @@ pub mod capabilities {
     /// device can update it (`install`, `canApplyRemotely`, and why not).
     /// Older hosts don't say: a client can't tell without trying.
     pub const UPDATE_ABILITY_V1: &str = "update-ability-v1";
+    /// The host looks in the edge's attachment store for bytes a message names
+    /// (`/blob/{chatId}/attachments/{uploadId}`). A sender holds a message for
+    /// such a host until its bytes are stored; older hosts get them over the
+    /// peer link, as they always did.
+    pub const ATTACHMENT_STORE_V1: &str = "attachment-store-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -60,6 +65,7 @@ pub mod capabilities {
         BACKGROUND_TASKS_V1,
         ZGX_INTERFACE_V1,
         UPDATE_ABILITY_V1,
+        ATTACHMENT_STORE_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -154,6 +160,7 @@ mod tests {
                     "background-tasks-v1",
                     "zgx-interface-v1",
                     "update-ability-v1",
+                    "attachment-store-v1",
                     "voice-client-media-v1"
                 ],
             })

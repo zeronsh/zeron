@@ -1,0 +1,9 @@
+# Tests in apps/zgx known to fail, which scripts/ci/test-zgx.sh lets through so
+# its CI job (zgx-tests.yml) gates everything else. Every other failure fails the
+# job. A known one that passes again is reported: then delete its line.
+#
+#   rust: <test path>     `cargo test --bin zeron-zgx` (skipped, exact name)
+#   luau: <test name>     `zgx test ui` (run; its FAIL line accepted)
+#
+# None now (2026-11-11): every test passes on macOS and Linux. A test that
+# can't pass yet goes here only with why, and whose fix it waits on.

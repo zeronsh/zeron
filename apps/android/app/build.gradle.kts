@@ -126,6 +126,7 @@ dependencies {
     implementation("${libs.jna.get()}@aar")
     implementation(libs.webrtc)
     debugImplementation(libs.compose.ui.tooling)
+    testImplementation(libs.junit)
 }
 
 kotlin {

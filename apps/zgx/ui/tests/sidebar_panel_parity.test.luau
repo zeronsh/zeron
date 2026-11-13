@@ -13,7 +13,10 @@ local KEY = "screens/shell/sidebar.luau::"
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
-	app:resize(1400, 1000)
+	-- (A panel's content an even width: its home, centred, then stands on
+	-- whole points. At an odd one it stands half a point over, and the
+	-- tree's whole points put a row's tile a point off the sidebar's.)
+	app:resize(1402, 1000)
 	app:frames(30)
 	app:command("side_chats")
 	app:frames(5)

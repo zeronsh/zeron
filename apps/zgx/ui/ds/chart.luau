@@ -3,8 +3,8 @@
 -- structure: gridlines a hairline at each round tick, the zero line firmer,
 -- tick labels small in the tertiary ink; the data is what reads. Under the
 -- pointer a category is picked out (a wash behind its bars, a hairline
--- through a line's points) and the legend says its values, so nothing
--- floats over the plot.
+-- through a line's points) and the legend says its values, in its own
+-- line over the plot that's there with the pointer or without it.
 --
 --   Chart {
 --     data = function() return {
@@ -300,20 +300,29 @@ return ui.component(function(props: Props): Node
 	end
 
 	-- The legend: each series' mark and name, and under the pointer its
-	-- value there, after the category's name.
+	-- value there, after the category's name. Its line is the chart's
+	-- whether the pointer is on it or not: a lone series' name and value
+	-- come only under the pointer, into a line kept for them, and what the
+	-- pointer adds wraps over the plot rather than pushing it down. The
+	-- chart is one height, so nothing under it moves as the pointer
+	-- crosses it.
 	local function legend(): boolean
 		local d = data()
 		if d.legend == false then
 			return false
 		end
-		local named = false
 		for _, s in d.series or {} do
 			if s.name and s.name ~= "" then
-				named = true
+				return true
 			end
 		end
-		return named and (#(d.series or {}) > 1 or hovered:get() > 0)
+		return false
 	end
+	local function entries(): boolean
+		return #(data().series or {}) > 1 or hovered:get() > 0
+	end
+	-- The legend's height with the pointer away, which it keeps under it.
+	local resting = ui.use_state(0)
 	local function category(): string
 		local i = hovered:get()
 		local d = data()
@@ -338,6 +347,19 @@ return ui.component(function(props: Props): Node
 				flex_wrap = true,
 				items = "center",
 				gap = "$space.4",
+				-- (The line's height as a number: a token doesn't size a box here.)
+				min_h = function(): number
+					return n("zeron.visual.text.sm.line", 20)
+				end,
+				h = function(): number?
+					local h = resting:get()
+					return if hovered:get() > 0 and h > 0 then h else nil
+				end,
+				on_resize = function(size: { w: number, h: number })
+					if hovered:peek() == 0 then
+						resting:set(size.h)
+					end
+				end,
 				ui.show(
 					function(): boolean
 						return category() ~= ""
@@ -360,7 +382,8 @@ return ui.component(function(props: Props): Node
 						local v = if i > 0 then value_at(s(), i) else nil
 						return if v then ink.format(v, data().fmt) else ""
 					end
-					return ui.row {
+					-- A lone series' mark and name only beside its value.
+					return ui.show(entries, ui.row {
 						items = "center",
 						gap = "$zeron.space.tight",
 						ui.div {
@@ -395,7 +418,7 @@ return ui.component(function(props: Props): Node
 								color = "$text.primary",
 							}
 						),
-					}
+					})
 				end, { flex_wrap = true, items = "center", gap_x = "$space.4", gap_y = "$space.1" }),
 			}
 		),

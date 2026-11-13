@@ -74,6 +74,7 @@ pub const BLOCKED: &[&str] = &[
     "chat.queue_edit",
     "chat.queue_finish",
     "chat.retry",
+    "chat.remove_held",
     // (Only one that says what an agent may do unasked: `chat.configure`.)
     "chat.configure",
     "agents.install",
@@ -87,11 +88,17 @@ pub const BLOCKED: &[&str] = &[
     "home.run_action",
     "home.save_action",
     "sessions.delete",
+    "sessions.remove_device",
     "projects.clone",
     "projects.delete",
     "github.disconnect",
     "engine.restart",
     "billing.checkout",
+    // (Each runs a machine, or says which one new chats run on: credits.)
+    "cloud.wake",
+    "cloud.sleep",
+    "cloud.retry",
+    "cloud.set_machine",
 ];
 
 pub fn blocked(action: &str) -> bool {
@@ -309,7 +316,8 @@ pub fn read_at_launch() {
     let crashed = crash_looping();
     let on = held || crashed || safe_path().is_some_and(|p| p.is_file());
     if held || crashed {
-        eprintln!("zeron-zgx: safe mode ({})", if held { "⌥ held at launch" } else { "the template crashed Zeron twice" });
+        let key = if cfg!(target_os = "macos") { "⌥ held at launch" } else { "Alt held at launch" };
+        eprintln!("zeron-zgx: safe mode ({})", if held { key } else { "the template crashed Zeron twice" });
         let _ = write_safe(true);
         LAUNCH_REASON.store(if held { 1 } else { 2 }, Ordering::Relaxed);
     }
@@ -436,11 +444,79 @@ fn option_held() -> bool {
     flags & 0x0008_0000 != 0
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Alt held as Zeron opens (either one), or `ZERON_SAFE_MODE` set.
+/// (`--safe-mode` is the same, asked on the command line: src/main.rs.)
+#[cfg(windows)]
 fn option_held() -> bool {
-    // Linux and Windows: `ZERON_SAFE_MODE=1` (and `--zeron-template`) until
-    // the platform's modifier state is read here.
-    std::env::var_os("ZERON_SAFE_MODE").is_some()
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetAsyncKeyState(key: i32) -> i16;
+    }
+    const VK_MENU: i32 = 0x12;
+    // SAFETY: a plain query of a key's state; the high bit is "down now".
+    let down = unsafe { GetAsyncKeyState(VK_MENU) } < 0;
+    down || std::env::var_os("ZERON_SAFE_MODE").is_some()
+}
+
+/// Alt held as Zeron opens, as the X server has the keyboard (Linux on X11,
+/// libX11 opened as it's needed: nothing links it), or `ZERON_SAFE_MODE`
+/// set. On Wayland no app reads the keyboard before it has a window, so
+/// there it's `--safe-mode`, or Ctrl+Alt+Shift+Home once the window is up
+/// (src/menu_bar.rs `DEFAULT_INTERFACE_KEY`).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn option_held() -> bool {
+    std::env::var_os("ZERON_SAFE_MODE").is_some() || x11_alt_held()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn x11_alt_held() -> bool {
+    use std::ffi::{c_char, c_int, c_ulong, c_void};
+    // The X server's keyboard isn't ours to read in a Wayland session
+    // (XWayland's says only what its own windows hear): nothing held.
+    if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return false;
+    }
+    type Open = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type Close = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type Keymap = unsafe extern "C" fn(*mut c_void, *mut c_char) -> c_int;
+    type Keycode = unsafe extern "C" fn(*mut c_void, c_ulong) -> u8;
+    // SAFETY: libX11's own functions, by their C signatures, on a display
+    // opened and closed here; the keymap is the 32 bytes XQueryKeymap fills.
+    unsafe {
+        let lib = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        if lib.is_null() {
+            return false;
+        }
+        let symbol = |name: &std::ffi::CStr| libc::dlsym(lib, name.as_ptr());
+        let (open, close, keymap, keycode) =
+            (symbol(c"XOpenDisplay"), symbol(c"XCloseDisplay"), symbol(c"XQueryKeymap"), symbol(c"XKeysymToKeycode"));
+        let held = if [open, close, keymap, keycode].iter().any(|s| s.is_null()) {
+            false
+        } else {
+            let (open, close, keymap, keycode): (Open, Close, Keymap, Keycode) = (
+                std::mem::transmute::<*mut c_void, Open>(open),
+                std::mem::transmute::<*mut c_void, Close>(close),
+                std::mem::transmute::<*mut c_void, Keymap>(keymap),
+                std::mem::transmute::<*mut c_void, Keycode>(keycode),
+            );
+            let display = open(std::ptr::null());
+            if display.is_null() {
+                false
+            } else {
+                let mut keys = [0 as c_char; 32];
+                keymap(display, keys.as_mut_ptr());
+                // XK_Alt_L, XK_Alt_R, and XK_ISO_Level3_Shift (AltGr) left out.
+                let down = [0xffe9_u64, 0xffea].iter().any(|&sym| {
+                    let code = keycode(display, sym as c_ulong) as usize;
+                    code != 0 && (keys[code / 8] as u8) & (1 << (code % 8)) != 0
+                });
+                close(display);
+                down
+            }
+        };
+        libc::dlclose(lib);
+        held
+    }
 }
 
 #[cfg(test)]
@@ -600,7 +676,8 @@ return ui.column {{
     ui.text {{ id = "up", "up" }},
 }}
 "#,
-            own.display()
+            // (In a Luau string: Windows' `\` escaped.)
+            own.display().to_string().replace('\\', "\\\\")
         );
         set(Some(sleek()));
         let mut app = guarded(script, |_| {});

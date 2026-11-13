@@ -44,7 +44,8 @@ export const isGrantRequest = (value: unknown): value is GrantRequest => {
     typeof request.sig === "string" &&
     request.sig.length > 0 &&
     request.sig.length <= MAX_SIG_CHARS &&
-    (request.repo === undefined || isRepoFullName(request.repo))
+    (request.repo === undefined || isRepoFullName(request.repo)) &&
+    (request.inheritFrom === undefined || isId(request.inheritFrom))
   );
 };
 

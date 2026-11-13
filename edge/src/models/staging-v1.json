@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "publishedAt": "2026-11-10",
+  "harnesses": {
+    "claude-code": {
+      "models": [
+        { "id": "claude-fable-5-2", "label": "Fable 5.2", "order": 10, "minCli": "2.1.290" },
+        { "id": "claude-fable-5-1", "label": "Fable 5.1", "order": 20, "minCli": "2.1.257" },
+        { "id": "claude-fable-5", "label": "Fable 5", "order": 30 },
+        { "id": "claude-opus-5-5", "label": "Opus 5.5", "order": 40, "minCli": "2.1.280", "default": true },
+        { "id": "claude-opus-4-8", "label": "Opus 4.8", "order": 60, "minCli": "2.1.154" },
+        { "id": "claude-opus-4-7", "label": "Opus 4.7", "order": 70, "minCli": "2.1.111" },
+        { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "order": 80, "minCli": "2.1.284" },
+        { "id": "claude-sonnet-5", "label": "Sonnet 5", "order": 90 },
+        { "id": "claude-haiku-5-5", "label": "Haiku 5.5", "order": 100, "minCli": "2.1.293" },
+        { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "order": 110, "aliases": ["claude-haiku-4-5-20251001"] }
+      ]
+    }
+  }
+}

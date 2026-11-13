@@ -26,6 +26,28 @@
 
 export const CLOUD_UNIT_NAME = "zeron-cloud.service";
 
+/**
+ * Starts the engine when a machine comes back, without anyone asking over the
+ * provider's API. A sleep stops the engine's unit first (it has to drain), and
+ * a machine restored from that snapshot can come back with the unit stopped.
+ * This one is never stopped: `RemainAfterExit` keeps it active through the
+ * snapshot, so it starts again whether the provider brings back every enabled
+ * unit or only the ones that were running. `--no-block`: a unit's start must
+ * not wait on another's during boot.
+ */
+export const CLOUD_BOOT_UNIT_NAME = "zeron-cloud-boot.service";
+export const CLOUD_BOOT_UNIT = `[Unit]
+Description=Start the Zeron Cloud engine when the machine comes back
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/systemctl start --no-block ${CLOUD_UNIT_NAME}
+
+[Install]
+WantedBy=multi-user.target
+`;
+
 export const CLOUD_INSTALL_SCRIPT = `#!/bin/sh
 # Zeron Cloud engine installer (edge/src/cloud/install-script.ts).
 # POSIX sh, idempotent, provider-neutral.
@@ -77,6 +99,10 @@ else
   tar -xzf "$tmp/zeron.tar.gz" -C "$tmp/unpacked" --strip-components=1
   # Probe before switching: a binary that cannot start must not replace one that can.
   "$tmp/unpacked/zeron" --version >/dev/null
+  # The desktop app's background engine (78 MB): never run here (the unit runs
+  # \`zeron headless\`, which links the engine), and every byte on this disk is
+  # copied back in on every wake. The engine's updater leaves it out too.
+  rm -f "$tmp/unpacked/zeron-engine"
   rm -rf "$dest"
   mv "$tmp/unpacked" "$dest"
 fi
@@ -114,8 +140,7 @@ unit_new="$(mktemp "$data/.unit.XXXXXX")"
 cat >"$unit_new" <<UNIT
 [Unit]
 Description=Zeron Cloud engine
-After=network-online.target
-Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 User=$run_user
@@ -124,7 +149,7 @@ Environment=HOME=$home
 EnvironmentFile=$data/env
 ExecStart=$app/current/zeron headless
 Restart=always
-RestartSec=5
+RestartSec=1
 
 [Install]
 WantedBy=multi-user.target
@@ -137,8 +162,19 @@ else
   restart=1
 fi
 
+boot_new="$(mktemp "$data/.unit.XXXXXX")"
+cat >"$boot_new" <<UNIT
+${CLOUD_BOOT_UNIT}UNIT
+if sudo cmp -s "$boot_new" "$unit_dir/${CLOUD_BOOT_UNIT_NAME}"; then
+  rm -f "$boot_new"
+else
+  sudo install -m 0644 "$boot_new" "$unit_dir/${CLOUD_BOOT_UNIT_NAME}"
+  rm -f "$boot_new"
+fi
+
 sudo systemctl daemon-reload
-sudo systemctl enable ${CLOUD_UNIT_NAME} >/dev/null
+sudo systemctl enable ${CLOUD_UNIT_NAME} ${CLOUD_BOOT_UNIT_NAME} >/dev/null
+sudo systemctl start ${CLOUD_BOOT_UNIT_NAME}
 if [ "$restart" = 1 ]; then
   sudo systemctl restart ${CLOUD_UNIT_NAME}
 else
@@ -210,11 +246,15 @@ export const installCommand = (env: SessionEnv): string => {
 /** Wake fallback when the engine doesn't come back on its own after resume. */
 export const RESTART_ENGINE_COMMAND = `sudo systemctl restart ${CLOUD_UNIT_NAME}`;
 
-/** A wake's first command once the sandbox runs: the sleep stopped the unit
- * before the provider snapshotted the machine, and a resume from that
- * snapshot can bring systemd back with the unit still stopped. Idempotent:
- * a no-op when the engine is already running. */
-export const START_ENGINE_COMMAND = `sudo systemctl start ${CLOUD_UNIT_NAME}`;
+/** A wake's first command: the sleep stopped the unit before the provider
+ * snapshotted the machine, and a resume from that snapshot can bring systemd
+ * back with the unit still stopped. Sent as soon as the resume is accepted, so
+ * it may be the first to touch a machine still restoring its `/etc`: a unit
+ * systemd hasn't read yet gets one reload. `--no-block` answers at once (the
+ * engine's first token says it's up). Idempotent: a no-op when it's running. */
+export const START_ENGINE_COMMAND =
+  `sudo systemctl start --no-block ${CLOUD_UNIT_NAME} || ` +
+  `{ sudo systemctl daemon-reload; sudo systemctl start --no-block ${CLOUD_UNIT_NAME}; }`;
 
 /** A sleep's first step: the engine starts no new work, so nothing begins that
  * the stop would cut off; what arrives meanwhile waits for the woken machine.
@@ -223,6 +263,40 @@ export const START_ENGINE_COMMAND = `sudo systemctl start ${CLOUD_UNIT_NAME}`;
 export const QUIESCE_ENGINE_COMMAND = `"$HOME/.zeron/app/current/zeron" quiesce`;
 export const QUIESCE_BUSY_EXIT = 75;
 
-/** Before a sleep's stop: systemd delivers SIGTERM and the engine drains. The
- * unit stays enabled, so it starts again when the sandbox resumes. */
-export const STOP_ENGINE_COMMAND = `sudo systemctl stop ${CLOUD_UNIT_NAME}`;
+/**
+ * Before a sleep's stop: systemd delivers SIGTERM and the engine drains. The
+ * unit stays enabled, so it starts again when the sandbox resumes.
+ *
+ * Machines provisioned before these units existed pick them up here, the one
+ * command every machine runs right before the snapshot its next wake restores
+ * (nothing re-runs the installer): the wait for `network-online.target` goes
+ * (the engine retries its own connections, and that wait can hold `systemctl
+ * start` on a resumed machine), a crash restarts in a second, and the boot
+ * unit appears. Then everything written is flushed to the disk, as the
+ * provider's snapshot follows. Best effort: only the stop decides the exit status.
+ * `ZERON_CLOUD_UNIT_DIR` exists for the unit tier.
+ */
+export const STOP_ENGINE_COMMAND = [
+  `d="\${ZERON_CLOUD_UNIT_DIR:-/etc/systemd/system}"`,
+  `if [ -f "$d/${CLOUD_UNIT_NAME}" ] && t="$(mktemp)"; then`,
+  `  if awk '/^After=network-online.target$/||/^Wants=network-online.target$/||/^StartLimitIntervalSec=/{next} ` +
+    `/^RestartSec=5$/{print "RestartSec=1";next} {print} /^Description=Zeron Cloud engine$/{print "StartLimitIntervalSec=0"}' ` +
+    `"$d/${CLOUD_UNIT_NAME}" >"$t" && grep -q '^ExecStart=' "$t"; then`,
+  `    cmp -s "$t" "$d/${CLOUD_UNIT_NAME}" || sudo install -m 0644 "$t" "$d/${CLOUD_UNIT_NAME}"`,
+  `  fi`,
+  `  printf '%s' '${CLOUD_BOOT_UNIT}' >"$t"`,
+  `  cmp -s "$t" "$d/${CLOUD_BOOT_UNIT_NAME}" || sudo install -m 0644 "$t" "$d/${CLOUD_BOOT_UNIT_NAME}"`,
+  `  rm -f "$t"`,
+  `  sudo systemctl daemon-reload`,
+  `  sudo systemctl enable ${CLOUD_BOOT_UNIT_NAME} >/dev/null 2>&1`,
+  `  sudo systemctl start ${CLOUD_BOOT_UNIT_NAME}`,
+  `fi`,
+  `sudo systemctl stop ${CLOUD_UNIT_NAME}`,
+  // The provider snapshots the disk next, from outside the machine: what the
+  // engine wrote on its way out (its databases' last checkpoint) must be on the
+  // disk by then, not in the page cache. A snapshot without it has held a
+  // database with pages from two moments, unreadable on the next wake.
+  `s=$?`,
+  `sync`,
+  `exit $s`
+].join("\n");

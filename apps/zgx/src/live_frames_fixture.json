@@ -1,0 +1,226 @@
+{
+  "steps": [
+    {
+      "frame": {
+        "reset": [
+          {
+            "createdAt": 1762000000000,
+            "deviceId": "dev",
+            "id": "u1",
+            "parts": [
+              {
+                "id": "u1-t",
+                "kind": "text",
+                "text": "Run the tests, then say how it went."
+              }
+            ],
+            "role": "user"
+          },
+          {
+            "createdAt": 1762000000500,
+            "deviceId": "dev",
+            "id": "a1",
+            "parts": [
+              {
+                "id": "a1-t",
+                "kind": "text",
+                "text": "I'll "
+              }
+            ],
+            "role": "assistant",
+            "status": "streaming"
+          }
+        ]
+      },
+      "sums": [
+        [
+          "u1",
+          "18001829821448304577"
+        ],
+        [
+          "a1",
+          "12505863151997688212"
+        ]
+      ]
+    },
+    {
+      "frame": {
+        "append": [
+          {
+            "entry": "a1",
+            "len": 43,
+            "part": "a1-t",
+            "text": "run the tests – «zeron-doc» first."
+          }
+        ],
+        "count": 2,
+        "remove": [],
+        "upsert": []
+      },
+      "sums": [
+        [
+          "u1",
+          "18001829821448304577"
+        ],
+        [
+          "a1",
+          "7544298034946320021"
+        ]
+      ]
+    },
+    {
+      "frame": {
+        "append": [],
+        "count": 2,
+        "parts": [
+          {
+            "at": 1,
+            "entry": "a1",
+            "len": 2,
+            "part": {
+              "call": {
+                "command": "cargo test -p zeron-doc",
+                "kind": "exec"
+              },
+              "id": "a1-c",
+              "isError": false,
+              "kind": "tool",
+              "resolved": false
+            }
+          }
+        ],
+        "remove": [],
+        "upsert": []
+      },
+      "sums": [
+        [
+          "u1",
+          "18001829821448304577"
+        ],
+        [
+          "a1",
+          "211685454774400575"
+        ]
+      ]
+    },
+    {
+      "frame": {
+        "append": [],
+        "count": 2,
+        "parts": [
+          {
+            "at": 1,
+            "entry": "a1",
+            "len": 2,
+            "part": {
+              "call": {
+                "command": "cargo test -p zeron-doc",
+                "kind": "exec"
+              },
+              "id": "a1-c",
+              "isError": false,
+              "kind": "tool",
+              "output": "test result: ok. 198 passed",
+              "resolved": true
+            }
+          }
+        ],
+        "remove": [],
+        "upsert": []
+      },
+      "sums": [
+        [
+          "u1",
+          "18001829821448304577"
+        ],
+        [
+          "a1",
+          "13564457030652585355"
+        ]
+      ]
+    },
+    {
+      "frame": {
+        "append": [],
+        "count": 2,
+        "parts": [
+          {
+            "at": 2,
+            "entry": "a1",
+            "len": 3,
+            "part": {
+              "id": "a1-u",
+              "kind": "text",
+              "text": "All 198 pass."
+            }
+          }
+        ],
+        "remove": [],
+        "upsert": []
+      },
+      "sums": [
+        [
+          "u1",
+          "18001829821448304577"
+        ],
+        [
+          "a1",
+          "14596670813355550037"
+        ]
+      ]
+    },
+    {
+      "frame": {
+        "append": [],
+        "count": 2,
+        "remove": [],
+        "upsert": [
+          {
+            "after": "u1",
+            "entry": {
+              "createdAt": 1762000000500,
+              "deviceId": "dev",
+              "durationMs": 4200,
+              "id": "a1",
+              "parts": [
+                {
+                  "id": "a1-t",
+                  "kind": "text",
+                  "text": "I'll run the tests – «zeron-doc» first."
+                },
+                {
+                  "call": {
+                    "command": "cargo test -p zeron-doc",
+                    "kind": "exec"
+                  },
+                  "id": "a1-c",
+                  "isError": false,
+                  "kind": "tool",
+                  "output": "test result: ok. 198 passed",
+                  "resolved": true
+                },
+                {
+                  "id": "a1-u",
+                  "kind": "text",
+                  "text": "All 198 pass. 🎉"
+                }
+              ],
+              "role": "assistant",
+              "status": "complete"
+            }
+          }
+        ]
+      },
+      "sums": [
+        [
+          "u1",
+          "18001829821448304577"
+        ],
+        [
+          "a1",
+          "10712900554065356481"
+        ]
+      ]
+    }
+  ]
+}

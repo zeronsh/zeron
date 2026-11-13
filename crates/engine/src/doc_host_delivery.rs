@@ -5,16 +5,40 @@
 use super::*;
 
 impl DocHost {
+    /// Deliver every durable remote-wake job, at most eight chats at a time.
+    /// A pass runs when the jobs change (the store's signal), when a
+    /// delivery ends (its chat may still owe a wake: the 12 s yield below),
+    /// or once the workspace is wired. Nothing else wakes it: with no job
+    /// pending, an idle engine never reads the table. Passes stay
+    /// [`SYNC_PASS_SPACING`] apart, so a job a delivery can't settle (a
+    /// store read failing) retries at that pace rather than spinning.
     pub(super) fn spawn_remote_wake_delivery(&self) {
         if self.inner.config.edge.is_none() {
             return;
         }
         let weak = Arc::downgrade(&self.inner);
+        let kick = self.inner.remote_wake_kick.clone();
+        let mut jobs = self.inner.store.watch_sync_jobs();
         self.spawn_worker(async move {
             let mut tasks = tokio::task::JoinSet::new();
             let mut active = HashSet::new();
             let mut after = String::new();
+            let mut last_pass: Option<tokio::time::Instant> = None;
             loop {
+                if let Some(last) = last_pass {
+                    tokio::select! {
+                        _ = kick.notified() => {}
+                        Ok(()) = jobs.changed() => {}
+                        Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                            if let Ok(chat) = result {
+                                active.remove(&chat);
+                            }
+                        }
+                    }
+                    tokio::time::sleep_until(last + SYNC_PASS_SPACING).await;
+                }
+                last_pass = Some(tokio::time::Instant::now());
+                jobs.borrow_and_update();
                 while let Some(result) = tasks.try_join_next() {
                     if let Ok(chat) = result {
                         active.remove(&chat);
@@ -22,22 +46,32 @@ impl DocHost {
                 }
                 let Some(inner) = weak.upgrade() else { return };
                 let host = DocHost { inner };
-                if host.workspace().is_some()
+                // Page through the jobs until eight deliveries run or the
+                // table ends; a full house resumes after `after` once one
+                // ends, so stalled chats can't hold later ones off. A pass
+                // that started mid-table goes round once from the top: a
+                // chat behind the cursor (its delivery yielded) is owed too.
+                let mut wrapped = after.is_empty();
+                while host.workspace().is_some()
                     && host.inner.config.edge.is_some()
                     && !host.inner.edge_disconnected.load(Ordering::Acquire)
                     && active.len() < 8
                 {
+                    #[cfg(test)]
+                    host.inner.remote_wake_scans.fetch_add(1, Ordering::Relaxed);
                     match host
                         .inner
                         .store
                         .pending_sync_jobs("remote-wake", &after, 32)
                     {
                         Ok(page) => {
-                            if page.is_empty() {
-                                after.clear();
-                            }
+                            let full = page.len() == 32;
+                            let mut capped = false;
                             for chat in page {
                                 if active.len() >= 8 {
+                                    // Keep `after` here: the next pass goes on
+                                    // past the eight, not back to them.
+                                    capped = true;
                                     break;
                                 }
                                 after = chat.clone();
@@ -56,12 +90,28 @@ impl DocHost {
                                     chat
                                 });
                             }
+                            if capped {
+                                break;
+                            }
+                            if !full {
+                                after.clear();
+                                if wrapped {
+                                    break;
+                                }
+                                wrapped = true;
+                            }
                         }
-                        Err(err) => tracing::warn!(%err, "remote wake discovery failed"),
+                        Err(err) => {
+                            tracing::warn!(%err, "remote wake discovery failed");
+                            // Retried on the next pass; a failed read wakes
+                            // nothing, so ask for one.
+                            after.clear();
+                            kick.notify_one();
+                            break;
+                        }
                     }
                 }
                 drop(host);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         });
     }
@@ -235,6 +285,148 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// An idle synced host reads nothing and runs no dispatch pass: both
+    /// sync loops wait on events, not a clock. Ten idle minutes on a paused
+    /// clock would be 6,000 passes of each with a standing 100 ms tick.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_host_never_wakes_its_sync_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let workspace = WorkspaceHost::open(
+            store.clone(),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "here".into(),
+                device_name: "Here".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace
+            .create_chat("hosted", None, Some("here"), None, None)
+            .unwrap();
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "here".into(),
+                default_harness: HarnessId::Mock,
+                // Nothing listens: no connection can succeed or matter.
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:9", "test")),
+            },
+        );
+        host.set_workspace(workspace.clone());
+        let counts = |host: &DocHost| {
+            (
+                host.inner.scheduler_passes.load(Ordering::Relaxed),
+                host.inner.remote_wake_scans.load(Ordering::Relaxed),
+            )
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let settled = counts(&host);
+        assert!(settled.0 >= 1 && settled.1 >= 1, "both loops ran at start: {settled:?}");
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        assert_eq!(counts(&host), settled, "an idle host woke its sync loops");
+
+        // A durable job wakes both at once; once it is handled they rest
+        // again. (Reconciliation waits for registry truth, which this
+        // edge-less registry never reports: no pass polls for it.)
+        host.enqueue_wakeup("*").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let woken = counts(&host);
+        assert!(woken.0 > settled.0, "a scheduled job wakes the dispatcher");
+        assert!(woken.1 > settled.1, "and remote-wake discovery");
+        assert!(store.reconciliation_progress().unwrap().is_some());
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        assert_eq!(counts(&host), woken, "pending reconciliation is no reason to poll");
+        // (No chat is opened here: its join would dial through the process-
+        // wide sync budget, which would keep this paused clock's far-future
+        // dial time and stall every later test's dials. Opens are covered by
+        // the live-transport tests in doc_host_sync_tests.)
+        host.shutdown_workers().await;
+    }
+
+    /// Eight hosts that never answer hold every delivery slot; the ninth
+    /// chat's wake must still go out once their deliveries yield (12 s),
+    /// not wait behind the same eight forever.
+    #[tokio::test(start_paused = true)]
+    async fn eight_dead_hosts_cannot_starve_a_ninth_chat() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge = format!("http://{}", listener.local_addr().unwrap());
+        let alive = Arc::new(AtomicUsize::new(0));
+        let reached = alive.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                while !request.windows(4).any(|s| s == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                if String::from_utf8_lossy(&request).starts_with("POST /device/alive/nudge ") {
+                    reached.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                } else {
+                    held.push(stream); // a dead host: never answers
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let workspace = WorkspaceHost::open(
+            store.clone(),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "sender".into(),
+                device_name: "Sender".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        for n in 0..8 {
+            workspace
+                .create_chat(&format!("a{n}"), None, Some("dead"), None, None)
+                .unwrap();
+        }
+        workspace.create_chat("b", None, Some("alive"), None, None).unwrap();
+        // All nine owed before delivery starts: its first pass fills every
+        // slot with the dead hosts (they sort first).
+        for chat in (0..8).map(|n| format!("a{n}")).chain(["b".to_string()]) {
+            store.schedule_sync_job(&chat, "remote-wake").unwrap();
+        }
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "sender".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token(&edge, "test")),
+            },
+        );
+        host.set_workspace(workspace.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            while store.sync_job_version("b", "remote-wake").unwrap().is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the ninth chat's wake waited behind eight dead hosts");
+        assert!(alive.load(Ordering::SeqCst) >= 1);
+        host.shutdown_workers().await;
+        server.abort();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_remote_wake_survives_row_ack_and_host_restart() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -296,15 +488,19 @@ mod tests {
             default_harness: HarnessId::Mock,
             edge: Some(EdgeConfig::with_static_token(&edge, "test")),
         };
-        let host = DocHost::new(store.clone(), config.clone());
-        host.set_workspace(workspace.clone());
+        // The send's row reached the room (acked) before its host wake goes
+        // out. Done before the host starts: a pending row is real sync work,
+        // and the dispatcher (which wakes on outbox writes) would admit the
+        // chat and join this test edge, which answers nudges only.
         store
             .enqueue_chat_update("outgoing", "acked-row", b"command bytes")
             .unwrap();
-        host.nudge_remote_host("outgoing");
         store
             .acknowledge_chat_update("outgoing", "acked-row")
             .unwrap();
+        let host = DocHost::new(store.clone(), config.clone());
+        host.set_workspace(workspace.clone());
+        host.nudge_remote_host("outgoing");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while attempts.load(Ordering::SeqCst) < 2 {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;

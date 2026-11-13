@@ -16,6 +16,17 @@ local sessions = require("@account/sessions")
 -- (Its start as it is, a new chat: not the launch's jump to the latest
 -- session, which its tests drive themselves.)
 require("@app/screens/shell/route").launched:set(true)
+-- (The sidebar these tests were written on: grouped by project, Activity
+-- off, empty projects listed. The app opens with Activity, by project then
+-- device and no empty projects (tests/sidebar_defaults.test.luau); a test
+-- of those views turns them on itself. Each set once, to what it stays: a
+-- reload runs this again, and a value set and then changed back here moves
+-- the sidebar still showing (its list crossfading out takes the keyboard
+-- from its row before the reload can keep it there).)
+require("@app/screens/shell/activity").on:set(false)
+local sidebar_options = require("@app/screens/shell/sidebar").options
+sidebar_options.organize:set("project")
+sidebar_options.details.empty_projects:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
 -- The host's chats, as the engine has them: one record a chat (its session,
@@ -142,6 +153,17 @@ end
 -- (A headless host draws no WebP: a new chat on no picture.)
 local appearance = require("@app/screens/shell/appearance")
 appearance.wallpaper:set("none")
+-- A wallpaper chosen, for what stands over a new chat's art (v2's
+-- title-bar island): its picture needn't draw.
+ui.command {
+	id = "fixture.wallpaper",
+	title = "Fixture: a wallpaper",
+	menu = "Fixture",
+	run = function()
+		appearance.image:set({ path = "/fixture/wallpaper.png", name = "wallpaper.png", w = 1600, h = 1000, x = 0.5, y = 0.5, zoom = 1 })
+		appearance.choose("image")
+	end,
+}
 -- The files pane's host calls (its own fixture drives them): a folder of
 -- one file, a beat later, as the host settles.
 local files_api = require("@app/screens/files/api") :: any
@@ -191,12 +213,28 @@ files_api.search = function(): any
 end
 local chat_store = store :: any
 for name, f in chat_store do
-	if type(f) == "function" then
+	-- (A sent prompt's id is the store's own: its row is keyed by it.)
+	if type(f) == "function" and name ~= "new_id" then
 		chat_store[name] = function() end
 	end
 end
 -- (Its open chat shown as the host's chats have it, above.)
 chat_store.open = open_store
+-- A message sent, answered as the host would (taken); each kept in
+-- `fixture_sent`, for a test to read.
+local sent = ui.state("fixture_sent", {} :: { any })
+chat_store.send = function(req: any): any
+	local now = table.clone(sent:peek())
+	table.insert(now, req)
+	sent:set(now)
+	return {
+		after = function(_, ok: (any) -> ())
+			ui.after(0, function()
+				ok(nil)
+			end)
+		end,
+	}
+end
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
@@ -217,7 +255,7 @@ local model = {
 	devices = {
 		{ id = "mac", name = "MacBook Pro", platform = "macos", here = true },
 		{ id = "box", name = "devbox", platform = "linux", here = false },
-	},
+	} :: { any },
 	projects = {
 		{ id = "atlas", name = "Atlas", device = "mac", path = "/work/atlas", git = true },
 		{ id = "borealis", name = "Borealis", device = "box", path = "/srv/borealis", git = true },
@@ -235,6 +273,10 @@ local model = {
 	places = { pinned = {}, sections = {} } :: any,
 }
 
+-- (`fixture.sessions_loading`: an engine that hasn't answered yet, nothing heard.)
+local unheard = false
+-- (`fixture.engine_offline`: no engine to ask, nothing heard.)
+local no_engine = false
 local function publish()
 	local chats = {}
 	for _, c in model.chats do
@@ -249,7 +291,7 @@ local function publish()
 		table.insert(sections, { id = s.id, name = s.name, sessions = table.clone(s.sessions), collapsed = s.collapsed == true })
 	end
 	sessions.now:set({
-		state = "ready",
+		state = if no_engine then "offline" elseif unheard then "loading" else "ready",
 		here = model.here,
 		devices = model.devices,
 		projects = model.projects,
@@ -368,6 +410,10 @@ stub.delete = function(id: string): any
 		end,
 	}
 end
+-- What a delete takes with it, as the host counts it (`tidy_side_chats`).
+stub.deleted_with = function(id: string): any
+	return settle(((model :: any).deleted_with or {})[id] or { subagents = 0, sides = 0 })
+end
 -- (A link as the host makes it: its workspace hashed there.)
 stub.link = function(id: string): any
 	note(`link:{id}`)
@@ -457,11 +503,56 @@ local icons_refused: string? = nil
 -- sessions' (their platform, id and capability say Cloud's), never a device
 -- to pick.
 ui.command {
+	id = "fixture.sessions_loading",
+	title = "Fixture: an engine that hasn't answered, no chats heard",
+	run = function()
+		unheard = true
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_sessions",
+	title = "Fixture: an engine that answered, with no chats",
+	run = function()
+		unheard = false
+		model.chats = {}
+		model.projects = {}
+		model.places.pinned = {}
+		publish()
+	end,
+}
+ui.command {
 	id = "fixture.cloud_machines",
 	title = "Fixture: Cloud sessions' machines among the devices",
 	run = function()
 		table.insert(model.devices, { id = "cloud-s1", name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
 		table.insert(model.devices, { id = "cloud-s2", name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+		publish()
+	end,
+}
+-- Cloud chats' machines, each with its own copy of the repository's
+-- project (as the engine stamps them, one repository identity), as Wing's
+-- beta.5 had them: zeronsh/zeron on three, acme/app on a fourth, and a
+-- clone of zeronsh/zeron on this Mac too.
+ui.command {
+	id = "fixture.cloud_projects",
+	title = "Fixture: Cloud machines, each with a copy of a repository's project",
+	run = function()
+		for i = 1, 4 do
+			table.insert(model.devices, { id = `cloud-m{i}`, name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+		end
+		local zeron = { github = "zeronsh/zeron", repository = "github.com/zeronsh/zeron", path = "/home/user/zeron", git = true }
+		for i, created in { 100, 300, 200 } do
+			table.insert(model.projects, { id = `zc{i}`, name = "zeron", device = `cloud-m{i}`, path = zeron.path, git = true, github = zeron.github, repository = zeron.repository, created = created })
+		end
+		table.insert(model.projects, { id = "app1", name = "app", device = "cloud-m4", path = "/home/user/app", git = true, github = "acme/app", repository = "github.com/acme/app", created = 150 })
+		table.insert(model.projects, { id = "zmac", name = "zeron", device = "mac", path = "/work/zeron", git = true, github = "zeronsh/zeron", repository = "github.com/zeronsh/zeron", created = 50 })
+		table.insert(model.chats, { id = "zc1a", title = "Cloud fix", project = "zc1", device = "cloud-m1", status = "working", updated = NOW - 120, created = NOW - HOUR, agent = "claude" })
+		table.insert(model.chats, { id = "zc2a", title = "Cloud docs", project = "zc2", device = "cloud-m2", updated = NOW - 2 * HOUR, created = NOW - 3 * HOUR, agent = "claude" })
+		table.insert(model.archived, { id = "zc3a", title = "Cloud old", project = "zc3", device = "cloud-m3", updated = NOW - 30 * HOUR, created = NOW - 31 * HOUR, agent = "claude" })
 		publish()
 	end,
 }
@@ -618,6 +709,10 @@ projects_stub.upload_icon = function(path: string, crop: any): any
 	if string.find(path, "offline", 1, true) then
 		return answer({ refused = { message = "offline" } })
 	end
+	-- (An edge without images of yours, as production's before its deploy.)
+	if string.find(path, "unavailable", 1, true) then
+		return answer({ refused = { message = "unavailable" } })
+	end
 	local url = `https://edge.test/auth/avatars/{string.rep("a", 32)}`
 	uploaded[url] = path
 	return answer(url)
@@ -644,6 +739,121 @@ projects_stub.delete = function(id: string): any
 	publish()
 	return answer(nil)
 end
+-- Settings → Devices' Remove and Projects' rename, as the engine answers:
+-- this device and one online refused, in the host's words.
+stub.remove_device = function(id: string): any
+	note(`remove_device:{id}`)
+	for i, d in model.devices do
+		if d.id == id then
+			if d.here then
+				return answer({ refused = "here" })
+			elseif d.online then
+				return answer({ refused = "online" })
+			end
+			table.remove(model.devices, i)
+			break
+		end
+	end
+	publish()
+	return answer(nil)
+end
+stub.rename_project_or_say = function(id: string, name: string): any
+	stub.rename_project(id, name)
+	return answer(nil)
+end
+-- (Settings → Projects' Show in Finder.)
+files_api.reveal = function(target: any, path: string): any
+	note(`reveal:{target.space or target.chat or ""}:{target.root or ""}:{path}`)
+	return settle(nil)
+end
+-- A session's turn stopped (Remove project stops those running first).
+stub.stop = function(id: string): any
+	note(`stop:{id}`)
+	local c = find(id)
+	if c then
+		c.status = nil
+	end
+	publish()
+	return answer(nil)
+end
+ui.command {
+	id = "fixture.engine_offline",
+	title = "Fixture: no engine to ask",
+	run = function()
+		no_engine = true
+		model.devices = {}
+		model.projects = {}
+		model.chats = {}
+		publish()
+	end,
+}
+-- Sessions running in projects: two of Atlas's, and Solo's only one.
+ui.command {
+	id = "fixture.running_projects",
+	title = "Fixture: Atlas busy twice, and Solo's one session running",
+	run = function()
+		local c = find("a2")
+		if c then
+			c.status = "working"
+		end
+		table.insert(model.projects, { id = "solo", name = "Solo", device = "mac", path = "/work/solo", git = true })
+		table.insert(model.chats, { id = "s1", title = "Only one", project = "solo", device = "mac", status = "working", updated = NOW - 60, created = NOW - HOUR, agent = "claude" })
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.nothing_heard",
+	title = "Fixture: an engine that hasn't answered, nothing heard at all",
+	run = function()
+		unheard = true
+		model.devices = {}
+		model.projects = {}
+		model.chats = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.no_devices",
+	title = "Fixture: an engine that answered, with no devices",
+	run = function()
+		model.devices = {}
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.box_online",
+	title = "Fixture: devbox online now",
+	run = function()
+		for _, d in model.devices do
+			if d.id == "box" then
+				d.online = true
+			end
+		end
+		publish()
+	end,
+}
+-- More computers, as a long-lived account has: an old laptop not seen in
+-- weeks, and a desktop on today; and a project on each.
+ui.command {
+	id = "fixture.more_devices",
+	title = "Fixture: an old laptop and a desktop too",
+	run = function()
+		for _, d in model.devices do
+			if d.id == "mac" then
+				d.version = "0.2.140"
+			elseif d.id == "box" then
+				d.version = "0.2.139"
+				d.seen = NOW - 3 * HOUR
+			end
+		end
+		table.insert(model.devices, { id = "studio", name = "Mac Studio", platform = "macos", here = false, online = true, version = "0.2.140" })
+		table.insert(model.devices, { id = "air", name = "Old MacBook Air", platform = "macos", here = false, seen = NOW - 41 * DAY, version = "0.2.88" })
+		table.insert(model.projects, { id = "cartography", name = "Cartography", device = "studio", path = "/Users/ada/src/cartography", git = true })
+		table.insert(model.projects, { id = "notes", name = "notes", device = "mac", path = "/Users/ada/Documents/notes", git = false })
+		table.insert(model.projects, { id = "thesis", name = "Thesis", device = "air", path = "/Users/ada/thesis", git = true })
+		publish()
+	end,
+}
 
 -- What opens tabs in the panel, as plugins, links and the panel home do:
 -- each its own tab (a PR from the GitHub plugin's board, a file, a page, a
@@ -831,6 +1041,13 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "session_delete_fails",
+	title = "The host refuses to delete “Tidy the tests”",
+	run = function()
+		refused.a3 = true
+	end,
+}
+ui.command {
 	id = "archive_many",
 	title = "Thirty sessions archived elsewhere",
 	run = function()
@@ -914,6 +1131,30 @@ ui.command {
 	run = function()
 		table.insert(model.chats, { id = "reg1", title = "Moved to Factory Droid", project = "atlas", device = "mac", updated = NOW - 3 * HOUR, created = NOW - 6 * HOUR, agent = "acp.factory-droid", harness = "acp.factory-droid" })
 		publish()
+	end,
+}
+-- A message in a chat that's running: the third most recent comes to the
+-- top, as the engine's list says once a reply moves (src/slide_bench_tests.rs
+-- sends one every two seconds). Its time by a count, not the clock, so every
+-- run moves the same rows at the same frames.
+local messages = 0
+ui.command {
+	id = "message",
+	title = "A message lands in a running chat",
+	run = function()
+		local live = {}
+		for _, c in model.chats do
+			table.insert(live, c)
+		end
+		table.sort(live, function(a: any, b: any): boolean
+			return a.updated > b.updated
+		end)
+		local c = live[math.min(3, #live)]
+		if c then
+			messages += 1
+			c.updated = NOW + messages
+			publish()
+		end
 	end,
 }
 ui.command {
@@ -1059,6 +1300,17 @@ ui.command {
 		publish()
 	end,
 }
+-- Two chats' titles long enough that each one's tab is as wide as its title may
+-- go (tests/session_tabs).
+ui.command {
+	id = "long_titles",
+	title = "Two chats with long titles",
+	run = function()
+		find("a1").title = "Desktop app performance investigation, first pass"
+		find("a2").title = "Desktop app performance investigation, second pass"
+		publish()
+	end,
+}
 -- A session starts in Cobalt (another device's, say): it has one again.
 ui.command {
 	id = "cobalt_arrives",
@@ -1115,6 +1367,43 @@ ui.command {
 		publish()
 	end,
 }
+-- Tidy the tests' side chats, one with a side chat of its own, and a Cloud
+-- delegate (a computer's chat keeps that one when it's deleted): what its
+-- delete says goes with it, as the host counts it (tests/
+-- sidebar_delete_children; the counting is src/sessions.rs `deleted_with`).
+ui.command {
+	id = "tidy_side_chats",
+	title = "Tidy the tests has three side chats",
+	run = function()
+		(model :: any).deleted_with = { a3 = { subagents = 0, sides = 3 } };
+		(model :: any).children = {
+			a3 = {
+				{ id = "t1", parent = "a3", title = "Split the slow suite", device = "mac", updated = NOW - 40, created = NOW - HOUR, agent = "claude" },
+				{ id = "t2", parent = "a3", title = "Drop the dead fixtures", device = "mac", updated = NOW - 50, created = NOW - HOUR, agent = "claude", child_kind = "side" },
+				{ id = "t3", parent = "a3", title = "Run it on Cloud", device = "cloud-t3", updated = NOW - 60, created = NOW - HOUR, agent = "claude", child_kind = "subagent" },
+			},
+			t1 = {
+				{ id = "t4", parent = "t1", title = "Time each test", device = "mac", updated = NOW - 70, created = NOW - HOUR, agent = "claude" },
+			},
+		}
+		publish()
+	end,
+}
+-- And a subagent of its own besides.
+ui.command {
+	id = "tidy_subagent",
+	title = "Tidy the tests has a subagent",
+	run = function()
+		local kids = (model :: any).children or {}
+		kids.a3 = kids.a3 or {}
+		table.insert(kids.a3, { id = "t5", parent = "a3", title = "Find the flaky one", device = "mac", updated = NOW - 80, created = NOW - HOUR, agent = "claude", child_kind = "subagent" })
+		;(model :: any).children = kids
+		local with = (model :: any).deleted_with or {}
+		with.a3 = { subagents = 1, sides = if with.a3 then with.a3.sides else 0 };
+		(model :: any).deleted_with = with
+		publish()
+	end,
+}
 -- Atlas crowded: six more sessions under its three, older than them
 -- ("Atlas 1" the newest), so it shows its first five and "Show 4 more".
 ui.command {
@@ -1165,12 +1454,15 @@ ui.command {
 	end,
 }
 -- A plugin narrowing the sidebar (`sidebar.filter`): to working sessions,
--- and to nonsense (a plugin's mistake, read as none).
+-- and to nonsense (a plugin's mistake, read as none). The host names the
+-- plugin allowed to (`sidebar.filter_by`), as src/plugins does.
 local sidebar_filter = ui.shared("sidebar.filter", nil :: any)
+local sidebar_filter_by = ui.shared("sidebar.filter_by", nil :: any)
 ui.command {
 	id = "focus",
 	title = "Focus shows working sessions only",
 	run = function()
+		sidebar_filter_by:set("Focus")
 		sidebar_filter:set({ statuses = { "working", "nonsense" }, by = "Focus" })
 	end,
 }
@@ -1205,6 +1497,15 @@ ui.command {
 	title = "A section of yours",
 	run = function()
 		model.places = { pinned = {}, sections = { { id = "later", name = "Later", sessions = { "b2" } } } }
+		publish()
+	end,
+}
+-- A section named longer than the sidebar is wide.
+ui.command {
+	id = "long_section",
+	title = "A section with a long name",
+	run = function()
+		model.places = { pinned = {}, sections = { { id = "later", name = "Everything to read again before the release goes out on Friday", sessions = { "b2" } } } }
 		publish()
 	end,
 }
@@ -1298,6 +1599,13 @@ end
 ui.command { id = "fixture.edit_project", title = "Fixture: edit project", menu = "Fixture", run = function()
 	editor().open("borealis")
 end }
+-- (Each copy of Atlas after `atlas_cloned_on_box`: tests/project_default.)
+ui.command { id = "fixture.edit_project_atlas", title = "Fixture: edit Atlas", menu = "Fixture", run = function()
+	editor().open("atlas")
+end }
+ui.command { id = "fixture.edit_project_atlas_clone", title = "Fixture: edit Atlas's clone", menu = "Fixture", run = function()
+	editor().open("atlas-clone")
+end }
 ui.command { id = "fixture.edit_project_emoji", title = "Fixture: edit project, emoji", menu = "Fixture", run = function()
 	editor().open("borealis", { kind = "emoji", emoji = "🚀", hue = "amber" })
 end }
@@ -1325,10 +1633,6 @@ end }
 
 publish()
 
--- Grouped by project (a view option; one list is the default): the tests
--- here follow projects' headers.
-require("@app/screens/shell/sidebar").options.organize:set("project")
-
 -- The plugins screen (what plugins ask of the shell: a tab in a panel, a
 -- link), as the app loads it beside the shell: on for the tests that need
 -- it (`shell_fixture.plugins`), so the rest stay as they are.
@@ -1338,5 +1642,8 @@ ui.effect(function()
 		require("@app/screens/plugins")
 	end
 end)
+-- The theme, for captures (as ui/chat_fixture.luau's).
+ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
+ui.command { id = "theme_dark", title = "Dark theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-dark") end }
 local shell = require("@app/screens/shell")
 return shell()

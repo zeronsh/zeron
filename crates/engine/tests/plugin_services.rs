@@ -148,15 +148,23 @@ const ICON: &str = r#"<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill=
 
 /// The plugin, installed in `dir`'s engine as `version`, signed as yours.
 async fn install(e: &Engine, dir: &Path, version: &str) {
+    install_asking(e, dir, version, &[]).await;
+}
+
+/// As `install`, asking for `more` besides.
+async fn install_asking(e: &Engine, dir: &Path, version: &str, more: &[&str]) {
     let folder = dir.join("plugins").join("hello-devices");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("init.luau"), "return nil").unwrap();
     std::fs::write(folder.join("service.luau"), SERVICE).unwrap();
     std::fs::write(folder.join("zeron.luau"), zeron_engine::plugins::scaffold::SDK).unwrap();
     std::fs::write(folder.join("icon.svg"), ICON).unwrap();
+    let permissions: Vec<&str> = ["service", "commands"].into_iter().chain(more.iter().copied()).collect();
     let manifest = json!({
         "id": "hello-devices", "name": "Hello devices", "version": version, "entry": "init.luau",
-        "service": "service.luau", "permissions": ["service", "commands"], "commands": ["echo"],
+        "service": "service.luau",
+        "permissions": permissions,
+        "commands": ["echo"],
         "icon": "icon.svg",
     });
     std::fs::write(folder.join("zeron-plugin.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
@@ -254,10 +262,11 @@ async fn a_window_on_one_device_calls_its_service_on_another() {
     let refused = ask(&a, "device-b", "where", json!({})).await;
     assert_eq!(refused["reason"], "not_approved", "{refused}");
 
-    // A lists B's (Settings → Plugins' device switcher), but allowing is
-    // B's person's, in B's own window (R6): a forwarded allow is refused,
-    // with or without a review, and changes nothing there. Then B allows
-    // it, and B's service answers, running B's own `echo`.
+    // A lists B's (Settings → Plugins' device switcher). An allow sent
+    // there needs a review B minted for A (one_device_allows_… below):
+    // without one, or with one A minted for itself, it's refused and
+    // changes nothing there. Then B allows it, and B's service answers,
+    // running B's own `echo`.
     let on_b = a
         .client
         .call(methods::LIST_PLUGINS, json!({ "targetDeviceId": "device-b" }))
@@ -276,9 +285,8 @@ async fn a_window_on_one_device_calls_its_service_on_another() {
                 json!({ "targetDeviceId": "device-b", "id": "hello-devices", "allow": true, "hash": item["hash"], "review": review }),
             )
             .await;
-        assert!(forwarded.is_err(), "another device allowed it: {forwarded:?}");
+        assert!(forwarded.is_err(), "allowed without B's review: {forwarded:?}");
     }
-    // (Nor past A's own refusal: B's relay refuses it on arrival.)
     let list = b.client.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
     let still = list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == "hello-devices").cloned().unwrap();
     assert_eq!(still["status"], "pending", "{still}");
@@ -344,4 +352,195 @@ async fn a_window_on_one_device_calls_its_service_on_another() {
 
     a.core.shutdown().await;
     b.core.shutdown().await;
+}
+
+// ── Your plugins on your other devices ──────────────────────────────────────
+
+/// Plugin `id` as `e` lists it on `device` (none: its own).
+async fn listed(e: &Engine, device: Option<&str>, id: &str) -> Option<Value> {
+    let params = match device {
+        Some(device) => json!({ "targetDeviceId": device }),
+        None => json!({}),
+    };
+    let list = e.client.call(methods::LIST_PLUGINS, params).await.unwrap();
+    list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned()
+}
+
+/// As A's consent window does for a plugin on `device`: a review minted
+/// there, for it as listed there.
+async fn review_on(e: &Engine, device: &str, item: &Value) -> Result<Value, String> {
+    e.client
+        .call(methods::REVIEW_PLUGIN, json!({ "targetDeviceId": device, "id": item["id"], "hash": item["hash"] }))
+        .await
+        .map(|minted| minted["review"].clone())
+        .map_err(|e| e.to_string())
+}
+
+async fn allow_on(e: &Engine, device: &str, item: &Value, review: &Value) -> Result<Value, String> {
+    e.client
+        .call(
+            methods::DECIDE_PLUGIN,
+            json!({ "targetDeviceId": device, "id": item["id"], "allow": true, "hash": item["hash"], "review": review }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// As Settings → Plugins sends a `.zeron-plugin` file on this device to
+/// `device`: in pieces (small ones here, so there are several), then
+/// installed there.
+async fn send_file(e: &Engine, device: &str, file: &Path) -> Result<Value, String> {
+    use base64::Engine as _;
+    let raw = std::fs::read(file).unwrap();
+    let mut upload = Value::Null;
+    let mut pieces = 0;
+    for piece in raw.chunks(2048) {
+        let staged = e
+            .client
+            .call(
+                methods::STAGE_PLUGIN_PACKAGE,
+                json!({ "targetDeviceId": device, "upload": upload, "data": base64::engine::general_purpose::STANDARD.encode(piece) }),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        upload = staged["upload"].clone();
+        pieces += 1;
+    }
+    assert!(pieces > 1, "sent in pieces");
+    e.client
+        .call(
+            methods::INSTALL_PLUGIN,
+            json!({ "targetDeviceId": device, "upload": upload, "name": file.file_name().unwrap().to_string_lossy() }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `e`'s plugin as a `.zeron-plugin` file in `dir`.
+async fn export(e: &Engine, dir: &Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let out = e
+        .client
+        .call(methods::EXPORT_PLUGIN, json!({ "id": "hello-devices", "to": dir }))
+        .await
+        .unwrap();
+    std::path::PathBuf::from(out["path"].as_str().unwrap())
+}
+
+/// An agent's call on `e` (its MCP server's scoped token, as the engine
+/// sees it once past the IPC gate).
+async fn as_agent(e: &Engine, method: &str, params: Value) -> Result<Value, String> {
+    use zeron_rpc::RpcService as _;
+    let rpc = e.core.rpc_service();
+    let reply = zeron_rpc::with_caller(zeron_rpc::Caller::Agent { chat: Some("chat-1".into()) }, async move {
+        rpc.handle(method, params).await
+    })
+    .await;
+    match reply {
+        Ok(zeron_rpc::RpcReply::Value(value)) => Ok(value),
+        Ok(_) => Ok(Value::Null),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Beta users couldn't install a plugin on another of their devices: its
+/// Allow was refused on the way. Now a person installs someone else's
+/// plugin on another of their devices from this one (a `.zeron-plugin` file
+/// here), sees what it asks as that device reads it, and allows it there;
+/// an update asking for more waits there again, and is allowed from here
+/// too. The decision is that device's alone (this one hasn't allowed it),
+/// held to a review that device minted for exactly what was shown, for
+/// this very device, never for an agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_device_installs_and_allows_a_plugin_on_another() {
+    let rooms = device_rooms().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let (dir_a, dir_b, dir_c) = (dirs.path().join("a"), dirs.path().join("b"), dirs.path().join("c"));
+    let a = engine(&dir_a, "device-a", &rooms);
+    let b = engine(&dir_b, "device-b", &rooms);
+    // Someone else made it (another key): a file they gave you, on A.
+    let c = engine(&dir_c, "device-c", &rooms);
+    install(&c, &dir_c, "1.0.0").await;
+    let file = export(&c, &dirs.path().join("downloads")).await;
+
+    // A sends it to B (once B is up): installed there, waiting for you.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let installed = loop {
+        match send_file(&a, "device-b", &file).await {
+            Ok(installed) => break installed,
+            Err(error) if error.contains("unreachable") && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(error) => panic!("couldn't install it on B: {error}"),
+        }
+    };
+    assert_eq!(installed["waiting"], true, "{installed}");
+    assert_eq!(installed["plugin"]["status"], "pending", "{installed}");
+    assert!(listed(&a, None, "hello-devices").await.is_none(), "on B, not A");
+    // An agent can't send one there.
+    let refused = as_agent(&a, methods::STAGE_PLUGIN_PACKAGE, json!({ "targetDeviceId": "device-b", "data": "aGk=" })).await;
+    assert!(refused.is_err(), "{refused:?}");
+
+    // A's consent window shows it as B lists it: what B read of it.
+    let item = listed(&a, Some("device-b"), "hello-devices").await.unwrap();
+    assert_eq!(item["status"], "pending", "{item}");
+    assert_eq!(item["ask"], json!(["commands", "service"]), "{item}");
+    assert_eq!(item["author"]["kind"], "unknown", "{item}");
+
+    // An agent on A can't mint a review on B, nor allow there.
+    let refused = as_agent(&a, methods::REVIEW_PLUGIN, json!({ "targetDeviceId": "device-b", "id": item["id"], "hash": item["hash"] })).await;
+    assert!(refused.is_err(), "{refused:?}");
+    let review = review_on(&a, "device-b", &item).await.expect("A's window gets a review from B");
+    let refused = as_agent(
+        &a,
+        methods::DECIDE_PLUGIN,
+        json!({ "targetDeviceId": "device-b", "id": item["id"], "allow": true, "hash": item["hash"], "review": review }),
+    )
+    .await;
+    assert!(refused.is_err(), "an agent allowed it: {refused:?}");
+    // A review B minted for A is A's: B's own app can't spend it either
+    // (and a misused one is used up).
+    let review = review_on(&a, "device-b", &item).await.unwrap();
+    let refused = b
+        .client
+        .call(methods::DECIDE_PLUGIN, json!({ "id": item["id"], "allow": true, "hash": item["hash"], "review": review }))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(allow_on(&a, "device-b", &item, &review).await.is_err(), "used up");
+    // Nor a review for something other than what B lists.
+    let stale = json!({ "id": item["id"], "hash": "ab".repeat(32) });
+    assert!(review_on(&a, "device-b", &stale).await.is_err());
+    assert_eq!(listed(&b, None, "hello-devices").await.unwrap()["status"], "pending");
+
+    // Your Allow, from A's window: on, on B alone.
+    let review = review_on(&a, "device-b", &item).await.unwrap();
+    let decided = allow_on(&a, "device-b", &item, &review).await.expect("allowed on B from A");
+    assert_eq!(decided["status"], "on", "{decided}");
+    let on_b = listed(&b, None, "hello-devices").await.unwrap();
+    assert_eq!(on_b["status"], "on", "{on_b}");
+    assert_eq!(on_b["allowed"], json!(["commands", "service"]), "{on_b}");
+    assert!(listed(&a, None, "hello-devices").await.is_none(), "approvals are per device");
+
+    // Its maker ships 1.1.0, asking for more: sent to B the same way, it
+    // waits there again with what it adds, and A allows that too.
+    install_asking(&c, &dir_c, "1.1.0", &["links.open"]).await;
+    let file = export(&c, &dirs.path().join("downloads-1.1")).await;
+    let updated = send_file(&a, "device-b", &file).await.expect("updated on B from A");
+    assert_eq!(updated["update"], true, "{updated}");
+    let item = listed(&a, Some("device-b"), "hello-devices").await.unwrap();
+    assert_eq!(item["status"], "pending", "asks again: {item}");
+    assert_eq!(item["version"], "1.1.0", "{item}");
+    let review = review_on(&a, "device-b", &item).await.unwrap();
+    assert_eq!(allow_on(&a, "device-b", &item, &review).await.unwrap()["status"], "on");
+    let on_b = listed(&b, None, "hello-devices").await.unwrap();
+    assert_eq!(on_b["allowed"], json!(["commands", "links.open", "service"]), "{on_b}");
+
+    // A device that isn't up says so, as the link does (Settings →
+    // Plugins reads either as "Can't reach …", zgx remote::unreachable).
+    let away = review_on(&a, "device-z", &item).await;
+    assert!(away.as_ref().is_err_and(|e| e.contains("unreachable") || e.contains("timed out")), "{away:?}");
+
+    a.core.shutdown().await;
+    b.core.shutdown().await;
+    c.core.shutdown().await;
 }

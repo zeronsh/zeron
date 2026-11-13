@@ -113,7 +113,7 @@ struct Updates {
     rpc: RefCell<Option<Rpc>>,
     /// Bumped with each connection: a retry from an old one does nothing.
     connection: Cell<u64>,
-    list: RefCell<Option<Watch>>,
+    list: RefCell<Option<crate::engine::lists::Listening>>,
     /// Publishes so far (for tests).
     #[cfg(test)]
     published: Cell<u32>,
@@ -156,16 +156,16 @@ impl Updates {
             device.retries = 0;
         }
         let weak = Rc::downgrade(self);
-        let list = rpc.watch("WatchDevices", json!({}), move |item| {
+        let list = crate::engine::lists::listen(rpc, "WatchDevices", move |frame| {
             if let Some(updates) = weak.upgrade() {
-                updates.heard_devices(&item);
+                updates.heard_devices(frame.list);
             }
         });
         *self.list.borrow_mut() = Some(list);
         let (me, rpc) = (self.clone(), rpc.clone());
         engine::get().spawn(async move {
-            if let Ok(answer) = rpc.call("LocalDevice", json!({})).await {
-                *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
+            if let Some(here) = engine::local_device(&rpc).await {
+                *me.here.borrow_mut() = Some(here);
                 me.publish();
             }
         });

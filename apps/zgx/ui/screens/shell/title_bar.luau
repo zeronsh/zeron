@@ -46,7 +46,7 @@ local function corner_card(size: number): Node
 			h = (16 + stroke) * s,
 			rounded = raw((4 + stroke / 2) * s),
 			border = "$zeron.glyph.stroke",
-			border_color = "$text.secondary",
+			border_color = "$zeron.bar.ink",
 		},
 		ui.div {
 			absolute = true,
@@ -55,7 +55,7 @@ local function corner_card(size: number): Node
 			w = 5.5 * s,
 			h = 4.5 * s,
 			rounded = raw(0.875 * s),
-			bg = "$text.secondary",
+			bg = "$zeron.bar.ink",
 		},
 	}
 end
@@ -95,6 +95,7 @@ return function(props: Props): Node
 					tooltip_side = "bottom",
 					w = size,
 					h = size,
+					tone = "bar",
 					lit = function(): boolean
 						local l = lanes()
 						return l ~= nil and l.shown ~= nil and (l.shown :: any)() == true
@@ -152,10 +153,11 @@ return function(props: Props): Node
 				tooltip_side = "bottom",
 				w = size,
 				h = size,
+				tone = "bar",
 				on_click = function()
 					fit.toggle_panel()
 				end,
-				ds.SidebarIcon { open = props.files, side = "right", size = 16 },
+				ds.SidebarIcon { open = props.files, side = "right", size = 16, ink = "$zeron.bar.ink" },
 			}
 		),
 	}
@@ -171,10 +173,11 @@ return function(props: Props): Node
 		ds.TitleBar {
 			collapsed = props.collapsed,
 			on_toggle = fit.toggle_sidebar,
-			-- (No glass behind the window's buttons and the controls: they stand on
-			-- the top bar, over nothing but the window.)
+			-- Glass behind the window's buttons and the controls while the
+			-- sidebar is collapsed over a wallpaper (v2's new chat). Zeron's own
+			-- look has no art here (`art` false): they stand on its top bar.
 			island = function(): boolean
-				return false
+				return props.collapsed:get() and props.art()
 			end,
 			can_back = route.can_back,
 			can_forward = route.can_forward,

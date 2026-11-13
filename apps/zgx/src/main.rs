@@ -25,7 +25,11 @@
 //! `ZERON_ZGX_REPLAY=1` shows every page, as if none were finished.
 //! `--inspect` (or `ZGX_INSPECT_SOCKET=1`) serves devtools to `zgx inspect`.
 
+#![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
+
 mod about;
+#[cfg(all(windows, feature = "beta"))]
+mod windows_install;
 mod acp_registry;
 mod agents;
 mod appshots;
@@ -34,6 +38,7 @@ mod carried_settings;
 mod chat;
 mod cloud;
 mod dev;
+mod dictation;
 mod completion;
 mod desktop_blur;
 mod engine;
@@ -46,6 +51,7 @@ mod github;
 mod haptics;
 mod heap;
 mod images;
+mod intro_handoff;
 mod links;
 mod pasted;
 mod math;
@@ -58,6 +64,8 @@ mod relaunch;
 mod session_home;
 mod sessions;
 mod settings;
+#[cfg(target_os = "macos")]
+mod system_sound;
 mod terminal;
 mod tool_details;
 mod themes;
@@ -69,6 +77,8 @@ mod audit_shots;
 mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod label_fade_tests;
 #[cfg(test)]
 mod waiting_toast_tests;
 #[cfg(test)]
@@ -108,7 +118,21 @@ mod chip_copy_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
+mod picker_settle_tests;
+#[cfg(test)]
 mod fit_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod slide_bench_tests;
+// (Unix only: it reads thread CPU time through libc.)
+#[cfg(all(test, unix))]
+mod activity_cost_tests;
+#[cfg(all(test, unix))]
+mod scroll_script_tests;
+#[cfg(test)]
+mod transcript_scroll_tests;
+#[cfg(test)]
+mod transcript_paint_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
@@ -119,7 +143,8 @@ mod visuals_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
-use zgx::{compose::component, platform::PlatformService, scene::Rect, widgets::Ui};
+use intro_handoff::Handoff;
+use zgx::{compose::component, platform::PlatformService, reactive::Signal, scene::Rect, widgets::Ui};
 use zgx_desktop::{
     Application, FontData, Glass, GlassMaterial, Titlebar, WindowBounds, WindowContext,
     WindowHandle, WindowLevel, WindowOptions,
@@ -210,6 +235,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
     zeron_update::set_app_version(about::APP_VERSION);
+    // The Zeron app's updater follows the channel on record on every
+    // platform, a stable build's too (crates/update `follows_channels`).
+    #[cfg(feature = "beta")]
+    zeron_update::set_app_follows_channels();
+    // On Windows this app's engine is a whole Zeron `zeron.exe`, in this
+    // version's folder (scripts/package-windows.ps1), which an older updater
+    // may not have brought: bring it in first (src/windows_install.rs).
+    #[cfg(all(windows, feature = "beta"))]
+    {
+        windows_install::complete_if_needed(&argv);
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
+            zeron_launch::set_full_app_engine(
+                zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
+            );
+        }
+    }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
@@ -220,7 +261,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
-            zeron_cli::Launch::Window { open_url: url } => open_url = url,
+            zeron_cli::Launch::Window { open_url: url, safe_mode } => {
+                open_url = url;
+                // Zeron's own interface (src/plugins/preview.rs safe mode):
+                // as Alt (⌥) held as it opens.
+                if safe_mode {
+                    plugins::ask_zeron_template();
+                }
+            }
             zeron_cli::Launch::Engine(_) => unreachable!("the helper runs the engine's commands"),
             #[cfg(target_os = "linux")]
             zeron_cli::Launch::Appshot => return Err("Appshots from the command line aren't in this app yet".into()),
@@ -241,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--inspect" => inspect = true,
             // Zeron's own template, whatever was in use (src/plugins/live.rs):
             // for one that breaks before its window can switch back.
-            "--zeron-template" => plugins::ask_zeron_template(),
+            "--zeron-template" | "--safe-mode" => plugins::ask_zeron_template(),
             // (Development: a fixture under ui/ in a window of its own, as
             // the gallery's; with `ZERON_ZGX_DEV_PLUGINS`, plugins in it.)
             other if other.starts_with("fixture=") && other.ends_with(".luau") => {
@@ -249,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => {
                 return Err(format!(
-                    "unknown argument `{other}`: expected intro, onboarding, main, gallery, --inspect or --zeron-template"
+                    "unknown argument `{other}`: expected intro, onboarding, main, gallery, --inspect, --safe-mode or --zeron-template"
                 )
                 .into());
             }
@@ -270,19 +318,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe { std::env::set_var("ZGX_LAYOUT_WARNINGS", "1") };
         }
     }
-    // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
-    // of this interface by someone who finished setup before is the exception:
-    // the intro, then their username and card, once.
-    if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        if welcome_due(finished_setup_before(), welcomed()) {
-            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            screen = Screen::Onboarding;
-            // Setup finished on this Mac before: the main window.
-            if onboarded() {
-                screen = Screen::Main;
-            }
+    // Where a launch opens (`opening`). Asking for `intro` still plays it.
+    if matches!(screen, Screen::Intro) && !asked_for_intro {
+        let session = auth::session_exists();
+        match opening(session, session && finished_setup_before(), welcomed(), onboarded()) {
+            Opening::Intro => {}
+            Opening::Welcome => WELCOME.store(true, std::sync::atomic::Ordering::Relaxed),
+            Opening::Setup => screen = Screen::Onboarding,
+            Opening::Main => screen = Screen::Main,
         }
     }
 
@@ -340,7 +383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// fixture, devtools), or none: not `zeron`'s command line.
 fn dev_launch(args: &[String]) -> bool {
     args.iter().all(|arg| {
-        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template")
+        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template" | "--safe-mode")
             || (arg.starts_with("fixture=") && arg.ends_with(".luau"))
     })
 }
@@ -395,18 +438,32 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
     // Setup's `onboarding.epoch`: when the way in was taken, which its card
     // wall reckons its drift from, as the intro's copy of it does.
     let epoch: Rc<RefCell<Option<Shared>>> = Rc::default();
+    // What the hand-off does with the two windows (src/intro_handoff.rs).
+    let setup_active: Rc<RefCell<Option<Signal<bool>>>> = Rc::default();
+    let handoff = Rc::new(Handoff::new(intro_handoff::HostWindows {
+        intro: cx.window.clone(),
+        intro_active: cx.ui.observe_window_active(),
+        setup: setup.clone(),
+        setup_active: setup_active.clone(),
+        windows: cx.windows.clone(),
+        open_setup: Box::new(|windows| {
+            windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
+        }),
+    }));
+    let closing = handoff.clone();
+    cx.on_closed(move || closing.intro_closed());
 
-    let window = cx.window.clone();
+    let (window, interactive) = (cx.window.clone(), handoff.clone());
     host.action("interactive", move |_| {
         window.set_pointer_passthrough(false);
-        window.request_focus();
+        interactive.interactive();
     });
     // `prepare { x, y, w, h }`: setup's window at that rect (points from the
     // overlay's top left, where the intro draws its screen over it), once,
     // made hidden (its screen built and its first frame drawn meanwhile, so
     // the intro can ask for it at launch, over the desktop) until `reveal`
     // shows it whole.
-    let (overlay, windows, opened) = (cx.window.clone(), cx.windows.clone(), setup.clone());
+    let (prepared, windows, opened) = (handoff.clone(), cx.windows.clone(), setup.clone());
     let (bounds, viewport) = (cx.window_info.bounds.clone(), cx.viewport.clone());
     let (arriving, epoch_slot) = (arrival.clone(), epoch.clone());
     host.action("prepare", move |rect| {
@@ -428,9 +485,10 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             visible: false,
             ..onboarding_window()
         };
-        let (overlay, radius, arriving, epoch_slot) =
-            (overlay.clone(), radius.clone(), arriving.clone(), epoch_slot.clone());
+        let (prepared, radius, arriving, epoch_slot, setup_active) =
+            (prepared.clone(), radius.clone(), arriving.clone(), epoch_slot.clone(), setup_active.clone());
         let handle = windows.open(options, move |cx| {
+            *setup_active.borrow_mut() = Some(cx.ui.observe_window_active());
             radius.set(cx.window_info.corner_radius.with_untracked(|r| *r).into());
             // Devtools are one socket a process: the intro keeps them (run
             // `onboarding` to inspect setup).
@@ -439,37 +497,25 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
             *epoch_slot.borrow_mut() = Some(host.shared("onboarding.epoch", 0.));
             serve(cx, host, "app.luau", false);
             // Keys stay with the intro until it hands over.
-            overlay.request_focus();
+            prepared.prepared();
         });
         *opened.borrow_mut() = Some(handle);
     });
     // The way in taken (at `ui.now()`'s time, the argument): setup's window
     // shows, under the scene's picture, its card wall reckoned from then.
-    let shown = setup.clone();
+    let shown = handoff.clone();
     host.action("reveal", move |at| {
         if let (Some(epoch), Some(at)) = (&*epoch.borrow(), at.as_f64()) {
             epoch.set(Value::Num(at));
         }
-        if let Some(window) = &*shown.borrow() {
-            window.set_visible(true);
-        }
+        shown.reveal();
     });
     // The card has faded over setup's window: it takes over.
-    let (overlay, windows) = (cx.window.clone(), cx.windows.clone());
     host.action("done", move |_| {
         if let Some(arrived) = &*arrival.borrow() {
             arrived.set(Value::Bool(true));
         }
-        match &*setup.borrow() {
-            Some(window) => {
-                window.set_visible(true);
-                window.request_focus();
-            }
-            None => {
-                windows.open(onboarding_window(), move |cx| open(cx, "app.luau", false));
-            }
-        }
-        overlay.close();
+        handoff.done();
     });
     serve(cx, host, "intro.luau", inspect);
 }
@@ -546,6 +592,38 @@ fn finished_setup_before() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
 }
 
+/// Where a launch that asked for no screen opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Opening {
+    /// The intro, then setup from its start.
+    Intro,
+    /// The intro, then their username and card only (`welcome_due`).
+    Welcome,
+    /// Setup at once, where sign-in leads (src/auth.rs).
+    Setup,
+    /// The main window.
+    Main,
+}
+
+/// Where a launch opens: signed in on an earlier run, no intro, setup at once
+/// (the first launch of this interface by someone who finished setup before
+/// is the exception: the intro, then their username and card, once), or the
+/// main window once setup was finished on this computer. Setup finished
+/// without an account opens the main window too: it works without one
+/// (screens/shell), and only the session was asked here before, so whoever
+/// went on without signing in saw the intro and setup on every launch.
+fn opening(session: bool, finished_before: bool, welcomed: bool, onboarded: bool) -> Opening {
+    if session && welcome_due(finished_before, welcomed) {
+        Opening::Welcome
+    } else if onboarded {
+        Opening::Main
+    } else if session {
+        Opening::Setup
+    } else {
+        Opening::Intro
+    }
+}
+
 /// Whether someone signed in gets the welcome: they'd finished setup before and
 /// haven't seen it. (Mid-way through their first setup, they carry on with that.)
 fn welcome_due(finished_before: bool, welcomed: bool) -> bool {
@@ -574,7 +652,10 @@ fn script_host(cx: &mut WindowContext, entry: &str) -> ScriptHost {
 fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptHost {
     // Zeron's design system, lent to the window's plugins (`@ds`).
     let lent = path.clone();
-    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID), &lent);
+    // A long chat's heap, past 32 MB, collected aiming for 150% of what's in
+    // use rather than Luau's double: its rows' nodes, which the collector
+    // can't see the size of, go sooner (zgx #1837, the carry it replaces).
+    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150), &lent);
     // The network, for `ui.fetch` and remote images: the app's scripts, and
     // plugins granted "network" (zgx's own transport; a plugin without the
     // grant reaches none).
@@ -757,6 +838,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         engine_update::install(cx, &host);
         // A chat: its transcript, sending, approvals (src/chat.rs).
         chat::install(cx, &host);
+        // Holding to dictate, and Settings → Voice (src/dictation.rs).
+        dictation::install(cx, &host);
         // Agent visuals in a transcript (src/visuals.rs).
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
@@ -915,6 +998,11 @@ fn serve_with(
     if inspect {
         zgx_script::inspect::prepare();
     }
+    // A press travels 6 points before it's a drag, so a click that wavers
+    // stays a click (a tab's above all). On macOS only: it gives no setting
+    // (zgx's own is 4); elsewhere zgx follows the system's.
+    #[cfg(target_os = "macos")]
+    cx.ui.input.set_drag_threshold(6.);
     // The platform, which the selection's Copy and Look Up go through, is
     // found as the view mounts.
     let platform = selection_platform(cx, &host);
@@ -1101,7 +1189,11 @@ fn palette_commands(bar: &[zgx_desktop::AppMenu], all: &[zgx_script::Command]) -
         for entry in entries {
             match entry {
                 zgx_desktop::AppMenuEntry::Item { label, action, accelerator, .. } if action.0 != plugins::KEEP_TEMPLATE => {
-                    let key = accelerator.as_ref().and_then(|_| all.iter().find(|c| c.id == action.0)).and_then(|c| c.key.clone());
+                    let key = accelerator.as_ref().and_then(|_| match all.iter().find(|c| c.id == action.0) {
+                        Some(command) => command.key.clone(),
+                        // The host's own way back has its key too.
+                        None => (action.0 == plugins::USE_ZERON_TEMPLATE).then(|| menu_bar::DEFAULT_INTERFACE_KEY.to_string()),
+                    });
                     let mut fields = vec![("id", Value::from(action.0.as_str())), ("title", Value::from(label.as_str())), ("menu", Value::from(menu))];
                     if let Some(key) = key {
                         fields.push(("key", Value::from(key.as_str())));
@@ -1151,6 +1243,19 @@ fn intro_window() -> WindowOptions {
     }
 }
 
+/// The glass under Zeron's window: the under-window blur alone, untinted
+/// (`plain`), which the theme's frost (`glass.tint`, Zeron's `glass` at
+/// 0.80) tints, on every platform. On Windows that's the acrylic accent's
+/// blur of what's behind the window (zgx #1495), gpui's `Blurred`, as the
+/// shipping app's: the frost values are that app's, made for it. The
+/// material's own backdrop there is Mica, which blurs nothing (solid under
+/// the frost); Acrylic, a transient material's, adds the system's tint
+/// under it and goes solid whenever the window isn't active. With
+/// Transparency effects off, plain glass goes solid (zgx #1496).
+fn zeron_glass() -> Glass {
+    Glass::new(GlassMaterial::UnderWindowBackground).plain()
+}
+
 /// Zeron's window: an inset title bar over the colourless under-window
 /// blur, which the theme's `background` tints (the shipping app's glass).
 fn zeron_window(width: f64, height: f64) -> WindowOptions {
@@ -1160,9 +1265,11 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
         height,
         decorations: cfg!(target_os = "macos"),
         titlebar: Titlebar::Inset,
-        glass: Some(Glass::new(GlassMaterial::UnderWindowBackground).plain()),
-        // (Windows: the caption buttons keep to the title row at any zoom.)
-        caption_height: Some(32.),
+        glass: Some(zeron_glass()),
+        // (Windows: the caption buttons keep to the title row at any zoom,
+        // the bar's whole 38, as Zeron's: shell.rs
+        // `render_windows_caption_controls`, `Theme::TITLEBAR_HEIGHT`.)
+        caption_height: Some(38.),
         ..Default::default()
     }
 }
@@ -1217,8 +1324,8 @@ fn gallery_window() -> WindowOptions {
 
 /// The scripts: this folder's `ui/`, or `ZERON_ZGX_UI` (scripts/smoke.sh's
 /// frozen copy, which other saves under ui/ can't reload mid-run), or, in
-/// an app bundle (the Zeron app: the beta), the copy in its `Contents/Resources/ui`
-/// (with `plugins-builtin` beside it).
+/// an installed Zeron app (the beta), the copy packaged with it (with
+/// `plugins-builtin` beside it).
 fn ui_dir() -> PathBuf {
     match dev::smoke_switch("ZERON_ZGX_UI") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -1226,16 +1333,37 @@ fn ui_dir() -> PathBuf {
     }
 }
 
-/// `Contents/Resources/ui` of the bundle this executable runs from, if any.
+/// The packaged scripts of the install this executable runs from, if any:
+/// `Contents/Resources/ui` of a macOS bundle, `ui` beside it on Linux (the
+/// tarball's, scripts/package-linux.sh), `beta\<version>\ui` beside it on
+/// Windows (scripts/package-windows.ps1).
 fn bundled_ui() -> Option<PathBuf> {
     static BUNDLED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     BUNDLED
         .get_or_init(|| {
             let exe = std::env::current_exe().ok()?;
-            let ui = exe.parent()?.parent()?.join("Resources").join("ui");
+            let dir = exe.parent()?;
+            let ui = if cfg!(target_os = "macos") {
+                dir.parent()?.join("Resources").join("ui")
+            } else if cfg!(windows) {
+                windows_version_files(dir)?.join("ui")
+            } else {
+                dir.join("ui")
+            };
             ui.join("app.luau").is_file().then_some(ui)
         })
         .clone()
+}
+
+/// This version's own folder beside the executable on Windows.
+fn windows_version_files(dir: &std::path::Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    return Some(zeron_update::windows::version_files(dir, about::APP_VERSION));
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// Geist (the iOS app's, copied into `fonts/` so this folder builds on its
@@ -1257,6 +1385,19 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
 }
 
 #[cfg(test)]
+mod glass_tests {
+    /// The window's glass is the under-window blur alone on every
+    /// platform: on Windows, the acrylic accent's blur the shipping app's
+    /// frost was made for, not Mica, which blurs nothing.
+    #[test]
+    fn the_window_s_glass_is_plain_everywhere() {
+        let glass = super::zeron_glass();
+        assert_eq!(glass.material, super::GlassMaterial::UnderWindowBackground);
+        assert!(glass.plain);
+    }
+}
+
+#[cfg(test)]
 mod welcome_tests {
     /// Someone who'd finished setup gets it once; someone new, or mid-way through
     /// their first setup, doesn't.
@@ -1265,5 +1406,19 @@ mod welcome_tests {
         assert!(super::welcome_due(true, false));
         assert!(!super::welcome_due(true, true));
         assert!(!super::welcome_due(false, false));
+    }
+
+    /// Setup finished without an account opens the main window on the next
+    /// launch, as it does signed in; the intro is for whoever hasn't finished it.
+    #[test]
+    fn setup_finished_without_an_account_opens_the_main_window() {
+        use super::{Opening, opening};
+        // (session, finished before, welcomed, onboarded here)
+        assert_eq!(opening(false, false, false, true), Opening::Main);
+        assert_eq!(opening(false, false, false, false), Opening::Intro);
+        assert_eq!(opening(true, false, false, true), Opening::Main);
+        assert_eq!(opening(true, false, false, false), Opening::Setup);
+        assert_eq!(opening(true, true, false, true), Opening::Welcome);
+        assert_eq!(opening(true, true, true, true), Opening::Main);
     }
 }

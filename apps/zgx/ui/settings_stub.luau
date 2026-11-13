@@ -8,6 +8,8 @@
 -- "name:detail" each). `ui.command`s change the data as the edge would on
 -- its own, or make the next change fail:
 --   settings_stub.sign_in          signed in as Ada, in org_1 (else signed out)
+--   settings_stub.restoring        the engine hasn't answered yet
+--   settings_stub.signed_out       the engine says signed out
 --   settings_stub.open_account     a way in to `settings/account` (a link)
 --   settings_stub.member_joins     someone accepts an invitation
 --   settings_stub.refuse_next      the next change is refused ("refused")
@@ -137,6 +139,9 @@ end
 local answers: { [string]: (arg: any) -> any } = {
 	["account.me"] = function()
 		return settled(table.clone(me))
+	end,
+	["dictation.call"] = function(arg: any)
+		return settled(if arg.op == "status" then { installed = false, size = 670479942 } elseif arg.op == "inputs" then {} else nil)
 	end,
 	["account.rename"] = function(name: string)
 		local r = change(nil)
@@ -504,6 +509,22 @@ auths.sign_out = function(done: (() -> ())?)
 	end
 end
 
+-- The launch before the engine has answered, and the engine saying signed out.
+ui.command {
+	id = "settings_stub.restoring",
+	title = "The engine hasn't answered yet",
+	run = function()
+		auth.account:set({ state = "restoring", env = "staging" } :: any)
+	end,
+}
+ui.command {
+	id = "settings_stub.signed_out",
+	title = "The engine says signed out",
+	run = function()
+		auth.account:set({ state = "signed_out", env = "staging" } :: any)
+	end,
+}
+
 ui.command {
 	id = "settings_stub.member_joins",
 	title = "A member joins",
@@ -562,6 +583,18 @@ ui.command {
 			mono = t["font.mono"],
 			secondary = t["text.secondary"],
 			tertiary = t["text.tertiary"],
+			-- "Accent colour throughout": a status dot, a find's highlight,
+			-- an @file token, a list marker, and a link's ink (nil: the
+			-- text's own).
+			working_dot = t["zeron.status.dot.working"],
+			working = t["zeron.status.working"],
+			find = t["zeron.editor.match"],
+			file_token = t["zeron.composer.token.file"],
+			marker = t["zeron.prose.marker"],
+			link = require("@ds/look").accented_ink(nil)(),
+			-- What the accent's own token is, and what the theme's says.
+			accented_ink = ui.theme.get("zeron.accented.ink"),
+			accent_ink = ui.theme.get("accent"),
 		})
 	end,
 }

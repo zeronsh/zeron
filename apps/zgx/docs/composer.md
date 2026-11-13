@@ -35,7 +35,9 @@ Expanded text occupies the width above the controls, with 16-point left/right
 insets. Attachments and questions contribute a measured header above the text.
 The text viewport grows with its natural wrapped content up to its limit;
 additional content scrolls inside the editor. The editor manages caret reveal
-and scrolling. Footer chips sit below the surface, and trays/deck content keep
+and scrolling. Its native placeholder follows IME composition; a press on blank
+composer space focuses the draft without a second focus change from the press
+layer. Footer chips sit below the surface, and trays/deck content keep
 their existing layout and interaction behavior.
 
 The pure `Layout.calculate(input, previous_text_expanded)` receives available

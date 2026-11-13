@@ -118,11 +118,19 @@ impl Notice {
         Notice { title, body, tone: Tone::Warning, action: None, stays: true }
     }
 
-    /// Zeron opened with the default interface (safe mode): ⌥ held, or
+    /// Zeron opened with the default interface (safe mode): ⌥ (Alt) held, or
     /// the template crashed it twice as it opened.
     pub fn safe_at_launch(reason: preview::SafeReason) -> Self {
         let (body, tone, stays) = match reason {
-            preview::SafeReason::Held => ("You held ⌥ as Zeron opened. Pick a template in Settings → Templates to use it again.", Tone::Neutral, false),
+            preview::SafeReason::Held => (
+                if cfg!(target_os = "macos") {
+                    "You held ⌥ as Zeron opened. Pick a template in Settings → Templates to use it again."
+                } else {
+                    "You held Alt as Zeron opened. Pick a template in Settings → Templates to use it again."
+                },
+                Tone::Neutral,
+                false,
+            ),
             preview::SafeReason::Crashed => (
                 "Your template closed Zeron twice as it opened. Pick it again in Settings → Templates once it's fixed.",
                 Tone::Warning,

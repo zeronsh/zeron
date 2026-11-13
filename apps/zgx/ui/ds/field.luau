@@ -12,6 +12,7 @@
 local Icon = require("@self/icon")
 local Hint = require("@self/hint")
 local control = require("@self/control")
+local material = require("@self/material")
 local EditorMenu = require("@self/editor_menu")
 
 local M = {}
@@ -205,7 +206,7 @@ function M.frame(props: FrameProps): Node
 			if joined() then
 				return "$zeron.menu.solid"
 			end
-			return if hovered:get() and not focused:get() then "$zeron.field.hover" else "$zeron.field.bg"
+			return if material.see_through() then (if hovered:get() and not focused:get() then "$zeron.field.glass_hover" else "$zeron.field.glass") elseif hovered:get() and not focused:get() then "$zeron.field.hover" else "$zeron.field.bg"
 		end,
 		border_color = function()
 			if invalid() then

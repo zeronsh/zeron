@@ -245,7 +245,9 @@ return function(id: string): any
 			return nil
 		end
 		local r = records:get() or {}
-		if name == "session" or name == "message" then
+		-- (A project's, as `.project-icon` gives it: its name, device and
+		-- icon with "sessions.read".)
+		if name == "session" or name == "message" or name == "project" then
 			local found = (r[name .. "s"] or {})[value]
 			local out = { id = value }
 			for k, v in found or {} do
@@ -1029,7 +1031,28 @@ return function(id: string): any
 	-- Its service's events (`zeron.emit` in service.luau), by device
 	-- (`@here`: this device's) and event.
 	local service_listeners: { [string]: { [string]: { (any, any) -> () } } } = {}
+	-- Its `zeron.on` listeners (usage, accounts, models, turns), by key.
+	local agent_listeners: { [string]: { event: string, opts: any, fn: (any, string) -> () } } = {}
 	local function heard_event(message: any)
+		-- Zeron's own (`zeron:<event>`), for one of its listeners.
+		local event = message.event
+		if type(event) == "string" and string.sub(event, 1, 6) == "zeron:" then
+			local wrapped = message.data or {}
+			if wrapped.listener == "@notice" then
+				-- What Zeron says of it (a listener failing, a loop stopped): its row says so.
+				local notice = (wrapped.data and wrapped.data.notice) or "A listener failed"
+				ui.invoke(`{prefix}.problem`, { error = notice, at = "zeron.on" })
+				return
+			end
+			local listener = agent_listeners[wrapped.listener or ""]
+			if listener then
+				local ok, why = pcall(listener.fn, wrapped.data, string.sub(event, 7))
+				if not ok then
+					print(`{id}: a {listener.event} listener failed: {why}`)
+				end
+			end
+			return
+		end
 		local keys = { message.from and message.from.id or "" }
 		if message.here then
 			table.insert(keys, "@here")
@@ -1153,6 +1176,148 @@ return function(id: string): any
 		end
 		services[key] = service
 		return service
+	end
+
+	-- ── Agents: usage, accounts, models, and their events ─────────────────
+	-- Each asks the engine, which checks what this device (or `device`,
+	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
+	-- "accounts.switch", "accounts.pin", "models.read", "models.set". Each is a promise; a
+	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
+	-- not_allowed, paced, already, loop, not_found, offline, …).
+	local function agents(op: string, args: any?, device: string?): any
+		return ui.call(`{prefix}.agents`, {
+			op = op,
+			args = if args == nil then {} else args,
+			device = device or ui.null,
+		})
+	end
+
+	-- Each provider's accounts' usage, as Zeron last read it (never a new
+	-- read): { { provider, account, active, plan?, fetched_at?, error?,
+	-- windows = { { label, used, remaining, resets_at? } } } }.
+	function M.usage(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("usage", { provider = o.provider }, o.device)
+	end
+
+	-- Read usage again now (once every 5 minutes, per plugin).
+	function M.usage_refresh(opts: { device: string? }?): any
+		return agents("usage_refresh", {}, opts and opts.device)
+	end
+
+	-- The saved accounts ("accounts.read"): { { provider, account, active,
+	-- switchable, email?, name?, organization?, plan? } }.
+	function M.accounts(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("accounts", { provider = o.provider }, o.device)
+	end
+
+	-- Make a saved account the active one ("accounts.switch"), on this
+	-- device or `device`, at once; with `when_idle`, once that provider's
+	-- chats there are done.
+	function M.switch_account(s: { provider: string, account: string, when_idle: boolean?, device: string? }): any
+		return agents("switch_account", { provider = s.provider, account = s.account, when_idle = s.when_idle }, s.device)
+	end
+
+	-- Run one chat on a saved account of its own ("accounts.pin"), on this
+	-- device or `device`, while the active account stays as it is. No
+	-- `account` takes the pin back. { provider, chat, account? }.
+	function M.pin_account(s: { provider: string, chat: string, account: string?, device: string? }): any
+		return agents("pin_account", { provider = s.provider, chat = s.chat, account = s.account }, s.device)
+	end
+
+	-- The chats pinned to an account ("accounts.read"): { { provider,
+	-- account, since, chat? } } (`chat` with "sessions.read").
+	function M.pins(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("pins", { provider = o.provider }, o.device)
+	end
+
+	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	function M.models(harness: string, opts: { device: string? }?): any
+		return agents("models", { harness = harness }, opts and opts.device)
+	end
+
+	-- A chat's model, effort and options ("models.read").
+	function M.chat_model(chat: string): any
+		return agents("chat_model", { chat = chat })
+	end
+
+	-- Set a chat's model, effort or options ("models.set"), for its next
+	-- turn, on the provider it has.
+	function M.set_model(s: { chat: string, model: string?, effort: string?, options: { [string]: string }? }): any
+		return agents("set_model", { chat = s.chat, model = s.model, effort = s.effort, options = s.options })
+	end
+
+	-- What a new chat starts with here ("models.set").
+	function M.set_default_model(s: { harness: string, model: string, effort: string? }): any
+		return agents("set_default_model", { harness = s.harness, model = s.model, effort = s.effort })
+	end
+
+	-- A message into a chat ("messages.send"), as you'd send it from the
+	-- composer: a turn of its own when nothing runs; while a turn runs,
+	-- queued for its end (`mode = "queue"`, the default) or steering it
+	-- (`"steer"`). `attachments`: files' paths on the chat's device (they
+	-- need "files.read" too). A promise of { status, chat, delivery, id }.
+	function M.send_message(s: { chat: string, text: string, attachments: { string }?, mode: string? }): any
+		return agents("send_message", { chat = s.chat, text = s.text, attachments = s.attachments, mode = s.mode })
+	end
+
+	-- A new chat, sent its first message ("messages.send"): `device`,
+	-- `project` (a project's id), `harness`, `model`, `effort`, `cwd` as you'd
+	-- pick them. A promise of { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+		return agents("new_chat", {
+			prompt = s.prompt,
+			device = s.device,
+			project = s.project,
+			harness = s.harness,
+			model = s.model,
+			effort = s.effort,
+			cwd = s.cwd,
+		})
+	end
+
+	-- The question (or approval) a chat waits on, answered ("messages.send"):
+	-- `answers` by question id, `{ [question] = label or { labels } }` (or a
+	-- list of { question, labels }); `request` names one, else the latest.
+	function M.answer(s: { chat: string, answers: any, request: string? }): any
+		return agents("answer", { chat = s.chat, answers = s.answers, request = s.request })
+	end
+
+	-- `fn(data, event)` for each `event` on this device while a window is
+	-- open: "usage.changed", "usage.threshold" (`opts.below`: percent
+	-- remaining), "usage.reset", "limit.hit", "account.switched",
+	-- "account.signed_out", "login.expired", "model.changed",
+	-- "models.updated", "turn.started", "turn.finished", "turn.errored",
+	-- "chat.awaiting_input", "chat.input_answered". `opts.provider`,
+	-- `account`, `window` and `chat` narrow it. Told as it changes, never
+	-- by polling. Returns a function that stops it. (A service's own
+	-- `zeron.on` hears them with no window open.)
+	local next_listener = 0
+	local function listen_all()
+		local list = {}
+		for key, l in agent_listeners do
+			table.insert(list, { key = key, event = l.event, opts = l.opts })
+		end
+		ui.call(`{prefix}.agents`, { op = "listen", args = {}, device = ui.null, listeners = list })
+			:after(nil, function(why)
+				print(`{id}: listening for Zeron's events: {why}`)
+			end)
+	end
+	function M.on(event: string, fn: (any, string) -> (), opts: { [string]: any }?): () -> ()
+		assert(type(event) == "string" and event ~= "", "zeron.on(event, fn)")
+		assert(type(fn) == "function", "zeron.on(event, fn)")
+		next_listener += 1
+		local key = `w{next_listener}`
+		agent_listeners[key] = { event = event, opts = opts or {}, fn = fn }
+		listen_all()
+		return function()
+			if agent_listeners[key] then
+				agent_listeners[key] = nil
+				listen_all()
+			end
+		end
 	end
 
 	-- A failed service call's reason: "offline", "not_installed",

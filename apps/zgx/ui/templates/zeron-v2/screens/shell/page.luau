@@ -81,7 +81,12 @@ return function(props: Props): Node
 		end)
 	end, { w_full = true, h_full = true })
 
-	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, home)
+	-- (Where the pointer is, only while a wallpaper reads it: a plugin's.
+	-- Your picture, or none, never does, and its writes on every move
+	-- went nowhere.)
+	local pane: ContainerProps = ds.wallpaper.follow(box, px, py, function(): boolean
+		return home() and string.find(appearance.showing:peek(), "^plugin:") ~= nil
+	end)
 	pane.ref = box
 	pane.id = "shell-page"
 	pane.hook = "shell.page"
@@ -90,15 +95,9 @@ return function(props: Props): Node
 	pane.h_full = true
 	pane.relative = true
 	pane.overflow = "hidden"
-	-- A trackpad's swipe between pages (the mouse's back and forward too):
-	-- the history, as the router's own view takes it.
-	pane.on_navigate = function(e)
-		if e.direction == "back" then
-			route.back()
-		else
-			route.forward()
-		end
-	end
+	-- No `on_navigate`: a trackpad's swipe over the page scrolls and never
+	-- steps the history (that's the title bar's arrows, the mouse's buttons,
+	-- ⌘[ and ⌘]).
 	-- Whether it shows, for what stands over it (screens/shell/art).
 	ui.effect(function()
 		local on = home() and not on_plugin() and appearance.showing:get() ~= "none"
@@ -118,6 +117,9 @@ return function(props: Props): Node
 				return home() and not on_plugin()
 			end,
 			width = props.width,
+			picture = function(): any
+				return if appearance.showing:peek() == "image" then appearance.image:peek() else nil
+			end,
 			key = function(): string
 				local showing = appearance.showing:get()
 				if showing == "image" then
@@ -534,6 +536,7 @@ return function(props: Props): Node
 	local base = open_w:peek()
 	local off = ui.use_state(0)
 	local easing: any = nil
+	local steps = 0
 	-- Whose panel shows (the session's, a plugin page's; none on a new
 	-- chat): another one is the route moving, not the person opening or
 	-- closing this one, and the panel lands at once, as it is there.
@@ -606,15 +609,16 @@ return function(props: Props): Node
 			end
 			off:set(showing - to)
 			local params = motion.column(off:peek(), 0)
-			local this: any = nil
+			-- (By number: a callback holding its own clip would keep both for good.)
+			steps += 1
+			local this = steps
 			params.onComplete = function()
-				if easing == this then
+				if steps == this then
 					easing = nil
 					revealing:set(false)
 				end
 			end
-			this = anime.animate(off, params)
-			easing = this
+			easing = anime.animate(off, params)
 		else
 			-- The window resized (or the room it fills while expanded moved):
 			-- where it goes moves at once; a step under way goes on.

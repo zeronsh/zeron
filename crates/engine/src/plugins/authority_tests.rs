@@ -368,6 +368,31 @@ async fn an_agent_cannot_choose_where_a_template_is_exported() {
     assert!(!path.exists());
 }
 
+/// R29 for plugins: an agent's export goes to Zeron's plugin-exports folder,
+/// never a path of its choosing.
+#[tokio::test]
+async fn an_agent_exports_a_plugin_only_to_the_exports_folder() {
+    let f = fixture();
+    call(&f.plugins, methods::NEW_PLUGIN, json!({ "id": "hello", "name": "Hello" })).await.unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let path = outside.path().join("x.zeron-plugin");
+    for caller in [Caller::Agent { chat: None }, Caller::Peer { device: None }] {
+        let refused = with_caller(
+            caller,
+            call(&f.plugins, methods::EXPORT_PLUGIN, json!({ "id": "hello", "to": path.display().to_string() })),
+        )
+        .await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("plugin-exports folder")), "{refused:?}");
+    }
+    assert!(!path.exists());
+    let exported = with_caller(Caller::Agent { chat: None }, call(&f.plugins, methods::EXPORT_PLUGIN, json!({ "id": "hello" })))
+        .await
+        .unwrap();
+    let saved = Path::new(exported["path"].as_str().unwrap());
+    assert_eq!(saved, f._dir.path().join("plugin-exports").join("hello-0.1.0.zeron-plugin"));
+    assert_eq!(exported["bytes"].as_u64().unwrap(), std::fs::metadata(saved).unwrap().len());
+}
+
 /// R14: a device-room dial's proof is this device's registered key over the
 /// edge's message, and nothing at all without a key.
 #[test]

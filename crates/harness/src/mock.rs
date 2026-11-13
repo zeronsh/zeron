@@ -106,6 +106,8 @@ fn fanout_settle(i: usize) -> Vec<AgentEvent> {
             is_error: failed,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         },
         fanout_tag(
@@ -202,6 +204,7 @@ impl Harness for MockHarness {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![
             Model {
+                default: false,
                 id: "mock-1".into(),
                 label: "Mock 1".into(),
                 description: None,
@@ -211,6 +214,7 @@ impl Harness for MockHarness {
             // Claude-mirroring demo model: lets scripted runs carry the same
             // chip labels ("Fable 5 · High") as a real Claude session.
             Model {
+                default: false,
                 id: "mock-fable-5".into(),
                 label: "Fable 5".into(),
                 description: None,
@@ -333,6 +337,8 @@ impl Harness for MockHarness {
                             is_error: false,
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                             exit_code: None,
                         });
                         send("All 128 tests pass.");
@@ -565,6 +571,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -604,6 +612,8 @@ impl Harness for MockHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 };
                 let done = AgentEvent::Done {
@@ -770,6 +780,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     },
                 ]
@@ -827,6 +839,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                         exit_code: None,
                     });
                     events.push(AgentEvent::TextDelta {
@@ -1005,6 +1019,8 @@ fn background_run(
                 },
             });
             let _ = tx.send(AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: format!("{id}-call"),
                 is_error: false,
                 output: Some(format!("Command running in background with ID: {id}")),
@@ -1222,6 +1238,8 @@ fn long_tool_run(
                         pid.unwrap_or(0)
                     )),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 });
                 turn.set_background_processes(vec![zeron_proto::BackgroundTask {
@@ -1283,6 +1301,8 @@ fn long_tool_run(
                     String::new()
                 }),
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: (!stopped).then_some(0),
             });
             if stopped {

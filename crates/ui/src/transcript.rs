@@ -3937,6 +3937,7 @@ impl Transcript {
             L::Syncing => "Syncing…",
             L::Reconnecting => "Reconnecting…",
             L::Offline => "Offline — this chat loads when you're back online",
+            L::HostAway => "This chat lives on another device — it loads when that device is back online",
         };
         let caption = div()
             .flex()
@@ -3946,7 +3947,7 @@ impl Transcript {
             .text_color(theme.text_faint)
             // Hard offline waits on nothing this app does: the amber dot the
             // composer and sidebar use, not a spinner.
-            .when(loading == L::Offline, |row| {
+            .when(matches!(loading, L::Offline | L::HostAway), |row| {
                 row.child(div().size(px(5.0)).rounded_full().bg(theme.warning))
             })
             .child(SharedString::from(caption));
@@ -7778,12 +7779,68 @@ impl Transcript {
         }
     }
 
+    /// Remove pressed on a held or failed send: it goes from view at once and
+    /// from the engine's outbox (`RemoveHeldSend`), and never goes out. Should
+    /// the engine refuse, it comes back.
+    fn remove_held_send(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let engine = self.state.read(cx).engine().cloned();
+        let removed = self.state.update(cx, |s, cx| {
+            let id = s.removable_held_send(&chat_id)?.id.clone();
+            let removed = s.remove_held_locally(&id);
+            cx.notify();
+            removed
+        });
+        let (Some(removed), Some(engine)) = (removed, engine) else {
+            return;
+        };
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let params = serde_json::json!({ "chatId": chat_id, "id": removed.id });
+            if let Err(err) = engine
+                .client()
+                .call(zeron_rpc::methods::REMOVE_HELD_SEND, params)
+                .await
+            {
+                tracing::warn!(error = %err, "remove held send RPC failed");
+                state.update(cx, |s, cx| {
+                    let mut held = s.held_sends_snapshot();
+                    held.push(removed);
+                    s.apply_held_sends(held);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Whether this chat's trailer offers Remove: a send the engine still holds
+    /// for it, failed or uploading.
+    fn offers_remove(&self, chat_id: &str, cx: &gpui::App) -> bool {
+        self.doc_override.is_none() && self.state.read(cx).removable_held_send(chat_id).is_some()
+    }
+
+    /// The Remove control beside a held send's state, styled like the line it
+    /// sits on.
+    fn remove_link(&self, id: &'static str, color: gpui::Hsla, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(id)
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(color)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.remove_held_send(cx)))
+            .child(SharedString::from("Remove"))
+            .into_any_element()
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn, booting) = if let Some(doc_id) =
+        let (sending, queued, elapsed_secs, seed, turn, booting, updating) = if let Some(doc_id) =
             &self.doc_override
         {
             // A subagent doc has no Session row — `indicator_for` would read
@@ -7810,6 +7867,7 @@ impl Transcript {
                 flavour_seed(doc_id),
                 last.created_at,
                 None,
+                false,
             )
         } else {
             let chat_id = self.chat_id.clone()?;
@@ -7817,23 +7875,38 @@ impl Transcript {
             // the retry affordance, whatever the indicator fell back to.
             if self.state.read(cx).send_undelivered(&chat_id, now) {
                 let theme = Theme::of(cx).clone();
+                let label = match self.state.read(cx).held_send_failure(&chat_id) {
+                    Some(why) => format!("Not delivered: {why} — click to retry"),
+                    None => "Not delivered — click to retry".to_string(),
+                };
+                let remove = self
+                    .offers_remove(&chat_id, cx)
+                    .then(|| self.remove_link("undelivered-remove", theme.danger, cx));
                 return Some(
                     div()
-                        .id("undelivered-retry")
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(Theme::SPACE_SM))
+                        .gap(px(Theme::SPACE_MD))
                         .pt(px(Theme::SPACE_LG))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from("Not delivered — click to retry"))
+                        .child(
+                            div()
+                                .id("undelivered-retry")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(Theme::SPACE_SM))
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.danger)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                                .child(SharedString::from(label)),
+                        )
+                        .children(remove)
                         .into_any_element(),
                 );
             }
-            let (sending, queued, elapsed, turn, booting) = {
+            let (sending, queued, elapsed, turn, booting, updating) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
@@ -7845,7 +7918,10 @@ impl Transcript {
                 // turn begins.
                 if let Some(sent) = state.cloud_setup_turn_started() {
                     let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
-                    (false, false, elapsed, sent, None)
+                    // A woken machine installing a release says so under
+                    // its steps, in place of the working word.
+                    let updating = state.send_waits_on_update(&chat_id, now);
+                    (false, false, elapsed, sent, None, updating)
                 } else {
                     // During the send→turn window the session row's `started_at`
                     // still belongs to the PREVIOUS turn — a timer based on the
@@ -7882,7 +7958,8 @@ impl Transcript {
                     } else {
                         None
                     };
-                    (sending, queued, elapsed, turn, booting)
+                    let updating = sending && state.send_waits_on_update(&chat_id, now);
+                    (sending, queued, elapsed, turn, booting, updating)
                 }
             };
             (
@@ -7892,6 +7969,7 @@ impl Transcript {
                 flavour_seed(&chat_id),
                 turn,
                 booting,
+                updating,
             )
         };
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
@@ -7914,8 +7992,19 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
+        let slow = updating
+            && self
+                .chat_id
+                .as_deref()
+                .is_some_and(|chat| self.state.read(cx).cloud_machine_slow(chat));
         let word = if queued {
             "Queued — will send automatically"
+        } else if slow {
+            // Far slower than a normal wake: said plainly, never as a failure.
+            "Waking the Cloud machine is taking longer than usual"
+        } else if updating {
+            // A longer wake: the machine installs the latest release first.
+            "Updating the Cloud machine"
         } else if let Some(state) = booting {
             // The send waits for the chat's own Cloud machine.
             if state == zeron_proto::CloudState::Provisioning {
@@ -7929,6 +8018,13 @@ impl Transcript {
             flavour_word(seed, elapsed_secs)
         };
         let theme = Theme::of(cx).clone();
+        // A send still uploading for its Cloud machine can be removed too.
+        let remove = (sending
+            && self
+                .chat_id
+                .as_deref()
+                .is_some_and(|chat| self.offers_remove(chat, cx)))
+        .then(|| self.remove_link("sending-remove", theme.text_muted, cx));
         Some(
             div()
                 .flex()
@@ -7978,6 +8074,7 @@ impl Transcript {
                             )),
                     )
                 })
+                .children(remove)
                 .into_any_element(),
         )
     }
@@ -12247,7 +12344,7 @@ mod tests {
                 state
                     .receive_transcript_update(
                         zeron_doc::TranscriptUpdate {
-                            frame: zeron_doc::TranscriptFrame::reset(&[]),
+                            frame: zeron_doc::TranscriptFrame::reset::<SessionMessageEntry>(&[]),
                             context_usage: None,
                             replay_baseline: Some(Default::default()),
                         },
@@ -13256,6 +13353,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -14454,6 +14552,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -14579,6 +14678,7 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            preview_paths: Vec::new(),
             exit_code: None,
             output_truncated: false,
             output_lines: None,
@@ -17004,6 +17104,44 @@ mod tests {
     /// A chip whose upload is still crossing to the host shows its progress
     /// in place of its icon, as the strip's thumbnail did; once the bytes
     /// land (the ref is rewritten to a local path) the icon comes back.
+    /// A failed send the engine still holds offers Remove beside Retry; Remove
+    /// takes it out of view, and the trailer goes with it.
+    #[gpui::test]
+    fn a_held_failed_send_offers_remove_and_remove_clears_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.begin_pending_send("c", "m-a", chrono::Utc::now());
+            state.apply_held_sends(vec![zeron_proto::HeldSendStatus {
+                id: "a".into(),
+                chat_id: "c".into(),
+                message_id: Some("m-a".into()),
+                prompt: "look".into(),
+                queue_row: false,
+                created_at: 1_000,
+                failure: Some("the file is too large".into()),
+            }]);
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |t, cx| {
+            t.chat_id = Some("c".into());
+            assert!(t.offers_remove("c", cx));
+            assert!(!t.offers_remove("other", cx));
+            assert!(t.render_working_trailer(cx).is_some(), "the failed line shows");
+            t.remove_held_send(cx);
+            assert!(!t.offers_remove("c", cx));
+        });
+        state.update(cx, |state, _| {
+            assert!(state.held_sends_snapshot().is_empty());
+            assert!(!state.send_undelivered("c", chrono::Utc::now()));
+        });
+    }
+
     #[gpui::test]
     fn sent_chips_show_upload_progress_until_their_bytes_land(cx: &mut gpui::TestAppContext) {
         use zeron_proto::attachment_mentions::attachment_mention_link;

@@ -355,6 +355,28 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 		["zeron.composer.tint"] = pick(a(shell, 0.35), a(card, 0.55)),
 		["zeron.composer.solid"] = pick(M.mix(card, raised, 0.18), card),
 		["zeron.composer.edge"] = a(text, pick(0.09, 0.12)),
+		-- The frosted surfaces, each by Zeron's own recipe from this palette
+		-- rather than Zeron's greys (zeron-dark/light.json have them written
+		-- out): the island the overlay's glass, the panel its background at
+		-- 0.4, a field dark a settings select's wash (light the input's), the
+		-- sidebar, tabs and cards a wash of the ink.
+		["zeron.island.tint"] = a(menu, pick(0.75, 0.45)),
+		["zeron.panel.tint"] = a(bg, 0.4),
+		["zeron.field.glass"] = pick(a(text, 0.06), a(card, 0.35)),
+		["zeron.field.glass_hover"] = pick(a(text, 0.1), a(card, 0.8)),
+		["zeron.sidebar.tint"] = a(text, 0.05),
+		["zeron.tab.selected"] = a(text, 0.1),
+		["zeron.tab.hover"] = a(text, 0.06),
+		["zeron.settings.tint"] = a(text, 0.045),
+		["zeron.settings.note"] = a(text, 0.035),
+		["zeron.settings.comment"] = a(text, 0.05),
+		-- The title bar's controls and Windows' caption buttons: their glyph
+		-- the secondary ink, on their own firmer wash (0.7 of it pressed, for
+		-- a caption button).
+		["zeron.bar.ink"] = muted,
+		["zeron.bar.hover"] = a(text, pick(0.11, 0.06)),
+		["zeron.bar.pressed"] = a(text, pick(0.16, 0.1)),
+		["caption.pressed"] = a(text, pick(0.08, 0.04)),
 		-- Buttons: the way on in the text's ink, beside it a wash of it,
 		-- destructive in the danger's fill.
 		["zeron.primary.bg"] = text,

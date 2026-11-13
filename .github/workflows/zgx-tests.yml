@@ -1,0 +1,162 @@
+name: zgx tests
+
+# Called by ci.yml (the `zgx` suite, scripts/ci/plan.py) when apps/zgx or a
+# crate it or the engine's plugin host builds changes. zgx-beta.yml only builds.
+#
+#   apps/zgx's unit tests (`cargo test --bin zeron-zgx`: src/plugins/*_tests.rs
+#   among them) and its Luau UI tests (`zgx test ui`, the zgx CLI at the rev
+#   apps/zgx/Cargo.toml pins), on macOS and Linux, the known failures let
+#   through (scripts/ci/test-zgx.sh, scripts/ci/zgx-known-failures.txt);
+#   and on macOS the engine's plugin tests (its lib's `plugins::` tests and
+#   tests/plugin_services.rs), which core-tests runs on Linux.
+#
+# Not on Windows yet: zgx-beta.yml builds apps/zgx there, but its tests have
+# never been run on Windows, so there's no known-failures list for it.
+on:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
+  CARGO_PROFILE_DEV_DEBUG: 0
+  # The zgx CLI without Luau's asserts (they slow scripts by about a fifth).
+  LUAU_CXXFLAGS: -DNDEBUG
+
+jobs:
+  zgx-macos:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup show active-toolchain || rustup toolchain install
+      # zgx's terminals are Ghostty's on macOS, built with Zig 0.16 (zgx-ghostty-sys).
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
+          restore-keys: zgx-ghostty-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-tests
+          workspaces: |
+            . -> target
+            apps/zgx -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Install cargo-nextest
+        run: |
+          # macos.yml's: pinned release, verified against a checksum.
+          version=0.9.146
+          sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$RUNNER_TEMP/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-universal-apple-darwin.tar.gz"
+          echo "$sha256  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
+          bin="$RUNNER_TEMP/nextest-bin"
+          mkdir -p "$bin"
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
+          echo "$bin" >> "$GITHUB_PATH"
+      - id: zgx-rev
+        name: The zgx rev apps/zgx pins
+        run: |
+          echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+          echo "url=$(sed -n 's/^zgx = .*git = "\([^"]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - id: zgx-cli
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+      - name: zgx CLI
+        if: steps.zgx-cli.outputs.cache-hit != 'true'
+        env:
+          REV: ${{ steps.zgx-rev.outputs.rev }}
+          URL: ${{ steps.zgx-rev.outputs.url }}
+        run: |
+          test -n "$REV"
+          test -n "$URL"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
+            --git "$URL" --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      - name: apps/zgx unit tests
+        run: scripts/ci/test-zgx.sh rust
+      - name: apps/zgx Luau UI tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
+      - name: Engine plugin tests
+        if: ${{ !cancelled() }}
+        run: |
+          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
+            -p zeron-engine --lib --test plugin_services \
+            -E 'binary(plugin_services) | test(/plugins::/)'
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-zgx-macos
+
+  zgx-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: System packages (zgx-beta.yml's)
+        run: >-
+          bash scripts/ci/apt-install.sh
+          libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
+          libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev
+          pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+          mesa-vulkan-drivers
+      # (mesa-vulkan-drivers: lavapipe, a Vulkan device on the CPU, so agent
+      # visuals' shaders and scenes render here as on a machine with a GPU;
+      # src/visuals_tests.rs. The runner has none of its own.)
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: zgx-tests
+          workspaces: apps/zgx -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - id: zgx-rev
+        name: The zgx rev apps/zgx pins
+        run: |
+          echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+          echo "url=$(sed -n 's/^zgx = .*git = "\([^"]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - id: zgx-cli
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+      - name: zgx CLI
+        if: steps.zgx-cli.outputs.cache-hit != 'true'
+        env:
+          REV: ${{ steps.zgx-rev.outputs.rev }}
+          URL: ${{ steps.zgx-rev.outputs.url }}
+        run: |
+          test -n "$REV"
+          test -n "$URL"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
+            --git "$URL" --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      - name: apps/zgx unit tests
+        run: scripts/ci/test-zgx.sh rust
+      - name: apps/zgx Luau UI tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-zgx-linux

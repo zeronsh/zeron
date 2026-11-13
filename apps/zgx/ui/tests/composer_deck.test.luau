@@ -89,6 +89,97 @@ test("the chevrons: the header's folds, the pill's opens the one open last", fun
 	expect(app:error()).to_be(nil)
 end)
 
+-- How many alert rows wear a glyph of their own (not a button's, within them).
+local function row_glyphs(app: any): number
+	local n = 0
+	for line in app:tree('role:list "Alerts"'):gmatch("[^\n]+") do
+		if line:match("^    @%d+ img") and not line:find(" hidden", 1, true) then
+			n += 1
+		end
+	end
+	return n
+end
+
+-- How far in from its row an alert's words start. (It needs a word more for the
+-- tree to list them apart from its row.)
+local function words_in(app: any, title: string): number
+	local tree = app:tree('role:list "Alerts"')
+	local row = string.match(tree, `listitem "{title}[^"]*" (%d+),`)
+	local words = string.match(tree, `text "{title}" (%d+),`)
+	return (tonumber(words) :: number) - (tonumber(row) :: number)
+end
+
+test("an alert alone has one glyph, the tab's; with others, each its own", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	local context = { id = "al1", tone = "warning", title = "Context nearly full", detail = "a word more" }
+	app:set_state("test_deck_alerts", { context })
+	app:frames(30)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	expect(row_glyphs(app)).to_be(0)
+	-- Its words stand where the glyph would have been, not after a gap.
+	expect(words_in(app, "Context nearly full") < 16).to_be(true)
+	app:set_state("test_deck_alerts", { context, { id = "al2", tone = "danger", title = "github MCP server failed to start" } })
+	app:frames(30)
+	expect(row_glyphs(app)).to_be(2)
+	expect(words_in(app, "Context nearly full") > 16).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("an alert alone that's still working keeps its ring: the tab's glyph doesn't say so", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_deck_alerts", { { id = "al1", tone = "info", title = "Reconnecting", detail = "a word more", spinner = true } })
+	app:frames(30)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	expect(words_in(app, "Reconnecting") > 16).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a quiet alert raises no pill of its own, and is read with the rest", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	local asleep = { id = "q1", tone = "info", title = "Machine asleep", quiet = true }
+	app:set_state("test_deck_alerts", { asleep })
+	app:frames(30)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	app:set_state("test_deck_alerts", { asleep, { id = "al1", tone = "warning", title = "Disk nearly full" } })
+	app:frames(30)
+	-- Counted: only what raises it.
+	expect(app:has('role:button "Open Alerts" >> "1"')).to_be(true)
+	app:click('role:button "Open Alerts"')
+	app:frames(30)
+	expect(app:has('role:listitem ~"Machine asleep"')).to_be(true)
+	expect(app:has('role:listitem ~"Disk nearly full"')).to_be(true)
+	-- The loud one gone, the tab goes with it.
+	app:set_state("test_deck_alerts", { asleep })
+	app:frames(30)
+	expect(app:state("test_running_tray")).to_be(nil)
+	expect(app:has('role:button "Open Alerts"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a held row waits: only Remove, its action's place saying why", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_deck_queue", { { id = "h1", text = "Held words", waiting = "Waits for a size", age = "2 days ago" } })
+	app:frames(30)
+	app:click('role:button "Open Queued"')
+	app:frames(30)
+	local row = 'role:listitem ~"Held words"'
+	expect(app:tree(`{row} >> role:button "Waits for a size"`)).to_contain("disabled")
+	expect(app:tree(`{row} >> role:button "Edit"`)).to_contain("disabled")
+	expect(app:tree(`{row} >> role:button "Remove"`)).never.to_contain("disabled")
+	expect(app:has(`{row} >> "2 days ago"`)).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
 test("alerts: first in the pill, each with its action and its dismiss", function()
 	local app = mount("running_tray_fixture.luau")
 	app:resize(700, 600)
@@ -116,4 +207,27 @@ test("alerts: first in the pill, each with its action and its dismiss", function
 	expect(app:state("test_running_tray")).to_be(nil)
 	expect(app:has('role:button "Open Alerts"')).to_be(false)
 	expect(app:error()).to_be(nil)
+end)
+
+-- A box from the test tree's first line under `target`: x, y, w, h.
+local function box(app: any, target: string): (number, number, number, number)
+	local line = string.match(app:tree(target), "[^\n]+") or ""
+	local x, y, w, h = line:match(" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+	return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
+end
+
+test("the pill's capsules sit the same inset in from all four of its sides", function()
+	local app = mount("running_tray_fixture.luau")
+	app:resize(700, 600)
+	app:frames(10)
+	app:set_state("test_running_tasks", tasks(2))
+	app:frames(30)
+	local px, py, pw, ph = box(app, 'role:toolbar "What\'s waiting"')
+	local cx, cy, _, ch = box(app, 'role:button "Open Running"')
+	local ex, _, ew = box(app, 'role:button "Show what\'s waiting"')
+	local top, bottom = cy - py, (py + ph) - (cy + ch)
+	-- (Its glass's border is laid out inside it: the inset counts it.)
+	expect(top).to_be(bottom)
+	expect(cx - px).to_be(top)
+	expect((px + pw) - (ex + ew)).to_be(top)
 end)

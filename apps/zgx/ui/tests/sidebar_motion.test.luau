@@ -37,6 +37,10 @@ end
 test("a group going first glides there, its rows the same nodes, focus kept", function()
 	local app = open()
 	-- Answer the review chosen (focused), Borealis under Atlas.
+	-- (Arriving on its chat gives the composer the keys; pressed again,
+	-- its chat already open, the row keeps them.)
+	app:click(`{SIDE} >> role:button "Answer the review"`)
+	app:frames(10)
 	app:click(`{SIDE} >> role:button "Answer the review"`)
 	app:frames(10)
 	local from = top(app, "Borealis")

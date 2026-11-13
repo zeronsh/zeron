@@ -1328,13 +1328,10 @@ impl BranchHeadContext {
             .and_then(|upstream| branch_from_upstream(upstream, remote_name.as_deref()));
         let head_branch = upstream_branch.unwrap_or(&local_branch).to_owned();
 
+        // Branch names only: `gh pr list --head` doesn't take `owner:branch`
+        // (it matched nothing, and cost a `gh` run on every lookup). The
+        // head's owner is checked on what comes back.
         let mut head_selectors = Vec::new();
-        if let Some(remote) = parsed_remote.as_ref() {
-            push_unique(
-                &mut head_selectors,
-                format!("{}:{head_branch}", remote.owner),
-            );
-        }
         if upstream_ref.is_some() {
             push_unique(&mut head_selectors, head_branch.clone());
         }
@@ -3441,7 +3438,7 @@ mod tests {
                 "pr",
                 "list",
                 "--head",
-                "acme:feature/status",
+                "feature/status",
                 "--state",
                 "all",
                 "--limit",
@@ -4308,7 +4305,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(source.branch.owner.as_deref(), Some("contributor"));
         assert_eq!(
             source.branch.head_selectors,
-            ["contributor:feature/no-upstream", "feature/no-upstream"]
+            ["feature/no-upstream"]
         );
     }
 
@@ -4495,30 +4492,18 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
     }
 
     #[tokio::test]
-    async fn empty_specific_lookup_uses_the_next_safe_selector() {
+    async fn a_branch_without_a_pull_request_costs_one_gh_run() {
+        // (It cost two: an `owner:branch` selector `gh` can't match, then the
+        // branch's own name.)
         let source = source("feature/status", "acme", Some("main"));
-        let json = serde_json::to_vec(&vec![pull_request(
-            100,
-            "OPEN",
-            "acme",
-            "feature/status",
-            "2026-08-15T12:00:00Z",
-        )])
-        .unwrap();
-        let runner = FakeProcessRunner::with_responses([
-            command_success(b"[]".to_vec()),
-            command_success(json),
-            command_failure("no signals"),
-        ]);
+        let runner = FakeProcessRunner::with_responses([command_success(b"[]".to_vec())]);
         let github = GitHubCli::with_runner(runner.clone());
 
-        let result = github.find_for_branch(&source).await.unwrap().unwrap();
+        assert_eq!(github.find_for_branch(&source).await.unwrap(), None);
 
-        assert_eq!(result.number, 100);
         let requests = runner.requests();
-        assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0].args[3], "acme:feature/status");
-        assert_eq!(requests[1].args[3], "feature/status");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].args[3], "feature/status");
     }
 
     #[tokio::test]
@@ -4813,7 +4798,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(context.head_branch, "published-name");
         assert_eq!(
             context.head_selectors,
-            ["contributor:published-name", "published-name"]
+            ["published-name"]
         );
     }
 
@@ -4829,7 +4814,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(context.head_branch, "feature/local");
         assert_eq!(
             context.head_selectors,
-            ["acme:feature/local", "feature/local"]
+            ["feature/local"]
         );
     }
 
@@ -4845,7 +4830,114 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(context.remote_name.as_deref(), Some("origin"));
         assert_eq!(
             context.head_selectors,
-            ["acme:feature/shared", "feature/shared"]
+            ["feature/shared"]
         );
+    }
+}
+
+// What the pull request badges cost a device: real `git` and `gh`, through
+// the engine's shared watch cache, for chats in real checkouts, with rows
+// coming and going as a list scrolls. Run by hand:
+// `MEASURE_CHATS=/path[@branch],… MEASURE_SECS=300 cargo test -p zeron-engine --lib
+//  measure_pull_request_watches -- --ignored --nocapture`
+// (Unix only: it reads child CPU time with getrusage.)
+#[cfg(all(test, unix))]
+mod measure {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use futures::StreamExt;
+
+    #[derive(Default)]
+    struct Counting {
+        launches: Mutex<HashMap<String, usize>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for Counting {
+        async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
+            let what = if request.program == "gh" {
+                format!("gh {}", request.args.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
+            } else {
+                request.program.clone()
+            };
+            *self.launches.lock().unwrap().entry(what).or_default() += 1;
+            SystemProcessRunner.run(request).await
+        }
+    }
+
+    fn children_cpu() -> Duration {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+        let tv = |t: libc::timeval| Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64);
+        tv(usage.ru_utime) + tv(usage.ru_stime)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn measure_pull_request_watches() {
+        let chats: Vec<(PathBuf, Option<String>)> = std::env::var("MEASURE_CHATS")
+            .expect("MEASURE_CHATS")
+            .split(',')
+            .map(|c| match c.split_once('@') {
+                Some((path, branch)) => (PathBuf::from(path), Some(branch.to_string())),
+                None => (PathBuf::from(c), None),
+            })
+            .collect();
+        let secs: u64 = std::env::var("MEASURE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+        let counting = Arc::new(Counting::default());
+        let resolver = ChangeRequestResolver {
+            inspector: GitCheckoutInspector::new(counting.clone()),
+            github: GitHubCli::with_runner(counting.clone()),
+        };
+        let data = tempfile::tempdir().unwrap();
+        let service = crate::change_requests::CheckoutChangeRequests::new(
+            crate::repos::Repos::new(data.path(), "device-1"),
+            "device-1",
+            Arc::new(resolver),
+        );
+        let cpu0 = children_cpu();
+        let started = std::time::Instant::now();
+        let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+        // Each chat watched twice (its sidebar row, the GitHub plugin's
+        // badge); the last third of the rows scroll out and back every 10 s.
+        let churn_from = chats.len() * 2 / 3;
+        let mut tasks = Vec::new();
+        for (i, (cwd, branch)) in chats.iter().cloned().enumerate() {
+            for _ in 0..2 {
+                let (service, cwd, branch) = (service.clone(), cwd.clone(), branch.clone());
+                let churns = i >= churn_from;
+                tasks.push(tokio::spawn(async move {
+                    while tokio::time::Instant::now() < end {
+                        let Ok(stream) = service.watch_for_branch(&cwd, branch.as_deref()).await else {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        };
+                        let until = if churns { (tokio::time::Instant::now() + Duration::from_secs(10)).min(end) } else { end };
+                        let mut stream = stream;
+                        let _ = tokio::time::timeout_at(until, async { while stream.next().await.is_some() {} }).await;
+                        drop(stream);
+                        if churns {
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                        }
+                    }
+                }));
+            }
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        service.shutdown();
+        let minutes = started.elapsed().as_secs_f64() / 60.0;
+        let cpu = children_cpu() - cpu0;
+        let launches = counting.launches.lock().unwrap().clone();
+        let mut launches: Vec<_> = launches.into_iter().collect();
+        launches.sort();
+        println!("MEASURE {} chats, {:.1} min", chats.len(), minutes);
+        for (what, n) in &launches {
+            println!("MEASURE   {what}: {n} ({:.1}/min)", *n as f64 / minutes);
+        }
+        let gh: usize = launches.iter().filter(|(w, _)| w.starts_with("gh")).map(|(_, n)| n).sum();
+        println!("MEASURE   gh total: {gh} ({:.1}/min); child CPU (gh+git): {:.2}s", gh as f64 / minutes, cpu.as_secs_f64());
     }
 }

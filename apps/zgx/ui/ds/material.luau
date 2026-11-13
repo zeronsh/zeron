@@ -77,4 +77,12 @@ function M.menus_see_through(): boolean
 	return M.see_through() and not (menus_blur ~= nil and menus_blur:get() == false)
 end
 
+-- A fill that follows `see_through()`: `tint` frosted, `solid` opaque (`bg =
+-- material.pick("$zeron.settings.tint", "$zeron.settings.card")`).
+function M.pick(tint: string, solid: string): () -> string
+	return function(): string
+		return if M.see_through() then tint else solid
+	end
+end
+
 return M

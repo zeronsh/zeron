@@ -130,7 +130,7 @@ local function failed(title: string | Message): (err: any) -> ()
 	return function(err: any)
 		ds.toast.show {
 			title = title,
-			body = if type(err) == "table" and err.message then tostring(err.message) else nil,
+			body = if type(err) == "table" and err.message then words.failure(tostring(err.message)) else nil,
 			tone = "warning",
 		}
 	end

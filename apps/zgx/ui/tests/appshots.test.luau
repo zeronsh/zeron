@@ -129,7 +129,9 @@ test("Settings → Appshots says what each permission needs, and nothing once gr
 	for _, words in { "Capture Appshots", "Capture sound", "Global shortcut", "Destination", "Window capture", "Application text", "Allow window capture", "Enable text capture", "Check again", "macOS asks for these for the app that opened Zeron" } do
 		expect(if page:find(words, 1, true) then words else `missing: {words}`).to_be(words)
 	end
-	expect(page:find("⌃⌥Space", 1, true) ~= nil).to_be(true)
+	-- (The keys as this platform writes them: ⌃⌥Space on macOS, where
+	-- Appshots are, Ctrl+Alt+Space where the page is only a fixture's.)
+	expect(page:find("⌃⌥Space", 1, true) ~= nil or page:find("Ctrl+Alt+Space", 1, true) ~= nil).to_be(true)
 	app:set_state("appshots.state", { platform = true, enabled = true, shortcut_ready = true, capture = "ready", text = "ready" })
 	app:frames(20)
 	page = app:tree("#settings-page")
@@ -149,7 +151,8 @@ test("Settings → Appshots records a new shortcut, and Escape keeps the old one
 	expect(app:state("appshots_shortcut")).to_be(before)
 	app:click('#settings-page >> role:button ~"Change shortcut"')
 	app:frames(10)
-	app:key("cmd+shift+k")
+	-- (⌘ itself: `meta`, which `cmd` is only on a Mac; Ctrl elsewhere.)
+	app:key("meta+shift+k")
 	app:frames(10)
 	expect(app:state("appshots_shortcut")).to_be("shift+cmd+k")
 end)

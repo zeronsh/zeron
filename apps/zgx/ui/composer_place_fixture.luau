@@ -172,6 +172,8 @@ return ui.column {
 			models = MODELS,
 			project = ui.state("test_place_project", "zeron" :: string?),
 			projects = PROJECTS,
+			device = ui.state("test_place_device", nil :: string?),
+			devices = ui.state("test_place_devices", {} :: { Composer.Device }),
 			checkout = ui.state("test_place_checkout", "worktree" :: string?),
 			branch = ui.state("test_place_branch", "zeron/create-readme-update-for-onboarding" :: string?),
 			branches = BRANCHES,

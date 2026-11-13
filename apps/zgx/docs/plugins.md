@@ -28,6 +28,10 @@ A plugin is a folder: `zeron-plugin.json` (its manifest), `init.luau` (its code)
 - `commands`: the programs it runs as you (`["gh", "git"]`), each by its name as it's found on the PATH, never a path. Needs `"commands"`, and the person sees each name when allowing it (see [Programs and a database](#programs-and-a-database)).
 - `service`: its headless half (`"service.luau"`), which Zeron's engine runs on each device that allowed the plugin. Needs `"service"` (see [Services](#services)).
 - `network`: `{ "hosts": ["api.example.com", "*.example.org", "localhost:8080"] }`, the hosts its requests may reach, from its window and its service alike (see [Reaching the network](#reaching-the-network)). Without it, `network` reaches any public address and never this device, your network or a cloud's metadata address. With it, only those hosts; a private one (`localhost`, `10.…`, `nas.local`) is reachable only when it's named exactly, and the consent sheet says so. `Authorization` and `Cookie` headers go only to hosts named here. Needs `"network"`.
+- `mcp`: `{ "command": "./bin/server", "args": ["--quiet"], "env": { "LOG": "off" } }`, a program of its own that Zeron starts as an MCP server beside your agents on this device, named `plugin-<id>`. `command` is required: `./…` is a file in your plugin's folder, anything else runs as named. `args` is a list of text, `env` names and text values. Needs `"native"`.
+- `settings_description`: a line under your settings page's title, in place of Zeron's own. Plain text, 200 characters at most; line breaks and runs of spaces become one space.
+- `author`: your name, as text. Optional. It's kept in the manifest (and signed with it), but Zeron never shows it as who made the plugin: that comes from the signature (see [Who made it](#who-made-it)).
+- `signature`: Zeron writes it when it signs the plugin; never write it yourself. `{ "key", "files", "sig" }`: `key` is the signer's public key (ed25519, base64url), `files` each file's path and its SHA-256 (hex), and `sig` the signature over the manifest with `key` and `files` in it. `files` covers every file in the folder except the manifest and anything whose name starts with a dot. Changing any file, or the manifest, breaks the signature until it's signed again.
 
 Your own plugins are signed as yours, and re-signed and reloaded each time you save.
 
@@ -46,6 +50,8 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `panel.tabs` | open tabs of its own in a chat's panel |
 | `pages.add` | add pages of its own to the sidebar |
 | `navigate` | open chats and pages (`zeron.open`) |
+| `links.open` | open http(s) links (`zeron.open_url`), where you open links (Settings → Links) |
+| `notifications` | send you notifications (`zeron.notify`), as Zeron's own: Settings → Notifications decides whether they show, a few a minute at most |
 | `compose` | put text in the message box (`zeron.compose`), or a review comment on it (`zeron.compose_comment`); you still send it |
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
@@ -53,8 +59,15 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `tools` | tools for agents (the manifest's `tools`) |
 | `devices` | send data to itself on your other devices |
 | `native` | run a program of its own (the manifest's `mcp`) |
-| `commands` | run the programs its manifest's `commands` names, as you, on this Mac (`zeron.run`) |
+| `commands` | run the programs its manifest's `commands` names, as you, on this device (`zeron.run`) |
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
+| `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
+| `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
+| `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
+| `accounts.pin` | run one chat on a saved account of its own, beside the active one (which stays as it is), and decide the account a new chat starts on. Always asked, even for your own plugins. See [Pinning chats](#pinning-chats-to-accounts) |
+| `models.read` | read each harness's models, efforts and options, and a chat's model |
+| `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
+| `messages.send` | send a chat a message, start a chat, answer a chat's question, as you would from the composer. Always asked, even for your own plugins. See [Sending messages](#sending-messages) |
 
 ## Reaching the network
 
@@ -76,7 +89,7 @@ With `network`, `ui.fetch`, remote pictures and the service's `zeron.fetch` all 
 - With a port, only that port. Without one (`"localhost"`, `"nas.local"`), any port on that host, which suits a dev server that changes ports. There's no port wildcard or range.
 - `localhost` and `127.0.0.1` are different hosts: name the one you use.
 - Naming any host narrows the plugin to the hosts you name, public ones included: a plugin that reaches `localhost:8080` and the internet lists its public hosts too (`*.example.org` covers names under it, never a private address).
-- A host that reads as local (`localhost`, an address, `.local`) asks the person again when an update adds it.
+- A host named exactly asks the person again when an update adds it, whatever it reads as, because it reaches where it resolves. The sheet says a named host can be on this computer or their network. A `*.` name never reaches a private address, so it needs no asking. A name like `box.tailnet.ts.net` that resolves to your network works once it's named and allowed.
 
 A refused request fails with an error that names what to add, such as `add "localhost:3000" to "network": { "hosts": [] } in its manifest`. `Host`, `Connection` and the like can't be set, and `Authorization` and `Cookie` go only to hosts named here. A program it runs (`commands`) isn't under this rule: what it can reach is what you can.
 
@@ -104,6 +117,7 @@ end }
 |---|---|---|
 | `#sidebar` | the sidebar's list | `sessions` |
 | `.session-row` | a sidebar row (place inside: `.session-title`) | `session` |
+| `.project-icon` | a project's icon, wherever it shows: the sidebar's group headers and rows, tabs, the composer's project, project pickers, the panel, the palette, archived chats. Replace it (`ui.change`) to draw each project's own | `project` |
 | `#session-header` | a chat's header (title: `#page-title`) | |
 | `.message` | a message (`.message-user`, `.message-assistant`) | `message` |
 | `#chat-composer` | the message box | |
@@ -174,6 +188,7 @@ Records hold only what you were allowed. A field you weren't allowed is absent, 
 |---|---|
 | `session` | `{ id }` + `title, status, project, device, updated, created, branch, worktree` with `sessions.read` |
 | `message` | `{ id }` + `role, text` with `messages.read` |
+| `project` | `{ id }` + `name, device, icon` (`{ emoji?, image?, hue? }`, as its people chose it) with `sessions.read` |
 | `profile` | `{}` + `id, name, username, avatar` with `profile.read`, `email` with `account.email` |
 | `file` | `{ id }` + `path, name` with `files.read` (else an id of your plugin's own) |
 | `panel` | `{ id, session, open_tab }` |
@@ -276,7 +291,7 @@ zeron.run("gh", { "api", "user", "--jq", ".login" }):after(function(r)
 end)
 ```
 
-- Each runs as you, on this Mac, with your login shell's PATH and your sign-ins (gh's GitHub login, git's credentials). The consent sheet names the programs and says so. Most programs can run others or write any file, so the sheet says a plugin that names one (git, gh, a shell, an interpreter, or anything not known to be harmless) can do anything you can, and asks every time.
+- Each runs as you, on this device, with your login shell's PATH and your sign-ins (gh's GitHub login, git's credentials). The consent sheet names the programs and says so. Most programs can run others or write any file, so the sheet says a plugin that names one (git, gh, a shell, an interpreter, or anything not known to be harmless) can do anything you can, and asks every time.
 - No shell: `args` reach the program exactly as given, so nothing in them is expanded or split. `stdin` is written to it; `cwd` (an absolute folder) is where it runs.
 - `env` sets harmless variables over yours: `LANG`, `LC_…`, `TZ`, `TERM`, `NO_COLOR`, `FORCE_COLOR`, `COLUMNS`, `CI`, git's identity (`GIT_AUTHOR_…`, `GIT_COMMITTER_…`), `GIT_TERMINAL_PROMPT`, `GIT_OPTIONAL_LOCKS`, `GIT_INDEX_FILE` (a `.index` file in a repository's git folder), gh's quiet switches (`GH_PROMPT_DISABLED`, …, `GH_REPO`), and your own `ZERON_PLUGIN_…` names. Nothing that changes what runs or what loads into it (`PATH`, `GIT_SSH_COMMAND`, `BASH_ENV`, `NODE_OPTIONS`, `PYTHON…`, `DYLD_…`, …).
 - git runs as git's own commands only (no aliases, no `git-<x>` from the PATH), with `-c` only for how it prints (`core.quotepath`, `color.…`, `core.pager=cat`, `user.name`, …), never `--upload-pack`, `--exec`, `--output`, `--template` or `--config`, `-C` inside the run's `cwd`, and `git config` read only. Every run has a repository's own fsmonitor turned off, no `ext::` transport, no pager, editor or prompt. Hooks run only where git would run yours and Zeron knows the checkout: a commit, merge, pull, push, rebase or branch switch from a service, in one of this device's chats' or projects' folders. Reading, anything elsewhere, and runs from a window run none. gh runs its own commands only: never `alias`, `extension`, `codespace`, `auth` except `auth status` (without the token), or `config` except reading.
@@ -299,7 +314,7 @@ Zeron's GitHub plugin is built this way: it asks GitHub's own API through `gh` (
 
 ## Services
 
-A service is your plugin's headless half: `service.luau`, run by Zeron's engine on each device, with no window open. Your windows call it on this device or on another of yours, and agents' tools can be answered by it. It's how a plugin does real work where the work is: a Git plugin runs `git` on the device a chat's checkout is on, whether that's this Mac or a devbox.
+A service is your plugin's headless half: `service.luau`, run by Zeron's engine on each device, with no window open. Your windows call it on this device or on another of yours, and agents' tools can be answered by it. It's how a plugin does real work where the work is: a Git plugin runs `git` on the device a chat's checkout is on, whether that's your laptop or a devbox.
 
 ```json
 "service": "service.luau",
@@ -373,7 +388,127 @@ The one exception: when the service stops during a call (it ran out of memory, o
 
 **When it runs.** A service starts on its first call, tool call or timer, and stops after 5 minutes with nothing to do. An update loads the new version beside the old one, which answers until the new one has loaded and finishes the calls it has. Each call or resumed task has 2 seconds of work before it fails (await between parts: waiting costs nothing), and the service has 64 MB. `plugin_status` shows the service on this device: running or not, what it serves, its last log lines (`print`) and why it didn't load.
 
+A service has `zeron.on(event, fn, opts)` and the agent calls of [Your agents](#your-agents-usage-accounts-and-models) too: register listeners at the top level, in the same order each time (they're known by their place, as timers are), and Zeron starts the service to tell it, with no window open.
+
 Zeron's Git plugin (`plugins-builtin/git`) is built this way: its service does every piece of git work on the device a chat's checkout is on (status, what changed through an index of its own via `GIT_INDEX_FILE`, diffs, staging, commits, pushes, branches, history), and its window says each refusal in its own words. `plugins-dev/checkout-status` is the small version, whole: a session row's menu asks the service on that session's device for the checkout's branch and changes, and agents get the same through a tool.
+
+## Your agents: usage, accounts and models
+
+A plugin can watch how much of your agents' plans you've used, switch which saved account a provider uses (as Settings → Providers' switcher does), and choose a chat's model, and hear each of those change. The same calls work in a window and in `service.luau`; each is a promise, and a refusal fails it with `"<reason>: <words>"` (`zeron.reason(err)`).
+
+| call | what | needs |
+|---|---|---|
+| `zeron.usage { provider?, device? }` | each account's usage, as Zeron last read it: `{ { provider, account, active, plan?, fetched_at?, error?, windows = { { label, used, remaining, resets_at? } } } }` (percent; `resets_at` in ms) | `usage.read` |
+| `zeron.usage_refresh { device? }` | read usage again now: once every 5 minutes per plugin (`paced` otherwise) | `usage.read` |
+| `zeron.accounts { provider?, device? }` | the saved accounts: `{ { provider, account, active, switchable, email?, name?, organization?, plan? } }` | `accounts.read` |
+| `zeron.switch_account { provider, account, when_idle?, device? }` | make a saved account the active one: a promise of `{ status = "switched" }`, or `"waiting"` with `when_idle` | `accounts.switch` |
+| `zeron.pin_account { provider, chat, account?, device? }` | run a chat on a saved account of its own, from its next run, while the active account stays as it is; no `account` takes the pin back: a promise of `{ provider, chat, account? }`, or `already` when nothing changes | `accounts.pin` |
+| `zeron.pins { provider?, device? }` | the chats pinned to an account: `{ { provider, account, since, chat? } }` (`chat` with `sessions.read`) | `accounts.read` |
+| `zeron.models(harness, { device? })` | a harness's models: `{ { id, label, efforts, options = { { id, label, default, choices } } } }` | `models.read` |
+| `zeron.chat_model(chat)` | a chat's `{ provider, model, effort, options }` | `models.read` |
+| `zeron.set_model { chat, model?, effort?, options? }` | a chat's model, effort or options, for its next turn, on the provider it has | `models.set` |
+| `zeron.set_default_model { harness, model, effort? }` | what a new chat starts with in this window (a window's call only) | `models.set` |
+| `zeron.on(event, fn, opts?)` | `fn(data, event)` for each event below; returns a function that stops it | the event's |
+
+`provider` and `harness` are a harness's id (`"claude-code"`, `"codex"`, …); `account` is an account's id from `zeron.accounts` or `zeron.usage`.
+
+**What it never gets.** No sign-in, token or password; it can't add or remove an account, or read another plugin's grants. A read never makes Zeron ask a provider again (that can spend a saved login's one-time refresh); only `usage_refresh` does, paced.
+
+**Switching.** A switch happens at once, chats running or not; pass `when_idle = true` to switch once that provider's chats on that device have finished (within 30 minutes). Switching to the account that's active already is refused (`already`). Each change says which plugin made it: in its event (`by = { plugin, name }`), and in `plugin_status` (`agents.actions`).
+
+**Another device.** Name it per call (`device = id`, a session's or project's `device`): that device decides with what it allowed your plugin there (installed, on, the same version by the same author, and the permission), as a service call does. A service acts on its own device; to act on another, call your service there.
+
+### Events
+
+They're told as Zeron learns of a change, never by polling: when Settings, the composer's usage ring or a plugin reads accounts, a provider reports usage, a chat's status or config changes, or a catalog is listed. A window hears them while it's open; a service's `zeron.on` hears them with no window open.
+
+| event | data | needs |
+|---|---|---|
+| `usage.changed` | an account's usage, as `zeron.usage` gives it | `usage.read` |
+| `usage.threshold` | `{ provider, account, window, remaining, below, resets_at }`, once as remaining crosses under `opts.below` (percent), again only after it's back over | `usage.read` |
+| `usage.reset` | `{ provider, account, window, next_reset_at }`: a window reset | `usage.read` |
+| `limit.hit` | `{ provider, account?, window? }`, or `{ provider, blocked_turn = true, chat? }` when a turn was stopped by a limit | `usage.read` |
+| `account.switched` | `{ provider, account, from?, by? }` | `accounts.read` |
+| `account.pinned` | `{ provider, account, from?, by?, chat? }`: a chat now runs on `account` | `accounts.read` |
+| `account.unpinned` | `{ provider, account, by?, reason?, chat? }`: a pin was taken back, or (`reason = "removed"`) its account is gone | `accounts.read` |
+| `run.preparing` | `{ provider, chat? }`, asked of a service right before a chat's first run: what its listener returns is the answer. See [Pinning chats](#pinning-chats-to-accounts) | `accounts.pin` |
+| `account.signed_out`, `login.expired` | `{ provider, account?, chat? }` | `accounts.read` |
+| `model.changed` | `{ chat, provider, model, effort, options, by? }`, or `{ default = true, provider, model, effort, by }` | `models.read` |
+| `models.updated` | `{ provider, models }`: a catalog changed | `models.read` |
+| `turn.started` | `{ chat, by? }` (`by`: the plugin whose message set it off) | `sessions.read` |
+| `turn.finished`, `turn.errored` | `{ chat, outcome, by?, reply? }`: `completed`, `errored`, `interrupted` or `limited`; `reply`, its final words (the last 16 KB), with `messages.read` | `sessions.read` |
+| `chat.awaiting_input`, `chat.input_answered` | `{ chat, by? }`: an agent asked a question or needs approval, and was answered | `sessions.read` |
+
+- **Narrowing.** `opts.provider`, `opts.account`, `opts.window` and `opts.chat` let only matching events through. A threshold watches the active account unless `opts.account` names one.
+- **A threshold starts from what it sees.** The first reading only learns which side of the line each window is on, so read `zeron.usage()` as you start to act on how things stand now.
+- **Only what you were allowed.** A field your plugin wasn't allowed is left out, never blanked: `email` is there with `accounts.read`, `chat` with `sessions.read`, a turn's `provider` with `models.read`.
+- **A handler can't hold Zeron up.** Events are told after the change, never before it. A listener that fails (or takes past its time) stays on and hears the next event; your row in Settings → Plugins and `plugin_status` (`agents.notices`) say the latest failure and how many in a row.
+- **A loop is stopped.** A plugin told of its own change (`by` is it) that answers with another change, and so on 16 times in a row, has that next change refused (`loop`), and your row says so. A message counts as a change: a turn your message set off is told with your `by`, so sending again on its `turn.finished` is counted. What you heard last decides: answering anyone else's change starts the count over. How often you change things never counts, only your changes setting off your own.
+
+```lua
+-- service.luau ("service", "usage.read", "accounts.read", "accounts.switch")
+zeron.on("usage.threshold", function(e)
+	for _, a in zeron.accounts({ provider = e.provider }):await() do
+		if not a.active and a.switchable then
+			zeron.switch_account({ provider = e.provider, account = a.account, when_idle = true }):await()
+			return
+		end
+	end
+end, { below = 10, provider = "claude-code" })
+```
+
+`plugins-dev/account-rotate` is this whole: its service switches Claude Code to the next saved account with more left when the active one drops below 10%, once its chats finish, and its window says so in a toast.
+
+### Pinning chats to accounts
+
+Switching moves everything on the device to another account at once. Pinning moves one chat: `zeron.pin_account` makes a chat run on a saved account of its own while the active account stays as it is, so your other chats and your own terminals keep running on it. Zeron holds the pins and delivers the credential; **which account a chat gets is the plugin's to decide.**
+
+- **A pin lasts the chat's life.** From its next run, until a plugin (or the same one) takes it back. Resume and prompt caching assume stable credentials, so a pin changes only when you or a plugin change it. A chat parked on the old account is replaced, and resumed, before its next turn.
+- **What can be pinned.** Each row of `zeron.accounts` says `pinnable` and `mechanism`: Claude Code logins (`"env"`: the saved login's token goes to that chat's process alone) and Muse's kept accounts (`"root"`). Other providers say `pinnable = false` for now, and an API key never can (it bills per token). A pinned Claude Code chat can't use features that need the account's profile (Remote Control). Rows also say `signed_out`; `zeron.usage` rows say `limited_until` while a full window hasn't reset.
+- **The first run.** A service listening for `run.preparing` is asked right before a chat that has no pin runs for the first time, one chat at a time. What its listener returns is the answer: `{ account = "…" }` pins the chat there, anything else leaves it on the active account. It has 3 seconds; a listener that's late, fails or names an account that can't be pinned is passed over (its row says so), and each chat is asked once.
+- **Pins follow accounts.** An account that's removed takes its pins with it (`account.unpinned` with `reason = "removed"`), and its chats run on the active account.
+- **Attributed and stopped like a switch.** Each pin is recorded as the plugin's (`by`, `plugin_status`), and the loop guard counts it.
+
+```lua
+-- service.luau ("service", "accounts.read", "accounts.pin", "sessions.read")
+zeron.on("run.preparing", function(e)
+	for _, a in zeron.accounts({ provider = e.provider }):await() do
+		if a.pinnable and not a.signed_out then
+			return { account = a.account }
+		end
+	end
+end, { provider = "claude-code" })
+```
+
+`plugins-dev/account-pin` is the whole of it: it answers with the saved account that has the fewest chats (counted from `zeron.pins()`), so new chats take turns.
+
+
+## Sending messages
+
+With `messages.send`, a plugin talks to your agents as you do: it sends a chat a message, starts a chat, and answers a chat's question or approval. The same calls work in a window and in `service.luau`, and each goes the way the composer's would, so a chat behaves exactly as if you'd sent it: queued behind a running turn, steering it, or a turn of its own, wherever the chat runs (its host may be another of your devices).
+
+| call | what | needs |
+|---|---|---|
+| `zeron.send_message { chat, text, attachments?, mode? }` | a message into `chat`: a turn of its own when nothing runs; while a turn runs, queued for its end (`mode = "queue"`, the default) or steering it (`"steer"`). A promise of `{ status = "sent", chat, delivery = "run" \| "queue" \| "steer", id }` | `messages.send`; `attachments` (files' paths on the chat's device) also `files.read` |
+| `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?, cwd? }` | a new chat, sent `prompt` as its first message: on `device` or in `project` (a project's id), with `harness` (else this device's default) and `model` and `effort` from its catalog. A promise of `{ status, chat, id }`: `chat` is the new chat's id | `messages.send` |
+| `zeron.answer { chat, answers, request? }` | the question (or approval) `chat` waits on, answered as you would: `answers = { [question] = label }` (or `{ labels }`, or a list of `{ question, labels }`); `request` names one, else the latest. A promise of `{ status = "answered", chat, request }` | `messages.send` |
+
+- **What it sends is yours.** Your agents read it as your message, and do what it says, so `messages.send` is always asked, even for your own plugins, and the consent sheet says so plainly.
+- **Who sent it is kept.** Each message a plugin sends is recorded as its (`{ plugin, name }`) beside the chat's transcript, synced with the chat, and in `plugin_status` (`agents.actions`). The transcript shows it as any message.
+- **Its turns say so.** The turn your message sets off (or, queued, the next one) is told with your `by`: `turn.started`, `chat.awaiting_input`, `turn.finished`, `turn.errored`.
+- **A loop is stopped**, as with switches: sending on your own message's `turn.finished`, 16 times in a row, has the next send refused (`loop`), and your row in Settings → Plugins says so. A send on something else (your own turn ending, say) starts the count over. How often you send never counts.
+- **Refusals.** `not_allowed` (the permission, or `files.read` for files), `not_found` (no such chat, model, effort or question waiting), `bad_call` (no text; `"steer"` while a chat waits for an answer: answer it, or queue), `loop`.
+
+```lua
+-- service.luau ("service", "sessions.read", "messages.read", "messages.send")
+zeron.on("turn.finished", function(e)
+	if e.outcome == "completed" and e.reply and string.find(e.reply, "%[continue%]%s*$") then
+		zeron.send_message({ chat = e.chat, text = "continue" }):await()
+	end
+end)
+```
+
+`plugins-dev/keep-going` is this whole: its service sends "continue" to a chat whose turn ends with the line `[continue]`, with no window open, and its window says so in a toast.
 
 ## Settings
 
@@ -396,7 +531,7 @@ Each setting has an `id` (letters, digits, `- _ .`), a `kind`, a `label`, and op
 | `choice` | one option's `value` (default the first) | `options` `[{ value, label, description? }]` (an option's `description` stands in for the setting's while it's chosen), `style` `"select"` or `"segmented"` |
 | `text` | text, 2000 characters at most | `placeholder` |
 | `number` | a number, kept within `min` and `max` | `min`, `max`, `step`, `unit` |
-| `shortcut` | `"ctrl+alt+space"` (Control, Option or Command held), or `""` | |
+| `shortcut` | `"ctrl+alt+space"` (with `ctrl`, `alt` or `cmd` held), or `""` | |
 | `folder` | the absolute path of a folder the person chose, or `""` | |
 | `wallpaper` | none of yours: Zeron's "Use as wallpaper" row, for a plugin that replaces `#new-chat-background` ([above](#a-new-chats-background)) | |
 
@@ -425,7 +560,7 @@ zeron.set_status("shortcut", nil)   -- cleared
 
 ## Translations
 
-Zeron speaks the language chosen in Settings → General → Language (English or 简体中文 today, or the Mac's own). A plugin can too: its words go in `locales/`, beside `zeron-plugin.json`, a file per language, with `en.json` the source:
+Zeron speaks the language chosen in Settings → General → Language (English or 简体中文 today, or System: your computer's own). A plugin can too: its words go in `locales/`, beside `zeron-plugin.json`, a file per language, with `en.json` the source:
 
 ```
 my-plugin/
@@ -473,15 +608,48 @@ A plugin travels as its folder, signed. The person installs it with Settings →
   - a link to a `.zeron-plugin` file;
   - a GitHub release (`…/releases/latest`, `…/releases/tag/<tag>`), from its `.zeron-plugin` asset;
   - a git repository: `owner/repo`, its GitHub page, `…/tree/<branch>/<folder>`, or any https git URL.
-- **`update_plugin { id }`** installs the newest version from wherever the plugin came from. **`update_plugin { check = true }`** only reports what's new: each update's version and the permissions it adds or removes.
+- **`update_plugin { id? }`** only checks. It looks where a plugin installed from someone else came from (its file, link, release or repository) and reports any newer version: its version and the permissions it adds or removes (`added`, `removed`). Without `id`, it checks every one. It never installs anything: the person installs an update in Zeron, with Update on the plugin in Settings → Plugins. Tell them what you found. (`check = true` is still accepted and changes nothing.)
 
 Zeron checks the signature over every file before anything is written, so an unsigned or changed plugin is refused.
-- **Signed by the person's own key:** it turns on at once.
+
+When installing or updating fails, the error reads `"<reason>: <words>"`, for example `rate_limited: GitHub is turning away requests…`. The reason is a stable word (`git_missing`, `repo_unreadable`, `rate_limited`, `release_not_found`, `no_package`, `download_failed`, `tampered`, `other_signer`, `not_newer`, …); Zeron's window says each one in the person's language. `rate_limited` means GitHub answered 403 or 429: wait, or sign in with `gh auth login` (Zeron looks up releases as you when `gh` is signed in, or `GITHUB_TOKEN`/`GH_TOKEN` is set). `git_missing` means installing from a repository needs git on that device; a release or a `.zeron-plugin` file doesn't.
+- **Signed with this device's key, installed from Zeron's window:** what it does inside its sandbox is allowed at once. Anything outside it (`commands`, `native`, `service`, `devices`, `ui.replace`, `accounts.switch`, `models.set`, `messages.send`) waits for the person. Installed by an agent, it waits.
 - **Signed by anyone else:** it waits until the person allows it in Zeron. The reply says `waiting`; you can't allow it for them.
-- **An update:** it must be signed by the same key as the installed version. One that asks for a new permission still installs, but waits for the person to allow just that.
+- **An update:** it must be signed by the same key as the installed version, or by another live key of the same account (the author on a new machine; an old key revoked still counts as theirs). One signed by a new key installs but waits for the person to allow it again. One that asks for a new permission still installs, but waits for the person to allow just that.
 - **Removing a plugin** (Settings) takes away its folder, what it stored, its pages and its placements.
 
-To publish a plugin, commit its folder with its signed `zeron-plugin.json` to a repository, or attach the `.zeron-plugin` file to a GitHub release. Zeron re-signs your own plugins as you save them, so what you commit is already signed. The package format (`zeron-plugin:v1`) is the same signed package templates use: the manifest, plus every file as base64.
+### Making a package
+
+To share a plugin, save it as one signed `.zeron-plugin` file:
+
+- **`export_plugin { id }`** (MCP), or **`zeron plugin export <id> [--to <path>]`** on the command line. Your own plugin is signed again first, so the file holds what's in its folder now. The reply gives the file's `path` and its size (`bytes`).
+- Without `--to`, it's saved in Zeron's data folder, as `plugin-exports/<id>-<version>.zeron-plugin` (an earlier one of the same name is replaced). `--to` is a folder to save it in, or a file whose name ends in `.zeron-plugin`. The tool takes `to` too, but an agent's export always goes to `plugin-exports`: leave `to` out and read `path`.
+
+Then attach that file to a GitHub release, or send it. People install it from the file, or from the release's link. You can also commit the plugin's folder, with its signed `zeron-plugin.json`, to a repository: Zeron re-signs your own plugins as you save them, so what you commit is already signed. The package format (`zeron-plugin:v1`) is the same signed package templates use: the manifest, plus every file as base64.
+
+### Who made it
+
+Zeron says who made a plugin from its signature, never from its manifest. Each device makes a signing key of its own and registers it to the Zeron account signed in there (a new key needs a fresh sign-in). To check a plugin, Zeron asks Zeron's servers whose key signed it. The answer is kept for an hour, so a key revoked elsewhere stops counting within that.
+
+| what people see | it means |
+|---|---|
+| by Zeron | one of Zeron's own, shipped in the app |
+| by you, Made by you | signed with this device's key |
+| Made on one of your devices | signed with your account's key from another of your devices. It's still asked, like anyone's |
+| by @username, Made by @username | signed with a key registered to the account that holds that username, and not revoked |
+| Unverified, Unknown author | Zeron can't confirm who made it: it's unsigned, its key was never registered or was revoked, its author has no username yet, or Zeron couldn't check (offline, signed out). The sheet says which, and where it came from |
+| Changed since you allowed it | its files changed after you allowed it, in a way its author's signature doesn't vouch for (edited on disk, or an unverified plugin replaced). It doesn't run, and it can't be allowed as it is: its sheet offers Remove, or Reinstall (fetched again from where it came from, then asked again) |
+
+**Claiming a username.** Your plugins read as "by @username" to others only once your account has a username. You claim it once, in Zeron's setup right after you sign in: 3 to 20 letters, digits, `_` or `-`, starting with a letter or digit, kept lowercase. It can't be changed afterwards, and names that look like Zeron's, its staff's or a brand's are reserved. Until you have one, your plugins show as Unverified to everyone else.
+
+A plugin you wrote that shows as Unverified here (one you copied in unsigned, say) can be made yours: the consent sheet's "It's mine…" signs it with this device's key. A plugin someone else signed can't be taken over; copy it under a new id to make your own version.
+
+## Trust model
+
+- A plugin you install runs with the access you grant it, and nothing more. It runs in its own sandbox, and each call it makes is checked against what you allowed.
+- What you grant, it has. A plugin with `commands`, `native` or `service` runs programs as you, so it can do anything you can. Grant those only to a plugin you trust.
+- Only you allow a plugin, in Zeron's window. An agent can make and install plugins, but never allow one for you.
+- Code already running as you on your computer (for example an agent with a shell) is trusted the same as you. Zeron doesn't try to confine it.
 
 ## Three examples
 
