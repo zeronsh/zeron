@@ -144,3 +144,15 @@ test("orch board: side by side wide, stacked narrow, and back", function()
 	expect(app:has(".orch-board-side")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+test("orch board: whose a card is, said only where the board holds more than one's", function()
+	local app = board()
+	-- All of them: each owned card names its orchestrator; the loose one none.
+	expect(app:has('#orch-col-now >> role:button "Merge phase-1 fixes" >> .orch-card-owner >> "Exnomic VPN"')).to_be(true)
+	expect(app:has('#orch-col-now >> role:button "Control room" >> .orch-card-owner >> "Orchestrators"')).to_be(true)
+	expect(app:has("#orch-col-inbox >> .orch-card-owner")).to_be(false)
+	-- One orchestrator's: nobody's named.
+	app:set_state("filter", "orc-orch")
+	app:frames(10)
+	expect(app:has(".orch-card-owner")).to_be(false)
+end)
