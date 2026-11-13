@@ -25,6 +25,8 @@ local templates = require("@app/screens/templates/state")
 local themes = require("@app/screens/themes/state")
 local keys = require("@app/screens/shell/keys")
 local host = require("@app/screens/settings/host")
+local orchestration = require("@account/orchestration")
+local orch_actions = require("@app/screens/orchestrator/actions")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -48,7 +50,15 @@ local function session_items(): { Item }
 		pinned[id] = true
 	end
 	local out: { Item } = {}
+	-- (An orchestrator's chat is found as the orchestrator, its page.)
+	local orchestrators: { [string]: boolean } = {}
+	for _, o in orchestration.now:get().orchestrators or {} do
+		orchestrators[o.id] = true
+	end
 	local function add(c: sessions.Chat, archived: boolean)
+		if orchestrators[c.id] then
+			return
+		end
 		local p = if c.project then projects[c.project] else nil
 		table.insert(out, {
 			id = `session:{c.id}`,
@@ -446,6 +456,26 @@ local function root(): { Item }
 			end,
 		},
 		{
+			id = "a-new-orchestrator",
+			label = locale.s("orch.palette.new_orchestrator"),
+			section = locale.s("shell.palette.actions"),
+			icon = "users-group-rounded",
+			keywords = "orchestrator crew manager agent",
+			run = function()
+				orch_actions.new()
+			end,
+		},
+		{
+			id = "a-control-room",
+			label = locale.s("orch.palette.control_room"),
+			section = locale.s("shell.palette.actions"),
+			icon = "monitor",
+			keywords = "control room board asks needs brain dump orchestrators",
+			run = function()
+				route.control()
+			end,
+		},
+		{
 			id = "a-sidebar",
 			label = locale.s("shell.palette.toggle_sidebar"),
 			section = locale.s("shell.palette.actions"),
@@ -527,6 +557,23 @@ local function root(): { Item }
 				verb = locale.s("shell.palette.open"),
 				run = function()
 					route.settings(id)
+				end,
+			})
+		end
+	end
+	-- Each orchestrator (not archived), to its page.
+	for _, o in orchestration.now:get().orchestrators or {} do
+		if o.kind == "standard" and not o.archived then
+			local id = o.id
+			table.insert(out, {
+				id = `orchestrator:{id}`,
+				label = o.name,
+				section = locale.s("orch.palette.orchestrators"),
+				icon = "users-group-rounded",
+				keywords = `orchestrator {o.goal or ""}`,
+				verb = locale.s("orch.palette.go"),
+				run = function()
+					orch_actions.open(id)
 				end,
 			})
 		end

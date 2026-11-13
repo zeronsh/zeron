@@ -99,6 +99,10 @@ pub const BLOCKED: &[&str] = &[
     "cloud.sleep",
     "cloud.retry",
     "cloud.set_machine",
+    // (What an orchestrator, its crew or the Brain dump is told, and what
+    // the machines are asked.)
+    "orchestration.op",
+    "orchestration.loads_wanted",
 ];
 
 pub fn blocked(action: &str) -> bool {

@@ -503,7 +503,12 @@
       "empty_projects": "{n, plural, other {# 个空项目}}",
       "activity": "动态",
       "working": "进行中",
-      "asleep": "已休眠"
+      "asleep": "已休眠",
+      "control_room": "Control room",
+      "orchestrators": "Orchestrators",
+      "new_orchestrator": "New orchestrator",
+      "orchestrator_actions": "Orchestrator actions",
+      "paused": "Paused"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -1092,6 +1097,104 @@
         "attachments": "没有与“{q}”匹配的附件"
       },
       "placeholder": "搜索文件、对话和附件"
+    },
+    "orch": {
+      "activity": {
+        "thinking": "Thinking",
+        "reading": "Reading",
+        "editing": "Editing",
+        "running": "Running",
+        "testing": "Testing",
+        "building": "Building",
+        "installing": "Installing",
+        "merging": "Merging",
+        "pushing": "Pushing",
+        "reviewing": "Reviewing",
+        "browsing": "Browsing",
+        "delegating": "Delegating",
+        "other": "Working"
+      },
+      "crew": {
+        "label": "Crew",
+        "empty": "No crew yet",
+        "thread": "Thread",
+        "open": "Open {title}",
+        "idle": "Idle",
+        "todo": "{done}/{total}",
+        "report": {
+          "done": "Done",
+          "blocked": "Blocked",
+          "failed": "Failed",
+          "progress": "Update",
+          "message": "Message"
+        }
+      },
+      "target": {
+        "orchestrator": "Orchestrator",
+        "chat": "Thread",
+        "new_orchestrator": "New orchestrator",
+        "new_thread": "New thread",
+        "item": "Inbox",
+        "inbox": "Inbox",
+        "note": "Notes",
+        "unsure": "Unsure",
+        "other": "Elsewhere"
+      },
+      "receipt": {
+        "open": "Open {name}",
+        "move_to": "Move to",
+        "chip": "{target}, {intent}, {state}",
+        "answer": "Answer",
+        "routing": "Routing"
+      },
+      "intent": {
+        "task": "Task",
+        "info": "Context",
+        "question": "Question",
+        "priority": "Priority",
+        "cancel": "Cancel",
+        "note": "Note",
+        "other": "Other"
+      },
+      "route_state": {
+        "pending": "Pending",
+        "delivered": "Delivered",
+        "answered": "Answered",
+        "undone": "Moved",
+        "failed": "Failed",
+        "unsure": "Unsure",
+        "other": "Other"
+      },
+      "ask": {
+        "question": "Question",
+        "decision": "Decision",
+        "approval": "Approval",
+        "blocker": "Blocker",
+        "input": "Awaiting input",
+        "other": "Ask",
+        "urgent": "Urgent",
+        "dismiss": "Dismiss",
+        "answer": "Answer",
+        "open": "Open",
+        "none": "Nothing needs you"
+      },
+      "more": "{n} more",
+      "less": "Fewer",
+      "map": {
+        "here": "this one",
+        "cpu": "CPU {percent}%",
+        "offline": "Offline",
+        "paused": "Paused",
+        "empty": "No machines online"
+      },
+      "machines": {
+        "running": "{n} running",
+        "memory": "{used} / {total} GB"
+      },
+      "comms": {
+        "you": "You",
+        "none": "Quiet"
+      }
     }
   },
   "settings": {
@@ -2483,7 +2586,9 @@
         "settings": "设置",
         "update_watch": "更新监视器",
         "search": "搜索",
-        "new_project": "新建项目"
+        "new_project": "新建项目",
+        "control": "The Control room",
+        "orchestrator": "The orchestrator's page"
       }
     },
     "title_bar": {
@@ -3871,6 +3976,151 @@
       "skipped": "部分主题未能导入：{names}",
       "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
       "imported_body": "它在“你的”中。"
+    }
+  },
+  "orch": {
+    "board": {
+      "label": "Board",
+      "column": {
+        "inbox": "Inbox",
+        "now": "Now",
+        "next": "Next",
+        "blocked": "Blocked",
+        "review": "Review",
+        "done": "Done today"
+      },
+      "priority": {
+        "title": "Priority",
+        "urgent": "Urgent",
+        "high": "High",
+        "normal": "Normal",
+        "low": "Low"
+      },
+      "all": "All",
+      "open_thread": "Open thread",
+      "open_thread_named": "Open “{title}”",
+      "outcome": "Outcome",
+      "card_actions": "Card actions",
+      "threads": "{n, plural, one {# thread} other {# threads}}"
+    },
+    "reports": {
+      "title": "Crew updates",
+      "thread": "Thread",
+      "open": "Open {title}: {summary}",
+      "show_more": "Show {n} more",
+      "show_less": "Show less",
+      "state": {
+        "done": "Done",
+        "blocked": "Blocked",
+        "failed": "Failed",
+        "progress": "Update",
+        "message": "Message"
+      }
+    },
+    "sidebar": {
+      "open": "Open",
+      "pause": "Pause",
+      "resume": "Resume",
+      "settings": "Settings…",
+      "archive": "Archive",
+      "make_orchestrator": "Make orchestrator"
+    },
+    "palette": {
+      "new_orchestrator": "New orchestrator",
+      "control_room": "Open control room",
+      "orchestrators": "Orchestrators",
+      "go": "Open"
+    },
+    "actions": {
+      "update_failed": "Couldn't change the orchestrator",
+      "promote_failed": "Couldn't make it an orchestrator",
+      "create_failed": "Couldn't create the orchestrator",
+      "untitled": "Orchestrator"
+    },
+    "page": {
+      "needs_you": "Needs you",
+      "board": "Board",
+      "crew": "Crew",
+      "chat": "Chat",
+      "live": "Live",
+      "paused": "Paused",
+      "pause": "Pause",
+      "resume": "Resume",
+      "settings": "Settings",
+      "answer_failed": "Couldn't send the answer",
+      "working_of": "{working}/{total}",
+      "missing": "This orchestrator isn't here",
+      "to_control": "Control room"
+    },
+    "dialog": {
+      "new_title": "New orchestrator",
+      "create": "Create",
+      "name": "Name",
+      "name_placeholder": "Release train",
+      "goal": "Goal",
+      "goal_placeholder": "What it's for",
+      "project": "Project",
+      "project_none": "No project",
+      "device": "Device",
+      "device_here": "This device",
+      "model": "Model",
+      "model_default": "Default",
+      "settings_title": "Orchestrator",
+      "save": "Save",
+      "rules": "Rules",
+      "crew_rules": "Crew rules",
+      "notes": "Notes",
+      "crew": "Crew",
+      "devices": "Runs on",
+      "max_running": "At once",
+      "max_running_none": "0 for no limit",
+      "crew_model": "Crew model",
+      "wake": "Wake",
+      "wake_on": "Wake on a schedule",
+      "wake_at": "At",
+      "wake_at_error": "Times as HH:MM, comma separated",
+      "wake_every": "Every",
+      "minutes": "min",
+      "weekdays": "Weekdays only",
+      "wake_prompt": "Prompt"
+    }
+  },
+  "control": {
+    "title": "Control room",
+    "summary": "{orchestrators, plural, one {# orchestrator} other {# orchestrators}} · {working} working · {needs} need you",
+    "capture": {
+      "name": "Dump",
+      "placeholder": "Dump anything",
+      "send": "Send",
+      "failed": "That didn't go through",
+      "move_failed": "Couldn't move it",
+      "newest": "Newest",
+      "earlier": "{n, plural, one {# earlier} other {# earlier}}"
+    },
+    "needs": {
+      "failed": "Couldn't send that"
+    },
+    "board": {
+      "failed": "Couldn't move it"
+    },
+    "widget": {
+      "capture": "Capture",
+      "needs": "Needs you",
+      "map": "Map",
+      "board": "Board",
+      "machines": "Machines",
+      "comms": "Comms"
+    },
+    "widgets": {
+      "title": "Widgets",
+      "menu": "Widget menu",
+      "up": "Move up",
+      "down": "Move down",
+      "hide": "Hide",
+      "reset": "Reset"
+    },
+    "map": {
+      "working": "{n} working"
     }
   }
 }

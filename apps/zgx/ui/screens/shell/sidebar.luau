@@ -32,6 +32,9 @@ local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
+local orchestration = require("@account/orchestration")
+local orch_data = require("@ds/orch_data")
+local orch_actions = require("@app/screens/orchestrator/actions")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -343,12 +346,39 @@ local function say(word: string): string
 	return locale.s(`shell.sidebar.filter.state.{word}`)
 end
 
+-- Every orchestrator's chat (the Brain dump's too, archived or not): an
+-- orchestrator is listed in its own section, never as a session. (The same
+-- table while the ids are: what reads it wakes only when one comes or goes.)
+local orch_ids_last: { [string]: boolean } = {}
+local orch_ids_key = ""
+local orch_ids = ui.computed(function(): { [string]: boolean }
+	local ids: { string } = {}
+	for _, o in orchestration.now:get().orchestrators or {} do
+		table.insert(ids, o.id)
+	end
+	table.sort(ids)
+	local key = table.concat(ids, ",")
+	if key == orch_ids_key then
+		return orch_ids_last
+	end
+	local set: { [string]: boolean } = {}
+	for _, id in ids do
+		set[id] = true
+	end
+	orch_ids_key, orch_ids_last = key, set
+	return set
+end)
+
 -- The Archived shelf's sessions (the most recently moved first), as the
 -- list's rows read them.
 local shelf = ui.computed(function(): { any }
 	local names = devices()
 	local out = {}
+	local hidden = orch_ids:get()
 	for _, c in sessions.archived:get() do
+		if hidden[c.id] then
+			continue
+		end
 		table.insert(out, {
 			id = c.id,
 			title = c.title,
@@ -498,8 +528,12 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	-- (Which have sessions listed, and which archived ones.)
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
+	local hidden = orch_ids:get()
 	local listed: { [any]: boolean } = {}
 	for _, c in now.chats do
+		if hidden[c.id] then
+			continue
+		end
 		local group = if c.project then by[c.project] else nil
 		if group then
 			listed[group] = true
@@ -522,6 +556,9 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 	end
 	for _, c in now.chats do
+		if hidden[c.id] then
+			continue
+		end
 		if just and not (just_group and c.project and by[c.project] == just_group) then
 			continue
 		end
@@ -1237,6 +1274,17 @@ local function menu(id: string): { any }?
 		if side or activity.on:peek() then false else { label = locale.s("shell.sidebar.menu.move_to"), icon = "folder-with-files", submenu = into },
 		sleep,
 		stop_waiting,
+		-- (A chat of its own, not yet one: it becomes an orchestrator, its
+		-- transcript kept.)
+		if side or orch_ids:peek()[id]
+			then false
+			else {
+				label = locale.s("orch.sidebar.make_orchestrator"),
+				icon = "users-group-rounded",
+				on_select = function()
+					orch_actions.promote(id)
+				end,
+			},
 		{ separator = true },
 		{
 			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
@@ -1585,6 +1633,139 @@ local function rename_dialog(): Node
 	}
 end
 
+-- Under the way to a working chat: a chat or crew thread counts as at work.
+local WORKING: { [string]: boolean } = { working = true, connecting = true, waiting = true }
+local ASKING: { [string]: boolean } = { input = true, approval = true }
+
+-- The Orchestrators section's rows: each standard orchestrator not
+-- archived, by when it was made (steady as others come), with its crew
+-- working of all of it and what of it needs you (its open asks, and its
+-- chat or its crew's asking). (The same table while what it says is.)
+local orch_rows_last: { any } = {}
+local orch_rows_key = ""
+local orch_rows = ui.computed(function(): { any }
+	local now = orchestration.now:get()
+	local chats = orch_data.chats(sessions.now:get())
+	local list: { any } = {}
+	for _, o in now.orchestrators or {} do
+		if o.kind == "standard" and not o.archived then
+			table.insert(list, o)
+		end
+	end
+	table.sort(list, function(a: any, b: any): boolean
+		if (a.created or 0) ~= (b.created or 0) then
+			return (a.created or 0) < (b.created or 0)
+		end
+		return a.id < b.id
+	end)
+	local out: { any } = {}
+	local parts: { string } = {}
+	for _, o in list do
+		local working, total, needs = 0, 0, 0
+		for _, m in now.crew or {} do
+			if m.orchestrator_id == o.id and not m.released then
+				total += 1
+				local c = chats[m.chat_id]
+				local st = c and c.status
+				if st and WORKING[st] then
+					working += 1
+				elseif st and ASKING[st] then
+					needs += 1
+				end
+			end
+		end
+		local own = chats[o.id]
+		local own_status: string? = own and own.status
+		if own_status and ASKING[own_status] then
+			needs += 1
+		end
+		for _, a in now.asks or {} do
+			if a.state == "open" and a.orchestrator_id == o.id then
+				needs += 1
+			end
+		end
+		table.insert(out, { id = o.id, name = o.name, hue = o.hue, working = working, total = total, needs = needs, paused = o.paused == true })
+		table.insert(parts, `{o.id}|{o.name}|{o.hue}|{working}|{total}|{needs}|{o.paused}`)
+	end
+	local key = table.concat(parts, "\n")
+	if key == orch_rows_key then
+		return orch_rows_last
+	end
+	orch_rows_key, orch_rows_last = key, out
+	return out
+end)
+M.orchestrator_rows = orch_rows
+-- What needs you, everywhere: open asks and chats awaiting input.
+M.needs_you = ui.computed(function(): number
+	return #orch_data.needs(orchestration.now:get(), sessions.now:get())
+end)
+
+-- An orchestrator's row menu: open it, pause or resume it, its settings,
+-- archive it.
+local function orchestrator_menu(id: string): { any }?
+	local o = orch_data.orchestrators(orchestration.now:peek())[id]
+	if not o then
+		return nil
+	end
+	return {
+		{
+			label = locale.s("orch.sidebar.open"),
+			icon = "arrow-up-right",
+			on_select = function()
+				orch_actions.open(id)
+			end,
+		},
+		{
+			label = locale.s(if o.paused then "orch.sidebar.resume" else "orch.sidebar.pause"),
+			icon = if o.paused then "action-play" else "moon",
+			on_select = function()
+				orch_actions.set_paused(id, not o.paused)
+			end,
+		},
+		{
+			label = locale.s("orch.sidebar.settings"),
+			icon = "settings",
+			on_select = function()
+				orch_actions.settings(id)
+			end,
+		},
+		{ separator = true },
+		{
+			label = locale.s("orch.sidebar.archive"),
+			icon = "archive-minimalistic",
+			on_select = function()
+				orch_actions.archive(id)
+			end,
+		},
+	}
+end
+
+local orchestration_prop = {
+	control = {
+		count = function(): number
+			return M.needs_you:get()
+		end,
+		selected = function(): boolean
+			return route.current:get().name == "control"
+		end,
+		on_click = function()
+			route.control()
+		end,
+	},
+	list = orch_rows,
+	selected = function(id: string): boolean
+		local c = route.current:get()
+		return c.name == "orchestrator" and c.orchestrator == id
+	end,
+	on_open = function(id: string)
+		orch_actions.open(id)
+	end,
+	on_new = function()
+		orch_actions.new()
+	end,
+	menu = orchestrator_menu,
+}
+
 M.Sidebar = ui.component(function(props: Props): Node
 	probe.builds += 1
 	probe.built_at = ui.now()
@@ -1641,6 +1822,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_page = function(page: any)
 			route.plugin_page(page.plugin, page.id)
 		end,
+		orchestration = orchestration_prop :: any,
 		on_search = function()
 			view.palette:set(true)
 		end,

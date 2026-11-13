@@ -428,10 +428,18 @@ pub enum RouteTarget {
     Orchestrator { id: String },
     /// An existing chat/thread (any, crew or not).
     Chat { id: String },
-    /// A new orchestrator the Brain dump created for it.
-    NewOrchestrator { id: String },
-    /// A new standalone thread the Brain dump started for it.
-    NewThread { id: String },
+    /// A new orchestrator the Brain dump created for it. (Empty while not
+    /// made yet: an unsure route's candidate, a reroute asking for one.)
+    NewOrchestrator {
+        #[serde(default)]
+        id: String,
+    },
+    /// A new standalone thread the Brain dump started for it. (Empty while
+    /// not made yet, as above.)
+    NewThread {
+        #[serde(default)]
+        id: String,
+    },
     /// A loose board item (no owner yet).
     Item { id: String },
     /// Kept in the Brain dump's notes; nothing to do yet.
@@ -880,6 +888,9 @@ mod tests {
         assert_eq!(s, WorkState::Other);
         let t: RouteTarget = serde_json::from_str(r#"{"kind":"planet","id":"x"}"#).unwrap();
         assert_eq!(t, RouteTarget::Other);
+        // A candidate not made yet carries no id.
+        let t: RouteTarget = serde_json::from_str(r#"{"kind":"newThread"}"#).unwrap();
+        assert_eq!(t, RouteTarget::NewThread { id: String::new() });
     }
 
     #[test]

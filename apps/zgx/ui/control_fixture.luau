@@ -1,0 +1,30 @@
+-- The Control room in the main window (the shell on /control), drawn from
+-- account/orchestration_sample with its chats and devices: what
+-- tests/control_*.test.luau drive and audit shots take. No engine: the
+-- host's calls are ui/control_world's.
+
+ui.theme.strict("warn")
+local ds = require("@ds")
+ds.setup()
+-- (Where the window is: the Control room, as left there.)
+ui.state("shell_route_path", "/control")
+require("@app/screens/shell/route").launched:set(true)
+require("@app/control_world")()
+-- (What the shell around the page asks of the host: Settings' calls, and the
+-- composer's catalog, answered here.)
+require("./settings_stub")
+local store = require("@app/screens/chat/store") :: any
+store.catalog_on = function() end
+store.load_catalog = function() end
+store.catalog:set({
+	state = "ready",
+	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
+	models = { { value = "opus", label = "Opus", harness = "claude-code" } },
+})
+local route = require("@app/screens/shell/route")
+local shell = require("@app/screens/shell")
+local built = shell()
+ui.after(0, function()
+	route.control()
+end)
+return built
