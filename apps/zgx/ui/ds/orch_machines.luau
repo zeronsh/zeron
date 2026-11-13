@@ -24,6 +24,7 @@ local Spark = require("@self/orch_spark")
 local Counter = require("@self/orch_counter")
 local Cells = require("@self/orch_cells")
 local hold = require("@self/orch_hold")
+local Block = require("@self/orch_block")
 
 export type Props = {
 	devices: () -> { any },
@@ -283,7 +284,15 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		},
 		ui.show(function(): boolean
 			return id() == props.here()
-		end, ui.text { locale.t("ds.orch.map.here"), shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" }),
+		end, ui.text {
+			locale.t("ds.orch.map.here"),
+			class = "orch-machine-here",
+			shrink = 0,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+			-- (On the name's baseline.)
+			y = Block.baseline("$font.size.sm", "$font.size.xs"),
+		}),
 		ui.div { grow = 1 },
 		ui.switch(function(): string
 			return if online() then "on" else "off"
@@ -292,7 +301,7 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 				gap = "$space.1",
 				items = "baseline",
 				shrink = 0,
-				ui.text { locale.t("ds.orch.machines.cpu"), text_size = "$font.size.xs", color = "$text.tertiary" },
+				ui.text { locale.t("ds.orch.machines.cpu"), text_size = "$font.size.xs", color = "$text.tertiary", y = Block.baseline("$font.size.sm", "$font.size.xs") },
 				Counter {
 					value = cpu,
 					suffix = "%",

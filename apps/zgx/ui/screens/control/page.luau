@@ -436,6 +436,7 @@ local function capture(): Node
 					tabular = true,
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
+					y = Block.baseline("$font.size.sm", "$font.size.xs"),
 				},
 			},
 			ui.show(function(): boolean
@@ -853,7 +854,17 @@ local function head(): Node
 			gap = "$space.3",
 			items = "center",
 			ds.Text { locale.t("control.title"), style = "heading" },
-			ui.text { summary, tabular = true, text_size = "$font.size.sm", color = "$text.tertiary", truncate = true, min_w = 0 },
+			ui.text {
+				summary,
+				id = "control-summary",
+				tabular = true,
+				text_size = "$font.size.sm",
+				color = "$text.tertiary",
+				truncate = true,
+				min_w = 0,
+				-- (On the title's baseline.)
+				y = Block.baseline("$font.size.lg", "$font.size.sm"),
+			},
 			ui.div { grow = 1 },
 			ui.div {
 				on_visible = seen,
