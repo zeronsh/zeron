@@ -901,6 +901,9 @@ local function scratchpad_props(): any
 		on_collapse = function()
 			M.scratchpad_open:set(false)
 		end,
+		on_page_wheel = function(dy: number)
+			KeptScroll.scroll_by(M.place, dy)
+		end,
 	}
 end
 local function scratchpad_widget(): Node

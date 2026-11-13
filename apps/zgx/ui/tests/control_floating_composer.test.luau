@@ -40,7 +40,7 @@ local function down(app: any)
 end
 
 -- (Back up with the wheel over the right column: scrolled down, the
--- page's middle is the Scratchpad's notes, a field that keeps a wheel
+-- page's middle is the Scratchpad's notes, a field that kept a wheel
 -- over it once anything has been pressed (`overscroll = "contain"`), the
 -- page not moving, as a person's wheel over it wouldn't.)
 local function up(app: any)
