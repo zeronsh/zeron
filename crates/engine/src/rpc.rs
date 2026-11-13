@@ -4230,6 +4230,15 @@ impl RpcService for EngineRpc {
                 _ => self.orchestration.stream(),
             })),
             methods::ORCHESTRATE => Box::pin(self.orchestrate(params)).await.map(RpcReply::Value),
+            // The Scratchpad: never routes, never makes work
+            // (orchestration/scratchpad.rs).
+            methods::SCRATCHPAD => self.scratchpad(params).await.map(RpcReply::Value),
+            methods::WATCH_SCRATCHPAD => match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { .. } => Err(RpcError::Failed(
+                    "Agents read the Scratchpad with Scratchpad{op: read}".into(),
+                )),
+                _ => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_scratchpad()))),
+            },
             methods::WATCH_DEVICE_LOADS => Ok(RpcReply::Stream(crate::orchestration::loads::stream(
                 std::sync::Arc::new(self.clone()),
             ))),

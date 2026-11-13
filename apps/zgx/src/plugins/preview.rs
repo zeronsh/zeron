@@ -104,6 +104,10 @@ pub const BLOCKED: &[&str] = &[
     "orchestration.op",
     "orchestration.loads_wanted",
     "orchestration.progress_check",
+    // (The Scratchpad written: a preview reads it, never changes it.)
+    "scratchpad.set_text",
+    "scratchpad.set_shapes",
+    "scratchpad.restore",
 ];
 
 pub fn blocked(action: &str) -> bool {

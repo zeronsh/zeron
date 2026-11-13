@@ -59,6 +59,7 @@ mod menu_bar;
 mod mermaid;
 mod orchestration;
 mod orchestration_progress;
+mod scratchpad;
 mod orchestration_timeline;
 mod plugins;
 mod previews;
@@ -827,6 +828,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         orchestration_timeline::install(cx, &host);
         // How far each chat's work has got (src/orchestration_progress.rs).
         orchestration_progress::install(cx, &host);
+        // The Control Room's Scratchpad (src/scratchpad.rs).
+        scratchpad::install(cx, &host);
         // What there is to update, on every device (src/updates.rs).
         updates::install(&host);
         // Adding a project, removing one (src/projects.rs).

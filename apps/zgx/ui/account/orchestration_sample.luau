@@ -9,6 +9,7 @@
 --   sample.comms      what orchestration.comms:get() returns
 --   sample.devices    sessions.now devices to pair with it
 --   sample.chats      sessions.now chats (crew threads carry activity/todo)
+--   sample.scratchpad what scratchpad.now:get() returns (account/scratchpad)
 --   sample.at(t)      a copy with every time shifted so "now" is `t`
 
 local NOW = 1794470400 -- 2026-11-12 18:40 PST
@@ -314,6 +315,8 @@ local TIME_KEYS = {
 	created = true, updated = true, done = true, joined = true, at = true, since = true, answered = true,
 	-- (A progress row's clocks.)
 	started = true, last_step = true, note_at = true, tool_since = true,
+	-- (The Scratchpad's.)
+	updated_at = true, edited_at = true,
 }
 
 local function shifted(v, by)
@@ -722,6 +725,74 @@ do
 	out["th-vpn-exporter"].state = "waiting"
 	out["th-reins-notes"].refreshing = true
 	f.progress = out
+end
+
+-- The Scratchpad as scratchpad.now:get() gives it (src/scratchpad.rs): a
+-- note with headings, a list and a code block, a small diagram, and its
+-- history (newest first, the first the document as it is now): the Brain
+-- dump's last edit over the person's.
+do
+	local text = table.concat({
+		"# Sync, the long way round",
+		"",
+		"Devices should agree without a central clock. Notes for later, not work yet.",
+		"",
+		"## Ideas",
+		"",
+		"- Every edit carries its device and a rev; the engine keeps the order",
+		"- Conflicts keep both: the newer wins, the other lands in history",
+		"- **Never** delete a snapshot, only write over the oldest",
+		"",
+		"## Shape of a change",
+		"",
+		"```rust",
+		"struct Change { rev: String, device: String, at: DateTime<Utc> }",
+		"```",
+		"",
+		"## Open",
+		"",
+		"1. How long a device may be offline before it re-reads everything",
+		"2. Whether the Brain dump appends or writes a section",
+	}, "\n")
+	local function shape(id: string, kind: string, z: number, extra: any): any
+		local s: any = { id = id, kind = kind, x = 0, y = 0, w = 0, h = 0, points = {}, text = "", color = "fg", z = z }
+		for k, v in extra do
+			s[k] = v
+		end
+		return s
+	end
+	sample.scratchpad = {
+		loaded = true,
+		text = text,
+		rev = "r-41",
+		updated_at = ago(180),
+		updated_by = "brain_dump",
+		device_id = "dev-desk",
+		-- App, Engine and Edge, their arrows labelled, a freehand mark
+		-- under the engine and a note beside it.
+		shapes = {
+			shape("sh-app", "rect", 0, { x = 40, y = 60, w = 150, h = 70, text = "App" }),
+			shape("sh-engine", "rect", 1, { x = 300, y = 60, w = 150, h = 70, text = "Engine", color = "accent" }),
+			shape("sh-edge", "ellipse", 2, { x = 560, y = 55, w = 150, h = 80, text = "Edge", color = "blue" }),
+			shape("sh-rpc", "arrow", 3, { points = { { x = 194, y = 95 }, { x = 296, y = 95 } }, text = "RPC", color = "muted" }),
+			shape("sh-sync", "arrow", 4, { points = { { x = 454, y = 95 }, { x = 556, y = 95 } }, text = "sync", color = "muted" }),
+			-- (An elbow: start, elbow, end.)
+			shape("sh-push", "arrow", 5, { points = { { x = 635, y = 140 }, { x = 375, y = 262 }, { x = 115, y = 136 } }, text = "push", color = "orange" }),
+			shape("sh-mark", "stroke", 6, {
+				points = { { x = 306, y = 150 }, { x = 330, y = 143 }, { x = 356, y = 154 }, { x = 382, y = 144 }, { x = 408, y = 155 }, { x = 432, y = 145 }, { x = 446, y = 150 } },
+				color = "green",
+				stroke = 2,
+			}),
+			shape("sh-note", "text", 7, { x = 318, y = 166, w = 150, h = 20, text = "retry on reconnect", color = "green" }),
+		},
+		history = {
+			{ id = "rv-6", at = ago(240), edited_at = ago(180), by = "brain_dump", chars = #text, shape_count = 8, preview = "Sync, the long way round" },
+			{ id = "rv-5", at = ago(1500), edited_at = ago(1320), by = "person", device_id = "dev-desk", chars = 612, shape_count = 7, preview = "Sync, the long way round" },
+			{ id = "rv-4", at = ago(5400), edited_at = ago(5100), by = "person", device_id = "dev-mac", chars = 380, shape_count = 3, preview = "Sync" },
+			{ id = "rv-3", at = ago(86400), edited_at = ago(86000), by = "person", device_id = "dev-desk", restored_from = "rv-1", chars = 120, shape_count = 0, preview = "Sync" },
+			{ id = "rv-2", at = ago(90000), edited_at = ago(89900), by = "brain_dump", chars = 64, shape_count = 0, preview = "Ask Wing about the relay deploy window" },
+		},
+	}
 end
 
 return sample

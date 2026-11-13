@@ -208,6 +208,8 @@ struct WorkspaceHostInner {
     orchestration_tx: watch::Sender<zeron_proto::orchestration::OrchestrationState>,
     /// Progress rows (`crate::orchestration::progress`), republished on change.
     progress_tx: watch::Sender<Vec<zeron_proto::orchestration::Progress>>,
+    /// The Scratchpad and its history (`crate::orchestration::scratchpad`).
+    scratchpad_tx: watch::Sender<zeron_proto::scratchpad::ScratchpadState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// [`WorkspaceHost::registry_synced`], published when it changes so
     /// waiters (the chat sync dispatcher's reconciliation) need not poll it.
@@ -277,6 +279,7 @@ struct PublishedVersions {
     spaces: u64,
     orchestration: u64,
     progress: u64,
+    scratchpad: u64,
 }
 
 /// The registry replica a store holds: its whole snapshot plus the row
@@ -437,6 +440,7 @@ impl WorkspaceHost {
         });
         let (orchestration_tx, _) = watch::channel(doc.read_orchestration());
         let (progress_tx, _) = watch::channel(doc.read_progress());
+        let (scratchpad_tx, _) = watch::channel(doc.read_scratchpad());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let edge_less = config.edge.is_none();
 
@@ -452,6 +456,7 @@ impl WorkspaceHost {
                 sidebar_preferences_tx,
                 orchestration_tx,
                 progress_tx,
+                scratchpad_tx,
                 room: Mutex::new(None),
                 registry_synced_tx: watch::Sender::new(edge_less),
                 changed_tx,
@@ -880,6 +885,11 @@ impl WorkspaceHost {
     /// coalesced: see `orchestration::progress::stream`).
     pub fn watch_progress_rows(&self) -> watch::Receiver<Vec<zeron_proto::orchestration::Progress>> {
         self.inner.progress_tx.subscribe()
+    }
+
+    /// The Scratchpad and its history, republished on every change.
+    pub fn watch_scratchpad(&self) -> watch::Receiver<zeron_proto::scratchpad::ScratchpadState> {
+        self.inner.scratchpad_tx.subscribe()
     }
 
     /// Read orchestration rows under the registry lock.
@@ -1740,6 +1750,7 @@ impl WorkspaceHostInner {
                 .wrapping_add(doc.kind_version(zeron_doc::KIND_REPOSITORY_LOOKS)),
             orchestration: doc.orchestration_version(),
             progress: doc.progress_version(),
+            scratchpad: doc.scratchpad_version(),
         };
         let last = *published;
         let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
@@ -1749,6 +1760,7 @@ impl WorkspaceHostInner {
         let spaces = changed(|v| v.spaces).then(|| doc.read_spaces());
         let orchestration = changed(|v| v.orchestration).then(|| doc.read_orchestration());
         let progress = changed(|v| v.progress).then(|| doc.read_progress());
+        let scratchpad = changed(|v| v.scratchpad).then(|| doc.read_scratchpad());
         // Pins reconcile against the chats as they read now: just read, or
         // (unchanged) as last published.
         let reconciled = match &chats {
@@ -1828,6 +1840,9 @@ impl WorkspaceHostInner {
         }
         if let Some(progress) = progress {
             publish_if_changed(&self.progress_tx, progress);
+        }
+        if let Some(scratchpad) = scratchpad {
+            publish_if_changed(&self.scratchpad_tx, scratchpad);
         }
         // A failed read retries every list on the next publish.
         *published = (!failed).then_some(now);

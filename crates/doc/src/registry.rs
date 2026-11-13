@@ -51,6 +51,8 @@ pub use orchestration::{
     MAX_TEXT_FIELD_BYTES, ORCHESTRATION_KINDS,
 };
 mod repository_looks;
+mod scratchpad;
+pub use scratchpad::{KIND_SCRATCHPAD, KIND_SCRATCHPAD_HISTORY, SCRATCHPAD_ROW, ScratchpadEdit};
 mod row_cache;
 mod sidebar_pins;
 mod sidebar_sections;

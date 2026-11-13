@@ -23,6 +23,7 @@ pub mod preview;
 pub mod program_status;
 pub mod projectless;
 pub mod redact;
+pub mod scratchpad;
 pub mod relay_gen;
 pub mod providers;
 pub mod run_errors;

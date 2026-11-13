@@ -2,7 +2,8 @@
 -- that shows everything orchestration is doing. Its widgets, in order:
 -- Capture (dump anything; the newest dump's receipt under it, older ones
 -- folded), Needs you, Q&A (the person's questions and their answers), the
--- Map, the Board, Machines and Comms. Two columns
+-- Map, the Scratchpad (the person's notes and drawings, opened to a page
+-- of its own in place), the Board, Machines and Comms. Two columns
 -- from 1100 points (Capture and the Map on the left; Needs you, Machines and
 -- Comms on the right; the Board across both, under them), one below that. Each widget can be
 -- hidden and moved; that's this device's (`control_widgets`). Plugins add
@@ -37,6 +38,8 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local KeptScroll = require("@ds/kept_scroll")
+local Scratch = require("@ds/orch_scratchpad")
+local scratchpad = require("@account/scratchpad")
 
 local M = {}
 
@@ -52,9 +55,9 @@ local SIDE_W = 420
 local GAP = "$space.4"
 
 -- The widgets: each one's column when wide.
-M.WIDGETS = { "capture", "needs", "qa", "progress", "map", "board", "machines", "comms" }
+M.WIDGETS = { "capture", "needs", "qa", "progress", "map", "scratchpad", "board", "machines", "comms" }
 -- (The Board spans both, under them: its columns want the room.)
-local COLUMN: { [string]: string } = { capture = "left", map = "left", board = "full", needs = "right", qa = "right", progress = "right", machines = "right", comms = "right" }
+local COLUMN: { [string]: string } = { capture = "left", map = "left", scratchpad = "left", board = "full", needs = "right", qa = "right", progress = "right", machines = "right", comms = "right" }
 
 -- Shown and in what order, on this device.
 export type Widgets = { order: { string }, hidden: { [string]: boolean } }
@@ -711,7 +714,36 @@ local function qa(): Node
 	}
 end
 
-local BUILD: { [string]: () -> Node } = { capture = capture, needs = needs, qa = qa, progress = Progress.Widget, map = map, board = board, machines = machines, comms = comms }
+-- The Scratchpad: its widget, and its page (the widget opened, in place of
+-- the others: `M.scratchpad_open`).
+M.scratchpad_open = ui.state("control_scratchpad_open", false)
+local function scratchpad_props(): any
+	return {
+		pad = function(): any
+			return scratchpad.now:get()
+		end,
+		on_save_text = function(text: string): any
+			return scratchpad.set_text(text)
+		end,
+		on_save_shapes = function(shapes: { any }): any
+			return scratchpad.set_shapes(shapes)
+		end,
+		on_restore = function(id: string)
+			scratchpad.restore(id):after(function() end, said("ds.orch.scratchpad.restore_failed"))
+		end,
+		on_expand = function()
+			M.scratchpad_open:set(true)
+		end,
+		on_collapse = function()
+			M.scratchpad_open:set(false)
+		end,
+	}
+end
+local function scratchpad_widget(): Node
+	return Scratch.Widget(scratchpad_props())
+end
+
+local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = Progress.Widget, map = map, board = board, machines = machines, comms = comms }
 
 -- How many of the crew work now.
 local function working_now(): number
@@ -865,6 +897,8 @@ local function figures_of(id: string): Node?
 		}
 	elseif id == "progress" then
 		return Progress.figures()
+	elseif id == "scratchpad" then
+		return Scratch.Status()
 	elseif id == "comms" then
 		return figure_if(function(): string
 			local list = orchestration.comms:get()
@@ -1142,16 +1176,28 @@ M.Page = ui.component(function(): Node
 					end
 					kept.on_resize(size, nil)
 				end,
-				ui.column {
-					w_full = true,
-					max_w = 1480,
-					gap = "$space.6",
-					head(),
-					ui.presence(function(): string
-						-- (A real swap: two columns or one, the widgets laid out again.)
-						return if width:get() >= M.WIDE then "wide" else "narrow"
-					end, layout, { w_full = true }),
-				},
+				-- (A real swap: the widgets, or the Scratchpad opened to its page.)
+				ui.presence(function(): string
+					return if M.scratchpad_open:get() then "scratchpad" else "widgets"
+				end, function(kind: string): Node
+					if kind == "scratchpad" then
+						return ui.column {
+							w_full = true,
+							max_w = 1480,
+							Scratch.Page(scratchpad_props()),
+						}
+					end
+					return ui.column {
+						w_full = true,
+						max_w = 1480,
+						gap = "$space.6",
+						head(),
+						ui.presence(function(): string
+							-- (A real swap: two columns or one, the widgets laid out again.)
+							return if width:get() >= M.WIDE then "wide" else "narrow"
+						end, layout, { w_full = true }),
+					}
+				end, { w_full = true, items = "center" }),
 			},
 		},
 	}
