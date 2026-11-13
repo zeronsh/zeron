@@ -282,6 +282,51 @@ test("a new side chat's footer is the chat page's: access, where it works, the m
 	expect(calls(app)).to_contain(`pick:{made}:claude-code/opus-5.5:claude-code:high:supervised`)
 end)
 
+test("a new side chat keeps its parent's existing worktree without a place override", function()
+	local app = open()
+	app:command("parent_in_worktree")
+	app:frames(20)
+	app:click('#session-lanes >> role:button "New side chat"')
+	app:frames(40)
+	expect(footer_words(app)).to_contain("feature")
+	-- Rebuilding the tab must keep the inherited branch too.
+	app:command("panel_home")
+	app:frames(10)
+	app:command("panel_back")
+	app:frames(30)
+	expect(footer_words(app)).to_contain("feature")
+	app:type('.side-chat-tab >> role:textbox', "stay in this worktree")
+	app:key("Enter")
+	app:frames(30)
+	local made = calls(app):match("create:chat%-1:([%w%-]+)") :: string
+	expect(made).never.to_be_nil()
+	-- No explicit place: sessions.create inherits the parent's exact cwd.
+	expect(calls(app)).never.to_contain(`place:{made}`)
+	expect(calls(app)).to_contain(`send:{made}:stay in this worktree:fresh`)
+	expect(calls(app)).never.to_contain(`pick:{made}:claude-code/opus-5.5:claude-code:high:supervised:worktree`)
+end)
+
+test("a side chat can explicitly leave its parent's worktree for the main checkout", function()
+	local app = open()
+	app:command("parent_in_worktree")
+	app:frames(20)
+	app:click('#session-lanes >> role:button "New side chat"')
+	app:frames(40)
+	local chat = ""
+	for id, parent in ((app:state("chat_lanes_unsent") :: any) or {}) do
+		if parent == "chat-1" then
+			chat = id
+		end
+	end
+	expect(chat).never.to_be("")
+	app:set_state(`chat_lane_branch_{chat}`, "main")
+	app:frames(20)
+	app:type('.side-chat-tab >> role:textbox', "use main instead")
+	app:key("Enter")
+	app:frames(30)
+	expect(calls(app)).to_contain(`place:{chat}:p1:d:main:/proj:`)
+end)
+
 test("a side chat's access and place picks stick per chat and go with its first message; then it's fixed", function()
 	local app = open()
 	app:click('#session-lanes >> role:button "New side chat"')
