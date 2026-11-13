@@ -177,8 +177,8 @@ test("control progress: a thread that asked at its turn's end waits on you, unti
 	app:set_state("progress_all", true)
 	app:frames(5)
 	expect(app:has(`#progress-full-th-ui-orch >> "Waiting on you"`)).to_be(false)
-	-- Answered: at rest again, off the list.
+	-- Answered (past its Undo): at rest again, off the list.
 	app:click('#control-widget-needs >> role:button "Commit and open a PR against zeron/zgx"')
-	expect(app:wait(UNIT, { gone = true, timeout_ms = 3000 })).to_be(true)
-	expect(app:state("calls")).to_contain("answer:ak-turn:Commit and open a PR against zeron/zgx")
+	expect(app:wait(UNIT, { gone = true, timeout_ms = 9000 })).to_be(true)
+	expect(app:state("calls")).to_contain("answer:ak-turn:1:")
 end)

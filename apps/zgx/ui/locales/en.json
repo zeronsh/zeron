@@ -1316,6 +1316,26 @@
           "blue": "Blue",
           "purple": "Purple"
         }
+      },
+      "decide": {
+        "label": "Decision",
+        "recommended": "Recommended",
+        "recommended_named": "{label}, recommended",
+        "expand": "Open the whole decision",
+        "answered": "Answered",
+        "undo": "Undo",
+        "open_thread": "Open thread",
+        "open_thread_named": "Open {name} at its question",
+        "open_at": "Opens the thread at the message that asked",
+        "asked_ago": "asked {ago} ago",
+        "context": "Context",
+        "reply": "Add a note, or answer in your own words",
+        "defer": "Defer",
+        "defer_hour": "For an hour",
+        "defer_hours": "For 4 hours",
+        "defer_tomorrow": "Until tomorrow, 9:00",
+        "defer_week": "Until Monday, 9:00",
+        "decide": "Decide"
       }
     }
   },
@@ -4130,7 +4150,9 @@
         "now": "Now",
         "blocked": "Blocked",
         "review": "Review",
-        "done": "Done today"
+        "done": "Done today",
+        "inbox": "Inbox",
+        "next": "Next"
       },
       "priority": {
         "title": "Priority",
@@ -4167,7 +4189,8 @@
       "cleared": "{n, plural, one {Cleared # done card} other {Cleared # done cards}}",
       "approve": "Approve",
       "request_changes": "Request changes…",
-      "changes_placeholder": "What to change"
+      "changes_placeholder": "What to change",
+      "deferred": "Deferred"
     },
     "reports": {
       "title": "Crew updates",

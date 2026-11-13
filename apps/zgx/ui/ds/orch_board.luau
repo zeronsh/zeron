@@ -71,7 +71,10 @@
 --     inbox = true,              -- (no longer used: Later is in Queued)
 --     now = fn() -> number,      -- Unix seconds: what "today" is
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
---     on_open_thread = fn(chat), on_link = fn(link),
+--     on_open_thread = fn(chat, message?), on_link = fn(link),
+--     on_answer = fn(ask, { option?, text? }),  -- a card waiting on a
+--                                -- decision: its options as chips (ds/orch_choices)
+--     on_expand_ask = fn(ask),   -- the whole of it (ds/orch_decision)
 --     on_source = fn({ dump_id, route_id }),  -- a card's dump, shown
 --     on_approve = fn(id),           -- a card in Review approved: Done
 --     on_request_changes = fn(id, text),  -- changes asked for on a card in
@@ -113,6 +116,7 @@ local Cells = require("@self/orch_cells")
 local Progress = require("@self/orch_progress")
 local Clocks = require("@self/orch_progress_clocks")
 local Card = require("@self/orch_card")
+local Choices = require("@self/orch_choices")
 local Tooltip = require("@self/tooltip")
 local data = require("@self/orch_data")
 local toast = require("@self/toast")
@@ -163,7 +167,9 @@ export type Props = {
 	now: (() -> number)?,
 	on_move: ((id: string, state: string, order: number) -> ())?,
 	on_priority: ((id: string, priority: string) -> ())?,
-	on_open_thread: ((chat: string) -> ())?,
+	on_open_thread: ((chat: string, message: string?) -> ())?,
+	on_answer: ((ask: any, choice: any) -> ())?,
+	on_expand_ask: ((ask: any) -> ())?,
 	on_link: ((link: Link) -> ())?,
 	on_source: ((source: { dump_id: string?, route_id: string? }) -> ())?,
 	on_remove: ((id: string) -> any)?,
@@ -336,6 +342,8 @@ local WAITING: { [string]: boolean } = { inbox = true, planned = true }
 -- unanswered: in the warning's ink).
 local ASKED = { key = "orch.board.waiting_on_you", ink = "$zeron.status.input" }
 local ASKED_LONG = { key = "orch.board.waiting_on_you", ink = "$zeron.tone.warning.ink" }
+-- Its ask put off until later (ds/orch_data `deferred`).
+local DEFERRED = { key = "orch.board.deferred", ink = "$text.tertiary" }
 
 -- Which card each open ask waits on, by card id: the one its `item_id`
 -- names (the card of the asking turn's own work), else its thread's newest
@@ -1298,6 +1306,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 			end
 			local a = waits:get()[it.id]
 			if a then
+				if data.deferred(a, clock_now()) then
+					return DEFERRED
+				end
 				return if a.escalated ~= nil then ASKED_LONG else ASKED
 			elseif stalled() then
 				return STALLED
@@ -1568,6 +1579,49 @@ local OrchBoard = ui.component(function(props: Props): Node
 				tooltip_placement = if k == "long" then { side = "bottom", align = "start", offset = 6 } else nil,
 			}
 		end, { w_full = true, min_w = 0 }))
+		-- The decision it waits on, compact: the question in a line, its
+		-- options as chips (not while it's put off).
+		local function asked(): { [string]: any }?
+			local a = waits:get()[id]
+			if not a or not props.on_answer or data.deferred(a, clock_now()) then
+				return nil
+			end
+			return a
+		end
+		local decision = ui.show(function(): boolean
+			return asked() ~= nil
+		end, ui.column {
+			class = "orch-card-decision",
+			w_full = true,
+			min_w = 0,
+			gap = "$space.1",
+			ui.text {
+				function(): string
+					local a = asked()
+					return if a then plain(a.question or "") else ""
+				end,
+				class = "orch-card-question",
+				w_full = true,
+				min_w = 0,
+				truncate = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			},
+			Choices {
+				ask = function(): any
+					return asked()
+				end,
+				on_answer = function(a: any, choice: any)
+					if props.on_answer then
+						(props.on_answer :: any)(a, choice)
+					end
+				end,
+				on_expand = props.on_expand_ask,
+				size = "xs",
+				class = "orch-card-choices",
+			},
+		})
 		local body = ui.column {
 			w_full = true,
 			min_w = 0,
@@ -1578,6 +1632,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				gap = if compact then "$space.1" else "$zeron.space.snug",
 				title_text,
 				outcome_text,
+				decision,
 				ui.show(has_status, status_line),
 				-- In Review: its end, Approve or Request changes (a box for
 				-- what to change, sent to its thread).
@@ -1673,9 +1728,17 @@ local OrchBoard = ui.component(function(props: Props): Node
 			on_hover = function(inside: boolean)
 				hovered:set(inside)
 			end,
+			-- Into its thread: waiting on a decision, at the message that
+			-- asked (its thread's), else its lead thread.
 			on_click = function()
 				local threads = item().threads or {}
-				if props.on_open_thread and #threads > 0 then
+				if not props.on_open_thread or #threads == 0 then
+					return
+				end
+				local a = waits:peek()[id]
+				if a and a.from_chat and table.find(threads, a.from_chat :: string) then
+					(props.on_open_thread :: any)(a.from_chat, a.turn_id)
+				else
 					(props.on_open_thread :: any)(threads[1])
 				end
 			end,

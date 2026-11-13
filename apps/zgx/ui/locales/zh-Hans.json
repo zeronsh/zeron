@@ -1316,6 +1316,26 @@
           "blue": "Blue",
           "purple": "Purple"
         }
+      },
+      "decide": {
+        "label": "决定",
+        "recommended": "推荐",
+        "recommended_named": "{label}（推荐）",
+        "expand": "查看完整决定",
+        "answered": "已回答",
+        "undo": "撤销",
+        "open_thread": "打开对话",
+        "open_thread_named": "在提问处打开 {name}",
+        "open_at": "在提问的那条消息处打开对话",
+        "asked_ago": "{ago}前提问",
+        "context": "背景",
+        "reply": "补充说明，或直接用自己的话回答",
+        "defer": "推迟",
+        "defer_hour": "推迟一小时",
+        "defer_hours": "推迟 4 小时",
+        "defer_tomorrow": "推迟到明天 9:00",
+        "defer_week": "推迟到周一 9:00",
+        "decide": "决定"
       }
     }
   },
@@ -4130,7 +4150,9 @@
         "now": "Now",
         "blocked": "Blocked",
         "review": "Review",
-        "done": "Done today"
+        "done": "Done today",
+        "inbox": "Inbox",
+        "next": "Next"
       },
       "priority": {
         "title": "Priority",
@@ -4167,7 +4189,8 @@
       "cleared": "已清除 {n} 张已完成卡片",
       "approve": "批准",
       "request_changes": "请求修改…",
-      "changes_placeholder": "要改什么"
+      "changes_placeholder": "要改什么",
+      "deferred": "已推迟"
     },
     "reports": {
       "title": "Crew updates",
