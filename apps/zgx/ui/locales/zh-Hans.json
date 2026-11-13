@@ -1236,7 +1236,8 @@
         "unpin": "Unpin from Progress",
         "menu": "Progress actions",
         "refreshing": "Writing a fresh note",
-        "pinned": "Pinned"
+        "pinned": "Pinned",
+        "under_minute": "<1m"
       }
     }
   },
