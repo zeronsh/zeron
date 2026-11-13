@@ -141,15 +141,44 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("orchestration.op", move |op| {
         let params = crate::plugins::value_json(&op);
         async move {
-            if !params["op"].is_string() {
-                return Err("invalid".to_string());
-            }
+            crate::plugins::preview::refuse("orchestration.op")?;
+            person_op(&params)?;
             let reply = engine::get().call("Orchestrate", params).await?;
             Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
         }
     });
     let a = o.clone();
-    host.action("orchestration.loads_wanted", move |on| a.want_loads(window, on.truthy()));
+    host.action("orchestration.loads_wanted", move |on| {
+        if crate::plugins::preview::refuse("orchestration.loads_wanted").is_err() {
+            return;
+        }
+        a.want_loads(window, on.truthy())
+    });
+}
+
+/// The ops the person sends from the window. The rest (`report`, `ask`,
+/// `route`, `dumpDone`) are an agent's, through Zeron's tools, and never come
+/// from here.
+const PERSON_OPS: &[&str] = &[
+    "createOrchestrator",
+    "promoteChat",
+    "updateOrchestrator",
+    "addToCrew",
+    "releaseFromCrew",
+    "upsertItem",
+    "answerAsk",
+    "dismissAsk",
+    "dump",
+    "reroute",
+];
+
+/// Whether `params` is one of the person's ops: else refused, unsent.
+fn person_op(params: &Json) -> Result<(), String> {
+    match params["op"].as_str() {
+        Some(op) if PERSON_OPS.contains(&op) => Ok(()),
+        Some(_) => Err("not yours".to_string()),
+        None => Err("invalid".to_string()),
+    }
 }
 
 impl Orchestration {
@@ -579,6 +608,27 @@ fn list<T>(v: &[T], f: impl Fn(&T) -> Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_sends_only_the_person_s_ops() {
+        for op in PERSON_OPS {
+            assert!(person_op(&json!({ "op": op })).is_ok(), "{op}");
+        }
+        for op in ["report", "ask", "route", "dumpDone", "somethingNew"] {
+            assert_eq!(person_op(&json!({ "op": op })), Err("not yours".to_string()), "{op}");
+        }
+        assert_eq!(person_op(&json!({ "text": "no op" })), Err("invalid".to_string()));
+    }
+
+    #[test]
+    fn a_preview_can_t_drive_orchestration() {
+        use crate::plugins::preview;
+        preview::set(Some(preview::Preview { id: "sleek".into(), name: "Sleek".into() }));
+        assert!(preview::refuse("orchestration.op").is_err());
+        assert!(preview::refuse("orchestration.loads_wanted").is_err());
+        preview::set(None);
+        assert!(preview::refuse("orchestration.op").is_ok());
+    }
 
     const NOW: i64 = 1_794_470_400;
 
