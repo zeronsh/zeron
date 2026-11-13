@@ -235,13 +235,18 @@ impl EngineRpc {
         Ok(json!({ "id": card.id, "threadId": chat }))
     }
 
-    /// Where a card's thread starts: the card's project or device; else its
-    /// orchestrator's first crew device (else the orchestrator's own
-    /// project); else the best project for its text.
+    /// Where a card's thread starts: the card's project or device (on a
+    /// device its orchestrator's crew may use); else its orchestrator's
+    /// first crew device (else the orchestrator's own project); else the
+    /// best project for its text.
     fn card_place(&self, card: &WorkItem, owner: Option<&Orchestrator>, text: &str) -> (Option<String>, Option<String>) {
+        let allowed = |device: &Option<String>| {
+            owner.is_none_or(|o| o.crew.devices.is_empty() || device.as_ref().is_some_and(|d| o.crew.devices.contains(d)))
+        };
         if card.space_id.is_some() || card.device_id.is_some() {
             match self.place(text, card.space_id.clone(), card.device_id.clone()) {
-                Ok(placed) => return placed,
+                Ok(placed) if allowed(&placed.1) => return placed,
+                Ok(_) => tracing::warn!(card = %card.id, "board: a card's project is off its crew's devices; placing it by the crew policy"),
                 Err(error) => tracing::warn!(card = %card.id, %error, "board: a card's project is gone; placing it anew"),
             }
         }
@@ -317,20 +322,22 @@ pub(crate) fn start(orchestration: Orchestration) {
 /// Start what has room, for every orchestrator with a crew limit hosted on
 /// this device. The threads started.
 pub(crate) fn start_due(orchestration: &Orchestration, rpc: &EngineRpc) -> Vec<String> {
-    let device = orchestration.device_id().to_owned();
-    let chats = orchestration.workspace().read_chats().unwrap_or_default();
     let state = orchestration.state();
-    let mut started = Vec::new();
-    for o in &state.orchestrators {
-        if o.crew.max_running.is_none() || !chats.iter().any(|c| c.id == o.id && c.device_id == device) {
-            continue;
-        }
-        if next_up(&state.items, &o.id).is_empty() {
-            continue;
-        }
-        started.extend(rpc.start_queued(&o.id));
+    let due: Vec<&str> = state
+        .orchestrators
+        .iter()
+        .filter(|o| o.crew.max_running.is_some() && !next_up(&state.items, &o.id).is_empty())
+        .map(|o| o.id.as_str())
+        .collect();
+    if due.is_empty() {
+        return Vec::new();
     }
-    started
+    let device = orchestration.device_id();
+    let chats = orchestration.workspace().read_chats().unwrap_or_default();
+    due.into_iter()
+        .filter(|o| chats.iter().any(|c| c.id == *o && c.device_id == device))
+        .flat_map(|o| rpc.start_queued(o))
+        .collect()
 }
 
 #[cfg(test)]

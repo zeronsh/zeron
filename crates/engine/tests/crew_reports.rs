@@ -868,7 +868,12 @@ async fn a_routed_threads_message_back_to_the_brain_dump_is_its_outcome() {
     let r = route();
     assert_eq!(r.state, RouteState::Answered);
     assert_eq!(r.answer.as_deref(), Some("Hello World — chat started correctly on this device."));
-    assert!(core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Report && e.from == thread && e.to == "you"));
+    // (Said in comms just after the route records it.)
+    wait_for(
+        || core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Report && e.from == thread && e.to == "you"),
+        "the report in comms",
+    )
+    .await;
     // Both turns end: the Brain dump isn't woken by it, and the thread's
     // reply (it only says it sent it) keeps the outcome and settles it done.
     let _ = finish.send(());
@@ -940,6 +945,7 @@ async fn routed_tasks_land_on_the_board_and_follow_their_route() {
     call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dismissAsk", "id": ask["id"] })).await;
     assert_eq!(state(&card.id), WorkState::Active);
     // The thread's turn ends with nothing left: the route is done, so is the card.
+    wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Make device names unique asap")), "the thread's turn").await;
     let _ = finish.send(());
     wait_for(
         || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.iter().any(|x| x.id == task && x.state == RouteState::Done),

@@ -673,15 +673,7 @@ impl Tools {
                 row.name
             );
         }
-        let starts = args.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
-        let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
-        let running = crew_running(&state, orchestrator, &chats, &sessions);
-        if let Some(waiting) = crew_queues(row, running, starts) {
-            return Ok(Some(waiting));
-        }
-        if let Some(refusal) = crew_refusal(row, running, starts) {
-            anyhow::bail!(refusal);
-        }
+        // Where it may run, checked before it starts or waits.
         if !policy.devices.is_empty() && !args.cloud {
             if args.device.is_none() && args.project.is_none() {
                 args.device = Some(policy.devices[0].clone());
@@ -694,6 +686,15 @@ impl Tools {
                     policy.devices.join(", ")
                 );
             }
+        }
+        let starts = args.prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
+        let (chats, sessions) = tokio::try_join!(self.zeron.chats(), self.zeron.sessions())?;
+        let running = crew_running(&state, orchestrator, &chats, &sessions);
+        if let Some(waiting) = crew_queues(row, running, starts) {
+            return Ok(Some(waiting));
+        }
+        if let Some(refusal) = crew_refusal(row, running, starts) {
+            anyhow::bail!(refusal);
         }
         if args.harness.is_none() {
             args.harness = policy.harness.clone();

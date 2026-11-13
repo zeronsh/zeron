@@ -592,7 +592,9 @@ impl EngineRpc {
     }
 
     /// A chat created through `createChat` (the agent gate caps an agent's),
-    /// in `space_id`, else on `device_id`, else here.
+    /// in `space_id`, else on `device_id`, else here. A crew thread runs
+    /// with no more than its orchestrator's sandbox and access, whoever
+    /// starts it.
     pub(crate) fn create_chat_for(
         &self,
         chat_id: &str,
@@ -607,13 +609,20 @@ impl EngineRpc {
                 .ok_or_else(|| RpcError::BadParams(format!("Unknown harness {slug}")))?,
             None => self.doc_host_ref().default_harness(),
         };
+        let (mut sandbox, mut access) = (SandboxLevel::WorkspaceWrite, Default::default());
+        if let Some((orchestrator, ChildKind::Crew)) = parent
+            && let Ok(Some(row)) = self.workspace_host().chat(orchestrator)
+            && let Some(ceiling) = row.config
+        {
+            (sandbox, access, _) = zeron_proto::cap_access((sandbox, access), (ceiling.sandbox, ceiling.access));
+        }
         let config = ChatConfig {
             harness,
             model: model.filter(|m| !m.trim().is_empty()),
             reasoning: None,
             model_options: Default::default(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            access: Default::default(),
+            sandbox,
+            access,
             plan: false,
         };
         let mut params = json!({
