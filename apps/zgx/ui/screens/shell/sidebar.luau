@@ -82,6 +82,10 @@ local shared = {
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
+		-- The chats an orchestrator started (its crew threads), listed in
+		-- their project and device as any chat: on until put away. (Its
+		-- Orchestrators row, the Control room and the Map list them anyway.)
+		orchestrator_chats = ui.persist("shell_sidebar_show_orchestrator_chats", true),
 	},
 	-- The groups showing all their sessions ("Show N more"): until the app
 	-- quits (a reload keeps them).
@@ -436,6 +440,10 @@ local NO_MARK: CrewMark = { name = "", hue = nil }
 -- side chat.)
 local function listed_chats(now: any, marks: { [string]: CrewMark }, names: { [string]: string }): { any }
 	local out: { any } = table.clone(now.chats)
+	-- (Put away in the view menu's Show: none of them.)
+	if not shared.details.orchestrator_chats:get() then
+		return out
+	end
 	for parent, kids in now.children or {} do
 		for _, c in kids do
 			if c.child_kind == "crew" then
@@ -1571,6 +1579,8 @@ local orch_rows = ui.computed(function(): { any }
 	return out
 end)
 M.orchestrator_rows = orch_rows
+-- Show → Orchestrator chats (fixtures put it away for their pictures).
+M.show_orchestrator_chats = shared.details.orchestrator_chats
 -- What needs you, everywhere: open asks and chats awaiting input.
 M.needs_you = ui.computed(function(): number
 	return #orch_data.needs(orchestration.now:get(), sessions.now:get())

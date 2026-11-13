@@ -494,7 +494,8 @@
         "projects_first": "Projects first",
         "empty_projects": "Empty projects",
         "activity": "Activity",
-        "activity_settings": "Activity settings…"
+        "activity_settings": "Activity settings…",
+        "orchestrator_chats": "Orchestrator chats"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
