@@ -707,10 +707,15 @@ pub enum RouteState {
     /// Decided, not delivered yet.
     Pending,
     Delivered,
-    /// The target answered (questions) or took it on.
+    /// The target answered (questions) or took it on, and said how it
+    /// went (`answer`: its latest outcome, updated each turn).
     Answered,
+    /// The work is done: the target went idle with nothing left on its
+    /// todo list (`answer`: what came of it).
+    Done,
     /// The person moved or undid it.
     Undone,
+    /// The target's turn failed (`answer`: why, when it said).
     Failed,
     #[serde(other)]
     Other,

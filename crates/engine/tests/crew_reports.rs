@@ -63,7 +63,10 @@ impl Harness for HeldHarness {
             cwd: request.cwd.clone(),
             session_id: "sess-orch".into(),
             assistant_message_id: uuid::Uuid::new_v4().to_string(),
-        }), Ok(AgentEvent::TextDelta { text: "On it.".into() })]);
+        })]
+        .into_iter()
+        .chain(scripted(&request.prompt).into_iter().map(Ok))
+        .collect::<Vec<_>>());
         let done = futures::stream::once(async move {
             let _ = finish.recv().await;
             Ok(AgentEvent::Done {
@@ -75,6 +78,37 @@ impl Harness for HeldHarness {
         });
         Ok(started.chain(done).boxed())
     }
+}
+
+/// What a turn says: `[say:…]` in its prompt picks its reply ("On it."
+/// otherwise), and `[todo:d/t]` a todo list with d of t done.
+fn scripted(prompt: &str) -> Vec<AgentEvent> {
+    let marker = |name: &str| {
+        let open = format!("[{name}:");
+        let at = prompt.find(&open)? + open.len();
+        let end = prompt[at..].find(']')? + at;
+        Some(prompt[at..end].to_owned())
+    };
+    let mut events = Vec::new();
+    if let Some(todo) = marker("todo")
+        && let Some((done, total)) = todo.split_once('/')
+    {
+        let (done, total): (usize, usize) = (done.parse().unwrap(), total.parse().unwrap());
+        let items = (0..total)
+            .map(|i| {
+                zeron_proto::TodoItem::new(
+                    format!("step {i}"),
+                    if i < done { zeron_proto::TodoStatus::Completed } else { zeron_proto::TodoStatus::Pending },
+                )
+            })
+            .collect();
+        events.push(AgentEvent::ToolCall {
+            id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+            call: zeron_proto::ToolCall::Todo { items },
+        });
+    }
+    events.push(AgentEvent::TextDelta { text: marker("say").unwrap_or_else(|| "On it.".into()) });
+    events
 }
 
 struct Setup {
@@ -149,6 +183,10 @@ async fn report(rpc: &Arc<EngineRpc>, state: &str, summary: &str) -> String {
     )
     .await;
     reply["id"].as_str().unwrap().to_owned()
+}
+
+fn entries_of(core: &EngineCore, chat: &str) -> Vec<SessionMessageEntry> {
+    core.doc_host.open(chat).unwrap().doc().read_entries().unwrap()
 }
 
 fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
@@ -743,5 +781,96 @@ async fn a_dumps_files_reach_the_brain_dump_and_the_work_it_starts() {
     wait_for(|| requests.lock().unwrap().iter().any(|r| r.prompt.contains("Unique device names.") && r.attachments == vec![shot.clone()]), "the thread's first prompt, with the file").await;
     assert!(core.workspace.chat(&thread).unwrap().is_some());
     let _ = finish.send(());
+    core.shutdown().await;
+}
+
+/// A dump's task, routed to a new thread: the thread's reply when its turn
+/// ends is the route's outcome, and it's done once nothing is left to do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_route_reports_what_came_of_it_each_turn_until_done() {
+    use zeron_proto::orchestration::{CommKind, RouteState, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(brain_of(&core)) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": DEVICES_TEXT, "target": { "kind": "newThread" },
+            "intent": "task", "message": "Check device names are unique. [todo:1/2] [say:Half the checks pass so far.]" }),
+    )
+    .await;
+    let route = || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.remove(0);
+    let RouteTarget::NewThread { id: thread } = route().target else { panic!() };
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the thread's turn").await;
+    let _ = finish.send(());
+    // Turn one: an outcome, not done (half its todo list is left).
+    wait_for(|| route().state == RouteState::Answered, "the first outcome").await;
+    assert_eq!(route().answer.as_deref(), Some("Half the checks pass so far."));
+    assert!(core.orchestration.comms().recent().iter().any(|e| {
+        e.kind == CommKind::Report && e.from == thread && e.to == "you" && e.summary.contains("Half the checks")
+    }));
+    // Turn two finishes the list: the outcome updates and it's done.
+    core.doc_host
+        .queue_message(&thread, "go on [todo:2/2] [say:All checks are fine: names already get -1, -2.]", Vec::new())
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 3, "the thread's second turn").await;
+    let _ = finish.send(());
+    wait_for(|| route().state == RouteState::Done, "done").await;
+    assert_eq!(route().answer.as_deref(), Some("All checks are fine: names already get -1, -2."));
+    core.shutdown().await;
+}
+
+/// The live flow: "Run Hello World Agent on … Tell me if it works." The
+/// thread the Brain dump started messages the Brain dump back: that's the
+/// route's outcome, and the Brain dump isn't woken by it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routed_threads_message_back_to_the_brain_dump_is_its_outcome() {
+    use zeron_proto::orchestration::{CommKind, RouteState, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let text = "Run Hello World Agent please, just to test out if chat spawning works for now. Tell me if it works.";
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": text })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let brain = brain_of(&core);
+    call(
+        &rpc,
+        Caller::Agent { chat: Some(brain.clone()) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": text, "target": { "kind": "newThread" },
+            "intent": "task",
+            "message": "Say hello world, then tell the Brain dump whether this chat started fine. [say:I've sent the result to the Brain dump.]" }),
+    )
+    .await;
+    let route = || core.workspace.read_orchestration_with(|d| d.dump(&dump_id)).unwrap().routes.remove(0);
+    let RouteTarget::NewThread { id: thread } = route().target else { panic!() };
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the thread's turn").await;
+    // Mid-turn, the thread sends its result back to the Brain dump.
+    let sent = zeron_proto::agent_messages::agent_message("Hello World Agent", &thread, "Hello World — chat started correctly on this device.");
+    let reply = call(
+        &rpc,
+        Caller::Agent { chat: Some(thread.clone()) },
+        methods::QUEUE_MESSAGE,
+        json!({ "chatId": brain, "text": sent, "holdForTurnEnd": true }),
+    )
+    .await;
+    assert!(reply["outcome"].is_string(), "{reply}");
+    wait_for(|| route().answer.is_some(), "the outcome on the route").await;
+    let r = route();
+    assert_eq!(r.state, RouteState::Answered);
+    assert_eq!(r.answer.as_deref(), Some("Hello World — chat started correctly on this device."));
+    assert!(core.orchestration.comms().recent().iter().any(|e| e.kind == CommKind::Report && e.from == thread && e.to == "you"));
+    // Both turns end: the Brain dump isn't woken by it, and the thread's
+    // reply (it only says it sent it) keeps the outcome and settles it done.
+    let _ = finish.send(());
+    wait_for(|| route().state == RouteState::Done, "done").await;
+    assert_eq!(route().answer.as_deref(), Some("Hello World — chat started correctly on this device."));
+    tokio::time::sleep(DEBOUNCE * 2).await;
+    assert_eq!(prompts.lock().unwrap().len(), 2, "the Brain dump isn't woken by it");
+    assert!(
+        !entries_of(&core, &brain).iter().any(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Text { text, .. } if text.contains("Hello World —")))),
+        "nor does it land in its transcript"
+    );
     core.shutdown().await;
 }
