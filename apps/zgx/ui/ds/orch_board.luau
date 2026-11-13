@@ -35,6 +35,8 @@
 --     on_move = fn(id, state, order), on_priority = fn(id, priority),
 --     on_open_thread = fn(chat), on_link = fn(link),
 --     compact = true,            -- denser cards (a page's side pane)
+--     progress = fn(chat) -> Node?,  -- a line of its lead thread's progress
+--                                -- (the app's ds/orch_progress strip)
 --   }
 
 local Icon = require("@self/icon")
@@ -74,6 +76,7 @@ export type Props = {
 	orchestrators: control.Live<{ Orchestrator }>?,
 	todo_of: ((chat: string) -> Todo?)?,
 	thread_of: ((chat: string) -> Thread?)?,
+	progress: ((chat: string) -> Node?)?,
 	filter: control.Live<string?>?,
 	show_filter: boolean?,
 	inbox: boolean?,
@@ -675,6 +678,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 			gap = if compact then "$space.1" else "$zeron.space.snug",
 			if compact then ui.row { w_full = true, gap = "$space.3", items = "start", title, marks } else title,
 			progress_bar,
+			-- How its lead thread's work is going, while it's under way.
+			if props.progress
+				then ui.presence(function(): string
+					local it = item()
+					return if it.state ~= "done" then (it.threads or {})[1] or "" else ""
+				end, function(chat: string): Node
+					return if chat == "" then ui.div {} else (props.progress :: any)(chat) or ui.div {}
+				end, { w_full = true, min_w = 0 })
+				else nil,
 			-- (Its marks, where it has any: several threads, a pull request.)
 			if compact then nil else ui.show(function(): boolean
 				return #(item().threads or {}) > 1 or #prs() > 0 or owner() ~= nil

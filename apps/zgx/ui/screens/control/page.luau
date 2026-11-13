@@ -411,6 +411,9 @@ local function board(): Node
 			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
 		end,
 		on_open_thread = M.open_chat,
+		progress = function(chat: string): Node
+			return Progress.strip(chat, { lean = true })
+		end,
 		on_link = function(link: any)
 			if link.kind == "chat" then
 				M.open_chat(link.target)

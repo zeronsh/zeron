@@ -25,6 +25,7 @@ local route = require("@app/screens/shell/route")
 local lanes = require("@app/screens/chat/lanes")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local actions = require("@app/screens/orchestrator/actions")
+local Progress = require("@app/screens/control/progress")
 
 local M = {}
 
@@ -370,6 +371,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					on_open_thread = function(chat: string)
 						route.open_session(chat)
 					end,
+					progress = function(chat: string): Node
+						return Progress.strip(chat, { lean = true })
+					end,
 					on_link = function(link: any)
 						if link.kind == "chat" then
 							route.open_session(link.target)
@@ -393,6 +397,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					end,
 					on_open = function(chat: string)
 						route.open_session(chat)
+					end,
+					progress = function(chat: string): Node
+						return Progress.strip(chat, { lean = true })
 					end,
 				}, "orch-section-crew"),
 			},

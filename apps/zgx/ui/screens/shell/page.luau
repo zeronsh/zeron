@@ -33,6 +33,8 @@ local DropOverlay = require("@ds/drop_overlay")
 local Dock = require("@app/screens/chat/dock")
 local control = require("@ds/control")
 local Glass = require("@ds/glass")
+-- How a working session's work is going, a line in its head.
+local Progress = require("@app/screens/control/progress")
 
 export type Props = {
 	files: State<boolean>,
@@ -566,6 +568,10 @@ return function(props: Props): Node
 						text_size = "$font.size.sm",
 					},
 				},
+				Progress.Header(function(): string?
+					local s = route.session:get()
+					return if s then s.id else nil
+				end),
 			}
 		)
 	)

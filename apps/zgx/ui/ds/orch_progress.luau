@@ -438,6 +438,10 @@ M.Progress = ui.component(function(props: Props): Node
 				else ui.row {
 					grow = 1,
 					min_w = 0,
+					items = "center",
+					ui.row {
+					min_w = 0,
+					shrink = 1,
 					gap = "$space.1",
 					items = "center",
 					tooltip = Tooltip { note },
@@ -464,6 +468,7 @@ M.Progress = ui.component(function(props: Props): Node
 						label = locale.t("ds.orch.progress.refreshing"),
 						status.Spinner { size = 10 },
 					}),
+					},
 				},
 			ui.show(function(): boolean
 				return left_text() ~= ""
@@ -605,7 +610,8 @@ M.Progress = ui.component(function(props: Props): Node
 			current = function(): boolean
 				return kind() == "working"
 			end,
-			cell = 6,
+			cell = 9,
+			gap = 3,
 			h = 10,
 			max = 24,
 		},
@@ -670,9 +676,9 @@ M.Progress = ui.component(function(props: Props): Node
 				class = "orch-progress-check",
 				tone = "ghost",
 				size = "xs",
-				busy = refreshing,
+				-- (A fresh note on its way: the note's roller says so.)
 				disabled = function(): boolean
-					return props.cooling ~= nil and props.cooling()
+					return refreshing() or (props.cooling ~= nil and props.cooling())
 				end,
 				label = locale.t("ds.orch.progress.whats_up"),
 				on_click = props.on_check,

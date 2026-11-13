@@ -10,7 +10,7 @@
 --   progress.strip(chat, opts?)  one line, where the chat has a row (crew
 --                                rows and board cards: `{ lean = true }`)
 --   progress.chip(chat)          tiny, where the chat has a row
---   progress.Header(id)          a working session's line, over its page
+--   progress.Header(id)          a working session's line, in its head
 --   progress.pin(chat, on), progress.pinned(chat), progress.check(chat)
 --   progress.figures()           the widget's live figures
 
@@ -310,42 +310,34 @@ function M.Widget(): Node
 	}
 end
 
--- A working session's line, floating over the top of its page: shown
--- while its work is under way (or stalled), and not while ⌘F's bar is.
-function M.Header(id: () -> string?, hidden: (() -> boolean)?): Node
+-- A working session's line, in its head (the shell's `#session-header`):
+-- shown while its work is under way (or stalled), the one line centred.
+function M.Header(id: () -> string?): Node
 	return ui.presence(function(): string
 		local s = id() or ""
 		local r = if s ~= "" then row_of(s) else nil
 		if not r or not (Unit.ACTIVE[r.state or ""] or Unit.stalled(r)) then
 			return ""
 		end
-		return if hidden and hidden() then "" else s
+		return s
 	end, function(s: string): Node
 		if s == "" then
 			return ui.div {}
 		end
 		return ui.row {
 			id = "chat-progress",
-			absolute = true,
-			top = 8,
-			left = 0,
-			right = 0,
+			w_full = true,
+			min_w = 0,
 			justify = "center",
-			px = "$space.6",
-			pointer_events = "none",
 			ui.row {
 				pointer_events = "auto",
 				w_full = true,
+				min_w = 0,
 				max_w = 560,
-				px = "$space.3",
-				rounded = "$radius.full",
-				bg = "$surface.overlay",
-				border = 1,
-				border_color = "$border.subtle",
 				unit(s, "strip"),
 			},
 		}
-	end)
+	end, { grow = 1, min_w = 0 })
 end
 
 return M
