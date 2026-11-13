@@ -434,6 +434,12 @@ pub struct WorkItem {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<DateTime<Utc>>,
+    /// Taken off the board by the person: kept (nothing is ever deleted)
+    /// but gone for every reader, and nothing brings it back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1607,6 +1613,10 @@ pub enum OrchestrateOp {
     /// (agent: orchestrators, own crew)
     #[serde(rename_all = "camelCase")]
     ReleaseFromCrew { chat_id: String },
+    /// The person takes a card off the board (done or not): it is kept,
+    /// marked `removed`, and gone for every reader. Its chat is untouched.
+    /// Replies `{ id }`.
+    RemoveItem { id: String },
     /// The person puts a chat on the board: its card (the one it has, when
     /// it has one not done). Replies `{ id }`.
     #[serde(rename_all = "camelCase")]

@@ -220,10 +220,12 @@ impl Orchestration {
             .read_orchestration_with(|doc| doc.orchestrator(id))
     }
 
+    /// A card on the board (`None` once it was taken off).
     pub fn item(&self, id: &str) -> Option<WorkItem> {
         self.inner
             .workspace
             .read_orchestration_with(|doc| doc.work_item(id))
+            .filter(|i| !i.removed)
     }
 
     /// Record a crew thread's newest report on its crew row. `false` when
@@ -276,6 +278,7 @@ pub(crate) fn apply_item_patch(
     let existing = match patch.id.as_deref().filter(|id| !id.trim().is_empty()) {
         Some(id) => Some(
             doc.work_item(id)
+                .filter(|i| !i.removed)
                 .ok_or_else(|| format!("No board item {id}"))?,
         ),
         None => None,
@@ -315,6 +318,8 @@ pub(crate) fn apply_item_patch(
                 created_at: now,
                 updated_at: now,
                 done_at: None,
+                removed: Default::default(),
+                removed_at: Default::default(),
             }
         }
     };

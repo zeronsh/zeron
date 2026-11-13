@@ -93,10 +93,20 @@ impl EngineRpc {
             return;
         }
         let orch = self.orchestration();
+        // Made once: a card taken off the board stays off.
+        if let Some(id) = route.item_id.clone() {
+            self.sync_card(&id, route);
+            return;
+        }
         let source = RouteRef { dump_id: dump.id.clone(), route_id: route.id.clone() };
-        let existing = route.item_id.clone().filter(|id| orch.item(id).is_some()).or_else(|| {
-            orch.state().items.into_iter().find(|i| i.source.as_ref() == Some(&source)).map(|i| i.id)
+        let existing = orch.workspace().read_orchestration_with(|doc| {
+            doc.read_work_items().into_iter().find(|i| i.source.as_ref() == Some(&source))
         });
+        if existing.as_ref().is_some_and(|i| i.removed) {
+            route.item_id = existing.map(|i| i.id);
+            return;
+        }
+        let existing = existing.map(|i| i.id);
         let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
         let made = match existing {
             Some(id) => Ok(id),
@@ -172,6 +182,21 @@ impl EngineRpc {
                 }
             }
         }
+    }
+
+    /// The person takes card `id` off the board: kept, marked removed.
+    pub(crate) fn remove_item(&self, id: &str) -> Result<(), RpcError> {
+        self.orchestration().workspace().write_orchestration(|doc| {
+            let mut item = doc.work_item(id).ok_or_else(|| RpcError::Failed(format!("No board item {id}")))?;
+            if !item.removed {
+                let now = chrono::Utc::now();
+                item.removed = true;
+                item.removed_at = Some(now);
+                item.updated_at = now;
+                doc.upsert_work_item(&item);
+            }
+            Ok(())
+        })
     }
 
     /// The person's "add to the board" for a chat: its card (the one it

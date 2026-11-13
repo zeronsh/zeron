@@ -1070,6 +1070,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             done_at: None,
+            removed: Default::default(),
+            removed_at: Default::default(),
         };
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],

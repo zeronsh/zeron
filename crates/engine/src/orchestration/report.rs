@@ -78,7 +78,7 @@ pub async fn file_report(
         let progress = report.progress;
         let chat = caller_chat.to_owned();
         orchestration.workspace().write_orchestration(|doc| {
-            let Some(mut item) = doc.work_item(item_id) else {
+            let Some(mut item) = doc.work_item(item_id).filter(|i| !i.removed) else {
                 return;
             };
             if let Some(progress) = progress {

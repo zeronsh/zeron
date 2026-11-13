@@ -110,7 +110,7 @@ impl DocHost {
         let ws = self.workspace()?;
         let (member, item) = ws.read_orchestration_with(|doc| {
             let member = doc.crew_member(&report.from_chat);
-            let item = report.item_id.as_deref().and_then(|id| doc.work_item(id));
+            let item = report.item_id.as_deref().and_then(|id| doc.work_item(id).filter(|i| !i.removed));
             (member, item)
         });
         let member = member.filter(|m| m.orchestrator_id == chat)?;

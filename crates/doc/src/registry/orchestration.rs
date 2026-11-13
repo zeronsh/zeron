@@ -480,7 +480,8 @@ impl RegistryDoc {
         OrchestrationState {
             orchestrators: self.read_orchestrators(),
             crew: self.read_crew(),
-            items: self.read_work_items(),
+            // A card taken off the board is gone for every reader.
+            items: self.read_work_items().into_iter().filter(|i| !i.removed).collect(),
             asks: self.read_asks(),
             dumps,
         }
@@ -533,6 +534,8 @@ mod tests {
             created_at: ts(1_000),
             updated_at: ts(1_000),
             done_at: None,
+            removed: Default::default(),
+            removed_at: Default::default(),
         }
     }
 

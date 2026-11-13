@@ -224,6 +224,10 @@ impl EngineRpc {
                 self.add_to_crew(&orchestrator_id, &chat_id, &role, item_id)?;
                 Ok(json!({ "id": chat_id }))
             }
+            OrchestrateOp::RemoveItem { id } => {
+                self.remove_item(&id)?;
+                Ok(json!({ "id": id }))
+            }
             OrchestrateOp::AddToBoard { chat_id } => {
                 let id = self.add_to_board(&chat_id)?;
                 Ok(json!({ "id": id }))
@@ -454,7 +458,7 @@ impl EngineRpc {
         let now = Utc::now();
         orch.workspace().write_orchestration(|doc| {
             if let Some(item) = item_id.as_deref()
-                && doc.work_item(item).is_none()
+                && doc.work_item(item).filter(|i| !i.removed).is_none()
             {
                 return Err(failed(format!("No board item {item}")));
             }
@@ -491,7 +495,7 @@ impl EngineRpc {
                     .map_or(now, |m| m.joined_at),
             };
             doc.upsert_crew_member(&member);
-            if let Some(item) = member.item_id.as_deref().and_then(|id| doc.work_item(id))
+            if let Some(item) = member.item_id.as_deref().and_then(|id| doc.work_item(id).filter(|i| !i.removed))
                 && !item.threads.iter().any(|t| t == chat_id)
             {
                 let mut item = item;
@@ -637,6 +641,7 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         },
         OrchestrateOp::PromoteChat { .. } => refuse("Only the person makes a chat an orchestrator"),
         OrchestrateOp::AddToBoard { .. } => refuse("Only the person puts a chat on the board"),
+        OrchestrateOp::RemoveItem { .. } => refuse("Only the person takes a card off the board"),
         OrchestrateOp::UpdateOrchestrator {
             id,
             name,

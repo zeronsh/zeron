@@ -229,6 +229,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             done_at: None,
+            removed: Default::default(),
+            removed_at: Default::default(),
         }
     }
 

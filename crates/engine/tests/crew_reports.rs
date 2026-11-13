@@ -981,3 +981,66 @@ async fn a_dump_runs_the_brain_dump_on_the_persons_pick() {
     let _ = finish.send(());
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_card_taken_off_the_board_stays_off() {
+    use zeron_proto::orchestration::{RouteState, RouteTarget};
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
+    let dump_id = dump["id"].as_str().unwrap().to_owned();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the Brain dump's turn").await;
+    let route_id = call(
+        &rpc,
+        Caller::Agent { chat: Some(brain_of(&core)) },
+        methods::ORCHESTRATE,
+        json!({ "op": "route", "dumpId": dump_id, "excerpt": DEVICES_TEXT, "target": { "kind": "newThread" },
+            "intent": "task", "message": "Make device names unique." }),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let route = || {
+        core.workspace
+            .read_orchestration_with(|d| d.dump(&dump_id))
+            .unwrap()
+            .routes
+            .into_iter()
+            .find(|r| r.id == route_id)
+            .unwrap()
+    };
+    let card = route().item_id.expect("a card");
+    let RouteTarget::NewThread { id: thread } = route().target else { panic!() };
+    // Only the person takes it off.
+    assert!(
+        try_call(&rpc, Caller::Agent { chat: Some(ORCH.into()) }, methods::ORCHESTRATE, json!({ "op": "removeItem", "id": card }))
+            .await
+            .is_err()
+    );
+    call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "removeItem", "id": card })).await;
+    let visible = || core.orchestration.state().items;
+    assert!(visible().iter().all(|i| i.id != card), "gone for readers");
+    assert!(core.orchestration.item(&card).is_none());
+    let kept = core.workspace.read_orchestration_with(|d| d.work_item(&card)).expect("kept, never deleted");
+    assert!(kept.removed && kept.removed_at.is_some());
+    assert!(core.workspace.chat(&thread).unwrap().is_some(), "its chat untouched");
+    // The route's outcome lands: no card comes back, none is made.
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the thread's turn").await;
+    let _ = finish.send(());
+    wait_for(|| route().state == RouteState::Done, "the route done").await;
+    assert!(visible().is_empty(), "{:?}", visible());
+    assert_eq!(route().item_id.as_deref(), Some(card.as_str()), "the route still points at it");
+    assert!(core.workspace.read_orchestration_with(|d| d.work_item(&card)).unwrap().removed);
+    // Putting the chat on the board again makes a fresh card.
+    let fresh = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "addToBoard", "chatId": thread })).await;
+    let fresh = fresh["id"].as_str().unwrap().to_owned();
+    assert_ne!(fresh, card);
+    assert_eq!(visible().iter().map(|i| i.id.clone()).collect::<Vec<_>>(), vec![fresh]);
+    // And a removed card can't be edited back.
+    assert!(
+        try_call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "upsertItem", "item": { "id": card, "state": "active" } }))
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
+}
