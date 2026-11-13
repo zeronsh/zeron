@@ -4478,12 +4478,7 @@ fn image_note_only(entry: &Json) -> bool {
                 if text.is_empty() {
                     continue;
                 }
-                let note = text
-                    .strip_prefix("[Image: ")
-                    .and_then(|rest| rest.strip_suffix(']'))
-                    .map(str::trim_start)
-                    .is_some_and(|rest| rest.starts_with("source: ") || rest.starts_with("original "));
-                if !note {
+                if !is_image_note(text) {
                     return false;
                 }
                 notes += 1;
@@ -4492,6 +4487,33 @@ fn image_note_only(entry: &Json) -> bool {
         }
     }
     notes > 0
+}
+
+/// The CLI's image note exactly (zeron-harness's `is_image_note`): one
+/// line, `[Image: source: <path>]` (the path may be followed by `, original
+/// WxH, displayed at WxH. …`), or `[Image: original WxH, displayed at WxH.
+/// …]`. Something a person typed that only starts and ends like one
+/// (`[Image: source: shot.png] why is button [x]`) is not it.
+fn is_image_note(text: &str) -> bool {
+    if text.contains('\n') {
+        return false;
+    }
+    let Some(rest) = text.strip_prefix("[Image: ").and_then(|rest| rest.strip_suffix(']')) else {
+        return false;
+    };
+    if let Some(path) = rest.strip_prefix("source: ") {
+        return !path.trim().is_empty() && !path.contains(['[', ']']);
+    }
+    fn dimensions(text: &str) -> Option<&str> {
+        let (width, rest) = text.split_once('x')?;
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (!width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) && digits > 0).then(|| &rest[digits..])
+    }
+    rest.strip_prefix("original ")
+        .and_then(dimensions)
+        .and_then(|rest| rest.strip_prefix(", displayed at "))
+        .and_then(dimensions)
+        .is_some_and(|rest| !rest.contains(['[', ']']))
 }
 
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
@@ -7044,6 +7066,15 @@ mod tests {
         // Words of its own around it, or a note-like line that isn't one, show.
         assert!(message(&user("Look: [Image: original 10x10, displayed at 10x10.]"), None).is_some());
         assert!(message(&user("[Image: the logo]"), None).is_some());
+        for typed in [
+            "[Image: source: shot.png] why is button [x]",
+            "[Image: original mockup attached]\nmatch it exactly [urgent]",
+            "[Image: original mockup attached]",
+            "[Image: original 10x10, displayed at big]",
+            "[Image: source: ]",
+        ] {
+            assert!(message(&user(typed), None).is_some(), "{typed} hidden");
+        }
     }
 
     #[test]
