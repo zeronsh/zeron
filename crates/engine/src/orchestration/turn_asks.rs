@@ -86,7 +86,16 @@ pub(crate) fn launch_of(
                 hand_to: Some(m.orchestrator_id.clone()),
             });
         }
-        let routed = state.dumps.iter().flat_map(|d| &d.routes).find(|r| super::watchers::target_chat(&r.target) == Some(chat));
+        // The route delivered to it last: what its turns since are about,
+        // and the card a question it ends on waits on (none for a question
+        // route).
+        let routed = state
+            .dumps
+            .iter()
+            .flat_map(|d| d.routes.iter().map(move |r| (r.delivered_at.unwrap_or(d.created_at), r)))
+            .filter(|(_, r)| super::watchers::target_chat(&r.target) == Some(chat))
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, r)| r);
         routed.map(|r| Launch { item_id: r.item_id.clone(), ..Default::default() })
     };
     if state.orchestrators.iter().any(|o| o.id == chat) {
@@ -220,6 +229,10 @@ pub(crate) fn plan(
         }
         if let Some(turn) = turn {
             ask.turn_id = Some(turn.to_owned());
+        }
+        // Asked again after a newer delivery: that delivery's card waits.
+        if launch.item_id.is_some() {
+            ask.item_id = launch.item_id.clone();
         }
         ask.updated_at = Some(now);
         if ask.state != AskState::Open {
@@ -364,6 +377,10 @@ pub(crate) fn raise(
             {
                 ask.dump_id = Some(dump.to_owned());
                 ask.route_id = Some(route.to_owned());
+                // Its route's card, when it has one, is the one that waits.
+                if let Some(item) = doc.dump(dump).and_then(|d| d.routes.into_iter().find(|r| r.id == route)).and_then(|r| r.item_id) {
+                    ask.item_id = Some(item);
+                }
             }
             doc.upsert_ask(ask);
         }
@@ -439,8 +456,15 @@ pub(crate) async fn after_turn(orch: &Orchestration, rpc: &Arc<EngineRpc>, chat:
     let Some((turn, text)) = final_message(&entries) else { return };
     // It asked through `ask` this turn: that is its ask.
     let since = turn_started(&entries);
+    // (Its own: not a chase or a "where should this go?" Zeron raised for
+    // it, which are quiet or tied to a dump.)
     if state.asks.iter().any(|a| {
-        a.from_chat == chat && a.origin == AskOrigin::Tool && a.state == AskState::Open && a.created_at.timestamp_millis() >= since
+        a.from_chat == chat
+            && a.origin == AskOrigin::Tool
+            && !a.quiet
+            && a.dump_id.is_none()
+            && a.state == AskState::Open
+            && a.created_at.timestamp_millis() >= since
     }) {
         return;
     }

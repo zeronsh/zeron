@@ -6,7 +6,7 @@
 //! outcome is the route's answer.
 
 use zeron_proto::orchestration::{
-    AskState, Dump, Priority, Route, RouteIntent, RouteRef, RouteState, RouteTarget, WorkItemPatch, WorkState,
+    Dump, Priority, Route, RouteIntent, RouteRef, RouteState, RouteTarget, WorkItemPatch, WorkState,
     prompt_text::one_line,
 };
 use zeron_rpc::RpcError;
@@ -60,12 +60,12 @@ pub(crate) fn priority_of(text: &str) -> Priority {
     }
 }
 
-/// The card's state for its route: `asking` is whether its thread waits on
-/// an open ask.
-pub(crate) fn card_state(route: &Route, asking: bool) -> WorkState {
-    if asking {
-        return WorkState::Blocked;
-    }
+/// The card's state for its route. Only a failed route is Blocked: a
+/// question its thread asks the person is a word on one card ("Waiting on
+/// you", the card of the asking turn's own route: the ask's `itemId`), never
+/// a column, and a finished task stays Done or Review whatever its thread
+/// asks later.
+pub(crate) fn card_state(route: &Route) -> WorkState {
     match route.state {
         RouteState::Done => WorkState::Done,
         RouteState::Failed => WorkState::Blocked,
@@ -144,12 +144,7 @@ impl EngineRpc {
     pub(crate) fn sync_card(&self, item: &str, route: &Route) {
         let orch = self.orchestration();
         let Some(card) = orch.item(item) else { return };
-        let asking = orch
-            .state()
-            .asks
-            .iter()
-            .any(|a| a.state == AskState::Open && card.threads.contains(&a.from_chat));
-        let state = card_state(route, asking);
+        let state = card_state(route);
         let outcome = route.answer.clone();
         if card.state == state && (outcome.is_none() || card.outcome == outcome) {
             return;
@@ -177,6 +172,26 @@ impl EngineRpc {
         {
             self.sync_card(&item, &route);
         }
+    }
+
+    /// Cards an ask once made Blocked (before an ask stopped meaning
+    /// Blocked) whose route didn't fail, re-derived from their route: Done,
+    /// Review or Now. Only those, so a person's own move of a card stands;
+    /// run again, it finds none. The cards it re-stated.
+    pub(crate) fn restate_ask_blocked_cards(&self) -> Vec<String> {
+        let state = self.orchestration().state();
+        let mut restated = Vec::new();
+        for dump in &state.dumps {
+            for route in &dump.routes {
+                let Some(item) = route.item_id.as_deref() else { continue };
+                let blocked = state.items.iter().any(|i| i.id == item && !i.removed && i.state == WorkState::Blocked);
+                if blocked && route.state != RouteState::Failed && card_state(route) != WorkState::Blocked {
+                    self.sync_card(item, route);
+                    restated.push(item.to_owned());
+                }
+            }
+        }
+        restated
     }
 
     /// The routed cards `chat` works on, brought up to date (it raised or
@@ -281,13 +296,13 @@ mod tests {
             "id": "r", "excerpt": "x", "target": { "kind": "chat", "id": "c" }, "intent": "task", "state": "delivered"
         }))
         .unwrap();
-        assert_eq!(card_state(&route, false), WorkState::Active);
+        assert_eq!(card_state(&route), WorkState::Active);
         route.state = RouteState::Answered;
-        assert_eq!(card_state(&route, false), WorkState::Review);
-        assert_eq!(card_state(&route, true), WorkState::Blocked, "its thread asks the person");
+        assert_eq!(card_state(&route), WorkState::Review);
         route.state = RouteState::Done;
-        assert_eq!(card_state(&route, false), WorkState::Done);
+        assert_eq!(card_state(&route), WorkState::Done);
+        // Only a real failure is Blocked.
         route.state = RouteState::Failed;
-        assert_eq!(card_state(&route, false), WorkState::Blocked);
+        assert_eq!(card_state(&route), WorkState::Blocked);
     }
 }

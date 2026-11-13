@@ -212,6 +212,7 @@ pub(crate) fn settle_chases(orchestration: &Orchestration, route_id: &str) {
     if open.is_empty() {
         return;
     }
+    let chats: Vec<String> = open.iter().map(|a| a.from_chat.clone()).collect();
     orchestration.workspace().write_orchestration(|doc| {
         for mut ask in open {
             ask.state = AskState::Dismissed;
@@ -219,6 +220,12 @@ pub(crate) fn settle_chases(orchestration: &Orchestration, route_id: &str) {
             doc.upsert_ask(&ask);
         }
     });
+    // Its thread's cards follow (as any ask's close does).
+    if let Some(rpc) = orchestration.rpc() {
+        for chat in chats {
+            rpc.sync_cards_of(&chat);
+        }
+    }
 }
 
 /// Catch an agent message the host is about to run in `receiver`: `true`

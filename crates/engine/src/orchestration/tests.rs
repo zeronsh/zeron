@@ -1570,3 +1570,97 @@ async fn a_question_sent_to_the_brain_dump_and_ended_on_is_one_ask() {
     assert_eq!(asks_from(&core, CODEX_THREAD).len(), 1);
     core.sessions.shutdown().await;
 }
+
+// ── Board cards and asks ────────────────────────────────────────────────────
+
+/// A thread the Brain dump routed `tasks` to, one card each, in order: the
+/// dump, the Brain dump, and each route's (id, card).
+async fn routed_thread(core: &crate::EngineCore, chat: &str, tasks: &[&str]) -> (String, String, Vec<(String, String)>) {
+    self::chat(core, chat, "Redesign Map Graph Mode", None).await;
+    let dump = op(core, Caller::Local, json!({"op":"dump","text":tasks.join(". ")})).await.unwrap();
+    let brain = core.orchestration.state().orchestrators.into_iter().find(|o| o.kind == OrchestratorKind::BrainDump).unwrap().id;
+    let mut routes = Vec::new();
+    for task in tasks {
+        let route = op(core, agent(&brain), json!({"op":"route","dumpId":dump,"excerpt":task,"target":{"kind":"chat","id":chat},
+            "intent":"task","message":task,"title":task})).await.unwrap();
+        let item = core.workspace.read_orchestration_with(|d| d.dump(&dump)).unwrap().routes.into_iter().find(|r| r.id == route).unwrap().item_id.unwrap();
+        routes.push((route, item));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    (dump, brain, routes)
+}
+
+fn card(core: &crate::EngineCore, item: &str) -> WorkState {
+    core.orchestration.item(item).unwrap().state
+}
+
+#[tokio::test]
+async fn a_thread_with_finished_cards_that_asks_waits_on_its_newest_card_and_none_is_blocked() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, routes) = routed_thread(&core, map, &["Fix the Nothing running line", "Fix the Timeline legend", "New Topology variants"]).await;
+    let rpc = core.rpc_service();
+    // The first two are finished: one done, one answered (in review).
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Fixed the line.".into(), Some(RouteState::Done)).await;
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[1].0, "x", "Legend fixed.".into(), Some(RouteState::Answered)).await;
+    // A quiet chase from the restart is open from the thread too (what
+    // blocked every card of it live).
+    let chase = Ask {
+        id: "chase".into(), from_chat: map.into(), orchestrator_id: None, item_id: None, kind: AskKind::Decision,
+        question: "Redesign Map Graph Mode hasn't answered: …".into(),
+        options: vec![AskOption { label: "Ask again".into(), detail: String::new() }, AskOption { label: "Dismiss".into(), detail: String::new() }],
+        urgent: false, state: AskState::Open, answer: None, created_at: chrono::Utc::now(), answered_at: None,
+        dump_id: Some(dump.clone()), route_id: None, quiet: true, origin: AskOrigin::Tool, turn_id: None,
+        updated_at: None, escalated_at: None, answered_via: None,
+    };
+    // Its newest work ends on a question for the person; the chase opened
+    // during that turn (an engine's, not the thread's own `ask`).
+    push(&core, map, "u3", zeron_doc::MessageRole::User, "New Topology variants");
+    let chase = Ask { created_at: chrono::Utc::now() + chrono::Duration::seconds(1), ..chase };
+    core.orchestration.workspace().write_orchestration(|doc| doc.upsert_ask(&chase));
+    rpc.sync_cards_of(map);
+    push(&core, map, "a3", zeron_doc::MessageRole::Assistant, "Four variants are built and scored.\n\nWhich do you want: the inline tag, or the coloured edge?");
+    turn_ended(&core, map).await;
+    let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.origin == AskOrigin::TurnEnd).collect();
+    assert_eq!(asks.len(), 1, "{asks:#?}");
+    // One card waits on the person: the one the asking turn's work is on.
+    assert_eq!(asks[0].item_id.as_deref(), Some(routes[2].1.as_str()));
+    assert_eq!(
+        [card(&core, &routes[0].1), card(&core, &routes[1].1), card(&core, &routes[2].1)],
+        [WorkState::Done, WorkState::Review, WorkState::Active],
+        "finished ones stay finished, none Blocked"
+    );
+    // A real failure is still Blocked.
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[2].0, "x", "The build broke.".into(), Some(RouteState::Failed)).await;
+    assert_eq!(card(&core, &routes[2].1), WorkState::Blocked);
+    assert_eq!(card(&core, &routes[0].1), WorkState::Done);
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn cards_an_ask_once_blocked_are_restated_from_their_routes_once() {
+    let (_temp, core) = core().await;
+    let map = "9ad131f1-map";
+    let (dump, _, routes) = routed_thread(&core, map, &["Fix the Timeline legend", "Every card in Now", "Rebuild the map"]).await;
+    let rpc = core.rpc_service();
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Legend fixed.".into(), Some(RouteState::Done)).await;
+    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[2].0, "x", "It broke.".into(), Some(RouteState::Failed)).await;
+    // As the live engine left them: Blocked by an ask, though done or at work.
+    for (_, item) in &routes[..2] {
+        core.orchestration
+            .patch_item(WorkItemPatch { id: Some(item.clone()), state: Some(WorkState::Blocked), ..Default::default() })
+            .unwrap();
+    }
+    let mut restated = rpc.restate_ask_blocked_cards();
+    restated.sort();
+    let mut want = vec![routes[0].1.clone(), routes[1].1.clone()];
+    want.sort();
+    assert_eq!(restated, want);
+    assert_eq!(
+        [card(&core, &routes[0].1), card(&core, &routes[1].1), card(&core, &routes[2].1)],
+        [WorkState::Done, WorkState::Active, WorkState::Blocked],
+        "the failed one stays Blocked"
+    );
+    assert!(rpc.restate_ask_blocked_cards().is_empty(), "idempotent");
+    core.sessions.shutdown().await;
+}

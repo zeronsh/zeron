@@ -48,6 +48,11 @@ pub(crate) fn start(orchestration: Orchestration) {
             if !settled.is_empty() {
                 tracing::info!(dumps = settled.len(), "brain dump: dumps left routing now need the person");
             }
+            // Cards an open ask made Blocked under the old rule: from their route.
+            let restated = rpc.restate_ask_blocked_cards();
+            if !restated.is_empty() {
+                tracing::info!(cards = ?restated, "board: cards an ask had blocked re-stated from their routes");
+            }
         }
     });
     // An agent's message about to run in a Brain dump or an orchestrator
@@ -334,6 +339,13 @@ pub(crate) fn waiting_on<'a>(dumps: &'a [Dump], chat: &str) -> Vec<Waiting<'a>> 
 /// The latest reply after the message carrying `message` (across the
 /// turns since), once the newest turn is done. `None` while it isn't.
 pub(crate) fn latest_reply(entries: &[SessionMessageEntry], message: &str) -> Option<String> {
+    latest_reply_until(entries, message, &[])
+}
+
+/// [`latest_reply`], up to the delivery of any of `others` (other routes'
+/// messages to the same chat): what came after one is that route's, so
+/// each card keeps the outcome of its own work.
+pub(crate) fn latest_reply_until(entries: &[SessionMessageEntry], message: &str, others: &[String]) -> Option<String> {
     let message = message.trim();
     if message.is_empty() {
         return None;
@@ -341,7 +353,16 @@ pub(crate) fn latest_reply(entries: &[SessionMessageEntry], message: &str) -> Op
     let at = entries
         .iter()
         .rposition(|e| e.role == MessageRole::User && texts(e).contains(message))?;
-    let after: Vec<_> = entries[at + 1..].iter().filter(|e| e.role == MessageRole::Assistant).collect();
+    let next = entries[at + 1..]
+        .iter()
+        .position(|e| {
+            e.role == MessageRole::User && {
+                let t = texts(e);
+                others.iter().map(|o| o.trim()).any(|o| !o.is_empty() && o != message && t.contains(o))
+            }
+        })
+        .map_or(entries.len(), |i| at + 1 + i);
+    let after: Vec<_> = entries[at + 1..next].iter().filter(|e| e.role == MessageRole::Assistant).collect();
     if after.is_empty() || after.iter().any(|e| e.status == Some(MessageStatus::Streaming)) {
         return None;
     }
@@ -708,6 +729,16 @@ async fn take_outcomes(
 ) -> Vec<WaitingRoute> {
     let Ok(handle) = rpc.doc_host_ref().open(chat) else { return waiting };
     let Ok(entries) = handle.doc().read_entries() else { return waiting };
+    // Every route's message to this chat: a task's outcome ends where the
+    // next one was delivered.
+    let others: Vec<String> = orchestration
+        .state()
+        .dumps
+        .iter()
+        .flat_map(|d| &d.routes)
+        .filter(|r| target_chat(&r.target) == Some(chat))
+        .map(|r| if r.message.trim().is_empty() { r.excerpt.clone() } else { r.message.clone() })
+        .collect();
     let mut left = Vec::new();
     for w in waiting {
         let (dump_id, route_id, message, excerpt, intent) = &w;
@@ -716,7 +747,7 @@ async fn take_outcomes(
         let found = if question {
             answer_to(&entries, message).map(|(text, ms)| (text, (ms > 0).then(|| chrono::DateTime::from_timestamp_millis(ms)).flatten()))
         } else {
-            latest_reply(&entries, message).map(|text| (text, None))
+            latest_reply_until(&entries, message, &others).map(|text| (text, None))
         };
         let Some((full, at)) = found else {
             left.push(w);
@@ -901,6 +932,14 @@ mod tests {
             entry("a2", Assistant, "All done.", Complete),
         ];
         assert_eq!(latest_reply(&entries, "Check device names.").as_deref(), Some("All done."));
+        // Another route delivered since: this one's outcome stops there.
+        let mut two = entries.clone();
+        two.push(entry("u9", User, "[Message from Zeron chat Brain dump (b).]\n\nNow fix the legend.", Complete));
+        two.push(entry("a9", Assistant, "Legend fixed.", Complete));
+        let others = vec!["Check device names.".to_owned(), "Now fix the legend.".to_owned()];
+        assert_eq!(latest_reply_until(&two, "Check device names.", &others).as_deref(), Some("All done."));
+        assert_eq!(latest_reply_until(&two, "Now fix the legend.", &others).as_deref(), Some("Legend fixed."));
+        assert_eq!(latest_reply(&two, "Check device names.").as_deref(), Some("Legend fixed."), "unscoped: the newest");
         assert_eq!(reply_to(&entries, "Check device names.").as_deref(), Some("Half done."));
     }
 

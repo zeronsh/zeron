@@ -72,7 +72,8 @@ const DECIDE_PLAIN: &[&str] = &[
     "tell me which", "tell me whether", "tell me if you want", "tell me if i should", "say the word",
     "your call", "go/no-go", "awaiting your", "waiting on your", "waiting for your", "need your decision",
     "need your call", "need your go-ahead", "need your approval", "need your ok", "pending your",
-    "which would you prefer", "which do you prefer",
+    "which would you prefer", "which do you prefer", "waiting on you", "waiting for you", "yours to make",
+    "your pick", "waiting for your pick", "up to you",
 ];
 
 /// Closers with nothing pending.
@@ -736,6 +737,15 @@ mod tests {
         assert_eq!(f.options, ["Wire them up", "Remove them"]);
         let Verdict::Borderline(f) = detect("Two restarts at 03:10. Is that the window you meant?") else { panic!() };
         assert_eq!(f.question, "Two restarts at 03:10. Is that the window you meant?", "too short alone");
+    }
+
+    #[test]
+    fn a_decision_said_to_wait_on_the_person_is_an_ask() {
+        // Thread 9ad131f1's last turns (Redesign Map Graph Mode).
+        let ended = "The Timeline legend's events group now always reads Report · Ask · Failed · Done.\n\n**Timing:** this lands after the current rebuild, not in it.\n\nThe Topology variation pick and the graph-label decision (accept round 9 or keep iterating) are still waiting on you.";
+        assert!(ask(ended).question.contains("Topology variation pick"));
+        let before = "I recommend (a) with all three. Tell me which version you want and I'll polish it and merge it.\n\nScreenshots are in `~/x/shots/`.\n\nThe graph label decision (accept round 9, or keep iterating) is also still yours to make.";
+        assert!(ask(before).question.contains("graph label decision"));
     }
 
     #[test]
