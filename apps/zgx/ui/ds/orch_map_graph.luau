@@ -344,10 +344,12 @@ M.View = ui.component(function(props: {
 			local name_w = c:measure_text(title, TAB_NAME)
 			local load_w = if load ~= "" then c:measure_text(load, TAB_LOAD) else 0
 			local tw = 8 + 14 + 6 + name_w + (if load ~= "" then 10 + load_w else 0) + 8
-			-- (The island makes room for it: settled again if it grew.)
-			local was = (n :: any).tab_w or 0
+			-- (The island makes room for it, and an empty one for its one
+			-- line saying so: settled again if either grew.)
+			local was = ((n :: any).tab_w or 0) + ((n :: any).idle_w or 0)
+			;(n :: any).idle_w = if next(isl.members) == nil then c:measure_text(locale.s("ds.orch.map.idle"), { size = 11 }) / z else 0
 			;(n :: any).tab_w = tw / z
-			if math.abs(was - tw / z) > 4 and not retab then
+			if math.abs(was - tw / z - (n :: any).idle_w) > 4 and not retab then
 				retab = true
 				ui.after(0, function()
 					graph.alpha = math.max(graph.alpha, 0.3)
@@ -552,7 +554,7 @@ M.View = ui.component(function(props: {
 			local ix, iy, ir = isl.x * z + v.x, isl.y * z + v.y, isl.r * z - 4
 			for _, p in { { x0, y0 }, { x1, y0 }, { x0, y1 }, { x1, y1 } } do
 				if (p[1] - ix) ^ 2 + (p[2] - iy) ^ 2 > ir * ir then
-					return 0.7
+					return 0.35
 				end
 			end
 			return 0
@@ -626,8 +628,22 @@ M.View = ui.component(function(props: {
 				-- (Ranked best but not allowed: the least crowded instead.)
 				best, least = fit, fit_k
 			end
-			if not best or (least >= (if must then 1 else 0.65) and not force) then
+			-- (Never dropped: a name with no free place takes the least
+			-- crowded, shortened.)
+			if not best then
 				return
+			end
+			if least >= (if must then 1 else 0.65) and #best.text == 1 and (utf8.len(best.text[1]) or 0) > 16 then
+				local t = best.text[1]
+				local short = string.sub(t, 1, (utf8.offset(t, 16) :: number) - 1) .. "…"
+				local nw = c:measure_text(short, opts)
+				best = table.clone(best)
+				if best.align == "end" then
+					best.x += best.tw - nw
+				elseif best.align == "center" then
+					best.x += (best.tw - nw) / 2
+				end
+				best.text, best.tw = { short }, nw
 			end
 			-- (Never past the field's edge: slid back in, a leader tying it.)
 			local cx0 = math.clamp(best.x, 6, math.max(6, w - best.tw - 6))
@@ -986,15 +1002,15 @@ M.View = ui.component(function(props: {
 		-- the field's way.)
 		for _, n in graph.nodes do
 			local x, y = at(n)
-			local rr = reach(n) + 14
+			local rr = reach(n) + 5
 			field:move(x + rr, y):arc(x, y, rr, 0, 360):close()
 		end
-		-- (The rims whole but for each heading: names lie over them.)
+		c:clip(field)
+		-- (Rims too break round a name, never strike through it.)
 		for _, rim in rims do
 			local lit = lit_of(rim.n.id)
 			c:stroke(ui.path():arc(rim.x, rim.y, rim.r, rim.from, rim.sweep), ink(if dark then 0.16 else 0.22, lit), 1, { cap = "round" })
 		end
-		c:clip(field)
 		for _, ln in lines do
 			local e, lit = ln.e, ln.lit
 			local a, b = graph.nodes[graph.index[e.a]], graph.nodes[graph.index[e.b]]
@@ -1122,7 +1138,7 @@ M.View = ui.component(function(props: {
 			local cy = y0 + th / 2
 			-- (A soft backing, the field's own colour, so lines pass under;
 			-- a hairline round it, the rim broken behind it.)
-			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.8 else 0.32, lit)), 6)
+			c:rect(x0, y0, tw, th, kit.ink("background", dim(if dark then 0.94 else 0.62, lit)), 6)
 			if over == rim.n.id then
 				c:rect(x0, y0, tw, th, ink(0.06, lit), 6)
 			end
@@ -1144,17 +1160,8 @@ M.View = ui.component(function(props: {
 			end
 			-- A machine with nothing at work says so, quietly, inside.
 			if rim.empty then
-				local word = locale.s("ds.orch.map.idle")
-				local o = { size = 11, color = ink(if dark then 0.4 else 0.42, lit), align = "center", baseline = "middle" }
-				local ww = c:measure_text(word, o)
-				local sp = string.find(word, " ")
-				if ww > rim.r * 2 - 28 and sp then
-					-- (Two lines, kept clear of the rim.)
-					c:text(string.sub(word, 1, sp - 1), rim.x, rim.y, o)
-					c:text(string.sub(word, sp + 1), rim.x, rim.y + 14, o)
-				else
-					c:text(word, rim.x, rim.y + 6, o)
-				end
+				-- (One line: the island is sized for it.)
+				c:text(locale.s("ds.orch.map.idle"), rim.x, rim.y + 6, { size = 11, color = ink(if dark then 0.4 else 0.42, lit), align = "center", baseline = "middle" })
 			end
 		end
 		for _, l in labels do

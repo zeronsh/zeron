@@ -330,7 +330,7 @@ function M.islands(g: Graph): { [string]: Island }
 		-- (Never smaller than its heading on top needs.)
 		-- (Never narrower than its heading on top, and a little more.)
 		local dev = list[id][1] :: any
-		isl.r = math.max(r + M.ISLAND_PAD, (dev.tab_w or 0) * 0.375, if next(isl.members) then 44 else 80)
+		isl.r = math.max(r + M.ISLAND_PAD, (dev.tab_w or 0) * 0.375, if next(isl.members) then 44 else math.max(60, (dev.idle_w or 0) / 2 + 16))
 	end
 	return out
 end
