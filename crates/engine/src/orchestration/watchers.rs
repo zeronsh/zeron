@@ -25,6 +25,9 @@ use super::Orchestration;
 pub(crate) const ASK_FRESH: TimeDelta = TimeDelta::minutes(10);
 /// The most ask ids kept as shown.
 const SHOWN_KEPT: usize = 1000;
+/// How long a reply's text is before it's taken as the answer, not a
+/// preamble ("Looking.").
+const SUBSTANTIAL: usize = 80;
 /// The most a whole reply (`answerFull`) keeps.
 const FULL_MAX: usize = 8000;
 /// The most of a reply the condensing run reads.
@@ -191,8 +194,9 @@ pub(crate) fn reply_to(entries: &[SessionMessageEntry], message: &str) -> Option
 }
 
 /// The reply to the message carrying `message` in `entries`, and when it
-/// was written (ms since the epoch): the last assistant text of the turn
-/// after it (before the next message to the chat), once that turn is done.
+/// was written (ms since the epoch): the first real reply of the turn after
+/// it (before the next message to the chat; its last text when none is
+/// more than a line), once that turn is done.
 /// Each of several questions sent to one thread so has the reply that
 /// follows its own delivery. One sent right before another message (two in
 /// a row, the thread answering both at once) has the first reply after it.
@@ -224,7 +228,13 @@ pub(crate) fn answer_to(entries: &[SessionMessageEntry], message: &str) -> Optio
     if turn.is_empty() || turn.iter().any(|e| e.status == Some(MessageStatus::Streaming)) {
         return None;
     }
-    let reply = turn.iter().rev().find(|e| !texts(e).trim().is_empty())?;
+    // Its first real reply (a line like "Looking." aside), else its last
+    // word: a long turn goes on to other work after it answers.
+    let said: Vec<&&SessionMessageEntry> = turn.iter().filter(|e| !texts(e).trim().is_empty()).collect();
+    let reply = said
+        .iter()
+        .find(|e| texts(e).trim().chars().count() >= SUBSTANTIAL)
+        .or_else(|| said.last())?;
     Some((texts(reply).trim().chars().take(FULL_MAX).collect(), reply.created_at))
 }
 
@@ -739,6 +749,57 @@ mod tests {
         assert_eq!(answer_to(&entries, "Which model does the Brain dump use?"), Some(("Haiku; the sidebar.".into(), 800)));
         assert_eq!(answer_to(&entries, "And where are the orchestrators?"), Some(("Haiku; the sidebar.".into(), 800)));
         assert_eq!(answer_to(&entries[..6], "Which model does the Brain dump use?"), None, "no reply yet");
+    }
+
+    /// The rule over a real replica, offline and read-only: each question
+    /// route in an orchestration snapshot (JSON, as WatchOrchestration sends
+    /// it), its target's transcript from a copy of a docs.sqlite3, and the
+    /// reply it would take in. Run on purpose:
+    /// `LIVE_DOCS=<copy> LIVE_STATE=<json> cargo test -p zeron-engine live_replay -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_replay() {
+        let (Some(db), Some(state)) = (std::env::var_os("LIVE_DOCS"), std::env::var_os("LIVE_STATE")) else {
+            return;
+        };
+        let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let state: serde_json::Value = serde_json::from_slice(&std::fs::read(state).unwrap()).unwrap();
+        let mut found = 0;
+        let mut asked = 0;
+        for d in state["dumps"].as_array().unwrap() {
+            for r in d["routes"].as_array().unwrap() {
+                let Some(chat) = r["target"]["id"].as_str().filter(|_| r["intent"] == "question") else { continue };
+                asked += 1;
+                let doc = zeron_doc::SessionDoc::from_doc(loro::LoroDoc::new());
+                let snapshot: Option<Vec<u8>> =
+                    conn.query_row("select bytes from snapshots where doc_id = ?1", [chat], |row| row.get(0)).ok();
+                if let Some(bytes) = snapshot {
+                    doc.import(&bytes).unwrap();
+                }
+                let mut deltas = conn.prepare("select bytes from snapshot_deltas where doc_id = ?1 order by ordinal").unwrap();
+                for bytes in deltas.query_map([chat], |row| row.get::<_, Vec<u8>>(0)).unwrap() {
+                    let _ = doc.import(&bytes.unwrap());
+                }
+                let entries = doc.read_entries().unwrap_or_default();
+                let message = r["message"].as_str().unwrap_or_default();
+                let reply = answer_to(&entries, message);
+                if reply.is_some() {
+                    found += 1;
+                }
+                println!(
+                    "{} -> {} ({} entries): {}",
+                    one_line_of(r["excerpt"].as_str().unwrap_or_default(), 60),
+                    &chat[..8],
+                    entries.len(),
+                    reply.map_or("NONE".into(), |(t, at)| format!("@{at} {}", one_line_of(&t, 100))),
+                );
+            }
+        }
+        println!("{found} of {asked} questions have a reply");
+    }
+
+    fn one_line_of(text: &str, max: usize) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max).collect()
     }
 
     #[test]
