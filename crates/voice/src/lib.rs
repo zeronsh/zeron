@@ -44,6 +44,10 @@ pub struct Manifest {
     pub languages: Vec<String>,
     /// The weights (the first file) and what they need beside them.
     pub files: Vec<Artifact>,
+    /// Its makers' marks, as Settings shows them (ds.Mark names): the base
+    /// model's maker first.
+    #[serde(default)]
+    pub marks: Vec<String>,
     /// About what it holds in memory while loaded (measured on the CPU).
     #[serde(default)]
     pub memory: u64,

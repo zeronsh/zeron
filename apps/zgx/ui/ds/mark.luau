@@ -18,6 +18,9 @@ export type Name =
 	| "pi"
 	| "hermes"
 	| "muse"
+	| "nvidia"
+	| "moondream"
+	| "cohere"
 
 local FILES: { [Name]: string } = {
 	claude = "claude-mark",
@@ -30,6 +33,10 @@ local FILES: { [Name]: string } = {
 	pi = "pi-mark",
 	hermes = "hermes-mark",
 	muse = "muse-mark",
+	-- Speech models' makers (Settings → Voice).
+	nvidia = "nvidia-mark",
+	moondream = "moondream-mark",
+	cohere = "cohere-mark",
 }
 
 -- Marks drawn in one ink (black, for the white tile): bare, they take the

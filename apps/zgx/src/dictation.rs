@@ -208,6 +208,7 @@ impl Service {
                     "installed":m.installed(&models.join(&m.id)),
                     "present":models.join(&m.id).exists(),
                     "memory":m.memory,
+                    "marks":m.marks,
                     "slow":m.cpu_slow && cfg!(not(target_os = "macos"))})
             })
             .collect();

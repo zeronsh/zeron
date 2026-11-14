@@ -7,6 +7,7 @@ local ds = require("@ds")
 local toast = require("@ds/toast")
 local Shortcut = require("@ds/shortcut_recorder")
 local prefs = require("@app/screens/settings/prefs")
+local people = require("@ds/people")
 local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
 local keys = require("@app/screens/shell/keys")
@@ -271,6 +272,53 @@ local function keep_row(): Node
 	})
 end
 
+-- Its makers' marks, round, at Providers' size, overlapping as faces in a
+-- stack do (each cut where the next sits: ds/people), the base model's
+-- maker behind.
+-- Marks that are round already, their own disc: drawn whole, no tile.
+local ROUND = { moondream = true }
+local function marks(list: { string }, size: number): Node
+	local overlap = math.floor(size * 0.3)
+	local cut = { x = size - overlap + size / 2, r = size / 2 + 1.5 }
+	local items: { Node } = {}
+	for i, name in list do
+		local whole = ROUND[name] == true
+		local held: { [any]: any } = {
+			w = size,
+			h = size,
+			shrink = 0,
+			rounded = "$radius.full",
+			overflow = "hidden",
+			items = "center",
+			justify = "center",
+			bg = if whole then nil else "$zeron.mark.bg",
+			border = if whole then nil else 1,
+			border_color = if whole then nil else "$zeron.mark.border",
+			ds.Mark { name = name, size = if whole then size else size * 0.62, bare = true },
+		}
+		if i < #list then
+			people.cut_into(held, size, cut)
+		end
+		table.insert(items, ui.div {
+			shrink = 0,
+			ml = if i == 1 then 0 else ui.raw(-overlap, "marks overlap by a third, as faces do"),
+			ui.column(held),
+		})
+	end
+	return ui.row { shrink = 0, items = "center", table.unpack(items) }
+end
+local function lead(m: () -> any): Node?
+	local list = m().marks or {}
+	if #list == 0 then return nil end
+	-- As wide as two overlapping marks, on every row: the names line up.
+	local size = 32
+	return ui.row {
+		w = ui.raw(2 * size - math.floor(size * 0.3), "two overlapping marks, on every row"),
+		shrink = 0,
+		marks(list, size),
+	}
+end
+
 -- A row a model, the one in use marked.
 local function model_rows(): Node
 	return search.anchor("model", ds.Settings.Section {
@@ -282,6 +330,7 @@ local function model_rows(): Node
 				return active ~= nil and active.id == m().id and m().installed
 			end
 			return ds.Settings.Row {
+				lead = lead(m),
 				label = function(): string return m().name end,
 				badge = ui.show(in_use, ds.Badge { ui.t("settings.voice.model.in_use"), size = "sm" }),
 				description = function(): string return progress(m()) or about(m()) end,

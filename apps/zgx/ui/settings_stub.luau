@@ -150,8 +150,8 @@ local answers: { [string]: (arg: any) -> any } = {
 			then {
 				supported = v.supported,
 				models = {
-					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, memory = 1150000000, installed = true, present = true, languages = table.create(25, "") },
-					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, memory = 2800000000, installed = v.cohere == "installed", present = v.cohere ~= "absent", slow = true, languages = table.create(14, "") },
+					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, memory = 1150000000, installed = true, present = true, marks = { "nvidia", "moondream" }, languages = table.create(25, "") },
+					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, memory = 2800000000, installed = v.cohere == "installed", present = v.cohere ~= "absent", slow = true, marks = { "cohere" }, languages = table.create(14, "") },
 				},
 			}
 			elseif arg.op == "inputs" then {}
