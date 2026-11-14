@@ -824,24 +824,38 @@ local function Composer(): Node
 	-- the focus; back from Settings): the composer takes the keys. Once
 	-- what brought it here is done (a palette closing
 	-- puts focus back where it was first), so this comes last; a field
-	-- that takes the keys after (a rename) has them. (Kept: a reload, or
-	-- the window opening, isn't an arrival.)
+	-- that takes the keys after (a rename) has them. The window opening on
+	-- a chat is an arrival too: what's typed from the launch on goes into
+	-- the composer, with no click first (Zeron's composer has the keys as it
+	-- opens; ademark's A1 types from the launch and timed out on every run
+	-- while they were nowhere). (Kept: a reload isn't one.)
 	local arrived = ui.state("chat_composer_arrived", "?")
 	ui.effect(function()
 		local now = route.current:get()
 		local pane = route.chat:get().session
 		local chat = now.name == "session" or now.name == "home"
-		local at = `{now.name}|{now.session or ""}|{now.project or ""}|{pane or ""}`
-		local was = arrived:peek()
-		if was == at then
+		-- (A session's project is the chat's own, known once the engine
+		-- lists it: its coming isn't a move, and it took the keys from
+		-- whatever had them by then, a dialog opened at launch.)
+		local project = if now.name == "home" then now.project or "" else ""
+		local at = `{now.name}|{now.session or ""}|{project}|{pane or ""}`
+		if arrived:peek() == at then
 			return
 		end
-		arrived:set(at)
 		-- (A tab strip's arrows keep the keys on the tab they chose.)
-		if route.take_keys_kept() or was == "?" or not chat then
+		if route.take_keys_kept() or not chat then
+			arrived:set(at)
 			return
 		end
+		-- Marked arrived as the keys are given, not before: the window's
+		-- scripts loaded again meanwhile (the engine's plugins coming in as
+		-- the window opens) drop this turn's callback, and the scripts made
+		-- again give them instead.
 		ui.after(0, function()
+			if arrived:peek() == at then
+				return
+			end
+			arrived:set(at)
 			shared.focus:add(1)
 		end)
 	end)
