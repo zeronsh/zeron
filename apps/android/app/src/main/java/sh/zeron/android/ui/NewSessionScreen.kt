@@ -83,13 +83,13 @@ fun NewSessionScreen(
     val client by model.client.collectAsState()
     var draft by remember { mutableStateOf(model.lastDraft) }
     // What was set up when the page was last closed unsent comes back.
-    val composer = remember { ComposerModel(model.newSessionText).apply { images.addAll(model.newSessionImages) } }
+    val composer = remember { ComposerModel(model.newSessionText).apply { attachments.addAll(model.newSessionAttachments) } }
     var created by remember { mutableStateOf(false) }
     fun rememberDraft() {
         if (created) return
         model.lastDraft = draft
         model.newSessionText = composer.text
-        model.newSessionImages = composer.images.toList()
+        model.newSessionAttachments = composer.attachments.toList()
     }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     androidx.compose.runtime.DisposableEffect(lifecycle) {
@@ -186,10 +186,10 @@ fun NewSessionScreen(
         starting = true
         scope.launch {
             try {
-                val id = model.createCloudSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+                val id = model.createCloudSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.attachments.map { it.outgoing })
                 created = true
                 model.newSessionText = ""
-                model.newSessionImages = emptyList()
+                model.newSessionAttachments = emptyList()
                 onCreated(id)
             } catch (e: Exception) {
                 if (sh.zeron.android.core.CloudStore.isOutOfCredits(e)) outOfCredits() else cloudFailure = sh.zeron.android.core.CloudStore.message(e)
@@ -202,11 +202,11 @@ fun NewSessionScreen(
     fun create() {
         model.lastDraft = draft
         if (runsOnCloud) return createOnCloud()
-        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.attachments.map { it.outgoing })
         if (id != null) {
             created = true
             model.newSessionText = ""
-            model.newSessionImages = emptyList()
+            model.newSessionAttachments = emptyList()
             onCreated(id)
         } else {
             scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }

@@ -35,13 +35,38 @@ pub const MAX_ATTACHMENT_BYTES: usize = 24 * 1024 * 1024;
 /// cap with envelope headroom, `% 4 == 0` so slices decode independently).
 pub const UPLOAD_CHUNK_B64_CHARS: usize = 680_000;
 
-/// Append the attachment trailer (no-op without paths).
+/// Extensions of the pictures the host reads back as images.
+const IMAGE_EXTENSIONS: [&str; 11] = [
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff", "avif", "heic",
+];
+
+/// Whether an attachment ref names a picture (by extension), as opposed to
+/// any other file.
+pub fn is_image_path(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
+
+/// The body for an attachments-only send of `paths`: the image wording only
+/// when every one is a picture.
+pub fn attachment_only_text(paths: &[String]) -> &'static str {
+    if paths.iter().all(|path| is_image_path(path)) {
+        ATTACHMENT_ONLY_TEXT
+    } else {
+        FILE_ATTACHMENT_ONLY_TEXT
+    }
+}
+
+/// Append the attachment trailer (no-op without paths). The marker line is
+/// the same for files: every parser keys on it.
 pub fn with_attachments(text: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return text.to_owned();
     }
     let body = if text.trim().is_empty() {
-        ATTACHMENT_ONLY_TEXT
+        attachment_only_text(paths)
     } else {
         text
     };
@@ -222,7 +247,7 @@ pub fn queue_visible_text(text: &str, attachments: &[String]) -> String {
     }
     let parsed = parse_user_message(text);
     if parsed.text.is_empty() {
-        ATTACHMENT_ONLY_TEXT.to_owned()
+        attachment_only_text(attachments).to_owned()
     } else {
         parsed.text
     }
@@ -306,6 +331,33 @@ mod tests {
             "{FILE_ATTACHMENT_ONLY_TEXT}\n\n{ATTACHMENT_MARKER}\n- /tmp/ab12cd34-notes.zip"
         );
         assert_eq!(parse_user_message(&files).text, "");
+    }
+
+    #[test]
+    fn files_only_sends_say_files_not_images() {
+        let pdf = vec![pending_ref("u1", "report.pdf")];
+        let sent = with_attachments("", &pdf);
+        assert!(sent.starts_with(FILE_ATTACHMENT_ONLY_TEXT), "{sent}");
+        // The trailer is unchanged, so it still parses back to a bare file.
+        assert!(sent.contains(ATTACHMENT_MARKER));
+        let parsed = parse_user_message(&sent);
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.images[0].name, "report.pdf");
+        assert_eq!(queue_visible_text(&sent, &pdf), FILE_ATTACHMENT_ONLY_TEXT);
+    }
+
+    #[test]
+    fn one_file_among_pictures_says_files() {
+        let mixed = vec!["/a/cat.png".to_owned(), "/a/notes.zip".to_owned()];
+        assert_eq!(attachment_only_text(&mixed), FILE_ATTACHMENT_ONLY_TEXT);
+        let pictures = vec!["/a/cat.PNG".to_owned(), pending_ref("u2", "b.jpeg")];
+        assert_eq!(attachment_only_text(&pictures), ATTACHMENT_ONLY_TEXT);
+        assert!(!is_image_path("/a/upload"));
+        assert!(!is_image_path("/a/.png"));
+        assert!(!is_image_path("/a/clip.ogg"));
+        assert!(is_image_path("C:\\a\\x.webp"));
+        // The user's own text always wins over the placeholder.
+        assert!(with_attachments("look", &mixed).starts_with("look\n\n"));
     }
 
     #[test]

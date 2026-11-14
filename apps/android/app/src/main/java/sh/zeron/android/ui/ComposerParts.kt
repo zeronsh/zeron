@@ -102,7 +102,7 @@ fun ComposerSurface(
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(Modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())) {
-            AnimatedVisibility(model.images.isNotEmpty() && card) { StagedThumbnails(model) }
+            AnimatedVisibility(model.attachments.isNotEmpty() && card) { StagedThumbnails(model) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 56.dp)) {
                 if (!card) {
                     Spacer(Modifier.width(4.dp))
@@ -174,31 +174,45 @@ fun ComposerSurface(
     }
 }
 
-/** Staged photos above the prompt, each removable. */
+/** Staged attachments above the prompt, each removable: thumbnails for pictures, a name tile for the rest. */
 @Composable
 private fun StagedThumbnails(model: ComposerModel) {
     Row(
         Modifier.horizontalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        for (image in model.images) {
-            Box(Modifier.size(72.dp)) {
-                Image(image.thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
+        for (item in model.attachments) {
+            val thumb = item.thumb
+            Box(Modifier.then(if (thumb != null) Modifier.size(72.dp) else Modifier.size(width = 120.dp, height = 72.dp))) {
+                if (thumb != null) {
+                    Image(thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        Column(Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ZIcon(ZIcons.Text, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(item.name, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
                 Surface(
-                    onClick = { model.images.remove(image) },
+                    onClick = { model.attachments.remove(item) },
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.85f),
                     contentColor = MaterialTheme.colorScheme.inverseOnSurface,
                     modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(22.dp),
                 ) {
-                    Box(contentAlignment = Alignment.Center) { ZIcon(ZIcons.Close, "Remove image", Modifier.size(14.dp)) }
+                    Box(contentAlignment = Alignment.Center) { ZIcon(ZIcons.Close, "Remove ${item.name}", Modifier.size(14.dp)) }
                 }
             }
         }
     }
 }
 
-/** [+] → Photos / Take photo / Files / Paste image, staged into the composer. */
+/** [+] → Photos / Take photo / Files (any type) / Paste image, staged into the composer. */
 @Composable
 private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     val context = LocalContext.current
@@ -206,10 +220,29 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     var open by remember { mutableStateOf(false) }
     fun add(uris: List<Uri>) {
         scope.launch {
-            for (uri in uris.take(Staging.MAX_IMAGES - model.images.size)) Staging.stage(context, uri)?.let { model.images.add(it) }
+            var skipped = 0
+            var problem: String? = null
+            for (uri in uris) {
+                if (model.attachments.size >= Staging.MAX_ATTACHMENTS) {
+                    skipped++
+                    continue
+                }
+                try {
+                    val item = Staging.stage(context, uri)
+                    if (model.attachments.sumOf { it.bytes.size } + item.bytes.size > Staging.MAX_TOTAL_BYTES) {
+                        problem = "Attachments are limited to ${Staging.MAX_TOTAL_BYTES / 1024 / 1024} MB in total"
+                    } else {
+                        model.attachments.add(item)
+                    }
+                } catch (e: StagingException) {
+                    problem = e.message
+                }
+            }
+            if (skipped > 0) problem = "Up to ${Staging.MAX_ATTACHMENTS} attachments per message"
+            problem?.let { android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_LONG).show() }
         }
     }
-    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_IMAGES)) { add(it) }
+    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_ATTACHMENTS)) { add(it) }
     val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
     // The camera writes into a cache file the FileProvider shares with it.
     var capture by remember { mutableStateOf<Uri?>(null) }
@@ -219,7 +252,7 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     }
     val hasCamera = remember { context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY) }
     Box {
-        IconButton(onClick = { open = true }, enabled = enabled && model.images.size < Staging.MAX_IMAGES) {
+        IconButton(onClick = { open = true }, enabled = enabled && model.attachments.size < Staging.MAX_ATTACHMENTS) {
             ZIcon(ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         val clip = if (open) context.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip else null
@@ -241,7 +274,7 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
                 } else {
                     null
                 },
-                MenuAction("Files", ZIcons.Folder) { files.launch(arrayOf("image/*")) },
+                MenuAction("Files", ZIcons.Folder) { files.launch(arrayOf("*/*")) },
                 pasted?.let { uri -> MenuAction("Paste image", ZIcons.Copy) { add(listOf(uri)) } },
             ),
         )

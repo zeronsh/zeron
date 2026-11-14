@@ -134,14 +134,14 @@ fun Composer(
     var lease by remember { mutableStateOf<QueueEditLease?>(null) }
     var editBase by remember { mutableStateOf<Pair<String, String>?>(null) }
     var renewal by remember { mutableStateOf<Job?>(null) }
-    var stash by remember { mutableStateOf<Pair<String, List<StagedImage>>?>(null) }
+    var stash by remember { mutableStateOf<Pair<String, List<StagedAttachment>>?>(null) }
     var editPending by remember { mutableStateOf(false) }
 
     fun restoreStash() {
-        stash?.let { (text, images) ->
+        stash?.let { (text, staged) ->
             draft.clear()
             draft.setText(text)
-            draft.images.addAll(images)
+            draft.attachments.addAll(staged)
         }
         stash = null
     }
@@ -186,7 +186,7 @@ fun Composer(
                 }
                 val item = handle.composer().queue.firstOrNull { it.id == id }
                 editBase = item?.let { it.text to it.visibleText }
-                if (stash == null) stash = draft.text to draft.images.toList()
+                if (stash == null) stash = draft.text to draft.attachments.toList()
                 draft.clear()
                 draft.setText(item?.visibleText ?: "")
                 editingId = id
@@ -213,7 +213,7 @@ fun Composer(
             handle.send(
                 SendRequest(
                     body,
-                    draft.images.map { it.outgoing },
+                    draft.attachments.map { it.outgoing },
                     null,
                     if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
                 ),
