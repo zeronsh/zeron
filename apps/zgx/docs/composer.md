@@ -76,9 +76,11 @@ next decision and target geometry together in a batch.
 
 ## Text metrics
 
-`Metrics.use { value, width, editor, keep? }` returns a computed `result` and
-a read-only `sample` state, and creates no measurement nodes. Geometry follows
-the sample without subscribing to request/readiness-only changes. The visible
+`Metrics.use { value, width, editor, keep?, estimate? }` returns a computed
+`result` and a read-only `sample` state (the size alone: unwrapped width,
+wrapped height, line height), and creates no measurement nodes. Geometry follows
+the sample without subscribing to request/readiness-only changes: a new
+revision of an equal size wakes no layout. The visible
 textarea supplies
 `Element:text_metrics(content_width)` (Rust: `EditorHandle::text_metrics`).
 It uses the editor's plain/rich shaping, spans, fonts and fallback, includes a
@@ -98,8 +100,10 @@ next target geometry.
 | `sample.wrapped_height`, `sample.line_height` | Natural wrapped height at the requested width and base line height. |
 | `sample.width`, `sample.revision` | Width and request generation represented by the complete sample. |
 
-Requests follow draft, width, theme and settled editor metrics, including
-uncommitted IME. A width-only query publishes immediately when the mounted
+Requests follow draft, theme and settled editor metrics, including
+uncommitted IME. They follow width only while the widest line doesn't fit the
+requested width: a draft that fits measures the same at any width it fits, so
+a pane resized asks nothing of it. A width-only query publishes immediately when the mounted
 editor, draft, theme and native metric revision match the last acknowledged
 request. Mount generations distinguish editor replacement from fresh userdata
 wrappers. Other requests retain deferred publication, checking request and
@@ -111,14 +115,25 @@ publish a fresh sample.
 With `keep`, the last complete sample survives reload but starts stale until
 revalidated against the mounted editor. Layout retains the last sample while
 waiting; before the first sample it uses its explicit geometry fallback.
-The persistence namespace is `editor_text_metrics`.
+The persistence namespaces are `editor_text_metrics` and `editor_text_size`.
+
+`estimate(text, line_height)` stands in for the exact query where the caller
+knows the answer can't change its layout. The composer passes
+`Layout.estimate`: a draft with enough hard lines to fill the text box to its
+cap at the last measured line height has a newline (forced open, its unwrapped
+width unused) and is capped whatever it wraps to, so it is not measured again.
+Finding that out looks for at most a dozen newlines. An estimate is used only
+for the editor, theme and composer line-height token of the last exact
+measure; a repeated equal estimate is the same request and publishes nothing.
 
 Framework metrics are exact. The first query per revision/width visits all
-hard lines using retained shaping caches; unchanged queries are constant-time.
-Full-document queries can be expensive for long drafts after edits. Focus,
+hard lines twice, past the editor's 4,096-line span cache; unchanged queries
+are constant-time. A full-document query after each edit cost a 5,000-line
+draft about 10,000 script calls (its highlighting) and 47 ms a keystroke,
+which is why long drafts are estimated. Focus,
 selection, scroll, caret blink and viewport size alone do not change the
 metric revision. The API is supplied by the immutable ZGX revision pinned in
-[`Cargo.toml`](../Cargo.toml), currently from `jsgrrchg/zgx`.
+[`Cargo.toml`](../Cargo.toml), from `zeronsh/zgx` main (zgx#2148).
 
 ## Geometry transitions and context changes
 
@@ -126,8 +141,11 @@ One controller keeps origin, destination and progress, with a 220 ms `out(3)`
 animation. Every view binding derives from the same presented snapshot. A changed
 destination cancels the previous animation and starts from the geometry
 currently presented. An unchanged visual destination retains progress, even
-if natural height above the cap or other metadata changes. Width-only changes
-publish without starting an animation when height and anchors already match.
+if natural height above the cap or other metadata changes. The view publishes
+a new target only when a field it binds or the motion reads changes
+(`Layout.same_target`): the pill's and text's widths, which layout applies
+itself, and the natural height past the cap don't, so resizing a pane runs no
+motion, frame or binding.
 View bindings share a projection of the complete presented snapshot, so changes
 to width or measurement metadata alone do not wake unchanged controls/insets.
 
@@ -166,13 +184,17 @@ A new chat stands near the page's middle, under the title bar. Its top is based
 on `rest`, so typing grows the composer downward without moving that top. If
 the presented box would overflow the page's foot, placement lifts it by the
 required amount. A session anchors at the bottom with the dock's 8-point gap.
-The main chat publishes presented height through `shared.dock_h`; side chats
-publish the same actual-height contract for their transcript clearance.
+The main chat publishes presented height through `shared.dock_h`; side chats'
+`Dock.Dock` publishes their laid-out height for their transcript clearance (they
+take no `on_sizes`). `on_sizes` is called only when one of its fields changes.
 
 While a new chat's model picker is open, a height compensation keeps its chip
 and picker anchored. Closing the picker releases that compensation with a
 260 ms `out(3)` animation. Sending from a new chat deliberately glides to the
-session dock with the same duration. Other route/split-context changes snap;
+session dock with the same duration, and the composer eases from its new-chat
+form to its docked one on the way (no snap). The send records the session it
+opens, so both effects that see the move (the page mode's and the routed
+chat's) know it for a send whichever runs first. Other route/split-context changes snap;
 reduced motion snaps these page movements too. Sidebar/page resizing follows
 layout. The rest height and context settlement use no fixed waiting window.
 
