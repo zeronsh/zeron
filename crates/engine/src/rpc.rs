@@ -3715,19 +3715,30 @@ impl RpcService for EngineRpc {
                     .transpose()
                     .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let p: ChatParams = parse_params(params)?;
+                // Someone reading the chat (this device's app, or another
+                // device) keeps its parked agent for the longer idle window:
+                // its person is likely to write next. Not an agent reading
+                // it through its tools.
+                let viewer = (!matches!(zeron_rpc::caller(), zeron_rpc::Caller::Agent { .. }))
+                    .then(|| self.sessions.retain_viewer(&p.chat_id));
                 if let Some(window) = window {
                     return windowed_doc_messages_stream(self.doc_host.clone(), p.chat_id, window)
                         .await
-                        .map(RpcReply::Stream);
+                        .map(|stream| {
+                            RpcReply::Stream(
+                                stream
+                                    .map(move |frame| {
+                                        let _held = &viewer;
+                                        frame
+                                    })
+                                    .boxed(),
+                            )
+                        });
                 }
                 // An open transcript keeps its chat's checkout diff live (and
                 // discardable) even when the chat is archived; the guard lives
                 // exactly as long as the stream.
                 let interest = self.diff_sync.retain_chat(&p.chat_id);
-                // Another device reading along keeps the chat's agent warm:
-                // its person is likely to write next.
-                let remote = matches!(zeron_rpc::caller(), zeron_rpc::Caller::Peer { .. })
-                    .then(|| self.sessions.retain_remote_viewer(&p.chat_id));
                 let stream = if let Some(known) = known {
                     since_doc_messages_stream(self.doc_host.clone(), p.chat_id, options, known).await?
                 } else if opening_tail {
@@ -3742,7 +3753,7 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(
                     stream
                         .map(move |frame| {
-                            let _held = (&interest, &remote);
+                            let _held = (&interest, &viewer);
                             frame
                         })
                         .boxed(),
