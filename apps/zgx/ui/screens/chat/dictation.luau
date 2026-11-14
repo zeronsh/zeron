@@ -137,7 +137,13 @@ local function start(combo: string?, target: string?)
 		starting, held = false, false
 		from_shortcut:set(false)
 		local why = if type(err) == "table" then tostring(err.message) else tostring(err)
-		if why == "no_model" then route.settings("voice") else say(why) end
+		if why == "no_model" then
+			route.settings("voice")
+		elseif why == "permission_asked" then
+			toast.show { title = ui.t("chat.dictation.allow_microphone"):get(), body = ui.t("chat.dictation.allow_then_hold"):get() }
+		else
+			say(why)
+		end
 	end)
 end
 -- A Command chord may produce no key-up on macOS. Modifier state still

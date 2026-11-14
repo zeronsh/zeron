@@ -31,9 +31,11 @@ fn authorize() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     match unsafe { zeron_microphone_permission() } {
         1 => (),
+        // First use (or, for a dev build, each new signature): macOS asks,
+        // and the page says what to do, not that something failed.
         0 => {
             unsafe { zeron_request_microphone() };
-            return Err("Allow microphone access, then hold to dictate again.".into());
+            return Err("permission_asked".into());
         }
         -2 => return Err("Microphone access requires a packaged Zeron app.".into()),
         _ => return Err(
@@ -83,6 +85,12 @@ struct Service {
     /// `<data>/models`, a folder a model (none: the data folder isn't known).
     models: Option<PathBuf>,
     session: Option<Box<dyn Recording>>,
+    /// Opens a recording; `Err(None)`: the worker is still finishing the
+    /// last one (a cancelled recording's model still loading).
+    open: Box<dyn Fn(PathBuf, Option<String>) -> Result<Box<dyn Recording>, Option<String>>>,
+    /// A start waiting for the worker: its folder, microphone, and when it
+    /// gives up. Meanwhile the bar keeps its starting look.
+    waiting: Option<(PathBuf, Option<String>, Instant)>,
     download: Option<DownloadJob>,
     deadline: Option<Instant>,
     /// When the recording began to listen, and whether its model is slow
@@ -101,6 +109,12 @@ impl Service {
         Self {
             models,
             session: None,
+            open: Box::new(|dir, device| match zeron_voice::Session::start(dir, device) {
+                Ok(session) => Ok(Box::new(session) as Box<dyn Recording>),
+                Err(_) if zeron_voice::busy() => Err(None),
+                Err(e) => Err(Some(e.to_string())),
+            }),
+            waiting: None,
             download: None,
             deadline: None,
             listening: None,
@@ -112,7 +126,7 @@ impl Service {
         }
     }
     fn needs_poll(&self) -> bool {
-        self.session.is_some() || self.download.is_some()
+        self.session.is_some() || self.download.is_some() || self.waiting.is_some()
     }
     fn clear_levels(&mut self) {
         self.meter.reset();
@@ -132,6 +146,7 @@ impl Service {
     }
     fn cancel(&mut self) {
         self.session = None;
+        self.waiting = None;
         // (What was drawn stays until the next recording: the bar is on
         // its way out.)
         self.meter.reset();
@@ -142,6 +157,11 @@ impl Service {
         self.state = json!({"phase":"cancelled", "serial":self.serial});
     }
     fn stop(&mut self) {
+        // Let go before the microphone opened: nothing was recorded.
+        if self.waiting.take().is_some() {
+            self.state = json!({"phase":"cancelled", "serial":self.serial});
+            return;
+        }
         if let Some(session) = &mut self.session {
             session.finish();
             self.meter.freeze(Instant::now());
@@ -198,7 +218,9 @@ impl Service {
         if !zeron_voice::cpu_supported() {
             return Err(zeron_voice::CPU_UNSUPPORTED.into());
         }
-        self.idle()?;
+        if self.needs_poll() || DOWNLOADING.load(Ordering::Acquire) {
+            return Err("Dictation is busy; try again when it finishes".into());
+        }
         // (The page says what to do about it: no words for the composer.)
         if !zeron_voice::installed(&dir) {
             return Err("no_model".into());
@@ -210,9 +232,17 @@ impl Service {
             .map(str::to_owned);
         self.slow = zeron_voice::model_for(&dir).is_some_and(|m| m.cpu_slow)
             && cfg!(not(target_os = "macos"));
-        let session = zeron_voice::Session::start(dir, device).map_err(|e| e.to_string())?;
+        // The worker still finishing the last recording (a tap or a cancel
+        // while its model loaded) isn't an error: this one starts as soon
+        // as it's done, the bar in its starting look meanwhile.
+        match (self.open)(dir.clone(), device.clone()) {
+            Ok(session) => self.session = Some(session),
+            Err(None) => {
+                self.waiting = Some((dir, device, Instant::now() + Duration::from_secs(15)))
+            }
+            Err(Some(e)) => return Err(e),
+        }
         self.listening = None;
-        self.session = Some(Box::new(session));
         self.clear_levels();
         self.serial += 1;
         self.state = json!({"phase":"starting", "serial":self.serial, "hold":args["hold"], "target":args["target"]});
@@ -255,6 +285,19 @@ impl Service {
         Ok(())
     }
     fn poll(&mut self) {
+        if let Some((dir, device, until)) = self.waiting.take() {
+            match (self.open)(dir.clone(), device.clone()) {
+                Ok(session) => self.session = Some(session),
+                Err(None) if Instant::now() < until => self.waiting = Some((dir, device, until)),
+                Err(e) => {
+                    self.state["phase"] = json!("failed");
+                    self.state["error"] = json!(e.unwrap_or_else(|| {
+                        "Dictation is still finishing the last recording. Try again in a moment."
+                            .into()
+                    }));
+                }
+            }
+        }
         let mut done = None;
         if let Some(job) = &self.download {
             while let Ok(event) = job.events.try_recv() {
@@ -630,6 +673,53 @@ mod tests {
         s.poll();
         assert_eq!(s.state["phase"], "final");
         assert_eq!(s.state["text"], "late words");
+    }
+    #[test]
+    fn dictation_pressed_while_the_last_one_finishes_waits_instead_of_failing() {
+        // The model in use, as downloaded (sizes and marker; no weights read).
+        let root = tempfile::tempdir().unwrap();
+        let m = zeron_voice::manifest();
+        let dir = root.path().join(&m.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in &m.files {
+            std::fs::File::create(dir.join(&f.name)).unwrap().set_len(f.size).unwrap();
+        }
+        std::fs::write(dir.join("verified"), m.marker()).unwrap();
+        // The worker finishes a cancelled recording's load for three tries.
+        let tries = Rc::new(Cell::new(0));
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let mut s = Service::new(Some(root.path().to_owned()));
+        let (counted, queued) = (tries.clone(), events.clone());
+        s.open = Box::new(move |_, _| {
+            counted.set(counted.get() + 1);
+            if counted.get() <= 3 {
+                return Err(None);
+            }
+            Ok(Box::new(Fake {
+                events: queued.clone(),
+                cancelled: Rc::default(),
+                stopped: Rc::default(),
+                level: Rc::default(),
+            }) as Box<dyn Recording>)
+        });
+        // Not an error: starting, as long as it takes.
+        assert_eq!(s.start(&json!({})).unwrap()["phase"], "starting");
+        s.poll();
+        s.poll();
+        assert_eq!(s.state["phase"], "starting");
+        assert!(s.session.is_none());
+        s.poll();
+        assert!(s.session.is_some());
+        events.borrow_mut().push_back(Event::Listening);
+        s.poll();
+        assert_eq!(s.state["phase"], "listening");
+        // Let go before the microphone opened: nothing recorded, no error.
+        let mut s = Service::new(Some(root.path().to_owned()));
+        s.open = Box::new(|_, _| Err(None));
+        s.start(&json!({})).unwrap();
+        s.stop();
+        assert_eq!(s.state["phase"], "cancelled");
+        assert!(!s.needs_poll());
     }
     #[test]
     fn dictation_without_a_data_folder_says_so_and_never_panics() {

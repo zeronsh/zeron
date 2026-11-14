@@ -2973,6 +2973,8 @@
       }
     },
     "dictation": {
+      "allow_microphone": "允许麦克风访问",
+      "allow_then_hold": "然后再次按住以听写。",
       "failed": "听写已停止",
       "hold": "按住听写",
       "hold_hint": "说话时请按住麦克风或快捷键。",
