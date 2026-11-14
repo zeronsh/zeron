@@ -35,8 +35,12 @@ pub(super) async fn models(
         use tokio::io::AsyncReadExt;
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let (mut stdout, mut stderr) = (stdout.take(64 * 1024 * 1024), stderr.take(65536));
-        let (read_out, read_err) =
-            tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err),);
+        let read_err = async {
+            stderr.read_to_end(&mut err).await?;
+            // Past the cap, keep draining: a full pipe would stall the listing.
+            tokio::io::copy(stderr.get_mut(), &mut tokio::io::sink()).await
+        };
+        let (read_out, read_err) = tokio::join!(stdout.read_to_end(&mut out), read_err);
         read_out?;
         read_err?;
         Ok::<_, HarnessError>((child.wait().await?, out, err))
