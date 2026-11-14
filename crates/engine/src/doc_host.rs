@@ -6799,9 +6799,15 @@ impl DocHost {
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
         let repos = self.inner.repos.get()?;
         let path = Path::new(cwd);
-        let identity = repos.checkout_identity(path).await.ok()?;
-        let branch = repos.current_branch(path).await.ok()?;
-        let head_sha = repos.head_sha(path).await.ok().flatten();
+        // Three `git` processes: side by side, not one after another.
+        let (identity, branch, head_sha) = tokio::join!(
+            repos.checkout_identity(path),
+            repos.current_branch(path),
+            repos.head_sha(path),
+        );
+        let identity = identity.ok()?;
+        let branch = branch.ok()?;
+        let head_sha = head_sha.ok().flatten();
         Some(ConversationSourceContext {
             checkout_id: identity.id,
             repo_root: identity.root.to_string_lossy().into_owned(),
@@ -6813,10 +6819,13 @@ impl DocHost {
     }
 
     /// Every fresh harness dispatch crosses this boundary, including
-    /// steer/input fallbacks and crash recovery. Capture immediately before
-    /// dispatch so the conversation records the checkout the harness will
-    /// actually observe, rather than whichever checkout state was current on
-    /// an earlier turn.
+    /// steer/input fallbacks and crash recovery. The conversation records
+    /// the checkout the harness will actually observe, rather than whichever
+    /// checkout state was current on an earlier turn: read as the dispatch
+    /// starts, beside it rather than before it. Its `git` processes took
+    /// ~25 ms (M5 Max; more on slower Macs) in front of every agent start,
+    /// and the agent reads nothing of its checkout for far longer than that
+    /// (its own startup is ~250 ms before its first request).
     pub(crate) async fn dispatch_with_source_context(
         &self,
         sessions: &SessionsEngine,
@@ -6825,15 +6834,19 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        if let Some(workspace) = self.workspace()
-            && let Some(context) = self.capture_source_context(&request.cwd).await
-            && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
-        {
-            tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
-        }
-        sessions
-            .dispatch(chat_id, harness, request, message_id)
-            .await
+        let cwd = request.cwd.clone();
+        let stamp = async {
+            if let Some(workspace) = self.workspace()
+                && let Some(context) = self.capture_source_context(&cwd).await
+                && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
+            {
+                tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+            }
+            tracing::debug!(target: "first_word", chat = %chat_id, "source context: stamped");
+        };
+        let dispatch = sessions.dispatch(chat_id, harness, request, message_id);
+        let ((), dispatched) = tokio::join!(stamp, dispatch);
+        dispatched
     }
 
     async fn materialize_worktree(
