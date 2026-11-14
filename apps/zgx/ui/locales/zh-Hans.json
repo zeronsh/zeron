@@ -2298,8 +2298,7 @@
       "dictation": {
         "label": "听写",
         "description": "按住麦克风说话,松开即可。发送前可以编辑文字。",
-        "needs_download": "开启后将下载 {total} 的语音模型。",
-        "downloading": "正在下载 · {done} / {total}。关闭以取消。"
+        "needs_download": "开启后将下载 {total} 的语音模型。"
       },
       "shortcut": {
         "label": "快捷键",
@@ -2319,6 +2318,7 @@
         "title": "语音模型",
         "about": "{size} · {n} 种语言",
         "unsupported": "这台电脑的处理器无法运行语音模型（需要 AVX2）。",
+        "downloading": "正在下载 · {done} / {total}",
         "about_slow": "{size} · {n} 种语言 · 在这台电脑上较慢",
         "mb": "{n} MB",
         "gb": "{n} GB",
