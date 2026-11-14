@@ -652,9 +652,103 @@ local function thought_of(m: Message, now: () -> Message, draft: State<Draft>?):
 	}
 end
 
+-- A long reply's blocks are windowed, as a long text's are (ds/markdown's
+-- `window`): in runs of about RUN blocks, each run built while its reach
+-- (the run and RUN_OVERSCAN either side) touches the view; away, a box of its
+-- last height (a guess until it has been laid out). A reply of a thousand steps,
+-- each a text and a tool (ademark's A11 thread), otherwise built all its
+-- blocks' rows, texts and tools, every time it opened, though its end alone
+-- shows. Only a reply of more than LONG_REPLY blocks, or one being written.
+local RUN = 32
+local RUN_MOST = 64
+local RUN_OVERSCAN = 600
+local LONG_REPLY = 48
+-- How much of a long reply's end is built as it's first made, before the
+-- view has said what's near it (its runs' heights, kept or guessed, from its
+-- end): the view a transcript opens on, at its end, and RUN_OVERSCAN past
+-- it, so the first frame shows its end whole and nothing near it is built a
+-- frame later. (A view not laid out yet: about a tall window's.)
+local OPENING_VIEW = 1000
+-- What windowed runs keep by their reply and first block (`<id>:<block id>`):
+-- each one's height as last laid out, and whether it was built when last
+-- judged, so a reply opened again holds its runs at their heights and builds
+-- the same ones. Plain tables a key at a time (ds/markdown's `kept`, the oldest half
+-- going as they fill).
+local KEPT_RUNS = 8192
+local function kept_runs<T>(): { get: (string) -> T?, set: (string, T) -> () }
+	local now: { [string]: T }, older: { [string]: T }, count = {}, {}, 0
+	local function set(k: string, value: T)
+		if now[k] == nil then
+			if count >= KEPT_RUNS then
+				now, older, count = {}, now, 0
+			end
+			count += 1
+		end
+		now[k] = value
+	end
+	return {
+		get = function(k: string): T?
+			local value = now[k]
+			if value == nil then
+				value = older[k]
+				if value ~= nil then
+					set(k, value)
+				end
+			end
+			return value
+		end,
+		set = set,
+	}
+end
+local RUN_HEIGHTS = kept_runs() :: { get: (string) -> number?, set: (string, number) -> () }
+local RUN_NEAR = kept_runs() :: { get: (string) -> boolean?, set: (string, boolean) -> () }
+
+-- About how tall a block will be before it's laid out: a text's lines at a
+-- reply's width (about 85 characters a line) and its code blocks by their
+-- lines (ds/markdown's `estimate`), a group of tools its summary's line.
+local function guess_block(b: Block): number
+	if b.kind == "text" then
+		local h, chars, code, fenced = 0, 0, 0, false
+		local function paragraph()
+			if chars > 0 then
+				h += math.ceil(chars / 85) * 24 + 16
+				chars = 0
+			end
+		end
+		for line in string.gmatch((b.text or "") .. "\n", "(.-)\n") do
+			if string.match(line, "^%s*```") then
+				if fenced then
+					h += code * 19 + 56 + 16
+					code = 0
+				else
+					paragraph()
+				end
+				fenced = not fenced
+			elseif fenced then
+				code += 1
+			elseif string.match(line, "^%s*$") then
+				paragraph()
+			else
+				chars += #line + 1
+			end
+		end
+		paragraph()
+		return math.max(24, h - 16)
+	elseif b.kind == "tools" or b.kind == "work" then
+		return if b.live then 26 * math.max(1, #(b.tools or {})) else 26
+	end
+	return 240
+end
+local function guess_run(blocks: { Block }): number
+	local h = 0
+	for _, b in blocks do
+		h += guess_block(b) + 12
+	end
+	return math.max(0, h - 12)
+end
+
 local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
-	local shown = ui.computed(list)
-	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
+	local function block(b: Block, brow: State<Block>): Node
 		if b.kind == "tools" or b.kind == "work" then
 			return Activity {
 				key = `{m.id}:{b.id}`,
@@ -767,9 +861,219 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
 			group = `reply:{m.id}`,
 		}
+	end
+	local function key(b: Block): string
+		return b.id
+	end
+	-- (A reply being written may grow long as it's watched: windowed from
+	-- the start, one run while it's short.)
+	if not view or (#(m.blocks or {}) <= LONG_REPLY and not m.streaming) then
+		return ui.each(ui.computed(list), function(b: Block, _i: number, brow: State<Block>): Node
+			return block(b, brow)
+		end, { key = key, w_full = true, gap = "$space.3" })
+	end
+	local w = view :: View
+	-- Its runs. Where one ends is said by its blocks' ids alone (a block
+	-- whose id falls on RUN starts a run; none runs past RUN_MOST), so blocks
+	-- coming before or after (the engine's opening tail, then the whole reply;
+	-- a reply being written) leave the runs they don't reach as they were.
+	-- Each is kept (its very table) while its blocks are the same ones, so
+	-- only a run whose blocks changed is looked at again; and keyed by its
+	-- first block.
+	local starts: { [string]: boolean } = {}
+	local function starts_run(id: string): boolean
+		local yes = starts[id]
+		if yes == nil then
+			local h = 0
+			for i = 1, #id do
+				h = (h * 31 + string.byte(id, i)) % 1000003
+			end
+			yes = h % RUN == 0
+			starts[id] = yes
+		end
+		return yes
+	end
+	type Run = { key: string, blocks: { Block } }
+	local made: { [string]: Run } = {}
+	-- The runs within the opening's reach of its end (by their heights, kept or
+	-- guessed), as they last stood: one made there is built from the start.
+	local reach: { [string]: boolean } = {}
+	local runs = ui.computed(function(): { Run }
+		local all = list()
+		local out: { Run } = {}
+		local now_made: { [string]: Run } = {}
+		local function take(from: number, to: number)
+			local first = all[from].id
+			local was = made[first]
+			local same = was ~= nil and #was.blocks == to - from + 1
+			if same then
+				for i = from, to do
+					if (was :: Run).blocks[i - from + 1] ~= all[i] then
+						same = false
+						break
+					end
+				end
+			end
+			local run = if same then was :: Run else { key = first, blocks = table.move(all, from, to, 1, {}) }
+			table.insert(out, run)
+			now_made[first] = run
+		end
+		local from = 1
+		for i = 2, #all do
+			if i - from >= RUN_MOST or starts_run(all[i].id) then
+				take(from, i - 1)
+				from = i
+			end
+		end
+		if #all >= from then
+			take(from, #all)
+		end
+		made = now_made
+		reach = {}
+		local list_el = w.view:peek()
+		local opening = (if list_el and list_el.height and list_el.height > 0 then list_el.height else OPENING_VIEW) + RUN_OVERSCAN
+		local h = 0
+		for i = #out, 1, -1 do
+			if h > opening then
+				break
+			end
+			reach[out[i].key] = true
+			h += RUN_HEIGHTS.get(`{m.id}:{out[i].key}`) or guess_run(out[i].blocks)
+		end
+		return out
+	end)
+	-- A find's current match, if it's in this reply: the key of its text.
+	local found = if w.find then w.find("") else nil
+	local function current_key(): string?
+		local c = if found then found.current() else nil
+		return if c then c.key else nil
+	end
+	-- Each run's judge, by its key: all judged again as what holds one
+	-- built changes (a find's current match moving, the reply's writing
+	-- ending); each judges itself as it comes near the view or goes.
+	local judges: { [string]: () -> () } = {}
+	ui.effect(function()
+		current_key()
+		local _ = now().streaming
+		for _, judge in judges do
+			judge()
+		end
+	end)
+	return ui.each(runs, function(run: Run, _i: number, row: State<any>): Node
+		local k = `{m.id}:{run.key}`
+		local was_near = RUN_NEAR.get(k)
+		-- Built if it was when last judged (a reply opened again where it was
+		-- read), and if it's near the reply's end (where a transcript opens,
+		-- and where a reply being written grows); else held at its height
+		-- until the view says it's near.
+		local near = ui.use_state(was_near == true or reach[run.key] == true)
+		local held = ui.use_state(RUN_HEIGHTS.get(k) or guess_run(run.blocks))
+		local r = ui.ref()
+		-- Built again after being held: its first layout makes up the
+		-- difference to the height it was held at, as ds/markdown's runs do.
+		local returning = false
+		-- Near the view, as zgx says (`on_visible`, its box grown by
+		-- `visible_margin`): nil until its first layout.
+		local seen: boolean? = nil
+		local function judge()
+			if seen == nil then
+				return
+			end
+			-- (Always built: the last run of a reply being written, where its
+			-- words arrive; and the run holding a find's current match.)
+			local all = runs:peek()
+			local live = now().streaming == true and #all > 0 and all[#all].key == run.key
+			local c = current_key()
+			local holds = false
+			if c then
+				for _, b in row:peek().blocks do
+					if c == `{m.id}:{b.id}` then
+						holds = true
+						break
+					end
+				end
+			end
+			local shows = live or holds or seen :: boolean
+			if RUN_NEAR.get(k) ~= shows then
+				RUN_NEAR.set(k, shows)
+			end
+			if near:peek() ~= shows then
+				returning = shows
+				near:set(shows)
+			end
+		end
+		judges[run.key] = judge
+		ui.on_cleanup(function()
+			if judges[run.key] == judge then
+				judges[run.key] = nil
+			end
+		end)
+		return ui.div {
+			ref = r,
+			w_full = true,
+			min_w = 0,
+			visible_margin = RUN_OVERSCAN,
+			on_visible = function(visible: boolean)
+				-- (Built as it was made, and not near at its first layout: kept
+				-- until the view has been near it and gone. Let go of at once,
+				-- it took a frame of its own after the one the reply opened in.)
+				if seen == nil and not visible and near:peek() then
+					seen = false
+					return
+				end
+				seen = visible
+				judge()
+			end,
+			on_resize = function(size: { w: number, h: number })
+				local before = held:peek()
+				local back = returning
+				returning = false
+				local last_height = RUN_HEIGHTS.get(k)
+				if last_height == nil or math.abs(size.h - last_height) >= 0.5 then
+					RUN_HEIGHTS.set(k, size.h)
+				end
+				if math.abs(size.h - before) < 0.5 then
+					return
+				end
+				held:set(size.h)
+				if not back or (w.at_end and w.at_end:peek()) then
+					return
+				end
+				-- Above the view's top (it came in from there): the view moves
+				-- with it, so what shows doesn't (ds/markdown's runs, the same).
+				local el, list_el = r:peek(), w.view:peek()
+				local outer = if w.row then w.row:peek() else nil
+				local row_above = outer ~= nil
+					and list_el ~= nil
+					and outer.y ~= nil
+					and outer.height ~= nil
+					and list_el.y ~= nil
+					and (outer.y :: number) + (outer.height :: number) <= (list_el.y :: number)
+				if el and list_el and el.y and list_el.y and (el.y :: number) < (list_el.y :: number) and not row_above then
+					w.offset:set(math.max(0, w.offset:peek() + size.h - before))
+				end
+			end,
+			ui.presence(function(): string
+				return if near:get() then "built" else "held"
+			end, function(kind: string): Node
+				if kind == "built" then
+					return ui.each(ui.computed(function(): { Block }
+						return row:get().blocks
+					end), function(b: Block, _j: number, brow: State<Block>): Node
+						return block(b, brow)
+					end, { key = key, w_full = true, gap = "$space.3" })
+				end
+				return ui.div {
+					w_full = true,
+					h = function(): number
+						return held:get()
+					end,
+				}
+			end, { w_full = true, min_w = 0 }),
+		}
 	end, {
-		key = function(b: Block): string
-			return b.id
+		key = function(run: Run): string
+			return run.key
 		end,
 		w_full = true,
 		gap = "$space.3",
