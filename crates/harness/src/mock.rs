@@ -85,6 +85,83 @@ fn longthread_events(count: usize) -> Vec<AgentEvent> {
     events
 }
 
+/// The seconds a `/stream [SECONDS]` prompt asks for (180 when bare).
+fn stream_seconds(prompt: &str) -> Option<u64> {
+    let rest = prompt.trim().strip_prefix("/stream")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let seconds = rest.trim().parse().unwrap_or(180);
+    Some(seconds.clamp(1, 3600))
+}
+
+/// How often a `/stream` reply's chunks come, and how many characters each
+/// holds: ademark's A7 replay, 80 tokens a second in 50 ms chunks (four
+/// tokens of about four characters).
+const STREAM_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+const STREAM_CHARS: usize = 16;
+
+/// The `/stream` reply's text: ademark's A7 stream (bench/replay's
+/// `stream-1`), one reply of text, code blocks and a diff block, as long as
+/// `seconds` of chunks at its pace.
+fn stream_text(seconds: u64) -> String {
+    let want = seconds as usize * (1000 / STREAM_EVERY.as_millis() as usize) * STREAM_CHARS;
+    let mut text = String::with_capacity(want + 512);
+    let mut n = 0;
+    while text.len() < want {
+        n += 1;
+        text.push_str(&format!(
+            "Section {n}. The invoice totals are summed per customer before the \
+             discount applies, so `invoiceTotal` stays the one place that rounds. \
+             The reports read the same totals, which keeps the **monthly** view and \
+             the export in step.\n\n"
+        ));
+        if n % 3 == 0 {
+            text.push_str(concat!(
+                "```ts\n",
+                "export function invoiceTotal(invoice: Invoice): number {\n",
+                "  const lines = invoice.lines.map((l) => l.quantity * l.unitCents);\n",
+                "  return Math.round(lines.reduce((a, b) => a + b, 0));\n",
+                "}\n",
+                "```\n\n",
+            ));
+        }
+        if n == 7 {
+            text.push_str(concat!(
+                "```diff\n",
+                "-  return total;\n",
+                "+  return Math.round(total);\n",
+                "```\n\n",
+            ));
+        }
+    }
+    text
+}
+
+/// The `/stream` reply, paced: `STREAM_CHARS` characters every
+/// `STREAM_EVERY`, then the end of the turn.
+fn stream_events(seconds: u64) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let chars: Vec<char> = stream_text(seconds).chars().collect();
+    let chunks: Vec<String> = chars
+        .chunks(STREAM_CHARS)
+        .map(|c| c.iter().collect())
+        .collect();
+    futures::stream::iter(chunks)
+        .then(|text| async move {
+            tokio::time::sleep(STREAM_EVERY).await;
+            Ok(AgentEvent::TextDelta { text })
+        })
+        .chain(futures::stream::once(async {
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            })
+        }))
+        .boxed()
+}
+
 /// The message a `/error <message>` prompt fails the run with.
 fn scripted_error(prompt: &str) -> Option<&str> {
     let message = prompt.trim().strip_prefix("/error ")?.trim();
@@ -455,6 +532,12 @@ impl Harness for MockHarness {
         if let Some(count) = longthread_count(&request.prompt) {
             let events = longthread_events(count).into_iter().map(Ok);
             return Ok(futures::stream::iter(events).boxed());
+        }
+        // `/stream [SECONDS]`: ademark's A7 stream, one reply of text, code
+        // and a diff at 80 tokens a second in 50 ms chunks, for SECONDS (180
+        // when bare), for what a window spends while agents stream.
+        if let Some(seconds) = stream_seconds(&request.prompt) {
+            return Ok(stream_events(seconds));
         }
         if let Some(message) = scripted_error(&request.prompt) {
             let events = vec![
@@ -1425,6 +1508,17 @@ mod tests {
         assert_eq!(fanout_count("/fanout 9000"), Some(200));
         assert_eq!(fanout_count("/fanouts"), None);
         assert_eq!(fanout_count("Walk me through the pipeline"), None);
+    }
+
+    #[test]
+    fn stream_is_a7s_reply_at_its_pace() {
+        assert_eq!(stream_seconds("/stream"), Some(180));
+        assert_eq!(stream_seconds(" /stream 30 "), Some(30));
+        assert_eq!(stream_seconds("/streams"), None);
+        let text = stream_text(10);
+        // 10 s of 16-character chunks every 50 ms, and a paragraph more.
+        assert!((3200..3800).contains(&text.len()), "{}", text.len());
+        assert!(text.contains("```ts") && text.contains("```diff"));
     }
 
     #[test]
