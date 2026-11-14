@@ -249,42 +249,62 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 	return own
 end
 
+-- The words into the draft, at its caret. Mid-composition (an IME's) they
+-- wait for it to end: inserting would throw it away.
+local function composing(): boolean
+	local ok, yes = pcall(ui.call_sync, "dictation.composing")
+	return ok and yes == true
+end
+local function land(p: any, text: string)
+	if pending ~= p then return end
+	if composing() then
+		if not p.waiting then
+			p.waiting = true
+			ui.after(100, function()
+				p.waiting = false
+				land(p, text)
+			end)
+		end
+		return
+	end
+	local ok = valid(p)
+	pending = nil
+	if not ok then op("cancel") return end
+	if not string.find(text, "%S") then
+		toast.show { title = ui.t("chat.dictation.no_speech"):get(), tone = "warning" }
+		op("cancel")
+		return
+	end
+	-- At the caret as the draft stands now (typing on was fine). One
+	-- paste is one native undo operation, selection replaced included.
+	local el = p.binding.editor:peek()
+	local now = p.binding.value:peek()
+	local a, b = el:selection_bytes()
+	a, b = math.min(a or #now, b or #now), math.max(a or #now, b or #now)
+	local applied = el:replace_selection(text)
+	if applied and p.send then
+		-- (The paste reaches the draft's state after this. Retiring the words
+		-- waits too: it runs the state's effect again, which would stop the
+		-- timer.)
+		local expected = string.sub(now, 1, a) .. text .. string.sub(now, b + 1)
+		ui.after(0, function()
+			if binding == p.binding and binding.key() == p.key and not binding.blocked() and binding.value:peek() == expected then
+				binding.send()
+			end
+			op("cancel")
+		end)
+		return
+	end
+	op("cancel") -- The words are in the draft: nothing keeps them.
+end
+
 ui.effect(function()
 	local s = M.state:get()
 	local p = pending
 	if p == nil then return end
 	if s.serial ~= p.serial then M.cancel() return end
 	if s.phase == "final" then
-		local ok = valid(p)
-		pending = nil
-		if not ok then op("cancel") return end
-		local text = s.text or ""
-		if not string.find(text, "%S") then
-			toast.show { title = ui.t("chat.dictation.no_speech"):get(), tone = "warning" }
-			op("cancel")
-			return
-		end
-		-- At the caret as the draft stands now (typing on was fine). One
-		-- paste is one native undo operation, selection replaced included.
-		local el = p.binding.editor:peek()
-		local now = p.binding.value:peek()
-		local a, b = el:selection_bytes()
-		a, b = math.min(a or #now, b or #now), math.max(a or #now, b or #now)
-		local applied = el:replace_selection(text)
-		if applied and p.send then
-			-- (The paste reaches the draft's state after this effect. Retiring
-			-- the words waits too: it runs this effect again, which would stop
-			-- the timer.)
-			local expected = string.sub(now, 1, a) .. text .. string.sub(now, b + 1)
-			ui.after(0, function()
-				if binding == p.binding and binding.key() == p.key and not binding.blocked() and binding.value:peek() == expected then
-					binding.send()
-				end
-				op("cancel")
-			end)
-			return
-		end
-		op("cancel") -- The words are in the draft: nothing keeps them.
+		land(p, s.text or "")
 	elseif s.phase == "failed" and s.late then
 		-- Overdue, not over: the words still land if they come.
 		if not p.told then
