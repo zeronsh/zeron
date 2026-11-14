@@ -17,7 +17,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -153,7 +152,7 @@ struct Entry {
 struct HomeEntry {
     index: Option<Arc<HomeIndex>>,
     /// A walk is running; `cancel` stops it when the index is dropped.
-    building: Option<Arc<AtomicBool>>,
+    building: Option<Arc<crate::home_index::WalkCancel>>,
     last_used: Option<Instant>,
     warmed: bool,
 }
@@ -468,7 +467,7 @@ impl WorkspaceSearch {
             .as_ref()
             .is_none_or(|index| index.built.elapsed() >= HOME_REFRESH);
         if stale && home.building.is_none() {
-            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel = Arc::new(crate::home_index::WalkCancel::default());
             home.building = Some(cancel.clone());
             let inner = Arc::downgrade(&self.inner);
             let root = root.to_path_buf();
@@ -500,7 +499,7 @@ impl WorkspaceSearch {
             return false;
         }
         if let Some(cancel) = home.building.take() {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel.cancel();
         }
         *home = HomeEntry::default();
         self.inner.home_built.notify_all();
@@ -557,7 +556,7 @@ impl WorkspaceSearch {
     }
 }
 
-fn build_home(inner: Weak<Inner>, root: PathBuf, cancel: Arc<AtomicBool>) {
+fn build_home(inner: Weak<Inner>, root: PathBuf, cancel: Arc<crate::home_index::WalkCancel>) {
     let started = Instant::now();
     let index = HomeIndex::build(&root, &cancel);
     let Some(inner) = inner.upgrade() else {
