@@ -242,6 +242,7 @@ end
 local keep_choices = {
 	{ value = 0, key = "settings.voice.keep.instant" },
 	{ value = 15, key = "settings.voice.keep.s15" },
+	{ value = 60, key = "settings.voice.keep.m1" },
 	{ value = 300, key = "settings.voice.keep.m5" },
 	{ value = 900, key = "settings.voice.keep.m15" },
 	{ value = 3600, key = "settings.voice.keep.h1" },
