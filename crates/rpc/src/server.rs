@@ -234,6 +234,30 @@ pub async fn serve_ws_listener_scoped(listener: TcpListener, service: Arc<dyn Rp
 pub(crate) struct AgentGuard {
     pub(crate) inner: Arc<dyn RpcService>,
     pub(crate) chat: Option<String>,
+    /// `chat` is verified (the engine minted the caller's credential for
+    /// it), so the methods that act on the calling chat act on it alone.
+    pub(crate) pinned: bool,
+}
+
+/// Methods that act on the calling chat, named by `chatId`: for a pinned
+/// agent ([`agent_service`]), only its own.
+const CALLING_CHAT_METHODS: [&str; 3] = [
+    crate::methods::PUBLISH_VISUAL,
+    crate::methods::PUBLISH_IMAGE,
+    crate::methods::AWAIT_BACKGROUND,
+];
+
+/// The service as one run's agent reaches it: only [`crate::agent_allowed`]
+/// methods, served as [`crate::Caller::Agent`] for `chat` — which, unlike
+/// the WS handshake's claimed `x-zeron-chat`, the engine itself vouches for
+/// (the run's own MCP token named it). What acts on "the calling chat"
+/// ([`CALLING_CHAT_METHODS`]) is refused for any other chat.
+pub fn agent_service(inner: Arc<dyn RpcService>, chat: String) -> Arc<dyn RpcService> {
+    Arc::new(AgentGuard {
+        inner,
+        chat: Some(chat),
+        pinned: true,
+    })
 }
 
 #[async_trait::async_trait]
@@ -243,6 +267,15 @@ impl RpcService for AgentGuard {
             tracing::warn!(method, chat = ?self.chat, "rpc: refused an agent's call outside its scope");
             return Err(RpcError::Failed(format!(
                 "{method} isn't open to agents: only the person can do that, in Zeron"
+            )));
+        }
+        if self.pinned
+            && CALLING_CHAT_METHODS.contains(&method)
+            && params.get("chatId").and_then(serde_json::Value::as_str) != self.chat.as_deref()
+        {
+            tracing::warn!(method, chat = ?self.chat, "rpc: refused an agent's call on another chat");
+            return Err(RpcError::Failed(format!(
+                "{method} acts on the calling chat only"
             )));
         }
         let caller = crate::Caller::Agent { chat: self.chat.clone() };
@@ -331,7 +364,7 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
     });
 
     let service: Arc<dyn RpcService> = match scope.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
-        Some(chat) => Arc::new(AgentGuard { inner: service, chat }),
+        Some(chat) => Arc::new(AgentGuard { inner: service, chat, pinned: false }),
         None => service,
     };
     serve_connection(service, out_tx, in_rx).await;

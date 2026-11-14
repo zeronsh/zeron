@@ -2653,6 +2653,7 @@ async fn mcp_injection_all_acp_harnesses_new_resume_and_fallback() {
                     ("ZERON_IPC_PORT".into(), "27699".into()),
                 ]
                 .into(),
+                http: None,
             });
             let (controls, _steer, _token) = controls();
             let mut stream = harness.run(req, controls).await.unwrap();

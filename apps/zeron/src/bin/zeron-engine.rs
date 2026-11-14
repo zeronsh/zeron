@@ -2,8 +2,9 @@
 //! own ("Zeron Engine" in Activity Monitor): the app starts it and attaches;
 //! sessions keep running with the app closed. Without the UI linked in.
 //!
-//! It also answers what the engine runs its own executable for: `mcp` (the
-//! Zeron MCP server injected into agents) and `--noop-browser` (browser
+//! It also answers what the engine runs its own executable for: `mcp-proxy`
+//! (an agent's Zeron MCP tools on stdio, served by the engine), `mcp` (the
+//! standalone Zeron MCP server) and `--noop-browser` (browser
 //! suppression for agents' sign-in flows). And it is the engine helper of an
 //! interface that doesn't link the engine (the zgx app): every `zeron`
 //! subcommand that runs the engine's code (`headless`, `login`, `status`,
@@ -17,6 +18,9 @@ use zeron_cli::{Engines, Launch};
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("--noop-browser") => Ok(()),
+        // An agent's Zeron MCP tools on stdio, forwarded to the engine's own
+        // endpoint. First, before any engine setup: it must stay tiny.
+        Some("mcp-proxy") => zeron_mcp::proxy::run(),
         Some("--version" | "-V") => {
             println!("zeron-engine {}", zeron_update::current_version());
             Ok(())

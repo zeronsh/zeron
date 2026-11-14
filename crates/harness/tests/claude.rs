@@ -243,6 +243,7 @@ async fn a_side_chats_only_run_launches_without_subagent_tools() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        http: None,
     };
     let mut tools = Vec::new();
     for side_chats_only in [false, true] {

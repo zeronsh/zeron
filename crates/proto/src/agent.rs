@@ -666,7 +666,12 @@ impl std::fmt::Debug for RunRequest {
 /// of whatever the user configured. Each driver spells it in its own dialect
 /// (Claude `--mcp-config`, ACP `session/new` `mcpServers`, Codex
 /// `mcp_servers.*` config overrides).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Zeron's own server also carries [`Self::http`]: the engine serves its
+/// tools itself, over loopback Streamable HTTP, so a driver whose agent
+/// speaks HTTP MCP adds that and starts no process. `command`/`args`/`env`
+/// then name a small stdio-to-HTTP proxy for agents that only speak stdio.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServer {
     pub name: String,
@@ -675,9 +680,78 @@ pub struct McpServer {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// The same server over Streamable HTTP, for agents that speak it.
+    /// Additive + serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<McpHttp>,
+}
+
+/// Values of these keys are credentials: never printed.
+const SECRET_ENV: [&str; 1] = [McpServer::TOKEN_ENV];
+
+/// Hand-written so a `{:?}` never prints a run's MCP token.
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env: std::collections::BTreeMap<&str, &str> = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                let value = if SECRET_ENV.contains(&key.as_str()) {
+                    "<redacted>"
+                } else {
+                    value.as_str()
+                };
+                (key.as_str(), value)
+            })
+            .collect();
+        f.debug_struct("McpServer")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &env)
+            .field("http", &self.http)
+            .finish()
+    }
+}
+
+/// An MCP server's Streamable HTTP endpoint: its URL and the headers every
+/// request carries (the run's bearer token).
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpHttp {
+    pub url: String,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+impl McpHttp {
+    /// The bearer token of an `Authorization: Bearer …` header, if any.
+    pub fn bearer_token(&self) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .and_then(|(_, value)| value.strip_prefix("Bearer "))
+    }
+}
+
+/// Header names only: the values are credentials.
+impl std::fmt::Debug for McpHttp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpHttp")
+            .field("url", &self.url)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl McpServer {
+    /// The stdio proxy's endpoint URL ([`Self::http`]'s, for agents that
+    /// only speak stdio).
+    pub const URL_ENV: &'static str = "ZERON_MCP_URL";
+    /// The stdio proxy's bearer token: the run's own, scoped to its chat and
+    /// revoked when the run ends.
+    pub const TOKEN_ENV: &'static str = "ZERON_MCP_TOKEN";
+
     /// Set to `1` on Zeron's own server when its host turned the provider's
     /// native subagents off (Settings → Providers) and the chat has no
     /// parent: the agent delegates through this server's side chats instead,

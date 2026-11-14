@@ -289,6 +289,9 @@ struct Inner {
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
+    /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
+    /// runs get a token for it instead of a `zeron mcp` process.
+    mcp_endpoint: Mutex<Option<Arc<zeron_mcp::http::McpHttpServer>>>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -335,6 +338,10 @@ struct Inner {
     plugins: OnceLock<crate::plugins::Plugins>,
 }
 
+
+/// The engine binary's stdio-to-HTTP MCP forwarder ([`zeron_mcp::proxy`]).
+pub const MCP_PROXY_SUBCOMMAND: &str = "mcp-proxy";
+
 /// Turn-start hook: called with `(chat_id, cwd)`.
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
@@ -368,6 +375,7 @@ impl SessionsEngine {
                 ipc_ready: tokio::sync::Notify::new(),
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
+                mcp_endpoint: Mutex::new(None),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -451,6 +459,28 @@ impl SessionsEngine {
         *lock(&self.inner.ipc_token_file) = Some(path);
     }
 
+    /// Serve Zeron's MCP tools to this engine's agents from the engine itself
+    /// ([`zeron_mcp::http`]), over `service` (the engine's RPC, reached as
+    /// each run's agent: [`zeron_rpc::agent_service`]). Runs started after
+    /// this get a token for it rather than a `zeron mcp` process.
+    /// `service` holds this engine, and the endpoint lives here: retirement
+    /// severs that ([`Self::clear_doc_host`]).
+    pub async fn serve_mcp_endpoint(
+        &self,
+        service: Arc<dyn zeron_rpc::RpcService>,
+    ) -> std::io::Result<()> {
+        let factory: zeron_mcp::http::ToolsFactory = Arc::new(move |origin: &zeron_mcp::Origin| {
+            let chat = origin.chat_id.clone().unwrap_or_default();
+            Arc::new(zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+                zeron_rpc::memory_client(zeron_rpc::agent_service(service.clone(), chat)),
+                origin.clone(),
+            ))))
+        });
+        let endpoint = zeron_mcp::http::McpHttpServer::bind(factory).await?;
+        *lock(&self.inner.mcp_endpoint) = Some(Arc::new(endpoint));
+        Ok(())
+    }
+
     /// Wire the plugins service: local runs get its native MCP servers.
     pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
         let _ = self.inner.plugins.set(plugins);
@@ -471,6 +501,8 @@ impl SessionsEngine {
     /// already treats a missing doc host as "not wired".
     pub fn clear_doc_host(&self) {
         lock(&self.inner.doc_host).take();
+        // The MCP endpoint's tools hold the engine's RPC, which holds this.
+        lock(&self.inner.mcp_endpoint).take();
     }
 
     /// Bind generated-image intake to the same profile store used by attachment RPCs.
@@ -2825,38 +2857,38 @@ impl Inner {
             })
     }
 
-    /// Zeron's own MCP server for a run of `chat_id`: this binary's `zeron
-    /// mcp` subcommand, dialing the engine's IPC port and stamped with the
+    /// Zeron's own MCP server for a run of `chat_id`, stamped with the
     /// originating chat + device so the agent's side chats link back here.
-    /// None when the engine serves no port or its executable is unknown.
+    /// None when the engine serves neither its MCP endpoint nor an IPC port.
     ///
-    /// The bearer is the agent-scoped one (`{data_dir}/ipc-token-agent`): it
-    /// reaches what the MCP tools need and nothing that decides, signs,
-    /// updates or hands out credentials ([`zeron_rpc::agent_allowed`]).
+    /// With the engine's MCP endpoint up ([`SessionsEngine::serve_mcp_endpoint`]),
+    /// the engine serves the tools itself: the run gets a token of its own
+    /// ([`zeron_mcp::http::Grant`], returned beside the server and held for
+    /// as long as the run lives), naming this chat and revoked when the run
+    /// ends. Agents that speak HTTP MCP get the endpoint
+    /// ([`zeron_proto::McpServer::http`]) and start no process; the rest get
+    /// this binary's `mcp-proxy`, a few-MB stdio-to-HTTP forwarder. The token
+    /// reaches what the agent-scoped IPC token reached, pinned to this chat.
     ///
-    /// The IPC bearer travels as a file PATH (`ZERON_IPC_TOKEN_FILE`), not as
-    /// `ZERON_IPC_TOKEN`: some harnesses hand this env to their CLI on the
-    /// command line (Claude's inline `--mcp-config`), where any local user can
-    /// read it with `ps`. The file is owner-only and always current.
+    /// Without it (no endpoint bound): this binary's `zeron mcp`, dialing the
+    /// engine's IPC port with the agent-scoped bearer
+    /// (`{data_dir}/ipc-token-agent`, [`zeron_rpc::agent_allowed`]), handed
+    /// over as a file PATH (`ZERON_IPC_TOKEN_FILE`) because some harnesses
+    /// put this env on the command line (Claude's inline `--mcp-config`).
     ///
     /// `side_chats_only`: the run's provider launches without its own
-    /// subagents, so all delegation goes through this server.
-    /// Zeron's own MCP server for a chat's run. `waits`: the runtime wakes
-    /// its agent as background work ends ([`Harness::wakes_on_background`]),
-    /// so the agent is offered `wait_on_background`.
+    /// subagents, so all delegation goes through this server. `waits`: the
+    /// runtime wakes its agent as background work ends
+    /// ([`Harness::wakes_on_background`]), so the agent is offered
+    /// `wait_on_background`.
     fn zeron_mcp(
         &self,
         chat_id: &str,
         side_chats_only: bool,
         waits: bool,
-    ) -> Option<zeron_proto::McpServer> {
-        let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
-        if port == 0 {
-            return None;
-        }
+    ) -> Option<(zeron_proto::McpServer, Option<zeron_mcp::http::Grant>)> {
         let command = crate::managed::mcp_executable()?.to_str()?.to_owned();
         let mut env: std::collections::BTreeMap<String, String> = [
-            ("ZERON_IPC_PORT".to_owned(), port.to_string()),
             (zeron_proto::McpServer::CHAT_ID_ENV.to_owned(), chat_id.to_owned()),
             ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
         ]
@@ -2874,6 +2906,49 @@ impl Inner {
                 "1".to_owned(),
             );
         }
+        let endpoint = lock(&self.mcp_endpoint).clone();
+        if let Some(endpoint) = endpoint {
+            let origin = zeron_mcp::Origin {
+                chat_id: Some(chat_id.to_owned()),
+                device_id: Some(self.device_id.clone()),
+                side_chats_only,
+                waits_on_background: waits,
+            };
+            match endpoint.grant(origin) {
+                Ok(grant) => {
+                    let url = endpoint.url();
+                    env.insert(zeron_proto::McpServer::URL_ENV.to_owned(), url.clone());
+                    env.insert(
+                        zeron_proto::McpServer::TOKEN_ENV.to_owned(),
+                        grant.token().to_owned(),
+                    );
+                    let headers = [(
+                        "Authorization".to_owned(),
+                        format!("Bearer {}", grant.token()),
+                    )]
+                    .into_iter()
+                    .collect();
+                    return Some((
+                        zeron_proto::McpServer {
+                            name: "zeron".into(),
+                            command,
+                            args: vec![MCP_PROXY_SUBCOMMAND.into()],
+                            env,
+                            http: Some(zeron_proto::McpHttp { url, headers }),
+                        },
+                        Some(grant),
+                    ));
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "no token for the agent MCP endpoint; using the stdio server");
+                }
+            }
+        }
+        let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
+        if port == 0 {
+            return None;
+        }
+        env.insert("ZERON_IPC_PORT".to_owned(), port.to_string());
         if let Some(path) = lock(&self.ipc_token_file)
             .as_ref()
             .and_then(|path| path.to_str())
@@ -2883,12 +2958,16 @@ impl Inner {
                 path.to_owned(),
             );
         }
-        Some(zeron_proto::McpServer {
-            name: "zeron".into(),
-            command,
-            args: vec!["mcp".into()],
-            env,
-        })
+        Some((
+            zeron_proto::McpServer {
+                name: "zeron".into(),
+                command,
+                args: vec!["mcp".into()],
+                env,
+                http: None,
+            },
+            None,
+        ))
     }
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
@@ -4214,8 +4293,14 @@ async fn drive_run(
     });
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
-    if request.mcp.is_none() {
-        request.mcp = inner.zeron_mcp(&chat_id, side_chats_only, harness.wakes_on_background());
+    // Held for the run's life: its MCP token stops working when it drops.
+    let mut _mcp_grant = None;
+    if request.mcp.is_none()
+        && let Some((server, grant)) =
+            inner.zeron_mcp(&chat_id, side_chats_only, harness.wakes_on_background())
+    {
+        request.mcp = Some(server);
+        _mcp_grant = grant;
     }
     // Plugins' native MCP servers come from this host's own allowed plugins,
     // run from their verified snapshots — never from what a sender put here.

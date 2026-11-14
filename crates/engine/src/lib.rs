@@ -1405,6 +1405,16 @@ impl Engine {
             .core()
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
+        // Agents' Zeron tools come from this engine itself (before the port:
+        // a run revived on boot waits on the port, then reads both).
+        if let Err(err) = runtime
+            .core()
+            .sessions
+            .serve_mcp_endpoint(runtime.core().rpc_service())
+            .await
+        {
+            tracing::warn!(error = %err, "agent MCP endpoint not served; agents get `zeron mcp`");
+        }
         runtime.core().sessions.set_ipc_port(config.ipc_port);
         update_trial::prove_and_commit(runtime.core(), &config);
         wake_update::start(runtime.core());
