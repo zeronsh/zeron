@@ -853,17 +853,28 @@ local function Composer(): Node
 		local now = route.current:get()
 		local pane = route.chat:get().session
 		local chat = now.name == "session" or now.name == "home"
-		local at = `{now.name}|{now.session or ""}|{now.project or ""}|{pane or ""}`
-		local was = arrived:peek()
-		if was == at then
+		-- (A session's project is the chat's own, known once the engine
+		-- lists it: its coming isn't a move, and it took the keys from
+		-- whatever had them by then, a dialog opened at launch.)
+		local project = if now.name == "home" then now.project or "" else ""
+		local at = `{now.name}|{now.session or ""}|{project}|{pane or ""}`
+		if arrived:peek() == at then
 			return
 		end
-		arrived:set(at)
 		-- (A tab strip's arrows keep the keys on the tab they chose.)
 		if route.take_keys_kept() or not chat then
+			arrived:set(at)
 			return
 		end
+		-- Marked arrived as the keys are given, not before: the window's
+		-- scripts loaded again meanwhile (the engine's plugins coming in as
+		-- the window opens) drop this turn's callback, and the scripts made
+		-- again give them instead.
 		ui.after(0, function()
+			if arrived:peek() == at then
+				return
+			end
+			arrived:set(at)
 			shared.focus:add(1)
 		end)
 	end)
