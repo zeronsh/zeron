@@ -6123,8 +6123,19 @@ fn seen_would_change(chat: &Json, session: &Json, now: chrono::DateTime<chrono::
     })
 }
 
-/// "Jul 1, 4:12 PM", in this Mac's time zone (the shipping app's
-/// `format_timestamp`).
+/// "Jul 1, 4:12 PM": a local time's month (0-based), day, hour and minute,
+/// as the shipping app's `format_timestamp` reads.
+fn clock(month0: u32, day: u32, hour: u32, minute: u32) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = MONTHS.get(month0 as usize).copied().unwrap_or("Jan");
+    let twelve = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{month} {day}, {twelve}:{minute:02} {}", if hour < 12 { "AM" } else { "PM" })
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone.
 #[cfg(unix)]
 fn stamp(at: i64) -> Option<String> {
     #[repr(C)]
@@ -6157,21 +6168,47 @@ fn stamp(at: i64) -> Option<String> {
         }
         tm.assume_init()
     };
-    let hour = match tm.hour % 12 {
-        0 => 12,
-        h => h,
+    Some(clock(tm.mon as u32, tm.mday as u32, tm.hour as u32, tm.min as u32))
+}
+
+/// [`clock`] for `at` (seconds since 1970) in this machine's time zone: on
+/// Windows through its own conversion (it has no `localtime_r`). Without
+/// it every message's time was missing there, and with it the hover strip
+/// that holds Copy.
+#[cfg(windows)]
+fn stamp(at: i64) -> Option<String> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    if at <= 0 {
+        return None;
+    }
+    // FILETIME counts 100 ns from 1601-01-01 (11,644,473,600 s before 1970).
+    let ticks = (at as u64).checked_add(11_644_473_600)?.checked_mul(10_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
     };
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let month = MONTHS.get(tm.mon as usize).copied().unwrap_or("Jan");
-    Some(format!(
-        "{month} {}, {hour}:{:02} {}",
-        tm.mday,
-        tm.min,
-        if tm.hour < 12 { "AM" } else { "PM" }
+    // SAFETY: both calls read only the structs passed in and write only the
+    // caller's SYSTEMTIMEs; a null zone means the machine's current one.
+    let local = unsafe {
+        let mut utc: SYSTEMTIME = std::mem::zeroed();
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&file, &mut utc) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+        {
+            return None;
+        }
+        local
+    };
+    Some(clock(
+        u32::from(local.wMonth).checked_sub(1)?,
+        u32::from(local.wDay),
+        u32::from(local.wHour),
+        u32::from(local.wMinute),
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn stamp(_at: i64) -> Option<String> {
     None
 }
@@ -6235,6 +6272,21 @@ mod stream_tests;
 
 #[cfg(test)]
 mod tests {
+    /// A message's time reads as the shipping app's, on every platform: the
+    /// formatting, and a real local time from `stamp` (Windows included,
+    /// where it once was always missing and hid the message's hover strip).
+    #[test]
+    fn a_messages_time_reads_like_the_shipping_apps_on_every_platform() {
+        assert_eq!(super::clock(6, 1, 16, 12), "Jul 1, 4:12 PM");
+        assert_eq!(super::clock(0, 9, 0, 5), "Jan 9, 12:05 AM");
+        assert_eq!(super::clock(11, 31, 12, 0), "Dec 31, 12:00 PM");
+        let at = super::stamp(1_794_600_000).expect("a time for a real moment");
+        let (month, rest) = at.split_once(' ').unwrap();
+        assert!(["Nov", "Dec"].contains(&month), "{at}");
+        assert!(rest.ends_with(" AM") || rest.ends_with(" PM"), "{at}");
+        assert_eq!(super::stamp(0), None);
+    }
+
     /// Opening a chat marks it seen only while that changes something any
     /// viewport reads (its last message, its terminal's report, the end of
     /// its sleep): a chat looked at already writes nothing, so its devices'

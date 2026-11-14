@@ -886,6 +886,16 @@ ui.command {
 	end,
 }
 
+-- A settled reply the host gave no time (as Windows did before it could
+-- read one): its Copy shows all the same (tests/chat_in_place).
+ui.command {
+	id = "reply_without_time",
+	title = "A reply with no time",
+	run = function()
+		store.messages:push { id = "notime1", role = "assistant", text = "Answered with no clock.", copy = "Answered with no clock." }
+	end,
+}
+
 -- Messages from other chats, as the host gives them: one from a chat that's
 -- listed, one from a chat that isn't, one with a long title (tests/chat_sender).
 ui.command {

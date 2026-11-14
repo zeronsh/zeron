@@ -300,9 +300,11 @@ local function strip(m: Message, row: State<Message>, hovered: () -> boolean): N
 		justify = if mine then "end" else "start",
 		selectable = false,
 		ui.presence(function(): string?
-			-- (Never while a reply is written: it has no time yet.)
+			-- (Never while a reply is written. A settled message shows it
+			-- with or without its time: a time missing, as on a platform
+			-- that couldn't read one, mustn't take Copy with it.)
 			local now = row:get()
-			return if hovered() and now.at and not now.streaming then "shown" else nil
+			return if hovered() and (now.at or now.copy) and not now.streaming then "shown" else nil
 		end, function(): Node
 			return ui.row {
 				class = "message-actions",
