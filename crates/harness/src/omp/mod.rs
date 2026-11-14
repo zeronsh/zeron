@@ -825,6 +825,8 @@ impl Runner {
                         "Oh My Pi prompt: {}",
                         frame["error"].as_str().unwrap_or("command failed")
                     ));
+                    // `Steered` confirms an assignment: a refused steer gets none.
+                    self.deliveries.retain(|d| *d != id);
                     if self.unacked.contains(&id) {
                         return self.completed(&id).await;
                     }

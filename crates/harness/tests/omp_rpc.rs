@@ -657,6 +657,40 @@ async fn handled_input_between_steers_keeps_its_own_delivery_receipt() {
 }
 
 #[tokio::test]
+async fn a_refused_steer_gets_no_delivery_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, tx, _) = controls();
+    let mut stream = harness()
+        .with_session_store(dir.path().join("index"))
+        .run(request(dir.path(), "burst-start"), c)
+        .await
+        .unwrap();
+    wait_until_blocked(&mut stream).await;
+    for prompt in ["reject", "redirect"] {
+        tx.send(SteerMessage::text(prompt)).await.unwrap();
+    }
+    drop(tx);
+    // The second input is sent only once OMP has answered the first.
+    wait_for_queued_steers(dir.path(), &["redirect".into()]).await;
+    std::fs::write(dir.path().join("release-burst"), "").unwrap();
+    let mut receipts = 0;
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::Steered { .. } => receipts += 1,
+                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(receipts, 1, "only the input OMP accepted is confirmed");
+    assert!(text.ends_with("reply:redirect"), "{text}");
+}
+
+#[tokio::test]
 async fn late_extension_notifications_do_not_reopen_completed_turns() {
     let dir = tempfile::tempdir().unwrap();
     let (c, tx, _) = controls();
