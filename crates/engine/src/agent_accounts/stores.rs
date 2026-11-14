@@ -66,7 +66,7 @@
 use std::collections::HashSet;
 
 /// Account keys of OpenCode 2.x's credentials: `credential:<id>`.
-const OPENCODE_CREDENTIAL: &str = "credential:";
+pub(super) const OPENCODE_CREDENTIAL: &str = "credential:";
 
 /// An OpenCode 1.x `auth.json` OAuth entry as the 2.x credential the service
 /// takes, under the sign-in method it names for the provider (listed live,

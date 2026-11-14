@@ -751,6 +751,8 @@ struct ProbeEndpoints {
     openai_port: u16,
     /// The Nous portal (`/api/oauth/account`).
     nous_portal: String,
+    /// Mistral's API (an OpenCode 2.x Mistral key's budget).
+    mistral_api: String,
     allow_slot_refresh: bool,
     /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
     /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
@@ -776,6 +778,7 @@ impl Default for ProbeEndpoints {
             openai_auth: oauth::OPENAI_AUTH.into(),
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
+            mistral_api: usage::MISTRAL_API.into(),
             allow_slot_refresh: true,
             allow_loopback_http: false,
         }
@@ -1118,8 +1121,14 @@ impl AgentAccounts {
                 .iter()
                 .flat_map(|(harness, slots)| {
                     let active = active_keys.get(harness);
-                    // (A live OpenCode 2.x row carries no tokens to probe.)
-                    slots.iter().filter(|slot| !slot.credentials.is_null()).map(move |slot| {
+                    // (A live OpenCode 2.x row carries no tokens: its probe
+                    // asks the service for the sign-in's own.)
+                    let probed = |slot: &&Slot| {
+                        !slot.credentials.is_null()
+                            || (slot.harness == HarnessId::Opencode
+                                && slot.account_key.starts_with(stores::OPENCODE_CREDENTIAL))
+                    };
+                    slots.iter().filter(probed).map(move |slot| {
                         (
                             *harness,
                             slot,

@@ -148,6 +148,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         openai_auth: base.to_string(),
         openai_port: 0,
         nous_portal: base.to_string(),
+        mistral_api: base.to_string(),
         allow_slot_refresh: true,
         allow_loopback_http: true,
     }
@@ -1182,6 +1183,34 @@ fn copilot_usage_reads_metered_quotas_and_the_plan() {
     assert!((snapshot.windows[0].used_fraction - 0.2).abs() < 1e-6);
     assert!((snapshot.windows[1].used_fraction - 0.75).abs() < 1e-6);
     assert!(copilot_usage_snapshot(&serde_json::json!({})).is_none());
+}
+
+#[test]
+fn mistral_usage_reads_both_budgets_and_the_plan() {
+    let budget = serde_json::json!({
+        "api_budget": { "usage_percentage": 12.5, "initial_budget": 10, "currency": "EUR",
+                        "reset_at": "2030-02-01T00:00:00Z", "payg_enabled": false },
+        "vibe_budget": { "usage_percentage": "40", "initial_budget": 20, "currency": "EUR",
+                         "reset_at": "2030-02-01T00:00:00Z", "payg_enabled": false },
+    });
+    let plan = serde_json::json!({ "plan_name": "INDIVIDUAL" });
+    let snapshot = mistral_usage_snapshot(&budget, Some(&plan)).unwrap();
+    assert_eq!(snapshot.plan_label.as_deref(), Some("Mistral Individual"));
+    let labels: Vec<_> = snapshot.windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["API", "Vibe"]);
+    assert!((snapshot.windows[0].used_fraction - 0.125).abs() < 1e-6);
+    assert!((snapshot.windows[1].used_fraction - 0.4).abs() < 1e-6);
+    assert!(snapshot.windows[0].resets_at.is_some());
+    // A budget of nothing has no meter (never "0% used"); none at all, no usage.
+    let free = serde_json::json!({
+        "api_budget": { "usage_percentage": 0, "initial_budget": 0, "currency": null },
+        "vibe_budget": { "usage_percentage": 3, "initial_budget": 5 },
+    });
+    let snapshot = mistral_usage_snapshot(&free, None).unwrap();
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].label, "Vibe");
+    assert_eq!(snapshot.plan_label, None);
+    assert!(mistral_usage_snapshot(&serde_json::json!({}), None).is_none());
 }
 
 #[tokio::test]

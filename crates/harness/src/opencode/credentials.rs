@@ -58,6 +58,22 @@ impl OpencodeHarness {
         Ok(list)
     }
 
+    /// What sign-in `id` holds, as the service keeps it (`{type: "key", key}`,
+    /// `{type: "oauth", access, …}`, `{type: "external", methodID}`): for a
+    /// usage probe of the vendor behind it, never kept.
+    pub async fn native_credential_value(&self, id: &str) -> Result<Option<Value>, HarnessError> {
+        let server = self.service_server().await.ok_or_else(|| {
+            HarnessError::Protocol("OpenCode's background service isn't available".into())
+        })?;
+        let credentials = unwrap_data(server.get_json("/api/credential", None).await?);
+        Ok(credentials
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|credential| credential.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|credential| credential.get("value").cloned()))
+    }
+
     /// Store a new sign-in for `integration` (its `value` as the service
     /// takes it: `{type: "oauth", methodID, access, refresh, expires}` or
     /// `{type: "key", key}`), made the integration's active one.

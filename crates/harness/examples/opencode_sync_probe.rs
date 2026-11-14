@@ -30,7 +30,8 @@ async fn main() {
         for message in &history {
             match &message.kind {
                 NativeMessageKind::User { .. } => users += 1,
-                NativeMessageKind::Assistant { events: e } => events += e.len(),
+                NativeMessageKind::Assistant { events: e, .. } => events += e.len(),
+                NativeMessageKind::Compaction { .. } => {}
             }
         }
         println!(
