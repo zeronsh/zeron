@@ -69,6 +69,15 @@ end
 -- How long a chat being read shows nothing before its skeleton: a chat
 -- kept here has come by then.
 local SKELETON_AFTER = 400
+-- How long the window keeps the page before showing while a chat switched to
+-- comes (`ui.window.hold_frames`): a chat read from this device's copy comes
+-- in a frame or two, and then shows whole in the frame that replaces the page
+-- before, never as a frame of the page without its transcript (a flash). One
+-- slower than this shows as it does without the hold.
+local HOLD_FOR = 200
+-- Whether a session has shown in this window: the first one, as the app
+-- opens, has nothing before it to hold.
+local shown_once = false
 -- How many session pages have been made, naming each one's own state.
 local made = 0
 
@@ -165,9 +174,17 @@ local function Session(id: Id?): Node
 	-- built outside a component.)
 	made += 1
 	local waited = ui.state(`chat_session_waited_{made}`, "")
+	local holding = false
 	ui.effect(function()
 		local want = which()
 		waited:set("")
+		-- Switched to a chat whose transcript is still on its way: the page
+		-- before stays until it has come (released below).
+		local s = store.session:peek()
+		if want and shown_once and (not s or s.id ~= want or s.state == "loading") then
+			holding = true
+			ui.window.hold_frames(HOLD_FOR)
+		end
 		if want then
 			ui.after(SKELETON_AFTER, function()
 				if which() == want then
@@ -188,6 +205,23 @@ local function Session(id: Id?): Node
 			return if waited:get() == want then "loading" else "waiting"
 		end
 		return s.state
+	end)
+	-- The transcript has come (or can't): the held frame goes, and the page
+	-- shows whole.
+	ui.effect(function()
+		if kind:get() ~= "waiting" then
+			shown_once = true
+			if holding then
+				holding = false
+				ui.window.release_frames()
+			end
+		end
+	end)
+	ui.on_cleanup(function()
+		if holding then
+			holding = false
+			ui.window.release_frames()
+		end
 	end)
 	-- The session it shows, for what lands inside the page (the transcript,
 	-- the composer; a plugin's node): its id, which the host resolves.

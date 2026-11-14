@@ -674,6 +674,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cx.window_info.controls.clone(),
     );
     host.window_zoom(&cx.ui);
+    // `ui.window.hold_frames`: a chat switched to keeps the page before it
+    // showing until its transcript has come (screens/chat/session.luau).
+    host.window_hold(&cx.ui);
     // `ui.window.size` (the lightbox fills the window with it).
     host.window_size(cx.viewport.clone());
     // `ui.window.full_screen` and its transition (macOS's animation, going
