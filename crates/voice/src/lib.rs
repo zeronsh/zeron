@@ -167,9 +167,9 @@ async fn cancelled(cancel: &AtomicBool) {
 
 pub struct Recognizer {
     session: transcribe_cpp::Session,
-    /// For a model that can't tell the language itself: who tells it, and
-    /// the languages to choose from, the likeliest first.
-    language: Option<(transcribe_cpp::LangIdSession, Vec<String>)>,
+    /// For a model that can't tell the language itself: who tells it, the
+    /// model's languages, and the person's among them, the likeliest first.
+    language: Option<(transcribe_cpp::LangIdSession, Vec<String>, Vec<String>)>,
 }
 impl Recognizer {
     pub fn load(dir: &Path) -> Result<Self> {
@@ -196,6 +196,7 @@ impl Recognizer {
                 transcribe_cpp::Model::load(dir.join(&f.name))
                     .and_then(|model| model.langid_session())
                     .map_err(failed)?,
+                m.languages.clone(),
                 spoken(sys_locale::get_locales(), &m.languages),
             )),
             None => None,
@@ -225,28 +226,32 @@ impl Recognizer {
             .map(|r| r.text.trim().to_owned())
             .map_err(|_| anyhow::anyhow!("Could not transcribe this recording"))
     }
-    /// The language of the whole recording, among the person's own (their
-    /// system's, in its order) the model speaks: the first of them when
-    /// the recording doesn't say, or says another. (None: the model tells.)
+    /// The language of the whole recording: what language ID hears among
+    /// all the model speaks, when it's sure; else the likeliest of the
+    /// person's own (their system's that the model speaks, in its order);
+    /// else the first of those. (None: the model tells by itself.)
     fn language(&mut self, pcm: &[f32]) -> Option<String> {
-        let (detect, choices) = self.language.as_mut()?;
-        if choices.len() > 1 {
-            let allowed = transcribe_cpp::LangIdOptions {
-                allowed: Some(choices.clone()),
-            };
-            if let Ok(heard) = detect.run(pcm, &allowed)
+        let (detect, all, mine) = self.language.as_mut()?;
+        let all = transcribe_cpp::LangIdOptions {
+            allowed: Some(all.clone()),
+        };
+        if let Ok(heard) = detect.run(pcm, &all) {
+            if let Some(top) = heard.candidates.first()
+                && top.p >= SURE
                 && heard.allowed_mass >= 0.5
-                && let Some(code) = heard.code()
             {
-                return Some(code.to_owned());
+                return Some(top.code.clone());
+            }
+            if let Some(theirs) = heard.candidates.iter().find(|c| mine.contains(&c.code)) {
+                return Some(theirs.code.clone());
             }
         }
-        choices.first().cloned()
+        mine.first().cloned()
     }
     #[cfg(test)]
     fn speaks(&mut self, languages: &[&str]) {
-        if let Some((_, choices)) = &mut self.language {
-            *choices = languages.iter().map(|l| l.to_string()).collect();
+        if let Some((_, _, mine)) = &mut self.language {
+            *mine = languages.iter().map(|l| l.to_string()).collect();
         }
     }
 }
@@ -270,6 +275,9 @@ fn spoken(locales: impl IntoIterator<Item = String>, supported: &[String]) -> Ve
     }
     out
 }
+
+/// How sure language ID must be to override the person's own languages.
+const SURE: f32 = 0.8;
 
 /// Below this, a sample is silence: no microphone is that quiet while it hears a room.
 const SILENT: f32 = 0.0001;
