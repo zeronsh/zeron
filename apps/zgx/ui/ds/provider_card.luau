@@ -35,6 +35,7 @@ local skeleton = require("@self/skeleton")
 local TextField = require("@self/text_field")
 local Links = require("@self/links")
 local Dialog = require("@self/dialog").Dialog
+local Select = require("@self/select")
 local RadioGroup = require("@self/radio")
 local PrivateText = require("@self/private_text")
 local locale = require("@self/locale")
@@ -69,6 +70,30 @@ export type Account = {
 	-- When each window starts over (seconds since the epoch), if known.
 	session_resets: number?,
 	week_resets: number?,
+	-- (A grouped card's:) whether it's the one in use in its group, and
+	-- whether it can be put in use.
+	active: boolean?,
+	switchable: boolean?,
+	-- An API key, not an account: no plan, no meters, its provider's mark
+	-- for a face (`provider`, the agent's id for it).
+	key: boolean?,
+	provider: string?,
+}
+
+-- One model provider's accounts of an agent that keeps a login per
+-- provider (Pi, OpenCode, Hermes): the provider (`name`), its accounts (one
+-- in use: its `active`), who Zeron signs you in to for it (`login`) and who
+-- issues the API key it adds (`key`) — neither: `hint` says how the agent
+-- adds one — and whether its accounts are the agent's own to choose
+-- (`read_only`, Hermes' pool).
+export type AccountGroup = {
+	id: string,
+	name: string,
+	accounts: { Account },
+	login: string?,
+	key: string?,
+	hint: string?,
+	read_only: boolean?,
 }
 
 -- When a window starts over, in this Mac's time, as the shipping app says
@@ -157,6 +182,20 @@ function M.disc(inside: Node, tone: string?): Node
 	}
 end
 
+-- What the card knows of a provider an API key is for, by the agent's own
+-- id for the provider: its mark (one set, one ink) and the shape its keys start
+-- with (the field's placeholder).
+local KEY_PROVIDERS: { [string]: { mark: string, shape: string } } = {
+	anthropic = { mark = "provider-anthropic", shape = "sk-ant-…" },
+	openai = { mark = "provider-openai", shape = "sk-…" },
+	["openai-api"] = { mark = "provider-openai", shape = "sk-…" },
+	openrouter = { mark = "provider-openrouter", shape = "sk-or-…" },
+	google = { mark = "provider-gemini", shape = "AIza…" },
+	gemini = { mark = "provider-gemini", shape = "AIza…" },
+	xai = { mark = "provider-xai", shape = "xai-…" },
+	deepseek = { mark = "provider-deepseek", shape = "sk-…" },
+}
+
 -- What a card's page does with it (setup's step and Settings share the
 -- card): `settings`, whether the agent's settings open from it (Settings
 -- only, `on_settings`); `on_add`, what Add account starts (a sign-in);
@@ -235,6 +274,26 @@ export type CardProps = {
 	login_methods: (() -> { LoginMethod })?,
 	on_sign_in_with: ((method: string) -> ())?,
 	on_key: ((var: string, value: string) -> ())?,
+	-- An agent that keeps a login per model provider: its accounts by
+	-- provider, as they stand (`accounts` then only finds one by id). Each
+	-- group with accounts is headed by its provider, the one in use marked
+	-- in it alone, and ends in its own add row ("Add ChatGPT account");
+	-- a provider with none yet is a Connect row at the card's foot. A
+	-- sign-in shows in the row of its provider (`login_for`), started by
+	-- `on_add_to`.
+	groups: (() -> { AccountGroup })?,
+	login_for: (() -> string?)?,
+	on_add_to: ((provider: string) -> ())?,
+	-- An API key for one of its providers, checked and kept by the agent's
+	-- device (a promise; rejecting with why not), whether keys can be typed
+	-- here (the agent is on this device: a key never travels), and a key
+	-- asked for from elsewhere (a provider id: its field opens).
+	on_add_key: ((provider: string, key: string, name: string?) -> any)?,
+	-- An API key's name changed (empty: its default): a promise.
+	on_rename: ((a: Account, name: string) -> any)?,
+	keys_here: (() -> boolean)?,
+	key_request: (() -> string?)?,
+	key_request_seen: (() -> ())?,
 }
 
 export type LoginMethod = {
@@ -265,7 +324,7 @@ end
 -- An account's actions, behind the ⋯ at its end: switch to it, use a
 -- banked reset (Codex), or remove it. `account` is its row's state: each
 -- action takes the account as it stands.
-local Actions = ui.component(function(p: { card: CardProps, account: State<Account> }): Node
+local Actions = ui.component(function(p: { card: CardProps, account: State<Account>, rename: ((a: Account) -> ())? }): Node
 	local c, account = p.card, p.account
 	local open = ui.use_state(false)
 	local trigger = IconButton {
@@ -291,7 +350,25 @@ local Actions = ui.component(function(p: { card: CardProps, account: State<Accou
 				w_full = true,
 				p = "$space.1",
 				gap = "$zeron.list.gap",
-				Menu.Row {
+				-- (An API key goes by a name it's given: changed here.)
+				ui.show(function(): boolean
+					return p.rename ~= nil and account:get().key == true
+				end, Menu.Row {
+					icon = "pen",
+					label = locale.s("ds.provider_card.rename"),
+					on_click = function()
+						open:set(false)
+						if p.rename then
+							p.rename(account:peek())
+						end
+					end,
+				}),
+				-- (Only to one that can be put in use and isn't already: a
+				-- switch the agent can't take is never offered.)
+				ui.show(function(): boolean
+					local a = account:get()
+					return a.switchable ~= false and a.active ~= true
+				end, Menu.Row {
 					icon = "check-circle",
 					label = locale.s("ds.provider_card.switch"),
 					on_click = function()
@@ -300,7 +377,7 @@ local Actions = ui.component(function(p: { card: CardProps, account: State<Accou
 							c.on_switch(account:peek())
 						end
 					end,
-				},
+				}),
 				ui.show(function()
 					local a = account:get()
 					return banks(c, a) and count(a) > 0 and word(a) ~= "using"
@@ -334,7 +411,7 @@ end)
 -- the one in use marked, its two meters and its actions at the end. Every
 -- account row has the same shape; what Codex banks for one is the row
 -- after it. Read from its row's state, so it changes in place.
-local function account(c: CardProps, row: State<Account>): Node
+local function account(c: CardProps, row: State<Account>, group: { read_only: boolean?, rename: ((a: Account) -> ())? }?): Node
 	-- (Its limits just started over: the data has its windows at 0 until a
 	-- probe says more.)
 	local function reset(): boolean
@@ -386,19 +463,34 @@ local function account(c: CardProps, row: State<Account>): Node
 	end
 	return Settings.Row {
 		label = email,
-		private_label = true,
+		-- (A key's name is no address: shown as it is.)
+		private_label = row:peek().key ~= true,
 		description = detail,
-		-- (The face is the address's: a new one only if the address changes.)
-		lead = ui.presence(email, function(e: string): Node
-			return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
-		end),
+		-- (The face is the address's: a new one only if the address changes.
+		-- An API key has no face: its provider's mark, in the add rows' well.)
+		lead = if row:peek().key == true
+			then M.disc(
+				if KEY_PROVIDERS[row:peek().provider or ""]
+					then Mark { name = KEY_PROVIDERS[row:peek().provider or ""].mark :: any, size = 16, bare = true }
+					else Icon { name = "keyboard", size = 16 }
+			)
+			else ui.presence(email, function(e: string): Node
+				return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
+			end),
+		-- (In a group, the one in use there: each group has its own.)
 		badge = ui.show(function()
+			if group then
+				return row:get().active == true
+			end
 			return c.active() == email()
 		end, Badge { locale.t("ds.provider_card.in_use"), tone = "accent" }),
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
-			ui.column {
+			-- (An API key has no plan, so no windows: no meters for it.)
+			ui.show(function(): boolean
+				return row:get().key ~= true
+			end, ui.column {
 				gap = "$zeron.space.hair",
 				-- (Labels alone where no reset is known, as the shipping app.)
 				tooltip = Tooltip {
@@ -408,8 +500,12 @@ local function account(c: CardProps, row: State<Account>): Node
 				},
 				meter("ds.provider_card.session", session),
 				meter("ds.provider_card.week", week),
-			},
-			Actions { card = c, account = row },
+			}),
+			-- (The agent's own to choose, Hermes' pool: nothing to do here —
+			-- its place kept, so the meters line up with every other card's.)
+			if group and group.read_only
+				then ui.div { w = ui.raw(24, "the actions button's width"), shrink = 0, aria_hidden = true }
+				else Actions { card = c, account = row, rename = if group then group.rename else nil },
 		},
 	}
 end
@@ -902,6 +998,447 @@ local function failed(provider: Provider, settle: (next: string) -> (), note: ((
 	}
 end
 
+-- ── An agent with a login per model provider ─────────────────────────────
+--
+-- The same card as every other agent's: its accounts a row each (the same
+-- row, rules and "In use"), then its add rows at the foot. Only the order
+-- and the foot differ: a provider's accounts stand together (the plan line
+-- says whose each is: "ChatGPT Plus", "Claude Max", "OpenRouter API key"),
+-- each provider with its own one in use; and the foot has an add row per
+-- provider Zeron signs in to ("Add ChatGPT account", "Add Claude account")
+-- and one "Add API key" (its menu says for which provider, where there's a
+-- choice). A sign-in under way, or a key being pasted, takes its add row's
+-- place, as Claude Code's does.
+
+-- The foot's add row for one provider's sign-in, or that sign-in in its
+-- place while it's under way (keyed by provider: each stands as the others
+-- change).
+local function login_row(c: CardProps, group: State<AccountGroup>, kind: () -> string): Node
+	local first = group:peek()
+	local id = first.id
+	local named: Provider = { id = id, name = first.login or first.name }
+	local function mine(): string
+		local k = kind()
+		return if k ~= "idle" and c.login_for and c.login_for() == id then k else "add"
+	end
+	return ui.column {
+		w_full = true,
+		id = `account-add-{c.provider.id}-{id}`,
+		rule(),
+		ui.presence(mine, function(k: string): Node
+			if k == "waiting" then
+				return waiting(named, c.settle, c.login_note, c)
+			elseif k == "code" then
+				return code_row(named, c.settle, c.on_code)
+			elseif k == "failed" then
+				return failed(named, c.settle, c.login_note, c)
+			end
+			return Settings.Row {
+				label = function(): string
+					return locale.s("ds.provider_card.add_named_account", { name = group:get().login or group:get().name })
+				end,
+				lead = M.disc(Icon { name = "plus", size = 16 }),
+				on_click = function()
+					if c.on_add_to then
+						c.on_add_to(id)
+					end
+				end,
+			}
+		end, { w_full = true }),
+	}
+end
+
+
+-- Adding an API key, in a dialog, as the app's other dialogs ask: its title,
+-- one quiet line, the provider (a select, each with its mark), the key
+-- (masked, its reveal, where it's kept under it), Cancel and Save. Save waits for something typed; while the
+-- provider checks the key it spins and the inputs hold still; a refused key
+-- says why under the field and the dialog stays, the key as typed. The
+-- typed key lives in the dialog alone and is cleared as it closes.
+local function key_dialog(c: CardProps, open: State<boolean>, choice: State<string>, keyed: () -> { AccountGroup }): Node
+	return ui.component(function(): Node
+		local key = ui.use_state("")
+		local name = ui.use_state("")
+		local busy = ui.use_state(false)
+		local why = ui.use_state("")
+		local input = ui.ref()
+		-- Closed (saved, cancelled, dismissed): nothing typed is kept.
+		ui.effect(function()
+			if not open:get() then
+				key:set("")
+				name:set("")
+				why:set("")
+				busy:set(false)
+			end
+		end)
+		local function chosen(): AccountGroup?
+			for _, g in keyed() do
+				if g.id == choice:get() then
+					return g
+				end
+			end
+			return nil
+		end
+		local function named(): string
+			local g = chosen()
+			return if g then (g.key or g.name) else ""
+		end
+		local function about(): { mark: string, shape: string }?
+			return KEY_PROVIDERS[choice:get()]
+		end
+		local function focus_key()
+			ui.after(0, function()
+				local el = input.current
+				if el then
+					el:focus()
+				end
+			end)
+		end
+		local function save()
+			local value = string.gsub(key:peek(), "^%s*(.-)%s*$", "%1")
+			local provider = choice:peek()
+			if value == "" or provider == "" or busy:peek() or not c.on_add_key then
+				return
+			end
+			busy:set(true)
+			why:set("")
+			local called = string.gsub(name:peek(), "^%s*(.-)%s*$", "%1")
+			c.on_add_key(provider, value, if called == "" then nil else called):after(function()
+				key:set("")
+				busy:set(false)
+				open:set(false)
+			end, function(err: any)
+				busy:set(false)
+				local message = if type(err) == "table" then err.message else tostring(err)
+				why:set(if message == "offline"
+					then locale.s("ds.provider_card.key_offline")
+					elseif message == "remote" then locale.s("ds.provider_card.key_remote", { name = c.provider.name })
+					else message or locale.s("ds.provider_card.key_failed"))
+				focus_key()
+			end)
+		end
+		local function options(): { any }
+			local out = {}
+			for _, g in keyed() do
+				local known = KEY_PROVIDERS[g.id]
+				table.insert(out, { value = g.id, label = g.key or g.name, mark = if known then known.mark else nil })
+			end
+			return out
+		end
+		return Dialog {
+			open = open,
+			title = locale.t("ds.provider_card.key_title"),
+			-- (A key being checked is kept once it passes: the dialog waits.)
+			hold = function(): boolean
+				return busy:get()
+			end,
+			body = function(): string
+				return locale.s("ds.provider_card.key_body", { agent = c.provider.name, name = named() })
+			end,
+			size = "md",
+			confirm = {
+				label = locale.t("ds.provider_card.save_key"),
+				keep_open = true,
+				busy = function(): boolean
+					return busy:get()
+				end,
+				disabled = function(): boolean
+					return string.match(key:get(), "%S") == nil
+				end,
+				on_click = save,
+			},
+			build = function(): Node
+				return ui.column {
+					w_full = true,
+					id = `key-dialog-{c.provider.id}`,
+					gap = "$space.4",
+					Select {
+						value = choice,
+						label = locale.t("ds.provider_card.key_provider"),
+						options = options,
+						w_full = true,
+						disabled = function(): boolean
+							return busy:get()
+						end,
+						on_change = function()
+							why:set("")
+							focus_key()
+						end,
+					},
+					TextField {
+						value = key,
+						label = locale.t("ds.provider_card.key_field"),
+						placeholder = function(): string
+							local a = about()
+							return if a then a.shape else ""
+						end,
+						password = true,
+						size = "md",
+						w_full = true,
+						autofocus = true,
+						input_ref = input,
+						hint = function(): string
+							return locale.s("ds.provider_card.key_kept", { agent = c.provider.name })
+						end,
+						-- Why the key wasn't kept, in the provider's words.
+						error = function(): string?
+							local w = why:get()
+							return if w == "" then nil else w
+						end,
+						disabled = function(): boolean
+							return busy:get()
+						end,
+						on_key = function(e: any): boolean?
+							if e.key == "Enter" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+								save()
+								return true
+							end
+							return nil
+						end,
+					},
+					-- What to call it (it has no address of its own): left
+					-- blank, its provider and last four.
+					TextField {
+						value = name,
+						label = locale.t("ds.provider_card.key_name_optional"),
+						placeholder = locale.t("ds.provider_card.key_name_placeholder"),
+						size = "md",
+						w_full = true,
+						disabled = function(): boolean
+							return busy:get()
+						end,
+						on_key = function(e: any): boolean?
+							if e.key == "Enter" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+								save()
+								return true
+							end
+							return nil
+						end,
+					},
+				}
+			end,
+		}
+	end)()
+end
+
+-- Renaming an API key, in the same dialog style: its name alone (no key
+-- asked again), blank for its default. A refusal (a name holding part of
+-- the key) says why under the field.
+local function rename_dialog(c: CardProps, open: State<boolean>, target: State<Account?>): Node
+	return ui.component(function(): Node
+		local name = ui.use_state("")
+		local busy = ui.use_state(false)
+		local why = ui.use_state("")
+		ui.effect(function()
+			if open:get() then
+				-- (Its name, if it has one: an unnamed key's title is no name.)
+				local a = target:peek() :: any
+				name:set(if a and a.named then a.email else "")
+				why:set("")
+			else
+				busy:set(false)
+			end
+		end)
+		local function save()
+			local a = target:peek()
+			if not a or not a.id or busy:peek() or not c.on_rename then
+				return
+			end
+			busy:set(true)
+			why:set("")
+			c.on_rename(a, string.gsub(name:peek(), "^%s*(.-)%s*$", "%1")):after(function()
+				busy:set(false)
+				open:set(false)
+			end, function(err: any)
+				busy:set(false)
+				local message = if type(err) == "table" then err.message else tostring(err)
+				why:set(if message == "offline" then locale.s("ds.provider_card.key_offline") else message or locale.s("ds.provider_card.key_failed"))
+			end)
+		end
+		return Dialog {
+			open = open,
+			title = locale.t("ds.provider_card.rename_title"),
+			-- Which key: its provider, and its last four where its title has them.
+			body = function(): string
+				local a = target:get() :: any
+				if not a then
+					return ""
+				end
+				return if a.named then a.plan else `{a.plan} · {a.email}`
+			end,
+			size = "sm",
+			confirm = {
+				label = locale.t("ds.provider_card.save_key"),
+				keep_open = true,
+				busy = function(): boolean
+					return busy:get()
+				end,
+				on_click = save,
+			},
+			build = function(): Node
+				return ui.column {
+					w_full = true,
+					id = `rename-dialog-{c.provider.id}`,
+					TextField {
+						value = name,
+						label = locale.t("ds.provider_card.key_name_label"),
+						placeholder = locale.t("ds.provider_card.key_name_placeholder"),
+						hint = locale.t("ds.provider_card.rename_hint"),
+						size = "md",
+						w_full = true,
+						autofocus = true,
+						select_on_focus = true,
+						error = function(): string?
+							local w = why:get()
+							return if w == "" then nil else w
+						end,
+						disabled = function(): boolean
+							return busy:get()
+						end,
+						on_key = function(e: any): boolean?
+							if e.key == "Enter" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+								save()
+								return true
+							end
+							return nil
+						end,
+					},
+				}
+			end,
+		}
+	end)()
+end
+
+-- The foot's "Add API key" (none while another device is shown: a key is
+-- typed on the device that runs the agent), opening the key dialog.
+local function key_row_foot(c: CardProps, keyed: () -> { AccountGroup }, open_keys: (provider: string?) -> ()): Node
+	local function keys_here(): boolean
+		return c.keys_here == nil or c.keys_here()
+	end
+	return ui.show(function(): boolean
+		return keys_here() and #keyed() > 0
+	end, ui.column {
+		w_full = true,
+		id = `account-add-key-{c.provider.id}`,
+		rule(),
+		Settings.Row {
+			label = locale.t("ds.provider_card.add_api_key"),
+			lead = M.disc(Icon { name = "plus", size = 16 }),
+			on_click = function()
+				open_keys(nil)
+			end,
+		},
+	})
+end
+
+-- An agent with a login per model provider: its accounts, a provider's
+-- together, then the foot's add rows.
+local function grouped(c: CardProps, kind: () -> string): Node
+	return ui.component(function(): Node
+		local keys_open = ui.use_state(false)
+		local key_choice = ui.use_state("")
+		local renaming = ui.use_state(false)
+		local renamed = ui.use_state(nil :: Account?)
+		local function rename(a: Account)
+			renamed:set(a)
+			renaming:set(true)
+		end
+		local function groups(): { AccountGroup }
+			return if c.groups then c.groups() or {} else {}
+		end
+		local function keyed(): { AccountGroup }
+			local out = {}
+			for _, g in groups() do
+				if g.key then
+					table.insert(out, g)
+				end
+			end
+			return out
+		end
+		-- The key dialog, on `provider`, else on the first provider with no
+		-- key yet (else the first).
+		local function open_keys(provider: string?)
+			local list = keyed()
+			local want: string? = provider
+			if not want then
+				for _, g in list do
+					local has_key = false
+					for _, a in g.accounts do
+						if a.key then
+							has_key = true
+						end
+					end
+					if not has_key then
+						want = g.id
+						break
+					end
+				end
+			end
+			local found = false
+			for _, g in list do
+				if g.id == want then
+					found = true
+				end
+			end
+			key_choice:set(if found then want :: string elseif list[1] then list[1].id else "")
+			keys_open:set(true)
+		end
+		-- Every account, a provider's together, each knowing whether its
+		-- provider's are the agent's own to choose (Hermes' pool).
+		local placed = ui.computed(function(): { Account }
+			local out = {}
+			for _, g in groups() do
+				for _, a in g.accounts do
+					local one = table.clone(a) :: any
+					one.read_only = g.read_only == true
+					table.insert(out, one)
+				end
+			end
+			return out
+		end)
+		local logins = ui.computed(function(): { AccountGroup }
+			local out = {}
+			for _, g in groups() do
+				if g.login then
+					table.insert(out, g)
+				end
+			end
+			return out
+		end)
+		-- A key asked for from elsewhere (the model picker): the dialog, open
+		-- on its provider.
+		ui.effect(function()
+			local want = if c.key_request then c.key_request() else nil
+			if want and want ~= "" then
+				open_keys(want)
+				if c.key_request_seen then
+					c.key_request_seen()
+				end
+			end
+		end)
+		local function by_id(g: AccountGroup): string
+			return g.id
+		end
+		return ui.column {
+			w_full = true,
+			ui.each(placed, function(a: Account, _i: number, row: State<Account>): Node
+				return ui.column {
+					w_full = true,
+					id = `account-row-{a.id or key(a)}`,
+					rule(),
+					account(c, row, { read_only = (a :: any).read_only == true, rename = if c.on_rename then rename else nil }),
+				}
+			end, { key = key }),
+			ui.each(logins, function(_g: AccountGroup, _i: number, row: State<AccountGroup>): Node
+				return login_row(c, row, kind)
+			end, { key = by_id }),
+			key_row_foot(c, keyed, open_keys),
+			key_dialog(c, keys_open, key_choice, keyed),
+			rename_dialog(c, renaming, renamed),
+		}
+	end)()
+end
+
 -- An installed agent's card.
 function M.Card(c: CardProps): Node
 	local provider = c.provider
@@ -989,6 +1526,13 @@ function M.Card(c: CardProps): Node
 		else function()
 			return (given :: string?) or "idle"
 		end
+	-- An agent with a login per model provider: its accounts, a provider's
+	-- together, and its add rows at the foot.
+	if c.groups then
+		return Settings.Group {
+			ui.column { w_full = true, head, grouped(c, kind) },
+		}
+	end
 	return Settings.Group {
 		ui.column { w_full = true, head, list },
 		ui.presence(kind, foot, { w_full = true }),

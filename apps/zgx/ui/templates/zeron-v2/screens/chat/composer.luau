@@ -1232,6 +1232,7 @@ local function Composer(): Node
 				return store.catalog:get().models
 			end,
 			accounts = accounts.accounts,
+			account_group = accounts.account_group,
 			on_account = accounts.on_account,
 			on_accounts_open = accounts.on_accounts_open,
 			-- What its context holds (the ring shows once a window is

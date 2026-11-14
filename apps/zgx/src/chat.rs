@@ -1351,6 +1351,36 @@ impl Chats {
         self.publish_views();
     }
 
+    /// `harness`'s logins on `device` ("" or this one: here) changed: its
+    /// models looked up again, as the agent now lists them (Pi signed in to
+    /// Claude lists Claude's models). Here, that agent's alone; another
+    /// device's, only while the composer runs on it.
+    fn accounts_changed(self: &Rc<Self>, device: &str, harness: &str) {
+        let here = self.here.borrow().clone();
+        if device.is_empty() || here.as_deref() == Some(device) {
+            if !self.models.borrow().contains_key(harness) {
+                return;
+            }
+            let (me, id) = (self.clone(), harness.to_owned());
+            engine::get().spawn(async move {
+                match engine::get()
+                    .call("ListModels", json!({ "harness": id, "force": true }))
+                    .await
+                {
+                    Ok(list) => {
+                        me.models
+                            .borrow_mut()
+                            .insert(id, list.as_array().cloned().unwrap_or_default());
+                        me.publish_catalog();
+                    }
+                    Err(error) => eprintln!("zeron-zgx: chat: {id}'s models didn't list again: {error}"),
+                }
+            });
+        } else if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
+            self.reload_remote();
+        }
+    }
+
     /// The composer now runs on `device` ("" or this one: here).
     fn catalog_on(self: &Rc<Self>, device: &str) {
         let here = self.here.borrow().clone();
@@ -1622,6 +1652,11 @@ impl Chats {
 /// A chat just made here (`sessions.create`), as the engine's list will
 /// have it: `params` is its `createChat` (`chatId`, `deviceId`, `spaceId`,
 /// `config`, `cwd`, `branch`, `parentChatId`).
+/// An agent's logins on a device changed (src/agents.rs): its models again.
+pub(crate) fn accounts_changed(device: &str, harness: &str) {
+    CHATS.with(|c| c.clone().accounts_changed(device, harness));
+}
+
 pub(crate) fn made(params: &Json) {
     let Some(id) = params["chatId"].as_str() else { return };
     let mut row = json!({ "id": id });
@@ -1748,6 +1783,15 @@ fn model_value(harness: &str, m: &Json) -> Value {
     // The agent's own default (Claude lists best-first, not default-first).
     if m["default"].as_bool() == Some(true) {
         fields.push(("default", Value::Bool(true)));
+    }
+    // Where it's served from, for an agent reaching models through several
+    // providers (Pi signed in to Codex and OpenCode): its id and its name.
+    let provider = &m["provider"];
+    if let (Some(pid), Some(name)) = (provider["id"].as_str(), provider["name"].as_str())
+        && !pid.is_empty()
+        && !name.is_empty()
+    {
+        fields.push(("provider", Value::record([("id", Value::from(pid)), ("name", Value::from(name))])));
     }
     Value::record(fields)
 }
@@ -7258,6 +7302,12 @@ mod tests {
         assert!(model_value("claude-code", &claude).field("default").is_none());
         let marked = json!({ "id": "claude-opus-5-5", "default": true });
         assert!(matches!(model_value("claude-code", &marked).field("default"), Some(Value::Bool(true))));
+        // A model's provider rides along when the agent names one, and only then.
+        assert!(model_value("claude-code", &marked).field("provider").is_none());
+        let pi = json!({ "id": "openai-codex/gpt-5.5", "label": "GPT-5.5", "provider": { "id": "openai-codex", "name": "Codex" } });
+        let provider = model_value("pi", &pi).field("provider").cloned().expect("a provider");
+        assert_eq!(provider.field("id").map(text).as_deref(), Some("openai-codex"));
+        assert_eq!(provider.field("name").map(text).as_deref(), Some("Codex"));
     }
 
     #[test]

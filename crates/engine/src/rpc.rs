@@ -535,6 +535,30 @@ struct AgentAccountParams {
     account_id: String,
 }
 
+/// `AddAgentApiKey`. The key is never logged: this type has no `Debug`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddAgentApiKeyParams {
+    harness: HarnessId,
+    provider: String,
+    key: String,
+    /// What to call it (no secret); none: "<Provider> ···<last4>".
+    #[serde(default)]
+    name: Option<String>,
+    /// The device the app meant: only ever this one (refused otherwise —
+    /// a key is never forwarded).
+    #[serde(default)]
+    target_device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameAgentAccountParams {
+    harness: HarnessId,
+    account_id: String,
+    name: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConsumeCodexResetCreditParams {
@@ -2556,6 +2580,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_AGENT_ACCOUNTS
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
+            | methods::RENAME_AGENT_ACCOUNT
             | methods::START_AGENT_LOGIN
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
@@ -5533,6 +5558,36 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
             }
+            methods::ADD_AGENT_API_KEY => {
+                // (Never `parse_params`'s error: it can quote the input.)
+                let p: AddAgentApiKeyParams = serde_json::from_value(params)
+                    .map_err(|_| RpcError::BadParams("expected {harness, provider, key}".into()))?;
+                if p
+                    .target_device_id
+                    .as_deref()
+                    .is_some_and(|target| !target.is_empty() && target != self.doc_host.device_id())
+                {
+                    return Err(RpcError::Failed(
+                        "API keys are added on the device that runs the agent — open Zeron there."
+                            .into(),
+                    ));
+                }
+                let snapshot = self
+                    .agent_accounts
+                    .add_api_key(p.harness, &p.provider, &p.key, p.name.as_deref())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
+            }
+            methods::RENAME_AGENT_ACCOUNT => {
+                let p: RenameAgentAccountParams = parse_params(params)?;
+                let snapshot = self
+                    .agent_accounts
+                    .rename_account(p.harness, &p.account_id, &p.name)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
+            }
             methods::CONSUME_CODEX_RESET_CREDIT => {
                 let p: ConsumeCodexResetCreditParams = parse_params(params)?;
                 let outcome = self
@@ -6470,6 +6525,18 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_READY));
         // The bearer is for local clients only, never a remote device's ask.
         assert!(!forwardable(methods::ACCESS_TOKEN));
+        // An API key never leaves the device it was typed on: not forwarded,
+        // not served to a peer through the relay, not an agent's to call.
+        assert!(!forwardable(methods::ADD_AGENT_API_KEY));
+        assert!(zeron_rpc::local_only(methods::ADD_AGENT_API_KEY));
+        assert!(zeron_rpc::peer_refused(methods::ADD_AGENT_API_KEY, &serde_json::json!({})));
+        assert!(!zeron_rpc::agent_allowed(methods::ADD_AGENT_API_KEY));
+        // Per-provider account actions do travel, provider and all.
+        assert!(forwardable(methods::START_AGENT_LOGIN));
+        assert!(forwardable(methods::ACTIVATE_AGENT_ACCOUNT));
+        // A key's name is no secret: renamed wherever the key lives.
+        assert!(forwardable(methods::RENAME_AGENT_ACCOUNT));
+        assert!(!zeron_rpc::local_only(methods::RENAME_AGENT_ACCOUNT));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));

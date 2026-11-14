@@ -525,6 +525,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return store.catalog:get().models
 		end,
 		accounts = accounts.accounts,
+		account_group = accounts.account_group,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
 		-- What its context holds: the chat page's ring and card, from the

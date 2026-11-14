@@ -45,6 +45,7 @@ pub(crate) fn model(id: &str) -> Model {
         default: false,
         id: id.into(),
         label: id.to_uppercase(),
+        provider: None,
         description: None,
         reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::High],
         options: vec![ModelOption {

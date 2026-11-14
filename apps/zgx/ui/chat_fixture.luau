@@ -92,6 +92,13 @@ do
 		note(`switch_on:{key}:{id}:{account}`)
 		return { after = function(_: any, done: (any) -> ()) done(nil) end }
 	end
+	-- (An Account row adding one of its provider's accounts.)
+	stub_agents.target = function(device: string?)
+		note(`target:{device or ""}`)
+	end
+	stub_agents.sign_in_to = function(id: string, provider: string)
+		note(`sign_in_to:{id}:{provider}`)
+	end
 end
 
 local function publish(id: string, patch: { [string]: any }?)

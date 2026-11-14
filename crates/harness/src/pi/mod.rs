@@ -1,5 +1,8 @@
 //! Native Pi JSONL RPC driver. See PROTOCOL.md for the legacy ACK barrier.
 mod catalog;
+/// A provider's name as people say it (`openai-codex` → Codex), for every
+/// agent that reaches models through several providers.
+pub(crate) use catalog::provider_name;
 mod mcp;
 mod normalize;
 mod rpc;
@@ -362,6 +365,7 @@ impl Harness for PiHarness {
             default: false,
             id: "default".into(),
             label: "Pi default".into(),
+            provider: None,
             description: Some("Model configured in Pi".into()),
             reasoning_levels: vec![],
             options: vec![],

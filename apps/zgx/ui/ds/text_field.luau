@@ -128,13 +128,15 @@ return ui.component(function(props: Props): Node
 	end
 
 	local function input(secure: boolean): Node
-		return ui.input(field.input({
+		local node = ui.input(field.input({
 			ref = input_ref,
 			value = value,
 			-- (Named by its placeholder, as a plain or changing string, or a
 			-- message.)
 			label = props.label or props.name or (if type(props.placeholder) == "string" or type(props.placeholder) == "function" or control.is_message(props.placeholder) then props.placeholder else nil) or "",
-			placeholder = props.placeholder,
+			-- (A masked input masks its placeholder too: a password's is
+			-- drawn over it instead, below.)
+			placeholder = if secure then nil else props.placeholder,
 			secure = secure,
 			error = props.error,
 			inputmode = props.inputmode,
@@ -159,6 +161,42 @@ return ui.component(function(props: Props): Node
 				return false
 			end,
 		}, size, focused))
+		if not secure or props.placeholder == nil then
+			return node
+		end
+		-- A password's placeholder, plain (the shape of what goes there:
+		-- "sk-ant-…"), over the empty input, in the placeholder's ink.
+		return ui.row {
+			grow = 1,
+			min_w = 0,
+			h_full = true,
+			relative = true,
+			node,
+			ui.show(function(): boolean
+				return value:get() == ""
+			end, ui.row {
+				absolute = true,
+				left = 0,
+				top = 0,
+				bottom = 0,
+				items = "center",
+				pointer_events = "none",
+				aria_hidden = true,
+				ui.text {
+					function(): string
+						local ph: any = props.placeholder
+						if type(ph) == "function" then
+							return ph()
+						elseif type(ph) == "table" and ph.get then
+							return ph:get()
+						end
+						return control.text(ph) or ""
+					end,
+					text_size = control.TEXT[size],
+					color = "$zeron.field.placeholder",
+				},
+			}),
+		}
 	end
 
 	local children: { any } = {}

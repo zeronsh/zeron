@@ -311,6 +311,7 @@ pub fn apply(
             default: false,
             id: hosted.id.clone(),
             label: hosted.label.clone().unwrap_or_else(|| hosted.id.clone()),
+            provider: None,
             description: hosted.description.clone(),
             reasoning_levels: ladder,
             options: hosted.options.iter().filter_map(|o| option(o)).collect(),
