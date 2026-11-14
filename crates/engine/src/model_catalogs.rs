@@ -79,6 +79,18 @@ fn unchanged(harness: &dyn Harness, context: &ModelContext) -> bool {
         .is_some_and(|now| now.hash == context.hash)
 }
 
+#[derive(Debug)]
+enum DiscoveryError {
+    ContextChanged,
+    Harness(HarnessError),
+}
+
+impl From<HarnessError> for DiscoveryError {
+    fn from(error: HarnessError) -> Self {
+        Self::Harness(error)
+    }
+}
+
 // Both the request and any background refresh retain the execution lease so
 // cancellation or an early disk-cache response cannot race a binary update.
 pub(crate) async fn list_with_lease(
@@ -90,7 +102,21 @@ pub(crate) async fn list_with_lease(
     let root = root.to_path_buf();
     tokio::spawn(async move {
         let _lease = lease.clone();
-        list_inner(&root, harness, force, lease).await
+        // A CLI can refresh credentials during discovery. Discard that answer
+        // and retry under the new context, including its separate disk cache.
+        for attempt in 0..3 {
+            match list_inner(&root, harness.clone(), force, lease.clone()).await {
+                Err(DiscoveryError::ContextChanged) if attempt < 2 => continue,
+                Err(DiscoveryError::ContextChanged) => {
+                    return Err(HarnessError::Protocol(
+                        "model discovery context changed; retry".into(),
+                    ));
+                }
+                Err(DiscoveryError::Harness(error)) => return Err(error),
+                Ok(models) => return Ok(models),
+            }
+        }
+        unreachable!()
     })
     .await
     .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
@@ -110,7 +136,7 @@ async fn list_inner(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
-) -> Result<Vec<Model>, HarnessError> {
+) -> Result<Vec<Model>, DiscoveryError> {
     // Applied to what is served, never to what is saved: the disk copy stays
     // the CLI's own answer, so a later list (or none) re-applies cleanly.
     let hosted = crate::hosted_models::HostedModels::shared(root);
@@ -130,7 +156,8 @@ async fn list_inner(
         return harness
             .model_catalog(force)
             .await
-            .map(|catalog| overlay(catalog, None));
+            .map(|catalog| overlay(catalog, None))
+            .map_err(Into::into);
     };
     let path = location(root, harness.as_ref(), &context);
     let disk = read(&path, &context);
@@ -143,9 +170,7 @@ async fn list_inner(
             let _lease = lease;
             let result = harness.model_catalog(force).await;
             if !unchanged(harness.as_ref(), &context) {
-                return Err(HarnessError::Protocol(
-                    "model discovery context changed; retry".into(),
-                ));
+                return Err(DiscoveryError::ContextChanged);
             }
             if let Err(error) = &result {
                 let code = CatalogFailure::classify(error);
@@ -167,7 +192,7 @@ async fn list_inner(
             {
                 tracing::warn!(%error, "Could not persist model catalog");
             }
-            result
+            result.map_err(DiscoveryError::from)
         }
     });
     let result = if disk.is_some() {
@@ -178,13 +203,16 @@ async fn list_inner(
         Some(refresh.await)
     };
     if !unchanged(harness.as_ref(), &context) {
-        return Err(HarnessError::Protocol(
-            "model discovery context changed; retry".into(),
-        ));
+        return Err(DiscoveryError::ContextChanged);
     }
     let catalog = match result {
         Some(Ok(Ok(catalog))) if !catalog.models.is_empty() => catalog,
-        Some(Ok(Err(error))) if !CatalogFailure::classify(&error).allows_stale() => {
+        Some(Ok(Err(DiscoveryError::ContextChanged))) => {
+            return Err(DiscoveryError::ContextChanged);
+        }
+        Some(Ok(Err(DiscoveryError::Harness(error))))
+            if !CatalogFailure::classify(&error).allows_stale() =>
+        {
             // Claude intentionally offers its manifest even while logged out.
             if harness.id() == zeron_proto::HarnessId::ClaudeCode
                 && CatalogFailure::classify(&error) == CatalogFailureCode::AuthRequired
@@ -194,7 +222,7 @@ async fn list_inner(
                     source: "static",
                 }
             } else {
-                return Err(CatalogFailure::from(error).into());
+                return Err(HarnessError::from(CatalogFailure::from(error)).into());
             }
         }
         result => {
@@ -209,7 +237,8 @@ async fn list_inner(
                     if models.is_empty() {
                         return Err(HarnessError::Protocol(
                             "model catalog unavailable; retry".into(),
-                        ));
+                        )
+                        .into());
                     }
                     ModelCatalog {
                         models,
@@ -250,6 +279,8 @@ mod tests {
         delay: std::sync::atomic::AtomicBool,
         forced: std::sync::atomic::AtomicBool,
         cached: std::sync::atomic::AtomicBool,
+        rotations: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
         failure: std::sync::Mutex<String>,
         harness: zeron_proto::HarnessId,
     }
@@ -261,6 +292,8 @@ mod tests {
                 delay: false.into(),
                 forced: false.into(),
                 cached: false.into(),
+                rotations: 0.into(),
+                calls: 0.into(),
                 failure: std::sync::Mutex::new("offline".into()),
                 harness: zeron_proto::HarnessId::Codex,
             })
@@ -296,6 +329,8 @@ mod tests {
             Ok(models())
         }
         async fn model_catalog(&self, force: bool) -> Result<ModelCatalog, HarnessError> {
+            self.calls.fetch_add(1, SeqCst);
+            let account = self.account.load(SeqCst);
             self.forced.store(force, SeqCst);
             if self.delay.load(SeqCst) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -303,8 +338,19 @@ mod tests {
             if self.fail.load(SeqCst) {
                 return Err(HarnessError::Protocol(self.failure.lock().unwrap().clone()));
             }
+            if self
+                .rotations
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                self.account.fetch_add(1, SeqCst);
+            }
+            let mut models = models();
+            if account != 1 {
+                models[0].id = format!("live-{account}");
+            }
             Ok(ModelCatalog {
-                models: models(),
+                models,
                 source: if self.cached.load(SeqCst) {
                     "cache"
                 } else {
@@ -383,6 +429,11 @@ mod tests {
             *probe.failure.lock().unwrap() = message.into();
             let error = list(dir.path(), probe.clone(), true).await.unwrap_err();
             assert!(!CatalogFailure::classify(&error).allows_stale());
+            assert_eq!(
+                probe.calls.load(SeqCst),
+                2,
+                "an auth or install failure is not a context-change retry"
+            );
             let context = probe.model_context().unwrap().unwrap();
             assert!(!location(dir.path(), probe.as_ref(), &context).exists());
         }
@@ -461,7 +512,46 @@ mod tests {
             probe.account.store(2, SeqCst);
         };
         let (result, _) = tokio::join!(list(dir.path(), probe.clone(), false), swap);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap()[0].id, "live-2");
+        assert_eq!(probe.calls.load(SeqCst), 2);
+        assert!(!dir.path().join("model-catalogs/codex/1.json").exists());
+        let context = probe.model_context().unwrap().unwrap();
+        assert_eq!(
+            read(&location(dir.path(), probe.as_ref(), &context), &context).unwrap()[0].id,
+            "live-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_refresh_retries_without_serving_the_previous_contexts_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        list(dir.path(), probe.clone(), false).await.unwrap();
+        probe.rotations.store(1, SeqCst);
+        assert_eq!(
+            list(dir.path(), probe.clone(), true).await.unwrap()[0].id,
+            "live-2"
+        );
+        assert_eq!(probe.calls.load(SeqCst), 3);
+        let context = probe.model_context().unwrap().unwrap();
+        assert_eq!(
+            read(&location(dir.path(), probe.as_ref(), &context), &context).unwrap()[0].id,
+            "live-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn continuously_changing_context_stops_after_three_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        probe.rotations.store(3, SeqCst);
+        let error = list(dir.path(), probe.clone(), false).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("model discovery context changed; retry")
+        );
+        assert_eq!(probe.calls.load(SeqCst), 3);
         assert!(!dir.path().join("model-catalogs").exists());
     }
 

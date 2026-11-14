@@ -272,8 +272,8 @@ function M.insert(text: string, inline: boolean?)
 	shared.focus:add(1)
 end
 
-function M.load_catalog()
-	ui.invoke("chat.catalog")
+function M.load_catalog(device: string?)
+	ui.invoke("chat.catalog", { device = device })
 end
 
 -- A background process of `session` stopped on its host: a promise of

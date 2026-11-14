@@ -601,7 +601,9 @@ ui.command {
 		end
 	end,
 }
-stub.load_catalog = function() end
+stub.load_catalog = function(device: string?)
+	note(`catalog_refresh:{device or "current"}`)
+end
 -- (The device whose catalog the composer reads, noted as it changes.)
 stub.catalog_on = function(device: string?)
 	note(`catalog_on:{device or "here"}`)
