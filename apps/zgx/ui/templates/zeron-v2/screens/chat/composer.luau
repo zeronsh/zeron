@@ -131,10 +131,11 @@ local function Composer(): Node
 	local function new_chat(): boolean
 		return session_id:get() == nil
 	end
-	-- (Set as it sends from a new chat: the move to the session that
-	-- follows slides, as the prompt glides; see `place`.)
-	local slide_next = false
-	local slide_session: string? = nil
+	-- (Set as it sends from a new chat, to the session it opens: the move
+	-- there slides and eases into its docked form, as the prompt glides;
+	-- see `place`. Kept until the route moves anywhere else, so neither
+	-- effect that sees the move depends on which of them runs first.)
+	local slide_to: string? = nil
 	-- Its form (a new chat's, opened out; a session's): the place it shows
 	-- at's, changing with its place (see `place`).
 	local form_new = ui.state("chat_composer_form_new", session_id:peek() == nil)
@@ -1006,7 +1007,7 @@ local function Composer(): Node
 			store.creating(req)
 			store.open(chat_id)
 			-- (Down with its prompt: the dock's one slide.)
-			slide_next = true
+			slide_to = chat_id
 			route.open_session(chat_id)
 			sessions
 				.create({ id = chat_id, project = plan.project, branch = plan.branch, cloud = true })
@@ -1078,7 +1079,7 @@ local function Composer(): Node
 				own_notice:set(nil)
 				store.open(id)
 				-- (Down with its prompt: the dock's one slide.)
-				slide_next = true
+				slide_to = id
 				route.open_session(id)
 				store.send(req):after(function() end, function(_e: any) end)
 			end, function(e: any)
@@ -1523,7 +1524,7 @@ local function Composer(): Node
 		return Placement.dock_offset(h, rest, tall, FOOT, Dock.hero_offset())
 	end
 	-- Moving between a new chat and a session: its own send from a new chat
-	-- slides it down with the prompt (`slide_next`); any other move (another
+	-- slides it down with the prompt (`slide_to`); any other move (another
 	-- chat opened, a new chat) puts it there at once, in its new form and
 	-- size, no fade, no slide, nothing growing (and as that size is
 	-- measured, it follows at once too). In the page, as it grows or the window resizes, it
@@ -1562,16 +1563,24 @@ local function Composer(): Node
 	ui.effect(function()
 		local y = target_y()
 		local nc = new_chat()
-		local sent = slide_next
-		if sent and not nc then slide_session = session_id:peek() end
 		local switched = was_new ~= nil and nc ~= was_new
 		was_new = nc
-		slide_next = false
-		if switched then
+		-- (A send's move: out of the new chat, to the session it opened. Its
+		-- form and size ease there as it slides, not snapped.)
+		local sent = switched and not nc and slide_to ~= nil
+		if switched and nc then
+			slide_to = nil
+		end
+		if switched and not sent then
 			ui.batch(function()
-				place_snap:set(not sent)
+				place_snap:set(true)
 				form_new:set(nc)
 				snap:set(snap:peek() + 1)
+			end)
+		elseif sent then
+			ui.batch(function()
+				place_snap:set(false)
+				form_new:set(nc)
 			end)
 		else
 			form_new:set(nc)
@@ -1606,10 +1615,14 @@ local function Composer(): Node
 		local now = route.chat:get().session
 		if now ~= chat_was then
 			chat_was = now
-			local sent = slide_next or (slide_session ~= nil and slide_session == now)
-			if not sent then slide_session = nil end
+			-- (The session a send opened: the page's move glides, no snap.)
+			if slide_to ~= nil and now == slide_to then
+				place_snap:set(false)
+				return
+			end
+			slide_to = nil
 			ui.batch(function()
-				place_snap:set(not sent)
+				place_snap:set(true)
 				snap:set(snap:peek() + 1)
 			end)
 		end

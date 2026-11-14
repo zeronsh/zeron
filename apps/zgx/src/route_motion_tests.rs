@@ -22,10 +22,14 @@ struct Shell {
 
 impl Shell {
     fn new(reduced: bool) -> Self {
+        Self::of("shell_fixture.luau", reduced)
+    }
+
+    fn of(fixture: &str, reduced: bool) -> Self {
         let ui = std::env::var_os("ZERON_ZGX_TEST_UI")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"));
-        let app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join("shell_fixture.luau")));
+        let app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join(fixture)));
         app.ui.scene.borrow_mut().resize(1200., 800.);
         let motion = app
             .host
@@ -545,6 +549,73 @@ fn a_new_chat_and_a_session_switch_the_composer_at_once() {
     c.watch(30);
     c.draft("build draft", (0, 5));
     c.at_target();
+}
+
+/// A send from a new chat: the composer slides down to the dock with its
+/// prompt and eases into its docked form on the way (no snap: its size
+/// passes through between), as the page's one slide; with motion reduced
+/// it's there at once. Any other move to or from a new chat snaps (above).
+#[test]
+fn a_send_from_a_new_chat_slides_the_composer_down_and_eases_it_docked() {
+    let snaps = |shell: &Shell| {
+        shell
+            .app
+            .host
+            .states()
+            .into_iter()
+            .find(|(n, _)| n.ends_with("::chat_composer_snap"))
+            .and_then(|(_, v)| v.as_f64())
+            .expect("the composer's snaps")
+    };
+    let mut shells = [false, true].map(|reduced| {
+        let mut shell = Shell::of("chat_fixture.luau", reduced);
+        assert!(shell.app.host.run_command("go_new"));
+        shell.frames(30);
+        shell.app.fill(FIELD, "please fix the build");
+        shell.frames(40);
+        shell
+    });
+    let start = shells[0].geometry().composer;
+    let snapped = snaps(&shells[0]);
+    for shell in &mut shells {
+        shell.app.key(Key::Enter);
+    }
+    shells[1].frames(2);
+    let end = shells[1].geometry().composer;
+    assert!(
+        end.y > start.y + 100. && end.height < start.height - 20.,
+        "the session docks it lower, one line: {start:?} -> {end:?}"
+    );
+    let mut trace = Vec::new();
+    for _ in 0..30 {
+        shells[0].frames(1);
+        trace.push(shells[0].geometry().composer);
+    }
+    let between = trace
+        .iter()
+        .filter(|r| {
+            r.y > start.y + 1.
+                && r.y < end.y - 1.
+                && r.height < start.height - 1.
+                && r.height > end.height + 1.
+        })
+        .count();
+    assert!(
+        between >= 5,
+        "its place and its size ease together, neither snapped: {start:?} -> {end:?}, {trace:?}"
+    );
+    for pair in trace.windows(2) {
+        assert!(
+            pair[1].y >= pair[0].y - 0.01 && pair[1].height <= pair[0].height + 0.01,
+            "one way, down and smaller: {trace:?}"
+        );
+    }
+    let last = trace.last().unwrap();
+    assert!(
+        (last.y - end.y).abs() < 1. && (last.height - end.height).abs() < 1.,
+        "lands where the reduced-motion shell put it: {end:?}, {trace:?}"
+    );
+    assert_eq!(snaps(&shells[0]), snapped, "a send snaps nothing");
 }
 
 #[test]
