@@ -2394,8 +2394,7 @@
       "dictation": {
         "label": "Dictation",
         "description": "Hold the microphone, speak, and let go. You edit the words before sending.",
-        "needs_download": "Turning this on downloads a {total} speech model.",
-        "downloading": "Downloading · {done} of {total}. Turn off to cancel."
+        "needs_download": "Turning this on downloads a {total} speech model."
       },
       "shortcut": {
         "label": "Shortcut",
@@ -2415,6 +2414,7 @@
         "title": "Speech models",
         "about": "{size} · {n, plural, one {# language} other {# languages}}",
         "unsupported": "This computer's processor can't run speech models (they need AVX2).",
+        "downloading": "Downloading · {done} of {total}",
         "about_slow": "{size} · {n, plural, one {# language} other {# languages}} · Slower on this computer",
         "mb": "{n} MB",
         "gb": "{n} GB",
