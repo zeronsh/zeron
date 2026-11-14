@@ -8,13 +8,16 @@
 -- ringed; a chip answers at once, with Undo for a moment before it is
 -- sent. The question, or the expand at the chips' end, opens the whole of
 -- it (ds/orch_decision); the thread's name opens the thread at the message
--- that asked. A chat awaiting input opens. An answered one slides out, the
--- rows under it closing up.
+-- that asked. A chat awaiting input opens. An answer the engine took says
+-- so a moment, then slides out, the rows under it closing up (one it
+-- turned down stays, saying why: ds/orch_choices); what was answered
+-- lately is folded at the foot, in Recent answers.
 --
 --   Asks {
 --     needs = function() return data.needs(now, sessions_now) end,
+--     recent = function() return decide.recent(now.asks, 5) end,
 --     name_of = function(chat_id) return "Orchestrators" end,
---     on_answer = function(ask, { option?, text? }) end,   -- option 1-based
+--     on_answer = function(ask, { option?, text? }) return promise end,
 --     on_dismiss = function(ask) end,
 --     on_open = function(chat_id, message_id?) end,
 --     on_expand = function(ask) end,               -- the overlay
@@ -33,11 +36,13 @@ local hold = require("@self/orch_hold")
 local Ref = require("@self/orch_ref")
 local decide = require("@self/orch_decide")
 local Choices = require("@self/orch_choices")
+local Icon = require("@self/icon")
 
 export type Props = {
 	needs: () -> { any },
+	recent: (() -> { any })?,
 	name_of: (id: string?) -> string?,
-	on_answer: (ask: any, choice: decide.Choice) -> (),
+	on_answer: (ask: any, choice: decide.Choice) -> any,
 	on_dismiss: (ask: any) -> (),
 	on_open: (chat_id: string, message: string?) -> (),
 	on_expand: ((ask: any) -> ())?,
@@ -99,23 +104,38 @@ local KIND_STATUS: { [string]: status.Kind } = {
 return ui.component(function(props: Props): Node
 	-- Rows answered here, kept while they leave: by id, the need as it was.
 	local leaving = ui.use_state({} :: { [string]: any })
-	-- Where each row last stood, so one leaving keeps its place.
+	-- Where each row last stood, so one leaving keeps its place, and each
+	-- row as last seen (one answered here, kept while it says so).
 	local last_order: { string } = {}
+	local seen: { [string]: any } = {}
 	local expanded = ui.use_state(false)
+	local recent_open = ui.use_state(false)
 	local limit = props.limit or 6
 
 	local all = ui.computed(function(): { any }
 		local now = props.needs()
 		local gone = leaving:get()
-		local present: { [string]: boolean } = {}
-		for _, n in now do
-			present[n.id] = true
+		local pending = decide.pending:get()
+		local function phase(n: any): string?
+			local p = if n and n.ask then pending[n.ask.id] else nil
+			return if p then p.phase else nil
 		end
-		local out = table.clone(now)
-		-- A leaving row the list no longer has: back at its old place.
+		local present: { [string]: boolean } = {}
+		local out = {}
+		for _, n in now do
+			-- (Answered here and said: out, unless it's leaving.)
+			if phase(n) ~= "done" or gone[n.id] then
+				present[n.id] = true
+				seen[n.id] = n
+				table.insert(out, n)
+			end
+		end
+		-- A row the list no longer has, leaving or answered here and still
+		-- saying so (the engine's state came first): back at its old place.
 		for i, id in last_order do
-			local n = gone[id]
-			if n and not present[id] then
+			local n = gone[id] or seen[id]
+			local ph = phase(n)
+			if n and not present[id] and (gone[id] or (ph ~= nil and ph ~= "done")) then
 				table.insert(out, math.min(i, #out + 1), n)
 			end
 		end
@@ -144,6 +164,28 @@ return ui.component(function(props: Props): Node
 			leaving:set_key({ n.id }, nil)
 		end)
 	end
+	-- An answer the engine took, said for a moment: the row slides out.
+	local left: { [string]: boolean } = {}
+	ui.effect(function()
+		local pending = decide.pending:get()
+		for ask_id, p in pending do
+			local key = `ask:{ask_id}`
+			if p.phase == "done" and not left[key] then
+				left[key] = true
+				local n = seen[key]
+				if n then
+					leave(n)
+				end
+			elseif p.phase ~= "done" then
+				left[key] = nil
+			end
+		end
+		for key in left do
+			if not pending[string.sub(key, 5)] then
+				left[key] = nil
+			end
+		end
+	end)
 
 	local function row(_n: any, _i: number, item: State<any>): Node
 		local function is_leaving(): boolean
@@ -152,10 +194,10 @@ return ui.component(function(props: Props): Node
 		local function ask(): any
 			return item:get().ask
 		end
-		-- Sent past its Undo: the row slides out.
-		local function commit(a: any, choice: decide.Choice)
-			props.on_answer(a, choice)
-			leave(item:peek())
+		-- Sent past its Undo: the engine's reply (the row goes once it's
+		-- taken, ds/orch_decide).
+		local function commit(a: any, choice: decide.Choice): any
+			return props.on_answer(a, choice)
 		end
 		local function expand()
 			local a = ask()
@@ -366,6 +408,117 @@ return ui.component(function(props: Props): Node
 		return ui.div { w_full = true, h = 1, bg = "$border.subtle" }
 	end
 
+	-- What was answered lately (the engine's, and what it took here),
+	-- folded at the foot: the question, and the answer under it.
+	local recent = ui.computed(function(): { any }
+		return if props.recent then props.recent() else {}
+	end)
+	local function recent_row(_r: any, _i: number, r: State<any>): Node
+		return ui.column {
+			class = "orch-recent-row",
+			w_full = true,
+			min_w = 0,
+			py = "$space.1",
+			gap = "$zeron.space.hair",
+			ui.row {
+				w_full = true,
+				gap = "$space.2",
+				items = "center",
+				ui.text {
+					function(): string
+						return plain(r:get().question or "")
+					end,
+					literal = true,
+					truncate = true,
+					grow = 1,
+					min_w = 0,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
+				},
+				ui.text {
+					function(): string
+						return status.ago(status.since(r:get().at or 0))
+					end,
+					tabular = true,
+					shrink = 0,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			},
+			ui.row {
+				w_full = true,
+				gap = "$zeron.space.tight",
+				items = "center",
+				ui.div { color = "$zeron.status.done", shrink = 0, Icon { name = "check", size = 10 } },
+				ui.text {
+					function(): string
+						return r:get().answer or ""
+					end,
+					literal = true,
+					truncate = true,
+					min_w = 0,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			},
+		}
+	end
+	local function recent_fold(): Node
+		return ui.column {
+			class = "orch-recent",
+			w_full = true,
+			pt = "$space.2",
+			gap = "$space.1",
+			ui.button {
+				class = "orch-recent-toggle",
+				label = locale.t("ds.orch.decide.recent"),
+				expanded = function(): boolean
+					return recent_open:get()
+				end,
+				h = 28,
+				px = "$space.2",
+				mx = ui.raw(-8, "its words over the rows' words, its wash out past them"),
+				gap = "$space.2",
+				items = "center",
+				rounded = "$radius.md",
+				bg = "#00000000",
+				hover = { bg = "$hover" },
+				active = { bg = "$pressed" },
+				focus = control.ring,
+				self = "start",
+				on_click = function()
+					recent_open:set(not recent_open:peek())
+				end,
+				ui.div {
+					color = "$text.tertiary",
+					Icon {
+						name = function(): any
+							return if recent_open:get() then "alt-arrow-down" else "alt-arrow-right"
+						end,
+						size = 12,
+					},
+				},
+				ui.text { locale.t("ds.orch.decide.recent"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
+				ui.text {
+					function(): string
+						return tostring(#recent:get())
+					end,
+					tabular = true,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			},
+			ui.show(function(): boolean
+				return recent_open:get()
+			end, ui.each(recent, recent_row, {
+				key = function(r: any): string
+					return r.id
+				end,
+				w_full = true,
+			})),
+		}
+	end
+
 	return ui.column {
 		class = "orch-asks",
 		w_full = true,
@@ -412,5 +565,8 @@ return ui.component(function(props: Props): Node
 				color = "$text.secondary",
 			},
 		}),
+		ui.show(function(): boolean
+			return #recent:get() > 0
+		end, recent_fold()),
 	}
 end)

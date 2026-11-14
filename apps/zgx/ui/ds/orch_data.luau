@@ -20,9 +20,11 @@
 --                                     its ask, `input` set, when it has
 --                                     one), urgent first, then the longest
 --                                     waiting
---   data.waiting_for_you(now, sessions_now)
+--   data.waiting_for_you(now, sessions_now, qa?, counted?)
 --                                     the one count of what waits on the
 --                                     person: { count, urgent, needs }
+--                                     (`counted(ask_id)`: false for an ask
+--                                     answered here, ds/orch_decide)
 --   data.open_asks(now)               the open asks by the chat that asked
 --                                     (its latest one)
 --   data.turn_end(ask)                whether a turn's end raised it
@@ -290,8 +292,17 @@ end
 -- Another source of "waiting for you" joins here, nowhere else.
 export type Waiting = { count: number, urgent: number, needs: { Need }, qa_unread: number }
 
-function M.waiting_for_you(now: any, sessions_now: any, qa: { unread: number, waiting: number }?): Waiting
+function M.waiting_for_you(now: any, sessions_now: any, qa: { unread: number, waiting: number }?, counted: ((ask_id: string) -> boolean)?): Waiting
 	local needs = M.needs(now, sessions_now)
+	if counted then
+		local kept: { Need } = {}
+		for _, n in needs do
+			if not n.ask or counted(n.ask.id) then
+				table.insert(kept, n)
+			end
+		end
+		needs = kept
+	end
 	local urgent = 0
 	for _, n in needs do
 		if n.urgent then

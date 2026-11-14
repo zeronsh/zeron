@@ -12,7 +12,12 @@
 -- (Enter decides, Shift+Enter a new line), Decide (the option chosen and
 -- the words), Defer (an hour, four, tomorrow, next week) and the thread.
 -- Deciding goes through ds/orch_decide's pick, so the row and the card
--- say "Answered · Undo" for its moment.
+-- say "Sending · Undo" for its moment.
+--
+-- It stays open until the person closes it (or decides): a frame of the
+-- engine's state without its ask (an engine coming up again, a republish)
+-- shows the ask as it last was rather than closing it, and a close the
+-- modal makes on its own while it is still opening is let go.
 --
 --   Decision {
 --     ask = function() return the shown ask or nil end,
@@ -45,7 +50,7 @@ export type Props = {
 	ask: () -> any,
 	name_of: (id: string?) -> string?,
 	hue_of: ((id: string?) -> number?)?,
-	on_answer: (ask: any, choice: decide.Choice) -> (),
+	on_answer: (ask: any, choice: decide.Choice) -> any,
 	on_defer: (ask: any, until_ms: number) -> (),
 	on_open: (chat: string, message: string?) -> (),
 	on_link: ((link: any) -> ())?,
@@ -381,6 +386,11 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 			return 6 * (1 - phase:get())
 		end,
 		on_key = function(e: any): boolean
+			-- (Escape is the person's: closed at once, whenever.)
+			if e.key == "Escape" and not (e.ctrl or e.alt or e.meta or e.cmd or e.shift) then
+				close()
+				return true
+			end
 			if typing then
 				typing = false
 				return false
@@ -692,10 +702,34 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 	}, "menu") :: any)
 end)
 
+-- How long after opening a close isn't the person's (no one closes what
+-- hasn't finished opening): the modal's own, its focus scope not taken.
+local SETTLE_MS = 250
+
 return ui.component(function(props: Props): Node
-	local function open(): boolean
-		return decide.shown:get() ~= nil and props.ask() ~= nil
+	-- The shown ask as last seen: the overlay keeps it through a frame of
+	-- the engine's state without it, rather than closing.
+	local known: any = nil
+	local function ask(): any
+		local id = decide.shown:get()
+		if not id then
+			return nil
+		end
+		local a = props.ask()
+		if a then
+			known = a
+			return a
+		end
+		return if known and known.id == id then known else nil
 	end
+	local function open(): boolean
+		return ask() ~= nil
+	end
+	local body_props = setmetatable({ ask = ask }, { __index = props }) :: any
+	-- When it last opened (`ui.now()`), and whether a close while it was
+	-- still opening was let go already (once an opening).
+	local opened_at = -math.huge
+	local let_go = false
 	local phase = ui.use_state(if open() then 1 else 0)
 	local shown = ui.use_state(open())
 	local moving: any = nil
@@ -706,6 +740,9 @@ return ui.component(function(props: Props): Node
 			moving = nil
 		end
 		if want then
+			if not shown:peek() then
+				opened_at, let_go = ui.now(), false
+			end
 			shown:set(true)
 			local opening: TableParams = { value = 1, duration = IN.duration, ease = IN.ease }
 			moving = anime.animate(phase, motion.params(opening))
@@ -726,6 +763,11 @@ return ui.component(function(props: Props): Node
 			return shown:get()
 		end,
 		on_close = function()
+			-- (Closed by the modal itself as it opened, once: kept open.)
+			if not let_go and ui.now() - opened_at < SETTLE_MS then
+				let_go = true
+				return
+			end
 			decide.hide()
 		end,
 		label = locale.t("ds.orch.decide.label"),
@@ -749,7 +791,7 @@ return ui.component(function(props: Props): Node
 		build = function()
 			return ui.column {
 				w_full = true,
-				Body { props = props, phase = phase },
+				Body { props = body_props, phase = phase },
 				Lightbox.Host(),
 			}
 		end,

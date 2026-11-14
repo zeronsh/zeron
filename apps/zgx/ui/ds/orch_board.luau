@@ -168,7 +168,7 @@ export type Props = {
 	on_move: ((id: string, state: string, order: number) -> ())?,
 	on_priority: ((id: string, priority: string) -> ())?,
 	on_open_thread: ((chat: string, message: string?) -> ())?,
-	on_answer: ((ask: any, choice: any) -> ())?,
+	on_answer: ((ask: any, choice: any) -> any)?,
 	on_expand_ask: ((ask: any) -> ())?,
 	on_link: ((link: Link) -> ())?,
 	on_source: ((source: { dump_id: string?, route_id: string? }) -> ())?,
@@ -1612,10 +1612,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 				ask = function(): any
 					return asked()
 				end,
-				on_answer = function(a: any, choice: any)
+				on_answer = function(a: any, choice: any): any
 					if props.on_answer then
-						(props.on_answer :: any)(a, choice)
+						return (props.on_answer :: any)(a, choice)
 					end
+					return nil
 				end,
 				on_expand = props.on_expand_ask,
 				size = "xs",

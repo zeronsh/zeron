@@ -630,9 +630,10 @@ function M.show_dump(id: string?)
 end
 
 -- An ask answered (its option 1-based, or words, or both): from Needs you,
--- a card, or the overlay, past its Undo.
-local function answer(ask: any, choice: any)
-	orchestration.answer(ask.id, choice):after(function() end, said("control.needs.failed"))
+-- a card, or the overlay, past its Undo. The engine's reply: a failure is
+-- said on the ask (ds/orch_decide), with Retry.
+local function answer(ask: any, choice: any): any
+	return orchestration.answer(ask.id, choice, ask)
 end
 
 -- A link of a card's or an ask's: a chat opened here, a web one outside.
@@ -734,6 +735,9 @@ local function needs(): Node
 		needs = function(): { any }
 			return data.needs(orchestration.now:get(), sessions.now:get())
 		end,
+		recent = function(): { any }
+			return decide.recent(orchestration.now:get().asks, 5)
+		end,
 		name_of = name_of,
 		on_answer = answer,
 		on_dismiss = function(ask: any)
@@ -766,7 +770,9 @@ local function decision(): Node
 		hue_of = hue_of,
 		on_answer = answer,
 		on_defer = function(ask: any, until_ms: number)
-			orchestration.defer(ask.id, until_ms):after(function() end, said("control.needs.failed"))
+			decide.defer(ask, until_ms, function(a: any, ms: number): any
+				return orchestration.defer(a.id, ms)
+			end)
 		end,
 		on_open = M.open_chat,
 		on_link = open_link,
@@ -944,8 +950,10 @@ function tally.working(): number
 end
 -- What waits on the person (data.waiting_for_you): Needs you's rows alone
 -- (`needs`), or with the Q&A answers not read yet (`waiting`).
+-- (An ask answered here, waiting out its Undo, on its way or taken, isn't
+-- counted: it comes back if it's undone or turned down.)
 local function waiting(): data.Waiting
-	return data.waiting_for_you(orchestration.now:get(), sessions.now:get(), QA.counts(qa_entries:get()))
+	return data.waiting_for_you(orchestration.now:get(), sessions.now:get(), QA.counts(qa_entries:get()), decide.counted)
 end
 function tally.needs(urgent: boolean?): number
 	local w = waiting()

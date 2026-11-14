@@ -1337,7 +1337,13 @@
         "defer_hours": "For 4 hours",
         "defer_tomorrow": "Until tomorrow, 9:00",
         "defer_week": "Until Monday, 9:00",
-        "decide": "Decide"
+        "decide": "Decide",
+        "sending": "Sending",
+        "failed": "Couldn't send your answer: {reason}",
+        "defer_failed": "Couldn't defer it: {reason}",
+        "retry": "Retry",
+        "timeout": "no reply from the engine",
+        "recent": "Recent answers"
       }
     }
   },

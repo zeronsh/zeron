@@ -1337,7 +1337,13 @@
         "defer_hours": "推迟 4 小时",
         "defer_tomorrow": "推迟到明天 9:00",
         "defer_week": "推迟到周一 9:00",
-        "decide": "决定"
+        "decide": "决定",
+        "sending": "正在发送",
+        "failed": "回答未能发送：{reason}",
+        "defer_failed": "未能推迟：{reason}",
+        "retry": "重试",
+        "timeout": "引擎没有回应",
+        "recent": "最近的回答"
       }
     }
   },
