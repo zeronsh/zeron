@@ -153,6 +153,14 @@ fn a_long_chat_come_back_to_mid_scroll_draws_what_a_whole_repaint_draws() {
     }
 }
 
+/// One reply of a thousand steps (ademark's A11 thread), its blocks windowed
+/// in runs: built as they come near, held as boxes away.
+#[test]
+fn a_long_thread_opened_and_scrolled_draws_what_a_whole_repaint_draws() {
+    let misses = drawn_against_whole("long_thread");
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
 #[test]
 fn a_long_chat_of_other_chats_messages_opened_and_scrolled_draws_what_a_whole_repaint_draws() {
     let misses = drawn_against_whole("long_chat_cross");
