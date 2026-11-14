@@ -29,8 +29,8 @@ mlua = { version = "0.12", features = ["luau"] }
 # winit). Pinned, as apps/zgx is, to the combined zgx pull request that
 # makes it a crate (zeronsh/zgx#2110, on the author's fork until it merges),
 # so the service and its windows measure alike.
-zgx = { git = "https://github.com/hoangvu12/zgx", rev = "9d74a723a7a07ae553928d6fa4e31072f03b4d4c", default-features = false }
-zgx-text = { git = "https://github.com/hoangvu12/zgx", rev = "9d74a723a7a07ae553928d6fa4e31072f03b4d4c" }
+zgx = { git = "https://github.com/hoangvu12/zgx", rev = "521b6158f7aec2457ff198acc40c3a7aba6f5948", default-features = false }
+zgx-text = { git = "https://github.com/hoangvu12/zgx", rev = "521b6158f7aec2457ff198acc40c3a7aba6f5948" }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true

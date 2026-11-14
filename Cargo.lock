@@ -14300,7 +14300,7 @@ dependencies = [
 [[package]]
 name = "zgx"
 version = "0.1.10"
-source = "git+https://github.com/hoangvu12/zgx?rev=9d74a723a7a07ae553928d6fa4e31072f03b4d4c#9d74a723a7a07ae553928d6fa4e31072f03b4d4c"
+source = "git+https://github.com/hoangvu12/zgx?rev=521b6158f7aec2457ff198acc40c3a7aba6f5948#521b6158f7aec2457ff198acc40c3a7aba6f5948"
 dependencies = [
  "foldhash 0.2.0",
  "libc",
@@ -14320,7 +14320,7 @@ dependencies = [
 [[package]]
 name = "zgx-cosmic-text"
 version = "0.19.14"
-source = "git+https://github.com/hoangvu12/zgx?rev=9d74a723a7a07ae553928d6fa4e31072f03b4d4c#9d74a723a7a07ae553928d6fa4e31072f03b4d4c"
+source = "git+https://github.com/hoangvu12/zgx?rev=521b6158f7aec2457ff198acc40c3a7aba6f5948#521b6158f7aec2457ff198acc40c3a7aba6f5948"
 dependencies = [
  "bitflags 2.13.1",
  "fontdb",
@@ -14344,7 +14344,7 @@ dependencies = [
 [[package]]
 name = "zgx-harfrust"
 version = "0.5.4"
-source = "git+https://github.com/hoangvu12/zgx?rev=9d74a723a7a07ae553928d6fa4e31072f03b4d4c#9d74a723a7a07ae553928d6fa4e31072f03b4d4c"
+source = "git+https://github.com/hoangvu12/zgx?rev=521b6158f7aec2457ff198acc40c3a7aba6f5948#521b6158f7aec2457ff198acc40c3a7aba6f5948"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -14356,7 +14356,7 @@ dependencies = [
 [[package]]
 name = "zgx-swash"
 version = "0.2.11"
-source = "git+https://github.com/hoangvu12/zgx?rev=9d74a723a7a07ae553928d6fa4e31072f03b4d4c#9d74a723a7a07ae553928d6fa4e31072f03b4d4c"
+source = "git+https://github.com/hoangvu12/zgx?rev=521b6158f7aec2457ff198acc40c3a7aba6f5948#521b6158f7aec2457ff198acc40c3a7aba6f5948"
 dependencies = [
  "skrifa 0.40.0",
  "yazi",
@@ -14366,7 +14366,7 @@ dependencies = [
 [[package]]
 name = "zgx-taffy"
 version = "0.9.2"
-source = "git+https://github.com/hoangvu12/zgx?rev=9d74a723a7a07ae553928d6fa4e31072f03b4d4c#9d74a723a7a07ae553928d6fa4e31072f03b4d4c"
+source = "git+https://github.com/hoangvu12/zgx?rev=521b6158f7aec2457ff198acc40c3a7aba6f5948#521b6158f7aec2457ff198acc40c3a7aba6f5948"
 dependencies = [
  "arrayvec",
  "grid 0.18.0",
@@ -14377,7 +14377,7 @@ dependencies = [
 [[package]]
 name = "zgx-text"
 version = "0.1.10"
-source = "git+https://github.com/hoangvu12/zgx?rev=9d74a723a7a07ae553928d6fa4e31072f03b4d4c#9d74a723a7a07ae553928d6fa4e31072f03b4d4c"
+source = "git+https://github.com/hoangvu12/zgx?rev=521b6158f7aec2457ff198acc40c3a7aba6f5948#521b6158f7aec2457ff198acc40c3a7aba6f5948"
 dependencies = [
  "fontconfig-parser",
  "rustc-hash 2.1.3",
