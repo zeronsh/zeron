@@ -164,6 +164,8 @@ Parakeet Ultra model weights are by Moondream (post-trained from NVIDIA Parakeet
 
 Cohere Transcribe 03-2026 model weights are by Cohere under the Apache License 2.0. The optional download is handy-computer's Q5_K_M GGUF conversion, pinned to revision `7353b6040bdc1be9e5a3823d99d5fe12afe88264`, with SHA-256 verification. Original: https://huggingface.co/CohereLabs/cohere-transcribe-03-2026. Conversion: https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf. License: https://www.apache.org/licenses/LICENSE-2.0. It comes with a language-ID model: SpeechBrain's ECAPA-TDNN on VoxLingua107 (Apache License 2.0, https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa), in handy-computer's Q8_0 GGUF conversion pinned to revision `e59f0f3847e77723b7d58447ef9456fa0c7e9436` (https://huggingface.co/handy-computer/lang-id-voxlingua107-ecapa-gguf), with SHA-256 verification.
 
+Settings → Voice names each model's makers with their marks (referential use; the marks are their owners' trademarks): NVIDIA's and Cohere's from LobeHub's icon set (`@lobehub/icons-static-svg` 1.102.0, MIT, © LobeHub, https://github.com/lobehub/lobe-icons), and Moondream's traced to vector from its official image (https://moondream.ai/images/moondream_logo_color.png). In `apps/zgx/ui/assets/icons`.
+
 Native runtime dependencies: transcribe.cpp 0.4.2 via transcribe-cpp/transcribe-cpp-sys (MIT), with the ggml, miniz and Silero VAD code it vendors (MIT), cpal 0.17.3 (Apache-2.0), and rubato 0.16.2 (MIT). See `crates/voice/NOTICE.md` for conversion provenance, changes, runtime and supported languages. Models are not included in the application bundle.
 
 ## Bezel thinking orbs
