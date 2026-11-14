@@ -231,9 +231,76 @@ async fn main() {
             }
             println!("{}", chats.join(" "));
         }
+        ("device", []) => {
+            let device = client
+                .call(methods::LOCAL_DEVICE, serde_json::json!({}))
+                .await
+                .unwrap_or_else(|err| fail(&format!("LocalDevice: {err}")));
+            println!("{}", device["deviceId"].as_str().unwrap_or_default());
+        }
+        // Forwarded calls to another device: each one's time (ms), one a line.
+        ("call", [target, n, gap_ms]) => {
+            let n: usize = n.parse().unwrap_or_else(|_| fail("bad n"));
+            let gap: u64 = gap_ms.parse().unwrap_or_else(|_| fail("bad gap"));
+            for _ in 0..n {
+                let start = Instant::now();
+                let result = client
+                    .call(
+                        methods::LIST_HARNESSES,
+                        serde_json::json!({ "targetDeviceId": target }),
+                    )
+                    .await;
+                match result {
+                    Ok(_) => println!("{:.1}", start.elapsed().as_secs_f64() * 1000.0),
+                    Err(err) => println!("error {err}"),
+                }
+                tokio::time::sleep(Duration::from_millis(gap)).await;
+            }
+        }
+        // Until a forwarded call to `target` succeeds: how long that took (ms).
+        ("reachable", [target, timeout_s]) => {
+            let timeout: u64 = timeout_s.parse().unwrap_or_else(|_| fail("bad timeout"));
+            let start = Instant::now();
+            loop {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    client.call(
+                        methods::LIST_HARNESSES,
+                        serde_json::json!({ "targetDeviceId": target }),
+                    ),
+                )
+                .await;
+                if matches!(result, Ok(Ok(_))) {
+                    println!("{:.0}", start.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(timeout) {
+                    println!("never");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
         ("client", [secs, chat @ ..]) => {
             let secs: u64 = secs.parse().unwrap_or_else(|_| fail("bad secs"));
             let count = app_watches(&client, chat.first().map(String::as_str)).await;
+            // The app follows each other device's agent updates, as zgx's
+            // updates view does (`IDLE_RIG_PEERS`: their ids).
+            for peer in std::env::var("IDLE_RIG_PEERS")
+                .unwrap_or_default()
+                .split_whitespace()
+            {
+                match client
+                    .subscribe(
+                        methods::WATCH_HARNESS_UPDATES,
+                        serde_json::json!({ "targetDeviceId": peer }),
+                    )
+                    .await
+                {
+                    Ok(rx) => drain(rx, count.clone()),
+                    Err(err) => eprintln!("WatchHarnessUpdates {peer}: {err}"),
+                }
+            }
             tokio::time::sleep(Duration::from_secs(secs)).await;
             println!(
                 "frames={}",
