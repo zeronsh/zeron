@@ -38,38 +38,68 @@ static PATH_OFFLINE: AtomicBool = AtomicBool::new(false);
 /// See [`set_resting`].
 static RESTING: OnceLock<watch::Sender<bool>> = OnceLock::new();
 
-/// Subscribe to system-wake events (the detector spawns on first call).
+/// Set once the OS delivers wake events itself ([`use_os_wake_events`]).
+static OS_EVENTS: AtomicBool = AtomicBool::new(false);
+
+/// Subscribe to system-wake events (the detector spawns on first call, unless
+/// the OS delivers them: [`use_os_wake_events`]).
 pub fn subscribe() -> broadcast::Receiver<()> {
     CHANNEL
         .get_or_init(|| {
             let (tx, _) = broadcast::channel(4);
-            let detector = tx.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(TICK);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                interval.tick().await; // consume the immediate first tick
-                let mut wall = SystemTime::now();
-                let mut mono = Instant::now();
-                loop {
-                    interval.tick().await;
-                    let wall_elapsed = SystemTime::now()
-                        .duration_since(wall)
-                        .unwrap_or(Duration::ZERO);
-                    let mono_elapsed = mono.elapsed();
-                    if wall_elapsed > mono_elapsed + JUMP_THRESHOLD {
-                        tracing::info!(
-                            slept_s = wall_elapsed.as_secs(),
-                            "wake: system resumed from suspend"
-                        );
-                        let _ = detector.send(());
-                    }
-                    wall = SystemTime::now();
-                    mono = Instant::now();
-                }
-            });
+            if !OS_EVENTS.load(Ordering::Acquire) {
+                spawn_detector(tx.clone());
+            }
             tx
         })
         .subscribe()
+}
+
+/// The process's OS tells it of each wake ([`notify_wake`]), so the
+/// clock-comparing detector, which wakes the process every [`TICK`] to look,
+/// isn't needed: it doesn't start, or stops at its next tick. Call before the
+/// first [`subscribe`] where possible (the macOS background engine registers
+/// for IOKit power notifications before its engine starts).
+pub fn use_os_wake_events() {
+    OS_EVENTS.store(true, Ordering::Release);
+}
+
+/// The system just woke (from the OS's own notification): what the detector
+/// would have broadcast.
+pub fn notify_wake() {
+    tracing::info!("wake: system resumed from sleep");
+    if let Some(tx) = CHANNEL.get() {
+        let _ = tx.send(());
+    }
+}
+
+fn spawn_detector(detector: broadcast::Sender<()>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TICK);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // consume the immediate first tick
+        let mut wall = SystemTime::now();
+        let mut mono = Instant::now();
+        loop {
+            interval.tick().await;
+            if OS_EVENTS.load(Ordering::Acquire) {
+                return;
+            }
+            let wall_elapsed = SystemTime::now()
+                .duration_since(wall)
+                .unwrap_or(Duration::ZERO);
+            let mono_elapsed = mono.elapsed();
+            if wall_elapsed > mono_elapsed + JUMP_THRESHOLD {
+                tracing::info!(
+                    slept_s = wall_elapsed.as_secs(),
+                    "wake: system resumed from suspend"
+                );
+                let _ = detector.send(());
+            }
+            wall = SystemTime::now();
+            mono = Instant::now();
+        }
+    });
 }
 
 fn online_channel() -> &'static broadcast::Sender<()> {

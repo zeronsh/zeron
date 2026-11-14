@@ -13617,6 +13617,7 @@ dependencies = [
  "zeron-mcp",
  "zeron-notify",
  "zeron-rpc",
+ "zeron-sync",
  "zeron-ui",
  "zeron-update",
 ]
