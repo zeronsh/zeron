@@ -240,6 +240,7 @@ icon_assets![
     (ANTIGRAVITY_MARK, "antigravity-mark"),
     // Muse Code's mark (Meta's infinity), tinted its brand blue at call sites.
     (MUSE_MARK, "muse-mark"),
+    (DROID_MARK, "droid-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

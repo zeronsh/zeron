@@ -545,6 +545,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: None,
             manual_command: "",
         },
+        HarnessId::Droid => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Command(&["update", "--check"]),
+            update_args: Some(&["update"]),
+            manual_command: "droid update",
+        },
         HarnessId::Mock => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Manual,

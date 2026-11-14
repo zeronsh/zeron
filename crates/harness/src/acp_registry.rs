@@ -130,6 +130,11 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("antigravity-acp", "antigravity"),
 ];
 
+/// The registry's ids for the agents Zeron drives itself and leaves out of
+/// the registry: only the built-in harness is offered. One already added
+/// reads as having left the registry.
+const REPLACED: &[&str] = &["factory-droid"];
+
 /// The built-in harness slug for a registry id Zeron drives itself.
 pub fn built_in(registry_id: &str) -> Option<&'static str> {
     BUILT_IN
@@ -141,7 +146,8 @@ pub fn built_in(registry_id: &str) -> Option<&'static str> {
 /// The index's agents: each decoded on its own and dropped if it doesn't
 /// hold up (an id that isn't one, a URL that isn't https, a package not
 /// pinned to an exact version, a `cmd` that leaves its archive), so one bad
-/// entry never hides the rest. Errs only when the index itself is unusable.
+/// entry never hides the rest, and left out if it is `REPLACED`. Errs only
+/// when the index itself is unusable.
 pub fn parse_index(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     if bytes.len() > MAX_INDEX_BYTES {
         return Err(format!("the registry index is over {} KiB", MAX_INDEX_BYTES / 1024));
@@ -157,7 +163,10 @@ pub fn parse_index(bytes: &[u8]) -> Result<Vec<Entry>, String> {
         let Ok(entry) = serde_json::from_value::<Entry>(raw.clone()) else {
             continue;
         };
-        if valid(&entry) && !out.iter().any(|e| e.id == entry.id) {
+        if valid(&entry)
+            && !REPLACED.contains(&entry.id.as_str())
+            && !out.iter().any(|e| e.id == entry.id)
+        {
             out.push(entry);
         }
     }
@@ -1222,6 +1231,7 @@ mod tests {
                 { "id": "escapes", "name": "x", "version": "1", "distribution": { "binary": { "linux-x86_64": { "archive": "https://x.dev/a.zip", "cmd": "../../bin/sh" } } } },
                 { "id": "no-dist", "name": "x", "version": "1", "distribution": {} },
                 { "id": "gemini", "name": "Twice", "version": "1", "distribution": { "npx": { "package": "a@1.0.0" } } },
+                { "id": "factory-droid", "name": "Factory Droid", "version": "1", "description": "z", "distribution": { "npx": { "package": "droid@1.0.0" } } },
                 "not an object"
             ],
             "extensions": []

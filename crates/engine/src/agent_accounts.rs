@@ -3954,6 +3954,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "antigravity",
         HarnessId::Muse => "muse",
+        HarnessId::Droid => "droid",
         HarnessId::Mock => "mock",
         HarnessId::Registry(agent) => agent.slug(),
     }

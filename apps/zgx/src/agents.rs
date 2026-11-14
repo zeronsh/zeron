@@ -546,6 +546,7 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
         "hermes" => "hermes",
         "antigravity" => "antigravity",
         "muse" => "muse",
+        "droid" => "droid",
         _ => return None,
     })
 }
@@ -773,6 +774,7 @@ impl Agents {
                     // An agent added from the ACP registry: its one-ink icon
                     // (it has no mark), and no accounts of Zeron's to show.
                     ("registry", Value::Bool(id.starts_with("acp."))),
+                    ("own_sign_in", Value::Bool(signs_in_on_its_own(id))),
                     ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
                     ("installed", Value::Bool(h["installed"].as_bool().unwrap_or(true))),
                     ("can_install", Value::Bool(h["canInstall"].as_bool().unwrap_or(false))),
@@ -1850,6 +1852,14 @@ fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
     }
 }
 
+/// Whether `id` is a built-in agent Zeron neither signs in nor lists accounts
+/// for (Factory Droid): its card has no "Connect an account".
+fn signs_in_on_its_own(id: &str) -> bool {
+    harness_id(id).is_some_and(|harness| {
+        !matches!(harness, zeron_proto::HarnessId::Registry(_)) && !zeron_proto::providers::signs_in(harness)
+    })
+}
+
 /// A device's accounts as the composer reads them, by agent: only an agent
 /// that signs in and reports its usage. `{ id, email, plan, active,
 /// can_switch, error?, windows = { { label, used } } }`.
@@ -2086,6 +2096,14 @@ mod tests {
         assert_eq!(openrouter.field("key").map(text).as_deref(), Some("OpenRouter"));
         assert!(!openrouter.field("login").is_some_and(|v| v.truthy()));
         assert!(logins.field("claude-code").is_none());
+    }
+
+    #[test]
+    fn droid_signs_in_on_its_own() {
+        assert!(signs_in_on_its_own("droid"));
+        assert!(!signs_in_on_its_own("claude-code"));
+        assert!(!signs_in_on_its_own("acp.someone"));
+        assert!(!signs_in_on_its_own("something-newer"));
     }
 
     #[test]

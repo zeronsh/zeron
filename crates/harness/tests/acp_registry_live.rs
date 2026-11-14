@@ -125,7 +125,7 @@ async fn live_registry_sign_ins_report_their_page() {
     }
     let (bytes, _) = reg::fetch_index(reg::INDEX_URL, None).await.unwrap();
     let entries = reg::parse_index(&bytes.unwrap()).unwrap();
-    let wanted = std::env::var("ZERON_LIVE_ACP_SIGNIN").unwrap_or_else(|_| "factory-droid".into());
+    let wanted = std::env::var("ZERON_LIVE_ACP_SIGNIN").unwrap_or_else(|_| "gemini".into());
     for id in wanted.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let entry = entries.iter().find(|e| e.id == id).unwrap();
         reg::install(entry, None).await.unwrap();

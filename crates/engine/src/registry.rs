@@ -953,6 +953,23 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
     );
+    registry.register_lazy(
+        HarnessDescriptor {
+            icon: None,
+            id: HarnessId::Droid,
+            name: "Factory Droid".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: vec![],
+            installed: true,
+            can_install: false,
+            enabled: None,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: true,
+        },
+        Box::new(|| zeron_harness::DroidHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::DroidHarness::new()) as Arc<dyn Harness>)),
+    );
     // Cursor via the pinned @cursor/sdk shim (NOT ACP — that surface strips
     // subagent transcripts), same lazy pattern: the static descriptor mirrors
     // CursorHarness exactly. Native step-boundary steering; no effort ladder.
@@ -1151,6 +1168,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn droid_lazy_descriptor_matches_resolved_harness() {
+        let registry = default_registry();
+        let before = registry
+            .descriptors()
+            .into_iter()
+            .find(|d| d.id == HarnessId::Droid)
+            .unwrap();
+        registry.resolve(HarnessId::Droid).unwrap();
+        let after = registry
+            .descriptors()
+            .into_iter()
+            .find(|d| d.id == HarnessId::Droid)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+        assert_eq!(after.access_modes, AccessMode::ALL);
+        assert!(after.supports_plan);
+    }
+
+    #[test]
     fn mid_turn_steering_requires_support_and_a_step_boundary() {
         let mut descriptor = HarnessDescriptor {
             icon: None,
@@ -1242,6 +1281,7 @@ mod tests {
                 HarnessId::Mock,
                 HarnessId::ClaudeCode,
                 HarnessId::Codex,
+                HarnessId::Droid,
                 HarnessId::Cursor,
                 HarnessId::Devin,
                 HarnessId::Grok,

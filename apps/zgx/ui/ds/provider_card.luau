@@ -244,6 +244,9 @@ export type CardProps = {
 	-- list (one from the ACP registry): its foot is a sign-in, not "Connect
 	-- an account".
 	sign_in_only: boolean?,
+	-- An agent that signs in from its own CLI, Zeron never asking it to
+	-- (Factory Droid): its foot says how, in place of "Connect an account".
+	own_sign_in: boolean?,
 	-- What a sign-in under way says to do (a device code to type in), or
 	-- why one failed, in the agent's own words: in the row's line, in place
 	-- of the usual one.
@@ -770,6 +773,13 @@ end
 -- The card's foot: connect the first account, or add another (Zeron's
 -- labels), leading into the sign-in.
 local function add(provider: Provider, empty: () -> boolean, on_add: (() -> ())?, sign_in_only: boolean?, c: CardProps?): Node
+	if c and c.own_sign_in then
+		return Settings.Row {
+			label = locale.t("ds.provider_card.own_sign_in", { name = provider.name }),
+			description = locale.t("ds.provider_card.own_sign_in_hint", { agent = provider.id }),
+			lead = M.disc(Icon { name = "lock-keyhole-unlocked", size = 16 }),
+		}
+	end
 	if sign_in_only then
 		local function sign_in(): Node
 			local row = Settings.Row {
