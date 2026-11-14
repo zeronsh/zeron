@@ -50,6 +50,7 @@ local function settled(ok: boolean, value: any): any
 end
 
 local NOW = os.time()
+local parent_place = { branch = "main", cwd = "/proj" }
 local children = {
 	{ id = "side-a", parent = "chat-1", title = "Looking at the tests", device = "d", status = "working", updated = NOW - 60, created = NOW - 120, agent = "openai" },
 	{ id = "side-b", parent = "chat-1", title = "New side chat", device = "d", updated = NOW - 600, created = NOW - 700 },
@@ -64,7 +65,7 @@ local function publish()
 			{ id = "p2", name = "zephyr", device = "d", path = "/zephyr", git = true },
 		},
 		chats = {
-			{ id = "chat-1", title = "Parent", project = "p1", device = "d", branch = "main", cwd = "/proj", updated = NOW, created = NOW - 3600, running_subagents = 1, side_chats = #children, working_side_chats = 1 },
+			{ id = "chat-1", title = "Parent", project = "p1", device = "d", branch = parent_place.branch, cwd = parent_place.cwd, updated = NOW, created = NOW - 3600, running_subagents = 1, side_chats = #children, working_side_chats = 1 },
 		},
 		archived = {},
 		children = { ["chat-1"] = table.clone(children) },
@@ -77,6 +78,13 @@ publish()
 -- The open chat: the parent, on Claude Code's Opus 5.5 at high effort (a
 -- new side chat starts as it runs); the agents and models to pick from.
 store.session:set({ id = "chat-1", state = "ready", title = "Parent", harness = "claude-code", model = "claude-code/opus-5.5", effort = "high", access = "supervised", project = "p1", device = "d", branch = "main", cwd = "/proj" } :: any)
+ui.command { id = "parent_in_worktree", title = "The parent works in an existing worktree", run = function()
+	parent_place = { branch = "feature", cwd = "/proj/.zeron/worktrees/feature" }
+	local parent = table.clone(store.session:peek() :: any)
+	parent.branch, parent.cwd = parent_place.branch, parent_place.cwd
+	store.session:set(parent)
+	publish()
+end }
 store.catalog:set({
 	state = "ready",
 	harnesses = {
@@ -198,8 +206,9 @@ ui.command { id = "send_fails", title = "Sends fail", run = function()
 	send_fails:set(true)
 end }
 -- A project's branches, as git where it is would say.
-stub_store.refs = function(_path: string, _device: string?): any
-	return settled(true, { { name = "main", current = true }, { name = "feature", current = false } })
+stub_store.refs = function(path: string, _device: string?): any
+	local worktree = if path == "/proj" and parent_place.cwd ~= "/proj" then parent_place.cwd else nil
+	return settled(true, { { name = "main", current = true }, { name = "feature", current = false, worktree = worktree } })
 end
 stub_store.interrupt = function(id: string)
 	note(`stop:{id}`)

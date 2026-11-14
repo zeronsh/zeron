@@ -434,10 +434,13 @@ function M.bind(c: Choices)
 		if not c.active() then
 			return
 		end
-		-- Another project: its own ref, chosen afresh.
+		-- Another project: its own ref, chosen afresh. The first project can
+		-- arrive with an inherited branch (a side chat's seed effect runs
+		-- after bind during mounting); that is initialization, not a move.
 		if id ~= project_was then
+			local moved = project_was ~= nil
 			project_was = id
-			if c.branch:peek() ~= nil then
+			if moved and c.branch:peek() ~= nil then
 				c.branch:set(nil)
 			end
 		end
