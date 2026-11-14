@@ -46,7 +46,7 @@ impl Fixture {
     ) -> Self {
         let (events_tx, events) = mpsc::sync_channel(4);
         let stop = Arc::new(AtomicBool::new(false));
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Cancel::new();
         let level = Arc::new(AtomicU32::new(0));
         let job = Job {
             dir: Default::default(),
@@ -164,7 +164,7 @@ fn cancel_after_stop_during_load_discards_retained_audio() {
     f.listening();
     f.session.finish();
     f.closed.recv_timeout(WAIT).unwrap();
-    f.session.cancel.store(true, Ordering::Release);
+    f.session.cancel.cancel();
     assert_eq!(f.release(Ok(())).unwrap(), None);
 }
 
@@ -223,7 +223,7 @@ fn recording_limit_closes_capture_while_model_is_still_loading() {
 fn cancelled_load_keeps_start_and_model_removal_guarded_until_native_work_returns() {
     let f = Fixture::with_admission(None, Some(BusyGuard::acquire().unwrap()));
     f.listening();
-    f.session.cancel.store(true, Ordering::Release);
+    f.session.cancel.cancel();
     f.closed.recv_timeout(WAIT).unwrap();
     assert!(busy(), "Settings must refuse model removal during loading");
     assert!(Session::start(Default::default(), None).is_err());
@@ -242,7 +242,7 @@ fn stop_before_capture_start_never_opens_the_microphone() {
     let job = Job {
         dir: Default::default(),
         stop: Arc::new(AtomicBool::new(true)),
-        cancel: Arc::new(AtomicBool::new(false)),
+        cancel: Cancel::new(),
         level: Arc::new(AtomicU32::new(0)),
         device: None,
         events,
@@ -262,7 +262,7 @@ fn cancel_during_device_open_does_not_emit_listening_or_transcribe() {
     let (opening, started) = mpsc::sync_channel(1);
     let mut f = Fixture::new(Some((opened, opening)));
     started.recv_timeout(WAIT).unwrap();
-    f.session.cancel.store(true, Ordering::Release);
+    f.session.cancel.cancel();
     open.send(()).unwrap();
     f.closed.recv_timeout(WAIT).unwrap();
     assert!(f.session.poll().is_none());
@@ -347,7 +347,7 @@ fn dictate(
     let (tx, events) = mpsc::sync_channel(4);
     let session = Session {
         stop: Arc::new(AtomicBool::new(false)),
-        cancel: Arc::new(AtomicBool::new(false)),
+        cancel: Cancel::new(),
         level: Arc::new(AtomicU32::new(0)),
         events,
     };
@@ -435,7 +435,7 @@ fn a_silent_room_still_says_listening() {
 /// A model that says when it's loaded and when it's let go.
 struct Weights(SyncSender<&'static str>);
 impl Model for Weights {
-    fn transcribe(&mut self, _: Vec<f32>, _: u32) -> Result<String> {
+    fn transcribe(&mut self, _: Vec<f32>, _: u32, _: &Cancel) -> Result<String> {
         Ok("words".into())
     }
 }
@@ -476,7 +476,7 @@ fn the_model_stays_ready_as_long_as_the_setting_says() {
         let job = Job {
             dir: "models/a".into(),
             stop: Arc::new(AtomicBool::new(true)),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: Cancel::new(),
             level: Arc::new(AtomicU32::new(0)),
             device: None,
             events,
@@ -526,7 +526,7 @@ fn a_slow_first_load_still_yields_the_words_with_no_error() {
     let (tx, events) = mpsc::sync_channel(8);
     let mut session = Session {
         stop: Arc::new(AtomicBool::new(false)),
-        cancel: Arc::new(AtomicBool::new(false)),
+        cancel: Cancel::new(),
         level: Arc::new(AtomicU32::new(0)),
         events,
     };
@@ -583,12 +583,12 @@ fn a_slow_first_load_still_yields_the_words_with_no_error() {
 }
 
 /// A model whose decode runs until it's told to stop, as a long one does.
-struct Decoding(SyncSender<&'static str>, transcribe_cpp::CancelToken);
+struct Decoding(SyncSender<&'static str>);
 impl Model for Decoding {
-    fn transcribe(&mut self, _: Vec<f32>, _: u32) -> Result<String> {
+    fn transcribe(&mut self, _: Vec<f32>, _: u32, cancel: &Cancel) -> Result<String> {
         let _ = self.0.send("decoding");
         let started = Instant::now();
-        while !self.1.is_cancelled() && started.elapsed() < WAIT {
+        while !cancel.is_cancelled() && started.elapsed() < WAIT {
             std::thread::sleep(Duration::from_millis(5));
         }
         Ok(String::new())
@@ -605,14 +605,12 @@ fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
     let (worker, rx) = mpsc::sync_channel::<Command>(1);
     let keep = Arc::new(AtomicU64::new(ALWAYS));
     let running = Arc::new(Mutex::new(None));
-    let abort = transcribe_cpp::CancelToken::new();
     let (said, life) = mpsc::sync_channel(8);
     let (closed, _closed) = mpsc::sync_channel(4);
     // The recording ends at once (a decode follows) or never (still held).
     let ends = Arc::new(AtomicBool::new(true));
     let serving = {
-        let (keep, running, abort, ends) =
-            (keep.clone(), running.clone(), abort.clone(), ends.clone());
+        let (keep, running, ends) = (keep.clone(), running.clone(), ends.clone());
         std::thread::spawn(move || {
             serve(
                 rx,
@@ -624,7 +622,7 @@ fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
                         ended: Arc::new(AtomicBool::new(ends.load(Ordering::Acquire))),
                     })
                 },
-                |_: &Path| Ok(Decoding(said.clone(), abort.clone())),
+                |_: &Path| Ok(Decoding(said.clone())),
             )
         })
     };
@@ -633,7 +631,7 @@ fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
         let job = Job {
             dir: "models/a".into(),
             stop: Arc::new(AtomicBool::new(false)),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: Cancel::new(),
             level: Arc::new(AtomicU32::new(0)),
             device: None,
             events,
@@ -645,7 +643,7 @@ fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
     dictate();
     assert_eq!(life.recv_timeout(WAIT).unwrap(), "decoding");
     let quitting = Instant::now();
-    release(&worker, &running, &abort, Duration::from_secs(2));
+    release(&worker, &running, Duration::from_secs(2));
     assert_eq!(life.try_recv().unwrap(), "released");
     assert!(
         quitting.elapsed() < Duration::from_secs(1),
@@ -654,13 +652,12 @@ fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
     );
     // Mid-recording (the key still held): the recording ends, nothing is
     // decoded, the model goes.
-    abort.reset();
     ends.store(false, Ordering::Release);
     dictate();
     // (Loaded beside the recording, then the recording waits.)
     std::thread::sleep(Duration::from_millis(200));
     let quitting = Instant::now();
-    release(&worker, &running, &abort, Duration::from_secs(2));
+    release(&worker, &running, Duration::from_secs(2));
     assert_eq!(life.try_recv().unwrap(), "released");
     assert!(life.try_recv().is_err(), "nothing decoded");
     assert!(
@@ -668,6 +665,68 @@ fn quitting_frees_the_model_before_exit_mid_decode_or_mid_recording() {
         "{:?}",
         quitting.elapsed()
     );
+    drop(worker);
+    serving.join().unwrap();
+}
+
+#[test]
+fn cancelling_a_long_decode_frees_the_worker_at_once() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(ALWAYS));
+    let (said, life) = mpsc::sync_channel(8);
+    let (closed, _closed) = mpsc::sync_channel(4);
+    let serving = {
+        let keep = keep.clone();
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                &Mutex::new(None),
+                move |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: closed.clone(),
+                        ended: Arc::new(AtomicBool::new(true)),
+                    })
+                },
+                |_: &Path| Ok(Decoding(said.clone())),
+            )
+        })
+    };
+    // A dictation whose decode would run on (WAIT), as a long one does.
+    let dictate = || {
+        let (events, heard) = mpsc::sync_channel(4);
+        let session = Session {
+            // (Its recording over at once: the microphone says it ended.)
+            stop: Arc::new(AtomicBool::new(false)),
+            cancel: Cancel::new(),
+            level: Arc::new(AtomicU32::new(0)),
+            events: heard,
+        };
+        let job = Job {
+            dir: "models/a".into(),
+            stop: session.stop.clone(),
+            cancel: session.cancel.clone(),
+            level: session.level.clone(),
+            device: None,
+            events,
+        };
+        worker.send(Command::Transcribe(job, None)).unwrap();
+        session
+    };
+    let session = dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "decoding");
+    // Cancelled (the bar's ×, Escape, another chat): the decode stops, and
+    // the next dictation starts on the worker at once.
+    let cancelled = Instant::now();
+    drop(session);
+    let _next = dictate();
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "decoding");
+    assert!(
+        cancelled.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        cancelled.elapsed()
+    );
+    drop(_next);
     drop(worker);
     serving.join().unwrap();
 }
