@@ -58,6 +58,7 @@ pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
+pub mod keep_running;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;

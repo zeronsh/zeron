@@ -124,6 +124,7 @@ local engine: { [string]: any } = {
 	},
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
+	GetBackgroundSettings = { keepRunningAfterQuit = true },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
@@ -295,7 +296,7 @@ local answers: { [string]: (arg: any) -> any } = {
 				local w = table.clone(engine[get])
 				w.settings = arg.params
 				engine[get] = w
-			elseif m == "SetTitleSettings" then
+			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params
 			end
 			return settled(engine[get])

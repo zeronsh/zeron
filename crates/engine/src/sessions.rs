@@ -798,6 +798,23 @@ impl SessionsEngine {
             .count()
     }
 
+    /// Chats with work running or pending: a turn in flight (or waiting on a
+    /// question), or background work live after their turn ended.
+    pub fn chats_with_work(&self) -> Vec<String> {
+        let mut chats: std::collections::BTreeSet<String> = lock(&self.inner.statuses)
+            .iter()
+            .filter(|(_, session)| is_active(session))
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        chats.extend(
+            lock(&self.inner.runs)
+                .iter()
+                .filter(|(_, run)| run.turn.background_live())
+                .map(|(chat, _)| chat.clone()),
+        );
+        chats.into_iter().collect()
+    }
+
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
     /// `activeRuns`).
     pub fn active_count(&self) -> usize {

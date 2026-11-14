@@ -190,6 +190,15 @@ pub mod methods {
     /// Headed IPC owners do not implement this method: closing another app's
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
+    /// "Keep Zeron running after you quit": `{ keepRunningAfterQuit }`
+    /// (the background engine's; this device's app only).
+    pub const GET_BACKGROUND_SETTINGS: &str = "GetBackgroundSettings";
+    pub const SET_BACKGROUND_SETTINGS: &str = "SetBackgroundSettings";
+    /// A quitting app asks what's still working: `{ keepRunning, working }`.
+    pub const QUIT_CHECK: &str = "QuitCheck";
+    /// The app quits with the setting off: the engine stops once nothing is
+    /// pending; `{ stopWork: true }` stops the chats still working first.
+    pub const APP_QUITTING: &str = "AppQuitting";
     /// Headless IPC only: stop starting work ahead of a Cloud sleep (the
     /// edge runs `zeron quiesce` before stopping the machine). Replies
     /// `{"quiesced":true}` or `{"quiesced":false,"busy":"<why>"}`.
@@ -692,6 +701,11 @@ pub fn local_only(method: &str) -> bool {
         method,
         methods::ACCESS_TOKEN
             | methods::STEP_UP
+            // This device's background engine: whether it outlives its app.
+            | methods::GET_BACKGROUND_SETTINGS
+            | methods::SET_BACKGROUND_SETTINGS
+            | methods::QUIT_CHECK
+            | methods::APP_QUITTING
             // An API key typed into this device's app: stored here alone.
             | methods::ADD_AGENT_API_KEY
             | methods::DELETE_ACCOUNT

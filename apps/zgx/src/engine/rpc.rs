@@ -136,6 +136,50 @@ fn dial(port: u16, token: Option<&str>) -> Result<Socket, DialError> {
     }
 }
 
+/// One call answered on a connection of its own, blocking (at most
+/// `timeout` waiting for the answer): for the app's last words to its
+/// engine as it quits, once its own connection and tasks are gone.
+pub fn call_blocking(
+    port: u16,
+    data_dir: &Path,
+    method: &str,
+    params: Value,
+    timeout: std::time::Duration,
+) -> Result<Value, String> {
+    let token = read_token(data_dir);
+    let mut socket = dial(port, token.as_deref()).map_err(|error| match error {
+        DialError::Refused => "offline".to_string(),
+        DialError::Unauthorized => "unauthorized".to_string(),
+        DialError::Other(error) => error,
+    })?;
+    let _ = socket.get_mut().set_read_timeout(Some(timeout));
+    let frame = serde_json::json!({ "id": 1, "method": method, "params": params });
+    socket
+        .send(tungstenite::Message::text(frame.to_string()))
+        .map_err(|error| error.to_string())?;
+    loop {
+        match socket.read().map_err(|error| error.to_string())? {
+            tungstenite::Message::Text(text) => {
+                for line in text.lines() {
+                    let Ok(frame) = serde_json::from_str::<Value>(line) else {
+                        continue;
+                    };
+                    if frame["id"] != 1 {
+                        continue;
+                    }
+                    if let Some(error) = frame["err"].as_str() {
+                        return Err(error.to_string());
+                    }
+                    let _ = socket.close(None);
+                    return Ok(frame["ok"].clone());
+                }
+            }
+            tungstenite::Message::Close(_) => return Err("closed".into()),
+            _ => {}
+        }
+    }
+}
+
 /// Whether a socket call only found nothing to do yet: no frame to read, or
 /// no room to write (the frame waits in tungstenite's buffer).
 pub(crate) fn would_block(error: &tungstenite::Error) -> bool {

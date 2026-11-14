@@ -55,26 +55,125 @@ pub fn launch(config: &EngineConfig, app_exe: &Path) -> std::io::Result<Child> {
 }
 
 /// IPC-only lifecycle control: `StopEngine` ends the background engine (the
-/// app's sign-out and workspace switches restart it on the new profile).
+/// app's sign-out and workspace switches restart it on the new profile), and
+/// whether it outlives its app ([`crate::keep_running`]).
 struct ManagedRpc {
     inner: Arc<dyn RpcService>,
     stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    data_dir: PathBuf,
+    runtime: Arc<tokio::sync::Mutex<Option<crate::EngineRuntime>>>,
+    quit: crate::keep_running::QuitWhenIdle,
+}
+
+impl ManagedRpc {
+    async fn sessions(&self) -> Option<crate::sessions::SessionsEngine> {
+        self.runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.core().sessions.clone())
+    }
+
+    async fn doc_host(&self) -> Option<crate::doc_host::DocHost> {
+        self.runtime
+            .lock()
+            .await
+            .as_ref()
+            .map(|runtime| runtime.core().doc_host.clone())
+    }
 }
 
 #[async_trait]
 impl RpcService for ManagedRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        if method != methods::STOP_ENGINE {
-            return self.inner.handle(method, params).await;
+        use crate::keep_running as keep;
+        // This device's app (or command line) is here again after asking
+        // the engine to stop with it: it keeps running.
+        if zeron_rpc::caller().is_local()
+            && !matches!(method, methods::APP_QUITTING | methods::QUIT_CHECK)
+            && self.quit.disarm()
+        {
+            tracing::info!(method, "the app is back: the engine keeps running");
         }
-        let stop_tx = self.stop_tx.clone();
-        // Let the reply reach the client before the server is aborted.
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = stop_tx.send(());
-        });
-        RpcReply::value(&serde_json::json!({ "ok": true }))
+        match method {
+            methods::STOP_ENGINE => {
+                let stop_tx = self.stop_tx.clone();
+                // Let the reply reach the client before the server is aborted.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let _ = stop_tx.send(());
+                });
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::GET_BACKGROUND_SETTINGS => RpcReply::value(&keep::load(&self.data_dir)),
+            methods::SET_BACKGROUND_SETTINGS => {
+                let settings: keep::BackgroundSettings = serde_json::from_value(params)
+                    .map_err(|err| RpcError::BadParams(err.to_string()))?;
+                keep::save(&self.data_dir, &settings)
+                    .map_err(|err| RpcError::Failed(format!("couldn't save: {err}")))?;
+                RpcReply::value(&settings)
+            }
+            methods::QUIT_CHECK => {
+                let working = match self.sessions().await {
+                    Some(sessions) => sessions.chats_with_work().len(),
+                    None => 0,
+                };
+                RpcReply::value(&keep::QuitCheck {
+                    keep_running: keep::load(&self.data_dir).keep_running_after_quit,
+                    working,
+                })
+            }
+            methods::APP_QUITTING => {
+                let stop_work = params
+                    .get("stopWork")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let mut stopped = 0;
+                if stop_work
+                    && let (Some(sessions), Some(doc_host)) = (self.sessions().await, self.doc_host().await)
+                {
+                    // The person's own Stop, on each chat still working.
+                    for chat in sessions.chats_with_work() {
+                        match doc_host.queue_command(
+                            &chat,
+                            zeron_doc::SessionCommandPayload::Interrupt {},
+                        ) {
+                            Ok(_) => stopped += 1,
+                            Err(err) => tracing::warn!(chat, error = %err, "couldn't stop a chat as the app quit"),
+                        }
+                    }
+                }
+                tracing::info!(stop_work, stopped, "the app quit: stopping once nothing is pending");
+                self.quit.arm();
+                RpcReply::value(&serde_json::json!({ "ok": true, "stopped": stopped }))
+            }
+            _ => self.inner.handle(method, params).await,
+        }
     }
+}
+
+/// Once the app quit with "Keep Zeron running after you quit" off
+/// ([`crate::keep_running`]): until nothing is pending (or there's no
+/// runtime to have any).
+async fn stop_after_quit(
+    runtime: Arc<tokio::sync::Mutex<Option<crate::EngineRuntime>>>,
+    quit: crate::keep_running::QuitWhenIdle,
+) {
+    let sessions = loop {
+        if let Some(runtime) = runtime.lock().await.as_ref() {
+            break Some(runtime.core().sessions.clone());
+        }
+        if quit.armed() {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    crate::keep_running::wait_until_idle_after_quit(quit, move || {
+        sessions
+            .as_ref()
+            .map_or(0, crate::keep_running::pending)
+    })
+    .await;
 }
 
 /// Take the data directory, waiting out a predecessor that is still
@@ -235,9 +334,13 @@ impl Engine {
 
         let mut engine = deferred::DeferredEngine::prepare(&config).await?;
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+        let quit = crate::keep_running::QuitWhenIdle::default();
         let service: Arc<dyn RpcService> = Arc::new(ManagedRpc {
             inner: engine.service.clone(),
             stop_tx: stop_tx.clone(),
+            data_dir: config.data_dir.clone(),
+            runtime: engine.runtime.clone(),
+            quit: quit.clone(),
         });
         // The app is waiting on this port; bind as soon as the data dir is
         // ours, retrying while a predecessor's listener closes.
@@ -297,6 +400,10 @@ impl Engine {
             _ = stop_rx.recv() => {
                 tracing::info!("background engine stop requested");
                 stop_requested = true;
+                Ok(())
+            }
+            () = stop_after_quit(engine.runtime.clone(), quit.clone()) => {
+                tracing::info!("the app quit and nothing is pending: stopping");
                 Ok(())
             }
             _ = crate::wait_for_signed_out(&mut auth_state), if synced => {

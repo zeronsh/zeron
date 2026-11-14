@@ -28,6 +28,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "compact_mode", title = ui.t("settings.general.compact_mode.label"), terms = ui.t("settings.general.compact_mode.terms") },
 	{ key = "escape_stops", title = ui.t("settings.general.escape_stops.label"), terms = ui.t("settings.general.escape_stops.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
+	{ key = "keep_running", title = ui.t("settings.general.keep_running.label"), terms = ui.t("settings.general.keep_running.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
@@ -46,6 +47,9 @@ type Titles = { harness: string?, model: string? }
 local credit = ui.state("settings_commit_credit", nil :: Credit?)
 local worktrees = ui.state("settings_worktrees", nil :: Worktrees?)
 local titles = ui.state("settings_titles", nil :: Titles?)
+-- Whether the engine outlives the app (src/quit_prompt.rs).
+type Background = { keepRunningAfterQuit: boolean }
+local background = ui.state("settings_background", nil :: Background?)
 -- Why one couldn't be had (an outcome word), by name.
 local failed = ui.state("settings_engine_failed", {} :: { [string]: string })
 
@@ -75,6 +79,7 @@ local function load_all()
 	load("credit", "GetCommitCredit", credit)
 	load("worktrees", "GetWorktreeSettings", worktrees)
 	load("titles", "GetTitleSettings", titles)
+	load("background", "GetBackgroundSettings", background)
 end
 
 -- A change to the engine's: shown now, back as it was if refused.
@@ -253,6 +258,26 @@ function M.view(): Node
 					label = ui.t("settings.general.close_panel.label"),
 					description = ui.t("settings.general.close_panel.description"),
 					control = ds.Switch { value = prefs.close_panel_with_last_tab, label = ui.t("settings.general.close_panel.label") },
+				}),
+				row("keep_running", {
+					label = ui.t("settings.general.keep_running.label"),
+					description = function()
+						if failed:get().background then
+							return says(failed:get().background):get()
+						end
+						local b = background:get()
+						return if b == nil or b.keepRunningAfterQuit
+							then ui.t("settings.general.keep_running.on"):get()
+							else ui.t("settings.general.keep_running.off"):get()
+					end,
+					control = engine_switch(ui.t("settings.general.keep_running.label"), function()
+						local b = background:get()
+						return if b then b.keepRunningAfterQuit else nil
+					end, function(on: boolean)
+						change("background", background, { keepRunningAfterQuit = on }, "SetBackgroundSettings", { keepRunningAfterQuit = on })
+					end, function()
+						return background:get() == nil
+					end),
 				}),
 			},
 		},
