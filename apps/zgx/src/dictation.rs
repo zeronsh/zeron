@@ -183,10 +183,13 @@ impl Service {
         // (What was drawn stays until the next recording: the bar is on
         // its way out.)
         self.meter.reset();
-        if let Some(job) = &self.download {
-            job.cancel.store(true, Ordering::Release);
-        }
         self.deadline = None;
+        if let Some(job) = &self.download {
+            // Still "downloading" until its worker has cleaned up: Settings
+            // asks what's on disk then, and a new download can start.
+            job.cancel.store(true, Ordering::Release);
+            return;
+        }
         self.state = json!({"phase":"cancelled", "serial":self.serial});
     }
     fn stop(&mut self) {
@@ -766,6 +769,29 @@ mod tests {
         s.poll();
         assert_eq!(s.state["phase"], "final");
         assert_eq!(s.state["text"], "late words");
+    }
+    #[test]
+    fn dictation_download_cancelled_ends_once_its_files_are_gone() {
+        let mut s = Service::new(None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tell, events) = mpsc::channel();
+        s.download = Some(DownloadJob {
+            cancel: cancel.clone(),
+            events,
+        });
+        s.state = json!({"phase":"downloading", "bytes":0, "total":1});
+        // Cancel: the worker is told, the download goes on until it's done.
+        s.cancel();
+        assert!(cancel.load(Ordering::Acquire));
+        assert_eq!(s.state["phase"], "downloading");
+        s.poll();
+        assert_eq!(s.state["phase"], "downloading");
+        // Its folder deleted: now it's over (Settings asks what's on disk).
+        tell.send(Download::Done(Err("Download cancelled".into())))
+            .unwrap();
+        s.poll();
+        assert_eq!(s.state["phase"], "cancelled");
+        assert!(s.download.is_none());
     }
     /// The model in use, as downloaded (sizes and marker; no weights read).
     fn downloaded() -> tempfile::TempDir {
