@@ -70,9 +70,7 @@ jobs:
           echo "$bin" >> "$GITHUB_PATH"
       - id: zgx-rev
         name: The zgx rev apps/zgx pins
-        run: |
-          echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
-          echo "url=$(sed -n 's/^zgx = .*git = "\([^"]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -82,12 +80,10 @@ jobs:
         if: steps.zgx-cli.outputs.cache-hit != 'true'
         env:
           REV: ${{ steps.zgx-rev.outputs.rev }}
-          URL: ${{ steps.zgx-rev.outputs.url }}
         run: |
           test -n "$REV"
-          test -n "$URL"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
-            --git "$URL" --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+            --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx Luau UI tests
@@ -131,9 +127,7 @@ jobs:
           cache-on-failure: true
       - id: zgx-rev
         name: The zgx rev apps/zgx pins
-        run: |
-          echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
-          echo "url=$(sed -n 's/^zgx = .*git = "\([^"]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -143,12 +137,10 @@ jobs:
         if: steps.zgx-cli.outputs.cache-hit != 'true'
         env:
           REV: ${{ steps.zgx-rev.outputs.rev }}
-          URL: ${{ steps.zgx-rev.outputs.url }}
         run: |
           test -n "$REV"
-          test -n "$URL"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
-            --git "$URL" --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+            --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx Luau UI tests
