@@ -270,6 +270,17 @@ local function service(id: string): any
 		return op("folders", {})
 	end
 
+	-- A file written on this device ("files.write"): a promise of
+	-- { path, bytes }. A relative `path` goes in the plugin's own folder in
+	-- Documents (`~/Documents/<plugin name>/…`); a whole one must be inside
+	-- one of this device's chats' or projects' folders. Folders on the way
+	-- are made; `..` and links out are refused. `base64 = true`: `data` is
+	-- base64 (a picture), written as its bytes. 64 MB at most.
+	function M.write_file(path: string, data: string, opts: { base64: boolean? }?): any
+		assert(type(path) == "string" and type(data) == "string", "zeron.write_file(path, data, opts)")
+		return op("write_file", { path = path, data = data, base64 = opts ~= nil and opts.base64 == true })
+	end
+
 	-- A program its manifest names ("commands"), as you, on this device:
 	-- a promise of { status, stdout, stderr }.
 	function M.run(program: string, args: { string }?, opts: { cwd: string?, stdin: string?, timeout: number?, env: { [string]: string }? }?): any
@@ -278,9 +289,28 @@ local function service(id: string): any
 	end
 
 	-- The internet ("network"): a promise of { status, headers, body }.
-	function M.fetch(url: string, opts: { method: string?, headers: { [string]: string }?, body: string?, timeout: number? }?): any
+	-- `binary = true` gives `body` in base64 (a font, a picture), whole.
+	function M.fetch(url: string, opts: { method: string?, headers: { [string]: string }?, body: string?, timeout: number?, binary: boolean? }?): any
 		local o = opts or {}
-		return op("fetch", { url = url, method = o.method, headers = o.headers, body = o.body, timeout = o.timeout })
+		return op("fetch", { url = url, method = o.method, headers = o.headers, body = o.body, timeout = o.timeout, binary = o.binary })
+	end
+
+	-- A script it was given (an agent's), run here at once ("eval"):
+	-- `ok, ...` (what it returned), or `false, why` for a syntax error, an
+	-- error, or running past `budget_ms` (1000 unless said). It sees only
+	-- `env`'s fields as its globals (no `zeron`, `require`, `getfenv`, …;
+	-- pass `math` and the like if it should have them), and what it sets
+	-- stays its own. Errors name it by `name` ("agent:3: …"). It runs to
+	-- its end: it can't await.
+	function M.eval(source: string, opts: { name: string?, env: { [string]: any }?, budget_ms: number? }?): (boolean, ...any)
+		if not host.eval then
+			error('zeron.eval needs the "eval" permission', 2)
+		end
+		assert(type(source) == "string", "zeron.eval(source, opts): the script's text")
+		local o = opts or {}
+		assert(o.env == nil or type(o.env) == "table", "zeron.eval: env is a table")
+		assert(o.budget_ms == nil or type(o.budget_ms) == "number", "zeron.eval: budget_ms is a number")
+		return host.eval(source, tostring(o.name or "script"), o.env or {}, o.budget_ms or 1000)
 	end
 
 	-- A notification, as Zeron's own ("notifications"): a promise of
@@ -399,6 +429,21 @@ local function service(id: string): any
 		return agents("answer", s)
 	end
 
+	-- The width and height `text` takes, as your window's canvas measures
+	-- it (`c:measure_text`), with no window: `{ font, size, weight, italic,
+	-- tabular, line_height, letter_spacing, width }`, `width` to wrap at.
+	function M.measure_text(text: string, opts: { [string]: any }?): (number, number)
+		return host.measure_text(text, opts)
+	end
+
+	-- A font file of the plugin's own ("fonts/Inter.ttf"), or one's bytes in
+	-- base64 (`{ base64 = r.body }` from `zeron.fetch(url, { binary = true })`),
+	-- for measuring beside the faces there are: its family names. Load the
+	-- same font in your window (`ui.load_font`) and both measure alike.
+	function M.load_font(source: string | { base64: string }): { string }
+		return host.load_font(source)
+	end
+
 	-- A promise done after `seconds`.
 	function M.sleep(seconds: number): any
 		return op("sleep", { seconds = seconds })
@@ -408,6 +453,18 @@ local function service(id: string): any
 	function M.task(fn: () -> ())
 		task(fn)
 	end
+
+	-- Its own SQLite database (no permission), the same file its windows'
+	-- `zeron.db` opens: promises of { changes, last_id } and of rows.
+	-- Parameters are always bound (`?`); `exec` with none runs a script.
+	M.db = {
+		exec = function(sql: string, params: { any }?): any
+			return op("db", { op = "exec", sql = sql, params = params or {} })
+		end,
+		query = function(sql: string, params: { any }?): any
+			return op("db", { op = "query", sql = sql, params = params or {} })
+		end,
+	}
 
 	-- What the service keeps between runs, on this device (1 MB at most).
 	function M.store(key: string, default: any): any

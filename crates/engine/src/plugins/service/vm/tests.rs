@@ -48,6 +48,7 @@ fn spec(dir: &Path, limits: Limits) -> Spec {
         device: json!({ "id": "dev-1", "name": "Laptop" }),
         store: Some(dir.join(".store.json")),
         limits,
+        eval: true,
     }
 }
 
@@ -261,6 +262,124 @@ async fn a_broken_service_says_why_it_didnt_load() {
     assert!(described.unwrap_err().contains("isn't in the plugin"));
 }
 
+const EVAL: &str = r#"
+local zeron = require("./zeron")("svc")
+local made = {}
+local api = { math = math, pcall = pcall, error = error, make = function(kind, w) table.insert(made, kind) return { kind = kind, w = w } end }
+
+zeron.serve("eval", function(args)
+	local started = os.clock()
+	local ok, value = zeron.eval(args.source, { name = "agent", env = api, budget_ms = args.budget })
+	return { ok = ok, value = value, ms = (os.clock() - started) * 1000, made = #made, leaked = api.x ~= nil }
+end)
+
+zeron.serve("add", function(args) return args.a + args.b end)
+"#;
+
+async fn eval(vm: &Vm, source: &str, budget: Option<u64>) -> Json {
+    ask(vm, "eval", json!({ "source": source, "budget": budget })).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn a_script_sees_only_what_its_given() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let seen = eval(
+        &vm,
+        r#"
+local here = {}
+here.zeron, here.ui, here.require = zeron ~= nil, ui ~= nil, require ~= nil
+here.getfenv, here.setfenv, here.debug = getfenv ~= nil, setfenv ~= nil, debug ~= nil
+here.loadstring, here._G, here.print, here.os = loadstring ~= nil, _G ~= nil, print ~= nil, os ~= nil
+-- (Strings keep their methods; the `string` library isn't given.)
+here.strings = ("ab"):len() == 2 and string == nil
+x = 1
+here.w = make("rect", math.floor(2.5)).w
+return here
+"#,
+        None,
+    )
+    .await;
+    assert_eq!(seen["ok"], true, "{seen}");
+    assert_eq!(
+        seen["value"],
+        json!({ "zeron": false, "ui": false, "require": false, "getfenv": false, "setfenv": false, "debug": false,
+                "loadstring": false, "_G": false, "print": false, "os": false, "strings": true, "w": 2 })
+    );
+    assert_eq!(seen["made"], 1);
+    // (What it set stayed its own.)
+    assert_eq!(seen["leaked"], false);
+}
+
+#[tokio::test]
+async fn a_scripts_errors_say_where() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let syntax = eval(&vm, "local a = 1\nlocal = 2", None).await;
+    assert_eq!(syntax["ok"], false);
+    assert!(syntax["value"].as_str().unwrap().starts_with("agent:2:"), "{syntax}");
+    let runtime = eval(&vm, "local a = 1\nlocal b = nil\nreturn b.field", None).await;
+    assert_eq!(runtime["ok"], false);
+    assert!(runtime["value"].as_str().unwrap().starts_with("agent:3:"), "{runtime}");
+    let raised = eval(&vm, "\nerror('no such screen')", None).await;
+    assert_eq!(raised["value"], "agent:2: no such screen");
+    // Bytecode is refused, as `require` refuses it.
+    let binary = eval(&vm, "\x1bLua", None).await;
+    assert_eq!(binary["ok"], false, "{binary}");
+}
+
+#[tokio::test]
+async fn a_runaway_script_stops_at_its_budget_and_the_service_goes_on() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    for source in [
+        "while true do end",
+        // (A `pcall` it was given doesn't keep it going.)
+        "while true do pcall(function() while true do end end) end",
+    ] {
+        let spun = eval(&vm, source, Some(50)).await;
+        assert_eq!(spun["ok"], false, "{spun}");
+        assert_eq!(spun["value"], "agent: the script ran past its time budget (50 ms)");
+        let ms = spun["ms"].as_f64().unwrap();
+        assert!((50.0..500.0).contains(&ms), "{ms}");
+    }
+    assert_eq!(eval(&vm, "return 1 + 1", None).await["value"], 2);
+    assert_eq!(ask(&vm, "add", json!({ "a": 1, "b": 2 })).await.unwrap().unwrap(), json!(3));
+}
+
+#[tokio::test]
+async fn eval_needs_its_permission() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let ops = Arc::new(Echo::default());
+    let (vm, loaded) = Vm::start(Spec { eval: false, ..spec(dir.path(), Limits::default()) }, ops);
+    loaded.await.unwrap().unwrap();
+    match ask(&vm, "eval", json!({ "source": "return 1" })).await.unwrap() {
+        Err(Failure::Error(why)) => assert!(why.contains("needs the \"eval\" permission"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_hundred_line_script_runs_in_a_few_milliseconds() {
+    let dir = folder(&[("service.luau", EVAL)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let mut source = String::from("local total = 0\n");
+    for i in 0..98 {
+        source.push_str(&format!("total = total + make(\"rect\", math.max({i}, 1)).w\n"));
+    }
+    source.push_str("return total");
+    let ran = eval(&vm, &source, None).await;
+    assert_eq!(ran["ok"], true, "{ran}");
+    assert_eq!(ran["made"], 98);
+    let ms = ran["ms"].as_f64().unwrap();
+    eprintln!("a 100-line script compiled and ran in {ms:.2} ms");
+    assert!(ms < 50.0, "{ms}");
+}
+
 #[test]
 fn paths_resolve_inside_the_plugin() {
     assert_eq!(resolve("service.luau", "./zeron").as_deref(), Some("zeron.luau"));
@@ -294,4 +413,162 @@ fn json_round_trips_through_luau() {
         };
         assert_eq!(back, expected);
     }
+}
+
+const MEASURING: &str = r#"
+local zeron = require("./zeron")("svc")
+
+zeron.serve("measure", function(args)
+	local w, h = zeron.measure_text(args.text, args.opts)
+	return { w, h }
+end)
+
+zeron.serve("load", function(args)
+	local ok, families = pcall(zeron.load_font, args.path)
+	return if ok then families else tostring(families)
+end)
+"#;
+
+/// The width and height a window's canvas measures (`c:measure_text`:
+/// `Scene::measure_text_with_font` on a scene with zgx-text, over the
+/// system's fonts and the app's), with `more` fonts beside them.
+fn as_a_window_measures(text: &str, size: f32, width: Option<f32>, font: &zgx::text_layout::FontStyle, more: &[&[u8]]) -> Json {
+    let services = zgx_text::TextServices::new();
+    for bytes in text::APP_FONTS.iter().chain(more) {
+        let font = zgx_text::text::FontData::new(Arc::<[u8]>::from(*bytes)).unwrap();
+        font.install(&mut services.text_system().borrow_mut());
+    }
+    let mut scene = zgx::scene::Scene::new(0., 0.);
+    services.install(&mut scene);
+    let (w, h) = scene.measure_text_with_font(text, size, width, font);
+    // As the service answers: whole numbers as integers.
+    json!([number(w as f64), number(h as f64)])
+}
+
+fn font(family: zgx::text_layout::FontFamily, weight: u16, italic: bool) -> zgx::text_layout::FontStyle {
+    zgx::text_layout::FontStyle {
+        family,
+        weight,
+        italic,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_service_measures_text_as_a_window_does() {
+    use zgx::text_layout::{FontFamily, LetterSpacing, LineHeight};
+    let dir = folder(&[("service.luau", MEASURING)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let measure = async |text: &str, opts: Json| ask(&vm, "measure", json!({ "text": text, "opts": opts })).await.unwrap().unwrap();
+
+    // What Zeron's window measured on a canvas for the app's Geist: 29.58 by 23.
+    let time = measure("9:41", json!({ "font": "Geist", "size": 16 })).await;
+    assert!((time[0].as_f64().unwrap() - 29.58).abs() < 0.01, "{time}");
+    assert_eq!(time[1], 23, "{time}");
+
+    let line = "The quick brown fox jumps over the lazy dog";
+    let geist = || FontFamily::Named("Geist".into());
+    let serif = || FontFamily::Named("Instrument Serif".into());
+    for (opts, size, width, style) in [
+        (json!({ "font": "Geist", "size": 12 }), 12., None, font(geist(), 400, false)),
+        (json!({ "font": "Geist", "size": 34, "weight": 700 }), 34., None, font(geist(), 700, false)),
+        (json!({ "font": "Geist", "size": 16, "italic": true }), 16., None, font(geist(), 400, true)),
+        (json!({ "font": "Instrument Serif", "size": 48 }), 48., None, font(serif(), 400, false)),
+        (json!({ "font": "mono", "size": 13 }), 13., None, font(FontFamily::Monospace, 400, false)),
+        (json!({}), 12., None, font(FontFamily::SansSerif, 400, false)),
+        (json!({ "font": "Geist", "size": 14, "width": 120 }), 14., Some(120.), font(geist(), 400, false)),
+        (
+            json!({ "font": "Geist", "size": 14, "width": 120, "line_height": 30, "letter_spacing": 2 }),
+            14.,
+            Some(120.),
+            zgx::text_layout::FontStyle {
+                line_height: LineHeight::px(30.),
+                letter_spacing: LetterSpacing::px(2.),
+                ..font(geist(), 400, false)
+            },
+        ),
+    ] {
+        let window = as_a_window_measures(line, size, width, &style, &[]);
+        assert_eq!(measure(line, opts.clone()).await, window, "{opts}");
+    }
+
+    // Wrapped, it's taller than one line, and each line is 30 points apart.
+    let tall = measure(line, json!({ "font": "Geist", "size": 14, "width": 120, "line_height": 30 })).await;
+    assert_eq!(tall[1].as_f64().unwrap() % 30., 0., "{tall}");
+    assert!(tall[1].as_f64().unwrap() >= 90., "{tall}");
+}
+
+#[tokio::test]
+async fn a_family_it_lacks_falls_back_as_in_a_window() {
+    let dir = folder(&[("service.luau", MEASURING)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let measure = async |opts: Json| ask(&vm, "measure", json!({ "text": "WWWWiiii 0123", "opts": opts })).await.unwrap();
+    let missing = measure(json!({ "font": "NoSuchFontXYZ", "size": 20 })).await.unwrap();
+    let style = font(zgx::text_layout::FontFamily::Named("NoSuchFontXYZ".into()), 400, false);
+    assert_eq!(missing, as_a_window_measures("WWWWiiii 0123", 20., None, &style, &[]));
+    // Every family it lacks falls back to the same face.
+    assert_eq!(missing, measure(json!({ "font": "AnotherMissingFamily", "size": 20 })).await.unwrap());
+
+    match measure(json!({ "width": 0 })).await {
+        Err(Failure::Error(why)) => assert!(why.contains("`width` is a number of points above 0"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_service_measures_in_its_plugins_fonts() {
+    // Geist's bold italic: not among the app's fonts.
+    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../ui/assets/fonts/Geist-BoldItalic.ttf");
+    let dir = folder(&[("service.luau", MEASURING), ("fonts/not-a-font.ttf", "hello")]);
+    std::fs::write(dir.path().join("fonts/Geist-BoldItalic.ttf"), BOLD_ITALIC).unwrap();
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let text = "Find your still point";
+    let opts = json!({ "font": "Geist", "size": 34, "weight": 700, "italic": true });
+    let style = font(zgx::text_layout::FontFamily::Named("Geist".into()), 700, true);
+    let measure = async || ask(&vm, "measure", json!({ "text": text, "opts": opts })).await.unwrap().unwrap();
+    let load = async |path: &str| ask(&vm, "load", json!({ "path": path })).await.unwrap().unwrap();
+
+    let before = measure().await;
+    assert_eq!(before, as_a_window_measures(text, 34., None, &style, &[]));
+    assert_eq!(load("fonts/Geist-BoldItalic.ttf").await, json!(["Geist"]));
+    let after = measure().await;
+    assert_ne!(after, before);
+    assert_eq!(after, as_a_window_measures(text, 34., None, &style, &[BOLD_ITALIC]));
+
+    let refused = load("fonts/not-a-font.ttf").await;
+    assert!(refused.as_str().unwrap().contains("invalid or unsupported"), "{refused}");
+    let outside = load("../outside.ttf").await;
+    assert!(outside.as_str().unwrap().contains("isn't in the plugin"), "{outside}");
+    let missing = load("fonts/Missing.ttf").await;
+    assert!(missing.as_str().unwrap().contains("the plugin has no fonts/Missing.ttf"), "{missing}");
+}
+
+/// A font fetched with `binary = true` loads from its bytes in base64, as
+/// its file would.
+#[tokio::test]
+async fn a_service_measures_in_a_font_from_its_bytes() {
+    use base64::Engine as _;
+    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../ui/assets/fonts/Geist-BoldItalic.ttf");
+    let dir = folder(&[("service.luau", MEASURING)]);
+    let (vm, described, _) = start(dir.path(), Limits::default()).await;
+    described.unwrap();
+    let text = "Find your still point";
+    let opts = json!({ "font": "Geist", "size": 34, "weight": 700, "italic": true });
+    let style = font(zgx::text_layout::FontFamily::Named("Geist".into()), 700, true);
+    let load = async |source: Json| ask(&vm, "load", json!({ "path": source })).await.unwrap().unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(BOLD_ITALIC);
+
+    assert_eq!(load(json!({ "base64": encoded })).await, json!(["Geist"]));
+    let after = ask(&vm, "measure", json!({ "text": text, "opts": opts })).await.unwrap().unwrap();
+    assert_eq!(after, as_a_window_measures(text, 34., None, &style, &[BOLD_ITALIC]));
+
+    let not_font = load(json!({ "base64": "aGVsbG8=" })).await;
+    assert!(not_font.as_str().unwrap().contains("invalid or unsupported"), "{not_font}");
+    let not_base64 = load(json!({ "base64": "not base64!" })).await;
+    assert!(not_base64.as_str().unwrap().contains("isn't base64"), "{not_base64}");
+    let no_bytes = load(json!({ "bytes": "x" })).await;
+    assert!(no_bytes.as_str().unwrap().contains("`base64`"), "{no_bytes}");
 }

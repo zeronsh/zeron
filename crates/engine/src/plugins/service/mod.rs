@@ -19,6 +19,7 @@
 //! memory, a crash, a stop), since running it twice does no harm.
 
 pub mod commands;
+pub mod files;
 pub mod vm;
 
 use std::collections::{HashMap, VecDeque};
@@ -27,10 +28,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde_json::{Value as Json, json};
 use zeron_plugin_guard::net;
 
-pub use vm::{Described, Failure, Kind, Limits};
+pub use vm::{DEFAULT_MEMORY_MB, Described, Failure, Kind, Limits};
 use vm::{Done, Ops, Spec, Vm};
 
 /// Why a call didn't get an answer from the service, as callers branch on.
@@ -106,10 +108,12 @@ pub struct Plan {
     pub commands: Vec<String>,
     /// The hosts its manifest names (`network.hosts`; none: any public).
     pub hosts: Vec<String>,
+    /// The heap its manifest asks (`limits.memory_mb`; none: the config's).
+    pub memory_mb: Option<u32>,
 }
 
 impl Plan {
-    fn allows(&self, permission: &str) -> bool {
+    pub(crate) fn allows(&self, permission: &str) -> bool {
         self.allowed.iter().any(|p| p == permission)
     }
 }
@@ -267,6 +271,12 @@ impl Services {
         store_dir.join(format!("{plugin}.service.json"))
     }
 
+    /// `zeron.db`'s file for `plugin`: the one its windows open
+    /// (`<data>/plugins/.storage/<id>.sqlite3`, the app's `plugins/db.rs`).
+    pub fn db_path(store_dir: &Path, plugin: &str) -> Option<PathBuf> {
+        zeron_plugin_db::path_in(store_dir, plugin)
+    }
+
     fn slot(&self, plugin: &str) -> Arc<Slot> {
         lock(&self.inner.slots)
             .entry(plugin.to_owned())
@@ -402,6 +412,7 @@ impl Services {
         }
         let ops = Arc::new(PluginOps {
             plan: plan.clone(),
+            db: Self::db_path(&self.inner.store_dir, &plan.plugin),
             hooks: hooks.clone(),
             http: match guarded_client(&plan.hosts) {
                 Ok(http) => http,
@@ -416,7 +427,13 @@ impl Services {
             entry: plan.entry.clone(),
             device: hooks.device(),
             store: Some(Self::store_path(&self.inner.store_dir, &plan.plugin)),
-            limits: self.inner.config.limits.clone(),
+            limits: Limits {
+                memory: plan
+                    .memory_mb
+                    .map_or(self.inner.config.limits.memory, |mb| (mb as usize) << 20),
+                ..self.inner.config.limits.clone()
+            },
+            eval: plan.allows("eval"),
         };
         let (vm, loaded) = Vm::start(spec, ops);
         let outcome = match tokio::time::timeout(self.inner.config.load_timeout, loaded).await {
@@ -706,6 +723,8 @@ async fn supervisor(slot: Weak<Slot>, shared: Weak<Shared>) {
 /// The world, as one plugin's permissions on this device let it reach it.
 struct PluginOps {
     plan: Plan,
+    /// Its `zeron.db`: the file its windows open too (none in memory-only runs).
+    db: Option<PathBuf>,
     hooks: Arc<dyn Hooks>,
     http: reqwest::Client,
     runtime: tokio::runtime::Handle,
@@ -736,6 +755,24 @@ impl Ops for PluginOps {
                 }
                 let (http, policy) = (self.http.clone(), self.policy());
                 self.runtime.spawn(async move { done(fetch(&http, &policy, &args).await) });
+            }
+            "db" => {
+                // Its own database, as its windows have it: no permission.
+                let Some(path) = self.db.clone() else {
+                    return done(Err("There's nowhere to keep it".into()));
+                };
+                // Off the VM's thread: a write may wait on a window's.
+                self.runtime.spawn_blocking(move || done(zeron_plugin_db::call(&path, &args)));
+            }
+            "write_file" => {
+                // Into its Documents folder, or a chat's or project's (files.rs).
+                if !self.plan.allows("files.write") {
+                    return done(Err(format!("{name} wasn't allowed to write files on this device")));
+                }
+                let (hooks, name) = (self.hooks.clone(), name.clone());
+                self.runtime.spawn_blocking(move || {
+                    done(files::write(&args, &name, &hooks.folders(), &crate::repos::home_dir()))
+                });
             }
             "folders" => {
                 // (Where its chats are: as much as "sessions.read" says.)
@@ -916,8 +953,9 @@ fn guarded_client(hosts: &[String]) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("The network isn't available: {e}"))
 }
 
-/// `zeron.fetch`: `{ url, method?, headers?, body?, timeout? }` → `{ status,
-/// headers, body }` (http and https only; the body as text, 16 MB at most).
+/// `zeron.fetch`: `{ url, method?, headers?, body?, timeout?, binary? }` →
+/// `{ status, headers, body }` (http and https only; the body as text, or
+/// with `binary` as base64 so a font or a picture comes whole; 16 MB at most).
 /// Where it may go is plugin-guard's `net` (R15): public addresses, or the
 /// hosts the manifest names; checked again on every redirect and at every
 /// address a name resolves to.
@@ -965,7 +1003,12 @@ async fn fetch(http: &reqwest::Client, policy: &net::Policy, args: &Json) -> Res
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(json!({ "status": status, "headers": headers, "body": String::from_utf8_lossy(&body) }))
+    // (Text crosses into Luau as UTF-8: any other byte would be lost.)
+    let body = match args["binary"].as_bool().unwrap_or(false) {
+        true => base64::engine::general_purpose::STANDARD.encode(&body),
+        false => String::from_utf8_lossy(&body).into_owned(),
+    };
+    Ok(json!({ "status": status, "headers": headers, "body": body }))
 }
 
 #[cfg(test)]

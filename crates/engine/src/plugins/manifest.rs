@@ -20,6 +20,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "messages.read",
     "account.email",
     "files.read",
+    // A service writing files in its Documents folder or a chat's or
+    // project's (`zeron.write_file`, service/files.rs).
+    "files.write",
     "panel.tabs",
     "pages.add",
     "github",
@@ -33,6 +36,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "files",
     "web",
     "windows",
+    // Font files of its own for its windows' text (`ui.load_font`), which
+    // reach every window's text, Zeron's too.
+    "fonts",
     "tools",
     "devices",
     "native",
@@ -42,6 +48,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // each device that allowed it, called by its windows and agents from
     // this device or another (plugins/service).
     "service",
+    // Its service running scripts it's given (`zeron.eval`): an agent's,
+    // sandboxed to what the service hands it.
+    "eval",
     // The agents' accounts, usage and models (plugins/agents): reading
     // them, and the two controls (switching an account, setting a model).
     "usage.read",
@@ -54,6 +63,11 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // questions, as you would from the composer (plugins/agents).
     "messages.send",
 ];
+
+/// The most memory a service may ask (`limits.memory_mb`): 8× the default,
+/// room for a large document and the garbage of a big call, while a few
+/// such services still fit on a laptop.
+pub const MAX_SERVICE_MEMORY_MB: u32 = 512;
 
 /// Ids the app keeps for itself.
 pub const RESERVED_IDS: &[&str] = &["templates", "zeron", "app"];
@@ -214,6 +228,10 @@ pub struct Manifest {
     /// with the permission): none named, any public host; named, those
     /// alone, a private one (`localhost:8080`) only so (plugin-guard's `net`).
     pub network_hosts: Vec<String>,
+    /// Its service's memory, in MB (`"limits": { "memory_mb": 256 }`, with a
+    /// service): none, the default; more than [`MAX_SERVICE_MEMORY_MB`] is
+    /// a problem, never cut down to it.
+    pub memory_mb: Option<u32>,
     /// `None` when absent; `Some(Err)` when present but malformed.
     pub signature: Option<Result<SignatureSpec, ()>>,
     /// The first thing wrong with it, in plain words.
@@ -407,6 +425,27 @@ impl Manifest {
                 Vec::new()
             }
         };
+        let memory_mb = match object.get("limits") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Object(limits)) => match limits.get("memory_mb") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(mb) => match mb.as_u64() {
+                    Some(mb) if (1..=u64::from(MAX_SERVICE_MEMORY_MB)).contains(&mb) => {
+                        Some(mb as u32)
+                    }
+                    _ => {
+                        problems.push(format!(
+                            "Its \"limits.memory_mb\" must be a whole number from 1 to {MAX_SERVICE_MEMORY_MB}"
+                        ));
+                        None
+                    }
+                },
+            },
+            Some(_) => {
+                problems.push("Its \"limits\" must be an object (\"memory_mb\": 256)".into());
+                None
+            }
+        };
         let signature = object.get("signature").map(parse_signature);
         let mut manifest = Manifest {
             raw: raw.clone(),
@@ -423,6 +462,7 @@ impl Manifest {
             commands,
             service,
             network_hosts,
+            memory_mb,
             signature,
             problem: None,
         };
@@ -478,6 +518,14 @@ impl Manifest {
                 ));
             }
             _ => {}
+        }
+        if self.memory_mb.is_some() && self.service.is_none() {
+            return Some(
+                "It asks for service memory (\"limits.memory_mb\") but has no service".into(),
+            );
+        }
+        if asks("eval") && self.service.is_none() {
+            return Some("It asks for \"eval\" but has no service to run scripts in".into());
         }
         if !self.ui.change.is_empty() && !asks("ui.change") {
             return Some("It changes parts of Zeron but doesn't ask for \"ui.change\"".into());
@@ -564,6 +612,11 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_plugin_may_ask_for_fonts() {
+        assert_eq!(problem(with("permissions", serde_json::json!(["fonts"]))), None);
+    }
+
     fn with(key: &str, value: serde_json::Value) -> serde_json::Value {
         let mut manifest = base();
         manifest[key] = value;
@@ -609,6 +662,31 @@ mod tests {
     }
 
     #[test]
+    fn plugins_manifest_a_service_may_ask_for_more_memory_up_to_the_cap() {
+        let limits = |limits: serde_json::Value| {
+            let mut m = with("limits", limits);
+            m["permissions"] = serde_json::json!(["service"]);
+            m["service"] = serde_json::json!("service.luau");
+            Manifest::from_value(m).unwrap()
+        };
+        let none = limits(serde_json::Value::Null);
+        assert_eq!((none.problem(), none.memory_mb), (None, None), "not asked: the default");
+        let asked = limits(serde_json::json!({ "memory_mb": 256 }));
+        assert_eq!((asked.problem(), asked.memory_mb), (None, Some(256)));
+        let most = limits(serde_json::json!({ "memory_mb": MAX_SERVICE_MEMORY_MB }));
+        assert_eq!((most.problem(), most.memory_mb), (None, Some(MAX_SERVICE_MEMORY_MB)));
+        // Past the cap is refused, never cut down to it.
+        for bad in [serde_json::json!(513), serde_json::json!(0), serde_json::json!(-1), serde_json::json!(256.5), serde_json::json!("256")] {
+            let m = limits(serde_json::json!({ "memory_mb": bad }));
+            assert!(m.problem().unwrap().contains("limits.memory_mb"), "{bad}");
+            assert_eq!(m.memory_mb, None);
+        }
+        assert!(limits(serde_json::json!(256)).problem().is_some(), "not an object");
+        let no_service = with("limits", serde_json::json!({ "memory_mb": 256 }));
+        assert!(problem(no_service).unwrap().contains("has no service"));
+    }
+
+    #[test]
     fn plugins_manifest_minimal_is_fine() {
         assert_eq!(problem(base()), None);
         let manifest = Manifest::from_value(base()).unwrap();
@@ -630,6 +708,12 @@ mod tests {
         assert!(problem(ui.clone()).is_some());
         ui["permissions"] = serde_json::json!(["ui.change"]);
         assert_eq!(problem(ui), None);
+        // Scripts run in a service: "eval" without one is broken.
+        let mut eval = with("permissions", serde_json::json!(["eval"]));
+        assert!(problem(eval.clone()).is_some());
+        eval["permissions"] = serde_json::json!(["service", "eval"]);
+        eval["service"] = serde_json::json!("service.luau");
+        assert_eq!(problem(eval), None);
         let replace = |screen: &str| {
             let mut m = with("ui", serde_json::json!({ "replace": [screen] }));
             m["permissions"] = serde_json::json!(["ui.replace"]);

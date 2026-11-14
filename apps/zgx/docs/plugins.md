@@ -27,6 +27,7 @@ A plugin is a folder: `zeron-plugin.json` (its manifest), `init.luau` (its code)
 - `settings`: what the person can set for your plugin (see [Settings](#settings)). Needs no permission.
 - `commands`: the programs it runs as you (`["gh", "git"]`), each by its name as it's found on the PATH, never a path. Needs `"commands"`, and the person sees each name when allowing it (see [Programs and a database](#programs-and-a-database)).
 - `service`: its headless half (`"service.luau"`), which Zeron's engine runs on each device that allowed the plugin. Needs `"service"` (see [Services](#services)).
+- `limits`: `{ "memory_mb": 256 }`, the memory its service may use, from 1 to 512 MB (64 without it). Ask only when the default runs out: the person sees the number when allowing it, and asking more later asks them again. Over 512, the plugin doesn't load. Needs a `service`.
 - `network`: `{ "hosts": ["api.example.com", "*.example.org", "localhost:8080"] }`, the hosts its requests may reach, from its window and its service alike (see [Reaching the network](#reaching-the-network)). Without it, `network` reaches any public address and never this device, your network or a cloud's metadata address. With it, only those hosts; a private one (`localhost`, `10.…`, `nas.local`) is reachable only when it's named exactly, and the consent sheet says so. `Authorization` and `Cookie` headers go only to hosts named here. Needs `"network"`.
 - `mcp`: `{ "command": "./bin/server", "args": ["--quiet"], "env": { "LOG": "off" } }`, a program of its own that Zeron starts as an MCP server beside your agents on this device, named `plugin-<id>`. `command` is required: `./…` is a file in your plugin's folder, anything else runs as named. `args` is a list of text, `env` names and text values. Needs `"native"`.
 - `settings_description`: a line under your settings page's title, in place of Zeron's own. Plain text, 200 characters at most; line breaks and runs of spaces become one space.
@@ -47,6 +48,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `profile.read` | read your id, name, username, avatar |
 | `account.email` | read your email (unless you hide email addresses) |
 | `files.read` | read file paths, and folders: a session's (`cwd`) and a project's (`path`) (without it a file is an id of the plugin's own) |
+| `files.write` | a service writes files (`zeron.write_file`): in its own folder in Documents, or inside a chat's or project's folder |
 | `panel.tabs` | open tabs of its own in a chat's panel |
 | `pages.add` | add pages of its own to the sidebar |
 | `navigate` | open chats and pages (`zeron.open`) |
@@ -56,11 +58,13 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
+| `fonts` | load font files of its own folder (`ui.load_font`) for its windows' text. A loaded font reaches every window's text, Zeron's included, so the person is asked. Its service measures in fonts of its own (`zeron.load_font`) with no permission |
 | `tools` | tools for agents (the manifest's `tools`) |
 | `devices` | send data to itself on your other devices |
 | `native` | run a program of its own (the manifest's `mcp`) |
 | `commands` | run the programs its manifest's `commands` names, as you, on this device (`zeron.run`) |
 | `service` | run its service (the manifest's `service`) on this device, with no window open, for its windows and agents here and on your other devices |
+| `eval` | run scripts it's given in its service (`zeron.eval`), such as code its agents write, with only what it hands them. Needs `service`. See [Running agents' scripts](#running-agents-scripts) |
 | `usage.read` | read each agent account's usage: its windows (session, week, …), how much is used, when each resets, its plan. Not who the account is. See [Your agents](#your-agents-usage-accounts-and-models) |
 | `accounts.read` | read the saved agent accounts: which is active, which can be switched to, each one's email and name |
 | `accounts.switch` | make another saved account the active one for a provider, on this device or one it names. Always asked, even for your own plugins |
@@ -256,6 +260,17 @@ end }
 
 `run` returns the answer, or `error()` fails the call. It runs as a task, so it can await (`ui.fetch`). `call.chat` is the chat that called. Tools run while Zeron is open on this device; a plugin with a [service](#services) can answer them there instead, with no window open.
 
+To show the agent pictures (a screenshot of what it made, a chart), put them in the answer's `imageContent`, base64 each. The agent sees them as images, and the rest of the answer as text:
+
+```lua
+return {
+	screen = "Home",
+	imageContent = { { type = "image", data = png_base64, mimeType = "image/png" } },
+}
+```
+
+PNG, JPEG, WebP or GIF, 5 MB each and about 8 MB together at most. An image that doesn't fit is left out, and the agent is told which and why.
+
 ### Review comments on the composer
 
 `zeron.compose_comment` leaves a review comment on a file or a diff on a chat's draft (`session`; without one, the draft shown), as the files pane leaves its own: a chip in the composer naming the file and lines (`graph.rs:10–12`), its note under it. Nothing goes until the person sends. Then, after their words, every comment goes in Zeron's review comments block, as production's composer writes it (crates/ui `comments.rs`), so the agent reads each as its file, its lines, its side and its note, with the code under it:
@@ -298,7 +313,7 @@ end)
 - A run waits `timeout` seconds at most (60 unless you say, 300 at most), then is stopped (`status` -1). What it prints is kept up to 16 MB.
 - Only the programs you named run; anything else is refused.
 
-**A database** (`zeron.db`, no permission). Your plugin's own SQLite file: removed with the plugin, 100 MB at most, and no other file reachable through it. Use it for a cache, an index or a history, anything past what `zeron.store`'s small JSON file holds.
+**A database** (`zeron.db`, no permission). Your plugin's own SQLite file: removed with the plugin, 100 MB at most, and no other file reachable through it. Use it for a cache, an index or a history, anything past what `zeron.store`'s small JSON file holds. Your windows and your service (below) open the same file: what one writes, the other reads. Each write is its own transaction; one that meets the other side's write waits for it (up to 5 s) rather than failing.
 
 ```lua
 zeron.db.exec("CREATE TABLE IF NOT EXISTS seen (url TEXT PRIMARY KEY, at INTEGER)")
@@ -356,12 +371,17 @@ end)
 | `zeron.emit(event, data)` | to your windows: those on this device, and those watching from another (`:on`). 64 KB at most | |
 | `zeron.watch(folders, fn, { quiet? })` | changes under whole paths on this device, each all the way down: `fn(changed)` once a burst has been quiet `quiet` ms (250), `changed` by folder: its changed paths (relative, `/`-separated), or `true` when anything may have (as it starts, too many, events lost). Reads aren't changes. Returns a stop function; it lasts while the service runs. Pair it with `emit` to tell windows, instead of their polling | `files.read` |
 | `zeron.run(program, args, { cwd, stdin, timeout, env })` | a promise of `{ status, stdout, stderr }`, as the window's | `commands` |
-| `zeron.fetch(url, { method, headers, body, timeout })` | a promise of `{ status, headers, body }` (http and https; public addresses, or the manifest's `network.hosts`) | `network` |
+| `zeron.fetch(url, { method, headers, body, timeout, binary })` | a promise of `{ status, headers, body }` (http and https; public addresses, or the manifest's `network.hosts`; 16 MB at most). `body` is text, any byte that isn't UTF-8 replaced; with `binary = true` it is the bytes in base64, whole (a font, a picture) | `network` |
 | `zeron.folders()` | a promise of this device's chats' and projects' folders (whole paths) | `sessions.read` |
+| `zeron.write_file(path, data, { base64? })` | a promise of `{ path, bytes }`: a relative `path` lands in `~/Documents/<plugin name>/`, a whole one must be inside a chat's or project's folder. Folders on the way are made; `..` and links out are refused; `base64 = true` writes `data`'s bytes (a picture); 64 MB at most | `files.write` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |
 | `zeron.store(key, default)` | `:get()`, `:set(v)`: kept on this device between runs (1 MB), the service's own (not the window's store) | |
+| `zeron.measure_text(text, { font, size, weight, italic, tabular, line_height, letter_spacing, width })` | the width and height `text` takes, as your window's canvas measures it (`c:measure_text`), with no window: the same shaper, the system's fonts and the app's. `width` wraps it; `line_height` and `letter_spacing` are in points. A family it doesn't have falls back as in a window | |
+| `zeron.load_font(path)`, `zeron.load_font { base64 }` | a font file of your plugin's own (`"fonts/Inter.ttf"`), or a font's bytes in base64 (one fetched with `binary = true`, 64 MiB at most), to measure in, beside the faces there are: its family names. Load the same font in your window (`ui.load_font`) and both measure alike | |
+| `zeron.db.exec(sql, params)`, `zeron.db.query(sql, params)` | its own SQLite database, the same file its windows' `zeron.db` opens: promises of `{ changes, last_id }` and of rows | |
 | `zeron.sleep(seconds)`, `zeron.task(fn)` | a promise done later; run `fn` as a task of its own | |
 | `zeron.json.encode(v)`, `zeron.json.decode(text)`, `zeron.device` | JSON; this device's `{ id, name }` | |
+| `zeron.eval(source, { name?, env?, budget_ms? })` | run a script it was given: `true, ...` (what it returned), or `false, why`. See below | `eval` |
 
 Handlers, tools, timers and `:after` callbacks each run as a task, so `:await()` works in them. A service shares nothing with your windows but what it answers and emits.
 
@@ -386,9 +406,29 @@ Handlers, tools, timers and `:after` callbacks each run as a task, so `:await()`
 
 The one exception: when the service stops during a call (it ran out of memory, or crashed), a method marked `safe = true` runs once more on a fresh start. Mark only what can run twice: reading, not posting.
 
-**When it runs.** A service starts on its first call, tool call or timer, and stops after 5 minutes with nothing to do. An update loads the new version beside the old one, which answers until the new one has loaded and finishes the calls it has. Each call or resumed task has 2 seconds of work before it fails (await between parts: waiting costs nothing), and the service has 64 MB. `plugin_status` shows the service on this device: running or not, what it serves, its last log lines (`print`) and why it didn't load.
+**When it runs.** A service starts on its first call, tool call or timer, and stops after 5 minutes with nothing to do. An update loads the new version beside the old one, which answers until the new one has loaded and finishes the calls it has. Each call or resumed task has 2 seconds of work before it fails (await between parts: waiting costs nothing), and the service has 64 MB, or what its manifest asks in `limits.memory_mb` (512 at most). `plugin_status` shows the service on this device: running or not, what it serves, its last log lines (`print`) and why it didn't load.
 
 A service has `zeron.on(event, fn, opts)` and the agent calls of [Your agents](#your-agents-usage-accounts-and-models) too: register listeners at the top level, in the same order each time (they're known by their place, as timers are), and Zeron starts the service to tell it, with no window open.
+
+### Running agents' scripts
+
+With `eval`, a service runs code it's given, such as a script an agent sends through one of its tools (a design tool's "draw this", or a query). The script sees only `env`: no `zeron`, `require`, `getfenv`/`setfenv`, `debug` or `print`, and none of Luau's libraries unless you hand them in. So it can do what the functions you give it do, and nothing more.
+
+```lua
+local api = { math = math, string = string, table = table, rect = rect, text = text }
+
+zeron.tool { name = "draw", run = function(args)
+	local ok, result = zeron.eval(args.script, { name = "agent", env = api, budget_ms = 1000 })
+	if not ok then error(result, 0) end        -- "agent:3: attempt to index nil with 'w'"
+	return result
+end }
+```
+
+- **Errors come back, with lines.** A syntax error, an `error()` or a runtime error is `false, "agent:3: …"` (`name` is `"script"` unless you say). The service goes on.
+- **A runaway stops.** Past `budget_ms` (1000 unless said; your call's own 2 s still applies) it's `false, "agent: the script ran past its time budget (1000 ms)"`, even if you gave it `pcall`.
+- **It runs to its end at once.** It can't `:await()`; one script can't run another.
+- **What it sets stays its own.** Its globals are a fresh table that reads through to `env`, so the next script doesn't see them. Tables inside `env` are shared, so they're changed for real.
+- Source text only (no bytecode), 1 MB at most. A script that runs the service out of memory stops the service, as any call would.
 
 Zeron's Git plugin (`plugins-builtin/git`) is built this way: its service does every piece of git work on the device a chat's checkout is on (status, what changed through an index of its own via `GIT_INDEX_FILE`, diffs, staging, commits, pushes, branches, history), and its window says each refusal in its own words. `plugins-dev/checkout-status` is the small version, whole: a session row's menu asks the service on that session's device for the checkout's branch and changes, and agents get the same through a tool.
 

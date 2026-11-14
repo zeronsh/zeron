@@ -174,6 +174,23 @@ impl Item {
             ),
         })
     }
+    /// Its window's heap, in bytes: what its manifest asks for its service
+    /// (`limits.memory_mb`, at most the engine's 512), its window too; none,
+    /// zgx's default for a plugin.
+    pub fn window_memory(&self) -> Option<usize> {
+        let mb = self.json["service_memory_mb"].as_u64().filter(|mb| *mb > 0)?;
+        Some((mb.min(512) as usize) << 20)
+    }
+}
+
+/// Each plugin's window heap as its manifest asks (`Item::window_memory`),
+/// after `set_plugins`, which forgets those set before.
+fn give_memory<'a>(host: &ScriptHost, items: impl IntoIterator<Item = &'a Item>) {
+    for item in items {
+        if let Some(bytes) = item.window_memory() {
+            host.plugin_memory(item.id(), bytes);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1340,6 +1357,7 @@ impl Bridge {
         }
         *self.loaded.borrow_mut() = want.clone();
         self.host.set_plugins(want);
+        give_memory(&self.host, items.iter().filter(|i| loading.contains(i.id())));
         self.reload();
     }
 
@@ -2955,6 +2973,12 @@ impl Bridge {
                 async move { crate::plugins::preview::refuse("plugins.remove")?;
                     let (id, device) = remote::id_and_device(&arg);
                     let elsewhere = device.is_some();
+                    // (Its windows' connection to its database first: the engine deletes it.)
+                    if device.is_none()
+                        && let Some(db) = db::path(&id)
+                    {
+                        zeron_plugin_db::close(&db);
+                    }
                     call_on(&me, device, "RemovePlugin", json!({ "id": id })).await?;
                     // Its settings go with it (they're this device's: another
                     // device's removal leaves them).

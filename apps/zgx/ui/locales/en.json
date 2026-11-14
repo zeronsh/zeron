@@ -3410,6 +3410,9 @@
         "files_read": {
           "title": "See file names and paths in your projects"
         },
+        "files_write": {
+          "title": "Save files in its Documents folder and your projects"
+        },
         "panel_tabs": {
           "title": "Open tabs in your chats' panels"
         },
@@ -3484,6 +3487,10 @@
         "windows": {
           "title": "Open windows of its own"
         },
+        "fonts": {
+          "title": "Add fonts of its own",
+          "detail": "Text in a font it adds, Zeron's included, may draw in its version of that font"
+        },
         "tools": {
           "title": "Give your agents tools"
         },
@@ -3505,7 +3512,12 @@
         "service": {
           "title": "Run in the background on this device",
           "title_on": "Run in the background on {device}",
-          "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it."
+          "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it.",
+          "detail_memory": "So its windows and your agents can use it from any of your devices. It does only what else you allow it, and may use up to {mb} MB of memory."
+        },
+        "eval": {
+          "title": "Run scripts its agents write",
+          "detail": "In its background service, with only what the plugin gives them. They can't do more than the plugin can."
         }
       },
       "author": {
@@ -3544,6 +3556,7 @@
         "service": "Run a different background service",
         "entry": "Start from a different file",
         "network": "Connect to more places",
+        "memory": "Use up to {mb} MB of memory in the background",
         "settings": "Its settings changed",
         "ui_replace": "Replace {places} with its own"
       },

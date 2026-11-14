@@ -315,14 +315,19 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match tools.call(name, arguments).await {
-                Ok(value) => ok_response(
-                    id,
-                    json!({
-                        "content": [{ "type": "text", "text": pretty(&value) }],
-                        "structuredContent": wrap_structured(value),
-                        "isError": false,
-                    }),
-                ),
+                Ok(value) => {
+                    let (content, value) = tool_content(value);
+                    // Given `structuredContent`, Codex shows the model only
+                    // that (no images), and Claude Code shows it in place of
+                    // the texts, so content beyond the result's text (its
+                    // images, what was left out) goes without it.
+                    let structured = (content.len() == 1).then(|| wrap_structured(value));
+                    let mut result = json!({ "content": content, "isError": false });
+                    if let Some(structured) = structured {
+                        result["structuredContent"] = structured;
+                    }
+                    ok_response(id, result)
+                }
                 Err(message) => ok_response(
                     id,
                     json!({
@@ -341,7 +346,9 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Report progress on token `token` every [`PROGRESS_EVERY`] until aborted.
@@ -389,6 +396,93 @@ fn cap_reply(response: Value) -> Value {
             "isError": result["isError"],
         },
     })
+}
+
+/// Where a tool's result (a plugin's `zeron.tool` answer included) carries
+/// images for the agent: `{type: "image", data: <base64>, mimeType}` each,
+/// MCP's own image content. They go out as image content, after the rest of
+/// the result as text.
+const IMAGE_CONTENT: &str = "imageContent";
+
+/// Image types the agents' models read.
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// The largest image passed on, decoded; the models refuse larger ones.
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// A tool result as MCP content: the result as text, then the images its
+/// [`IMAGE_CONTENT`] carries, and the result without them. An image left
+/// out is named in a last text, so the agent knows.
+fn tool_content(mut value: Value) -> (Vec<Value>, Value) {
+    let text = |value: &Value| json!({ "type": "text", "text": pretty(value) });
+    if !value.get(IMAGE_CONTENT).is_some_and(Value::is_array) {
+        return (vec![text(&value)], value);
+    }
+    let images = match value.as_object_mut().and_then(|v| v.remove(IMAGE_CONTENT)) {
+        Some(Value::Array(images)) => images,
+        _ => Vec::new(),
+    };
+    let mut content = vec![text(&value)];
+    // What the reply has left before `cap_reply` would cut it to text,
+    // images and all; a 64 KiB margin for the notes and the envelope.
+    let mut room = MAX_REPLY_BYTES.saturating_sub(content[0].to_string().len() + 64 * 1024);
+    let mut left_out = Vec::new();
+    for (index, image) in images.iter().enumerate() {
+        match image_content(image) {
+            Ok(image) => {
+                let size = image["data"].as_str().map_or(0, str::len);
+                if size > room {
+                    let mb = MAX_REPLY_BYTES / (1024 * 1024);
+                    left_out.push(format!(
+                        "{IMAGE_CONTENT}[{index}] left out: the reply would pass {mb} MB"
+                    ));
+                } else {
+                    room -= size;
+                    content.push(image);
+                }
+            }
+            Err(why) => left_out.push(format!("{IMAGE_CONTENT}[{index}] left out: {why}")),
+        }
+    }
+    if !left_out.is_empty() {
+        content.push(text(&Value::String(left_out.join("\n"))));
+    }
+    (content, value)
+}
+
+fn image_content(image: &Value) -> Result<Value, String> {
+    use base64::Engine as _;
+    let shape = "not { type = \"image\", data = <base64>, mimeType }";
+    if image.get("type").and_then(Value::as_str) != Some("image") {
+        return Err(shape.into());
+    }
+    let (Some(data), Some(mime_type)) = (
+        image.get("data").and_then(Value::as_str),
+        image.get("mimeType").and_then(Value::as_str),
+    ) else {
+        return Err(shape.into());
+    };
+    if !IMAGE_TYPES.contains(&mime_type) {
+        return Err(format!(
+            "{mime_type} is not one of {}",
+            IMAGE_TYPES.join(", ")
+        ));
+    }
+    let too_large = || format!("larger than {} MB", MAX_IMAGE_BYTES / (1024 * 1024));
+    // Too long to be small enough, without decoding it.
+    if data.len() / 4 * 3 > MAX_IMAGE_BYTES + 3 {
+        return Err(too_large());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| "data is not base64".to_owned())?;
+    if bytes.is_empty() {
+        return Err("data is empty".into());
+    }
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    Ok(json!({ "type": "image", "data": data, "mimeType": mime_type }))
 }
 
 /// `structuredContent` must be an object; arrays and scalars are wrapped.
@@ -502,6 +596,146 @@ mod tests {
         }
     }
 
+    /// An engine whose plugin tool answers with the value it was given.
+    struct Answering(Value);
+
+    #[async_trait]
+    impl RpcService for Answering {
+        async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+            match method {
+                methods::CALL_PLUGIN_TOOL => {
+                    Ok(RpcReply::Value(json!({ "ok": true, "value": self.0 })))
+                }
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    /// What `tools/call` of a plugin tool answering `value` gives the client.
+    async fn plugin_call(value: Value) -> Value {
+        let tools = Tools::new(Arc::new(Zeron::with_client(
+            memory_client(Arc::new(Answering(value))),
+            Origin::default(),
+        )));
+        let reply = handle_request(
+            &tools,
+            json!(1),
+            "tools/call",
+            json!({ "name": "design__screenshot" }),
+        )
+        .await;
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        reply["result"].clone()
+    }
+
+    /// A 1x1 PNG, base64.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    #[tokio::test]
+    async fn a_plugin_tools_image_content_reaches_the_agent_as_images() {
+        let result = plugin_call(json!({
+            "id": "screen-1",
+            "imageContent": [
+                { "type": "image", "data": PNG, "mimeType": "image/png" },
+                { "type": "image", "data": PNG, "mimeType": "image/webp", "label": "extra fields go" },
+            ],
+        }))
+        .await;
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3, "{result}");
+        assert_eq!(content[0]["type"], "text");
+        let text: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            text,
+            json!({ "id": "screen-1" }),
+            "the images leave the text"
+        );
+        assert_eq!(
+            content[1],
+            json!({ "type": "image", "data": PNG, "mimeType": "image/png" })
+        );
+        assert_eq!(
+            content[2],
+            json!({ "type": "image", "data": PNG, "mimeType": "image/webp" })
+        );
+        assert!(
+            result.get("structuredContent").is_none(),
+            "clients would show it in place of the images"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_or_oversized_image_is_left_out_and_said_so() {
+        use base64::Engine as _;
+        let huge = base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_IMAGE_BYTES + 1]);
+        let result = plugin_call(json!({
+            "ok": true,
+            "imageContent": [
+                "data:image/png;base64,abc",
+                { "type": "image", "data": "not base64!", "mimeType": "image/png" },
+                { "type": "image", "data": PNG, "mimeType": "image/svg+xml" },
+                { "type": "image", "data": huge, "mimeType": "image/png" },
+                { "type": "image", "data": "A".repeat(2 * MAX_IMAGE_BYTES), "mimeType": "image/png" },
+                { "type": "image", "data": PNG, "mimeType": "image/png" },
+            ],
+        }))
+        .await;
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3, "{result}");
+        assert_eq!(content[0]["text"], pretty(&json!({ "ok": true })));
+        assert_eq!(content[1]["type"], "image");
+        assert!(
+            result.get("structuredContent").is_none(),
+            "clients would show it in place of the images"
+        );
+        assert_eq!(
+            content[2]["text"],
+            "imageContent[0] left out: not { type = \"image\", data = <base64>, mimeType }\n\
+             imageContent[1] left out: data is not base64\n\
+             imageContent[2] left out: image/svg+xml is not one of image/png, image/jpeg, image/webp, image/gif\n\
+             imageContent[3] left out: larger than 5 MB\n\
+             imageContent[4] left out: larger than 5 MB"
+        );
+    }
+
+    #[tokio::test]
+    async fn images_stop_before_the_reply_would_be_cut() {
+        use base64::Engine as _;
+        let big = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 3 * 1024 * 1024]);
+        let image = json!({ "type": "image", "data": big, "mimeType": "image/png" });
+        let result = plugin_call(json!({ "imageContent": [image, image, image] })).await;
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3, "the text, one image, the note");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(
+            content[2]["text"],
+            "imageContent[1] left out: the reply would pass 8 MB\n\
+             imageContent[2] left out: the reply would pass 8 MB"
+        );
+        let reply = ok_response(json!(1), result);
+        assert_eq!(
+            cap_reply(reply.clone()),
+            reply,
+            "sent whole, the image kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_without_an_image_array_stays_text() {
+        for value in [
+            json!({ "imageContent": "screenshot.png" }),
+            json!([{ "type": "image", "data": PNG, "mimeType": "image/png" }]),
+            json!("done"),
+        ] {
+            let result = plugin_call(value.clone()).await;
+            assert_eq!(
+                result["content"],
+                json!([{ "type": "text", "text": pretty(&value) }])
+            );
+            assert_eq!(result["structuredContent"], wrap_structured(value));
+        }
+    }
+
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
         assert_eq!(instructions(false, false), INSTRUCTIONS);
@@ -512,7 +746,10 @@ mod tests {
 
     #[test]
     fn a_reply_too_big_to_send_is_cut_down_not_dropped() {
-        let small = ok_response(json!(1), json!({ "content": [{ "type": "text", "text": "hi" }], "isError": false }));
+        let small = ok_response(
+            json!(1),
+            json!({ "content": [{ "type": "text", "text": "hi" }], "isError": false }),
+        );
         assert_eq!(cap_reply(small.clone()), small);
         let huge = "é".repeat(MAX_REPLY_BYTES);
         let big = ok_response(
@@ -527,7 +764,12 @@ mod tests {
         assert!(cut.to_string().len() <= MAX_REPLY_BYTES);
         assert_eq!(cut["id"], 2);
         assert!(cut["result"].get("structuredContent").is_none());
-        assert!(cut["result"]["content"][0]["text"].as_str().unwrap().ends_with("`offset`.)"));
+        assert!(
+            cut["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("`offset`.)")
+        );
     }
 
     #[tokio::test(start_paused = true)]
