@@ -148,3 +148,32 @@ test("composer geometry: calculation is deterministic and leaves inputs untouche
 	a.text.top = -100
 	expect(Layout.calculate(p, false)).to_equal(b)
 end)
+
+test("composer geometry: a draft past the cap is estimated, and lays out as measured", function()
+	-- Fewer hard lines than fill the box: measured. One more newline each.
+	expect(Layout.estimate("", 22)).to_be(nil)
+	expect(Layout.estimate(string.rep("line\n", 9), 22)).to_be(nil)
+	local est = Layout.estimate(string.rep("line\n", 5000), 22) :: Layout.Sample
+	expect(est).never.to_be(nil)
+	-- The same estimate however long: a keystroke past the cap changes nothing.
+	expect(Layout.estimate(string.rep("line\n", 12), 22)).to_equal(est)
+	-- Laid out as the exact measure of the long draft would be: open, capped.
+	local estimated = Layout.calculate(input({ sample = est, multiline = true }), false)
+	local measured = Layout.calculate(input({
+		sample = { unwrapped_width = 900, wrapped_height = 5000 * 22, line_height = 22 },
+		multiline = true,
+	}), false)
+	expect(estimated.height).to_be(measured.height)
+	expect(Layout.same_target(estimated, measured)).to_be(true)
+	-- A smaller line height needs more lines to reach the cap.
+	expect(Layout.estimate(string.rep("line\n", 12), 14)).to_be(nil)
+end)
+
+test("composer geometry: a target differs only where a view or the motion reads it", function()
+	local a = Layout.calculate(input(), false)
+	-- Wider: the widths layout applies itself, nothing bound.
+	expect(Layout.same_target(a, Layout.calculate(input({ width = 900 }), false))).to_be(true)
+	expect(Layout.same_target(a, Layout.calculate(input({ trailing_width = 100 }), false))).to_be(false)
+	expect(Layout.same_target(a, Layout.calculate(input({ expanded = true }), false))).to_be(false)
+	expect(Layout.same_target(a, Layout.calculate(input({ control_corner = 30 }), false))).to_be(false)
+end)

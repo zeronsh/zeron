@@ -10,7 +10,7 @@ fn composer_geometry_rules_have_boundary_header_and_purity_coverage() {
         }
     })
     .expect("geometry tests load");
-    assert_eq!(report.outcomes.len(), 8, "all geometry cases must run");
+    assert_eq!(report.outcomes.len(), 10, "all geometry cases must run");
     assert_eq!(report.failed(), 0, "{report:?}");
 }
 

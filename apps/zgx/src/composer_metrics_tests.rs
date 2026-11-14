@@ -252,6 +252,24 @@ fn composer_metrics_follow_styled_editor_and_uncommitted_ime_without_extra_nodes
 #[test]
 fn composer_metrics_acknowledge_width_only_queries_without_waiting_but_revalidate_content() {
     let app = mount();
+    // A draft that fits measures the same at any width it fits: a resize
+    // asks nothing of it (a pane dragged ran the whole chain at each frame).
+    let fits = ready(&app);
+    for width in [240., 180., 360.] {
+        app.host
+            .set_state("fixture_metrics_width", Value::Num(width))
+            .unwrap();
+        assert_eq!(result(&app).field("status"), Some(&Value::from("ready")));
+        assert_eq!(ready(&app), fits, "a width it fits asks nothing again");
+    }
+    // One that wraps follows the width, each published at once.
+    app.host
+        .set_state(
+            "fixture_metrics_text",
+            Value::from("words ".repeat(60).as_str()),
+        )
+        .unwrap();
+    app.frames(3);
     let mut previous = ready(&app);
     for width in [240., 180., 360.] {
         app.host

@@ -75,7 +75,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, published_height: State<number>?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -446,9 +446,6 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
 	end, name)
 	return ds.Composer {
-		on_sizes = function(sizes: ds.ComposerSizes)
-			if published_height then published_height:set(sizes.presented) end
-		end,
 		dictation = dictation,
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
@@ -887,7 +884,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, dock_h), id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus), id = `lane-composer-{slot}` },
 			}
 			for k, v in zone do
 				body[k] = v

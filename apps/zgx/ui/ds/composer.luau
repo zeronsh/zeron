@@ -992,10 +992,20 @@ return ui.component(function(props: Props): Node
 		value = value,
 		keep = props.keep,
 		editor = field,
-		width = function(): number
+		width = function(peek: boolean?): number
 			-- The surface's content box excludes its two hairlines. Both
 			-- expanded text insets come out of that, never the eased field.
-			return Layout.measurement(pill_w:get()).width
+			return Layout.measurement(if peek then pill_w:peek() else pill_w:get()).width
+		end,
+		-- Past the cap a draft is measured no more: its size changes nothing
+		-- (Layout.estimate). The type's line height changed (tracked), it is
+		-- measured again.
+		estimate = function(text: string, line_height: number): Layout.Sample?
+			local line = ui.theme.get("zeron.composer.line")
+			if type(line) == "number" and math.abs(line - line_height) > 0.01 then
+				return nil
+			end
+			return Layout.estimate(text, line_height)
 		end,
 	}
 	local head_h_seen = kept("head_h", 0)
@@ -1174,7 +1184,12 @@ return ui.component(function(props: Props): Node
 		local next = Layout.calculate(layout_input(), previous_text_expanded:peek())
 		ui.batch(function()
 			previous_text_expanded:set(next.next_text_expanded)
-			target_geometry:set(next)
+			-- Only a target laid out differently: a pane resized changes the
+			-- widths layout applies itself, and a new target at each of its
+			-- frames woke the motion, its frame and every binding of it.
+			if not Layout.same_target(target_geometry:peek(), next) then
+				target_geometry:set(next)
+			end
 		end)
 	end)
 	local settlement = ui.computed(function()
@@ -2418,21 +2433,42 @@ return ui.component(function(props: Props): Node
 
 	if props.on_sizes then
 		local on_sizes = props.on_sizes
+		-- Each its own computed, so what changes and leaves it the same (the
+		-- pill's width, a keystroke, a new metrics revision) wakes nothing.
+		local rest = ui.computed(function(): number
+			local _ = ui.theme.current:get()
+			return Layout.calculate({
+				-- (Its height is the same at any width: it is never measured.)
+				width = pill_w:peek(), sample = nil, trailing_width = trailing_seen:get(),
+				control_corner = control.nest("$zeron.composer.radius", Layout.BORDER),
+				header_height = 0, header_gap = 0, expanded = read(props.expanded) == true,
+				cargo = false, asking = false, dictating = false, multiline = false,
+			}, false).height
+		end)
+		local ready = ui.computed(function(): boolean
+			return settlement:get().status == "ready"
+		end)
+		local target_h = ui.computed(function(): number
+			return target_geometry:get().height
+		end)
+		local last: Sizes? = nil
 		ui.effect(function()
-			local input = layout_input()
-			input.sample = nil
-			input.cargo, input.asking, input.dictating, input.multiline = false, false, false, false
-			local rest = Layout.calculate(input, false).height
 			local footer_h, deck_h, actual = footer_size.height, deck_size.height, outer_size.height
-			local target = target_geometry:get()
-			local active = transition.active:get()
-			local ready = settlement:get().status == "ready"
-			local settling = transition.settling:get()
 			local context = if props.snap then props.snap:get() else 0
-			if footer_h ~= nil and deck_h ~= nil and actual and actual > 0 then
-				on_sizes({ rest = rest + footer_h + deck_h, target = target.height + footer_h + deck_h,
-					presented = actual, active = active, ready = ready, settling = settling, context = context })
+			if footer_h == nil or deck_h == nil or not actual or actual <= 0 then
+				return
 			end
+			local sizes: Sizes = { rest = rest:get() + footer_h + deck_h, target = target_h:get() + footer_h + deck_h,
+				presented = actual, active = transition.active:get(), ready = ready:get(),
+				settling = transition.settling:get(), context = context }
+			local was = last
+			if was and was.rest == sizes.rest and was.target == sizes.target and was.presented == sizes.presented
+				and was.active == sizes.active and was.ready == sizes.ready and was.settling == sizes.settling
+				and was.context == sizes.context then
+				return
+			end
+			last = sizes
+			on_sizes(sizes)
 		end)
 	end
 

@@ -590,6 +590,52 @@ fn composer_resize_theme_transparency_and_zoom_reflow_preserve_the_draft() {
     }
 }
 
+/// Typing in a long draft costs what typing in a short one past the cap
+/// does: the composer's natural size can't change there (open, capped), so
+/// the draft isn't measured again. Measuring walked every line twice at each
+/// keystroke, past what the editor's span cache holds (a 5,000-line draft:
+/// 10,039 script calls and 47 ms a key; 30,000 lines: 294 ms).
+#[test]
+fn typing_in_a_long_draft_costs_what_a_short_one_does() {
+    let per_key = |lines: usize| {
+        let mut shell = Shell::new(false);
+        shell.app.click(BUILD);
+        shell.frames(60);
+        let text: String = (0..lines)
+            .map(|i| format!("line {i} with some words that go on for a while here\n"))
+            .collect();
+        shell.app.fill(FIELD, &text);
+        shell.frames(60);
+        let capped = shell.geometry().composer.height;
+        let before = shell.app.calls();
+        for _ in 0..20 {
+            shell.app.ui.dispatch(InputEvent::Text("x".into()));
+            shell.app.settle();
+            shell.frames(3);
+        }
+        let calls = (shell.app.calls() - before) / 20;
+        let field = shell.app.find(FIELD).unwrap();
+        let editor = shell.app.ui.editor_within(field).unwrap();
+        assert!(
+            editor
+                .editor
+                .borrow()
+                .text()
+                .ends_with("xxxxxxxxxxxxxxxxxxxx")
+        );
+        assert!(
+            (shell.geometry().composer.height - capped).abs() < 0.5,
+            "typing past the cap must not resize the composer"
+        );
+        calls
+    };
+    let (short, long) = (per_key(20), per_key(5000));
+    assert!(
+        long <= short && long <= 20,
+        "{long} script calls a key in 5,000 lines, {short} in 20"
+    );
+}
+
 /// What comes and goes with the panel stands still and only fades a little
 /// (ds/motion `content`), never popping: the panel's tabs as it opens and
 /// closes, the page as the panel expands over it and gives it back. Over

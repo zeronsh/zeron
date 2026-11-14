@@ -207,7 +207,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, published_height: State<number>?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -651,9 +651,6 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			or (focused ~= nil and not focused())
 	end, name)
 	return ds.Composer {
-		on_sizes = function(sizes: ds.ComposerSizes)
-			if published_height then published_height:set(sizes.presented) end
-		end,
 		dictation = dictation,
 		value = draft,
 		snap = if split then snap else nil,
@@ -1278,7 +1275,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, dock_h), id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil), id = `lane-composer-{slot}` },
 				},
 			}
 			if zone then

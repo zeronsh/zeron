@@ -9,8 +9,8 @@ local editor_key = ui.state("fixture_metrics_editor", 1)
 local field = ui.ref()
 local metrics = Metrics.use {
 	value = value,
-	width = function()
-		return width:get()
+	width = function(peek: boolean?)
+		return if peek then width:peek() else width:get()
 	end,
 	editor = field,
 	keep = "fixture",

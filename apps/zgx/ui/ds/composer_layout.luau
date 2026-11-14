@@ -52,6 +52,51 @@ function M.measurement(width: number)
 	return { left = TEXT_OPEN_SIDE, width = math.max(0, width - M.BORDER * 2 - TEXT_OPEN_SIDE * 2) }
 end
 
+-- A draft whose size can't change the layout, standing in for measuring it:
+-- one with enough hard lines to fill the text box to its cap at
+-- `line_height` (each line at least that tall, however it wraps). It has a
+-- newline, so it's open whatever its widest line, and capped, whatever it
+-- wraps to. Measuring a long draft walks every line at each keystroke; this
+-- looks for at most a dozen newlines. Nil: the draft must be measured.
+function M.estimate(text: string, line_height: number): Sample?
+	local need = math.ceil((TEXT_MAX - TEXT_TOP - TEXT_BOTTOM) / math.max(1, line_height))
+	local lines, at = 1, 1
+	while lines < need do
+		local newline = string.find(text, "\n", at, true)
+		if newline == nil then
+			return nil
+		end
+		lines += 1
+		at = newline + 1
+	end
+	return { unwrapped_width = 0, wrapped_height = lines * line_height, line_height = line_height }
+end
+
+-- Whether two targets lay the composer out alike: every field a view binds
+-- or the motion reads, leaving out the widths layout applies itself (the
+-- pill's, the text's) and the natural height past the cap, which nothing
+-- shows. A pane resized changes only those, so it publishes no new target.
+local UNBOUND = { width = true, natural_height = true }
+local function same_fields(a: any, b: any): boolean
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return a == b
+	end
+	for key, value in a do
+		if not UNBOUND[key] and not same_fields(value, b[key]) then
+			return false
+		end
+	end
+	for key in b do
+		if not UNBOUND[key] and a[key] == nil then
+			return false
+		end
+	end
+	return true
+end
+function M.same_target(a: Geometry, b: Geometry): boolean
+	return same_fields(a, b)
+end
+
 -- Also used by the footer/tray to line up with the pill's controls; their
 -- own layout stays outside the text geometry calculation.
 local function chrome_of(control_corner: number)
