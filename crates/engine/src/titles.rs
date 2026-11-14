@@ -90,6 +90,7 @@ impl TitleGenerator {
             return Ok(()); // already named
         }
 
+        tracing::debug!(target: "first_word", chat = %chat_id, "title: start");
         let generated = self.run_title_model(harness_id, prompt, cwd).await;
         // Fallback so a chat is always named even if the model run produced nothing.
         let fallback: String = prompt

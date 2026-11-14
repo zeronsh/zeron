@@ -1247,6 +1247,7 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
             return Ok(String::new());
         }
+        tracing::debug!(target: "first_word", chat = %chat_id, "dispatch: fresh run");
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -4580,6 +4581,7 @@ async fn drive_run(
                         h.credential = now;
                     }
                 }
+                tracing::debug!(target: "first_word", chat = %chat_id, "drive_run: prepared");
                 match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => {
@@ -5175,6 +5177,7 @@ async fn drive_run(
                     // (parent + any dirty subagent docs).
                     last_flush = Some(tokio::time::Instant::now());
                     if dirty {
+                        tracing::debug!(target: "first_word", chat = %chat_id, "segment commit");
                         if let Err(err) = sync_segment(
                             doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
                         ) {

@@ -4265,6 +4265,7 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        tracing::debug!(target: "first_word", chat = %chat_id, "queue command");
         let handle = self.open(chat_id)?;
         // A chat hosted on Cloud: the bytes go to the edge's store first, and
         // the message enters the chat only once they're there.
@@ -6141,6 +6142,7 @@ impl DocHost {
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
                         crate::wake_trace::mark_command(entry.issued_at);
+                        tracing::debug!(target: "first_word", chat = %handle.chat_id, "drain picked the run");
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {

@@ -653,12 +653,14 @@ impl ClaudeHarness {
         title_only: bool,
     ) -> Result<Runtime, HarnessError> {
         let (mut command, mcp_config) = Self::build_command_with_config(exe, request, title_only);
+        tracing::debug!(target: "first_word", title_only, "claude spawning");
         let mut child = command
             .spawn()
             .map_err(|e| {
                 let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
                 crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
             })?;
+        tracing::debug!(target: "first_word", title_only, pid = child.id(), "claude spawned");
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -1488,6 +1490,7 @@ async fn run_session(session: Session) {
     // [`background`]), and the stops asked of them.
     let mut shells = background::BackgroundShells::default();
     let mut task_stops_sent = 0u64;
+    let mut first_lines = 0u8;
 
     'main: loop {
         if std::mem::take(&mut relaunch) {
@@ -1551,6 +1554,10 @@ async fn run_session(session: Session) {
                     // The CLI is still producing: whatever it is doing is not
                     // the quiet end a held turn end's fallback waits for.
                     last_frame_at = tokio::time::Instant::now();
+                    if first_lines < 16 {
+                        first_lines += 1;
+                        tracing::debug!(target: "first_word", title_only, frame = %line.chars().take(60).collect::<String>(), "claude stdout");
+                    }
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
                         Err(e) => {
