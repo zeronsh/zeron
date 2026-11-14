@@ -2491,6 +2491,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_COMMIT_CREDIT
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
+            | methods::GET_OPENCODE_SETTINGS
+            | methods::SET_OPENCODE_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -3373,6 +3375,12 @@ impl RpcService for EngineRpc {
                     .set_native_subagents(p.harness, p.enabled)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.native_subagent_settings())
+            }
+            methods::GET_OPENCODE_SETTINGS => RpcReply::value(&self.registry.opencode_settings()),
+            methods::SET_OPENCODE_SETTINGS => {
+                let p: crate::registry::OpencodeSettings = parse_params(params)?;
+                self.registry.set_opencode_settings(p);
+                RpcReply::value(&self.registry.opencode_settings())
             }
             methods::SET_HARNESS_ENABLED => {
                 let include = include_registry(&params);

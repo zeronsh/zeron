@@ -45,6 +45,8 @@ pub struct NativeSession {
     pub model: Option<String>,
     /// The Zeron chat a run of Zeron's made it for (its metadata).
     pub zeron_chat: Option<String>,
+    /// The session it was forked from (`/fork`, in any client).
+    pub forked_from: Option<String>,
     /// An undo staged in it: this message and everything after it are taken
     /// back until a redo, and gone at the next prompt.
     pub reverted_from: Option<String>,
@@ -56,7 +58,27 @@ pub struct NativeMessage {
     /// OpenCode's own id (`msg_…`): stable, so a re-read finds the same one.
     pub id: String,
     pub created_at_ms: i64,
+    /// When it finished being written (an assistant reply's last token),
+    /// if it has.
+    pub completed_at_ms: Option<i64>,
     pub kind: NativeMessageKind,
+}
+
+impl NativeMessage {
+    /// What the session's context holds after this message, as the meter
+    /// counts it: a reply's whole prompt and answer; a finished compaction's
+    /// summary, all that is left of what came before. `None` for others.
+    pub fn context_tokens(&self) -> Option<u64> {
+        match &self.kind {
+            NativeMessageKind::Assistant { context, .. } => *context,
+            NativeMessageKind::Compaction {
+                status: CompactionStatus::Completed,
+                tokens_out,
+                ..
+            } => *tokens_out,
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +89,34 @@ pub enum NativeMessageKind {
     /// What the agent did, as the events a run of Zeron's would have sent.
     Assistant {
         events: Vec<AgentEvent>,
+        /// Its tokens, prompt and reply (`None` until it has any).
+        context: Option<u64>,
     },
+    /// The session compacted: by `/compact`, or by itself as it filled.
+    Compaction {
+        status: CompactionStatus,
+        /// What the summary read (the whole prompt, cache included) and
+        /// wrote, once done — OpenCode's own "in · out".
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl CompactionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompactionStatus::Running => "running",
+            CompactionStatus::Completed => "completed",
+            CompactionStatus::Failed => "failed",
+        }
+    }
 }
 
 /// A question the agent is waiting on (the `question` tool's form), in
@@ -184,6 +233,24 @@ impl OpencodeHarness {
         messages.sort_by_key(|message| message.created_at_ms);
         messages.dedup_by(|a, b| a.id == b.id);
         Ok(messages)
+    }
+
+    /// The context window of `model` (`provider/model`), as OpenCode's
+    /// provider catalog gives it.
+    pub async fn native_context_window(&self, model: &str) -> Result<Option<u64>, HarnessError> {
+        let Some((provider_id, model_id)) = model.split_once('/') else {
+            return Ok(None);
+        };
+        let server = self.sync_server().await?;
+        let providers = server.provider_catalog(None).await?;
+        Ok(providers
+            .all
+            .iter()
+            .flatten()
+            .filter(|provider| provider.id.as_deref() == Some(provider_id))
+            .flat_map(|provider| provider.models.iter().flatten())
+            .find(|(id, _)| id.as_str() == model_id)
+            .and_then(|(_, model)| model.limit.context.filter(|n| *n > 0)))
     }
 
     /// The questions `session` is waiting on, oldest first.
@@ -374,8 +441,18 @@ fn change_of(frame: &Value) -> Option<NativeChange> {
         | "session.revert.staged"
         | "session.revert.cleared"
         | "session.revert.committed"
+        | "session.shell.started"
         | "session.shell.ended"
+        | "session.compaction.started"
         | "session.compaction.ended"
+        | "session.compaction.failed"
+        | "session.inbox.enqueued"
+        | "session.inbox.delivered"
+        | "session.inbox.cancelled"
+        | "session.step.started"
+        | "session.step.failed"
+        | "session.error"
+        | "session.updated"
         | "form.created"
         | "form.replied"
         | "form.cancelled" => Some(NativeChange::Session(session)),
@@ -401,6 +478,11 @@ fn native_session(info: &Value) -> Option<NativeSession> {
         info.pointer(&format!("/time/{key}"))
             .and_then(Value::as_f64)
     };
+    let forked_from = info
+        .pointer("/fork/sessionID")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
     let busy = match (time("busy"), time("idle")) {
         (Some(busy), Some(idle)) => busy > idle,
         (Some(_), None) => true,
@@ -426,11 +508,13 @@ fn native_session(info: &Value) -> Option<NativeSession> {
             (Some(provider), Some(model)) => Some(format!("{provider}/{model}")),
             _ => None,
         },
+        // (A fork copies its source's metadata: the tag is the source's.)
         zeron_chat: info
             .pointer("/metadata/zeron/chatId")
             .and_then(Value::as_str)
-            .filter(|chat| !chat.is_empty())
+            .filter(|chat| !chat.is_empty() && forked_from.is_none())
             .map(str::to_owned),
+        forked_from,
         reverted_from: info
             .pointer("/revert/messageID")
             .and_then(Value::as_str)
@@ -477,6 +561,7 @@ fn native_message(message: &Value) -> Option<NativeMessage> {
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
             ),
+            context: None,
         },
         "assistant" => NativeMessageKind::Assistant {
             events: message
@@ -486,14 +571,45 @@ fn native_message(message: &Value) -> Option<NativeMessage> {
                 .flatten()
                 .flat_map(part_events)
                 .collect(),
+            context: message
+                .get("tokens")
+                .map(|tokens| token_sum(tokens, &["input", "output", "cache/read", "cache/write"]))
+                .filter(|tokens| *tokens > 0),
         },
+        "compaction" => {
+            let status = match message.get("status").and_then(Value::as_str) {
+                Some("completed") => CompactionStatus::Completed,
+                Some("failed" | "error") => CompactionStatus::Failed,
+                _ => CompactionStatus::Running,
+            };
+            let tokens = message
+                .get("tokens")
+                .filter(|_| status == CompactionStatus::Completed);
+            NativeMessageKind::Compaction {
+                status,
+                tokens_in: tokens.map(|t| token_sum(t, &["input", "cache/read", "cache/write"])),
+                tokens_out: tokens.map(|t| token_sum(t, &["output", "reasoning"])),
+            }
+        }
         _ => return None,
     };
     Some(NativeMessage {
         id,
         created_at_ms,
+        completed_at_ms: message
+            .pointer("/time/completed")
+            .and_then(Value::as_f64)
+            .map(|ms| ms as i64),
         kind,
     })
+}
+
+/// The sum of a message's token counts at `paths` (`cache/read`, …).
+fn token_sum(tokens: &Value, paths: &[&str]) -> u64 {
+    paths
+        .iter()
+        .filter_map(|path| tokens.pointer(&format!("/{path}")).and_then(Value::as_u64))
+        .fold(0, u64::saturating_add)
 }
 
 /// One part of an assistant message as the events that would have built it.
@@ -594,6 +710,14 @@ mod tests {
         // (A subagent's session is its parent's business.)
         let child = json!({"id": "ses_c", "parentID": "ses_a", "location": {"directory": "/w"}});
         assert!(native_session(&child).is_none());
+        // (A fork's copied Zeron tag is its source's, not its own.)
+        let fork = json!({
+            "id": "ses_f", "location": {"directory": "/w"},
+            "fork": {"sessionID": "ses_a"}, "metadata": {"zeron": {"chatId": "chat-a"}}
+        });
+        let fork = native_session(&fork).unwrap();
+        assert_eq!(fork.forked_from.as_deref(), Some("ses_a"));
+        assert_eq!(fork.zeron_chat, None);
     }
 
     #[test]
@@ -613,7 +737,7 @@ mod tests {
             ]
         });
         let message = native_message(&message).unwrap();
-        let NativeMessageKind::Assistant { events } = message.kind else {
+        let NativeMessageKind::Assistant { events, .. } = message.kind else {
             panic!("an assistant message");
         };
         assert!(matches!(&events[0], AgentEvent::ReasoningDelta { text } if text == "thinking"));
@@ -634,11 +758,44 @@ mod tests {
 
     #[test]
     fn bookkeeping_messages_have_no_entry() {
-        for kind in ["agent-switched", "model-switched", "compaction", "idle"] {
+        for kind in ["agent-switched", "model-switched", "idle", "system"] {
             assert!(native_message(&json!({"id": "m", "type": kind})).is_none());
         }
         let user = native_message(&json!({"id": "m", "type": "user", "text": "hi"})).unwrap();
         assert!(matches!(user.kind, NativeMessageKind::User { text } if text == "hi"));
+    }
+
+    #[test]
+    fn a_compaction_reads_as_opencode_counts_it_and_resets_the_context() {
+        // (Shape captured live from 2.3.0.)
+        let done = json!({
+            "id": "msg_c", "type": "compaction", "status": "completed", "reason": "manual",
+            "time": {"created": 10},
+            "tokens": {"input": 4, "output": 2812, "reasoning": 0,
+                       "cache": {"read": 646940, "write": 1427}}
+        });
+        let done = native_message(&done).unwrap();
+        assert!(matches!(
+            done.kind,
+            NativeMessageKind::Compaction {
+                status: CompactionStatus::Completed,
+                tokens_in: Some(648_371),
+                tokens_out: Some(2_812),
+            }
+        ));
+        assert_eq!(done.context_tokens(), Some(2_812));
+        let running = native_message(&json!({"id": "msg_d", "type": "compaction", "status": "running"})).unwrap();
+        assert!(matches!(
+            running.kind,
+            NativeMessageKind::Compaction { status: CompactionStatus::Running, tokens_in: None, .. }
+        ));
+        assert_eq!(running.context_tokens(), None);
+        let reply = native_message(&json!({
+            "id": "msg_e", "type": "assistant", "content": [],
+            "tokens": {"input": 10, "output": 5, "cache": {"read": 100, "write": 0}}
+        }))
+        .unwrap();
+        assert_eq!(reply.context_tokens(), Some(115));
     }
 
     #[test]

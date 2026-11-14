@@ -740,9 +740,9 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::{
-    NativeChange, NativeCredential, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
+    CompactionStatus, NativeChange, NativeCredential, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
     OPENCODE_ACCESS_MODES,
-    OpencodeHarness,
+    OpencodeHarness, set_runs_on_service as set_opencode_runs_on_service,
 };
 pub use muse::MuseHarness;
 pub use pi::PiHarness;

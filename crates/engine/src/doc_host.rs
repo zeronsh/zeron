@@ -6319,34 +6319,17 @@ impl DocHost {
     }
 
     /// `prompt` to an OpenCode chat is one of OpenCode's TUI actions
-    /// (`/compact`, `/undo`, `/redo`, `/fork`, `!command`): no message of the
-    /// person's, so none is written, and an undo or redo changes the
-    /// transcript as it changes OpenCode's session. Any other prompt there
-    /// makes earlier undos final, as it does in OpenCode.
+    /// (`/compact`, `/undo`, `/redo`, `/fork`, `!command`, typed or picked):
+    /// no message of the person's, so none is written — the session shows
+    /// what it did ([`crate::opencode_sync`]).
     fn apply_opencode_action(
         &self,
         chat_id: &str,
         harness: zeron_proto::HarnessId,
-        handle: &ChatDocHandle,
         prompt: &str,
     ) -> bool {
-        use crate::opencode_sync::{self, TuiAction};
-        if harness != zeron_proto::HarnessId::Opencode {
-            return false;
-        }
-        let Some(action) = opencode_sync::tui_action(prompt) else {
-            opencode_sync::forget_undone(chat_id);
-            return false;
-        };
-        let result = match action {
-            TuiAction::Undo => opencode_sync::undo_in_transcript(chat_id, handle.doc()),
-            TuiAction::Redo => opencode_sync::redo_in_transcript(chat_id, handle.doc()),
-            TuiAction::Compact | TuiAction::Fork | TuiAction::Shell => Ok(()),
-        };
-        if let Err(error) = result {
-            tracing::warn!(chat = %chat_id, %error, "opencode undo/redo in the transcript failed");
-        }
-        true
+        harness == zeron_proto::HarnessId::Opencode
+            && crate::opencode_sync::note_prompt(chat_id, prompt)
     }
 
     /// `entry` is a prompt sent before the Stop that has already acted on
@@ -6522,7 +6505,7 @@ impl DocHost {
                 // OpenCode's TUI actions are no message of the person's: the
                 // transcript shows what they did (and an undo takes its turn
                 // out of it, as OpenCode's session does).
-                if !self.apply_opencode_action(chat_id, harness, handle, &request.prompt)
+                if !self.apply_opencode_action(chat_id, harness, &request.prompt)
                     && let Err(err) = handle.write_user_message(
                         message_id,
                         &request.prompt,
@@ -6792,7 +6775,7 @@ impl DocHost {
         // transcript copy would duplicate it until the update finishes.
         let action = sessions
             .run_harness(chat_id)
-            .is_some_and(|harness| self.apply_opencode_action(chat_id, harness, handle, &prompt));
+            .is_some_and(|harness| self.apply_opencode_action(chat_id, harness, &prompt));
         if !action
             && !sessions.live_run_update_pending(chat_id)
             && let Some(message_id) = message_id.as_deref()

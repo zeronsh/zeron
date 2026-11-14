@@ -846,6 +846,34 @@ local function Composer(): Node
 		end)
 	end)
 
+	-- One of OpenCode's TUI actions (`/compact`, `/undo`, `/redo`, `/fork`,
+	-- `!command`), typed or picked from the `/` list (its link): no message of
+	-- the person's — the session shows what it did (the engine's
+	-- opencode_sync, src/chat.rs `opencode_action`).
+	local function opencode_action(text: string): string?
+		local t = string.match(text, "^%s*(.-)%s*$") or text
+		t = string.match(t, "^%[(/[%w_%-]+)%]%(zeron%-invoke:%x+%)$") or t
+		if t == "/compact" or t == "/undo" or t == "/redo" or t == "/fork" then
+			return string.sub(t, 2)
+		end
+		if string.sub(t, 1, 1) == "!" and string.match(string.sub(t, 2), "%S") then
+			return "shell"
+		end
+		return nil
+	end
+
+	-- The newest prompt in the transcript: what an undo takes back.
+	local function last_prompt(): string?
+		local list = store.messages
+		for i = list:len(), 1, -1 do
+			local m = list:at(i)
+			if m and m.role == "user" then
+				return m.text
+			end
+		end
+		return nil
+	end
+
 	local function send(text: string)
 		-- Editing a queued message: Send saves it.
 		if editing:peek() then
@@ -943,6 +971,21 @@ local function Composer(): Node
 				end)
 			end
 			if running:peek() then
+				deliver(nil)
+				return
+			end
+			-- An OpenCode action: no prompt joins the transcript. An undo puts
+			-- the prompt it takes back in the composer, as OpenCode's own
+			-- clients do, to send again as it is or changed.
+			local s = store.session:peek()
+			local action = if s and s.harness == "opencode" then opencode_action(text_out) else nil
+			if action then
+				if action == "undo" then
+					local undone = last_prompt()
+					if undone and shared.text:peek() == "" then
+						shared.text:set(undone)
+					end
+				end
 				deliver(nil)
 				return
 			end

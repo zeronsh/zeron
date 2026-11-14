@@ -4,8 +4,9 @@
 //! of their own on the service. And `!command`, which runs a shell command
 //! in the session as the TUI's shell mode does.
 //!
-//! Each answers with what the transcript shows for it, and never starts a
-//! turn of the agent's own: the run settles the turn as soon as it's done.
+//! None writes to the transcript itself, and none starts a turn of the
+//! agent's own: the session shows what it did, in Zeron as in OpenCode's
+//! own clients, and the run settles the turn once it's done.
 //! Semantics verified live against 2.3.0: a staged revert leaves the
 //! messages listed (clients hide them) until the next prompt commits it;
 //! clearing it brings them back; compaction is queued like a steer; a fork
@@ -76,15 +77,19 @@ impl TuiAction {
             .then_some(action)
     }
 
-    /// Do it, answering with what the transcript shows.
+    /// Do it. It answers with nothing: the transcript shows what it did
+    /// as the session does in every client (the engine's session sync) —
+    /// an undo's turn gone, a compaction's note, a fork's own chat. A
+    /// compaction is waited on, so the chat shows it working until done.
     pub async fn run(
         self,
         server: &Server,
         session_id: &str,
         dir: Option<&str>,
     ) -> Result<Vec<AgentEvent>, HarnessError> {
-        let note = match self {
+        match self {
             TuiAction::Compact => {
+                let started = now_ms();
                 server
                     .post_json(
                         &format!("/api/session/{session_id}/compact"),
@@ -92,27 +97,32 @@ impl TuiAction {
                         &json!({}),
                     )
                     .await?;
-                "Compacting the session.".to_owned()
+                let deadline = tokio::time::Instant::now() + COMPACT_WAIT;
+                while tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let messages = unwrap_data(
+                        server
+                            .get_json(&format!("/api/session/{session_id}/message?limit=20"), dir)
+                            .await?,
+                    );
+                    if compaction_settled(&messages, started - 2000.0) {
+                        break;
+                    }
+                }
             }
             TuiAction::Undo => {
                 let messages = server
                     .get_json(&format!("/api/session/{session_id}/message?limit=200"), dir)
                     .await?;
-                let Some((id, text)) = last_prompt(&unwrap_data(messages)) else {
-                    return Ok(self.chip("Nothing to undo."));
-                };
-                server
-                    .post_json(
-                        &format!("/api/session/{session_id}/revert/stage"),
-                        dir,
-                        &json!({ "messageID": id }),
-                    )
-                    .await?;
-                let text = text.lines().next().unwrap_or_default();
-                format!(
-                    "Undid “{}” and what followed it. `/redo` brings it back until the next message.",
-                    cap_text(text, 80)
-                )
+                if let Some((id, _)) = last_prompt(&unwrap_data(messages)) {
+                    server
+                        .post_json(
+                            &format!("/api/session/{session_id}/revert/stage"),
+                            dir,
+                            &json!({ "messageID": id }),
+                        )
+                        .await?;
+                }
             }
             TuiAction::Redo => {
                 let info = unwrap_data(
@@ -120,24 +130,22 @@ impl TuiAction {
                         .get_json(&format!("/api/session/{session_id}"), dir)
                         .await?,
                 );
-                if info.get("revert").is_none_or(Value::is_null) {
-                    return Ok(self.chip("Nothing to redo."));
+                if info.get("revert").is_some_and(|revert| !revert.is_null()) {
+                    let path = format!("/api/session/{session_id}/revert");
+                    let request = server.request(reqwest::Method::DELETE, &path);
+                    let response = server
+                        .scoped(request, dir)
+                        .await
+                        .send()
+                        .await
+                        .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
+                    if !response.status().is_success() {
+                        return Err(HarnessError::Protocol(format!(
+                            "opencode DELETE {path}: {}",
+                            response.status()
+                        )));
+                    }
                 }
-                let path = format!("/api/session/{session_id}/revert");
-                let request = server.request(reqwest::Method::DELETE, &path);
-                let response = server
-                    .scoped(request, dir)
-                    .await
-                    .send()
-                    .await
-                    .map_err(|e| HarnessError::Protocol(format!("opencode DELETE {path}: {e}")))?;
-                if !response.status().is_success() {
-                    return Err(HarnessError::Protocol(format!(
-                        "opencode DELETE {path}: {}",
-                        response.status()
-                    )));
-                }
-                "Brought back what undo took.".to_owned()
             }
             TuiAction::Fork => {
                 let forked = unwrap_data(
@@ -145,48 +153,41 @@ impl TuiAction {
                         .post_json(&format!("/api/session/{session_id}/fork"), dir, &json!({}))
                         .await?,
                 );
-                match forked.get("id").and_then(Value::as_str) {
-                    Some(_) => "Forked into a new chat.".to_owned(),
-                    None => {
-                        return Err(HarnessError::Protocol(
-                            "opencode fork returned no session".into(),
-                        ));
-                    }
+                if forked.get("id").and_then(Value::as_str).is_none() {
+                    return Err(HarnessError::Protocol(
+                        "opencode fork returned no session".into(),
+                    ));
                 }
             }
-        };
-        Ok(self.chip(&note))
+        }
+        Ok(Vec::new())
     }
+}
 
-    /// What it did, as a chip of its own (named for the action, its note
-    /// the chip's output) rather than words of the agent's.
-    fn chip(self, note: &str) -> Vec<AgentEvent> {
-        let id = format!("action-{}", uuid::Uuid::new_v4());
-        let name = match self {
-            TuiAction::Compact => "Compact",
-            TuiAction::Undo => "Undo",
-            TuiAction::Redo => "Redo",
-            TuiAction::Fork => "Fork",
-        };
-        vec![
-            AgentEvent::ToolCall {
-                id: id.clone(),
-                call: ToolCall::Unknown {
-                    name: name.to_owned(),
-                    input: None,
-                },
-            },
-            AgentEvent::ToolResult {
-                id,
-                is_error: false,
-                output: Some(note.to_owned()),
-                diff: None,
-                preview_paths: Vec::new(),
-                image_payloads: Vec::new(),
-                exit_code: None,
-            },
-        ]
-    }
+/// How long a compaction is waited on before the turn settles anyway (the
+/// transcript still shows it finish).
+const COMPACT_WAIT: Duration = Duration::from_secs(15 * 60);
+
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or_default()
+}
+
+/// Whether the compaction started since `since` is done (or failed).
+fn compaction_settled(messages: &Value, since: f64) -> bool {
+    messages.as_array().into_iter().flatten().any(|message| {
+        message.get("type").and_then(Value::as_str) == Some("compaction")
+            && message
+                .pointer("/time/created")
+                .and_then(Value::as_f64)
+                .is_some_and(|created| created >= since)
+            && message
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| !matches!(status, "running" | "pending"))
+    })
 }
 
 /// The newest prompt in a session's message list (newest first or not).
@@ -222,18 +223,15 @@ pub(super) fn shell_command(prompt: &str) -> Option<&str> {
         .filter(|command| !command.is_empty())
 }
 
-/// Run `command` in the session, and answer with it and what it printed once
-/// it exits (or [`SHELL_WAIT`] runs out: then with what it printed so far).
+/// Run `command` in the session, and wait for it to exit (or [`SHELL_WAIT`]
+/// to run out); the session's shell message shows it and what it printed.
 pub(super) async fn run_shell(
     server: &Server,
     session_id: &str,
     dir: Option<&str>,
     command: &str,
 ) -> Result<Vec<AgentEvent>, HarnessError> {
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or_default();
+    let started = now_ms();
     server
         .post_json(
             &format!("/api/session/{session_id}/shell"),
@@ -259,7 +257,9 @@ pub(super) async fn run_shell(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    Ok(shell_events(seen.as_ref(), command))
+    // (The session's shell message is its chip, in every client.)
+    let _ = seen;
+    Ok(Vec::new())
 }
 
 /// This run's `shell` message: the newest for `command` since `since`.
@@ -335,6 +335,16 @@ mod tests {
         }];
         assert_eq!(TuiAction::of("undo", &theirs), None);
         assert_eq!(TuiAction::of("review", &ours), None);
+    }
+
+    #[test]
+    fn a_compaction_is_settled_once_its_message_is_done() {
+        let running = json!([{"type": "compaction", "status": "running", "time": {"created": 10}}]);
+        assert!(!compaction_settled(&running, 5.0));
+        let done = json!([{"type": "compaction", "status": "completed", "time": {"created": 10}}]);
+        assert!(compaction_settled(&done, 5.0));
+        // (An earlier compaction is not this one.)
+        assert!(!compaction_settled(&done, 50.0));
     }
 
     #[test]

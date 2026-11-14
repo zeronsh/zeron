@@ -761,9 +761,49 @@ local function settings_dialog(): Node
 			end)
 		end)
 	end)
+	-- OpenCode's own (this Mac's engine: GetOpencodeSettings): whether its
+	-- sessions show here, whether their folders become projects, and
+	-- whether chats run on its background service.
+	local function opencode(): boolean
+		local a = agent()
+		return a ~= nil and a.id == "opencode"
+	end
+	local oc_sync = ui.state("settings_agent_oc_sync", false)
+	local oc_projects = ui.state("settings_agent_oc_projects", false)
+	local oc_service = ui.state("settings_agent_oc_service", true)
+	local function oc_show(v: any)
+		if type(v) == "table" then
+			oc_sync:set(v.syncSessions == true)
+			oc_projects:set(v.addProjects == true)
+			oc_service:set(v.backgroundService ~= false)
+		end
+	end
+	ui.effect(function()
+		if dialog_open:get() and opencode() then
+			host.call("settings.engine", { method = "GetOpencodeSettings", params = {} }):after(oc_show, function() end)
+		end
+	end)
+	local function oc_set(key: string, state: State<boolean>): (on: boolean) -> ()
+		return function(on: boolean)
+			local params = {
+				syncSessions = oc_sync:peek(),
+				addProjects = oc_projects:peek(),
+				backgroundService = oc_service:peek(),
+			}
+			params[key] = on
+			host.call("settings.engine", { method = "SetOpencodeSettings", params = params }):after(oc_show, function()
+				state:set(not on)
+				toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+			end)
+		end
+	end
 	return ds.Dialog {
 		open = open,
-		title = ui.t("settings.providers.agent_settings"),
+		title = (function(): string
+			return if opencode()
+				then ui.t("settings.providers.opencode.title"):get()
+				else ui.t("settings.providers.agent_settings"):get()
+		end) :: any,
 		body = (function(): string
 			return ui.t("settings.providers.dialog_body", { device = device_name() }):get()
 		end) :: any,
@@ -771,6 +811,42 @@ local function settings_dialog(): Node
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
 		ds.Settings.Group {
+			ui.show(opencode, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.sync.label"),
+				description = ui.t("settings.providers.opencode.sync.description"),
+				control = ds.Switch {
+					value = oc_sync,
+					label = ui.t("settings.providers.opencode.sync.label"),
+					on_change = oc_set("syncSessions", oc_sync),
+				},
+			}),
+			ui.show(opencode, ui.div {
+				w_full = true,
+				opacity = function()
+					return if oc_sync:get() then 1 else "$zeron.disabled"
+				end,
+				disabled = function()
+					return not oc_sync:get()
+				end,
+				ds.Settings.Row {
+					label = ui.t("settings.providers.opencode.projects.label"),
+					description = ui.t("settings.providers.opencode.projects.description"),
+					control = ds.Switch {
+						value = oc_projects,
+						label = ui.t("settings.providers.opencode.projects.label"),
+						on_change = oc_set("addProjects", oc_projects),
+					},
+				},
+			}),
+			ui.show(opencode, ds.Settings.Row {
+				label = ui.t("settings.providers.opencode.service.label"),
+				description = ui.t("settings.providers.opencode.service.description"),
+				control = ds.Switch {
+					value = oc_service,
+					label = ui.t("settings.providers.opencode.service.label"),
+					on_change = oc_set("backgroundService", oc_service),
+				},
+			}),
 			ui.div {
 				w_full = true,
 				opacity = function()

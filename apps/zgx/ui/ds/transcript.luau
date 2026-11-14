@@ -63,9 +63,12 @@ local locale = require("@self/locale")
 export type Tool = Activity.Tool
 export type Message = {
 	id: string,
-	-- A person's, a reply, or the seam where the chat moved to another
-	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	-- A person's, a reply, the seam where the chat moved to another
+	-- agent (`[mark] From → [mark] To` over the prompt that moved it), or a
+	-- note of the agent's session ("Session compacted · 648.4K in · 2.8K
+	-- out"; `live` while it's still under way).
+	role: "user" | "assistant" | "switch" | "note",
+	live: boolean?,
 	text: string,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
@@ -616,6 +619,18 @@ local function turn_line(line: () -> TurnLine?): Node
 			line_height = "$font.line.sm",
 			color = "$text.tertiary",
 		},
+	}
+end
+
+-- A note of the agent's session (its compaction): in the working word's
+-- quiet ink, a ring while it's still under way.
+local function note(state: State<Message>): Node
+	return ui.row {
+		w_full = true,
+		turn_line(function(): TurnLine?
+			local m = state:get()
+			return { text = m.text, spinner = m.live == true }
+		end),
 	}
 end
 
@@ -1868,7 +1883,7 @@ local function Transcript(props: Props): Node
 				max_w = measure,
 				min_w = 0,
 				-- Anywhere on a message shows its lane (Zeron's entry hover).
-				on_hover = if m.role == "switch"
+				on_hover = if m.role == "switch" or m.role == "note"
 					then nil
 					else function(inside: boolean)
 						if inside then
@@ -1878,6 +1893,7 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "note" then note(state)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the

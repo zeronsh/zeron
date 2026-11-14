@@ -111,6 +111,7 @@ struct HarnessPrefsFile {
     /// Harnesses the user turned native subagents off for: their runs
     /// delegate through side chats only.
     native_subagents_off: Vec<HarnessId>,
+    opencode: OpencodeSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -125,6 +126,32 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+/// This device's OpenCode settings (Settings → Providers → OpenCode
+/// settings). A chat Zeron runs on OpenCode's background service is kept in
+/// step with the session whatever these say: they are about the rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OpencodeSettings {
+    /// Show the sessions made in OpenCode's own clients as chats, live.
+    pub sync_sessions: bool,
+    /// With sync on: a session in a folder that is no project yet makes it
+    /// one. Off, only sessions in Zeron's projects are shown.
+    pub add_projects: bool,
+    /// Runs use OpenCode's background service, which its TUI and desktop app
+    /// share; off, each run has a private server of its own.
+    pub background_service: bool,
+}
+
+impl Default for OpencodeSettings {
+    fn default() -> Self {
+        Self {
+            sync_sessions: false,
+            add_projects: false,
+            background_service: true,
+        }
+    }
 }
 
 /// Per-device native subagent preferences (Settings → Providers).
@@ -526,6 +553,7 @@ impl HarnessRegistry {
             .ok()
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
+        zeron_harness::set_opencode_runs_on_service(loaded.opencode.background_service);
         *self.prefs() = loaded;
         *self
             .prefs_path
@@ -630,6 +658,18 @@ impl HarnessRegistry {
         if let Err(err) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
             tracing::warn!(error = %err, "harness-prefs save failed");
         }
+    }
+
+    pub fn opencode_settings(&self) -> OpencodeSettings {
+        self.prefs().opencode.clone()
+    }
+
+    /// Keep `settings` and apply them: runs from now on use the background
+    /// service or not; the session sync reads the rest as it goes.
+    pub fn set_opencode_settings(&self, settings: OpencodeSettings) {
+        zeron_harness::set_opencode_runs_on_service(settings.background_service);
+        self.prefs().opencode = settings;
+        self.persist_prefs();
     }
 
     pub fn title_settings(&self) -> TitleSettings {

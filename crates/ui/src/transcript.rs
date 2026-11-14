@@ -1853,6 +1853,33 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
+                    // Where the agent's session compacted: its note, one
+                    // muted line.
+                    MessagePart::Compaction {
+                        id: part_id,
+                        status,
+                        tokens_in,
+                        tokens_out,
+                    } => {
+                        let note = format!(
+                            "_{}_",
+                            zeron_doc::compaction_note(status, *tokens_in, *tokens_out)
+                        );
+                        let key = format!("{}#{}", entry.id, part_id);
+                        rows.push(Row {
+                            id: format!("{key}.0").into(),
+                            version: fnv1a(note.as_bytes()),
+                            turn_start: false,
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                            kind: RowKind::Markdown {
+                                tree: parse(&key, &note),
+                                block_ix: 0,
+                            },
+                        });
+                    }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
                     MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}

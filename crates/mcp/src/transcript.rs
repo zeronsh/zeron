@@ -162,6 +162,13 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
             // The fork seam is a transcript marker, not agent content: an
             // orchestrator reads the copied history as ordinary turns.
             MessagePart::Fork { .. } | MessagePart::Switch { .. } => {}
+            // What the agent's context holds changed: worth knowing.
+            MessagePart::Compaction {
+                status,
+                tokens_in,
+                tokens_out,
+                ..
+            } => tools.push(zeron_doc::compaction_note(status, *tokens_in, *tokens_out)),
         }
     }
     RenderedMessage {

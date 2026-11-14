@@ -85,6 +85,8 @@ pub mod methods {
     /// (`{switchable, off}`; set with `{harness, enabled}`).
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
+    pub const GET_OPENCODE_SETTINGS: &str = "GetOpencodeSettings";
+    pub const SET_OPENCODE_SETTINGS: &str = "SetOpencodeSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

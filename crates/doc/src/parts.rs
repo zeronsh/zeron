@@ -372,6 +372,20 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_harness: Option<String>,
     },
+    /// Where the agent's session was compacted (OpenCode's `/compact`, or
+    /// its own when the context filled): `running` while the summary is
+    /// written, then `completed` (with the tokens it read and wrote) or
+    /// `failed`. Old builds' unknown-kind fallback yields an invisible empty
+    /// text part.
+    #[serde(rename_all = "camelCase")]
+    Compaction {
+        id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_in: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_out: Option<u64>,
+    },
 }
 
 impl MessagePart {
@@ -385,7 +399,8 @@ impl MessagePart {
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
             | MessagePart::Fork { id, .. }
-            | MessagePart::Switch { id, .. } => id,
+            | MessagePart::Switch { id, .. }
+            | MessagePart::Compaction { id, .. } => id,
         }
     }
 
@@ -432,7 +447,35 @@ impl MessagePart {
                 ..
             } => source_chat_id.len() + source_title.len(),
             MessagePart::Switch { from, to, .. } => from.len() + to.len(),
+            MessagePart::Compaction { status, .. } => status.len(),
         }
+    }
+}
+
+/// What a [`MessagePart::Compaction`] says, as OpenCode's own clients say
+/// it: `Compacting session…` while it runs, then `Session compacted ·
+/// 648.4K in · 2.8K out`.
+pub fn compaction_note(status: &str, tokens_in: Option<u64>, tokens_out: Option<u64>) -> String {
+    match status {
+        "running" | "pending" => "Compacting session…".to_owned(),
+        "failed" => "Compaction failed".to_owned(),
+        _ => match (tokens_in, tokens_out) {
+            (Some(tokens_in), Some(tokens_out)) if tokens_in + tokens_out > 0 => format!(
+                "Session compacted · {} in · {} out",
+                short_count(tokens_in),
+                short_count(tokens_out)
+            ),
+            _ => "Session compacted".to_owned(),
+        },
+    }
+}
+
+/// `648371` as `648.4K`, `2812` as `2.8K`, `1234567` as `1.2M`.
+fn short_count(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}K", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
     }
 }
 

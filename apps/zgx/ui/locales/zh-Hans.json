@@ -1523,6 +1523,24 @@
         "terms": "补全 输入框 斜杠 技能 菜单 completion composer slash skills menu",
         "description": "不在 / 菜单中显示技能。"
       },
+      "opencode": {
+        "title": "OpenCode 设置",
+        "sync": {
+          "label": "同步会话",
+          "terms": "同步 会话 opencode tui desktop import sessions live",
+          "description": "将你在 OpenCode 终端界面和桌面应用中开始的会话显示为此处的聊天，并实时保持同步。在 Zeron 中开始的聊天始终与 OpenCode 保持一致。"
+        },
+        "projects": {
+          "label": "添加项目",
+          "terms": "项目 文件夹 opencode projects folders import",
+          "description": "同步的会话所在文件夹尚不是项目时，将其添加为项目。关闭后，只显示你的项目中的会话。"
+        },
+        "service": {
+          "label": "使用后台服务",
+          "terms": "服务 opencode service server tui desktop shared",
+          "description": "在 OpenCode 终端界面和桌面应用共享的服务上运行，会话可在它们之间实时切换。关闭后，每个聊天都在自己的服务器上运行。"
+        }
+      },
       "more": {
         "label": "更多智能体",
         "terms": "安装 添加 新建 install add new",

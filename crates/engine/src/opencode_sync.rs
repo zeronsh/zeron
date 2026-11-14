@@ -1,18 +1,23 @@
 //! OpenCode's sessions as Zeron chats, kept current as they change in any
 //! client. OpenCode 2.x keeps every session on one background service that
 //! its TUI, its desktop app and Zeron's runs share ([`zeron_harness`]'s
-//! OpenCode driver attaches to it): this host reads them all from there and
-//! shows each as a chat under the project of its directory.
+//! OpenCode driver attaches to it): this host reads them from there and
+//! keeps each chat's transcript the session's, so a session can move from
+//! Zeron to the TUI and back mid-way with nothing lost.
 //!
-//! - A session a Zeron chat already runs on (`harness_session_id`, or the
-//!   chat named in its metadata) stays that chat's: only what happened in it
-//!   since Zeron last wrote — a turn continued in the TUI — is added.
-//! - Any other session becomes a chat of its own, its id derived from the
-//!   session's so it is made once, whichever device-side restart reads it.
-//!   A chat deleted in Zeron is not brought back.
-//! - Its messages keep OpenCode's ids (`oc:<id>`), so a message read again
-//!   as it grows replaces its entry instead of adding one.
-//! - A chat with a run of Zeron's on this device is left to that run.
+//! - A session a Zeron chat runs on (its metadata, or `harness_session_id`)
+//!   is always followed. While a turn of Zeron's own streams into it, that
+//!   run writes the transcript; once it ends, what the run wrote is replaced
+//!   by the session's messages — with anything sent from another client
+//!   meanwhile. A turn running in another client streams in live.
+//! - With "Sync sessions" on (Settings → Providers → OpenCode settings), any
+//!   other session becomes a chat of its own, under the project of its
+//!   folder (made for it with "Add projects" on), its id derived from the
+//!   session's so it is made once. A chat deleted in Zeron is not brought
+//!   back. A fork of a session Zeron shows is always brought in.
+//! - Messages keep OpenCode's ids (`oc:<id>`), so one read again as it grows
+//!   replaces its entry. Above where a chat moved to OpenCode from another
+//!   agent, its transcript is its own and stays.
 //!
 //! Runs on the host device only, and only while OpenCode is enabled here and
 //! has a background service; a Cloud machine has neither. `ZERON_OPENCODE_SYNC=0`
@@ -28,6 +33,8 @@ use zeron_harness::{
     NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession, OpencodeHarness,
 };
 use zeron_proto::{Chat, ChatConfig, HarnessId};
+
+use crate::registry::OpencodeSettings;
 
 use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
@@ -71,6 +78,7 @@ pub(crate) fn spawn(
         registry,
         read: HashMap::new(),
         working: HashMap::new(),
+        windows: HashMap::new(),
     };
     tokio::spawn(mirror.run());
 }
@@ -87,6 +95,8 @@ struct Mirror {
     /// Chats shown working for a turn in another client, and when that was
     /// last stamped.
     working: HashMap<String, tokio::time::Instant>,
+    /// Each model's context window, as read once.
+    windows: HashMap<String, Option<u64>>,
 }
 
 /// How often a turn running in another client re-stamps its chat's status:
@@ -173,10 +183,27 @@ impl Mirror {
             running.remove(&session.id);
         }
         let known = self.chat_for(session);
-        // (A run of Zeron's is writing this chat: it has the session live.)
+        let settings = self.registry.opencode_settings();
+        let own = known
+            .as_ref()
+            .is_some_and(|chat| chat.id != imported_chat_id(&session.id));
+        let followed = if own {
+            // (A run on a private server isn't on the service's feed.)
+            settings.background_service
+        } else {
+            settings.sync_sessions || self.fork_source(session).is_some()
+        };
+        if !followed {
+            return;
+        }
+        // A turn of Zeron's own is streaming into it: that run writes the
+        // transcript until it ends. Read again after, whatever changes then.
         if let Some(chat) = &known
-            && self.sessions.has_run(&chat.id)
+            && self.sessions.turn_in_flight(&chat.id)
+            && !acting(&chat.id)
         {
+            running.insert(session.id.clone());
+            self.read.remove(&session.id);
             return;
         }
         let unchanged = self.read.get(&session.id)
@@ -198,9 +225,10 @@ impl Mirror {
                 Vec::new()
             }
         };
+        let window = self.window(session).await;
         let result = match known {
-            Some(chat) => self.update(&chat, session, &history, &questions),
-            None => self.import(session, &history, &questions),
+            Some(chat) => self.update(&chat, session, &history, &questions, window),
+            None => self.import(session, &history, &questions, &settings, window),
         };
         match result {
             Ok(()) => {
@@ -214,6 +242,36 @@ impl Mirror {
                 tracing::warn!(%error, session = %session.id, "opencode sync: couldn't mirror a session");
             }
         }
+    }
+
+    /// The chat showing the session `session` was forked from, if any.
+    fn fork_source(&self, session: &NativeSession) -> Option<Chat> {
+        let source = session.forked_from.as_deref()?;
+        let chats = self.workspace.watch_chats();
+        let chats = chats.borrow();
+        let derived = imported_chat_id(source);
+        chats
+            .iter()
+            .find(|chat| {
+                chat.id == derived || chat.harness_session_id.as_deref() == Some(source)
+            })
+            .cloned()
+    }
+
+    /// The context window of the session's model, read once per model.
+    async fn window(&mut self, session: &NativeSession) -> Option<u64> {
+        let model = session.model.clone()?;
+        if let Some(window) = self.windows.get(&model) {
+            return *window;
+        }
+        let window = self
+            .harness
+            .native_context_window(&model)
+            .await
+            .ok()
+            .flatten();
+        self.windows.insert(model, window);
+        window
     }
 
     /// Show the session's chat working while a turn runs in it in another
@@ -263,13 +321,16 @@ impl Mirror {
     }
 
     /// A session no chat shows yet: a chat of its own, under the project of
-    /// its directory. Its history is saved before its row is published, so a
-    /// crash never leaves an empty chat in the sidebar.
+    /// its folder (or its fork source's). Its history is saved before its
+    /// row is published, so a crash never leaves an empty chat in the
+    /// sidebar.
     fn import(
         &self,
         session: &NativeSession,
         history: &[NativeMessage],
         questions: &[NativeQuestion],
+        settings: &OpencodeSettings,
+        window: Option<u64>,
     ) -> Result<(), String> {
         // A session Zeron made for a chat that is gone went with that chat.
         if session.zeron_chat.is_some() {
@@ -279,15 +340,38 @@ impl Mirror {
         if self.workspace.chat_deleted(&chat_id) {
             return Ok(());
         }
-        let space_id = self
+        let existing = self
             .workspace
-            .space_for_path(&session.directory)
+            .existing_space_for_path(&session.directory)
             .map_err(|e| e.to_string())?;
+        let space_id = match existing {
+            Some(space) => space,
+            None => match self.fork_source(session).and_then(|chat| chat.space_id) {
+                Some(space) => space,
+                None if settings.add_projects => self
+                    .workspace
+                    .space_for_path(&session.directory)
+                    .map_err(|e| e.to_string())?,
+                // (Not a project of Zeron's, and none is to be made.)
+                None => return Ok(()),
+            },
+        };
         let doc = self.doc_host.open(&chat_id).map_err(|e| e.to_string())?;
-        let written = write_history(doc.doc(), history, session, None, self.doc_host.device_id())
-            .map_err(|e| e.to_string())?;
+        let written = write_history(
+            doc.doc(),
+            history,
+            session,
+            Start::ALL,
+            self.doc_host.device_id(),
+        )
+        .map_err(|e| e.to_string())?;
         write_questions(doc.doc(), questions, self.doc_host.device_id())
             .map_err(|e| e.to_string())?;
+        if let Some(tokens) = context_tokens(history, session, Start::ALL) {
+            doc.doc()
+                .update_context_usage(Some(tokens), window)
+                .map_err(|e| e.to_string())?;
+        }
         self.doc_host
             .persist_fork(&doc)
             .map_err(|e| e.to_string())?;
@@ -330,28 +414,41 @@ impl Mirror {
             .map_err(|e| e.to_string())
     }
 
-    /// A chat that shows `session` already: what's new in the session, and
-    /// for an imported chat its title and archived state too.
+    /// A chat that shows `session` already: its transcript, from where it
+    /// moved to OpenCode, made the session's; for an imported chat its
+    /// title and archived state too.
     fn update(
         &self,
         chat: &Chat,
         session: &NativeSession,
         history: &[NativeMessage],
         questions: &[NativeQuestion],
+        window: Option<u64>,
     ) -> Result<(), String> {
         let imported = chat.id == imported_chat_id(&session.id);
         let doc = self.doc_host.open(&chat.id).map_err(|e| e.to_string())?;
-        // Zeron's own entries end where its last run did; only what came
-        // after (a turn in another client) is the session's to add.
-        let since = (!imported).then(|| zeron_written_until(doc.doc()));
+        let start = if imported {
+            Some(Start::ALL)
+        } else {
+            Start::of(&doc.doc().read_entries().map_err(|e| e.to_string())?)
+        };
+        // (Moved on to another agent since: the session is no longer its.)
+        let Some(start) = start else {
+            return Ok(());
+        };
         let written = write_history(
             doc.doc(),
             history,
             session,
-            since,
+            start,
             self.doc_host.device_id(),
         )
         .map_err(|e| e.to_string())?;
+        if let Some(tokens) = context_tokens(history, session, start) {
+            doc.doc()
+                .update_context_usage(Some(tokens), window)
+                .map_err(|e| e.to_string())?;
+        }
         let asked = write_questions(doc.doc(), questions, self.doc_host.device_id())
             .map_err(|e| e.to_string())?;
         if asked {
@@ -408,35 +505,78 @@ fn millis(ms: i64) -> chrono::DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-/// Where Zeron's own entries end: the last one's end (its start, plus how
-/// long it streamed). Entries read from the session are not Zeron's.
-fn zeron_written_until(doc: &zeron_doc::SessionDoc) -> i64 {
-    doc.read_entries()
-        .unwrap_or_default()
-        .iter()
-        .filter(|entry| !entry.id.starts_with(ENTRY_PREFIX))
-        .map(|entry| entry.created_at + entry.duration_ms.unwrap_or(0))
-        .max()
-        .unwrap_or(i64::MIN)
+/// Where the session's part of a chat's transcript starts. Above it, the
+/// chat's own: turns another agent ran before the chat moved to OpenCode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Start {
+    /// The first entry that is the session's to write.
+    index: usize,
+    /// Messages from before this (a stint on OpenCode before the chat moved
+    /// away and back) are not shown again.
+    at: i64,
+}
+
+impl Start {
+    /// All of it: a chat that has only ever been the session.
+    const ALL: Start = Start {
+        index: 0,
+        at: i64::MIN,
+    };
+
+    /// For a chat Zeron runs: below its last move to OpenCode, or all of it
+    /// when it never moved. `None` when it has moved on to another agent.
+    fn of(entries: &[SessionMessageEntry]) -> Option<Start> {
+        let seam = entries.iter().enumerate().rev().find_map(|(index, entry)| {
+            entry.parts.iter().find_map(|part| match part {
+                MessagePart::Switch { to_harness, .. } => {
+                    Some((index, entry.created_at, to_harness.as_deref()))
+                }
+                _ => None,
+            })
+        });
+        match seam {
+            None => Some(Start::ALL),
+            Some((index, at, None | Some("opencode"))) => Some(Start {
+                index: index + 1,
+                at,
+            }),
+            Some(_) => None,
+        }
+    }
 }
 
 /// What [`write_history`] did.
 #[derive(Debug, Default)]
 struct Written {
-    /// An entry was added or rewritten.
+    /// An entry was added, rewritten or taken out.
     changed: bool,
     /// The last message's text, for the sidebar.
     preview: Option<String>,
 }
 
-/// Write `history` into `doc`: a message not there yet is added, one that
-/// grew is rewritten in place, one that's the same is left alone. Only
-/// messages after `since` count, when given (a chat Zeron also writes).
+/// An entry a run of Zeron's wrote for a turn on the session (a prompt, a
+/// reply): the session has it too, once the turn is over. Errors stay: the
+/// session may never have heard of what failed.
+fn zeron_written(entry: &SessionMessageEntry) -> bool {
+    !entry.id.starts_with(ENTRY_PREFIX)
+        && !entry.id.starts_with(QUESTION_PREFIX)
+        && matches!(entry.role, MessageRole::User | MessageRole::Assistant)
+        && !entry
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::Error { .. }))
+}
+
+/// Make `doc`'s transcript from `start` on the session's `history`: a
+/// message not there yet goes in where it belongs, one that grew is
+/// rewritten in place, one that's the same is left alone; one the session no
+/// longer has (undone) goes, and so do the entries a run of Zeron's wrote for
+/// turns the session now holds.
 fn write_history(
     doc: &zeron_doc::SessionDoc,
     history: &[NativeMessage],
     session: &NativeSession,
-    since: Option<i64>,
+    start: Start,
     device_id: &str,
 ) -> Result<Written, zeron_doc::DocError> {
     // An undo staged in the session takes its message and all after it back,
@@ -446,52 +586,73 @@ fn write_history(
         .as_ref()
         .and_then(|id| history.iter().position(|message| &message.id == id))
         .unwrap_or(history.len());
-    let history = &history[..cut];
-    // Entries read from the session whose message it no longer has (undone,
-    // or an undo that a new prompt made final) go too.
+    let history: Vec<&NativeMessage> = history[..cut]
+        .iter()
+        .filter(|message| message.created_at_ms >= start.at)
+        .collect();
     let kept: HashSet<String> = history
         .iter()
         .map(|message| format!("{ENTRY_PREFIX}{}", message.id))
         .collect();
-    let mut written = Written::default();
-    let gone: Vec<usize> = doc
-        .read_entries()?
+    // Zeron's writes up to here are the session's to show now.
+    let held_until = history
         .iter()
-        .enumerate()
-        .filter(|(_, entry)| entry.id.starts_with(ENTRY_PREFIX) && !kept.contains(&entry.id))
-        .map(|(index, _)| index)
-        .collect();
+        .map(|message| message.completed_at_ms.unwrap_or(0).max(message.created_at_ms))
+        .max();
+    let mut written = Written::default();
+    let mut ids: Vec<String> = Vec::new();
+    let entries = doc.read_entries()?;
+    let mut gone = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let replaced = index >= start.index
+            && ((entry.id.starts_with(ENTRY_PREFIX) && !kept.contains(&entry.id))
+                || (zeron_written(entry) && held_until.is_some_and(|t| entry.created_at <= t)));
+        if replaced {
+            gone.push(index);
+        } else {
+            ids.push(entry.id.clone());
+        }
+    }
     for index in gone.into_iter().rev() {
         doc.remove_message(index)?;
         written.changed = true;
     }
-    let existing = doc.read_entries()?;
-    let at: HashMap<&str, usize> = existing
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| (entry.id.as_str(), index))
+    let existing: HashMap<String, SessionMessageEntry> = doc
+        .read_entries()?
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry))
         .collect();
     let last = history.len().saturating_sub(1);
     for (index, message) in history.iter().enumerate() {
-        if since.is_some_and(|since| message.created_at_ms <= since) {
-            continue;
-        }
-        // (The last reply of a running session is still being written.)
+        // (The last message of a running session is still being written.)
         let streaming = session.busy && index == last;
         let entry = entry_of(message, streaming, device_id);
         if let Some(text) = preview_of(&entry) {
             written.preview = Some(text);
         }
-        match at.get(entry.id.as_str()) {
-            Some(&index) => {
-                let current = &existing[index];
-                if current.parts != entry.parts || current.status != entry.status {
-                    doc.replace_message(index, &entry)?;
+        match ids.iter().position(|id| *id == entry.id) {
+            Some(at) => {
+                let current = &existing[&entry.id];
+                if current.parts != entry.parts
+                    || current.status != entry.status
+                    || current.duration_ms != entry.duration_ms
+                {
+                    doc.replace_message(at, &entry)?;
                     written.changed = true;
                 }
             }
             None => {
-                doc.push_message(&entry)?;
+                // Before the next of the session's messages already shown,
+                // else last.
+                let at = history[index + 1..]
+                    .iter()
+                    .find_map(|later| {
+                        let later = format!("{ENTRY_PREFIX}{}", later.id);
+                        ids.iter().position(|id| *id == later)
+                    })
+                    .unwrap_or(ids.len());
+                doc.insert_message(at, &entry)?;
+                ids.insert(at, entry.id.clone());
                 written.changed = true;
             }
         }
@@ -499,21 +660,38 @@ fn write_history(
     Ok(written)
 }
 
-/// One of OpenCode's TUI actions, as typed in Zeron's composer for an
-/// OpenCode chat. The driver does them (`zeron_harness`'s OpenCode actions);
-/// the transcript shows what they did, never the typed command as a message.
+/// What the session's context holds now: its newest reply's tokens, or a
+/// compaction's summary when that came after.
+fn context_tokens(history: &[NativeMessage], session: &NativeSession, start: Start) -> Option<u64> {
+    let cut = session
+        .reverted_from
+        .as_ref()
+        .and_then(|id| history.iter().position(|message| &message.id == id))
+        .unwrap_or(history.len());
+    history[..cut]
+        .iter()
+        .rev()
+        .take_while(|message| message.created_at_ms >= start.at)
+        .find_map(NativeMessage::context_tokens)
+}
+
+/// One of OpenCode's TUI actions, as sent from Zeron's composer for an
+/// OpenCode chat — typed, or picked from its `/` list (a link the agent gets
+/// as the command). The driver does them (`zeron_harness`'s OpenCode
+/// actions); the session shows what they did, never the command as a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TuiAction {
     Compact,
     Undo,
     Redo,
     Fork,
-    /// `!command`, the TUI's shell mode: its command chip says what ran.
+    /// `!command`, the TUI's shell mode.
     Shell,
 }
 
 /// The action `prompt` is, if it is one.
 pub(crate) fn tui_action(prompt: &str) -> Option<TuiAction> {
+    let prompt = zeron_proto::invocation::harness_prompt(prompt, HarnessId::Opencode);
     let prompt = prompt.trim();
     match prompt {
         "/compact" => Some(TuiAction::Compact),
@@ -527,74 +705,30 @@ pub(crate) fn tui_action(prompt: &str) -> Option<TuiAction> {
     }
 }
 
-/// What an undo took out of a chat's transcript, and where it was: a redo
-/// puts it back there. Per chat, newest last; kept for the engine's life
-/// (after a restart a redo still restores OpenCode's session, and an
-/// imported chat's entries with it, through the sync).
-struct Undone {
-    at: usize,
-    entries: Vec<SessionMessageEntry>,
-}
-
-static UNDONE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<Undone>>>> =
+/// Chats whose turn in flight is one of those actions: it writes nothing of
+/// its own, so the session's changes show as they happen (a compaction's
+/// progress, an undo).
+static ACTING: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 
-fn undone() -> std::sync::MutexGuard<'static, HashMap<String, Vec<Undone>>> {
-    UNDONE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn acting_set() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    ACTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// `/undo` in the transcript, as OpenCode's session takes it back: the last
-/// prompt and everything after it go, kept for a redo.
-pub(crate) fn undo_in_transcript(
-    chat_id: &str,
-    doc: &zeron_doc::SessionDoc,
-) -> Result<(), zeron_doc::DocError> {
-    let entries = doc.read_entries()?;
-    let Some(at) = entries
-        .iter()
-        .rposition(|entry| entry.role == MessageRole::User)
-    else {
-        return Ok(());
-    };
-    for index in (at..entries.len()).rev() {
-        doc.remove_message(index)?;
+fn acting(chat_id: &str) -> bool {
+    acting_set().contains(chat_id)
+}
+
+/// A prompt sent to an OpenCode chat: whether it is one of the TUI's
+/// actions (no message of the person's), noted for the sync either way.
+pub(crate) fn note_prompt(chat_id: &str, prompt: &str) -> bool {
+    let action = tui_action(prompt).is_some();
+    if action {
+        acting_set().insert(chat_id.to_owned());
+    } else {
+        acting_set().remove(chat_id);
     }
-    undone()
-        .entry(chat_id.to_owned())
-        .or_default()
-        .push(Undone {
-            at,
-            entries: entries[at..].to_vec(),
-        });
-    Ok(())
-}
-
-/// `/redo` in the transcript: what the last undo took goes back where it
-/// was (entries back already, by the sync, are left as they are).
-pub(crate) fn redo_in_transcript(
-    chat_id: &str,
-    doc: &zeron_doc::SessionDoc,
-) -> Result<(), zeron_doc::DocError> {
-    let Some(undo) = undone().get_mut(chat_id).and_then(Vec::pop) else {
-        return Ok(());
-    };
-    let present: HashSet<String> = doc.read_entries()?.into_iter().map(|e| e.id).collect();
-    let mut at = undo.at;
-    for entry in undo.entries {
-        if present.contains(&entry.id) {
-            continue;
-        }
-        doc.insert_message(at, &entry)?;
-        at += 1;
-    }
-    Ok(())
-}
-
-/// A new prompt makes the chat's undos final, as it does in OpenCode.
-pub(crate) fn forget_undone(chat_id: &str) {
-    undone().remove(chat_id);
+    action
 }
 
 /// Entry ids of the questions a session is waiting on.
@@ -707,16 +841,34 @@ fn entry_of(message: &NativeMessage, streaming: bool, device_id: &str) -> Sessio
                 text: text.clone(),
             }],
         ),
-        NativeMessageKind::Assistant { events } => {
+        NativeMessageKind::Assistant { events, .. } => {
             let mut parts = Vec::new();
             for event in events {
                 zeron_doc::fold_event_into_parts(&mut parts, event);
             }
             (MessageRole::Assistant, parts)
         }
+        NativeMessageKind::Compaction {
+            status,
+            tokens_in,
+            tokens_out,
+        } => (
+            MessageRole::System,
+            vec![MessagePart::Compaction {
+                id: "c0".into(),
+                status: status.as_str().to_owned(),
+                tokens_in: *tokens_in,
+                tokens_out: *tokens_out,
+            }],
+        ),
     };
+    let duration_ms = matches!(message.kind, NativeMessageKind::Assistant { .. })
+        .then_some(message.completed_at_ms)
+        .flatten()
+        .map(|done| done - message.created_at_ms)
+        .filter(|ms| *ms > 0);
     SessionMessageEntry {
-        duration_ms: None,
+        duration_ms,
         id: format!("{ENTRY_PREFIX}{}", message.id),
         role,
         parts,
@@ -742,6 +894,7 @@ fn preview_of(entry: &SessionMessageEntry) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_harness::CompactionStatus;
     use zeron_proto::AgentEvent;
 
     fn session(busy: bool) -> NativeSession {
@@ -755,6 +908,7 @@ mod tests {
             busy,
             model: None,
             zeron_chat: None,
+            forked_from: None,
             reverted_from: None,
         }
     }
@@ -763,6 +917,7 @@ mod tests {
         NativeMessage {
             id: id.into(),
             created_at_ms: at,
+            completed_at_ms: None,
             kind: NativeMessageKind::User { text: text.into() },
         }
     }
@@ -771,8 +926,10 @@ mod tests {
         NativeMessage {
             id: id.into(),
             created_at_ms: at,
+            completed_at_ms: Some(at + 1),
             kind: NativeMessageKind::Assistant {
                 events: vec![AgentEvent::TextDelta { text: text.into() }],
+                context: Some(at as u64 * 10),
             },
         }
     }
@@ -781,7 +938,7 @@ mod tests {
     fn a_session_reads_in_once_and_grows_in_place() {
         let doc = zeron_doc::SessionDoc::init("sync").unwrap();
         let history = vec![user("m1", 10, "hi"), reply("m2", 11, "hel")];
-        let written = write_history(&doc, &history, &session(true), None, "dev").unwrap();
+        let written = write_history(&doc, &history, &session(true), Start::ALL, "dev").unwrap();
         assert!(written.changed);
         assert_eq!(written.preview.as_deref(), Some("hel"));
         let entries = doc.read_entries().unwrap();
@@ -791,14 +948,14 @@ mod tests {
 
         // The reply grows and the turn ends: the same entry, rewritten.
         let history = vec![user("m1", 10, "hi"), reply("m2", 11, "hello")];
-        write_history(&doc, &history, &session(false), None, "dev").unwrap();
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
         let entries = doc.read_entries().unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].status, Some(MessageStatus::Complete));
         assert_eq!(preview_of(&entries[1]).as_deref(), Some("hello"));
 
         // Read again unchanged: nothing written.
-        let again = write_history(&doc, &history, &session(false), None, "dev").unwrap();
+        let again = write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
         assert!(!again.changed);
     }
 
@@ -811,7 +968,7 @@ mod tests {
             user("m3", 12, "two"),
             reply("m4", 13, "2"),
         ];
-        write_history(&doc, &history, &session(false), None, "dev").unwrap();
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
         let ids = |doc: &zeron_doc::SessionDoc| -> Vec<String> {
             doc.read_entries()
                 .unwrap()
@@ -823,13 +980,13 @@ mod tests {
         let mut undone = session(false);
         undone.reverted_from = Some("m3".into());
         assert!(
-            write_history(&doc, &history, &undone, None, "dev")
+            write_history(&doc, &history, &undone, Start::ALL, "dev")
                 .unwrap()
                 .changed
         );
         assert_eq!(ids(&doc), ["oc:m1", "oc:m2"]);
         // /redo: the same messages, back in their place.
-        write_history(&doc, &history, &session(false), None, "dev").unwrap();
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
         assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m3", "oc:m4"]);
         // The undo made final by a new prompt: the session no longer has them.
         let after = vec![
@@ -837,41 +994,138 @@ mod tests {
             reply("m2", 11, "1"),
             user("m5", 20, "three"),
         ];
-        write_history(&doc, &after, &session(false), None, "dev").unwrap();
+        write_history(&doc, &after, &session(false), Start::ALL, "dev").unwrap();
         assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m5"]);
     }
 
-    #[test]
-    fn a_chat_zeron_writes_only_gains_what_came_after_its_runs() {
-        let doc = zeron_doc::SessionDoc::init("own").unwrap();
-        doc.push_message(&SessionMessageEntry {
-            duration_ms: Some(5),
-            id: "zeron-reply".into(),
-            role: MessageRole::Assistant,
-            parts: Vec::new(),
-            created_at: 100,
+    fn zeron_entry(id: &str, role: MessageRole, at: i64, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            duration_ms: None,
+            id: id.into(),
+            role,
+            parts,
+            created_at: at,
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
-        })
-        .unwrap();
-        let since = zeron_written_until(&doc);
-        assert_eq!(since, 105);
-        // The session holds Zeron's own turn too (before 105) and one the TUI
-        // added after it.
-        let history = vec![
-            user("m1", 99, "from zeron"),
-            reply("m2", 104, "zeron's answer"),
-            user("m3", 200, "from the tui"),
-        ];
-        write_history(&doc, &history, &session(false), Some(since), "dev").unwrap();
-        let ids: Vec<String> = doc
-            .read_entries()
+        }
+    }
+
+    fn ids(doc: &zeron_doc::SessionDoc) -> Vec<String> {
+        doc.read_entries()
             .unwrap()
             .into_iter()
             .map(|e| e.id)
-            .collect();
-        assert_eq!(ids, ["zeron-reply", "oc:m3"]);
+            .collect()
+    }
+
+    #[test]
+    fn once_zerons_turn_is_over_the_transcript_is_the_sessions() {
+        let doc = zeron_doc::SessionDoc::init("own").unwrap();
+        // Claude ran the chat first; then it moved to OpenCode.
+        doc.push_message(&zeron_entry("claude-q", MessageRole::User, 1, Vec::new())).unwrap();
+        doc.push_message(&zeron_entry(
+            "seam",
+            MessageRole::System,
+            5,
+            vec![MessagePart::Switch {
+                id: "s".into(),
+                from: "Claude Code".into(),
+                to: "OpenCode".into(),
+                from_harness: Some("claude-code".into()),
+                to_harness: Some("opencode".into()),
+            }],
+        ))
+        .unwrap();
+        // Zeron's run wrote its turn; a failure of its own stays.
+        doc.push_message(&zeron_entry("prompt", MessageRole::User, 9, Vec::new())).unwrap();
+        doc.push_message(&zeron_entry("reply", MessageRole::Assistant, 10, Vec::new())).unwrap();
+        doc.push_message(&zeron_entry(
+            "failed",
+            MessageRole::Assistant,
+            11,
+            vec![MessagePart::Error {
+                id: "e".into(),
+                message: "boom".into(),
+            }],
+        ))
+        .unwrap();
+        let start = Start::of(&doc.read_entries().unwrap()).unwrap();
+        assert_eq!(start, Start { index: 2, at: 5 });
+        // The session has Zeron's turn, and one sent from the TUI after it.
+        let history = vec![
+            user("m1", 10, "from zeron"),
+            reply("m2", 11, "zeron's answer"),
+            user("m3", 20, "from the tui"),
+            reply("m4", 21, "the tui's answer"),
+        ];
+        write_history(&doc, &history, &session(false), start, "dev").unwrap();
+        assert_eq!(
+            ids(&doc),
+            ["claude-q", "seam", "failed", "oc:m1", "oc:m2", "oc:m3", "oc:m4"]
+        );
+        // A prompt Zeron wrote that the session hasn't taken yet stays.
+        doc.push_message(&zeron_entry("next", MessageRole::User, 500, Vec::new())).unwrap();
+        write_history(&doc, &history, &session(true), start, "dev").unwrap();
+        assert_eq!(ids(&doc).last().map(String::as_str), Some("next"));
+        // Moved on to another agent: no longer the session's to write.
+        doc.push_message(&zeron_entry(
+            "seam2",
+            MessageRole::System,
+            600,
+            vec![MessagePart::Switch {
+                id: "s2".into(),
+                from: "OpenCode".into(),
+                to: "Codex".into(),
+                from_harness: Some("opencode".into()),
+                to_harness: Some("codex".into()),
+            }],
+        ))
+        .unwrap();
+        assert_eq!(Start::of(&doc.read_entries().unwrap()), None);
+    }
+
+    #[test]
+    fn a_message_brought_back_goes_in_where_it_was() {
+        let doc = zeron_doc::SessionDoc::init("order").unwrap();
+        let history = vec![user("m1", 10, "one"), reply("m2", 11, "1"), user("m3", 12, "two")];
+        write_history(&doc, &[history[0].clone(), history[2].clone()], &session(false), Start::ALL, "dev")
+            .unwrap();
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m3"]);
+    }
+
+    #[test]
+    fn a_compaction_shows_as_it_runs_and_resets_the_context() {
+        let doc = zeron_doc::SessionDoc::init("compact").unwrap();
+        let compaction = |status: CompactionStatus, tokens: Option<(u64, u64)>| NativeMessage {
+            id: "mc".into(),
+            created_at_ms: 30,
+            completed_at_ms: None,
+            kind: NativeMessageKind::Compaction {
+                status,
+                tokens_in: tokens.map(|t| t.0),
+                tokens_out: tokens.map(|t| t.1),
+            },
+        };
+        let mut history = vec![user("m1", 10, "one"), reply("m2", 11, "1")];
+        assert_eq!(context_tokens(&history, &session(false), Start::ALL), Some(110));
+        history.push(compaction(CompactionStatus::Running, None));
+        write_history(&doc, &history, &session(true), Start::ALL, "dev").unwrap();
+        let entry = doc.read_entries().unwrap().pop().unwrap();
+        assert_eq!(entry.role, MessageRole::System);
+        assert!(matches!(&entry.parts[0], MessagePart::Compaction { status, .. } if status == "running"));
+        // (Still running: the context is what it was.)
+        assert_eq!(context_tokens(&history, &session(true), Start::ALL), Some(110));
+        history[2] = compaction(CompactionStatus::Completed, Some((648_371, 2_812)));
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
+        let entry = doc.read_entries().unwrap().pop().unwrap();
+        assert!(matches!(
+            &entry.parts[0],
+            MessagePart::Compaction { status, tokens_in: Some(648_371), tokens_out: Some(2_812), .. }
+                if status == "completed"
+        ));
+        assert_eq!(context_tokens(&history, &session(false), Start::ALL), Some(2_812));
     }
 
     #[test]
@@ -916,55 +1170,15 @@ mod tests {
         assert_eq!(tui_action("!"), None);
         assert_eq!(tui_action("/undo this please"), None);
         assert_eq!(tui_action("please /compact"), None);
-    }
-
-    #[test]
-    fn undo_takes_the_last_turn_out_and_redo_puts_it_back_in_place() {
-        let doc = zeron_doc::SessionDoc::init("undo-visual").unwrap();
-        let entry = |id: &str, role: MessageRole| SessionMessageEntry {
-            duration_ms: None,
-            id: id.into(),
-            role,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: id.into(),
-            }],
-            created_at: 0,
-            device_id: "dev".into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
+        // Picked from the composer's list: a link the agent gets as the command.
+        let picked = zeron_proto::invocation::Invocation::Command {
+            name: "undo".into(),
         };
-        for (id, role) in [
-            ("p1", MessageRole::User),
-            ("r1", MessageRole::Assistant),
-            ("p2", MessageRole::User),
-            ("r2", MessageRole::Assistant),
-        ] {
-            doc.push_message(&entry(id, role)).unwrap();
-        }
-        let ids = |doc: &zeron_doc::SessionDoc| -> Vec<String> {
-            doc.read_entries()
-                .unwrap()
-                .into_iter()
-                .map(|e| e.id)
-                .collect()
-        };
-        let chat = "undo-visual-chat";
-        undo_in_transcript(chat, &doc).unwrap();
-        assert_eq!(ids(&doc), ["p1", "r1"]);
-        // The action's own chip lands after it.
-        doc.push_message(&entry("undo-chip", MessageRole::Assistant))
-            .unwrap();
-        redo_in_transcript(chat, &doc).unwrap();
-        assert_eq!(ids(&doc), ["p1", "r1", "p2", "r2", "undo-chip"]);
-        // Nothing left to redo: nothing changes.
-        redo_in_transcript(chat, &doc).unwrap();
-        assert_eq!(ids(&doc).len(), 5);
-        // An undo made final by a new prompt can't be redone.
-        undo_in_transcript(chat, &doc).unwrap();
-        forget_undone(chat);
-        redo_in_transcript(chat, &doc).unwrap();
-        assert_eq!(ids(&doc), ["p1", "r1"]);
+        assert_eq!(tui_action(&picked.link()), Some(TuiAction::Undo));
+        assert!(note_prompt("acting-chat", "/compact"));
+        assert!(acting("acting-chat"));
+        assert!(!note_prompt("acting-chat", "hello"));
+        assert!(!acting("acting-chat"));
     }
 
     #[test]

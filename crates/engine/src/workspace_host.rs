@@ -971,23 +971,11 @@ impl WorkspaceHost {
     /// the worktree path itself minted a phantom sidebar space named after the
     /// worktree folder ("clever-ember") next to the project's real space.
     pub(crate) fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
+        if let Some(space) = self.existing_space_for_path(path)? {
+            return Ok(space);
+        }
         let device_id = &self.inner.config.device_id;
-        let spaces = self.read(|doc| doc.read_spaces())?;
-        if let Some(space) = spaces
-            .iter()
-            .find(|s| s.device_id == *device_id && s.path == path)
-        {
-            return Ok(space.id.clone());
-        }
         let root = linked_worktree_root(std::path::Path::new(path));
-        if let Some(root) = root.as_deref()
-            && let Some(space) = spaces.iter().find(|s| {
-                s.device_id == *device_id
-                    && (s.path == root || same_file::is_same_file(&s.path, root).unwrap_or(false))
-            })
-        {
-            return Ok(space.id.clone());
-        }
         let space = Space {
             id: crate::new_id(),
             device_id: device_id.clone(),
@@ -1003,6 +991,29 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
         Ok(space.id)
+    }
+
+    /// This device's project for `path` (its own folder, or the repository a
+    /// linked worktree of it belongs to), if there is one; none is made.
+    pub(crate) fn existing_space_for_path(&self, path: &str) -> Result<Option<String>, EngineError> {
+        let device_id = &self.inner.config.device_id;
+        let spaces = self.read(|doc| doc.read_spaces())?;
+        if let Some(space) = spaces
+            .iter()
+            .find(|s| s.device_id == *device_id && s.path == path)
+        {
+            return Ok(Some(space.id.clone()));
+        }
+        let root = linked_worktree_root(std::path::Path::new(path));
+        Ok(root.as_deref().and_then(|root| {
+            spaces
+                .iter()
+                .find(|s| {
+                    s.device_id == *device_id
+                        && (s.path == root || same_file::is_same_file(&s.path, root).unwrap_or(false))
+                })
+                .map(|space| space.id.clone())
+        }))
     }
 
     /// The chat's configured harness/model row, when present (RunRequest harness

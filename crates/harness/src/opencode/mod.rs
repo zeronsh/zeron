@@ -110,7 +110,9 @@ mod sync;
 use actions::TuiAction;
 
 pub use credentials::NativeCredential;
-pub use sync::{NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession};
+pub use sync::{
+    CompactionStatus, NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
+};
 
 /// Health-poll cadence while the server boots.
 const HEALTH_POLL: Duration = Duration::from_millis(150);
@@ -408,6 +410,16 @@ pub struct OpencodeHarness {
     mcp_routes: client_mcp::Routes,
 }
 
+/// Whether runs use OpenCode's background service (2.x), as Settings →
+/// Providers → OpenCode settings says; off, each run boots a private
+/// server. The session feed reads the service either way.
+static RUNS_ON_SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set from the person's OpenCode settings, for runs that start from now.
+pub fn set_runs_on_service(on: bool) {
+    RUNS_ON_SERVICE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl Default for OpencodeHarness {
     fn default() -> Self {
         Self {
@@ -521,6 +533,7 @@ impl OpencodeHarness {
         // answered here, as the TUI's auto-accept is — and Zeron's MCP
         // servers are offered over client MCP ([`client_mcp`]).
         if run_env.is_empty()
+            && RUNS_ON_SERVICE.load(std::sync::atomic::Ordering::Relaxed)
             && let Some(server) = self.service_server().await
         {
             return Ok(server);

@@ -1685,11 +1685,21 @@ pub(crate) fn made(params: &Json) {
 /// takes it; ready once any agent's models are in (more may follow), or all
 /// have answered (`done`). (`device`: whose, when it isn't this one.)
 /// One of OpenCode's TUI actions, as the engine takes them for an OpenCode
-/// chat (`/compact`, `/undo`, `/redo`, `/fork`, `!command`): no message.
-fn opencode_action(words: &str) -> bool {
+/// chat (`/compact`, `/undo`, `/redo`, `/fork`, `!command`, typed or picked
+/// from the `/` list, whose link the agent gets as the command): no message.
+fn opencode_action(words: &str) -> Option<&'static str> {
+    let words = zeron_proto::invocation::harness_prompt(words, zeron_proto::HarnessId::Opencode);
     let words = words.trim();
-    matches!(words, "/compact" | "/undo" | "/redo" | "/fork")
-        || words.strip_prefix('!').is_some_and(|command| !command.trim().is_empty())
+    match words {
+        "/compact" => Some("compact"),
+        "/undo" => Some("undo"),
+        "/redo" => Some("redo"),
+        "/fork" => Some("fork"),
+        _ => words
+            .strip_prefix('!')
+            .is_some_and(|command| !command.trim().is_empty())
+            .then_some("shell"),
+    }
 }
 
 /// The access modes a listed harness honours (`accessModes`), as the
@@ -2502,7 +2512,7 @@ impl View {
         let prompts = pending.entry(id.clone()).or_default();
         // (Shown already while its chat was being made: `chat.creating`.)
         prompts.retain(|p| p.id != message_id);
-        if !(chat["config"]["harness"].as_str() == Some("opencode") && opencode_action(&words)) {
+        if !(chat["config"]["harness"].as_str() == Some("opencode") && opencode_action(&words).is_some()) {
             prompts.push(Pending {
                 id: message_id.clone(),
                 words: words.clone(),
@@ -4767,6 +4777,25 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
         // The provider-switch seam (the engine's system entry when a chat
         // moves to another agent): `[mark] From → [mark] To` over the prompt
         // that switched, as the shipping app's `switch_marker`.
+        // Where the agent's session compacted (OpenCode's): its note, as
+        // OpenCode's own clients word it — "Compacting session…", then
+        // "Session compacted · 648.4K in · 2.8K out".
+        "system"
+            if let Some(part) = entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["kind"].as_str() == Some("compaction")) =>
+        {
+            let status = part["message"].as_str().unwrap_or_default();
+            let note = compaction_note(status, part["tokensIn"].as_u64(), part["tokensOut"].as_u64());
+            Some(Value::record([
+                ("id", Value::from(id)),
+                ("role", Value::from("note")),
+                ("text", Value::from(note.as_str())),
+                ("live", Value::Bool(matches!(status, "running" | "pending"))),
+            ]))
+        }
         "system" => {
             let part = entry["parts"]
                 .as_array()
@@ -4793,6 +4822,24 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             ]))
         }
         _ => None,
+    }
+}
+
+/// What a compaction part says (the engine's `zeron_doc::compaction_note`,
+/// in OpenCode's own words and number format).
+fn compaction_note(status: &str, tokens_in: Option<u64>, tokens_out: Option<u64>) -> String {
+    let short = |n: u64| match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}K", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    };
+    match (status, tokens_in, tokens_out) {
+        ("running" | "pending", ..) => "Compacting session…".to_owned(),
+        ("failed", ..) => "Compaction failed".to_owned(),
+        (_, Some(tokens_in), Some(tokens_out)) if tokens_in + tokens_out > 0 => {
+            format!("Session compacted · {} in · {} out", short(tokens_in), short(tokens_out))
+        }
+        _ => "Session compacted".to_owned(),
     }
 }
 

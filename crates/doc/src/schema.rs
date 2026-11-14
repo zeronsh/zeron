@@ -159,6 +159,12 @@ struct DocPartJson {
     /// `outputTruncated`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_lines: Option<u64>,
+    /// Compaction (`kind: "compaction"`, additive; its status rides
+    /// `message`): the tokens the summary read and wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokens_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokens_out: Option<u64>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -290,6 +296,19 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             to_harness: to_harness.clone(),
             ..Default::default()
         },
+        MessagePart::Compaction {
+            id,
+            status,
+            tokens_in,
+            tokens_out,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "compaction".into(),
+            message: Some(status.clone()),
+            tokens_in: *tokens_in,
+            tokens_out: *tokens_out,
+            ..Default::default()
+        },
     })
 }
 
@@ -367,6 +386,12 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             to: p.to_provider.unwrap_or_default(),
             from_harness: p.from_harness,
             to_harness: p.to_harness,
+        },
+        "compaction" => MessagePart::Compaction {
+            id: p.id,
+            status: p.message.unwrap_or_default(),
+            tokens_in: p.tokens_in,
+            tokens_out: p.tokens_out,
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -1673,6 +1698,14 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(lines) = doc_part.output_lines {
         map.insert("outputLines", lines as i64)?;
     }
+    for (key, value) in [
+        ("tokensIn", doc_part.tokens_in),
+        ("tokensOut", doc_part.tokens_out),
+    ] {
+        if let Some(value) = value {
+            map.insert(key, value as i64)?;
+        }
+    }
     Ok(())
 }
 
@@ -2801,6 +2834,31 @@ mod tests {
         doc.mark_provider_switched().unwrap();
         assert_eq!(doc.read_entries().unwrap()[0].parts, vec![seam]);
         assert!(doc.provider_switched());
+    }
+
+    #[test]
+    fn a_compaction_round_trips_with_its_tokens() {
+        let doc = SessionDoc::init("compaction").unwrap();
+        let entry = |status: &str, tokens: Option<(u64, u64)>| SessionMessageEntry {
+            duration_ms: None,
+            id: "oc:msg_c".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Compaction {
+                id: "c".into(),
+                status: status.into(),
+                tokens_in: tokens.map(|t| t.0),
+                tokens_out: tokens.map(|t| t.1),
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        doc.push_message(&entry("running", None)).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0], entry("running", None));
+        let done = entry("completed", Some((648_371, 2_812)));
+        doc.replace_message(0, &done).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0], done);
     }
     use zeron_proto::{AgentEvent, ToolCall};
 
