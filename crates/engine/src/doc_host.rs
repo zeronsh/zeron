@@ -6834,19 +6834,25 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        let cwd = request.cwd.clone();
-        let stamp = async {
-            if let Some(workspace) = self.workspace()
-                && let Some(context) = self.capture_source_context(&cwd).await
-                && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
-            {
-                tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
-            }
-            tracing::debug!(target: "first_word", chat = %chat_id, "source context: stamped");
-        };
-        let dispatch = sessions.dispatch(chat_id, harness, request, message_id);
-        let ((), dispatched) = tokio::join!(stamp, dispatch);
-        dispatched
+        // Stamped on a task of its own: the drain resolves the command as
+        // soon as the run is dispatched, never behind the `git` processes.
+        if self.workspace().is_some() {
+            let host = self.clone();
+            let chat_id = chat_id.to_owned();
+            let cwd = request.cwd.clone();
+            self.spawn_worker(async move {
+                if let Some(workspace) = host.workspace()
+                    && let Some(context) = host.capture_source_context(&cwd).await
+                    && let Err(err) = workspace.set_chat_source_context(&chat_id, &context)
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+                }
+                tracing::debug!(target: "first_word", chat = %chat_id, "source context: stamped");
+            });
+        }
+        sessions
+            .dispatch(chat_id, harness, request, message_id)
+            .await
     }
 
     async fn materialize_worktree(
