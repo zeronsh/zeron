@@ -3551,8 +3551,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local going: { [string]: { it: Item, after: string? } } = {}
 		local pending: { [string]: number }? = nil
 		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true, empties = true }
+		-- (Folded away, it takes each new shape at once: no row glides,
+		-- comes or goes where none can see it, every frame of its motion
+		-- laying out the list again.)
 		local function quiet(): boolean
-			return drag:peek() == nil and starting == nil
+			local away = not is_island and collapsed:peek() and shown_w:peek() <= 0
+			return drag:peek() == nil and starting == nil and not away
 		end
 		local function settled(it: Item, t: number): boolean
 			for _, f in it.chain do
