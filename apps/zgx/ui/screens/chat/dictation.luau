@@ -20,16 +20,17 @@ local M = {}
 M.state = ui.shared("dictation", { phase = "idle" } :: any)
 M.active = ui.computed(function(): boolean
 	local p = M.state:get().phase
-	return p == "starting" or p == "listening" or p == "finalizing"
+	return p == "starting" or p == "listening" or p == "finalizing" or p == "late"
 end)
 -- The voice bar's waveform: the microphone's loudness, one bar a 60 ms slot,
 -- newest first (0 to 1), from the host as each slot fills while listening.
 -- On its own, so what reads `state` doesn't run again at each slot.
 M.levels = ui.shared("dictation_levels", {} :: { number })
 -- starting, listening or finalizing (else what it last was): the waveform's
--- mode, apart from the rest of `state`.
+-- mode, apart from the rest of `state`. Late is finalizing still.
 M.phase = ui.computed(function(): string
-	return M.state:get().phase
+	local p = M.state:get().phase
+	return if p == "late" then "finalizing" else p
 end)
 local function active_for(id: string): any
 	return ui.computed(function(): boolean
@@ -198,7 +199,7 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 		levels = M.levels, phase = M.phase,
 		status = function(): string
 			local p = M.state:get().phase
-			return ui.t(if p == "finalizing" then "chat.dictation.transcribing" elseif p == "starting" then "chat.dictation.starting" else "ds.composer.listening"):get()
+			return ui.t(if p == "finalizing" or p == "late" then "chat.dictation.transcribing" elseif p == "starting" then "chat.dictation.starting" else "ds.composer.listening"):get()
 		end,
 		cancel = M.cancel,
 		on_change = function() if pending and not valid(pending) then M.cancel() end end,
@@ -310,11 +311,11 @@ ui.effect(function()
 	if s.serial ~= p.serial then M.cancel() return end
 	if s.phase == "final" then
 		land(p, s.text or "")
-	elseif s.phase == "failed" and s.late then
+	elseif s.phase == "late" then
 		-- Overdue, not over: the words still land if they come.
 		if not p.told then
 			p.told = true
-			say(s.error)
+			toast.show { title = ui.t("chat.dictation.late"):get(), body = ui.t("chat.dictation.late_body"):get() }
 		end
 	elseif s.phase == "failed" or s.phase == "cancelled" then
 		pending = nil

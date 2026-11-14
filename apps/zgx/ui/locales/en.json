@@ -2978,6 +2978,8 @@
       "hold": "Hold to dictate",
       "hold_hint": "Hold the microphone or shortcut while speaking.",
       "no_speech": "No speech recognized. Your draft is unchanged.",
+      "late": "Still transcribing",
+      "late_body": "The words land in your draft when they're ready. Escape stops it.",
       "transcribing": "Transcribing…",
       "starting": "Starting…"
     },
