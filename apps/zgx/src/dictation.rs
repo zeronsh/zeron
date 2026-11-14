@@ -144,12 +144,19 @@ impl Service {
             self.state["phase"] = json!("finalizing");
         }
     }
-    /// The folder of the model `args` names (`model`, an id), else the default's.
+    /// The folder of the model `args` names (`model`, an id; none or empty:
+    /// the default). One it doesn't offer is an error, never another's folder.
     fn dir(&self, args: &Json) -> Result<PathBuf, String> {
-        let models = zeron_voice::models();
-        let id = args["model"].as_str().filter(|id| models.iter().any(|m| m.id == *id));
         let models_dir = self.models.as_ref().ok_or("Zeron's data folder isn't known")?;
-        Ok(models_dir.join(id.unwrap_or(&models[0].id)))
+        let id = match args["model"].as_str().filter(|id| !id.is_empty()) {
+            Some(id) => zeron_voice::models()
+                .into_iter()
+                .find(|m| m.id == id)
+                .ok_or("No such speech model")?
+                .id,
+            None => zeron_voice::manifest().id,
+        };
+        Ok(models_dir.join(id))
     }
     fn idle(&self) -> Result<(), String> {
         if self.needs_poll() || zeron_voice::busy() || DOWNLOADING.load(Ordering::Acquire) {
@@ -192,7 +199,7 @@ impl Service {
     }
     fn download(&mut self, args: &Json) -> Result<Json, String> {
         let dir = self.dir(args)?;
-        let total = zeron_voice::model_for(&dir).size();
+        let total = zeron_voice::model_for(&dir).map_or(0, |m| m.size());
         self.idle()?;
         if DOWNLOADING.swap(true, Ordering::AcqRel) {
             return Err("Another window is downloading the model".into());

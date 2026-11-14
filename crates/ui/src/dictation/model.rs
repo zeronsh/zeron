@@ -22,7 +22,7 @@ struct VoiceGlobal {
 }
 impl Global for VoiceGlobal {}
 pub(crate) fn init(root: PathBuf, cx: &mut App) {
-    let directory = root.join("models/parakeet-tdt-0.6b-v3-int8");
+    let directory = root.join("models").join(zeron_voice::manifest().id);
     let card = cx.new(|_| VoiceCard {
         scroll: widgets::PageScroll::default(),
         ready: zeron_voice::installed(&directory),
@@ -655,7 +655,7 @@ mod tests {
     #[gpui::test]
     fn dictation_partial_cache_is_removable_after_restart(cx: &mut gpui::TestAppContext) {
         let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("models/parakeet-tdt-0.6b-v3-int8");
+        let cache = root.path().join("models").join(zeron_voice::manifest().id);
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("encoder-model.int8.onnx.part"), b"partial").unwrap();
         cx.update(|cx| settings::init(settings::UiSettings::default(), root.path(), cx));

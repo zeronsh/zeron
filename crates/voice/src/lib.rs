@@ -60,24 +60,21 @@ pub fn manifest() -> Manifest {
     models().swap_remove(0)
 }
 /// The model a folder holds: the one its name is the id of (each lives in
-/// `<data>/models/<id>`), else the default.
-pub fn model_for(dir: &Path) -> Manifest {
-    let id = dir.file_name().and_then(|n| n.to_str());
-    let mut all = models();
-    let at = all
-        .iter()
-        .position(|m| Some(m.id.as_str()) == id)
-        .unwrap_or(0);
-    all.swap_remove(at)
+/// `<data>/models/<id>`). None for any other folder.
+pub fn model_for(dir: &Path) -> Option<Manifest> {
+    let id = dir.file_name().and_then(|n| n.to_str())?;
+    models().into_iter().find(|m| m.id == id)
 }
 pub fn download_size() -> u64 {
     manifest().size()
 }
 pub fn installed(dir: &Path) -> bool {
-    model_for(dir).installed(dir)
+    model_for(dir).is_some_and(|m| m.installed(dir))
 }
 pub fn download(dir: &Path, cancel: &AtomicBool, progress: impl FnMut(u64)) -> Result<()> {
-    model_for(dir).download(dir, cancel, progress)
+    model_for(dir)
+        .context("No such speech model")?
+        .download(dir, cancel, progress)
 }
 
 /// Models Zeron no longer offers, by folder.
@@ -158,7 +155,7 @@ pub struct Recognizer {
 }
 impl Recognizer {
     pub fn load(dir: &Path) -> Result<Self> {
-        let m = model_for(dir);
+        let m = model_for(dir).context("No such speech model")?;
         // Hashed once, at download: a load reads only what it needs.
         if !m.installed(dir) {
             bail!("Model is damaged. Remove it in Settings and download again.")
@@ -838,13 +835,11 @@ mod tests {
         assert_eq!(manifest().name, "Parakeet Ultra");
         assert_eq!(download_size(), 740363168);
         let dir = Path::new("models/cohere-transcribe-q5");
-        assert_eq!(model_for(dir).name, "Cohere Transcribe");
-        assert_eq!(
-            model_for(Path::new("models/elsewhere")).name,
-            "Parakeet Ultra"
-        );
+        assert_eq!(model_for(dir).unwrap().name, "Cohere Transcribe");
+        // Any other folder is no model's, not the default's.
+        assert!(model_for(Path::new("models/parakeet-tdt-0.6b-v3-int8")).is_none());
         // A model that can't tell the language hears the person's own.
-        let cohere = model_for(dir).languages;
+        let cohere = model_for(dir).unwrap().languages;
         let locales = ["fr-FR", "en_GB.UTF-8", "fr-CA", "uk-UA"].map(String::from);
         assert_eq!(spoken(locales, &cohere), ["fr", "en"]);
         assert_eq!(spoken(["uk-UA".to_string()], &cohere), ["en"]);
