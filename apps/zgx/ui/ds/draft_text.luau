@@ -69,6 +69,10 @@ local NEAR = 1024
 
 -- The token at `caret` (bytes from 0): looked for around the caret, and only
 -- where there is one, in the whole draft (whether a fence above holds it).
+-- The look around can't tell a fence's parity, though: a closed block
+-- opened more than `NEAR` above shows it only its closing fence, which
+-- reads as one still open. Where it found nothing with a fence before the
+-- caret, the whole draft decides.
 function M.token(s: any, caret: number): tokens.Token?
 	if not native(s) then
 		return tokens.token(s:get(), caret)
@@ -76,7 +80,10 @@ function M.token(s: any, caret: number): tokens.Token?
 	local lo = math.max(1, caret - NEAR + 1)
 	local near = s:sub(lo, caret + NEAR)
 	if tokens.token(near, caret - lo + 1) == nil then
-		return nil
+		local fence = string.find(near, "```", 1, true)
+		if fence == nil or fence > caret - lo + 1 then
+			return nil
+		end
 	end
 	return tokens.token(s:get(), caret)
 end

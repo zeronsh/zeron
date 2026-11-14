@@ -255,3 +255,25 @@ test("the lit row follows the list as it narrows, and the arrows move it", funct
 	settle(app)
 	expect(takes()).to_be("/review ")
 end)
+
+-- A closed code block longer than the composer's first look around the
+-- caret (ds/draft_text, 1 KB each way): that look sees only its closing
+-- fence, which read as one still open. Every trigger after it opens its
+-- list; one inside a block still open never does.
+test("after a closed code block over 1 KB long, each trigger opens its list", function()
+	local app = chat()
+	local code = string.rep("let value = compute(input);\n", 60)
+	expect(#code > 1024).to_be(true)
+	-- (Filled, trigger and all, so the caret is at its end: typing clicks
+	-- the box first, mid-draft in one this tall.)
+	for _, t in TRIGGERS do
+		fresh(app, "Look at this:\n```rust\n" .. code .. "```\n" .. t.trigger)
+		expect(`{t.trigger} after a closed block: {shown(app)}`).to_be(`{t.trigger} after a closed block: true`)
+		-- (Closed, so it covers no part of the box.)
+		app:key("Escape")
+		settle(app)
+		-- Still inside one: nothing.
+		fresh(app, "Look at this:\n```rust\n" .. code .. t.trigger)
+		expect(`{t.trigger} inside an open block: {shown(app)}`).to_be(`{t.trigger} inside an open block: false`)
+	end
+end)
