@@ -23,6 +23,7 @@ local auth = require("@account/auth")
 local M = {}
 
 local calls = ui.state("settings_stub_calls", {} :: { string })
+local voice = ui.state("settings_stub_voice", { cohere = "absent", supported = true } :: any)
 local refuse = ui.state("settings_stub_refuse", false)
 local role = ui.state("settings_stub_role", "admin")
 local about_next = ui.state("settings_stub_about_next", "ok")
@@ -140,12 +141,17 @@ local answers: { [string]: (arg: any) -> any } = {
 	["account.me"] = function()
 		return settled(table.clone(me))
 	end,
+	-- Settings → Voice: Ultra downloaded; Cohere as `settings_stub_voice`
+	-- says ("absent", "partial": some files, "installed"), and whether this
+	-- processor runs them (`supported`).
 	["dictation.call"] = function(arg: any)
+		local v = voice:peek()
 		return settled(if arg.op == "status"
 			then {
+				supported = v.supported,
 				models = {
-					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, memory = 1150000000, installed = true, languages = table.create(25, "") },
-					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, memory = 2800000000, installed = false, slow = true, languages = table.create(14, "") },
+					{ id = "parakeet-ultra-q8", name = "Parakeet Ultra", size = 740363168, memory = 1150000000, installed = true, present = true, languages = table.create(25, "") },
+					{ id = "cohere-transcribe-q5", name = "Cohere Transcribe", size = 1796963840, memory = 2800000000, installed = v.cohere == "installed", present = v.cohere ~= "absent", slow = true, languages = table.create(14, "") },
 				},
 			}
 			elseif arg.op == "inputs" then {}

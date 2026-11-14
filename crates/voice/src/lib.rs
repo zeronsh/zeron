@@ -77,6 +77,24 @@ pub fn download(dir: &Path, cancel: &AtomicBool, progress: impl FnMut(u64)) -> R
         .download(dir, cancel, progress)
 }
 
+/// Whether this computer's processor runs the models: on x86-64 they're
+/// built for AVX2, FMA, F16C and BMI2 (most since 2013, not every Celeron or
+/// Pentium: Gemini Lake and Jasper Lake have none of them), and would crash
+/// the app without them.
+pub fn cpu_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("f16c")
+            && std::arch::is_x86_feature_detected!("bmi2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    true
+}
+pub const CPU_UNSUPPORTED: &str =
+    "This computer's processor can't run speech models (they need AVX2).";
+
 /// Models Zeron no longer offers, by folder.
 const RETIRED: &[&str] = &["parakeet-tdt-0.6b-v3-int8"];
 /// Frees what retired models take in `models` (Parakeet v3: 670 MB). Whoever
@@ -155,6 +173,9 @@ pub struct Recognizer {
 }
 impl Recognizer {
     pub fn load(dir: &Path) -> Result<Self> {
+        if !cpu_supported() {
+            bail!(CPU_UNSUPPORTED)
+        }
         let m = model_for(dir).context("No such speech model")?;
         // Hashed once, at download: a load reads only what it needs.
         if !m.installed(dir) {

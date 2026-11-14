@@ -2318,6 +2318,7 @@
       "model": {
         "title": "Speech models",
         "about": "{size} · {n, plural, one {# language} other {# languages}}",
+        "unsupported": "This computer's processor can't run speech models (they need AVX2).",
         "about_slow": "{size} · {n, plural, one {# language} other {# languages}} · Slower on this computer",
         "mb": "{n} MB",
         "gb": "{n} GB",
