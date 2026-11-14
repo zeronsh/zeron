@@ -165,6 +165,12 @@ struct DocPartJson {
     tokens_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tokens_out: Option<u64>,
+    /// Revert (`kind: "revert"`, additive): how many of the person's
+    /// messages it took back, and the files it put back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverted: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverted_files: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -309,6 +315,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             tokens_out: *tokens_out,
             ..Default::default()
         },
+        MessagePart::Revert { id, messages, files } => DocPartJson {
+            id: id.clone(),
+            kind: "revert".into(),
+            reverted: Some(*messages),
+            reverted_files: (!files.is_empty()).then(|| serde_json::to_value(files).unwrap_or_default()),
+            ..Default::default()
+        },
     })
 }
 
@@ -392,6 +405,14 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             status: p.message.unwrap_or_default(),
             tokens_in: p.tokens_in,
             tokens_out: p.tokens_out,
+        },
+        "revert" => MessagePart::Revert {
+            id: p.id,
+            messages: p.reverted.unwrap_or_default(),
+            files: p
+                .reverted_files
+                .and_then(|files| serde_json::from_value(files).ok())
+                .unwrap_or_default(),
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -1701,10 +1722,14 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     for (key, value) in [
         ("tokensIn", doc_part.tokens_in),
         ("tokensOut", doc_part.tokens_out),
+        ("reverted", doc_part.reverted),
     ] {
         if let Some(value) = value {
             map.insert(key, value as i64)?;
         }
+    }
+    if let Some(files) = &doc_part.reverted_files {
+        map.insert("revertedFiles", loro_value_from_json(files))?;
     }
     Ok(())
 }
@@ -2859,6 +2884,32 @@ mod tests {
         let done = entry("completed", Some((648_371, 2_812)));
         doc.replace_message(0, &done).unwrap();
         assert_eq!(doc.read_entries().unwrap()[0], done);
+    }
+
+    #[test]
+    fn a_revert_round_trips_with_its_files() {
+        let doc = SessionDoc::init("revert").unwrap();
+        let entry = SessionMessageEntry {
+            duration_ms: None,
+            id: "oc:revert".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Revert {
+                id: "r".into(),
+                messages: 2,
+                files: vec![crate::RevertedFile {
+                    path: "src/a.rs".into(),
+                    status: "modified".into(),
+                    additions: 3,
+                    deletions: 1,
+                }],
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        doc.push_message(&entry).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0], entry);
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

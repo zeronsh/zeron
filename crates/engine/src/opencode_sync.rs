@@ -30,7 +30,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use zeron_harness::{
-    NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession, OpencodeHarness,
+    CompactionStatus, NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession, OpencodeHarness,
 };
 use zeron_proto::{Chat, ChatConfig, HarnessId};
 
@@ -43,6 +43,9 @@ use crate::workspace_host::WorkspaceHost;
 
 /// Entry ids of messages read from an OpenCode session.
 const ENTRY_PREFIX: &str = "oc:";
+
+/// The entry of an undo staged in the session (one at most).
+const REVERT_ENTRY: &str = "oc:revert";
 
 /// Namespace of the chat ids derived from session ids.
 const CHAT_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x7a1c_42e5_0b4f_4d8e_9c1a_5e0f_2d3b_6c71);
@@ -79,6 +82,7 @@ pub(crate) fn spawn(
         read: HashMap::new(),
         working: HashMap::new(),
         windows: HashMap::new(),
+        summaries: HashMap::new(),
     };
     tokio::spawn(mirror.run());
 }
@@ -97,6 +101,9 @@ struct Mirror {
     working: HashMap<String, tokio::time::Instant>,
     /// Each model's context window, as read once.
     windows: HashMap<String, Option<u64>>,
+    /// The words of the summary a session's compaction is writing, as they
+    /// came on the feed: the session's own copy has none until it is done.
+    summaries: HashMap<String, String>,
 }
 
 /// How often a turn running in another client re-stamps its chat's status:
@@ -130,7 +137,14 @@ impl Mirror {
                         Some(NativeChange::Session(id)) => {
                             changed.insert(id);
                         }
-                        Some(NativeChange::Deleted(id)) => self.deleted(&id),
+                        Some(NativeChange::Deleted(id)) => {
+                            self.summaries.remove(&id);
+                            self.deleted(&id);
+                        }
+                        Some(NativeChange::CompactionText { session, text }) => {
+                            self.summaries.entry(session.clone()).or_default().push_str(&text);
+                            changed.insert(session);
+                        }
                         // (The harness's catalogs follow these themselves.)
                         Some(NativeChange::Catalog) => {}
                     },
@@ -208,10 +222,11 @@ impl Mirror {
         }
         let unchanged = self.read.get(&session.id)
             == Some(&(session.updated_at_ms, session.reverted_from.clone()));
-        if unchanged && known.is_some() && !session.busy {
+        let summarizing = self.summaries.contains_key(&session.id);
+        if unchanged && known.is_some() && !session.busy && !summarizing {
             return;
         }
-        let history = match self.harness.native_history(session).await {
+        let mut history = match self.harness.native_history(session).await {
             Ok(history) => history,
             Err(error) => {
                 tracing::debug!(%error, session = %session.id, "opencode sync: history unreadable");
@@ -225,6 +240,7 @@ impl Mirror {
                 Vec::new()
             }
         };
+        self.fill_summary(&session.id, &mut history);
         let window = self.window(session).await;
         let result = match known {
             Some(chat) => self.update(&chat, session, &history, &questions, window),
@@ -240,6 +256,31 @@ impl Mirror {
             }
             Err(error) => {
                 tracing::warn!(%error, session = %session.id, "opencode sync: couldn't mirror a session");
+            }
+        }
+    }
+
+    /// The running compaction's summary so far, from the feed's words; once
+    /// none runs, the session's own summary is the whole of it.
+    fn fill_summary(&mut self, session: &str, history: &mut [NativeMessage]) {
+        let running = history.iter_mut().rev().find_map(|message| match &mut message.kind {
+            NativeMessageKind::Compaction {
+                status: CompactionStatus::Running,
+                summary,
+                ..
+            } => Some(summary),
+            _ => None,
+        });
+        match running {
+            Some(summary) => {
+                if summary.is_empty()
+                    && let Some(so_far) = self.summaries.get(session)
+                {
+                    summary.clone_from(so_far);
+                }
+            }
+            None => {
+                self.summaries.remove(session);
             }
         }
     }
@@ -593,13 +634,44 @@ fn write_history(
         .filter(|message| message.created_at_ms >= start.at)
         .map(|message| message.completed_at_ms.unwrap_or(0).max(message.created_at_ms))
         .max();
+    let all = history;
     let history: Vec<&NativeMessage> = history[..cut]
         .iter()
         .filter(|message| message.created_at_ms >= start.at)
         .collect();
+    // The undo itself stands where the turns it took back were, as OpenCode's
+    // own clients show it: how many of the person's messages went.
+    let revert = (cut < all.len()).then(|| SessionMessageEntry {
+        duration_ms: None,
+        id: REVERT_ENTRY.to_owned(),
+        role: MessageRole::System,
+        parts: vec![MessagePart::Revert {
+            id: "r0".into(),
+            messages: all[cut..]
+                .iter()
+                .filter(|message| message.created_at_ms >= start.at)
+                .filter(|message| matches!(message.kind, NativeMessageKind::User { .. }))
+                .count() as u64,
+            files: session
+                .reverted_files
+                .iter()
+                .map(|file| zeron_doc::RevertedFile {
+                    path: file.path.clone(),
+                    status: file.status.clone(),
+                    additions: file.additions,
+                    deletions: file.deletions,
+                })
+                .collect(),
+        }],
+        created_at: all[cut].created_at_ms,
+        device_id: device_id.to_owned(),
+        status: Some(MessageStatus::Complete),
+        continuation_of: None,
+    });
     let kept: HashSet<String> = history
         .iter()
         .map(|message| format!("{ENTRY_PREFIX}{}", message.id))
+        .chain(revert.as_ref().map(|entry| entry.id.clone()))
         .collect();
     let mut written = Written::default();
     let mut ids: Vec<String> = Vec::new();
@@ -655,6 +727,37 @@ fn write_history(
                     .unwrap_or(ids.len());
                 doc.insert_message(at, &entry)?;
                 ids.insert(at, entry.id.clone());
+                written.changed = true;
+            }
+        }
+    }
+    if let Some(entry) = revert {
+        // After the last of the session's messages still shown.
+        let after = history
+            .last()
+            .and_then(|last| {
+                let last = format!("{ENTRY_PREFIX}{}", last.id);
+                ids.iter().position(|id| *id == last)
+            })
+            .map_or(start.index.min(ids.len()), |at| at + 1);
+        match ids.iter().position(|id| *id == entry.id) {
+            Some(at) if at == after => {
+                if existing.get(&entry.id).map(|current| &current.parts) != Some(&entry.parts) {
+                    doc.replace_message(at, &entry)?;
+                    written.changed = true;
+                }
+            }
+            Some(at) => {
+                doc.remove_message(at)?;
+                ids.remove(at);
+                let after = if at < after { after - 1 } else { after };
+                doc.insert_message(after, &entry)?;
+                ids.insert(after, entry.id.clone());
+                written.changed = true;
+            }
+            None => {
+                doc.insert_message(after, &entry)?;
+                ids.insert(after, entry.id.clone());
                 written.changed = true;
             }
         }
@@ -850,18 +953,26 @@ fn entry_of(message: &NativeMessage, streaming: bool, device_id: &str) -> Sessio
             }
             (MessageRole::Assistant, parts)
         }
+        // Its summary under it, as OpenCode's clients show it: written as it
+        // runs, then the session's own.
         NativeMessageKind::Compaction {
             status,
             tokens_in,
             tokens_out,
+            summary,
         } => (
             MessageRole::System,
-            vec![MessagePart::Compaction {
+            std::iter::once(MessagePart::Compaction {
                 id: "c0".into(),
                 status: status.as_str().to_owned(),
                 tokens_in: *tokens_in,
                 tokens_out: *tokens_out,
-            }],
+            })
+            .chain((!summary.trim().is_empty()).then(|| MessagePart::Text {
+                id: "s0".into(),
+                text: summary.clone(),
+            }))
+            .collect(),
         ),
     };
     let duration_ms = matches!(message.kind, NativeMessageKind::Assistant { .. })
@@ -896,7 +1007,6 @@ fn preview_of(entry: &SessionMessageEntry) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_harness::CompactionStatus;
     use zeron_proto::AgentEvent;
 
     fn session(busy: bool) -> NativeSession {
@@ -912,6 +1022,7 @@ mod tests {
             zeron_chat: None,
             forked_from: None,
             reverted_from: None,
+            reverted_files: Vec::new(),
         }
     }
 
@@ -986,7 +1097,7 @@ mod tests {
                 .unwrap()
                 .changed
         );
-        assert_eq!(ids(&doc), ["oc:m1", "oc:m2"]);
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", REVERT_ENTRY]);
         // /redo: the same messages, back in their place.
         write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
         assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m3", "oc:m4"]);
@@ -1104,7 +1215,7 @@ mod tests {
         let mut undone = session(false);
         undone.reverted_from = Some("m3".into());
         write_history(&doc, &history, &undone, Start::ALL, "dev").unwrap();
-        assert_eq!(ids(&doc), ["oc:m1", "oc:m2"]);
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", REVERT_ENTRY]);
     }
 
     #[test]
@@ -1120,7 +1231,7 @@ mod tests {
     #[test]
     fn a_compaction_shows_as_it_runs_and_resets_the_context() {
         let doc = zeron_doc::SessionDoc::init("compact").unwrap();
-        let compaction = |status: CompactionStatus, tokens: Option<(u64, u64)>| NativeMessage {
+        let compaction = |status: CompactionStatus, tokens: Option<(u64, u64)>, summary: &str| NativeMessage {
             id: "mc".into(),
             created_at_ms: 30,
             completed_at_ms: None,
@@ -1128,18 +1239,21 @@ mod tests {
                 status,
                 tokens_in: tokens.map(|t| t.0),
                 tokens_out: tokens.map(|t| t.1),
+                summary: summary.into(),
             },
         };
         let mut history = vec![user("m1", 10, "one"), reply("m2", 11, "1")];
         assert_eq!(context_tokens(&history, &session(false), Start::ALL), Some(110));
-        history.push(compaction(CompactionStatus::Running, None));
+        history.push(compaction(CompactionStatus::Running, None, "## Goal"));
         write_history(&doc, &history, &session(true), Start::ALL, "dev").unwrap();
         let entry = doc.read_entries().unwrap().pop().unwrap();
         assert_eq!(entry.role, MessageRole::System);
         assert!(matches!(&entry.parts[0], MessagePart::Compaction { status, .. } if status == "running"));
+        // (Its summary so far, under it.)
+        assert!(matches!(&entry.parts[1], MessagePart::Text { text, .. } if text == "## Goal"));
         // (Still running: the context is what it was.)
         assert_eq!(context_tokens(&history, &session(true), Start::ALL), Some(110));
-        history[2] = compaction(CompactionStatus::Completed, Some((648_371, 2_812)));
+        history[2] = compaction(CompactionStatus::Completed, Some((648_371, 2_812)), "## Goal\n- tides");
         write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
         let entry = doc.read_entries().unwrap().pop().unwrap();
         assert!(matches!(
@@ -1148,6 +1262,45 @@ mod tests {
                 if status == "completed"
         ));
         assert_eq!(context_tokens(&history, &session(false), Start::ALL), Some(2_812));
+        let entry = doc.read_entries().unwrap().pop().unwrap();
+        assert!(matches!(&entry.parts[1], MessagePart::Text { text, .. } if text == "## Goal\n- tides"));
+    }
+
+    #[test]
+    fn an_undo_stands_where_its_turns_were_until_a_redo() {
+        let doc = zeron_doc::SessionDoc::init("revert-note").unwrap();
+        let history = vec![
+            user("m1", 10, "one"),
+            reply("m2", 11, "1"),
+            user("m3", 20, "two"),
+            reply("m4", 21, "2"),
+            user("m5", 30, "three"),
+            reply("m6", 31, "3"),
+        ];
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
+        let mut undone = session(false);
+        undone.reverted_from = Some("m3".into());
+        undone.reverted_files = vec![zeron_harness::OpencodeRevertedFile {
+            path: "a.rs".into(),
+            status: "modified".into(),
+            additions: 2,
+            deletions: 1,
+        }];
+        write_history(&doc, &history, &undone, Start::ALL, "dev").unwrap();
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", REVERT_ENTRY]);
+        let note = doc.read_entries().unwrap().pop().unwrap();
+        assert!(matches!(
+            &note.parts[0],
+            MessagePart::Revert { messages: 2, files, .. } if files.len() == 1 && files[0].additions == 2
+        ));
+        // Undone further: the same note, counting more.
+        undone.reverted_from = Some("m1".into());
+        write_history(&doc, &history, &undone, Start::ALL, "dev").unwrap();
+        assert_eq!(ids(&doc), [REVERT_ENTRY]);
+        assert!(matches!(&doc.read_entries().unwrap()[0].parts[0], MessagePart::Revert { messages: 3, .. }));
+        // Redone: the turns back, the note gone.
+        write_history(&doc, &history, &session(false), Start::ALL, "dev").unwrap();
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2", "oc:m3", "oc:m4", "oc:m5", "oc:m6"]);
     }
 
     #[test]

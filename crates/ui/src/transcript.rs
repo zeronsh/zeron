@@ -1853,18 +1853,10 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
-                    // Where the agent's session compacted: its note, one
-                    // muted line.
-                    MessagePart::Compaction {
-                        id: part_id,
-                        status,
-                        tokens_in,
-                        tokens_out,
-                    } => {
-                        let note = format!(
-                            "_{}_",
-                            zeron_doc::compaction_note(status, *tokens_in, *tokens_out)
-                        );
+                    // Where the agent's session compacted, or an undo took
+                    // turns back: its note, one muted line.
+                    MessagePart::Compaction { id: part_id, .. } | MessagePart::Revert { id: part_id, .. } => {
+                        let note = format!("_{}_", part.session_note().unwrap_or_default());
                         let key = format!("{}#{}", entry.id, part_id);
                         rows.push(Row {
                             id: format!("{key}.0").into(),

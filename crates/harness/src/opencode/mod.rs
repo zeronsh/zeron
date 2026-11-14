@@ -112,6 +112,7 @@ use actions::TuiAction;
 pub use credentials::NativeCredential;
 pub use sync::{
     CompactionStatus, NativeChange, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
+    RevertedFile,
 };
 
 /// Health-poll cadence while the server boots.

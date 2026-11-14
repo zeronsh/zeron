@@ -50,6 +50,19 @@ pub struct NativeSession {
     /// An undo staged in it: this message and everything after it are taken
     /// back until a redo, and gone at the next prompt.
     pub reverted_from: Option<String>,
+    /// The files that undo put back, as OpenCode lists them under it.
+    pub reverted_files: Vec<RevertedFile>,
+}
+
+/// A file an undo put back: its path, what the undone turn did to it
+/// (`added`, `modified`, `deleted`), and the lines that turn added and
+/// removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertedFile {
+    pub path: String,
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 /// One message of a session's history.
@@ -99,6 +112,9 @@ pub enum NativeMessageKind {
         /// wrote, once done — OpenCode's own "in · out".
         tokens_in: Option<u64>,
         tokens_out: Option<u64>,
+        /// The summary, once written: empty while it runs (its words come
+        /// on the feed meanwhile, [`NativeChange::CompactionText`]).
+        summary: String,
     },
 }
 
@@ -144,6 +160,9 @@ pub enum NativeChange {
     /// Agents, commands, skills, models, providers or the configuration
     /// changed: catalogs read before are out of date.
     Catalog,
+    /// The next words of the summary a compaction of this session is
+    /// writing (the session's own copy has none until it is done).
+    CompactionText { session: String, text: String },
 }
 
 impl OpencodeHarness {
@@ -421,6 +440,10 @@ fn change_of(frame: &Value) -> Option<NativeChange> {
         .to_owned();
     match kind {
         "session.deleted" => Some(NativeChange::Deleted(session)),
+        "session.compaction.delta" => Some(NativeChange::CompactionText {
+            session,
+            text: data?.get("text").and_then(Value::as_str)?.to_owned(),
+        }),
         "session.created"
         | "session.renamed"
         | "session.archived"
@@ -519,6 +542,25 @@ fn native_session(info: &Value) -> Option<NativeSession> {
             .pointer("/revert/messageID")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        reverted_files: info
+            .pointer("/revert/files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| {
+                let count = |key: &str| file.get(key).and_then(Value::as_u64).unwrap_or(0);
+                Some(RevertedFile {
+                    path: file.get("file").and_then(Value::as_str)?.to_owned(),
+                    status: file
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("modified")
+                        .to_owned(),
+                    additions: count("additions"),
+                    deletions: count("deletions"),
+                })
+            })
+            .collect(),
     })
 }
 
@@ -589,6 +631,11 @@ fn native_message(message: &Value) -> Option<NativeMessage> {
                 status,
                 tokens_in: tokens.map(|t| token_sum(t, &["input", "cache/read", "cache/write"])),
                 tokens_out: tokens.map(|t| token_sum(t, &["output", "reasoning"])),
+                summary: message
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
             }
         }
         _ => return None,
@@ -770,7 +817,7 @@ mod tests {
         // (Shape captured live from 2.3.0.)
         let done = json!({
             "id": "msg_c", "type": "compaction", "status": "completed", "reason": "manual",
-            "time": {"created": 10},
+            "time": {"created": 10}, "summary": "## Goal\n- tides",
             "tokens": {"input": 4, "output": 2812, "reasoning": 0,
                        "cache": {"read": 646940, "write": 1427}}
         });
@@ -781,7 +828,8 @@ mod tests {
                 status: CompactionStatus::Completed,
                 tokens_in: Some(648_371),
                 tokens_out: Some(2_812),
-            }
+                ref summary,
+            } if summary == "## Goal\n- tides"
         ));
         assert_eq!(done.context_tokens(), Some(2_812));
         let running = native_message(&json!({"id": "msg_d", "type": "compaction", "status": "running"})).unwrap();

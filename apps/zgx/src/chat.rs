@@ -4777,9 +4777,9 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
         // The provider-switch seam (the engine's system entry when a chat
         // moves to another agent): `[mark] From → [mark] To` over the prompt
         // that switched, as the shipping app's `switch_marker`.
-        // Where the agent's session compacted (OpenCode's): its note, as
-        // OpenCode's own clients word it — "Compacting session…", then
-        // "Session compacted · 648.4K in · 2.8K out".
+        // Where the agent's session compacted (OpenCode's), as OpenCode's
+        // own clients show it: "Session compaction started", the summary as
+        // it is written, then "Session compacted · 648.4K in · 2.8K out".
         "system"
             if let Some(part) = entry["parts"]
                 .as_array()
@@ -4788,12 +4788,58 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .find(|p| p["kind"].as_str() == Some("compaction")) =>
         {
             let status = part["message"].as_str().unwrap_or_default();
-            let note = compaction_note(status, part["tokensIn"].as_u64(), part["tokensOut"].as_u64());
+            let live = matches!(status, "running" | "pending");
+            let summary = entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|p| p["kind"].as_str() == Some("text"))
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let close = (!live).then(|| compaction_note(status, part["tokensIn"].as_u64(), part["tokensOut"].as_u64()));
             Some(Value::record([
                 ("id", Value::from(id)),
                 ("role", Value::from("note")),
-                ("text", Value::from(note.as_str())),
-                ("live", Value::Bool(matches!(status, "running" | "pending"))),
+                ("kind", Value::from("compaction")),
+                ("open", Value::from("Session compaction started")),
+                ("text", Value::from(summary.as_str())),
+                ("close", close.map_or(Value::Nil, |close| Value::from(close.as_str()))),
+                ("live", Value::Bool(live)),
+            ]))
+        }
+        // An undo staged in the agent's session (OpenCode's): where the
+        // turns it took back were, as its TUI says it — "2 messages
+        // reverted", the files it put back, "/redo to restore".
+        "system"
+            if let Some(part) = entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["kind"].as_str() == Some("revert")) =>
+        {
+            let count = part["reverted"].as_u64().unwrap_or_default();
+            let files: Vec<Value> = part["revertedFiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|file| {
+                    Value::record([
+                        ("path", Value::from(file["path"].as_str().unwrap_or_default())),
+                        ("status", Value::from(file["status"].as_str().unwrap_or("modified"))),
+                        ("additions", Value::Num(file["additions"].as_f64().unwrap_or_default())),
+                        ("deletions", Value::Num(file["deletions"].as_f64().unwrap_or_default())),
+                    ])
+                })
+                .collect();
+            let s = if count == 1 { "" } else { "s" };
+            Some(Value::record([
+                ("id", Value::from(id)),
+                ("role", Value::from("note")),
+                ("kind", Value::from("revert")),
+                ("text", Value::from(format!("{count} message{s} reverted").as_str())),
+                ("close", Value::from("/redo to restore")),
+                ("files", Value::List(Rc::from(files))),
             ]))
         }
         "system" => {
@@ -4834,7 +4880,6 @@ fn compaction_note(status: &str, tokens_in: Option<u64>, tokens_out: Option<u64>
         _ => format!("{:.1}M", n as f64 / 1_000_000.0),
     };
     match (status, tokens_in, tokens_out) {
-        ("running" | "pending", ..) => "Compacting session…".to_owned(),
         ("failed", ..) => "Compaction failed".to_owned(),
         (_, Some(tokens_in), Some(tokens_out)) if tokens_in + tokens_out > 0 => {
             format!("Session compacted · {} in · {} out", short(tokens_in), short(tokens_out))
@@ -7381,6 +7426,32 @@ mod tests {
         assert!(matches!(card.field("mark"), Some(Value::Str(s)) if s.as_ref() == mark("codex")));
         CHATS.with(|c| c.chats.borrow_mut().remove("c1"));
     }
+    #[test]
+    fn a_compaction_shows_between_its_rules_and_an_undo_says_what_it_took() {
+        let compaction = |status: &str, summary: Option<&str>| {
+            let mut parts = vec![json!({ "id": "c0", "kind": "compaction", "message": status, "tokensIn": 648_371, "tokensOut": 2_812 })];
+            parts.extend(summary.map(|text| json!({ "id": "s0", "kind": "text", "text": text })));
+            message(&json!({ "id": "oc:c", "role": "system", "parts": parts }), None).expect("a compaction shows")
+        };
+        let running = compaction("running", Some("## Goal"));
+        assert!(matches!(running.field("open"), Some(Value::Str(s)) if s.as_ref() == "Session compaction started"));
+        assert!(matches!(running.field("text"), Some(Value::Str(s)) if s.as_ref() == "## Goal"));
+        assert!(matches!(running.field("close"), None | Some(Value::Nil)));
+        assert!(matches!(running.field("live"), Some(Value::Bool(true))));
+        let done = compaction("completed", Some("## Goal\n- tides"));
+        assert!(matches!(done.field("close"), Some(Value::Str(s)) if s.as_ref() == "Session compacted · 648.4K in · 2.8K out"));
+        let undo = message(
+            &json!({ "id": "oc:revert", "role": "system", "parts": [{ "id": "r0", "kind": "revert", "reverted": 2,
+                "revertedFiles": [{ "path": "a.rs", "status": "modified", "additions": 3, "deletions": 1 }] }] }),
+            None,
+        )
+        .expect("an undo shows");
+        assert!(matches!(undo.field("text"), Some(Value::Str(s)) if s.as_ref() == "2 messages reverted"));
+        assert!(matches!(undo.field("close"), Some(Value::Str(s)) if s.as_ref() == "/redo to restore"));
+        let Some(Value::List(files)) = undo.field("files") else { panic!("no files") };
+        assert!(matches!(files[0].field("path"), Some(Value::Str(s)) if s.as_ref() == "a.rs"));
+    }
+
     #[test]
     fn a_prompts_attached_passages_show_as_chips_on_the_sent_message() {
         let text = "Why this one?\n\nSelected from this conversation:\n- GPT-5.5, Sep 8, 1:43 PM: Layout dominates.\n  Paint is second.\n- You: the first ask\n\nAttached images (local files — open them to view):\n- /tmp/shot.png";

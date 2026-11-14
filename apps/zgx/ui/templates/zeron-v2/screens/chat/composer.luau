@@ -133,6 +133,9 @@ end
 -- The tray open behind the composer (its todos, tasks or queue), kept
 -- across a reload.
 local TRAY = ui.state("chat_tray", nil :: ("todos" | "tasks" | "queue")?)
+-- How long an undo's turn may fade before it's let go of, the undo come
+-- to nothing.
+local UNDO_WAIT_MS = 3000
 
 local function Composer(): Node
 	-- The session shown, or nil on a new chat.
@@ -863,12 +866,12 @@ local function Composer(): Node
 	end
 
 	-- The newest prompt in the transcript: what an undo takes back.
-	local function last_prompt(): string?
+	local function last_prompt(): any
 		local list = store.messages
 		for i = list:len(), 1, -1 do
 			local m = list:at(i)
 			if m and m.role == "user" then
-				return m.text
+				return m
 			end
 		end
 		return nil
@@ -981,11 +984,21 @@ local function Composer(): Node
 			local action = if s and s.harness == "opencode" then opencode_action(text_out) else nil
 			if action then
 				if action == "undo" then
-					-- (Once the composer has cleared what was sent.)
+					-- Its turn fades as it goes (the transcript lets go once
+					-- it's gone, or the undo comes to nothing).
 					local undone = last_prompt()
+					if undone then
+						shared.undoing:set(undone.id)
+						ui.after(UNDO_WAIT_MS, function()
+							if shared.undoing:peek() == undone.id then
+								shared.undoing:set(nil)
+							end
+						end)
+					end
+					-- (Once the composer has cleared what was sent.)
 					ui.after(0, function()
 						if undone and shared.text:peek() == "" then
-							shared.text:set(undone)
+							shared.text:set(undone.text)
 							shared.focus:add(1)
 						end
 					end)

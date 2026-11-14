@@ -163,12 +163,9 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
             // orchestrator reads the copied history as ordinary turns.
             MessagePart::Fork { .. } | MessagePart::Switch { .. } => {}
             // What the agent's context holds changed: worth knowing.
-            MessagePart::Compaction {
-                status,
-                tokens_in,
-                tokens_out,
-                ..
-            } => tools.push(zeron_doc::compaction_note(status, *tokens_in, *tokens_out)),
+            MessagePart::Compaction { .. } | MessagePart::Revert { .. } => {
+                tools.extend(part.session_note());
+            }
         }
     }
     RenderedMessage {

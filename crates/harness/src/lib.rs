@@ -742,6 +742,7 @@ pub use cursor::CursorHarness;
 pub use opencode::{
     CompactionStatus, NativeChange, NativeCredential, NativeMessage, NativeMessageKind, NativeQuestion, NativeSession,
     OPENCODE_ACCESS_MODES,
+    RevertedFile as OpencodeRevertedFile,
     OpencodeHarness, set_runs_on_service as set_opencode_runs_on_service,
 };
 pub use muse::MuseHarness;
