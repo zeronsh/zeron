@@ -27,6 +27,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod catalog;
+mod changes;
 mod client;
 pub mod cloud;
 mod cloud_stage;

@@ -1299,6 +1299,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func workspaceRevision()  -> UInt64
     
     /**
+     * Read a working-tree diff on the chat's host. Parsing/highlighting runs
+     * on the core runtime, never on the platform's UI thread.
+     */
+    func checkoutChanges(chatId: String, knownChecksum: String?) async throws  -> CheckoutChanges?
+    
+    /**
      * A Stripe Checkout url: a plan (`kind = "subscription"`, `plan`) or
      * extra credits (`kind = "credits"`, `packs`).
      */
@@ -2376,6 +2382,26 @@ open func workspaceRevision() -> UInt64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Read a working-tree diff on the chat's host. Parsing/highlighting runs
+     * on the core runtime, never on the platform's UI thread.
+     */
+open func checkoutChanges(chatId: String, knownChecksum: String?)async throws  -> CheckoutChanges?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_checkout_changes(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterOptionString.lower(knownChecksum)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeCheckoutChanges.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -7725,6 +7751,204 @@ public func FfiConverterTypeCaptionSpan_lower(_ value: CaptionSpan) -> RustBuffe
 }
 
 
+public struct ChangeHighlight: Equatable, Hashable {
+    public var startUtf16: UInt32
+    public var lenUtf16: UInt32
+    public var color: ColorRole
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(startUtf16: UInt32, lenUtf16: UInt32, color: ColorRole) {
+        self.startUtf16 = startUtf16
+        self.lenUtf16 = lenUtf16
+        self.color = color
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ChangeHighlight: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChangeHighlight: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChangeHighlight {
+        return
+            try ChangeHighlight(
+                startUtf16: FfiConverterUInt32.read(from: &buf), 
+                lenUtf16: FfiConverterUInt32.read(from: &buf), 
+                color: FfiConverterTypeColorRole.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ChangeHighlight, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.startUtf16, into: &buf)
+        FfiConverterUInt32.write(value.lenUtf16, into: &buf)
+        FfiConverterTypeColorRole.write(value.color, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangeHighlight_lift(_ buf: RustBuffer) throws -> ChangeHighlight {
+    return try FfiConverterTypeChangeHighlight.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangeHighlight_lower(_ value: ChangeHighlight) -> RustBuffer {
+    return FfiConverterTypeChangeHighlight.lower(value)
+}
+
+
+public struct ChangeLine: Equatable, Hashable {
+    public var kind: ChangeLineKind
+    public var oldLine: UInt32?
+    public var newLine: UInt32?
+    public var text: String
+    public var highlights: [ChangeHighlight]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: ChangeLineKind, oldLine: UInt32?, newLine: UInt32?, text: String, highlights: [ChangeHighlight]) {
+        self.kind = kind
+        self.oldLine = oldLine
+        self.newLine = newLine
+        self.text = text
+        self.highlights = highlights
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ChangeLine: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChangeLine: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChangeLine {
+        return
+            try ChangeLine(
+                kind: FfiConverterTypeChangeLineKind.read(from: &buf), 
+                oldLine: FfiConverterOptionUInt32.read(from: &buf), 
+                newLine: FfiConverterOptionUInt32.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                highlights: FfiConverterSequenceTypeChangeHighlight.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ChangeLine, into buf: inout [UInt8]) {
+        FfiConverterTypeChangeLineKind.write(value.kind, into: &buf)
+        FfiConverterOptionUInt32.write(value.oldLine, into: &buf)
+        FfiConverterOptionUInt32.write(value.newLine, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterSequenceTypeChangeHighlight.write(value.highlights, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangeLine_lift(_ buf: RustBuffer) throws -> ChangeLine {
+    return try FfiConverterTypeChangeLine.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangeLine_lower(_ value: ChangeLine) -> RustBuffer {
+    return FfiConverterTypeChangeLine.lower(value)
+}
+
+
+public struct ChangedFile: Equatable, Hashable {
+    public var path: String
+    public var oldPath: String?
+    public var status: String
+    public var additions: UInt32
+    public var deletions: UInt32
+    public var binary: Bool
+    public var lines: [ChangeLine]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, oldPath: String?, status: String, additions: UInt32, deletions: UInt32, binary: Bool, lines: [ChangeLine]) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.additions = additions
+        self.deletions = deletions
+        self.binary = binary
+        self.lines = lines
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ChangedFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChangedFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChangedFile {
+        return
+            try ChangedFile(
+                path: FfiConverterString.read(from: &buf), 
+                oldPath: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf), 
+                additions: FfiConverterUInt32.read(from: &buf), 
+                deletions: FfiConverterUInt32.read(from: &buf), 
+                binary: FfiConverterBool.read(from: &buf), 
+                lines: FfiConverterSequenceTypeChangeLine.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ChangedFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.oldPath, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterUInt32.write(value.additions, into: &buf)
+        FfiConverterUInt32.write(value.deletions, into: &buf)
+        FfiConverterBool.write(value.binary, into: &buf)
+        FfiConverterSequenceTypeChangeLine.write(value.lines, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangedFile_lift(_ buf: RustBuffer) throws -> ChangedFile {
+    return try FfiConverterTypeChangedFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangedFile_lower(_ value: ChangedFile) -> RustBuffer {
+    return FfiConverterTypeChangedFile.lower(value)
+}
+
+
 /**
  * A chat's run configuration. Ids are wire strings.
  */
@@ -7809,6 +8033,72 @@ public func FfiConverterTypeChatConfig_lift(_ buf: RustBuffer) throws -> ChatCon
 #endif
 public func FfiConverterTypeChatConfig_lower(_ value: ChatConfig) -> RustBuffer {
     return FfiConverterTypeChatConfig.lower(value)
+}
+
+
+public struct CheckoutChanges: Equatable, Hashable {
+    public var checksum: String
+    public var additions: UInt32
+    public var deletions: UInt32
+    public var truncated: Bool
+    public var files: [ChangedFile]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(checksum: String, additions: UInt32, deletions: UInt32, truncated: Bool, files: [ChangedFile]) {
+        self.checksum = checksum
+        self.additions = additions
+        self.deletions = deletions
+        self.truncated = truncated
+        self.files = files
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CheckoutChanges: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCheckoutChanges: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CheckoutChanges {
+        return
+            try CheckoutChanges(
+                checksum: FfiConverterString.read(from: &buf), 
+                additions: FfiConverterUInt32.read(from: &buf), 
+                deletions: FfiConverterUInt32.read(from: &buf), 
+                truncated: FfiConverterBool.read(from: &buf), 
+                files: FfiConverterSequenceTypeChangedFile.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CheckoutChanges, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.checksum, into: &buf)
+        FfiConverterUInt32.write(value.additions, into: &buf)
+        FfiConverterUInt32.write(value.deletions, into: &buf)
+        FfiConverterBool.write(value.truncated, into: &buf)
+        FfiConverterSequenceTypeChangedFile.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCheckoutChanges_lift(_ buf: RustBuffer) throws -> CheckoutChanges {
+    return try FfiConverterTypeCheckoutChanges.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCheckoutChanges_lower(_ value: CheckoutChanges) -> RustBuffer {
+    return FfiConverterTypeCheckoutChanges.lower(value)
 }
 
 
@@ -14948,6 +15238,93 @@ public func FfiConverterTypeBusyPolicy_lower(_ value: BusyPolicy) -> RustBuffer 
 
 
 
+public enum ChangeLineKind: Equatable, Hashable {
+    
+    case context
+    case addition
+    case deletion
+    case hunk
+    case notice
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ChangeLineKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChangeLineKind: FfiConverterRustBuffer {
+    typealias SwiftType = ChangeLineKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChangeLineKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .context
+        
+        case 2: return .addition
+        
+        case 3: return .deletion
+        
+        case 4: return .hunk
+        
+        case 5: return .notice
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChangeLineKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .context:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .addition:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .deletion:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .hunk:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .notice:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangeLineKind_lift(_ buf: RustBuffer) throws -> ChangeLineKind {
+    return try FfiConverterTypeChangeLineKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChangeLineKind_lower(_ value: ChangeLineKind) -> RustBuffer {
+    return FfiConverterTypeChangeLineKind.lower(value)
+}
+
+
+
+
 public enum ChatIndicator: Equatable, Hashable {
     
     case working
@@ -19923,6 +20300,30 @@ fileprivate struct FfiConverterOptionTypeChatConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCheckoutChanges: FfiConverterRustBuffer {
+    typealias SwiftType = CheckoutChanges?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCheckoutChanges.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCheckoutChanges.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeContextUsage: FfiConverterRustBuffer {
     typealias SwiftType = ContextUsage?
 
@@ -20570,6 +20971,81 @@ fileprivate struct FfiConverterSequenceTypeCaptionSpan: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeCaptionSpan.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeChangeHighlight: FfiConverterRustBuffer {
+    typealias SwiftType = [ChangeHighlight]
+
+    public static func write(_ value: [ChangeHighlight], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeChangeHighlight.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ChangeHighlight] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ChangeHighlight]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeChangeHighlight.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeChangeLine: FfiConverterRustBuffer {
+    typealias SwiftType = [ChangeLine]
+
+    public static func write(_ value: [ChangeLine], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeChangeLine.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ChangeLine] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ChangeLine]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeChangeLine.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeChangedFile: FfiConverterRustBuffer {
+    typealias SwiftType = [ChangedFile]
+
+    public static func write(_ value: [ChangedFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeChangedFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ChangedFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ChangedFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeChangedFile.read(from: &buf))
         }
         return seq
     }
@@ -22336,6 +22812,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_checkout_changes() != 8104) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_billing_checkout() != 44997) {

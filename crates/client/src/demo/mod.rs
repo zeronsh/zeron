@@ -794,6 +794,50 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if method == m::GET_CHECKOUT_DIFF {
+            let mut diff = serde_json::json!({
+                "checkoutId": "demo-checkout", "deviceId": device_id,
+                "cwd": params["cwd"], "checksum": "demo-changes-v1",
+                "updatedAt": "2026-11-08T00:00:00Z", "truncated": false,
+                "additions": 4, "deletions": 2,
+                "files": [
+                    { "path": "Sources/Welcome.swift", "status": "modified", "additions": 3, "deletions": 2 },
+                    { "path": "Tests/WelcomeTests.swift", "status": "added", "additions": 1, "deletions": 0 }
+                ],
+                "patch": concat!(
+                    "diff --git a/Sources/Welcome.swift b/Sources/Welcome.swift\n",
+                    "--- a/Sources/Welcome.swift\n+++ b/Sources/Welcome.swift\n",
+                    "@@ -1,4 +1,5 @@\n struct Welcome {\n-    let title = \"Hello\"\n-    let subtitle = \"World\"\n",
+                    "+    let title = \"Welcome back\"\n+    let subtitle = \"Ready to build something?\"\n+    let isPersonalized = true\n }\n",
+                    "diff --git a/Tests/WelcomeTests.swift b/Tests/WelcomeTests.swift\nnew file mode 100644\n",
+                    "--- /dev/null\n+++ b/Tests/WelcomeTests.swift\n@@ -0,0 +1 @@\n+// Verify the personalized welcome message.\n"
+                )
+            });
+            // The scroll-focused demo has enough source to exercise pinned
+            // section headers and the transition to the following file.
+            if params["chatId"].as_str() == Some("chat-ios-scroll") {
+                let mut extra = "\nprivate let previewNames = [\n".to_owned();
+                for n in 1..=40 {
+                    extra.push_str(&format!("    \"Preview {n:02}\",\n"));
+                }
+                extra.push_str("]\n");
+                let count = extra.lines().count();
+                let context = extra.lines().map(|line| format!(" {line}\n")).collect::<String>();
+                let mut patch = diff["patch"].as_str().unwrap_or_default()
+                    .replacen("@@ -1,4 +1,5 @@", &format!("@@ -1,{} +1,{} @@", 4 + count, 5 + count), 1)
+                    .replacen("diff --git a/Tests", &format!("{context}diff --git a/Tests"), 1);
+                // Keep the following section scrollable too, so its header
+                // can replace the first pinned title without overscrolling.
+                let added = extra.lines().map(|line| format!("+{line}\n")).collect::<String>();
+                patch = patch.replacen("@@ -0,0 +1 @@", &format!("@@ -0,0 +1,{} @@", 1 + count), 1);
+                patch.push_str(&added);
+                diff["files"][1]["additions"] = serde_json::json!(1 + count);
+                diff["additions"] = serde_json::json!(4 + count);
+                diff["patch"] = patch.into();
+                diff["checksum"] = "demo-scroll-changes-v1".into();
+            }
+            return Ok(diff);
+        }
         if let Some(reply) = self.companion_rpc(&client, method, &params)? {
             return Ok(reply);
         }
