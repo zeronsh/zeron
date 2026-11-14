@@ -202,8 +202,17 @@ struct Gh {
     watches: github::Watches<Watch>,
 }
 
+/// How long Settings → Plugins waits for what asked it to settle: past the
+/// launch (its first publish), then a moment.
+const PAGE_SETTLE_LAUNCH: std::time::Duration = std::time::Duration::from_millis(1500);
+const PAGE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct Bridge {
     host: ScriptHost,
+    /// A publish of Settings → Plugins on its way (`publish_page`), and
+    /// whether one has been made.
+    page_due: Cell<bool>,
+    page_published: Cell<bool>,
     /// Where each plugin's requests may go, as its manifest names them.
     network: network::Network,
     windows: WindowFactory,
@@ -468,6 +477,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
+        page_due: Cell::new(false),
+        page_published: Cell::new(false),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
         requests: host.shared("plugins.request", vlist(Vec::new())),
         request_list: RefCell::default(),
@@ -674,27 +685,42 @@ pub fn prepare_live() -> PathBuf {
         preview::set_template_running(id != live::BUILTIN);
         preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     }
-    if let Err(error) = live::sync_zeron(&crate::ui_dir(), &root) {
-        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
-        return fallback;
-    }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
     // (retired_themes.rs).
     if let Some(data) = crate::engine::data_dir() {
         retired_themes::retire(&root, &data);
     }
+    let ui = crate::ui_dir();
     let id = live::active(&root);
+    // `.live` as the last launch left it, from the same Zeron and template:
+    // it runs as it is (live::LaunchStamp), nothing read or written.
+    let stamp = live::LaunchStamp::now(&ui, &root, &id);
+    if stamp.still_laid(&ui, &root) {
+        let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
+        LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
+        let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
+        LIVE_LAID.with(|l| *l.borrow_mut() = laid);
+        return root.join(live::LIVE).join("app.luau");
+    }
+    if let Err(error) = live::sync_zeron(&ui, &root) {
+        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
+        return fallback;
+    }
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
-            let template_stamp = if id == live::BUILTIN { String::new() } else { live::template_stamp(&root.join(&id)) };
-            let laid = live::Laid { ui_stamp: live::ui_stamp(&crate::ui_dir()), id, template_stamp, ..Default::default() };
-            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             // (Pictures of templates taken from the window, before their
             // previews were drawn from their colours: gone.)
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
+            // What the next launch can run as it is: `.live` as this left it.
+            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
+            if let Err(error) = laid_now.write(&root) {
+                eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
+            }
+            let laid = live::Laid { ui_stamp: laid_now.ui, id, template_stamp: laid_now.template, ..Default::default() };
+            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             root.join(live::LIVE).join("app.luau")
         }
         Err(error) => {
@@ -1702,7 +1728,32 @@ impl Bridge {
         ]));
     }
 
+    /// Settings → Plugins brought up to date, once what asked has settled:
+    /// asks in a row (a launch makes several: the view known, the engine's
+    /// list, its look) make one, after [`PAGE_SETTLE`] ([`PAGE_SETTLE_LAUNCH`]
+    /// for a launch's first). It walks every element of the window (a tenth
+    /// of a second of a launch's main thread), and nothing a launch shows
+    /// reads it.
     fn publish_page(&self) {
+        if cfg!(test) {
+            return self.publish_page_now();
+        }
+        if self.page_due.replace(true) {
+            return;
+        }
+        let settle = if self.page_published.get() { PAGE_SETTLE } else { PAGE_SETTLE_LAUNCH };
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(settle).await;
+            if let Some(b) = me.upgrade() {
+                b.page_due.set(false);
+                b.page_published.set(true);
+                b.publish_page_now();
+            }
+        });
+    }
+
+    fn publish_page_now(&self) {
         // A plugin that failed here shows so, with why, whatever the engine
         // says of it; one placed where the template in use has nothing says
         // where it won't show, and one whose place zgx refused says why.

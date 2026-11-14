@@ -219,6 +219,14 @@ pub struct Overlay {
 /// `failed` files (Zeron's show in their place) and the paths never templated.
 /// Zeron's own alone for `BUILTIN`, or `whole_failed`. How many files changed.
 pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> std::io::Result<(usize, Overlay)> {
+    let (want, overlay) = plan(templates, id, failed, whole_failed);
+    let changed = mirror(&templates.join(LIVE), &want, |_| false)?;
+    Ok((changed, overlay))
+}
+
+/// What `compose` lays down, each file's source by its path in `.live`, and
+/// the overlay that is: folders listed, nothing read.
+pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> (BTreeMap<String, PathBuf>, Overlay) {
     let mut want = files(&templates.join(ZERON), |rel| !template_meta(rel));
     let mut from_template = BTreeSet::new();
     if id != BUILTIN && !whole_failed {
@@ -240,8 +248,64 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
             want.insert(rel, path);
         }
     }
-    let changed = mirror(&templates.join(LIVE), &want, |_| false)?;
-    Ok((changed, Overlay { template: id.to_string(), from_template }))
+    (want, Overlay { template: id.to_string(), from_template })
+}
+
+/// Beside the templates: what a launch last laid `.live` down from, and
+/// `.live` as that left it (`LaunchStamp`).
+pub const LAUNCH_STAMP: &str = ".launch-stamp.json";
+
+/// What a launch lays `.live` down from, as it stands (each file's path,
+/// size and time written; nothing read): this Zeron, `ui/`, the active
+/// template, and `.live` itself. A launch that finds the one the last left
+/// needs neither `sync_zeron` nor `compose`, which read every file of
+/// Zeron's (twice) to write none: a quarter of a second of a warm launch
+/// spent before the window, more from a cold disk. Anything changed since
+/// (an update, a template edited or switched, `.live` written by anyone)
+/// stamps differently, and the launch lays everything down as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchStamp {
+    pub zeron: String,
+    pub ui: String,
+    pub id: String,
+    pub template: String,
+    pub live: String,
+}
+
+impl LaunchStamp {
+    /// `ui/` and template `id` under `templates` as they stand now.
+    pub fn now(ui: &Path, templates: &Path, id: &str) -> Self {
+        Self {
+            zeron: ZERON_VERSION.to_string(),
+            ui: ui_stamp(ui),
+            id: id.to_string(),
+            template: if id == BUILTIN { String::new() } else { template_stamp(&templates.join(id)) },
+            live: stamp(&templates.join(LIVE), |_| true),
+        }
+    }
+
+    /// The one the last launch left, if any.
+    pub fn read(templates: &Path) -> Option<Self> {
+        let v = read_json(&templates.join(LAUNCH_STAMP));
+        let field = |k: &str| v[k].as_str().map(str::to_string);
+        Some(Self { zeron: field("zeron")?, ui: field("ui")?, id: field("id")?, template: field("template")?, live: field("live")? })
+    }
+
+    pub fn write(&self, templates: &Path) -> std::io::Result<bool> {
+        let v = serde_json::json!({
+            "zeron": self.zeron, "ui": self.ui, "id": self.id, "template": self.template, "live": self.live,
+        });
+        put(&templates.join(LAUNCH_STAMP), &serde_json::to_vec_pretty(&v).unwrap_or_default())
+    }
+
+    /// Whether `.live` can run as it is: laid from just this, and whole
+    /// (Zeron's copy and its hashes there, the official templates too).
+    pub fn still_laid(&self, ui: &Path, templates: &Path) -> bool {
+        Self::read(templates).as_ref() == Some(self)
+            && templates.join(LIVE).join("app.luau").is_file()
+            && templates.join(ZERON).join(".hashes.json").is_file()
+            && !super::official::missing(ui, templates)
+    }
 }
 
 /// The files of `.live` an error names, first mention first: each
@@ -839,6 +903,59 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         write(&t, "mine/screens/x.luau", "-- mine, edited");
         assert_ne!(survey(&ui, &t, Some(&saved.ui_stamp)).template_stamp, used.template_stamp);
+    }
+
+    /// A launch lays `.live` down once; the next, finding everything as the
+    /// last left it, runs it as it is. Anything changed since lays it down
+    /// again: `ui/` (an update), the template switched or edited, `.live`
+    /// written by anyone, a file of it gone.
+    #[test]
+    fn a_launch_runs_live_as_it_is_only_while_nothing_changed() {
+        let root = dir("launch-stamp");
+        let ui = root.join("ui");
+        write(&ui, "app.luau", "-- app");
+        write(&ui, "screens/x.luau", "-- x");
+        let t = root.join("templates");
+        let lay = |id: &str| {
+            sync_zeron(&ui, &t).unwrap();
+            compose(&t, id, &Default::default(), false).unwrap();
+            LaunchStamp::now(&ui, &t, id).write(&t).unwrap();
+        };
+        let runs_as_is = |id: &str| LaunchStamp::now(&ui, &t, id).still_laid(&ui, &t);
+        // Nothing laid yet.
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        assert!(runs_as_is(BUILTIN));
+        assert!(runs_as_is(BUILTIN), "looking writes nothing");
+        // Zeron's own changed (an update): laid again, then as it is.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(&ui, "screens/x.luau", "-- x, updated");
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        assert!(runs_as_is(BUILTIN));
+        assert_eq!(read(&t.join(LIVE), "screens/x.luau"), "-- x, updated");
+        // `.live` written by someone else, or a file of it gone.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(&t.join(LIVE), "screens/x.luau", "-- not this Zeron's");
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        std::fs::remove_file(t.join(LIVE).join("app.luau")).unwrap();
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        assert!(runs_as_is(BUILTIN));
+        // Another template in use, then one of its files edited.
+        write(&t, "mine/zeron-template.json", r#"{"name":"Mine"}"#);
+        write(&t, "mine/screens/x.luau", "-- mine");
+        assert!(!runs_as_is("mine"));
+        lay("mine");
+        assert!(runs_as_is("mine"));
+        assert_eq!(read(&t.join(LIVE), "screens/x.luau"), "-- mine");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(&t, "mine/screens/x.luau", "-- mine, edited");
+        assert!(!runs_as_is("mine"));
+        // (The overlay a launch that skips the copy still knows.)
+        let (_, overlay) = plan(&t, "mine", &Default::default(), false);
+        assert!(overlay.from_template.contains("screens/x.luau"));
     }
 
     #[test]

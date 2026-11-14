@@ -7,6 +7,9 @@ keeping its state, so most work never rebuilds Rust. The Rust host
 actions, and speaks to a Zeron engine (`src/engine/`), which owns the
 account, this Mac's agents and GitHub for Cloud.
 
+The composer's current behavior, layout and sizing contracts are documented
+in [Composer](docs/composer.md).
+
 ## Running it
 
 **Dev builds talk to Zeron's staging servers, not production.** Signing in

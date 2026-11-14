@@ -3655,28 +3655,47 @@ fn cancel_params(harness: HarnessId, session_id: &str) -> Value {
 /// config, never from here.
 #[cfg(test)]
 fn acp_mcp_servers(mcp: Option<&zeron_proto::McpServer>) -> Vec<Value> {
-    acp_session_mcp_servers(mcp, &[])
+    acp_session_mcp_servers(mcp, &[], false)
+}
+
+/// Whether the agent takes HTTP MCP servers in `session/new`
+/// (`agentCapabilities.mcpCapabilities.http`).
+fn takes_http_mcp(init: &Value) -> bool {
+    init.pointer("/agentCapabilities/mcpCapabilities/http")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// [`acp_mcp_servers`] plus the plugins' native servers
-/// ([`RunRequest::extra_mcp`]), Zeron's own first.
+/// ([`RunRequest::extra_mcp`]), Zeron's own first. With `http` (the agent
+/// takes HTTP servers), Zeron's own is the engine's endpoint
+/// (`{type: "http", name, url, headers: [{name, value}]}`) and no process
+/// starts; otherwise its stdio command — the engine's `mcp-proxy`.
 fn acp_session_mcp_servers(
     mcp: Option<&zeron_proto::McpServer>,
     extras: &[zeron_proto::McpServer],
+    http: bool,
 ) -> Vec<Value> {
+    let pairs = |map: &std::collections::BTreeMap<String, String>| {
+        map.iter()
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect::<Vec<_>>()
+    };
     mcp.into_iter()
         .chain(extras)
-        .map(|mcp| {
-            json!({
+        .map(|mcp| match mcp.http.as_ref().filter(|_| http) {
+            Some(endpoint) => json!({
+                "type": "http",
+                "name": mcp.name,
+                "url": endpoint.url,
+                "headers": pairs(&endpoint.headers),
+            }),
+            None => json!({
                 "name": mcp.name,
                 "command": mcp.command,
                 "args": mcp.args,
-                "env": mcp
-                    .env
-                    .iter()
-                    .map(|(name, value)| json!({ "name": name, "value": value }))
-                    .collect::<Vec<_>>(),
-            })
+                "env": pairs(&mcp.env),
+            }),
         })
         .collect()
 }
@@ -4572,7 +4591,11 @@ async fn open_session(
 ) -> Result<(String, Value), HarnessError> {
     let params = json!({
         "cwd": request.cwd,
-        "mcpServers": acp_session_mcp_servers(request.mcp.as_ref(), &request.extra_mcp),
+        "mcpServers": acp_session_mcp_servers(
+            request.mcp.as_ref(),
+            &request.extra_mcp,
+            takes_http_mcp(init),
+        ),
     });
     if let Some(resume) = &request.resume {
         let method = restore_method(init, harness);
@@ -8274,6 +8297,7 @@ mod mcp_injection_tests {
             env: [("ZERON_IPC_PORT".to_owned(), "27654".to_owned())]
                 .into_iter()
                 .collect(),
+            http: None,
         };
         let servers = acp_mcp_servers(Some(&mcp));
         assert_eq!(
@@ -8293,14 +8317,16 @@ mod mcp_injection_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec![],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
-        let servers = acp_session_mcp_servers(Some(&zeron), std::slice::from_ref(&extra));
+        let servers = acp_session_mcp_servers(Some(&zeron), std::slice::from_ref(&extra), false);
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0]["name"], "zeron");
         assert_eq!(
@@ -8312,6 +8338,35 @@ mod mcp_injection_tests {
                 "env": [{ "name": "FOCUS", "value": "1" }],
             })
         );
-        assert_eq!(acp_session_mcp_servers(None, &[extra]).len(), 1);
+        assert_eq!(acp_session_mcp_servers(None, &[extra], false).len(), 1);
+    }
+
+    /// An agent that takes HTTP servers gets the engine's endpoint for
+    /// Zeron's own (no process); one that doesn't gets the stdio proxy.
+    #[test]
+    fn zeron_s_server_is_http_only_where_the_agent_takes_it() {
+        let zeron = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron-engine".into(),
+            args: vec!["mcp-proxy".into()],
+            env: [("ZERON_MCP_TOKEN".to_owned(), "t".to_owned())].into_iter().collect(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:4321/mcp".into(),
+                headers: [("Authorization".to_owned(), "Bearer t".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
+        };
+        let http = acp_session_mcp_servers(Some(&zeron), &[], true);
+        assert_eq!(http[0]["type"], "http");
+        assert_eq!(http[0]["url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(http[0]["headers"], json!([{ "name": "Authorization", "value": "Bearer t" }]));
+        let stdio = acp_session_mcp_servers(Some(&zeron), &[], false);
+        assert_eq!(stdio[0]["command"], "/opt/zeron/zeron-engine");
+        assert_eq!(stdio[0]["args"], json!(["mcp-proxy"]));
+        assert!(stdio[0].get("type").is_none());
+        let init = json!({ "agentCapabilities": { "mcpCapabilities": { "http": true } } });
+        assert!(takes_http_mcp(&init));
+        assert!(!takes_http_mcp(&json!({ "agentCapabilities": {} })));
     }
 }

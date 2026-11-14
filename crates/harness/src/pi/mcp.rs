@@ -63,12 +63,14 @@ mod tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec![],
             env: Default::default(),
+            http: None,
         };
         let mut cmd = Command::new("pi");
         let scratch = configure_all(&mut cmd, Some(&zeron), std::slice::from_ref(&extra))
