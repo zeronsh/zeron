@@ -25,6 +25,66 @@ fn fanout_count(prompt: &str) -> Option<usize> {
     Some(count.clamp(1, 200))
 }
 
+/// The step count a `/longthread [N]` prompt asks for (1,000 when bare).
+fn longthread_count(prompt: &str) -> Option<usize> {
+    let rest = prompt.trim().strip_prefix("/longthread")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let count = rest.trim().parse().unwrap_or(1000);
+    Some(count.clamp(1, 20_000))
+}
+
+/// The `/longthread` reply: ademark's A11 thread (bench/replay's
+/// `long-2000`), `count` steps each a short text (one in five with a code
+/// block) and a call reading one small file, the last text holding
+/// `LONGTHREAD-END`. Streamed unpaced, as the replay is.
+fn longthread_events(count: usize) -> Vec<AgentEvent> {
+    let mut events = Vec::with_capacity(count * 3 + 2);
+    for n in 1..=count {
+        let mut text = format!(
+            "Step {n} of {count}. I read src/invoices.ts and noted what step {n} needs from it."
+        );
+        if n % 5 == 0 {
+            text.push_str(concat!(
+                "\n\n```ts\n",
+                "function summarize(invoice: Invoice): InvoiceSummary {\n",
+                "  const total = invoiceTotal(invoice);\n",
+                "  return { id: invoice.id, totalCents: total };\n",
+                "}\n",
+                "```"
+            ));
+        }
+        events.push(AgentEvent::TextDelta { text });
+        let id = format!("toolu_long_{n:04}");
+        events.push(AgentEvent::ToolCall {
+            id: id.clone(),
+            call: zeron_proto::ToolCall::ReadFile {
+                path: "/private/tmp/ademark-recording/arena/src/invoices.ts".into(),
+            },
+        });
+        events.push(AgentEvent::ToolResult {
+            id,
+            is_error: false,
+            output: Some("export function invoiceTotal() {}\n".into()),
+            diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
+            exit_code: None,
+        });
+    }
+    events.push(AgentEvent::TextDelta {
+        text: "All steps done. LONGTHREAD-END".into(),
+    });
+    events.push(AgentEvent::Done {
+        status: DoneStatus::Completed,
+        result: None,
+        error: None,
+        session_id: None,
+    });
+    events
+}
+
 /// The message a `/error <message>` prompt fails the run with.
 fn scripted_error(prompt: &str) -> Option<&str> {
     let message = prompt.trim().strip_prefix("/error ")?.trim();
@@ -390,6 +450,12 @@ impl Harness for MockHarness {
         // `ZERON_MOCK_DELAY_MS` apart, 2.5s by default.
         // `/error <message>`: the run fails with that message (error cards
         // for any provider failure, without a real provider).
+        // `/longthread [N]`: ademark's A11 long thread, N steps of a text
+        // and a file read (1,000 when bare), for timing a long chat's open.
+        if let Some(count) = longthread_count(&request.prompt) {
+            let events = longthread_events(count).into_iter().map(Ok);
+            return Ok(futures::stream::iter(events).boxed());
+        }
         if let Some(message) = scripted_error(&request.prompt) {
             let events = vec![
                 Ok(AgentEvent::Error {
@@ -1359,6 +1425,37 @@ mod tests {
         assert_eq!(fanout_count("/fanout 9000"), Some(200));
         assert_eq!(fanout_count("/fanouts"), None);
         assert_eq!(fanout_count("Walk me through the pipeline"), None);
+    }
+
+    #[test]
+    fn longthread_is_a11s_thread() {
+        assert_eq!(longthread_count("/longthread"), Some(1000));
+        assert_eq!(longthread_count(" /longthread 20 "), Some(20));
+        assert_eq!(longthread_count("/longthreads"), None);
+        let events = longthread_events(10);
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let reads = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolCall {
+                        call: zeron_proto::ToolCall::ReadFile { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!((texts.len(), reads), (11, 10));
+        assert!(texts[4].contains("```ts"), "one text in five holds code");
+        assert!(texts[10].ends_with("LONGTHREAD-END"));
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
     }
 
     #[test]
