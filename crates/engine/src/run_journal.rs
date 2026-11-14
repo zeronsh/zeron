@@ -11,6 +11,12 @@
 //!
 //! Bounded-window compaction is deferred (whole file kept for now, per M2 scope); a torn
 //! trailing line from a crash mid-write is tolerated everywhere.
+//!
+//! Lines are written in batches: a streaming agent sends tens of events a second, and
+//! a `write` each (under the one lock every chat's appends share) was a large part of
+//! a streaming engine's work. An event waits in memory at most [`FLUSH_AFTER`] (until
+//! the next append or [`RunJournal::flush`], which a run calls with each doc commit),
+//! a turn's `Done` is written at once, and every read writes what's waiting first.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -36,18 +42,54 @@ struct JournalLine {
     event: AgentEvent,
 }
 
+/// A [`JournalLine`] to write, borrowing its event.
+#[derive(Serialize)]
+struct JournalLineRef<'a> {
+    seq: u64,
+    event: &'a AgentEvent,
+}
+
+/// The longest an appended line waits in memory before it's written.
+const FLUSH_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
+/// Lines waiting past this many bytes are written at once.
+const FLUSH_BYTES: usize = 64 * 1024;
+
 struct ChatJournal {
     file: File,
     next_seq: u64,
     /// True when the file ends without a newline (torn write) — the next append
     /// starts with one so the torn line stays isolated.
     needs_newline: bool,
+    /// Lines appended and not yet written, and since when.
+    pending: Vec<u8>,
+    pending_since: Option<std::time::Instant>,
+}
+
+impl ChatJournal {
+    fn write_pending(&mut self) -> Result<(), JournalError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let result = self.file.write_all(&self.pending);
+        // A failed write keeps nothing half-sent in memory: what reached the
+        // file is a torn line the next append isolates.
+        self.pending.clear();
+        self.pending_since = None;
+        self.needs_newline = result.is_err();
+        Ok(result?)
+    }
 }
 
 /// Append-only JSONL journal store, one file per chat.
 pub struct RunJournal {
     dir: PathBuf,
     open_files: Mutex<HashMap<String, ChatJournal>>,
+}
+
+impl Drop for RunJournal {
+    fn drop(&mut self) {
+        self.flush_all();
+    }
 }
 
 impl RunJournal {
@@ -179,6 +221,11 @@ impl RunJournal {
             // comfortably exceeds concurrent runs, so eviction stays rare.
             const OPEN_FILE_CAP: usize = 16;
             if files.len() >= OPEN_FILE_CAP {
+                for (chat, journal) in files.iter_mut() {
+                    if let Err(err) = journal.write_pending() {
+                        tracing::warn!(chat = %chat, error = %err, "journal write failed");
+                    }
+                }
                 files.clear();
             }
             let path = self.path_for(chat_id);
@@ -190,6 +237,8 @@ impl RunJournal {
                     file,
                     next_seq,
                     needs_newline,
+                    pending: Vec::new(),
+                    pending_since: None,
                 },
             );
         }
@@ -200,21 +249,44 @@ impl RunJournal {
             )));
         };
         let seq = journal.next_seq;
-        let line = serde_json::to_string(&JournalLine {
-            seq,
-            event: event.clone(),
-        })?;
-        let mut buf = Vec::with_capacity(line.len() + 2);
-        if journal.needs_newline {
-            buf.push(b'\n');
+        let line = serde_json::to_vec(&JournalLineRef { seq, event })?;
+        if journal.pending.is_empty() {
+            if journal.needs_newline {
+                journal.pending.push(b'\n');
+            }
+            journal.pending_since = Some(std::time::Instant::now());
         }
-        buf.extend_from_slice(line.as_bytes());
-        buf.push(b'\n');
-        journal.file.write_all(&buf)?;
-        journal.file.flush()?;
-        journal.needs_newline = false;
+        journal.pending.extend_from_slice(&line);
+        journal.pending.push(b'\n');
         journal.next_seq = seq + 1;
+        let due = matches!(event, AgentEvent::Done { .. })
+            || journal.pending.len() >= FLUSH_BYTES
+            || journal
+                .pending_since
+                .is_some_and(|since| since.elapsed() >= FLUSH_AFTER);
+        if due {
+            journal.write_pending()?;
+        }
         Ok(seq)
+    }
+
+    /// Write what's waiting of a chat's journal (a run calls this with each
+    /// doc commit, so the journal is never behind its transcript).
+    pub fn flush(&self, chat_id: &str) {
+        if let Some(journal) = self.lock().get_mut(chat_id)
+            && let Err(err) = journal.write_pending()
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "journal write failed");
+        }
+    }
+
+    /// Write what's waiting of every chat's journal.
+    pub fn flush_all(&self) {
+        for (chat, journal) in self.lock().iter_mut() {
+            if let Err(err) = journal.write_pending() {
+                tracing::warn!(chat = %chat, error = %err, "journal write failed");
+            }
+        }
     }
 
     /// Events with `seq > after_seq`, in order. A cursor ahead of the last issued seq is
@@ -224,6 +296,7 @@ impl RunJournal {
         chat_id: &str,
         after_seq: u64,
     ) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
+        self.flush(chat_id);
         let path = self.path_for(chat_id);
         if !path.exists() {
             return Ok(Vec::new());
@@ -236,6 +309,7 @@ impl RunJournal {
 
     /// The last event in a chat's journal, if any (ignores a torn tail line).
     pub fn last_event(&self, chat_id: &str) -> Result<Option<(u64, AgentEvent)>, JournalError> {
+        self.flush(chat_id);
         last_valid_line(&self.path_for(chat_id))
     }
 
@@ -246,6 +320,7 @@ impl RunJournal {
         &self,
         chat_id: &str,
     ) -> Result<impl Iterator<Item = Result<(u64, AgentEvent), JournalError>>, JournalError> {
+        self.flush(chat_id);
         RevEvents::open(&self.path_for(chat_id))
     }
 
@@ -262,6 +337,7 @@ impl RunJournal {
         chat_id: &str,
         tool_id: &str,
     ) -> Result<Option<ToolExchange>, JournalError> {
+        self.flush(chat_id);
         let path = self.path_for(chat_id);
         let Some(mut lines) = RevLines::open(&path)? else {
             return Ok(None);
@@ -308,6 +384,7 @@ impl RunJournal {
     /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
     /// runs died mid-stream and need recovery (stamp `aborted`, close the journal).
     pub fn stale_sessions(&self) -> Result<Vec<String>, JournalError> {
+        self.flush_all();
         let mut stale = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
