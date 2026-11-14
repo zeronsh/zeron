@@ -578,6 +578,15 @@ impl ClaudeHarness {
         // stream-json`) forwards its own subagents' text too, which only
         // adds tagged frames to its stream.
         cmd.env("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
+        // No session title of the CLI's own. Zeron titles chats itself and
+        // nothing reads the CLI's title, but in stream-json mode the CLI
+        // sends one more Haiku request to name every session whose first
+        // prompt is 10+ characters: the chat's run, and every titling run
+        // too (its prompt is long), ~4.3 KB each on every new chat. The
+        // variable latches the CLI's titling as done (2.1.322 `hhi()`); it
+        // also leaves the process title and terminal tab alone, which a
+        // piped CLI never shows anyway. A `claude` the run starts inherits it.
+        cmd.env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
         // "200K" really limits the window (see `caps_context_at_200k`).
         if caps_context_at_200k(request) {
             cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
@@ -2437,6 +2446,44 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    /// The CLI's own Haiku session-title request is skipped on chat runs and
+    /// titling runs alike: Zeron titles chats itself.
+    #[test]
+    fn runs_turn_off_the_clis_own_session_titles() {
+        let request = RunRequest {
+            mcp: None,
+            prompt: "Read src/paginate.ts and list every bug".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access: Default::default(),
+            plan: false,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
+        };
+        for title_only in [false, true] {
+            let mut cmd =
+                ClaudeHarness::build_command(std::path::Path::new("claude"), &request, title_only);
+            let value = cmd
+                .as_std_mut()
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CODE_DISABLE_TERMINAL_TITLE")
+                .and_then(|(_, value)| value.map(|v| v.to_os_string()));
+            assert_eq!(
+                value.as_deref(),
+                Some(std::ffi::OsStr::new("1")),
+                "title_only {title_only}"
+            );
+        }
     }
 
     #[test]
