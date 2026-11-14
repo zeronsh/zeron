@@ -29,6 +29,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "escape_stops", title = ui.t("settings.general.escape_stops.label"), terms = ui.t("settings.general.escape_stops.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
+	{ key = "keep_chats_local", title = ui.t("settings.general.keep_chats_local.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.keep_chats_local.terms") },
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
@@ -71,7 +72,24 @@ local function load(name: string, method: string, into: State<any>)
 	end)
 end
 
+-- Whether this device keeps its chats local while signed in (the host's,
+-- beside the engine: it decides which workspace the engine opens).
+local keep_local = ui.state("settings_keep_chats_local", nil :: boolean?)
+
+local function set_keep_local(on: boolean)
+	local before = keep_local:peek()
+	keep_local:set(on)
+	-- The engine starts again on the other workspace; the window reconnects.
+	host.call("account.keep_chats_local", on):after(function() end, function(err: any)
+		keep_local:set(before)
+		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message):get(), tone = "danger" }
+	end)
+end
+
 local function load_all()
+	host.call("account.keeps_chats_local"):after(function(on: any)
+		keep_local:set(on == true)
+	end, function() end)
 	load("credit", "GetCommitCredit", credit)
 	load("worktrees", "GetWorktreeSettings", worktrees)
 	load("titles", "GetTitleSettings", titles)
@@ -263,6 +281,13 @@ function M.view(): Node
 					label = ui.t("settings.general.hide_emails.label"),
 					description = ui.t("settings.general.hide_emails.description"),
 					control = ds.Switch { value = prefs.hide_emails, label = ui.t("settings.general.hide_emails.label") },
+				}),
+				row("keep_chats_local", {
+					label = ui.t("settings.general.keep_chats_local.label"),
+					description = ui.t("settings.general.keep_chats_local.description"),
+					control = engine_switch(ui.t("settings.general.keep_chats_local.label"), function(): boolean?
+						return keep_local:get()
+					end, set_keep_local),
 				}),
 			},
 		},

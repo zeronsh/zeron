@@ -1150,6 +1150,11 @@
         "description": "在所有位置模糊显示，方便共享屏幕。点按即可查看。",
         "terms": "屏幕共享 录屏 模糊 马赛克 隐私 遮盖 screen sharing recording blur blurred mosaic private censor redact"
       },
+      "keep_chats_local": {
+        "label": "将对话保留在此设备上",
+        "description": "保持登录，但此设备的对话、对话列表和项目不会同步到 Zeron 的服务器。你的其他设备看不到它们，此设备也看不到其他设备的。切换时 Zeron 会重启其引擎。",
+        "terms": "同步 本地 离线 隐私 服务器 云端 上传 对话 记录 设备 sync synced local only offline private privacy server cloud upload chats transcripts devices"
+      },
       "links_in": {
         "external": "默认浏览器。",
         "tab": "对话旁边的浏览器标签页。"

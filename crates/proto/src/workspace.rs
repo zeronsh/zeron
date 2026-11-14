@@ -74,6 +74,32 @@ pub mod capabilities {
     }
 }
 
+/// The marker in the data dir that keeps chats on this device while signed
+/// in: an engine started with it opens the local workspace even with a saved
+/// session, so chats, the chat list and projects never join the account's
+/// rooms. Read once, as the engine starts; changing it takes a restart.
+pub const KEEP_CHATS_LOCAL_FILE: &str = "keep-chats-local";
+
+/// Whether this device keeps its chats local while signed in.
+pub fn keeps_chats_local(data_dir: &std::path::Path) -> bool {
+    data_dir.join(KEEP_CHATS_LOCAL_FILE).exists()
+}
+
+/// Keep this device's chats local while signed in (`true`), or let a signed-in
+/// engine sync them again (`false`). Takes effect at the engine's next start.
+pub fn set_keep_chats_local(data_dir: &std::path::Path, on: bool) -> std::io::Result<()> {
+    let marker = data_dir.join(KEEP_CHATS_LOCAL_FILE);
+    if on {
+        std::fs::create_dir_all(data_dir)?;
+        std::fs::write(marker, b"")
+    } else {
+        match std::fs::remove_file(marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+}
+
 /// The fixed data boundary selected when an engine runtime is assembled.
 ///
 /// Authentication can change while a runtime is alive, but its workspace scope

@@ -558,6 +558,13 @@ impl Auth {
         self.inner.loaded_workos_session
     }
 
+    /// Whether this device keeps its chats local while signed in
+    /// ([`zeron_proto::KEEP_CHATS_LOCAL_FILE`] in the data dir). Only
+    /// [`crate::Engine::initial_workspace_scope`] should act on it, once.
+    pub fn keeps_chats_local(&self) -> bool {
+        zeron_proto::keeps_chats_local(&self.inner.config.data_dir)
+    }
+
     /// Live auth status (current value + changes).
     pub fn watch_state(&self) -> watch::Receiver<AuthState> {
         self.inner.state_tx.subscribe()

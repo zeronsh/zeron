@@ -283,16 +283,36 @@ impl Engine {
         self.follow_session();
     }
 
+    /// Whether this device keeps its chats local while signed in.
+    pub fn keeps_chats_local(&self) -> bool {
+        self.data_dir().is_some_and(|dir| zeron_proto::keeps_chats_local(&dir))
+    }
+
+    /// Keep this device's chats local while signed in, or sync them again:
+    /// saved for the engine's next start, and the engine started again now
+    /// if its workspace no longer follows (see [`manager::needs_restart`]).
+    pub fn keep_chats_local(&self, on: bool) -> Result<(), String> {
+        let dir = self.data_dir().ok_or("offline")?;
+        zeron_proto::set_keep_chats_local(&dir, on).map_err(|error| error.to_string())?;
+        self.follow_session();
+        Ok(())
+    }
+
     fn follow_session(&self) {
         let scope = self.scope.borrow().clone();
-        if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get()) {
+        let keep_local = self.keeps_chats_local();
+        if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get(), keep_local) {
             return;
         }
         let Some(rpc) = self.rpc.borrow().clone() else {
             return;
         };
         self.restarting.set(true);
-        eprintln!("zeron-zgx: engine: signed in on a local workspace; starting it again to sync");
+        if keep_local {
+            eprintln!("zeron-zgx: engine: chats kept on this device; starting it again on the local workspace");
+        } else {
+            eprintln!("zeron-zgx: engine: signed in on a local workspace; starting it again to sync");
+        }
         self.spawn(async move {
             // It answers, then stops; the connection ends and a new engine
             // is started in its place.

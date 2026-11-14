@@ -949,9 +949,11 @@ impl Engine {
             WorkspaceScope::Synced
         } else if !auth.workos_enabled() {
             WorkspaceScope::Development
-        } else if auth.loaded_workos_session() {
+        } else if auth.loaded_workos_session() && !auth.keeps_chats_local() {
             WorkspaceScope::Synced
         } else {
+            // Signed out, or signed in with chats kept on this device: the
+            // local profile, with no edge transports.
             WorkspaceScope::Local
         }
     }

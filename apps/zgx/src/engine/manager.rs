@@ -402,9 +402,15 @@ fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
 
 /// Whether the engine has to start again to follow its session: signed in
 /// (or choosing an organization) while its workspace is still the local
-/// one it opened signed out.
-pub fn needs_restart(scope: Option<&str>, signed_in: bool) -> bool {
-    signed_in && scope == Some("local")
+/// one it opened signed out, unless this device keeps its chats local; or
+/// synced while it now keeps them local.
+pub fn needs_restart(scope: Option<&str>, signed_in: bool, keep_local: bool) -> bool {
+    signed_in
+        && match scope {
+            Some("local") => !keep_local,
+            Some("synced") => keep_local,
+            _ => false,
+        }
 }
 
 #[cfg(test)]
@@ -426,11 +432,23 @@ mod tests {
 
     #[test]
     fn a_signed_in_session_on_a_local_workspace_restarts() {
-        assert!(needs_restart(Some("local"), true));
-        assert!(!needs_restart(Some("local"), false));
-        assert!(!needs_restart(Some("synced"), true));
-        assert!(!needs_restart(Some("development"), true));
-        assert!(!needs_restart(None, true));
+        assert!(needs_restart(Some("local"), true, false));
+        assert!(!needs_restart(Some("local"), false, false));
+        assert!(!needs_restart(Some("synced"), true, false));
+        assert!(!needs_restart(Some("development"), true, false));
+        assert!(!needs_restart(None, true, false));
+    }
+
+    #[test]
+    fn keeping_chats_local_holds_a_signed_in_engine_local() {
+        // Signed in and kept local: the local workspace stays.
+        assert!(!needs_restart(Some("local"), true, true));
+        // Kept local after it synced: back to the local workspace.
+        assert!(needs_restart(Some("synced"), true, true));
+        // Signed out, it changes nothing.
+        assert!(!needs_restart(Some("local"), false, true));
+        assert!(!needs_restart(Some("development"), true, true));
+        assert!(!needs_restart(None, true, true));
     }
 
     /// A development build never touches the production engine: its port,

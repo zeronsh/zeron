@@ -341,6 +341,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Ok(Value::Nil)
         }
     });
+    host.async_action("account.keeps_chats_local", move |_| async move {
+        Ok(Value::Bool(engine::get().keeps_chats_local()))
+    });
+    host.async_action("account.keep_chats_local", move |on| async move {
+        crate::plugins::preview::refuse("account.keep_chats_local")?;
+        engine::get().keep_chats_local(matches!(on, Value::Bool(true)))?;
+        Ok(Value::Nil)
+    });
     let a = auth.clone();
     host.async_action("account.username", move |_| {
         let a = a.clone();

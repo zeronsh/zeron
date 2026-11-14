@@ -1150,6 +1150,11 @@
         "description": "Blurred everywhere, for screen sharing. Click one to see it.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact"
       },
+      "keep_chats_local": {
+        "label": "Keep chats on this device",
+        "description": "Stay signed in, but this device's chats, chat list and projects aren't synced to Zeron's servers. Your other devices won't see them, and this one won't see theirs. Zeron restarts its engine to switch.",
+        "terms": "sync synced local only offline private privacy server cloud upload chats transcripts devices"
+      },
       "links_in": {
         "external": "Your default browser.",
         "tab": "A browser tab beside the conversation."
