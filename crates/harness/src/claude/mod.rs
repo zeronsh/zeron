@@ -889,6 +889,13 @@ impl Harness for ClaudeHarness {
     fn wakes_on_background(&self) -> bool {
         true
     }
+    /// `--resume` brings the session back whole (live-verified 2.1.322
+    /// against a replay server: the resumed request carries every earlier
+    /// turn), and teardown never signals mid login refresh
+    /// ([`refresh_lock::settle`]).
+    fn stops_when_idle(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &str {
         "Claude Code"
     }

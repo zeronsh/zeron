@@ -292,6 +292,8 @@ struct Inner {
     /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
     /// runs get a token for it instead of a `zeron mcp` process.
     mcp_endpoint: Mutex<Option<Arc<zeron_mcp::http::McpHttpServer>>>,
+    /// Per chat: how many other devices have its transcript open now.
+    remote_viewers: Arc<Mutex<HashMap<String, usize>>>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -338,6 +340,42 @@ struct Inner {
     plugins: OnceLock<crate::plugins::Plugins>,
 }
 
+/// How long a runtime parked between turns with nothing pending keeps its
+/// agent process when its driver resumes sessions whole
+/// ([`Harness::stops_when_idle`]). Then it is stopped, and the next message
+/// resumes the session (`--resume`), paying a cold start once.
+///
+/// Measured (docs in the PR): a parked Claude CLI holds ~200 MB and wakes
+/// ~1% of a core at rest, and resuming one costs the next message ~0.5 s
+/// before its request leaves. Two minutes covers reading a reply and
+/// writing the next message in one sitting, so a conversation in progress
+/// stays warm, while a chat left alone gives its memory back soon.
+pub const AGENT_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The idle window of drivers not stopped after [`AGENT_IDLE_STOP`].
+const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A live subagent silent this long is presumed lost (its terminal signal
+/// went missing) and no longer holds its runtime.
+const SUBAGENT_SILENCE: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
+
+/// One other device's open view of a chat ([`SessionsEngine::retain_remote_viewer`]).
+pub struct RemoteViewer {
+    viewers: Arc<Mutex<HashMap<String, usize>>>,
+    chat_id: String,
+}
+
+impl Drop for RemoteViewer {
+    fn drop(&mut self) {
+        let mut viewers = lock(&self.viewers);
+        if let Some(count) = viewers.get_mut(&self.chat_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                viewers.remove(&self.chat_id);
+            }
+        }
+    }
+}
 
 /// The engine binary's stdio-to-HTTP MCP forwarder ([`zeron_mcp::proxy`]).
 pub const MCP_PROXY_SUBCOMMAND: &str = "mcp-proxy";
@@ -376,6 +414,7 @@ impl SessionsEngine {
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
                 mcp_endpoint: Mutex::new(None),
+                remote_viewers: Arc::default(),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -479,6 +518,18 @@ impl SessionsEngine {
         let endpoint = zeron_mcp::http::McpHttpServer::bind(factory).await?;
         *lock(&self.inner.mcp_endpoint) = Some(Arc::new(endpoint));
         Ok(())
+    }
+
+    /// Another device has `chat_id`'s transcript open until the guard drops:
+    /// its runtime is not stopped for idleness meanwhile.
+    pub fn retain_remote_viewer(&self, chat_id: &str) -> RemoteViewer {
+        *lock(&self.inner.remote_viewers)
+            .entry(chat_id.to_owned())
+            .or_default() += 1;
+        RemoteViewer {
+            viewers: self.inner.remote_viewers.clone(),
+            chat_id: chat_id.to_owned(),
+        }
     }
 
     /// Wire the plugins service: local runs get its native MCP servers.
@@ -2599,6 +2650,19 @@ impl Inner {
             });
         }
         seq
+    }
+
+    /// Whether a question of this chat's waits on the person.
+    fn awaiting_input(&self, chat_id: &str) -> bool {
+        lock(&self.statuses)
+            .get(chat_id)
+            .is_some_and(|session| session.status == SessionStatus::AwaitingInput)
+    }
+
+    /// Whether another device has this chat open now
+    /// ([`SessionsEngine::retain_remote_viewer`]).
+    fn watched_remotely(&self, chat_id: &str) -> bool {
+        lock(&self.remote_viewers).get(chat_id).is_some_and(|n| *n > 0)
     }
 
     /// Bump the session's freshness on stream activity WITHOUT a status
@@ -4737,22 +4801,28 @@ async fn drive_run(
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
     // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (zeron SESSION_IDLE_MS). A voice
-    // orchestrator holds Codex and its MCP servers (~200 MB) for calls only,
-    // so it goes after 5 minutes. A call holds the reaper off, and the window
-    // restarts at hang-up. `ZERON_SESSION_IDLE_MS` overrides both (tests).
-    let session_idle = std::env::var("ZERON_SESSION_IDLE_MS")
+    // latency. `Some(when)` = idle since then; the idle reaper below stops a
+    // runtime nobody comes back to. A driver whose resume brings the session
+    // back whole ([`Harness::stops_when_idle`]) is stopped after
+    // [`AGENT_IDLE_STOP`], the rest after [`SESSION_IDLE`] (zeron
+    // SESSION_IDLE_MS). A voice orchestrator holds Codex and its MCP servers
+    // (~200 MB) for calls only, so it goes after 5 minutes. A call holds the
+    // reaper off, and the window restarts at hang-up. Nothing pending is
+    // ever stopped (see the reaper arm). `ZERON_SESSION_IDLE_MS` overrides
+    // every window (tests, the measurement rig).
+    let idle_override = std::env::var("ZERON_SESSION_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(
-            if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
-                5 * 60
-            } else {
-                30 * 60
-            },
-        ));
+        .map(std::time::Duration::from_millis);
+    let session_idle = idle_override.unwrap_or(
+        if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
+            std::time::Duration::from_secs(5 * 60)
+        } else if harness.stops_when_idle() {
+            AGENT_IDLE_STOP
+        } else {
+            SESSION_IDLE
+        },
+    );
     // A live subagent stretches the window, but never unbounded: every
     // driver's subagent terminal is a best-effort vendor signal (claude's
     // untagged task_notification, grok's subagent_finished, codex thread
@@ -4760,7 +4830,13 @@ async fn drive_run(
     // loop's registry heartbeat — until the chat is archived. A subagent
     // silent this long (4h by default) is presumed lost; the reap stamps its
     // chip failed.
-    let subagent_silence = session_idle * 8;
+    let subagent_silence = idle_override.map_or(SUBAGENT_SILENCE, |idle| idle * 8);
+    // Wake-ups the agent scheduled for itself (Claude's `ScheduleWakeup`,
+    // until a wake turn starts) and session crons it created (`CronCreate`
+    // less `CronDelete`): both live in its process, so it is never stopped
+    // while any is pending.
+    let mut scheduled_wakeups: u32 = 0;
+    let mut session_crons: u32 = 0;
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
     // A parked runtime whose agent reports background work (see
@@ -4915,6 +4991,7 @@ async fn drive_run(
                 // ended): a turn is running from this moment, not from its
                 // first words.
                 () = turn.woke() => {
+                    scheduled_wakeups = 0;
                     if idle_since.is_some() {
                         tracing::info!(chat = %chat_id, "parked session resumed by a wake turn");
                         idle_since = None;
@@ -4988,6 +5065,27 @@ async fn drive_run(
                     }
                     if std::mem::take(&mut held_for_background) {
                         // The work just ended: a full idle window from here.
+                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        continue;
+                    }
+                    // Anything else still pending in this runtime holds it
+                    // too: the agent said it waits on work, it scheduled a
+                    // wake-up or a cron, a question waits on the person, or
+                    // another device has the chat open (its person is likely
+                    // to write next). Checked again a full window later.
+                    let held = if wait.is_some() {
+                        Some("the agent waits on background work")
+                    } else if scheduled_wakeups > 0 || session_crons > 0 {
+                        Some("the agent scheduled a wake-up")
+                    } else if inner.awaiting_input(&chat_id) {
+                        Some("a question waits on the person")
+                    } else if inner.watched_remotely(&chat_id) {
+                        Some("another device has the chat open")
+                    } else {
+                        None
+                    };
+                    if let Some(why) = held {
+                        tracing::info!(chat = %chat_id, why, "idle reaper deferred");
                         reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
                         continue;
                     }
@@ -5149,6 +5247,19 @@ async fn drive_run(
             };
             event
         };
+        // Scheduled wake-ups and session crons live in the agent's process.
+        if let AgentEvent::ToolCall {
+            call: zeron_proto::ToolCall::Unknown { name, .. },
+            ..
+        } = &event
+        {
+            match name.as_str() {
+                "ScheduleWakeup" => scheduled_wakeups += 1,
+                "CronCreate" => session_crons += 1,
+                "CronDelete" => session_crons = session_crons.saturating_sub(1),
+                _ => {}
+            }
+        }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream

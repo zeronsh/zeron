@@ -299,6 +299,14 @@ pub trait Harness: Send + Sync {
     fn wakes_on_background(&self) -> bool {
         false
     }
+    /// Whether a runtime parked between turns, with nothing pending, may be
+    /// stopped once idle a short while (the engine's `AGENT_IDLE_STOP`) and
+    /// its session resumed by the next message — for drivers whose resume
+    /// is proven to bring the whole context back. Elsewhere the runtime
+    /// stays warm for the long idle window, as before.
+    fn stops_when_idle(&self) -> bool {
+        false
+    }
     /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
     /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
     /// with its background work. Otherwise stopping a turn tears the runtime

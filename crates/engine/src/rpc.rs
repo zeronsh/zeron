@@ -3722,6 +3722,10 @@ impl RpcService for EngineRpc {
                 // discardable) even when the chat is archived; the guard lives
                 // exactly as long as the stream.
                 let interest = self.diff_sync.retain_chat(&p.chat_id);
+                // Another device reading along keeps the chat's agent warm:
+                // its person is likely to write next.
+                let remote = matches!(zeron_rpc::caller(), zeron_rpc::Caller::Peer { .. })
+                    .then(|| self.sessions.retain_remote_viewer(&p.chat_id));
                 let stream = if let Some(known) = known {
                     since_doc_messages_stream(self.doc_host.clone(), p.chat_id, options, known).await?
                 } else if opening_tail {
@@ -3736,7 +3740,7 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(
                     stream
                         .map(move |frame| {
-                            let _held = &interest;
+                            let _held = (&interest, &remote);
                             frame
                         })
                         .boxed(),
