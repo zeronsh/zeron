@@ -370,6 +370,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
+    // Quitting: no speech model left loaded (Metal's device, a C++ static,
+    // aborts the app at exit if one is; zeron_voice also does this at exit,
+    // for a quit that never comes back here, as macOS's ⌘Q).
+    zeron_voice::release_models();
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
     about::install_on_quit();

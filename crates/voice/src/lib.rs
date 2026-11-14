@@ -256,9 +256,10 @@ impl Recognizer {
         static LOGS: std::sync::Once = std::sync::Once::new();
         LOGS.call_once(transcribe_cpp::init_logging);
         let failed = |e: transcribe_cpp::Error| anyhow::anyhow!("Could not load {}: {e}", m.name);
-        let session = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
+        let mut session = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
             .and_then(|model| model.session())
             .map_err(failed)?;
+        session.set_cancel_token(&ABORT);
         let language = match m
             .files
             .iter()
@@ -273,6 +274,12 @@ impl Recognizer {
             )),
             None => None,
         };
+        // After the first load, so it runs before the C++ statics this load
+        // made (exit runs its handlers newest first).
+        static AT_EXIT: std::sync::Once = std::sync::Once::new();
+        AT_EXIT.call_once(|| unsafe {
+            atexit(release_at_exit);
+        });
         Ok(Self { session, language })
     }
     pub fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
@@ -738,6 +745,7 @@ impl Model for Recognizer {
 fn serve<C: Recording, M: Model>(
     rx: std::sync::mpsc::Receiver<Command>,
     keep: &AtomicU64,
+    running: &Running,
     start: impl Fn(&Job) -> Result<C> + Sync,
     mut load: impl FnMut(&Path) -> Result<M>,
 ) {
@@ -765,6 +773,7 @@ fn serve<C: Recording, M: Model>(
             }
             Err(_) => break,
         };
+        *running.lock().unwrap_or_else(|e| e.into_inner()) = Some(job.cancel.clone());
         // A native panic must not take down the worker, and with it every
         // later session, until the app restarts.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -791,7 +800,11 @@ fn serve<C: Recording, M: Model>(
                 "Dictation stopped unexpectedly. Your draft is safe."
             ))
         });
+        *running.lock().unwrap_or_else(|e| e.into_inner()) = None;
         since = Instant::now();
+        if EXITING.load(Ordering::Acquire) {
+            cached = None;
+        }
         match result {
             Ok(Some(text)) => {
                 let _ = job.events.try_send(Event::Final(text));
@@ -822,6 +835,7 @@ impl Session {
                 serve(
                     rx,
                     &KEEP_MS,
+                    &RUNNING,
                     |job| Capture::start(job.device.as_deref(), job.level.clone()),
                     |dir| Recognizer::load(dir),
                 )
@@ -874,6 +888,61 @@ impl Drop for Session {
 }
 pub fn busy() -> bool {
     BUSY.load(Ordering::Acquire)
+}
+
+/// Stops every decode as Zeron exits (`release_models`).
+static ABORT: std::sync::LazyLock<transcribe_cpp::CancelToken> =
+    std::sync::LazyLock::new(transcribe_cpp::CancelToken::new);
+/// Zeron is exiting: no model stays loaded after a job.
+static EXITING: AtomicBool = AtomicBool::new(false);
+/// The job the worker runs now: its cancel flag, for `release_models`.
+type Running = Mutex<Option<Arc<AtomicBool>>>;
+static RUNNING: Running = Mutex::new(None);
+
+/// Frees the loaded model before the process goes: a decode under way stops,
+/// the worker lets the model go, and this waits for it (2 s at most). On
+/// macOS, Metal's device is a C++ static whose destructor, at exit, aborts
+/// the app if a model still holds its buffers. Runs at exit by itself
+/// (registered after the first load, so before that destructor); call it
+/// too where the app knows it's quitting.
+pub fn release_models() {
+    EXITING.store(true, Ordering::Release);
+    if let Some(worker) = WORKER.get() {
+        release(worker, &RUNNING, &ABORT, Duration::from_secs(2));
+    }
+}
+fn release(
+    worker: &std::sync::mpsc::SyncSender<Command>,
+    running: &Running,
+    abort: &transcribe_cpp::CancelToken,
+    within: Duration,
+) {
+    // A recording under way ends (nothing comes of it), a decode stops.
+    if let Some(job) = running.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        job.store(true, Ordering::Release);
+    }
+    abort.cancel();
+    let until = Instant::now() + within;
+    let (done, released) = std::sync::mpsc::sync_channel(1);
+    let mut command = Command::Unload(done);
+    // (A job may be queued ahead: it ends at once, the decode aborted.)
+    loop {
+        match worker.try_send(command) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TrySendError::Full(back)) if Instant::now() < until => {
+                command = back;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return,
+        }
+    }
+    let _ = released.recv_timeout(until.saturating_duration_since(Instant::now()));
+}
+extern "C" fn release_at_exit() {
+    release_models();
+}
+unsafe extern "C" {
+    fn atexit(callback: extern "C" fn()) -> i32;
 }
 
 /// Retire cached weights on the worker, and wait (briefly) until they are.
