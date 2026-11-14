@@ -31,6 +31,45 @@ export type Token = { trigger: Trigger, query: string, from: number, to: number 
 -- What a token is made of after its trigger.
 local WORD = "[%w%./_:%-]"
 
+-- How far from the caret a token is looked for, each way. A token never
+-- crosses a line and none runs this long, so only the caret's line, this
+-- much of it at most, is read: a keystroke in a draft of 30,000 lines costs
+-- what one in a draft of a line does. (The whole draft was copied and
+-- matched against at every keystroke: 9 ms of each, at 30,000 lines.)
+local REACH = 1024
+
+-- Whether the `upto` bytes of `text` leave it in a fenced block: an odd
+-- number of its lines start with ``` (after blanks). Found with a plain
+-- search, which skips the lines between fences rather than matching each.
+local function fenced(text: string, upto: number): boolean
+	local fences, from = 0, 1
+	while true do
+		local s = string.find(text, "```", from, true)
+		if s == nil or s + 2 > upto then
+			break
+		end
+		-- Only blanks (`%s`) between its line's start and it.
+		local i = s - 1
+		while i >= 1 do
+			local c = string.byte(text, i)
+			if c == 10 or (c ~= 32 and (c < 9 or c > 13)) then
+				break
+			end
+			i -= 1
+		end
+		if i < 1 or string.byte(text, i) == 10 then
+			fences += 1
+		end
+		-- (A line counts once, however many it holds.)
+		local nl = string.find(text, "\n", s + 3, true)
+		if nl == nil then
+			break
+		end
+		from = nl + 1
+	end
+	return fences % 2 == 1
+end
+
 -- The token the caret is in, if any: its trigger, what has been typed
 -- before the caret (the query), and where the whole token runs, to its
 -- end past the caret too, so a pick replaces all of it (a caret in the
@@ -38,7 +77,13 @@ local WORD = "[%w%./_:%-]"
 -- trigger starts a token only at a start, after a space, or after an
 -- opening bracket.
 function M.token(text: string, caret: number): Token?
-	local before = string.sub(text, 1, caret)
+	-- The caret's line before it (`REACH` of it at most), which starts
+	-- `base` bytes into the text.
+	local lo = math.max(1, caret - REACH + 1)
+	local near = string.sub(text, lo, caret)
+	local line = string.match(near, "^.*\n()")
+	local base = lo - 1 + (if line then line - 1 else 0)
+	local before = if line then string.sub(near, line) else near
 	local function starts(at: number): boolean
 		local prev = if at > 1 then string.sub(before, at - 1, at - 1) else ""
 		return prev == "" or string.match(prev, "[%s%(%[{>]") ~= nil
@@ -46,18 +91,8 @@ function M.token(text: string, caret: number): Token?
 	-- Where the token ends: over its characters after the caret (a
 	-- command's never cross a slash).
 	local function ends(chars: string): number
-		local rest = string.match(string.sub(text, caret + 1), "^" .. chars .. "*") or ""
+		local rest = string.match(string.sub(text, caret + 1, caret + REACH), "^" .. chars .. "*") or ""
 		return caret + #rest
-	end
-	-- Inside a fenced block, nothing.
-	local function fenced(at: number): boolean
-		local fences = 0
-		for line in string.gmatch(string.sub(text, 1, at), "[^\n]*") do
-			if string.match(line, "^%s*```") then
-				fences += 1
-			end
-		end
-		return fences % 2 == 1
 	end
 	-- `@` and `$`: back over the token's characters (a path's slashes among
 	-- them) to the trigger.
@@ -74,19 +109,20 @@ function M.token(text: string, caret: number): Token?
 		local query = string.sub(before, at + 1)
 		local to = ends(WORD)
 		-- "$12" is money, wherever the caret sits in it.
-		if trigger == "$" and string.match(string.sub(text, at + 1, to), "^%d") then
+		if trigger == "$" and string.match(string.sub(text, base + at + 1, to), "^%d") then
 			return nil
 		end
-		if fenced(at) then
+		-- Inside a fenced block, nothing.
+		if fenced(text, base + at) then
 			return nil
 		end
-		return { trigger = trigger :: Trigger, query = query, from = at - 1, to = to }
+		return { trigger = trigger :: Trigger, query = query, from = base + at - 1, to = to }
 	end
 	-- `/`: the run after the last slash, where that slash starts a word (a
 	-- path's slashes never do), with no slash in the run.
 	local s = string.find(before, "/[%w%._:%-]*$")
-	if s and starts(s) and not fenced(s) then
-		return { trigger = "/", query = string.sub(before, s + 1), from = s - 1, to = ends("[%w%._:%-]") }
+	if s and starts(s) and not fenced(text, base + s) then
+		return { trigger = "/", query = string.sub(before, s + 1), from = base + s - 1, to = ends("[%w%._:%-]") }
 	end
 	return nil
 end
