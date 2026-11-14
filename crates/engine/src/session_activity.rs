@@ -31,9 +31,8 @@ impl SessionsEngine {
         let task = tokio::spawn(async move {
             // Only checks: a refresh is stored once a heartbeat old, so this
             // bounds terminal leases to a heartbeat plus one tick apart.
-            let mut tick = tokio::time::interval(super::HEARTBEAT_CHECK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await;
+            // On the beat grid, with the sockets' pings (`zeron_sync::wake`).
+            let mut tick = zeron_sync::wake::beat_interval(super::HEARTBEAT_CHECK);
             let mut previous = Vec::<Session>::new();
             loop {
                 let Some(inner) = inner.upgrade() else { break };
