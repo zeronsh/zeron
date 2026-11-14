@@ -516,3 +516,67 @@ fn the_model_stays_ready_as_long_as_the_setting_says() {
     drop(worker);
     serving.join().unwrap();
 }
+
+#[test]
+fn a_slow_first_load_still_yields_the_words_with_no_error() {
+    // A cold model (two seconds to load) while he speaks from the start.
+    let speech: Vec<f32> = (0..8_000).map(|i| 0.3 * (i as f32 * 0.05).cos()).collect();
+    let (mic, buffers) = mpsc::sync_channel(200);
+    let (tx, events) = mpsc::sync_channel(8);
+    let mut session = Session {
+        stop: Arc::new(AtomicBool::new(false)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        level: Arc::new(AtomicU32::new(0)),
+        events,
+    };
+    let job = Job {
+        dir: Default::default(),
+        stop: session.stop.clone(),
+        cancel: session.cancel.clone(),
+        level: session.level.clone(),
+        device: None,
+        events: tx.clone(),
+    };
+    let worker = std::thread::spawn(move || {
+        let result = run_job(
+            &job,
+            || Ok(Microphone::open(buffers)),
+            || {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(|samples: Vec<f32>, _| Ok(format!("{} samples", samples.len())))
+            },
+        );
+        if let Ok(Some(text)) = result {
+            let _ = tx.send(Event::Final(text));
+        }
+    });
+    for buffer in speech.chunks(160) {
+        mic.send(buffer.to_vec()).unwrap();
+    }
+    // Listening at once, long before the model is ready.
+    let started = Instant::now();
+    assert!(matches!(
+        session.events.recv_timeout(WAIT).unwrap(),
+        Event::Listening
+    ));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    drop(mic);
+    session.finish();
+    let mut seen = Vec::new();
+    while let Ok(event) = session.events.recv_timeout(WAIT) {
+        let last = matches!(event, Event::Final(_));
+        seen.push(event);
+        if last {
+            break;
+        }
+    }
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::Failed(_))),
+        "{seen:?}"
+    );
+    assert!(
+        matches!(seen.last(), Some(Event::Final(text)) if text == "8000 samples"),
+        "{seen:?}"
+    );
+    worker.join().unwrap();
+}
