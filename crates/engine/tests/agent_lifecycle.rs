@@ -1,5 +1,7 @@
 //! An agent process parked between turns with nothing pending is stopped
-//! after a short idle period ([`zeron_engine::sessions::AGENT_IDLE_STOP`]),
+//! after a short idle period ([`zeron_engine::sessions::AGENT_IDLE_STOP`]
+//! while its chat is open anywhere, [`zeron_engine::sessions::UNWATCHED_IDLE_STOP`]
+//! when it's open nowhere),
 //! where its driver resumes sessions whole; the next message resumes it.
 //! Nothing pending is ever stopped: background work, a scheduled wake-up, a
 //! question, another device reading along.
@@ -19,7 +21,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
-use zeron_engine::sessions::AGENT_IDLE_STOP;
+use zeron_engine::sessions::{AGENT_IDLE_STOP, UNWATCHED_IDLE_STOP};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls, TurnControl};
 use zeron_proto::{
@@ -291,16 +293,16 @@ impl Rig {
     }
 }
 
-/// Just under, then just past, the idle window.
-async fn idle_window() {
-    tokio::time::sleep(AGENT_IDLE_STOP - Duration::from_secs(5)).await;
+/// Just under the idle window of a chat open nowhere.
+async fn unwatched_window() {
+    tokio::time::sleep(UNWATCHED_IDLE_STOP - Duration::from_secs(5)).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_idle_agent_is_stopped_and_the_next_message_resumes_its_session() {
+async fn an_unwatched_idle_agent_stops_after_30_s_and_the_next_message_resumes() {
     let rig = rig(true);
     rig.send("hello").await;
-    idle_window().await;
+    unwatched_window().await;
     assert!(rig.live(), "stopped before its idle window ran out");
     tokio::time::sleep(Duration::from_secs(10)).await;
     rig.stopped().await;
@@ -315,9 +317,41 @@ async fn an_idle_agent_is_stopped_and_the_next_message_resumes_its_session() {
     rig.core.sessions.shutdown().await;
 }
 
+/// A chat open (in this device's app or another's): the person is likely
+/// to reply, so its agent keeps the two-minute window.
+#[tokio::test(start_paused = true)]
+async fn a_watched_chat_s_agent_stops_only_after_two_minutes() {
+    let rig = rig(true);
+    let viewer = rig.core.sessions.retain_viewer(CHAT);
+    rig.send("hello").await;
+    tokio::time::sleep(AGENT_IDLE_STOP - Duration::from_secs(5)).await;
+    assert!(rig.live(), "stopped before the watched window ran out");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    rig.stopped().await;
+    drop(viewer);
+    rig.core.sessions.shutdown().await;
+}
+
+/// Switching away from a chat gives it the short window from then.
+#[tokio::test(start_paused = true)]
+async fn a_watcher_leaving_starts_a_30_s_window() {
+    let rig = rig(true);
+    let viewer = rig.core.sessions.retain_viewer(CHAT);
+    rig.send("hello").await;
+    tokio::time::sleep(Duration::from_secs(100)).await;
+    assert!(rig.live());
+    drop(viewer);
+    unwatched_window().await;
+    assert!(rig.live(), "stopped before 30 s from the viewer leaving");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    rig.stopped().await;
+    rig.core.sessions.shutdown().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_conversation_in_progress_stays_warm() {
     let rig = rig(true);
+    let viewer = rig.core.sessions.retain_viewer(CHAT);
     rig.send("hello").await;
     // Replies inside the window keep the one process.
     for n in 0..5 {
@@ -326,9 +360,11 @@ async fn a_conversation_in_progress_stays_warm() {
     }
     assert_eq!(rig.ledger.spawns.load(Ordering::SeqCst), 1);
     assert_eq!(rig.kills(), 0);
+    drop(viewer);
     rig.core.sessions.shutdown().await;
 }
 
+/// Holds win over either window: background work, open or not.
 #[tokio::test(start_paused = true)]
 async fn an_agent_with_background_work_is_never_stopped() {
     let rig = rig(true);
@@ -336,11 +372,15 @@ async fn an_agent_with_background_work_is_never_stopped() {
     // Hours of background work: never stopped.
     tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
     assert!(rig.live(), "stopped while its background work ran");
+    let viewer = rig.core.sessions.retain_viewer(CHAT);
+    tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+    drop(viewer);
+    assert!(rig.live(), "stopped while its background work ran");
     assert_eq!(rig.kills(), 0);
     // The work ends: a full idle window from then, then stopped.
     let turn = rig.ledger.turn.lock().unwrap().clone().unwrap();
     turn.set_background(0);
-    idle_window().await;
+    unwatched_window().await;
     assert!(rig.live(), "stopped as its background work ended");
     tokio::time::sleep(AGENT_IDLE_STOP * 2).await;
     rig.stopped().await;
@@ -354,19 +394,6 @@ async fn an_agent_with_a_scheduled_wake_up_is_never_stopped() {
     tokio::time::sleep(Duration::from_secs(2 * 60 * 60)).await;
     assert!(rig.live(), "stopped with a wake-up pending");
     assert_eq!(rig.kills(), 0);
-    rig.core.sessions.shutdown().await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_agent_another_device_is_reading_stays_warm() {
-    let rig = rig(true);
-    rig.send("hello").await;
-    let viewer = rig.core.sessions.retain_remote_viewer(CHAT);
-    tokio::time::sleep(AGENT_IDLE_STOP * 10).await;
-    assert!(rig.live(), "stopped while another device had the chat open");
-    drop(viewer);
-    tokio::time::sleep(AGENT_IDLE_STOP * 3).await;
-    rig.stopped().await;
     rig.core.sessions.shutdown().await;
 }
 

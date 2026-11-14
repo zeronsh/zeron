@@ -292,8 +292,8 @@ struct Inner {
     /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
     /// runs get a token for it instead of a `zeron mcp` process.
     mcp_endpoint: Mutex<Option<Arc<zeron_mcp::http::McpHttpServer>>>,
-    /// Per chat: how many other devices have its transcript open now.
-    remote_viewers: Arc<Mutex<HashMap<String, usize>>>,
+    /// Per chat: who has its transcript open now, and when the last left.
+    viewers: Arc<Viewers>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -368,21 +368,78 @@ const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60
 /// went missing) and no longer holds its runtime.
 const SUBAGENT_SILENCE: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
 
-/// One other device's open view of a chat ([`SessionsEngine::retain_remote_viewer`]).
-pub struct RemoteViewer {
-    viewers: Arc<Mutex<HashMap<String, usize>>>,
+/// [`AGENT_IDLE_STOP`] for a chat open nowhere: nobody is reading the reply,
+/// so a next message is unlikely soon. Counted from the later of the turn's
+/// end and the moment its last viewer left. Measured (the ademark A5 shape:
+/// five chats seeded, then at rest): its agents gone within 30 s, against
+/// two minutes; the next message to such a chat costs the resume
+/// (~0.2 s before its request leaves).
+pub const UNWATCHED_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Who has a chat's transcript open: the app on this device or another
+/// device ([`SessionsEngine::retain_viewer`]), and when the last one left.
+#[derive(Default)]
+struct Viewers {
+    open: Mutex<HashMap<String, ViewState>>,
+    /// Bumped on every change: parked runs re-check their idle window.
+    changed: OnceLock<watch::Sender<u64>>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct ViewState {
+    count: usize,
+    /// When the count last fell to zero.
+    left_at: Option<tokio::time::Instant>,
+}
+
+impl Viewers {
+    fn sender(&self) -> &watch::Sender<u64> {
+        self.changed.get_or_init(|| watch::channel(0).0)
+    }
+
+    fn bump(&self) {
+        self.sender().send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// Whether the chat is open anywhere now, and when it was last left.
+    fn state(&self, chat_id: &str) -> ViewState {
+        lock(&self.open).get(chat_id).copied().unwrap_or_default()
+    }
+}
+
+/// One open view of a chat's transcript ([`SessionsEngine::retain_viewer`]).
+pub struct Viewer {
+    viewers: Arc<Viewers>,
     chat_id: String,
 }
 
-impl Drop for RemoteViewer {
+impl Drop for Viewer {
     fn drop(&mut self) {
-        let mut viewers = lock(&self.viewers);
-        if let Some(count) = viewers.get_mut(&self.chat_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                viewers.remove(&self.chat_id);
+        {
+            let mut open = lock(&self.viewers.open);
+            if let Some(state) = open.get_mut(&self.chat_id) {
+                state.count = state.count.saturating_sub(1);
+                if state.count == 0 {
+                    state.left_at = Some(tokio::time::Instant::now());
+                }
             }
         }
+        self.viewers.bump();
+    }
+}
+
+/// The idle window that applies to a chat now: the longer one while its
+/// transcript is open anywhere.
+fn window_now(
+    inner: &Inner,
+    chat_id: &str,
+    watched_idle: std::time::Duration,
+    unwatched_idle: std::time::Duration,
+) -> std::time::Duration {
+    if inner.view_state(chat_id).0 {
+        watched_idle
+    } else {
+        unwatched_idle
     }
 }
 
@@ -423,7 +480,7 @@ impl SessionsEngine {
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
                 mcp_endpoint: Mutex::new(None),
-                remote_viewers: Arc::default(),
+                viewers: Arc::default(),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -529,14 +586,17 @@ impl SessionsEngine {
         Ok(())
     }
 
-    /// Another device has `chat_id`'s transcript open until the guard drops:
-    /// its runtime is not stopped for idleness meanwhile.
-    pub fn retain_remote_viewer(&self, chat_id: &str) -> RemoteViewer {
-        *lock(&self.inner.remote_viewers)
+    /// `chat_id`'s transcript is open (in this device's app or another
+    /// device's) until the guard drops: its parked agent gets the longer
+    /// idle window ([`AGENT_IDLE_STOP`], not [`UNWATCHED_IDLE_STOP`]).
+    pub fn retain_viewer(&self, chat_id: &str) -> Viewer {
+        lock(&self.inner.viewers.open)
             .entry(chat_id.to_owned())
-            .or_default() += 1;
-        RemoteViewer {
-            viewers: self.inner.remote_viewers.clone(),
+            .or_default()
+            .count += 1;
+        self.inner.viewers.bump();
+        Viewer {
+            viewers: self.inner.viewers.clone(),
             chat_id: chat_id.to_owned(),
         }
     }
@@ -2699,10 +2759,10 @@ impl Inner {
             .is_some_and(|session| session.status == SessionStatus::AwaitingInput)
     }
 
-    /// Whether another device has this chat open now
-    /// ([`SessionsEngine::retain_remote_viewer`]).
-    fn watched_remotely(&self, chat_id: &str) -> bool {
-        lock(&self.remote_viewers).get(chat_id).is_some_and(|n| *n > 0)
+    /// Whether the chat is open anywhere, and when its last viewer left.
+    fn view_state(&self, chat_id: &str) -> (bool, Option<tokio::time::Instant>) {
+        let state = self.viewers.state(chat_id);
+        (state.count > 0, state.left_at)
     }
 
     /// Bump the session's freshness on stream activity WITHOUT a status
@@ -4887,6 +4947,14 @@ async fn drive_run(
             SESSION_IDLE
         },
     );
+    // A chat open nowhere: the shorter window, from the later of the turn's
+    // end and its last viewer leaving (only where the short window applies).
+    let short_window = idle_override.is_none()
+        && stops_when_idle
+        && !zeron_proto::voice::is_orchestrator_chat(&chat_id);
+    let unwatched_idle = if short_window { UNWATCHED_IDLE_STOP } else { session_idle };
+    // Viewers coming and going: the window is worked out again.
+    let mut viewers_changed = inner.viewers.sender().subscribe();
     // A live subagent stretches the window, but never unbounded: every
     // driver's subagent terminal is a best-effort vendor signal (claude's
     // untagged task_notification, grok's subagent_finished, codex thread
@@ -5102,11 +5170,31 @@ async fn drive_run(
                 // A live background subagent is somebody still using the child:
                 // the window counts from its last activity, and stretches to
                 // `subagent_silence` while its sink is open.
+                // Someone opened or left a transcript: work the window out again.
+                Ok(()) = viewers_changed.changed(), if idle_since.is_some() => {
+                    continue;
+                }
                 _ = tokio::time::sleep_until(
                     {
-                        let window = if subagents.is_empty() { session_idle } else { subagent_silence };
-                        let base = idle_since
-                            .map(|at| at.max(last_subagent_activity.unwrap_or(at)) + window);
+                        let (watched, left_at) = inner.view_state(&chat_id);
+                        let window = if !subagents.is_empty() {
+                            subagent_silence
+                        } else if watched {
+                            session_idle
+                        } else {
+                            unwatched_idle
+                        };
+                        let base = idle_since.map(|at| {
+                            let mut from = at.max(last_subagent_activity.unwrap_or(at));
+                            // Left alone: from when the last viewer left.
+                            if !watched
+                                && subagents.is_empty()
+                                && let Some(left) = left_at
+                            {
+                                from = from.max(left);
+                            }
+                            from + window
+                        });
                         match (base, reap_deferred_until) {
                             (Some(base), Some(deferred)) => base.max(deferred),
                             (base, deferred) => base.or(deferred).unwrap_or_else(tokio::time::Instant::now),
@@ -5123,34 +5211,31 @@ async fn drive_run(
                     // the runtime for as long as that work lives.
                     if turn.background_live() {
                         tracing::info!(chat = %chat_id, "idle reaper deferred: the agent reports background work");
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
                         held_for_background = true;
                         continue;
                     }
                     if std::mem::take(&mut held_for_background) {
                         // The work just ended: a full idle window from here.
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
                         continue;
                     }
                     // Anything else still pending in this runtime holds it
                     // too: the agent said it waits on work, it scheduled a
-                    // wake-up or a cron, a question waits on the person, or
-                    // another device has the chat open (its person is likely
-                    // to write next). Checked again a full window later.
+                    // wake-up or a cron, or a question waits on the person.
+                    // Checked again a full window later.
                     let held = if wait.is_some() {
                         Some("the agent waits on background work")
                     } else if scheduled_wakeups > 0 || session_crons > 0 {
                         Some("the agent scheduled a wake-up")
                     } else if inner.awaiting_input(&chat_id) {
                         Some("a question waits on the person")
-                    } else if inner.watched_remotely(&chat_id) {
-                        Some("another device has the chat open")
                     } else {
                         None
                     };
                     if let Some(why) = held {
                         tracing::info!(chat = %chat_id, why, "idle reaper deferred");
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
                         continue;
                     }
                     // Belt and braces, trusting no report of the agent's:
@@ -5173,7 +5258,7 @@ async fn drive_run(
                                 ?lingering,
                                 "idle reaper deferred: the agent's process runs children it didn't report"
                             );
-                            reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                            reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
                             continue;
                         }
                     }
