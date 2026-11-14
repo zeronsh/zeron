@@ -254,8 +254,10 @@ fn private_mcp_config(config: &str) -> std::io::Result<(crate::scratch::ScratchD
         options.mode(0o600);
     }
     let mut file = options.open(&path)?;
+    // No `sync_all`: the file lives only as long as the run that reads it at
+    // once, and on macOS it is an `F_FULLFSYNC` that held every agent start
+    // for a disk-cache flush (4 ms on an M5 Max, 6 ms with builds running).
     file.write_all(config.as_bytes())?;
-    file.sync_all()?;
     Ok((dir, path))
 }
 
