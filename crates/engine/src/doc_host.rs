@@ -417,6 +417,20 @@ impl Drop for TransferProgressGuard<'_> {
 /// is never delayed.
 const DEGRADE_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// How often the connectivity monitor looks once the posture has held
+/// healthy for [`CONNECTIVITY_SETTLE_TICKS`] seconds. A fresh degradation is
+/// then seen up to this late, on top of its [`DEGRADE_GRACE`]; recovery from
+/// one is still seen within a second, as the monitor looks every second
+/// while anything is degraded.
+const CONNECTIVITY_STEADY: std::time::Duration = std::time::Duration::from_secs(5);
+const CONNECTIVITY_SETTLE_TICKS: u32 = 3;
+
+/// Nothing degraded: local, or connected with every open chat connected.
+fn connectivity_healthy(posture: &zeron_proto::Connectivity) -> bool {
+    use zeron_proto::ConnectivityState as S;
+    matches!(posture.state, S::Connected | S::Disabled) && posture.chats.iter().all(|chat| chat.connected)
+}
+
 /// One tracked degradation source in [`DegradeGrace`].
 enum GraceKey<'a> {
     OsPath,
@@ -461,6 +475,11 @@ impl DegradeGrace {
         }
         let since = *slot.get_or_insert(now);
         now.duration_since(since) >= DEGRADE_GRACE
+    }
+
+    /// A degradation is being timed: the report may change with time alone.
+    fn timing(&self) -> bool {
+        self.os_path.is_some() || self.registry.is_some() || !self.chats.is_empty()
     }
 
     /// Drop timers for chats that no longer have open docs.
@@ -2442,7 +2461,25 @@ impl DocHost {
                         _ = tokio::time::sleep_until(last + SYNC_PASS_SPACING), if busy => {}
                         _ = kick.notified() => {}
                         Ok(()) = jobs.changed() => {}
-                        Ok(()) = outbox.changed() => {}
+                        Ok(()) = outbox.changed() => {
+                            // Rows a started chat's own client sends: nothing
+                            // for a pass to admit. A streaming chat adds
+                            // several a second, and each pass reads the store.
+                            let Some(inner) = weak.upgrade() else { return };
+                            let changed = inner.store.take_outbox_changes();
+                            let handles = lock(&inner.handles);
+                            let own = changed.iter().all(|id| {
+                                !stopping_ids.contains(id)
+                                    && handles.get(id).is_some_and(|h| {
+                                        h.sync_started.load(Ordering::Acquire)
+                                            && !h.publication_failed.load(Ordering::Acquire)
+                                    })
+                            });
+                            drop(handles);
+                            if own && !busy {
+                                continue;
+                            }
+                        }
                         Ok(()) = socket_contention.changed() => {}
                         Some(Ok(())) = changed(&mut registry_chats) => {}
                         Some(Ok(())) = changed(&mut registry_synced) => {}
@@ -2463,6 +2500,9 @@ impl DocHost {
                 // Whatever changes from here on wakes the next pass.
                 jobs.borrow_and_update();
                 outbox.borrow_and_update();
+                if let Some(inner) = weak.upgrade() {
+                    inner.store.take_outbox_changes();
+                }
                 socket_contention.borrow_and_update();
                 let Some(inner) = weak.upgrade() else { return };
                 let host = Self { inner };
@@ -3998,10 +4038,13 @@ impl DocHost {
     }
 
     /// The connectivity stream: current posture first, then every change.
-    /// Lazily starts a monitor — a 1s recompute over in-memory stats
-    /// (atomics + small locks), published only when the value changes. The
-    /// retry countdown renders client-side from `retry_at_ms`, so quiet
-    /// periods emit nothing at all.
+    /// Lazily starts a monitor — a recompute over in-memory stats (atomics +
+    /// small locks), published only when the value changes: every second
+    /// while it's changing, degraded or timing a degradation's grace, and
+    /// every [`CONNECTIVITY_STEADY`] once it has held healthy (or local) for
+    /// a few seconds, so a settled engine isn't woken each second to find
+    /// nothing changed. The retry countdown renders client-side from
+    /// `retry_at_ms`, so quiet periods emit nothing at all.
     pub fn watch_connectivity(&self) -> watch::Receiver<zeron_proto::Connectivity> {
         let tx = self
             .inner
@@ -4013,12 +4056,17 @@ impl DocHost {
         {
             let host = self.clone();
             self.spawn_worker(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut held = 0u32;
                 loop {
-                    tick.tick().await;
+                    let wait = if held >= CONNECTIVITY_SETTLE_TICKS {
+                        CONNECTIVITY_STEADY
+                    } else {
+                        std::time::Duration::from_secs(1)
+                    };
+                    tokio::time::sleep(wait).await;
                     let next = host.compute_connectivity();
-                    if let Some(tx) = host.inner.connectivity.get() {
+                    let healthy = connectivity_healthy(&next);
+                    let changed = host.inner.connectivity.get().is_some_and(|tx| {
                         tx.send_if_modified(|cur| {
                             if *cur == next {
                                 false
@@ -4026,8 +4074,10 @@ impl DocHost {
                                 *cur = next;
                                 true
                             }
-                        });
-                    }
+                        })
+                    });
+                    let timing = lock(&host.inner.connectivity_grace).timing();
+                    held = if changed || timing || !healthy { 0 } else { held.saturating_add(1) };
                 }
             });
         }
