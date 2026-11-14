@@ -446,6 +446,10 @@ fn batch_override_helper() {
         Some(index) => argv[index + 1..].to_vec(),
         None => Vec::new(),
     };
+    if forwarded.first().is_some_and(|arg| arg == "--version") {
+        println!("codex-cli 0.166.0");
+        return;
+    }
     std::fs::write(file, forwarded.join("\n")).unwrap();
 }
 
@@ -458,7 +462,7 @@ async fn batch_overrides_launch_through_cmd() {
     std::fs::write(
         &script,
         format!(
-            "@echo off\r\n\"{}\" --exact batch_override_helper -- %*\r\n",
+            "@echo off\r\n\"{}\" --exact batch_override_helper --nocapture -- %*\r\n",
             std::env::current_exe().unwrap().display()
         ),
     )
