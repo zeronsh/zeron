@@ -736,3 +736,56 @@ fn cancelling_a_long_decode_frees_the_worker_at_once() {
     drop(worker);
     serving.join().unwrap();
 }
+
+#[test]
+fn a_switch_lets_the_loaded_model_go_and_removing_another_keeps_it() {
+    let (worker, rx) = mpsc::sync_channel::<Command>(1);
+    let keep = Arc::new(AtomicU64::new(ALWAYS));
+    let (said, life) = mpsc::sync_channel(8);
+    let serving = {
+        let keep = keep.clone();
+        std::thread::spawn(move || {
+            serve(
+                rx,
+                &keep,
+                &Mutex::new(None),
+                |_: &Job| {
+                    Ok(FakeCapture {
+                        closed: mpsc::sync_channel(4).0,
+                        ended: Arc::new(AtomicBool::new(true)),
+                    })
+                },
+                |_: &Path| {
+                    said.send("loaded").unwrap();
+                    Ok(Weights(said.clone()))
+                },
+            )
+        })
+    };
+    let (events, heard) = mpsc::sync_channel(4);
+    let job = Job {
+        dir: "models/a".into(),
+        stop: Arc::new(AtomicBool::new(true)),
+        cancel: Cancel::new(),
+        level: Arc::new(AtomicU32::new(0)),
+        device: None,
+        events,
+    };
+    worker.send(Command::Transcribe(job, None)).unwrap();
+    while !matches!(heard.recv_timeout(WAIT).unwrap(), Event::Final(_)) {}
+    assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
+    let unload = |which: Which| {
+        let (done, unloaded) = mpsc::sync_channel(1);
+        worker.send(Command::Unload(done, which)).unwrap();
+        unloaded.recv_timeout(WAIT).unwrap();
+    };
+    // Another model removed, or "a" chosen again: "a" stays (kept Always).
+    unload(Which::Only("models/b".into()));
+    unload(Which::Except("models/a".into()));
+    assert!(life.try_recv().is_err());
+    // "b" chosen: "a" goes at once.
+    unload(Which::Except("models/b".into()));
+    assert_eq!(life.try_recv().unwrap(), "released");
+    drop(worker);
+    serving.join().unwrap();
+}
