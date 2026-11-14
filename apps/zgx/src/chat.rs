@@ -2567,16 +2567,13 @@ impl View {
             self.mark_failed(&id, &message_id, None);
             return Err("missing");
         }
-        if fresh {
-            engine::get()
-                .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
-                .await
-                .map_err(|e| {
-                    eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
-                    self.mark_failed(&id, &message_id, None);
-                    engine::outcome(&e)
-                })?;
-        }
+        // A chat just made: its config goes out now, and its first message
+        // right behind it rather than after its answer. Awaited first, the
+        // message waited out the frame that builds the new chat's page
+        // (the answer is read once that frame is done). The message carries
+        // the same agent and model, and the engine stamps them on a chat
+        // whose config hasn't landed yet, so the two may land in any order.
+        let set_config = fresh.then(|| json!({ "op": "setChatConfig", "chatId": id, "config": config }));
         let field = |key: &str| req.field(key).map(text).filter(|s| !s.is_empty());
         let cwd = field("cwd")
             .or_else(|| chat["cwd"].as_str().map(Into::into))
@@ -2609,7 +2606,20 @@ impl View {
             });
         }
         let run = json!({ "kind": "run", "messageId": message_id, "request": request });
-        let sent = command_with(&id, run.clone(), &transfers).await;
+        let sent = match set_config {
+            Some(params) => {
+                let engine = engine::get();
+                // (Polled together: both go out at once, the config first.)
+                let (configured, sent) =
+                    both(engine.call("Mutate", params), command_with(&id, run.clone(), &transfers)).await;
+                if let Err(e) = configured {
+                    // (The run went with its own agent and model all the same.)
+                    eprintln!("zeron-zgx: chat: a new chat's config wasn't set: {e}");
+                }
+                sent
+            }
+            None => command_with(&id, run.clone(), &transfers).await,
+        };
         if sent.is_err() {
             // Not delivered: the prompt stays, failed, to send again.
             if let Some(pending) = self.pending.borrow_mut().get_mut(&id)
@@ -3138,6 +3148,30 @@ async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
 }
 
 /// [`command`], with the files the engine delivers for it.
+/// Both futures, polled together (`a` first each time), and both answers.
+async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
+    let (mut done_a, mut done_b) = (None, None);
+    std::future::poll_fn(move |cx| {
+        if done_a.is_none()
+            && let std::task::Poll::Ready(out) = a.as_mut().poll(cx)
+        {
+            done_a = Some(out);
+        }
+        if done_b.is_none()
+            && let std::task::Poll::Ready(out) = b.as_mut().poll(cx)
+        {
+            done_b = Some(out);
+        }
+        if done_a.is_some() && done_b.is_some() {
+            std::task::Poll::Ready((done_a.take().unwrap(), done_b.take().unwrap()))
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
 async fn command_with(chat: &str, command: Json, transfers: &[Json]) -> Result<(), Outcome> {
     let mut params = json!({ "chatId": chat, "command": command });
     if !transfers.is_empty() {
@@ -6591,6 +6625,28 @@ mod tests {
         let words = super::thought_words(&format!("\n{}\n", long.join("\n")));
         assert!(words.starts_with("line 1\n") && words.ends_with("\nline 30"), "{words}");
         assert_eq!(words.lines().count(), 30);
+    }
+
+    /// A new chat's config and first message go out in the same poll, the
+    /// config first, and both answers come back (`both`).
+    #[test]
+    fn both_sends_the_first_then_the_second_in_one_poll() {
+        use std::task::{Context, Poll, Waker};
+        let sent = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (a, b) = (sent.clone(), sent.clone());
+        let mut joined = std::pin::pin!(super::both(
+            async move {
+                a.borrow_mut().push("config");
+                1
+            },
+            async move {
+                b.borrow_mut().push("message");
+                2
+            },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(joined.as_mut().poll(&mut cx), Poll::Ready((1, 2)));
+        assert_eq!(*sent.borrow(), vec!["config", "message"]);
     }
 
     /// 2026-11-11, work-laptop: a queued message on the Mac hosting it said
