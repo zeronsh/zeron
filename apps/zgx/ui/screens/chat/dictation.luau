@@ -204,7 +204,8 @@ function M.bind(value: any, key: () -> string, blocked: () -> boolean, id: strin
 	table.insert(bindings, own)
 	if binding == nil then binding = own end
 	ui.effect(function()
-		value:get()
+		-- (Its edits followed, the draft not read.)
+		value:len()
 		key()
 		local no = blocked()
 		if pending and pending.binding == own and (no or not valid(pending)) then M.cancel() end

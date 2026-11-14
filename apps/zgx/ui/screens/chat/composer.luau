@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Draft = require("@ds/draft_text")
 local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
 local Placement = require("@app/screens/chat/composer_place")
@@ -716,10 +717,10 @@ local function Composer(): Node
 		end
 		return LinkNotice.of {
 			connection = sessions.connection:get(),
-			cloud = machine.cloud_link(string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0),
+			cloud = machine.cloud_link(Draft.has_text(shared.text) or #shared.cargo:get() > 0 or #queue:get() > 0),
 			host_unreachable = host_unreachable,
 			host = host,
-			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
+			intent = Draft.has_text(shared.text) or #shared.cargo:get() > 0 or #queue:get() > 0,
 		}
 	end)
 
