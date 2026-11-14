@@ -586,6 +586,13 @@ fn write_history(
         .as_ref()
         .and_then(|id| history.iter().position(|message| &message.id == id))
         .unwrap_or(history.len());
+    // Zeron's writes up to here are the session's to show now — or, undone,
+    // not to show: the session's messages past an undo still hold them.
+    let held_until = history
+        .iter()
+        .filter(|message| message.created_at_ms >= start.at)
+        .map(|message| message.completed_at_ms.unwrap_or(0).max(message.created_at_ms))
+        .max();
     let history: Vec<&NativeMessage> = history[..cut]
         .iter()
         .filter(|message| message.created_at_ms >= start.at)
@@ -594,11 +601,6 @@ fn write_history(
         .iter()
         .map(|message| format!("{ENTRY_PREFIX}{}", message.id))
         .collect();
-    // Zeron's writes up to here are the session's to show now.
-    let held_until = history
-        .iter()
-        .map(|message| message.completed_at_ms.unwrap_or(0).max(message.created_at_ms))
-        .max();
     let mut written = Written::default();
     let mut ids: Vec<String> = Vec::new();
     let entries = doc.read_entries()?;
@@ -1083,6 +1085,26 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(Start::of(&doc.read_entries().unwrap()), None);
+    }
+
+    #[test]
+    fn an_undo_takes_back_the_turn_zerons_run_wrote() {
+        let doc = zeron_doc::SessionDoc::init("undo-own").unwrap();
+        let history = vec![
+            user("m1", 10, "one"),
+            reply("m2", 11, "1"),
+            user("m3", 20, "two"),
+            reply("m4", 21, "2"),
+        ];
+        write_history(&doc, &history[..2], &session(false), Start::ALL, "dev").unwrap();
+        // Zeron's run wrote the second turn; it was undone before the
+        // transcript was made the session's again.
+        doc.push_message(&zeron_entry("prompt", MessageRole::User, 19, Vec::new())).unwrap();
+        doc.push_message(&zeron_entry("reply", MessageRole::Assistant, 20, Vec::new())).unwrap();
+        let mut undone = session(false);
+        undone.reverted_from = Some("m3".into());
+        write_history(&doc, &history, &undone, Start::ALL, "dev").unwrap();
+        assert_eq!(ids(&doc), ["oc:m1", "oc:m2"]);
     }
 
     #[test]

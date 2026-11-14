@@ -529,10 +529,13 @@ impl OpencodeHarness {
         // The background service, shared with the TUI and desktop app. A run
         // carrying host secrets (a Cloud device's credential broker) keeps
         // its private server: they must never reach a server other clients
-        // use. The access mode needs no server of its own there — it is
+        // use. (The chat marker every run carries is no secret; on the
+        // service, which outlives any run, it can't ride along — preview
+        // discovery counts the dev servers started there as the person's.)
+        // The access mode needs no server of its own there — it is
         // answered here, as the TUI's auto-accept is — and Zeron's MCP
         // servers are offered over client MCP ([`client_mcp`]).
-        if run_env.is_empty()
+        if run_env.keys().all(|key| key == zeron_proto::ORIGIN_ENV)
             && RUNS_ON_SERVICE.load(std::sync::atomic::Ordering::Relaxed)
             && let Some(server) = self.service_server().await
         {

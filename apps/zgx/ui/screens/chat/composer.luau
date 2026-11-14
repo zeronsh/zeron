@@ -977,10 +977,14 @@ local function Composer(): Node
 			local action = if s and s.harness == "opencode" then opencode_action(text_out) else nil
 			if action then
 				if action == "undo" then
+					-- (Once the composer has cleared what was sent.)
 					local undone = last_prompt()
-					if undone and shared.text:peek() == "" then
-						shared.text:set(undone)
-					end
+					ui.after(0, function()
+						if undone and shared.text:peek() == "" then
+							shared.text:set(undone)
+							shared.focus:add(1)
+						end
+					end)
 				end
 				deliver(nil)
 				return
