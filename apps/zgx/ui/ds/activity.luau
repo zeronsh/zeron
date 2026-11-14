@@ -28,6 +28,7 @@ local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
 local ReplyPicture = require("@self/reply_picture")
 local FoldButton = require("@self/fold_button")
+local Tooltip = require("@self/tooltip")
 
 -- (`cloud`, `git`: a Cloud machine's own setup steps, the machine and its
 -- checkout.)
@@ -52,6 +53,10 @@ export type Tool = {
 	added: number?,
 	removed: number?,
 	failed: boolean?,
+	-- Auto's reviewer on it (the agent's own: Codex's auto-review, Claude
+	-- Code's auto mode): "reviewing", "approved", "denied" or "timed-out",
+	-- its risk ("low" to "critical") and why, as the reviewer said.
+	review: { status: string, risk: string?, reason: string? }?,
 	-- What its row opens to beyond its call (ds/tool_detail): its output
 	-- (as the harness gave it, escapes and all, growing while it runs), a
 	-- command's exit code, its files' counts, an older doc's diff, and the
@@ -587,6 +592,49 @@ local COUNTS: { [string]: boolean } = { edit = true, write = true }
 -- A row is built often (each comes into view, a long group's thousands), so
 -- what can't change once a tool has started is read once as it's made (its
 -- kind, its verb, its glyph); only what a tool's result changes follows it.
+-- Auto's reviewer on a call: its glyph becomes a shield in the verdict's
+-- hue (let through quiet, stopped in danger's, timed out in warning's), its
+-- risk and why in the tooltip. A call no reviewer looked at keeps its own.
+local REVIEW_TONE: { [string]: string } = {
+	reviewing = "$text.tertiary",
+	approved = "$text.secondary",
+	denied = "$danger",
+	["timed-out"] = "$warning",
+}
+local function reviewed(now: () -> Tool): () -> boolean
+	return function(): boolean
+		return now().review ~= nil
+	end
+end
+local function review_glyph(now: () -> Tool, size: number): Node
+	local function review(): any
+		return now().review
+	end
+	return ui.div {
+		color = function(): string
+			local r = review()
+			return if r then REVIEW_TONE[r.status] or "$text.secondary" else "$text.secondary"
+		end,
+		tooltip = Tooltip {
+			function(): string
+				local r = review()
+				if not r then
+					return ""
+				end
+				local lines = { locale.s(`ds.activity.review.{r.status}`), locale.s(`ds.activity.review.{r.status}_hint`) }
+				if r.risk then
+					table.insert(lines, locale.s("ds.activity.review.risk", { risk = r.risk }))
+				end
+				if r.reason then
+					table.insert(lines, r.reason)
+				end
+				return table.concat(lines, "\n")
+			end,
+		},
+		Icon { name = "shield-check", size = size },
+	}
+end
+
 local function row(
 	now: () -> Tool,
 	below: () -> boolean,
@@ -704,25 +752,29 @@ local function row(
 			end,
 			-- (A row before the group's last never runs: its glyph alone, placed
 			-- and coloured itself. The last may be the one in flight.)
-			if settled
-				then Icon {
-					name = GLYPH[t.kind],
-					size = GLYPH_SIZE,
-					absolute = true,
-					left = GLYPH_LEFT,
-					top = (ROW - GLYPH_SIZE) / 2,
-					color = tint,
-				}
-				else ui.div {
-					absolute = true,
-					left = GLYPH_LEFT,
-					top = (ROW - GLYPH_SIZE) / 2,
-					color = tint,
-					ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
-						name = GLYPH[t.kind],
-						size = GLYPH_SIZE,
-					}),
-				},
+			-- Its glyph, in a box of its own off the line (what shows in it
+			-- never moves the line): Auto's reviewer looked at it, a shield in
+			-- the glyph's place.
+			ui.div {
+				absolute = true,
+				left = GLYPH_LEFT,
+				top = (ROW - GLYPH_SIZE) / 2,
+				w = GLYPH_SIZE,
+				h = GLYPH_SIZE,
+				ui.show(
+					reviewed(now),
+					review_glyph(now, GLYPH_SIZE),
+					ui.div {
+						color = tint,
+						if settled
+							then Icon { name = GLYPH[t.kind], size = GLYPH_SIZE }
+							else ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
+								name = GLYPH[t.kind],
+								size = GLYPH_SIZE,
+							}),
+					}
+				),
+			},
 			ui.row {
 				pl = ui.raw(GUTTER, "past the tree's gutter"),
 				grow = 1,
@@ -798,6 +850,8 @@ local function row(
 		ui.show(showing, Opened { now = now, pictures = pictures }),
 	}
 end
+
+
 
 return ui.component(function(props: Props): Node
 	local live = props.live or function()

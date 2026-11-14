@@ -1700,6 +1700,11 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
             ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
+            // It has an auto mode of its own: the access picker offers Auto.
+            (
+                "auto",
+                Value::Bool(h["accessModes"].as_array().is_some_and(|m| m.iter().any(|x| x == "auto"))),
+            ),
         ]));
         for m in list {
             models.push(model_value(id, m));
@@ -3340,6 +3345,7 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         match access.as_str() {
             "supervised" => c["access"] = json!("supervised"),
             "edits" => c["access"] = json!("auto-accept-edits"),
+            "auto" => c["access"] = json!("auto"),
             _ => {
                 if let Some(map) = c.as_object_mut() {
                     map.remove("access");
@@ -5537,6 +5543,15 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     if part["isError"].as_bool() == Some(true) {
         fields.push(("failed", Value::Bool(true)));
     }
+    // Auto's reviewer on it: reviewing, approved, denied or timed-out, its
+    // risk and why (as the agent's reviewer said).
+    if let Some(status) = part["review"]["status"].as_str() {
+        let text = |key: &str| part["review"][key].as_str().filter(|t| !t.trim().is_empty()).map_or(Value::Nil, Value::from);
+        fields.push((
+            "review",
+            Value::record([("status", Value::from(status)), ("risk", text("risk")), ("reason", text("reason"))]),
+        ));
+    }
     // A subagent's spawn: the doc it runs in (its lane, a panel tab of its
     // own), how it stands, and its tab's title (the shipping app's).
     if kind == "agent"
@@ -5770,6 +5785,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let access = match config["access"].as_str() {
         Some("supervised") => "supervised",
         Some("auto-accept-edits") => "edits",
+        Some("auto") => "auto",
         _ => "full",
     };
     let fast = fast_in(&config["modelOptions"]);

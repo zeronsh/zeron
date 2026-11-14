@@ -187,6 +187,7 @@ mod tests {
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,
+                    review: None,
                 },
             ],
             created_at: 5,

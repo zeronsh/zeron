@@ -1719,12 +1719,13 @@ impl AcpHarness {
     }
 
     /// The access mode `request` runs with: its own when this agent honors
-    /// it, else full access — as is any auto-approve run.
+    /// it, else as [`AccessMode::honored_by`] falls back — full access, but
+    /// never for Auto — and full access for any auto-approve run.
     fn access_for(&self, request: &RunRequest) -> AccessMode {
-        if request.auto_approve || !self.spec.access_modes.contains(&request.access) {
+        if request.auto_approve {
             AccessMode::FullAccess
         } else {
-            request.access
+            request.access.honored_by(self.spec.access_modes)
         }
     }
 

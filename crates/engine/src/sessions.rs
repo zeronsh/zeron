@@ -3947,6 +3947,15 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     }
 }
 
+/// A reviewer's reason as the doc keeps it: its first 600 characters.
+fn cap_review_reason(why: &str) -> String {
+    const MAX: usize = 600;
+    match why.char_indices().nth(MAX) {
+        Some((at, _)) => format!("{}…", why[..at].trim_end()),
+        None => why.to_owned(),
+    }
+}
+
 /// Apply the render-parts privacy policy: strip heavy/sensitive tool inputs before doc
 /// entry. Full inputs live only in the local run journal.
 fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
@@ -3971,6 +3980,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 exit_code,
                 output_truncated,
                 output_lines,
+                review,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3993,6 +4003,12 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 exit_code: *exit_code,
                 output_truncated: *output_truncated,
                 output_lines: *output_lines,
+                // The reviewer's verdict stays: it's what the person needs to
+                // see. Its reason is bounded, as an output summary is.
+                review: review.as_ref().map(|r| zeron_proto::ToolReview {
+                    reason: r.reason.as_deref().map(|why| cap_review_reason(why)),
+                    ..r.clone()
+                }),
             },
             other => other.clone(),
         })
