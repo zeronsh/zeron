@@ -202,8 +202,17 @@ struct Gh {
     watches: github::Watches<Watch>,
 }
 
+/// How long Settings → Plugins waits for what asked it to settle: past the
+/// launch (its first publish), then a moment.
+const PAGE_SETTLE_LAUNCH: std::time::Duration = std::time::Duration::from_millis(1500);
+const PAGE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct Bridge {
     host: ScriptHost,
+    /// A publish of Settings → Plugins on its way (`publish_page`), and
+    /// whether one has been made.
+    page_due: Cell<bool>,
+    page_published: Cell<bool>,
     /// Where each plugin's requests may go, as its manifest names them.
     network: network::Network,
     windows: WindowFactory,
@@ -468,6 +477,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
+        page_due: Cell::new(false),
+        page_published: Cell::new(false),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
         requests: host.shared("plugins.request", vlist(Vec::new())),
         request_list: RefCell::default(),
@@ -1717,7 +1728,32 @@ impl Bridge {
         ]));
     }
 
+    /// Settings → Plugins brought up to date, once what asked has settled:
+    /// asks in a row (a launch makes several: the view known, the engine's
+    /// list, its look) make one, after [`PAGE_SETTLE`] ([`PAGE_SETTLE_LAUNCH`]
+    /// for a launch's first). It walks every element of the window (a tenth
+    /// of a second of a launch's main thread), and nothing a launch shows
+    /// reads it.
     fn publish_page(&self) {
+        if cfg!(test) {
+            return self.publish_page_now();
+        }
+        if self.page_due.replace(true) {
+            return;
+        }
+        let settle = if self.page_published.get() { PAGE_SETTLE } else { PAGE_SETTLE_LAUNCH };
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(settle).await;
+            if let Some(b) = me.upgrade() {
+                b.page_due.set(false);
+                b.page_published.set(true);
+                b.publish_page_now();
+            }
+        });
+    }
+
+    fn publish_page_now(&self) {
         // A plugin that failed here shows so, with why, whatever the engine
         // says of it; one placed where the template in use has nothing says
         // where it won't show, and one whose place zgx refused says why.
