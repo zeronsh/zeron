@@ -2544,3 +2544,50 @@ async fn the_topology_turn_becomes_a_decision_with_its_variants_pictures_and_pic
     assert!(sent(&core, map).iter().any(|m| m.ends_with("Option 1: (a) Inline tag \"↳ Brain dump\"")), "{:?}", sent(&core, map));
     core.sessions.shutdown().await;
 }
+
+/// Live, after the restart onto 4f34e371e: "Map machine headings: decide
+/// R9" sat in Now, moved there by the Brain dump (marked as moved by hand),
+/// still waiting on a decision, and the start raised no ask for it. The
+/// mark keeps a card's column, never its question.
+#[tokio::test]
+async fn a_card_moved_by_hand_into_now_still_gets_its_decision_ask() {
+    let (_temp, core) = core().await;
+    let calls = answers_model(&core, None);
+    let r9 = "Round 9 is merged locally (e357a3876); final scores are Claude 8, GPT 8.5, Grok 9.\n\nThe graph-label decision (accept round 9 or keep iterating) is still waiting on you.";
+    let mut cards = Vec::new();
+    for chat in ["r9-open", "r9-answered"] {
+        let (dump, brain, r) = routed_thread(&core, chat, &["Map machine headings: decide R9"]).await;
+        push(&core, chat, &format!("{chat}-u1"), zeron_doc::MessageRole::User, "Map machine headings: decide R9");
+        push(&core, chat, &format!("{chat}-a1"), zeron_doc::MessageRole::Assistant, r9);
+        outcome(&core, chat, &dump, &r[0].0, r9, RouteState::Done).await;
+        // As live: no ask for it, and the Brain dump moved the card to Now.
+        for a in asks_from(&core, chat) {
+            op(&core, Caller::Local, json!({"op":"dismissAsk","id":a.id})).await.unwrap();
+        }
+        op(&core, agent(&brain), json!({"op":"upsertItem","item":{"id":r[0].1,"state":"active"}})).await.unwrap();
+        let moved = core.orchestration.item(&r[0].1).unwrap();
+        assert!(moved.moved_at.is_some() && moved.state == WorkState::Active);
+        cards.push((chat, r[0].1.clone()));
+    }
+    // The second: the person answered in its thread since.
+    push(&core, "r9-answered", "r9-answered-u2", zeron_doc::MessageRole::User, "keep iterating on the labels");
+    core.rpc_service().settle_card_states().await;
+    // Unanswered: one ask, on its card.
+    let open = open_asks(&core, "r9-open");
+    assert_eq!(open.len(), 1, "{open:#?}");
+    assert_eq!(open[0].item_id.as_deref(), Some(cards[0].1.as_str()));
+    assert!(open[0].question.contains("graph-label decision"));
+    // Answered: none.
+    assert!(open_asks(&core, "r9-answered").is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "a reply in the thread needs no model");
+    // Their columns, and their marks, as they were.
+    for (_, item) in &cards {
+        let c = core.orchestration.item(item).unwrap();
+        assert!(c.state == WorkState::Active && c.moved_at.is_some());
+    }
+    // Once: the start's pass again raises nothing more.
+    core.rpc_service().settle_card_states().await;
+    assert_eq!(open_asks(&core, "r9-open").len(), 1);
+    assert_eq!(asks_from(&core, "r9-open").iter().filter(|a| a.state == AskState::Open).count(), 1);
+    core.sessions.shutdown().await;
+}

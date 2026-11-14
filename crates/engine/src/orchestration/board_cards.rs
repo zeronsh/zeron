@@ -277,6 +277,12 @@ impl EngineRpc {
                 }
             }
         }
+        // Then every card in Now waiting on a decision gets its ask (hand-moved
+        // ones included).
+        let asked = self.ask_for_waiting_cards(&restated).await;
+        if !asked.is_empty() {
+            tracing::info!(cards = ?asked, "board: asks raised for cards waiting on a decision");
+        }
         (restated, kept)
     }
 
@@ -368,36 +374,104 @@ impl EngineRpc {
             && card.approved_at.is_none()
             && card.moved_at.is_none()
         {
-            match super::turn_asks::answered_after_asking(self.orchestration(), self, chat, &entries, Some(sent)).await {
-                Some(reply) => {
-                    let open: Vec<String> = self
-                        .orchestration()
-                        .state()
-                        .asks
-                        .iter()
-                        .filter(|a| a.from_chat == chat && a.state == zeron_proto::orchestration::AskState::Open)
-                        .filter(|a| {
-                            a.item_id.as_deref() == Some(card.id.as_str())
-                                || zeron_proto::turn_question::same_question(
-                                    &a.question,
-                                    &a.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>(),
-                                    &found.question,
-                                    &found.options,
-                                )
-                        })
-                        .map(|a| a.id.clone())
-                        .collect();
-                    for id in open {
-                        super::turn_asks::close(self.orchestration(), &id, zeron_proto::orchestration::AnswerVia::Thread, &reply, chrono::Utc::now());
-                    }
-                }
-                None => {
-                    self.ask_for(chat, found, Some((&dump.id, &route.id)));
-                }
-            }
+            self.ask_or_settle_decision(chat, &entries, sent, found, &dump.id, &route.id, &card.id).await;
         }
         self.sync_card(&card.id, &route);
         self.orchestration().item(&card.id).is_some_and(|c| c.state != WorkState::Review || c.outcome != card.outcome)
+    }
+
+    /// Card `card_id` (route `route_id` of dump `dump_id`, its thread `chat`)
+    /// waits on the decision `found`: its ask is raised (one per question,
+    /// on this card), unless a message that reached the thread after the one
+    /// that asked answers it ([`super::turn_asks::answered_after_asking`]),
+    /// which closes any open ask for it instead. `true` when it raised one.
+    #[allow(clippy::too_many_arguments)]
+    async fn ask_or_settle_decision(
+        &self,
+        chat: &str,
+        entries: &[zeron_doc::SessionMessageEntry],
+        sent: &str,
+        found: &zeron_proto::turn_question::Found,
+        dump_id: &str,
+        route_id: &str,
+        card_id: &str,
+    ) -> bool {
+        match super::turn_asks::answered_after_asking(self.orchestration(), self, chat, entries, Some(sent)).await {
+            Some(reply) => {
+                let open: Vec<String> = self
+                    .orchestration()
+                    .state()
+                    .asks
+                    .iter()
+                    .filter(|a| a.from_chat == chat && a.state == zeron_proto::orchestration::AskState::Open)
+                    .filter(|a| {
+                        a.item_id.as_deref() == Some(card_id)
+                            || zeron_proto::turn_question::same_question(
+                                &a.question,
+                                &a.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>(),
+                                &found.question,
+                                &found.options,
+                            )
+                    })
+                    .map(|a| a.id.clone())
+                    .collect();
+                for id in open {
+                    super::turn_asks::close(self.orchestration(), &id, zeron_proto::orchestration::AnswerVia::Thread, &reply, chrono::Utc::now());
+                }
+                false
+            }
+            None => self.ask_for(chat, found, Some((dump_id, route_id))).is_some(),
+        }
+    }
+
+    /// Cards in Now waiting on a decision with no open ask for it: their ask,
+    /// raised (or, answered since, the open one closed) the way the Review
+    /// re-statement does it. Moved by hand or not: the mark keeps a card's
+    /// column, never its question; one approved, Done, or moved out of Now
+    /// is not in Now. Its column is left as it is. The cards it asked for.
+    /// (`done`: cards the Review re-statement just settled, its question
+    /// included.)
+    pub(crate) async fn ask_for_waiting_cards(&self, done: &[String]) -> Vec<String> {
+        use zeron_proto::turn_question::{Verdict, detect};
+        let state = self.orchestration().state();
+        let mut asked = Vec::new();
+        for dump in &state.dumps {
+            for route in &dump.routes {
+                let Some(item) = route.item_id.as_deref() else { continue };
+                let Some(card) = state.items.iter().find(|i| i.id == item && !i.removed) else { continue };
+                if card.state != WorkState::Active
+                    || card.approved_at.is_some()
+                    || route.state == RouteState::Failed
+                    || done.iter().any(|d| d == item)
+                {
+                    continue;
+                }
+                let Some(chat) = super::watchers::target_chat(&route.target) else { continue };
+                let entries = self
+                    .doc_host_ref()
+                    .open(chat)
+                    .ok()
+                    .and_then(|h| h.doc().read_entries().ok())
+                    .unwrap_or_default();
+                let sent = if route.message.trim().is_empty() { &route.excerpt } else { &route.message };
+                let others = dump_messages_to(&state.dumps, chat);
+                let latest = super::watchers::latest_reply_until(&entries, sent, &others);
+                let evidence: Vec<&str> =
+                    [latest.as_deref(), route.answer_full.as_deref(), card.outcome.as_deref()].into_iter().flatten().collect();
+                let Some(found) = evidence.iter().find_map(|t| match detect(t) {
+                    Verdict::Ask(found) => Some(found),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                // (Its open ask: nothing to raise; still checked for an
+                // answer that came since.)
+                if self.ask_or_settle_decision(chat, &entries, sent, &found, &dump.id, &route.id, item).await {
+                    asked.push(item.to_owned());
+                }
+            }
+        }
+        asked
     }
 
     /// The routed cards `chat` works on, brought up to date (it raised or
