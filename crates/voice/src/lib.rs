@@ -456,10 +456,10 @@ fn input_device(id: Option<&str>) -> Option<(cpal::Device, bool)> {
         .or_else(|| Some((host.default_input_device()?, false)))
 }
 
-/// The chosen microphone as the last recording opened it. Looking it up and
-/// asking for its configuration again costs time before the first sample.
-static OPENED: Mutex<Option<(String, cpal::Device, cpal::SupportedStreamConfig)>> =
-    Mutex::new(None);
+/// The chosen microphone, found by the last recording. Finding it again
+/// costs time before the first sample; its configuration is asked each time
+/// (the system's audio settings may have changed it).
+static OPENED: Mutex<Option<(String, cpal::Device)>> = Mutex::new(None);
 
 pub struct Capture {
     stream: Option<cpal::Stream>,
@@ -469,17 +469,18 @@ pub struct Capture {
 impl Capture {
     pub fn start(id: Option<&str>, level: Arc<AtomicU32>) -> Result<Self> {
         let opened = OPENED.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some((_, device, config)) = opened.filter(|(was, ..)| Some(was.as_str()) == id) {
-            if let Ok(capture) = Self::open(&device, config, level.clone()) {
-                return Ok(capture);
-            }
+        if let Some((_, device)) = opened.filter(|(was, _)| Some(was.as_str()) == id)
+            && let Ok(config) = device.default_input_config()
+            && let Ok(capture) = Self::open(&device, config, level.clone())
+        {
+            return Ok(capture);
         }
         *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let (device, chosen) = input_device(id).context("No microphone available")?;
         let config = device.default_input_config()?;
-        let capture = Self::open(&device, config.clone(), level)?;
+        let capture = Self::open(&device, config, level)?;
         if let (Some(id), true) = (id, chosen) {
-            *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some((id.into(), device, config));
+            *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some((id.into(), device));
         }
         Ok(capture)
     }
@@ -703,7 +704,7 @@ static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Command>> =
     std::sync::OnceLock::new();
 /// How long the worker keeps a model after a dictation, in ms (0: released
 /// at once; ALWAYS: while Zeron is open).
-static KEEP_MS: AtomicU64 = AtomicU64::new(30_000);
+static KEEP_MS: AtomicU64 = AtomicU64::new(300_000);
 const ALWAYS: u64 = u64::MAX;
 
 /// Keep the model loaded this long after a dictation (zero: released at
