@@ -34,7 +34,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust toolchain
         run: |
           rustup update stable --no-self-update
@@ -43,12 +43,12 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/zgx-ghostty
           key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
           restore-keys: zgx-ghostty-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: zgx-tests
           workspaces: |
@@ -72,7 +72,7 @@ jobs:
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/zgx-cli
           key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
@@ -97,7 +97,7 @@ jobs:
             -E 'binary(plugin_services) | test(/plugins::/)'
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-zgx-macos
@@ -106,7 +106,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: System packages (zgx-beta.yml's)
         run: >-
           bash scripts/ci/apt-install.sh
@@ -119,7 +119,7 @@ jobs:
       # src/visuals_tests.rs. The runner has none of its own.)
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: zgx-tests
           workspaces: apps/zgx -> target
@@ -129,7 +129,7 @@ jobs:
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/zgx-cli
           key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
@@ -148,7 +148,7 @@ jobs:
         run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-zgx-linux
