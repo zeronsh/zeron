@@ -935,7 +935,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = Service::new(Some(dir.path().to_owned()));
         assert_eq!(s.status().unwrap()["models"][0]["installed"], false);
-        assert_eq!(s.start(&json!({})).unwrap_err(), "no_model");
+        // (A processor without AVX2 is told that first.)
+        let refused = if zeron_voice::cpu_supported() {
+            "no_model"
+        } else {
+            zeron_voice::CPU_UNSUPPORTED
+        };
+        assert_eq!(s.start(&json!({})).unwrap_err(), refused);
         assert!(s.session.is_none());
     }
     /// The composer of ui/dictation_fixture.luau, with the host's dictation
