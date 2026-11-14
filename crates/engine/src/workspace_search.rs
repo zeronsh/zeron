@@ -501,8 +501,13 @@ impl WorkspaceSearch {
         if let Some(cancel) = home.building.take() {
             cancel.cancel();
         }
-        *home = HomeEntry::default();
+        let dropped = std::mem::take(&mut *home);
         self.inner.home_built.notify_all();
+        std::mem::drop(home);
+        std::mem::drop(dropped);
+        // Its paths sit in the pages of the walk's thread, long gone: only a
+        // forced collect gives them back.
+        crate::heap::trim();
         tracing::info!("workspace search home index evicted");
         true
     }
@@ -580,6 +585,11 @@ fn build_home(inner: Weak<Inner>, root: PathBuf, cancel: Arc<crate::home_index::
     home.index = Some(Arc::new(index));
     home.building = None;
     inner.home_built.notify_all();
+    drop(home);
+    // What the walk's workers allocated and dropped is in their pages, given
+    // back once they've exited (they're leaving now).
+    std::thread::sleep(Duration::from_millis(200));
+    crate::heap::trim();
 }
 
 fn reap(inner: Weak<Inner>) {

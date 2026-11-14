@@ -7,7 +7,6 @@
 //! on macOS). This walk reads directory listings only, and skips cloud
 //! folders, hidden folders and dependency folders altogether. It holds no
 //! file contents, so home has no content search.
-
 //!
 //! The walk is bounded and never polls. Its workers share a queue of folders
 //! and sleep on a condition variable while it's empty, so a worker held up
@@ -19,6 +18,12 @@
 //! project picker closed); a folder still being read then is skipped by
 //! later walks until that read returns, so a stuck folder holds one thread,
 //! not one per walk.
+//!
+//! The index is two allocations, whatever its size: every path in one
+//! string and where each ends in a list ([`Paths`]), matched without case
+//! as it's searched. One string per path and a lowercase copy of each were
+//! ~47 MB for a 200k-entry home, and scattered over 400,000 small blocks the
+//! allocator couldn't hand any of it back once the index was dropped.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -96,7 +101,7 @@ struct Walk {
     changed: Condvar,
     /// `queue.quit`, read without the lock between entries.
     stop: AtomicBool,
-    found: Mutex<Vec<HomePath>>,
+    found: Mutex<Paths>,
     /// Folders skipped as stalled by an earlier walk.
     skip: HashSet<PathBuf>,
     /// Times an idle worker woke (tests: idle workers must not poll).
@@ -129,7 +134,7 @@ impl Walk {
     }
 
     /// Keep `items`; `false` once the walk has enough.
-    fn keep(&self, items: &mut Vec<HomePath>) -> bool {
+    fn keep(&self, items: &mut Paths) -> bool {
         let mut found = self.found.lock().unwrap_or_else(PoisonError::into_inner);
         found.append(items);
         if found.len() >= MAX_ENTRIES {
@@ -193,7 +198,7 @@ impl Walk {
     fn visit(&self, unit: &Unit) {
         #[cfg(test)]
         tests::held(&unit.dir);
-        let mut items = Vec::new();
+        let mut items = Paths::default();
         if unit.depth < EXPAND_DEPTH && !unit.dir.join(".git").exists() {
             let Ok(listing) = std::fs::read_dir(&unit.dir) else {
                 return;
@@ -213,9 +218,7 @@ impl Walk {
                     continue;
                 }
                 let path = entry.path();
-                if let Some(home_path) = self.home_path(&path, is_dir) {
-                    items.push(home_path);
-                }
+                self.record(&mut items, &path, is_dir);
                 if is_dir {
                     self.push(Unit { dir: path, depth });
                 }
@@ -251,9 +254,7 @@ impl Walk {
                 continue;
             }
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            if let Some(home_path) = self.home_path(entry.path(), is_dir) {
-                items.push(home_path);
-            }
+            self.record(&mut items, entry.path(), is_dir);
             if items.len() >= 512 && !self.keep(&mut items) {
                 return;
             }
@@ -261,14 +262,10 @@ impl Walk {
         self.keep(&mut items);
     }
 
-    fn home_path(&self, path: &Path, is_dir: bool) -> Option<HomePath> {
-        let relative = path.strip_prefix(&self.home).ok()?;
-        let path = relative.to_string_lossy().replace('\\', "/");
-        Some(HomePath {
-            lower: path.to_lowercase(),
-            path,
-            is_dir,
-        })
+    fn record(&self, items: &mut Paths, path: &Path, is_dir: bool) {
+        if let Ok(relative) = path.strip_prefix(&self.home) {
+            items.push(&relative.to_string_lossy(), is_dir);
+        }
     }
 }
 
@@ -296,15 +293,104 @@ const MACHINE_ROOTS: &[&str] = &["library", "appdata", "applications"];
 const SKIPPED_DIRS: &[&str] = &["node_modules", "__pycache__", "venv", "site-packages"];
 
 pub struct HomeIndex {
-    entries: Vec<HomePath>,
+    entries: Paths,
     pub built: Instant,
 }
 
-struct HomePath {
-    /// Home-relative, `/`-separated.
-    path: String,
-    lower: String,
-    is_dir: bool,
+/// Home-relative, `/`-separated paths, packed: all of them in `text`, and
+/// where each ends there in `ends`, its top bit set for a folder.
+#[derive(Default)]
+struct Paths {
+    text: String,
+    ends: Vec<u32>,
+}
+
+const DIR_BIT: u32 = 1 << 31;
+
+impl Paths {
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn push(&mut self, path: &str, is_dir: bool) {
+        let end = self.text.len() + path.len();
+        // (Past 2 GB of names the rest goes unindexed.)
+        let Ok(end) = u32::try_from(end) else { return };
+        if end & DIR_BIT != 0 {
+            return;
+        }
+        #[cfg(windows)]
+        self.text.push_str(&path.replace('\\', "/"));
+        #[cfg(not(windows))]
+        self.text.push_str(path);
+        self.ends.push(if is_dir { end | DIR_BIT } else { end });
+    }
+
+    /// Move `other`'s paths to the end of these.
+    fn append(&mut self, other: &mut Paths) {
+        let base = self.text.len();
+        if u32::try_from(base + other.text.len()).is_ok_and(|end| end & DIR_BIT == 0) {
+            self.text.push_str(&other.text);
+            self.ends.extend(other.ends.iter().map(|end| {
+                let at = (end & !DIR_BIT) + base as u32;
+                at | (end & DIR_BIT)
+            }));
+        }
+        other.text.clear();
+        other.ends.clear();
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if len < self.ends.len() {
+            self.ends.truncate(len);
+            let end = self.ends.last().map_or(0, |end| (end & !DIR_BIT) as usize);
+            self.text.truncate(end);
+        }
+    }
+}
+
+/// `query` (already lowercase) in `text`, without case: ASCII compared in
+/// place, anything else lowercased first.
+struct Folded<'a> {
+    query: &'a str,
+}
+
+impl Folded<'_> {
+    fn equals(&self, text: &str) -> bool {
+        if text.is_ascii() {
+            text.eq_ignore_ascii_case(self.query)
+        } else {
+            text.to_lowercase() == self.query
+        }
+    }
+
+    fn starts(&self, text: &str) -> bool {
+        if text.is_ascii() {
+            text.len() >= self.query.len()
+                && text.as_bytes()[..self.query.len()].eq_ignore_ascii_case(self.query.as_bytes())
+        } else {
+            text.to_lowercase().starts_with(self.query)
+        }
+    }
+
+    fn within(&self, text: &str) -> bool {
+        if !text.is_ascii() {
+            return text.to_lowercase().contains(self.query);
+        }
+        let (query, text) = (self.query.as_bytes(), text.as_bytes());
+        let Some((&first, rest)) = query.split_first() else {
+            return true;
+        };
+        if text.len() < query.len() {
+            return false;
+        }
+        let (lower, upper) = (first.to_ascii_lowercase(), first.to_ascii_uppercase());
+        (0..=text.len() - query.len()).any(|at| {
+            let byte = text[at];
+            (byte == lower || byte == upper)
+                && text[at + 1..at + query.len()].eq_ignore_ascii_case(rest)
+        })
+    }
 }
 
 impl HomeIndex {
@@ -323,7 +409,7 @@ impl HomeIndex {
             queue: Mutex::new(Queue::default()),
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
-            found: Mutex::new(Vec::new()),
+            found: Mutex::new(Paths::default()),
             skip: stalled().clone().unwrap_or_default(),
             #[cfg(test)]
             wakes: Default::default(),
@@ -333,7 +419,7 @@ impl HomeIndex {
         *cancel.walk.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&walk);
         if cancel.is_cancelled() {
             return Self {
-                entries: Vec::new(),
+                entries: Paths::default(),
                 built: Instant::now(),
             };
         }
@@ -383,6 +469,8 @@ impl HomeIndex {
         let mut entries =
             std::mem::take(&mut *walk.found.lock().unwrap_or_else(PoisonError::into_inner));
         entries.truncate(MAX_ENTRIES);
+        entries.text.shrink_to_fit();
+        entries.ends.shrink_to_fit();
         Self {
             entries,
             built: Instant::now(),
@@ -403,42 +491,61 @@ impl HomeIndex {
         if query.is_empty() && kinds == NameKinds::Directories {
             return Vec::new();
         }
-        let mut found: Vec<(i64, &HomePath)> = self
+        let folded = Folded { query: &query };
+        // (Kinds are read from the ends before a path is looked at.)
+        let mut start = 0;
+        let mut found: Vec<(i64, usize, &str, bool)> = self
             .entries
+            .ends
             .iter()
-            .filter(|entry| wanted(entry.is_dir) && (!query.is_empty() || !entry.is_dir))
-            .filter_map(|entry| {
+            .filter_map(|&end| {
+                let (from, to) = (start, (end & !DIR_BIT) as usize);
+                start = to;
+                let is_dir = end & DIR_BIT != 0;
+                (wanted(is_dir) && (!query.is_empty() || !is_dir))
+                    .then(|| (&self.entries.text[from..to], is_dir))
+            })
+            .filter_map(|(path, is_dir)| {
                 if query.is_empty() {
-                    return Some((0, entry));
+                    return Some((0, depth(path), path, is_dir));
                 }
-                let name = entry.lower.rsplit('/').next().unwrap_or(&entry.lower);
-                let score = if name == query {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                let score = if folded.equals(name) {
                     3
-                } else if name.starts_with(&query) {
+                } else if folded.starts(name) {
                     2
-                } else if name.contains(&query) {
+                } else if folded.within(name) {
                     1
-                } else if entry.lower.contains(&query) {
+                } else if folded.within(path) {
                     0
                 } else {
                     return None;
                 };
-                Some((score, entry))
+                Some((score, depth(path), path, is_dir))
             })
             .collect();
-        found.sort_by(|(a_score, a), (b_score, b)| {
-            b_score
-                .cmp(a_score)
-                .then_with(|| depth(&a.path).cmp(&depth(&b.path)))
-                .then_with(|| a.path.len().cmp(&b.path.len()))
-                .then_with(|| a.path.cmp(&b.path))
-        });
+        // Best first: higher tier, then shallower, shorter, by name. Only the
+        // first `limit` are put in order (a common query can match tens of
+        // thousands of paths).
+        let order = |a: &(i64, usize, &str, bool), b: &(i64, usize, &str, bool)| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.len().cmp(&b.2.len()))
+                .then_with(|| a.2.cmp(b.2))
+        };
+        if limit == 0 {
+            return Vec::new();
+        }
+        if found.len() > limit {
+            found.select_nth_unstable_by(limit - 1, order);
+            found.truncate(limit);
+        }
+        found.sort_by(order);
         found
             .into_iter()
-            .take(limit)
-            .map(|(score, entry)| NameMatch {
-                path: entry.path.clone(),
-                is_dir: entry.is_dir,
+            .map(|(score, _, path, is_dir)| NameMatch {
+                path: path.to_owned(),
+                is_dir,
                 score,
             })
             .collect()
@@ -625,6 +732,34 @@ mod tests {
         gate.1.notify_all();
     }
 
+    /// Matched without case, ASCII or not, and kept as typed.
+    #[test]
+    fn names_match_without_case_and_keep_their_case() {
+        let (_dir, root) = home(&[
+            "Code/MyApp/src/Main.rs",
+            "Écoles/Notes.md",
+            "school/notes.md",
+        ]);
+        let index = HomeIndex::build(&root, &WalkCancel::default());
+        assert_eq!(
+            paths(&index, "MYAPP", NameKinds::Directories),
+            ["Code/MyApp", "Code/MyApp/src"]
+        );
+        assert_eq!(
+            paths(&index, "main.RS", NameKinds::Files),
+            ["Code/MyApp/src/Main.rs"]
+        );
+        assert_eq!(paths(&index, "écol", NameKinds::Directories), ["Écoles"]);
+        assert_eq!(
+            paths(&index, "NOTES", NameKinds::Files),
+            ["school/notes.md", "Écoles/Notes.md"]
+        );
+        assert_eq!(
+            paths(&index, "app/src", NameKinds::Directories),
+            ["Code/MyApp/src"]
+        );
+    }
+
     /// One folder never answers: the walk answers at its deadline with the
     /// rest, its idle workers sleep instead of polling, and later walks skip
     /// that folder (no second thread stuck in it) until its read returns.
@@ -663,12 +798,18 @@ mod tests {
             walk.wakes.load(Ordering::Relaxed)
         );
 
-        // The walk is over: its free workers left; nothing wakes while the
-        // stuck one waits.
+        // The walk is over: its free workers leave (each woken once to go),
+        // and then nothing wakes while the stuck one waits.
+        let left = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&walk) > 2 {
+            assert!(Instant::now() < left, "free workers left the walk");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let wakes = walk.wakes.load(Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            walk.wakes.load(Ordering::Relaxed) - wakes <= 1,
+        assert_eq!(
+            walk.wakes.load(Ordering::Relaxed),
+            wakes,
             "idle workers must sleep, not poll"
         );
         assert_eq!(
@@ -758,15 +899,53 @@ mod bench {
     #[test]
     #[ignore]
     fn home_walk_bench() {
+        fn footprint_mb() -> f64 {
+            let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::proc_pid_rusage(
+                    std::process::id() as i32,
+                    libc::RUSAGE_INFO_V4,
+                    (&mut info as *mut libc::rusage_info_v4).cast(),
+                )
+            };
+            info.ri_phys_footprint as f64 / 1048576.0
+        }
         let root = std::fs::canonicalize(std::env::var("HOME_WALK_BENCH").unwrap()).unwrap();
+        let before = footprint_mb();
         for _ in 0..3 {
             let started = std::time::Instant::now();
             let index = super::HomeIndex::build(&root, &Default::default());
+            let held = footprint_mb();
             println!(
-                "WALK entries={} ms={}",
+                "WALK entries={} ms={} held_mb=+{:.1}",
                 index.len(),
-                started.elapsed().as_millis()
+                started.elapsed().as_millis(),
+                held - before
             );
+            for (query, kinds) in [
+                (
+                    "component7",
+                    crate::workspace_search::NameKinds::Directories,
+                ),
+                ("modulefile9", crate::workspace_search::NameKinds::Files),
+                (
+                    "zzz",
+                    crate::workspace_search::NameKinds::FilesAndDirectories,
+                ),
+            ] {
+                let started = std::time::Instant::now();
+                let found = (0..20)
+                    .map(|_| index.search(query, 20, kinds).len())
+                    .sum::<usize>();
+                println!(
+                    "SEARCH {query} {:?}: {:.2} ms each ({found})",
+                    kinds,
+                    started.elapsed().as_secs_f64() * 1000.0 / 20.0
+                );
+            }
+            drop(index);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            println!("DROPPED +{:.1} MB", footprint_mb() - before);
         }
     }
 }

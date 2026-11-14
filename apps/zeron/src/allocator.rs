@@ -31,6 +31,14 @@ fn tag_heap() {
     }
 }
 
+/// mimalloc's forced collect: what its threads freed (exited threads'
+/// pages too) goes back to the system. The engine calls it after dropping
+/// a large short-lived allocation ([`zeron_engine::heap`]).
+pub fn trim() {
+    // SAFETY: mimalloc's collect frees nothing in use.
+    unsafe { libmimalloc_sys::mi_collect(true) };
+}
+
 unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
