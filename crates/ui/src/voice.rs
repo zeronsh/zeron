@@ -402,7 +402,7 @@ impl VoiceController {
             Some(VoiceRejection::ChatgptRequired) => "Sign in to Codex with ChatGPT to use voice.",
             // Remote calls still play audio here, through this device's Codex helper.
             Some(VoiceRejection::NativeRuntimeUnavailable) => {
-                "Install or update Codex on this device with its official installer to use voice. npm installs lack the voice runtime."
+                "Install or update Codex on this device with its official installer to use voice. This copy of Codex has no voice runtime."
             }
             Some(VoiceRejection::DeviceUnavailable) => {
                 "Check microphone permission and your audio devices."
