@@ -66,6 +66,10 @@ const STALE_SECONDS: i64 = 45;
 /// How much of an upload goes in one chunk, in base64 characters (the
 /// shipping app's).
 const CHUNK: usize = 680_000;
+/// The agents whose catalog follows them live (OpenCode's service: agents
+/// and providers added from its TUI or a profile switch), asked again as the
+/// model picker opens.
+const LIVE_CATALOGS: &[&str] = &["opencode"];
 
 thread_local! {
     static CHATS: Rc<Chats> = Rc::new(Chats::default());
@@ -863,6 +867,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let c = c.clone();
         engine::get().spawn(async move { c.load_catalog(true).await });
     });
+    // The model picker opened: the catalogs that follow their agent live
+    // asked again (cheap when nothing changed), so an agent added in
+    // OpenCode, or another profile, shows without a restart.
+    let c = chats.clone();
+    host.action("chat.catalog_fresh", move |_| c.catalog_fresh());
     // The composer's device: its catalog is `chat.catalog` from now on (nil
     // or this device: this one's).
     let c = chats.clone();
@@ -1362,6 +1371,29 @@ impl Chats {
             shared.set(value.clone());
         }
         self.publish_views();
+    }
+
+    /// [`LIVE_CATALOGS`]' models on this device again, unforced: the agent
+    /// answers from its cache unless its catalog changed since. Shown only
+    /// when they differ.
+    fn catalog_fresh(self: &Rc<Self>) {
+        for id in LIVE_CATALOGS {
+            if !self.models.borrow().contains_key(*id) {
+                continue;
+            }
+            let me = self.clone();
+            engine::get().spawn(async move {
+                let Ok(list) = engine::get().call("ListModels", json!({ "harness": id })).await else {
+                    return;
+                };
+                let list = list.as_array().cloned().unwrap_or_default();
+                if me.models.borrow().get(*id) == Some(&list) {
+                    return;
+                }
+                me.models.borrow_mut().insert((*id).to_owned(), list);
+                me.publish_catalog();
+            });
+        }
     }
 
     /// `harness`'s logins on `device` ("" or this one: here) changed: its

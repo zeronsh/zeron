@@ -2712,19 +2712,17 @@ fn agent_model_option_filters_and_preserves_ids() {
     ]}));
     assert_eq!(option.id, "agent");
     assert_eq!(option.label, "Agent");
-    assert_eq!(option.default_choice, "");
+    // (The service lists its default first; there is no "default" agent.)
+    assert_eq!(option.default_choice, "build-id");
     assert_eq!(
         option
             .choices
             .iter()
             .map(|c| (c.id.as_str(), c.label.as_str()))
             .collect::<Vec<_>>(),
-        vec![
-            ("", "Server default"),
-            ("build-id", "Build"),
-            ("all-id", "All")
-        ]
+        vec![("build-id", "Build"), ("all-id", "All")]
     );
+    assert_eq!(agent_option(&json!({"data":[]})).default_choice, "");
 }
 
 #[tokio::test]
@@ -2871,7 +2869,8 @@ async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
     for model in &first {
         assert_eq!(model.options.len(), 1);
         assert_eq!(model.options[0].id, "agent");
-        assert_eq!(model.options[0].choices[1].id, "agent-id");
+        assert_eq!(model.options[0].choices[0].id, "agent-id");
+        assert_eq!(model.options[0].default_choice, "agent-id");
     }
     assert_eq!(
         calls

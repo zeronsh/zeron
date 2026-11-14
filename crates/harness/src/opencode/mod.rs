@@ -664,12 +664,13 @@ impl OpencodeHarness {
         runtime.spawn(async move {
             let mut follower = OpencodeHarness::new();
             follower.executable = executable;
+            // (The first connection is the start, not a change: bumping on it
+            // would void a catalog being read. Any after it — the service
+            // restarted, perhaps with other agents — is one.)
+            let mut connected = false;
             loop {
                 match follower.follow_native().await {
                     Ok(mut feed) => {
-                        // (The first connection is the start, not a change:
-                        // bumping on it would void a catalog being read.)
-                        let mut connected = false;
                         while let Some(change) = feed.recv().await {
                             let changed = match change {
                                 NativeChange::Catalog => true,
@@ -1948,39 +1949,53 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
 }
 
 /// Stored with the models so overlapping discovery calls share the same probe.
+/// The agents a prompt can be given (2.x's primary ones, as its TUI lists
+/// them). The service lists its default first — the configuration's
+/// `default_agent`, else `build`, else the first — and it is the option's
+/// default: OpenCode has no agent called "default".
 fn agent_option(agents: &Value) -> ModelOption {
-    let mut choices = vec![ModelOptionChoice {
-        id: String::new(),
-        label: "Server default".into(),
-    }];
-    for agent in agents
+    let choices: Vec<ModelOptionChoice> = primary_agents(agents)
+        .map(|(id, name)| ModelOptionChoice {
+            id: id.into(),
+            label: name.into(),
+        })
+        .collect();
+    ModelOption {
+        id: "agent".into(),
+        label: "Agent".into(),
+        default_choice: choices.first().map(|c| c.id.clone()).unwrap_or_default(),
+        choices,
+    }
+}
+
+/// `/api/agent`'s primary agents (shown, not subagents), as `(id, name)`,
+/// in its order: its default first.
+fn primary_agents(agents: &Value) -> impl Iterator<Item = (&str, &str)> {
+    agents
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        if agent.get("hidden").and_then(Value::as_bool) == Some(true)
-            || agent.get("mode").and_then(Value::as_str) == Some("subagent")
-        {
-            continue;
-        }
-        if let (Some(id), Some(name)) = (
-            agent.get("id").and_then(Value::as_str),
-            agent.get("name").and_then(Value::as_str),
-        ) && !id.is_empty()
-        {
-            choices.push(ModelOptionChoice {
-                id: id.into(),
-                label: name.into(),
-            });
-        }
-    }
-    ModelOption {
-        id: "agent".into(),
-        label: "Agent".into(),
-        choices,
-        default_choice: String::new(),
-    }
+        .filter(|agent| {
+            agent.get("hidden").and_then(Value::as_bool) != Some(true)
+                && agent.get("mode").and_then(Value::as_str) != Some("subagent")
+        })
+        .filter_map(|agent| {
+            let id = agent.get("id").and_then(Value::as_str)?;
+            let name = agent.get("name").and_then(Value::as_str)?;
+            (!id.is_empty()).then_some((id, name))
+        })
+}
+
+/// The agent the service gives a prompt that names none (2.x): its
+/// default, read now (a profile or the configuration may have changed it).
+async fn service_default_agent(server: &Server, dir: Option<&str>) -> String {
+    server
+        .get_json("/api/agent", dir)
+        .await
+        .ok()
+        .and_then(|agents| primary_agents(&agents).next().map(|(id, _)| id.to_owned()))
+        .unwrap_or_else(|| DEFAULT_AGENT.to_owned())
 }
 
 /// OpenCode exposes plugin/configured skills in its native command catalog.
@@ -2382,10 +2397,13 @@ async fn run_session(session: Session) {
                             .to_owned();
                         // A session a plan-mode run left on the plan agent
                         // goes back to the default one.
-                        let agent = agent.or_else(|| {
-                            (info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT))
-                                .then_some(DEFAULT_AGENT)
-                        });
+                        let agent = match agent {
+                            Some(agent) => Some(agent.to_owned()),
+                            None if info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT) => {
+                                Some(service_default_agent(&server, dir).await)
+                            }
+                            None => None,
+                        };
                         if server.protocol().await == Protocol::V2
                             && let Some(agent) = agent
                         {
@@ -3512,9 +3530,12 @@ async fn adopt_config(
     }
     if v2 && next.plan != *plan {
         let agent = if next.plan {
-            PLAN_AGENT
+            PLAN_AGENT.to_owned()
         } else {
-            chosen_agent(next).unwrap_or(DEFAULT_AGENT)
+            match chosen_agent(next) {
+                Some(agent) => agent.to_owned(),
+                None => service_default_agent(server, dir).await,
+            }
         };
         server
             .post_json(
@@ -3528,7 +3549,8 @@ async fn adopt_config(
     Ok((model, variant))
 }
 
-/// opencode's read-only planning agent, and the agent it hands back to.
+/// opencode's read-only planning agent, and the agent it hands back to when
+/// the service names no default ([`service_default_agent`]).
 const PLAN_AGENT: &str = "plan";
 const DEFAULT_AGENT: &str = "build";
 

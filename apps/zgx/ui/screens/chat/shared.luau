@@ -1189,6 +1189,10 @@ function M.model_accounts(device: () -> string?): any
 		end,
 		on_accounts_open = function()
 			agents.refresh_device(account_key(device()))
+			-- (An agent's models, where they follow it live, asked again.)
+			if account_key(device()) == "" then
+				pcall(ui.invoke, "chat.catalog_fresh")
+			end
 		end,
 	}
 end
