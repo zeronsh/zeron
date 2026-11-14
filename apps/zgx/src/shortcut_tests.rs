@@ -219,6 +219,74 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// ⌘N's new chat is ready in the frame it first shows (ademark's A3: ⌘N,
+/// then a key every 50 ms, timed to the first frame the keys read in the
+/// new chat's composer, with the old chat gone). From a session whose
+/// composer has the keys, what's typed right after ⌘N, with no frame
+/// between, is the new chat's draft, not the session's; that first frame
+/// shows the new chat, the session's page gone, its composer already where
+/// it rests (it snaps there: nothing glides into place). From focus
+/// anywhere else, the first frame gives the composer the keys.
+#[test]
+fn keys_typed_right_after_command_n_land_in_the_new_chat_in_its_first_frame() {
+    let field = "#chat-composer >> role:textbox";
+    let draft = |w: &mut Window| -> String {
+        let node = w.app.find(field).expect("the composer's field");
+        let editor = w.app.ui.editor_within(node).expect("its editor");
+        editor.editor.borrow().text().to_string()
+    };
+    let composer = |w: &mut Window| -> zgx::scene::Rect {
+        let node = w.app.find("#chat-composer").expect("the composer");
+        w.app.ui.scene.borrow().transformed_bounds(node)
+    };
+    let mut w = mount();
+    w.app.ui.scene.borrow_mut().resize(1600., 1000.);
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(30);
+    let session = w.route();
+    for at in [Focus::Composer, Focus::Nothing, Focus::Sidebar] {
+        if w.route() != session {
+            w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+            w.app.frames(30);
+        }
+        focus(&mut w, at);
+        assert_eq!(draft(&mut w), "", "{at:?}: the session's draft starts empty");
+        // ⌘N as the menu runs it, then the first keys: no frame between
+        // for a composer that had the keys, the first frame for any other
+        // focus.
+        w.heard.borrow_mut().clear();
+        w.app.keys("cmd+n");
+        let heard: Vec<String> = w.heard.borrow_mut().drain(..).collect();
+        assert_eq!(heard, ["shell.new_chat"], "{at:?}: ⌘N reached the new chat");
+        assert!(w.app.host.run_command("shell.new_chat"));
+        if !matches!(at, Focus::Composer) {
+            w.app.frame();
+        }
+        w.app.ui.dispatch(InputEvent::Text("ad".into()));
+        w.app.settle();
+        w.app.frame();
+        assert_eq!(w.route(), "/", "{at:?}: a new chat");
+        assert!(w.app.find("#chat-session").is_none(), "{at:?}: the session's page is gone in the first frame");
+        assert!(w.app.find("#chat-home").is_some(), "{at:?}: the new chat's page shows in the first frame");
+        assert_eq!(draft(&mut w), "ad", "{at:?}: the keys are the new chat's draft");
+        let first = composer(&mut w);
+        w.app.frames(30);
+        let rest = composer(&mut w);
+        assert!(
+            (first.y - rest.y).abs() < 0.5 && (first.height - rest.height).abs() < 0.5 && (first.x - rest.x).abs() < 0.5,
+            "{at:?}: the composer rests where the first frame put it: {first:?}, then {rest:?}"
+        );
+        // (The draft goes, so the next new chat starts empty.)
+        w.app.click(field);
+        w.app.keys("cmd+a");
+        w.app.key(zgx::input::Key::Backspace);
+        w.app.frames(10);
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(30);
+        assert_eq!(draft(&mut w), "", "{at:?}: nothing typed reached the session's draft");
+    }
+}
+
 /// Alt+←/→ step the history on Windows and Linux (zgx's router binds them
 /// there, ⌘[ ⌘] on macOS, where ⌥← ⌥→ are the caret's word-jump and must
 /// not): from anywhere, text fields included, as a browser's are (the
