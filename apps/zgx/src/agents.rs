@@ -1852,14 +1852,12 @@ fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
     }
 }
 
-/// Whether `id` signs in from its own CLI, Zeron neither signing it in nor
-/// listing its accounts (Factory Droid): its card has no "Connect an
-/// account". A registry agent has a sign-in of its own (`registry`), and an
-/// id this build doesn't know reads as before.
+/// Whether `id` is a built-in agent Zeron neither signs in nor lists accounts
+/// for (Factory Droid): its card has no "Connect an account".
 fn signs_in_on_its_own(id: &str) -> bool {
-    !id.starts_with("acp.")
-        && serde_json::from_value::<zeron_proto::HarnessId>(json!(id))
-            .is_ok_and(|harness| !zeron_proto::providers::signs_in(harness))
+    harness_id(id).is_some_and(|harness| {
+        !matches!(harness, zeron_proto::HarnessId::Registry(_)) && !zeron_proto::providers::signs_in(harness)
+    })
 }
 
 /// A device's accounts as the composer reads them, by agent: only an agent

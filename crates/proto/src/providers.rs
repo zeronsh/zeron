@@ -29,14 +29,13 @@ pub fn signs_in(harness: HarnessId) -> bool {
 }
 
 pub fn provider_name(harness: HarnessId) -> &'static str {
-    match harness {
-        HarnessId::Fx => "fx",
-        HarnessId::Droid => "Factory Droid",
-        _ => PROVIDERS
-            .iter()
-            .find(|(provider, _, _)| *provider == harness)
-            .map_or("this provider", |(_, name, _)| name),
+    if harness == HarnessId::Fx {
+        return "fx";
     }
+    PROVIDERS
+        .iter()
+        .find(|(provider, _, _)| *provider == harness)
+        .map_or("this provider", |(_, name, _)| name)
 }
 
 /// Whether the provider reports plan usage. One that doesn't shows no meters

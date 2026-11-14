@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
                 workos_client_id: workos_client_id_from_env(&edge_token),
                 edge_token,
                 org_id: std::env::var("ZERON_ORG_ID").ok(),
-                default_harness: zeron_app::harness_from_env(),
+                default_harness: zeron_ui::HarnessId::ClaudeCode,
                 initial_url: open_url,
             });
             Ok(())

@@ -142,10 +142,8 @@ pub(super) fn plan(item: &Value) -> Option<String> {
     let input = &item["toolUse"]["input"];
     let plan = details["plan"]
         .as_str()
-        .or_else(|| input["plan"].as_str())?;
-    if plan.trim().is_empty() || plan.len() > 64 * 1024 {
-        return None;
-    }
+        .or_else(|| input["plan"].as_str())
+        .filter(|plan| !plan.trim().is_empty())?;
     let title = details["title"]
         .as_str()
         .or_else(|| input["title"].as_str())
@@ -237,28 +235,24 @@ pub(super) fn question_response(
     questions: &[UserInputQuestion],
     answers: &[UserInputAnswer],
 ) -> Value {
-    let mut native = vec![];
-    for question in questions {
-        let Some(answer) = answers
-            .iter()
-            .find(|a| a.question_id == question.id && !a.labels.is_empty())
-        else {
-            return cancel_questions();
-        };
-        let labels = answer
-            .labels
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        if labels.is_empty() {
-            return cancel_questions();
-        }
-        native.push(json!({"index":question.id.parse::<u64>().unwrap_or_default(),"question":question.question,"answer":labels.join(",")}));
-    }
-    if native.is_empty() {
-        cancel_questions()
-    } else {
-        json!({"answers":native})
-    }
+    let native: Option<Vec<Value>> = questions
+        .iter()
+        .map(|question| {
+            let answer = answers.iter().find(|a| a.question_id == question.id)?;
+            let labels: Vec<_> = answer
+                .labels
+                .iter()
+                .map(|label| label.trim())
+                .filter(|label| !label.is_empty())
+                .collect();
+            (!labels.is_empty()).then(|| {
+                json!({
+                    "index": question.id.parse::<u64>().unwrap_or_default(),
+                    "question": question.question,
+                    "answer": labels.join(","),
+                })
+            })
+        })
+        .collect();
+    native.map_or_else(cancel_questions, |answers| json!({ "answers": answers }))
 }

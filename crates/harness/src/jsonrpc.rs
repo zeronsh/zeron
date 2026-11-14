@@ -111,20 +111,27 @@ impl RpcClient {
     /// Spawn the writer + reader tasks over the child's stdio; returns the
     /// client and the incoming (notification/request) channel.
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
-        Self::with_stdout_observer(stdin, stdout, None)
+        Self::spawn(stdin, stdout, None, Envelope::Plain)
     }
 
     /// [`Self::new`] for a peer speaking Factory's stream-jsonrpc.
     pub fn factory(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
-        let (mut client, incoming) = Self::new(stdin, stdout);
-        client.envelope = Envelope::Factory;
-        (client, incoming)
+        Self::spawn(stdin, stdout, None, Envelope::Factory)
     }
 
     pub(crate) fn with_stdout_observer(
         stdin: ChildStdin,
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
+    ) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::spawn(stdin, stdout, observer, Envelope::Plain)
+    }
+
+    fn spawn(
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        observer: Option<StdoutObserver>,
+        envelope: Envelope,
     ) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Arc::default();
@@ -149,7 +156,7 @@ impl RpcClient {
         ));
         (
             Self {
-                envelope: Envelope::Plain,
+                envelope,
                 next_id: Arc::new(AtomicI64::new(0)),
                 pending,
                 writer: writer_tx,

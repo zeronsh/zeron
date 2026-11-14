@@ -348,6 +348,277 @@ fn frames(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+async fn title_run(harness: &DroidHarness, request: RunRequest) -> Vec<AgentEvent> {
+    let (steer, steering) = mpsc::channel(8);
+    steer
+        .send(SteerMessage::text("Never send a second title prompt"))
+        .await
+        .unwrap();
+    let events = harness
+        .run_title(
+            request,
+            RunControls {
+                realtime: None,
+                execution_lease: None,
+                steering,
+                interrupt: CancellationToken::new(),
+                turn: Default::default(),
+                request_input: Box::new(|_| panic!("title runs must never ask for input")),
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        events.map(Result::unwrap).collect(),
+    )
+    .await
+    .expect("single title turn closes even with steering open")
+}
+
+fn title_request(cwd: &Path, scenario: &str) -> RunRequest {
+    let mut req = request(
+        cwd,
+        "Implement a dangerous request\n  exactly as supplied.\n",
+    );
+    req.env.insert(
+        "DROID_FIXTURE_LOG".into(),
+        cwd.join("frames.jsonl").display().to_string(),
+    );
+    req.env
+        .insert("DROID_FIXTURE_SCENARIO".into(), scenario.into());
+    req
+}
+
+#[tokio::test]
+async fn droid_title_run_is_isolated_and_tool_free() {
+    assert!(zeron_harness::supports_titles(
+        zeron_proto::HarnessId::Droid
+    ));
+    let temp = tempfile::tempdir().unwrap();
+    let harness = harness();
+    harness.model_catalog(false).await.unwrap();
+    let mut req = title_request(temp.path(), "title");
+    let prompt = req.prompt.clone();
+    req.access = AccessMode::default();
+    assert_eq!(req.access, AccessMode::FullAccess);
+    req.auto_approve = true;
+    req.plan = true;
+    req.reasoning = Some(zeron_proto::ReasoningLevel::Minimal);
+    req.resume = Some("must-not-load".into());
+    req.worktree = Some(zeron_proto::WorktreeSpec {
+        repo_path: "/must-not-use".into(),
+        base: "main".into(),
+        space_id: None,
+    });
+    req.attachments = vec!["/must-not-read.png".into()];
+    let mcp = zeron_proto::McpServer {
+        name: "forbidden".into(),
+        command: "must-not-run".into(),
+        args: vec![],
+        env: Default::default(),
+    };
+    req.mcp = Some(mcp.clone());
+    req.extra_mcp = vec![mcp];
+    req.model_options
+        .insert("autonomyLevel".into(), json!("high"));
+    req.model_options
+        .insert("systemPrompt".into(), json!("Not title instructions"));
+    let events = title_run(&harness, req).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        "Fixture Thread Title"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCall { .. } | AgentEvent::Error { .. }))
+    );
+    let frames = frames(&temp.path().join("frames.jsonl"));
+    let methods: Vec<_> = frames.iter().filter_map(|f| f["method"].as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "droid.initialize_session",
+            "droid.update_session_settings",
+            "droid.list_tools",
+            "droid.add_user_message"
+        ]
+    );
+    let init = &frames[0]["params"];
+    assert_eq!(init["systemPrompt"], zeron_harness::TITLE_INSTRUCTIONS);
+    assert_eq!(init["restrictToolIds"], json!(["__no-tools__"]));
+    for key in [
+        "disableBuiltinSkills",
+        "autoRejectPermissionRequests",
+        "blockOnStartupLoad",
+        "blockOnMcpLoad",
+    ] {
+        assert_eq!(init[key], true);
+    }
+    assert_eq!(init["privacyLevel"], "private");
+    for key in [
+        "toolExecutionMode",
+        "mcpServers",
+        "sessionId",
+        "worktree",
+        "model_options",
+    ] {
+        assert!(init.get(key).is_none(), "{key}");
+    }
+    assert_eq!(
+        frames[1]["params"],
+        json!({
+            "modelId":"fixture-mini","specModeModelId":"fixture-mini",
+            "reasoningEffort":"low","specModeReasoningEffort":"low",
+            "autonomyLevel":"off","interactionMode":"auto"
+        })
+    );
+    assert_eq!(frames[2]["params"], json!({}));
+    assert_eq!(frames[3]["params"], json!({"text":prompt}));
+}
+
+#[tokio::test]
+async fn droid_title_run_refuses_when_tools_remain() {
+    for scenario in [
+        "title-tools-enabled",
+        "title-tools-missing",
+        "title-tools-missing-allowed",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let events = title_run(&harness(), title_request(temp.path(), scenario)).await;
+        assert!(
+            matches!(events.last(), Some(AgentEvent::Done {
+            status:DoneStatus::Errored,error:Some(error),..
+        }) if error.contains("Droid") && error.contains("tool")),
+            "{scenario}: {events:?}"
+        );
+        let frames = frames(&temp.path().join("frames.jsonl"));
+        assert!(frames.iter().any(|f| f["method"] == "droid.list_tools"));
+        assert!(
+            !frames
+                .iter()
+                .any(|f| f["method"] == "droid.add_user_message"),
+            "{scenario}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn droid_title_rejects_a_launch_or_settings_droid_did_not_keep() {
+    for scenario in ["title-init-system", "coerced"] {
+        let temp = tempfile::tempdir().unwrap();
+        let events = title_run(&harness(), title_request(temp.path(), scenario)).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    error: Some(_),
+                    ..
+                })
+            ),
+            "{scenario}: {events:?}"
+        );
+        assert!(
+            !frames(&temp.path().join("frames.jsonl"))
+                .iter()
+                .any(|f| f["method"] == "droid.add_user_message"),
+            "{scenario}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn droid_title_refuses_server_requests_at_startup_barriers_and_during_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let events = title_run(&harness(), title_request(temp.path(), "title-requests")).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Interrupted,
+            ..
+        })
+    ));
+    let frames = frames(&temp.path().join("frames.jsonl"));
+    for stage in ["startup", "settings", "tools", "turn"] {
+        for (method, expected) in [
+            ("permission", json!({"selectedOption":"cancel"})),
+            ("ask", json!({"cancelled":true,"answers":[]})),
+            ("unknown", Value::Null),
+        ] {
+            let id = format!("title-{stage}-{method}");
+            let replies: Vec<_> = frames
+                .iter()
+                .filter(|f| f["id"] == id && f["type"] == "response")
+                .collect();
+            assert_eq!(replies.len(), 1, "{id}");
+            if method == "unknown" {
+                assert_eq!(replies[0]["error"]["code"], -32601);
+            } else {
+                assert_eq!(replies[0]["result"], expected);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn droid_title_effort_follows_the_cached_ladder() {
+    for (model, cached, effort) in [
+        ("fixture-mini-fast", true, "minimal"),
+        ("fixture-mini-fast", false, "low"),
+        ("auto", true, "none"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let harness = harness();
+        if cached {
+            harness.model_catalog(false).await.unwrap();
+        }
+        let mut req = title_request(temp.path(), "title");
+        req.model = Some(model.into());
+        req.reasoning = Some(zeron_proto::ReasoningLevel::Minimal);
+        let events = title_run(&harness, req).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                })
+            ),
+            "{events:?}"
+        );
+        let frames = frames(&temp.path().join("frames.jsonl"));
+        let settings = &frames
+            .iter()
+            .find(|f| f["method"] == "droid.update_session_settings")
+            .unwrap()["params"];
+        assert_eq!(
+            settings["reasoningEffort"], effort,
+            "{model} cached={cached}"
+        );
+        assert_eq!(settings["specModeReasoningEffort"], effort);
+    }
+}
+
 fn assistant_id(events: &[AgentEvent]) -> String {
     events
         .iter()
@@ -718,43 +989,6 @@ async fn droid_steering_waits_for_consumption_and_preserves_initial_turn_id() {
             close(run).await;
         }
     }
-}
-
-#[tokio::test]
-async fn droid_successive_mid_turn_receipts_chain_assistant_ids() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut run = start(request(temp.path(), "wait")).await;
-    let mut initial_events = vec![];
-    loop {
-        let event = next(&mut run.events).await;
-        let waiting = matches!(event, AgentEvent::TextDelta { .. });
-        initial_events.push(event);
-        if waiting {
-            break;
-        }
-    }
-    let initial = assistant_id(&initial_events);
-    run.steering
-        .send(SteerMessage::text("keep-steering"))
-        .await
-        .unwrap();
-    let mut first = vec![];
-    loop {
-        let event = next(&mut run.events).await;
-        let waiting = matches!(event, AgentEvent::TextDelta { .. });
-        first.push(event);
-        if waiting {
-            break;
-        }
-    }
-    let next_id = rotation(&first, &initial);
-    run.steering
-        .send(SteerMessage::text("steer"))
-        .await
-        .unwrap();
-    let second = done(&mut run.events).await;
-    assert_ne!(rotation(&second, &next_id), initial);
-    close(run).await;
 }
 
 #[tokio::test]

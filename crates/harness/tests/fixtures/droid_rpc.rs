@@ -26,6 +26,24 @@ fn request(id: &str, method: &str, params: Value) {
     );
 }
 
+fn title_requests(stage: &str) {
+    request(
+        &format!("title-{stage}-permission"),
+        "droid.request_permission",
+        json!({"toolUses":[{"toolUse":{"id":"forbidden","name":"Read","input":{"file_path":"secret"}}}],"options":[{"value":"proceed_once"},{"value":"cancel"}]}),
+    );
+    request(
+        &format!("title-{stage}-ask"),
+        "droid.ask_user",
+        json!({"toolCallId":"ask","questions":[{"index":1,"topic":"Forbidden","question":"Do not ask","options":["Yes","No"]}]}),
+    );
+    request(
+        &format!("title-{stage}-unknown"),
+        "droid.unknown_title_method",
+        json!({}),
+    );
+}
+
 const LIVE_CHILD: &str = "11111111-1111-4111-8111-111111111111";
 const FAILED_CHILD: &str = "22222222-2222-4222-8222-222222222222";
 
@@ -132,6 +150,8 @@ fn main() {
     let mut active = String::new();
     let mut ongoing = false;
     let mut children_started = false;
+    let mut title = false;
+    let mut configured = false;
     let scenario = std::env::var("DROID_FIXTURE_SCENARIO").unwrap_or_default();
     for line in io::stdin().lock().lines() {
         let line = line.unwrap();
@@ -151,6 +171,19 @@ fn main() {
         assert_eq!(frame["factoryApiVersion"], "1.0.0");
         assert!(frame["id"].is_string());
         if frame["type"] == "response" {
+            if let Some(id) = frame["id"].as_str().filter(|id| id.starts_with("title-")) {
+                if id.ends_with("-permission") {
+                    assert_eq!(frame["result"]["selectedOption"], "cancel");
+                } else if id.ends_with("-ask") {
+                    assert_eq!(frame["result"], json!({"cancelled":true,"answers":[]}));
+                } else {
+                    assert_eq!(frame["error"]["code"], -32601);
+                }
+                if id == "title-turn-unknown" {
+                    completed(&active, "cancelled");
+                }
+                continue;
+            }
             let cancelled = frame["result"]["selectedOption"] == "cancel"
                 || frame["result"]["cancelled"] == true;
             completed(&active, if cancelled { "cancelled" } else { "completed" });
@@ -182,8 +215,34 @@ fn main() {
                 ),
             },
             "droid.initialize_session" => {
-                assert_eq!(params["toolExecutionMode"], "direct_only");
-                assert_eq!(std::env::var("DROID_DISABLE_AUTO_UPDATE").unwrap(), "true");
+                title = params.get("systemPrompt").is_some();
+                if title {
+                    assert_eq!(params["systemPrompt"], zeron_harness::TITLE_INSTRUCTIONS);
+                    assert_eq!(params["restrictToolIds"], json!(["__no-tools__"]));
+                    for key in [
+                        "disableBuiltinSkills",
+                        "autoRejectPermissionRequests",
+                        "blockOnStartupLoad",
+                        "blockOnMcpLoad",
+                    ] {
+                        assert_eq!(params[key], true, "{key}");
+                    }
+                    assert_eq!(params["autonomyLevel"], "off");
+                    assert_eq!(params["interactionMode"], "auto");
+                    assert_eq!(params["privacyLevel"], "private");
+                    for key in ["toolExecutionMode", "mcpServers", "sessionId", "worktree"] {
+                        assert!(params.get(key).is_none(), "{key}");
+                    }
+                    settings["systemPrompt"] = params["systemPrompt"].clone();
+                    if scenario == "title-init-system" {
+                        settings["systemPrompt"] = json!("Coding prompt");
+                    }
+                    if scenario == "title-requests" {
+                        title_requests("startup");
+                    }
+                } else {
+                    assert_eq!(params["toolExecutionMode"], "direct_only");
+                }
                 assert_eq!(
                     std::env::var("FACTORY_DROID_AUTO_UPDATE_ENABLED").unwrap(),
                     "false"
@@ -194,11 +253,15 @@ fn main() {
                 );
             }
             "droid.update_session_settings" => {
+                configured = true;
                 for (key, value) in params.as_object().unwrap() {
                     settings[key] = value.clone();
                 }
                 if scenario == "coerced" {
                     settings["autonomyLevel"] = json!("high");
+                }
+                if scenario == "title-requests" {
+                    title_requests("settings");
                 }
                 response(id, json!({}));
                 notification(
@@ -215,6 +278,31 @@ fn main() {
                         json!({"type":"settings_updated","requestId":id,"settings":settings}),
                     );
                 }
+            }
+            "droid.list_tools" => {
+                assert!(title);
+                assert!(configured, "verify after the model/settings barrier");
+                assert_eq!(
+                    params,
+                    &json!({}),
+                    "query actual session, not hypothetical overrides"
+                );
+                if scenario == "title-requests" {
+                    title_requests("tools");
+                }
+                let result = match scenario.as_str() {
+                    "title-tools-enabled" => {
+                        json!({"tools":[{"id":"Read","currentlyAllowed":true}]})
+                    }
+                    "title-tools-missing" => json!({}),
+                    "title-tools-missing-allowed" => json!({"tools":[{"id":"Read"}]}),
+                    _ => json!({"tools":[
+                        {"id":"read-cli","currentlyAllowed":false},
+                        {"id":"script-cli","currentlyAllowed":false},
+                        {"id":"mcp_global","currentlyAllowed":false}
+                    ]}),
+                };
+                response(id, result);
             }
             "droid.add_user_message" => {
                 response(id, json!({}));
@@ -236,6 +324,18 @@ fn main() {
                 notification(
                     json!({"type":"create_message","requestId":id,"message":{"id":message_id,"role":"user","content":[{"type":"text","text":params["text"]}]}}),
                 );
+                if title {
+                    assert!(params.get("imagePaths").is_none());
+                    if scenario == "title-requests" {
+                        title_requests("turn");
+                    } else {
+                        notification(
+                            json!({"type":"assistant_text_delta","textDelta":"Fixture Thread Title"}),
+                        );
+                        completed(&active, "completed");
+                    }
+                    continue;
+                }
                 match params["text"].as_str().unwrap() {
                     "subagents-live" => {
                         subagents();
@@ -307,9 +407,6 @@ fn main() {
                                 "options":options.into_iter().map(|value| json!({"value":value,"label":value})).collect::<Vec<_>>()
                             }),
                         );
-                        if text == "plan-terminal" {
-                            completed(&active, "cancelled");
-                        }
                     }
                     "permission-edit" | "permission-mixed" => {
                         let mut tools = vec![
@@ -335,7 +432,7 @@ fn main() {
                         );
                     }
                     "eof" => return,
-                    "ack-only" | "wait" | "keep-steering" => {
+                    "ack-only" | "wait" => {
                         ongoing = true;
                         notification(json!({"type":"assistant_text_delta","textDelta":"waiting"}));
                         notification(

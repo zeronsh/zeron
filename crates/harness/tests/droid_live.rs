@@ -234,3 +234,64 @@ async fn droid_live_subagent_transcript() {
         }
     )));
 }
+
+#[tokio::test]
+#[ignore = "requires DROID_LIVE_EXECUTABLE and Droid login or FACTORY_API_KEY; spends tokens"]
+async fn droid_live_title_has_no_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = std::env::var_os("DROID_LIVE_EXECUTABLE")
+        .map(PathBuf::from)
+        .expect("Set DROID_LIVE_EXECUTABLE to the installed Droid binary");
+    let harness = DroidHarness::new().with_executable(executable);
+    harness.model_catalog(false).await.unwrap();
+    let model = std::env::var("DROID_LIVE_MODEL").unwrap_or_else(|_| "gpt-6-luna".into());
+    let request = serde_json::from_value(serde_json::json!({
+        "prompt":"Add a keyboard shortcut for opening the settings panel",
+        "model":model,"reasoning":"minimal","cwd":temp.path(),
+        "sandbox":"workspace-write"
+    }))
+    .unwrap();
+    let (_steer, steering) = mpsc::channel(8);
+    let interrupt = CancellationToken::new();
+    let mut events = harness
+        .run_title(
+            request,
+            RunControls {
+                realtime: None,
+                execution_lease: None,
+                steering,
+                interrupt: interrupt.clone(),
+                turn: Default::default(),
+                request_input: Box::new(|_| panic!("title generation must never ask for input")),
+            },
+        )
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut text = String::new();
+        let mut completed = false;
+        while let Some(event) = events.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                AgentEvent::Done { status, error, .. } => {
+                    assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                    assert!(!completed);
+                    completed = true;
+                }
+                AgentEvent::ToolCall { .. }
+                | AgentEvent::Error { .. }
+                | AgentEvent::InputRequested { .. }
+                | AgentEvent::Subagent { .. } => panic!("unexpected title event"),
+                _ => {}
+            }
+        }
+        assert!(completed);
+        let words = text.split_whitespace().count();
+        assert!((3..=5).contains(&words), "expected a short title: {text:?}");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        eprintln!("Droid title model={model}: {}", text.trim());
+    })
+    .await;
+    interrupt.cancel();
+    result.expect("live Droid title timed out");
+}

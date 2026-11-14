@@ -91,8 +91,12 @@ impl DroidHarness {
         })
     }
 
+    fn context(&self) -> Result<crate::ModelContext, HarnessError> {
+        crate::model_context::context(HarnessId::Droid, &self.resolve_executable()?, &[])
+    }
+
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let context = self.model_context()?.expect("Droid model context");
+        let context = self.context()?;
         context.log();
         let mut host = Host::spawn(
             &context.binary_path,
@@ -155,14 +159,14 @@ impl Harness for DroidHarness {
         Ok(self.model_catalog(false).await?.models)
     }
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
-        crate::model_context::context(HarnessId::Droid, &self.resolve_executable()?, &[]).map(Some)
+        self.context().map(Some)
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.models_cache
             .get_with_timeout(
                 force,
                 Duration::from_secs(25),
-                || Ok(self.model_context()?.expect("Droid model context").key()),
+                || Ok(self.context()?.key()),
                 || self.discover_models(),
             )
             .await
@@ -182,6 +186,40 @@ impl Harness for DroidHarness {
         &self,
         request: RunRequest,
         controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_launch(request, controls, Launch::Coding)
+            .await
+    }
+
+    async fn run_title(
+        &self,
+        mut request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.resume = None;
+        request.worktree = None;
+        request.attachments.clear();
+        request.mcp = None;
+        request.extra_mcp.clear();
+        request.model_options.clear();
+        request.auto_approve = false;
+        request.access = AccessMode::Supervised;
+        request.plan = false;
+        let models = self
+            .models_cache
+            .cached_for(self.context()?.key())
+            .unwrap_or_default();
+        self.run_with_launch(request, controls, Launch::Title { models })
+            .await
+    }
+}
+
+impl DroidHarness {
+    async fn run_with_launch(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        launch: Launch,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let mut host = Host::spawn(
             &self.resolve_executable()?,
@@ -209,13 +247,13 @@ impl Harness for DroidHarness {
             };
             tokio::pin!(abandoned);
             let opened = tokio::select! {
-                opened = open(&mut host, &request, &tx) => Some(opened),
+                opened = open(&mut host, &launch, &request, &tx) => Some(opened),
                 _ = &mut abandoned => None,
             };
             match opened {
                 Some(Ok((session_id, settings))) => {
                     let mut runner =
-                        Runner::new(&mut host, tx, request, turn, session_id, settings);
+                        Runner::new(&mut host, launch, tx, request, turn, session_id, settings);
                     let result = tokio::select! {
                         result = runner.run(&mut steering) => result,
                         _ = &mut abandoned => {
@@ -258,6 +296,65 @@ fn launch_matches(live: &RunRequest, next: &RunRequest) -> bool {
         && crate::same_model_options(&live.model_options, &next.model_options)
 }
 
+/// What a session is opened for, fixed for its life.
+enum Launch {
+    Coding,
+    /// One tool-free turn that names a thread, its effort from `models`.
+    Title {
+        models: Vec<Model>,
+    },
+}
+
+impl Launch {
+    fn is_title(&self) -> bool {
+        matches!(self, Self::Title { .. })
+    }
+
+    /// What a session is opened with, beside what names it.
+    fn params(&self, request: &RunRequest) -> Value {
+        match self {
+            Self::Coding => {
+                let mut params = json!({ "toolExecutionMode": "direct_only" });
+                let servers: Vec<_> = request
+                    .mcp
+                    .iter()
+                    .chain(&request.extra_mcp)
+                    .map(|server| {
+                        json!({
+                            "name": server.name, "command": server.command,
+                            "args": server.args, "env": server.env,
+                        })
+                    })
+                    .collect();
+                if !servers.is_empty() {
+                    params["mcpServers"] = json!(servers);
+                }
+                params
+            }
+            Self::Title { .. } => json!({
+                "systemPrompt": crate::TITLE_INSTRUCTIONS,
+                "disableBuiltinSkills": true,
+                "autoRejectPermissionRequests": true,
+                "privacyLevel": "private",
+                "restrictToolIds": ["__no-tools__"],
+                "autonomyLevel": "off",
+                "interactionMode": "auto",
+                "blockOnStartupLoad": true,
+                "blockOnMcpLoad": true,
+            }),
+        }
+    }
+
+    /// The parameters an opened session reports in its settings: one that
+    /// reports another value was not opened as asked.
+    fn reported(&self) -> &'static [&'static str] {
+        match self {
+            Self::Coding => &["toolExecutionMode"],
+            Self::Title { .. } => &["systemPrompt", "autonomyLevel", "interactionMode"],
+        }
+    }
+}
+
 struct Host {
     child: Child,
     client: RpcClient,
@@ -280,7 +377,6 @@ impl Host {
                 "--output-format",
                 "stream-jsonrpc",
             ])
-            .env("DROID_DISABLE_AUTO_UPDATE", "true")
             .env("FACTORY_DROID_AUTO_UPDATE_ENABLED", "false")
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -333,8 +429,8 @@ impl Host {
         }
     }
 
-    /// A request made before any session runs here: there is nobody to ask,
-    /// so server requests are refused, and no session for a notification.
+    /// A request made before a session's first turn: there is nobody to ask,
+    /// so server requests are refused, and no turn for a notification.
     async fn call(
         &mut self,
         method: &str,
@@ -371,35 +467,24 @@ impl Drop for Host {
     }
 }
 
-/// Loads the request's saved session, or starts one when there is none to
-/// load: its id and the settings in effect. Direct tool mode is a startup
-/// setting, so it is asked for and checked here.
+/// Loads the request's saved session, or starts a fresh one, as `launch`
+/// opens it: its id and the settings in effect.
 async fn open(
     host: &mut Host,
+    launch: &Launch,
     request: &RunRequest,
     tx: &mpsc::Sender<Output>,
 ) -> Result<(String, Value), HarnessError> {
-    let servers: Vec<_> = request
-        .mcp
-        .iter()
-        .chain(&request.extra_mcp)
-        .map(|server| {
-            json!({
-                "name": server.name, "command": server.command,
-                "args": server.args, "env": server.env,
-            })
-        })
-        .collect();
-    let launch = |mut params: Value| {
-        params["toolExecutionMode"] = json!("direct_only");
-        if !servers.is_empty() {
-            params["mcpServers"] = json!(servers);
+    let params = launch.params(request);
+    let opening = |mut session: Value| {
+        for (key, value) in params.as_object().into_iter().flatten() {
+            session[key] = value.clone();
         }
-        params
+        session
     };
     let loaded = match &request.resume {
         Some(id) => {
-            let load = launch(json!({ "sessionId": id }));
+            let load = opening(json!({ "sessionId": id }));
             match host.call("droid.load_session", load, START_TIMEOUT).await {
                 // A loaded session answers without its id: it is the one asked for.
                 Ok(session) => Some((id.clone(), session)),
@@ -421,7 +506,7 @@ async fn open(
     let (id, session) = match loaded {
         Some(loaded) => loaded,
         None => {
-            let start = launch(json!({ "machineId": "default", "cwd": request.cwd }));
+            let start = opening(json!({ "machineId": "default", "cwd": request.cwd }));
             let session = host
                 .call("droid.initialize_session", start, START_TIMEOUT)
                 .await?;
@@ -442,12 +527,15 @@ async fn open(
             "Droid restored a different working directory; refusing to prompt".into(),
         ));
     }
-    if session["settings"]["toolExecutionMode"] != "direct_only" {
-        return Err(HarnessError::Protocol(
-            "Droid refused direct tool execution mode".into(),
-        ));
+    let settings = &session["settings"];
+    for key in launch.reported() {
+        if settings[*key] != params[*key] {
+            return Err(HarnessError::Protocol(format!(
+                "Droid opened the session without the requested {key}; refusing to prompt"
+            )));
+        }
     }
-    Ok((id, session["settings"].clone()))
+    Ok((id, settings.clone()))
 }
 
 /// The `Done` of a run that failed.
@@ -486,6 +574,7 @@ struct Turn {
 
 struct Runner<'a> {
     host: &'a mut Host,
+    launch: Launch,
     tx: mpsc::Sender<Output>,
     request: RunRequest,
     control: crate::TurnControl,
@@ -508,6 +597,7 @@ struct Runner<'a> {
 impl<'a> Runner<'a> {
     fn new(
         host: &'a mut Host,
+        launch: Launch,
         tx: mpsc::Sender<Output>,
         request: RunRequest,
         control: crate::TurnControl,
@@ -517,6 +607,7 @@ impl<'a> Runner<'a> {
         Self {
             children: subagents::Subagents::new(&request.env, &request.cwd, &session_id),
             host,
+            launch,
             tx,
             request,
             control,
@@ -541,6 +632,9 @@ impl<'a> Runner<'a> {
         steering: &mut mpsc::Receiver<SteerMessage>,
     ) -> Result<(), HarnessError> {
         self.configure().await?;
+        if self.launch.is_title() {
+            self.verify_no_tools().await?;
+        }
         self.emit(AgentEvent::SessionStarted {
             harness: HarnessId::Droid,
             model: string(&self.settings, "modelId").into(),
@@ -556,7 +650,8 @@ impl<'a> Runner<'a> {
             self.request.attachments.clone(),
         );
         let mut queued = VecDeque::new();
-        let mut mailbox_open = true;
+        // A title is its one turn: nothing steers it or follows it.
+        let mut mailbox_open = !self.launch.is_title();
         let mut child_poll = tokio::time::interval(subagents::POLL);
         child_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -606,10 +701,11 @@ impl<'a> Runner<'a> {
                     Some(message) => self.follow_up(message.prompt, message.attachments),
                     None => mailbox_open = false,
                 },
-                _ = tokio::time::sleep_until(stop_by.unwrap_or_else(Instant::now)), if stop_by.is_some() => {
-                    return Err(HarnessError::Protocol(
-                        "Droid did not complete its interrupted turn within 10 seconds".into(),
-                    ));
+                _ = overdue(stop_by) => {
+                    return Err(HarnessError::Protocol(format!(
+                        "Droid did not complete its interrupted turn within {} seconds",
+                        STOP_TIMEOUT.as_secs()
+                    )));
                 }
             }
         }
@@ -671,7 +767,7 @@ impl<'a> Runner<'a> {
 
     /// Asks for the request's settings and refuses to go on under any others.
     async fn configure(&mut self) -> Result<(), HarnessError> {
-        let wanted = settings(&self.request, &self.settings)?;
+        let wanted = settings(&self.launch, &self.request, &self.settings)?;
         let (id, ack) = self
             .host
             .client
@@ -688,6 +784,26 @@ impl<'a> Runner<'a> {
                     "Droid changed requested {key}; refusing to send a prompt under different settings"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// A title's launch asks for no tools; only the catalog says it held.
+    async fn verify_no_tools(&mut self) -> Result<(), HarnessError> {
+        let catalog = self
+            .host
+            .call("droid.list_tools", json!({}), START_TIMEOUT)
+            .await?;
+        let tools = catalog["tools"]
+            .as_array()
+            .ok_or_else(|| HarnessError::Protocol("Droid returned no title tool catalog".into()))?;
+        if tools
+            .iter()
+            .any(|tool| tool["currentlyAllowed"].as_bool() != Some(false))
+        {
+            return Err(HarnessError::Protocol(
+                "Droid title tools remain enabled or their availability is unknown".into(),
+            ));
         }
         Ok(())
     }
@@ -884,10 +1000,12 @@ impl<'a> Runner<'a> {
     }
 
     async fn server_request(&mut self, id: Value, method: &str, params: &Value) {
-        let asking = self
-            .turn
-            .as_ref()
-            .is_some_and(|turn| turn.stop_by.is_none());
+        // Nobody is asked by a title, outside a turn, or once it is stopping.
+        let asking = !self.launch.is_title()
+            && self
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.stop_by.is_none());
         match method {
             "droid.request_permission" if asking => self.permission(id, params).await,
             "droid.ask_user" if asking => {
@@ -975,7 +1093,16 @@ impl<'a> Runner<'a> {
     }
 }
 
-fn settings(request: &RunRequest, effective: &Value) -> Result<Value, HarnessError> {
+/// Resolves once a turn asked to stop has outlived `stop_by`: never for one
+/// that was not asked.
+async fn overdue(stop_by: Option<Instant>) {
+    match stop_by {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn model<'a>(request: &'a RunRequest, effective: &'a Value) -> Result<&'a str, HarnessError> {
     let model = request
         .model
         .as_deref()
@@ -986,13 +1113,24 @@ fn settings(request: &RunRequest, effective: &Value) -> Result<Value, HarnessErr
             "Droid returned no default model".into(),
         ));
     }
-    let effort = if model == "auto" {
-        json!("none")
-    } else {
-        request
+    Ok(model)
+}
+
+fn settings(
+    launch: &Launch,
+    request: &RunRequest,
+    effective: &Value,
+) -> Result<Value, HarnessError> {
+    let model = model(request, effective)?;
+    let current = &effective["reasoningEffort"];
+    let effort = match launch {
+        _ if model == "auto" => json!("none"),
+        Launch::Coding => request
             .reasoning
-            .map(|level| json!(level))
-            .unwrap_or_else(|| effective["reasoningEffort"].clone())
+            .map_or_else(|| current.clone(), |level| json!(level)),
+        Launch::Title { models } => {
+            catalog::title_effort(model, request.reasoning, current, models)
+        }
     };
     Ok(json!({
         "modelId": model, "specModeModelId": model,
