@@ -28,10 +28,16 @@ downloads from it).
 GGUF conversion by handy-computer for transcribe.cpp: https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/tree/7353b6040bdc1be9e5a3823d99d5fe12afe88264
 Changes, as its NOTICE states: the conversion repackages the weights (renamed and re-laid-out tensors) and the Q5_K_M file
 Zeron downloads stores them at reduced numeric precision. The weights were not retrained or fine-tuned. Pinned in
-`models.json` like Parakeet Ultra.
+`models.json` like Parakeet Ultra; `verified` names each file's SHA-256, so a changed pin verifies again.
 
 Languages: Arabic, Chinese, Dutch, English, French, German, Greek, Italian, Japanese, Korean, Polish, Portuguese,
 Spanish, Vietnamese.
+
+Cohere can't tell the language by itself: with it comes a language-ID model, SpeechBrain's ECAPA-TDNN trained on
+VoxLingua107 (© the SpeechBrain authors, Apache License 2.0), https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa
+at commit `0253049`. GGUF conversion by handy-computer for transcribe.cpp:
+https://huggingface.co/handy-computer/lang-id-voxlingua107-ecapa-gguf/tree/e59f0f3847e77723b7d58447ef9456fa0c7e9436
+(repackaged tensors, Q8_0 precision; not retrained). Pinned by revision, size and SHA-256 in `models.json`.
 
 ## Runtime
 
