@@ -82,6 +82,8 @@ pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     processes: std::sync::Arc<background::BackgroundWork>,
+    /// The agent process's pid (0: none, or not known).
+    agent_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl TurnControl {
@@ -99,6 +101,20 @@ impl TurnControl {
     pub fn set_background(&self, tasks: usize) {
         self.background
             .store(tasks, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Driver: the agent CLI process the runtime runs now (`None` once it
+    /// has gone). The host checks its live children before stopping an idle
+    /// runtime ([`process::unexpected_descendants`]), whatever the agent
+    /// reports of its background work.
+    pub fn set_agent_pid(&self, pid: Option<u32>) {
+        self.agent_pid
+            .store(pid.unwrap_or(0), std::sync::atomic::Ordering::Release);
+    }
+
+    /// Host: the agent CLI's pid, while the driver knows it.
+    pub fn agent_pid(&self) -> Option<u32> {
+        Some(self.agent_pid.load(std::sync::atomic::Ordering::Acquire)).filter(|pid| *pid != 0)
     }
 
     /// Host: the runtime reports live background work, so retiring it now

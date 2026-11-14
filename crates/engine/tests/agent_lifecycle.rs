@@ -39,6 +39,8 @@ struct Ledger {
     turn: Mutex<Option<TurnControl>>,
     /// Each spawn's Zeron MCP server, as the host stamped it.
     mcp: Mutex<Vec<Option<zeron_proto::McpServer>>>,
+    /// The real process standing in for the agent CLI, told to the host.
+    process: Mutex<Option<u32>>,
 }
 
 /// `bg` in a prompt starts background work (the test ends it); `wake`
@@ -99,6 +101,7 @@ impl Harness for Agent {
         ledger.resumes.lock().unwrap().push(request.resume.clone());
         ledger.mcp.lock().unwrap().push(request.mcp.clone());
         *ledger.turn.lock().unwrap() = Some(controls.turn.clone());
+        controls.turn.set_agent_pid(*ledger.process.lock().unwrap());
         let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
         tokio::spawn(async move {
             let turn = controls.turn.clone();
@@ -127,7 +130,10 @@ impl Harness for Agent {
                     {
                         return false;
                     }
-                    send(AgentEvent::TextDelta { text: format!("on it: {prompt}") }).await
+                    send(AgentEvent::TextDelta {
+                        text: format!("on it: {prompt}"),
+                    })
+                    .await
                         && send(done()).await
                 }
             };
@@ -223,17 +229,24 @@ fn request(prompt: &str) -> RunRequest {
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while !predicate() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
 impl Rig {
     async fn send(&self, prompt: &str) {
+        self.send_request(request(prompt)).await;
+    }
+
+    async fn send_request(&self, request: RunRequest) {
         let before = self.ledger.prompts.lock().unwrap().len();
         self.core
             .sessions
-            .dispatch(CHAT, HarnessId::Mock, request(prompt), None)
+            .dispatch(CHAT, HarnessId::Mock, request, None)
             .await
             .unwrap();
         wait_for(
@@ -256,7 +269,11 @@ impl Rig {
     }
 
     async fn stopped(&self) {
-        wait_for(|| self.kills() == 1 && !self.live(), "the idle agent to be stopped").await;
+        wait_for(
+            || self.kills() == 1 && !self.live(),
+            "the idle agent to be stopped",
+        )
+        .await;
     }
 }
 
@@ -378,15 +395,23 @@ async fn a_run_s_zeron_tools_come_from_the_engine_on_a_token_that_dies_with_it()
         .await
         .unwrap();
     rig.send("hello").await;
-    let mcp = rig.ledger.mcp.lock().unwrap()[0].clone().expect("the host stamps Zeron's server");
+    let mcp = rig.ledger.mcp.lock().unwrap()[0]
+        .clone()
+        .expect("the host stamps Zeron's server");
     let http = mcp.http.clone().expect("served over HTTP by the engine");
     assert!(http.url.starts_with("http://127.0.0.1:"), "{}", http.url);
     let token = http.bearer_token().expect("a bearer token").to_owned();
     // Agents that speak only stdio get the small forwarder, not the engine.
     assert_eq!(mcp.args, ["mcp-proxy"]);
     assert_eq!(mcp.env.get(zeron_proto::McpServer::TOKEN_ENV), Some(&token));
-    assert_eq!(mcp.env.get(zeron_proto::McpServer::URL_ENV), Some(&http.url));
-    assert!(!format!("{mcp:?}").contains(&token), "a token never reaches a log line");
+    assert_eq!(
+        mcp.env.get(zeron_proto::McpServer::URL_ENV),
+        Some(&http.url)
+    );
+    assert!(
+        !format!("{mcp:?}").contains(&token),
+        "a token never reaches a log line"
+    );
 
     // The token speaks as its run's chat.
     let call = serde_json::json!({
@@ -418,5 +443,99 @@ async fn a_run_s_zeron_tools_come_from_the_engine_on_a_token_that_dies_with_it()
     let next = rig.ledger.mcp.lock().unwrap()[1].clone().unwrap();
     let next_token = next.http.unwrap().bearer_token().unwrap().to_owned();
     assert_ne!(next_token, token);
+    rig.core.sessions.shutdown().await;
+}
+
+/// A real process standing in for the agent CLI, with one child: `sleep
+/// <secs>` (a background shell, or an MCP server). Killed on drop.
+#[cfg(unix)]
+struct AgentProcess(std::process::Child);
+
+#[cfg(unix)]
+impl AgentProcess {
+    fn with_child(secs: &str) -> Self {
+        let agent = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("sleep {secs} & wait")])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while zeron_harness::process::unexpected_descendants(agent.id(), &[]).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never started"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Self(agent)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AgentProcess {
+    fn drop(&mut self) {
+        // SAFETY: the test's own process group: `sh` and its `sleep`.
+        let pid = self.0.id() as i32;
+        for child in zeron_harness::process::unexpected_descendants(pid as u32, &[]) {
+            if let Some(child) = child
+                .split_whitespace()
+                .next()
+                .and_then(|p| p.parse::<i32>().ok())
+            {
+                unsafe { libc::kill(child, libc::SIGKILL) };
+            }
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The agent says it holds no background work, but its process still runs
+/// a child nobody configured (a background shell it never reported): never
+/// stopped, however long.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_agent_whose_process_runs_an_unreported_child_is_never_stopped() {
+    let rig = rig(true);
+    let agent = AgentProcess::with_child("3603");
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    rig.send("hello").await;
+    assert!(
+        !rig.ledger
+            .turn
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .background_live()
+    );
+    tokio::time::sleep(Duration::from_secs(3 * 60 * 60)).await;
+    assert!(
+        rig.live(),
+        "stopped while its process ran an unreported child"
+    );
+    assert_eq!(rig.kills(), 0);
+    drop(agent);
+    rig.core.sessions.shutdown().await;
+}
+
+/// One whose only child is the MCP server its run configured is idle, and
+/// is stopped.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_agent_whose_only_child_is_its_mcp_server_is_stopped() {
+    let rig = rig(true);
+    let agent = AgentProcess::with_child("3604");
+    *rig.ledger.process.lock().unwrap() = Some(agent.0.id());
+    let mut first = request("hello");
+    first.mcp = Some(zeron_proto::McpServer {
+        name: "zeron".into(),
+        command: "sleep".into(),
+        args: vec!["3604".into()],
+        ..Default::default()
+    });
+    rig.send_request(first).await;
+    tokio::time::sleep(AGENT_IDLE_STOP + Duration::from_secs(10)).await;
+    rig.stopped().await;
+    drop(agent);
     rig.core.sessions.shutdown().await;
 }

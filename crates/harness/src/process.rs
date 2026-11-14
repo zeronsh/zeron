@@ -295,6 +295,94 @@ mod proc_table {
         info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn zombie(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let rest = &stat[stat.rfind(')')? + 1..];
+                rest.split_whitespace().next().map(|state| state == "Z")
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn argv(pid: i32) -> Option<Vec<String>> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        Some(
+            raw.split(|byte| *byte == 0)
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn zombie(pid: i32) -> bool {
+        // SZOMB (sys/proc.h).
+        bsd_info(pid).is_some_and(|info| info.pbi_status == 5)
+    }
+
+    /// `KERN_PROCARGS2`: argc, the exec path, padding, then argv.
+    #[cfg(target_os = "macos")]
+    pub(super) fn argv(pid: i32) -> Option<Vec<String>> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut size: libc::size_t = 0;
+        // SAFETY: a null buffer asks for the size only.
+        let asked = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if asked != 0 || size < 4 {
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        // SAFETY: `buf` is `size` bytes; sysctl writes at most that and says how many.
+        let read = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 || size < 4 {
+            return None;
+        }
+        buf.truncate(size);
+        let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?).max(0) as usize;
+        let mut rest = &buf[4..];
+        // The exec path, then NUL padding up to argv.
+        let path_end = rest.iter().position(|byte| *byte == 0)?;
+        rest = &rest[path_end..];
+        let start = rest.iter().position(|byte| *byte != 0)?;
+        rest = &rest[start..];
+        Some(
+            rest.split(|byte| *byte == 0)
+                .take(argc)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect(),
+        )
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn zombie(_pid: i32) -> bool {
+        false
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn argv(_pid: i32) -> Option<Vec<String>> {
+        None
+    }
+
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(super) fn read() -> Vec<ProcEntry> {
         Vec::new()
@@ -314,6 +402,80 @@ mod proc_table {
         let fields: Vec<&str> = rest.split_whitespace().collect();
         Some((fields.get(1)?.parse().ok()?, fields.get(19)?.parse().ok()?))
     }
+}
+
+/// An MCP server a run was configured with: its command and leading args,
+/// as the agent starts it (`McpServer::command`/`args`).
+pub type KnownServer = (String, Vec<String>);
+
+/// The live descendants of `root` (an agent CLI) that aren't MCP servers its
+/// run was configured with (`known`, and whatever those start), each as
+/// `"<pid> <argv>"`. Independent of what the agent reports about its own
+/// background work: a shell or dev server it started shows up here whether
+/// or not the agent listed it. Zombies don't count. Blocking: one
+/// process-table read and an argv read per child.
+///
+/// A process table that can't be read answers with one entry saying so, so
+/// a caller holding on "anything here" errs toward keeping the agent.
+/// (Windows: not traced here; always empty.)
+pub fn unexpected_descendants(root: u32, known: &[KnownServer]) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        let table = proc_table::read();
+        if table.is_empty() {
+            return vec!["(the process table can't be read)".to_owned()];
+        }
+        let root = root as i32;
+        let mut found = Vec::new();
+        for entry in table
+            .iter()
+            .filter(|entry| entry.ppid == root && entry.pid > 1)
+        {
+            if proc_table::zombie(entry.pid) {
+                continue;
+            }
+            let argv = proc_table::argv(entry.pid).unwrap_or_default();
+            if known
+                .iter()
+                .any(|(command, args)| started_as(&argv, command, args))
+            {
+                continue;
+            }
+            let mut shown = argv.join(" ");
+            if shown.len() > 160 {
+                let mut end = 160;
+                while !shown.is_char_boundary(end) {
+                    end -= 1;
+                }
+                shown.truncate(end);
+            }
+            found.push(format!("{} {shown}", entry.pid));
+        }
+        found
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, known);
+        Vec::new()
+    }
+}
+
+/// Whether a process's `argv` is `command args…`: as given, or with an
+/// interpreter in front (a `#!` script runs as `node /path/server …`), the
+/// command named by path or by its file name.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn started_as(argv: &[String], command: &str, args: &[String]) -> bool {
+    let name = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let wanted = name(command);
+    (0..argv.len().min(3)).any(|i| {
+        (argv[i] == command || (!wanted.is_empty() && name(&argv[i]) == wanted))
+            && argv[i + 1..].starts_with(args)
+    })
 }
 
 /// Start times recorded by [`descendants`] snapshots, consulted before every
@@ -572,3 +734,73 @@ mod tests {
 }
 
 pub(crate) mod owned;
+
+#[cfg(all(test, unix))]
+mod unexpected_descendants_tests {
+    use super::*;
+
+    /// `sh` standing in for an agent, with two children: one a configured
+    /// MCP server, one not (a background shell's command).
+    fn agent() -> std::process::Child {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 3601 & sleep 3602 & wait"])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unexpected_descendants(child.id(), &[]).len() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the children never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        child
+    }
+
+    fn end(mut agent: std::process::Child) {
+        let group = agent.id();
+        for pid in proc_table::read().iter().filter(|e| e.ppid == group as i32) {
+            // SAFETY: our own test's children.
+            unsafe { libc::kill(pid.pid, libc::SIGKILL) };
+        }
+        let _ = agent.kill();
+        let _ = agent.wait();
+    }
+
+    #[test]
+    fn a_child_that_is_no_configured_mcp_server_is_reported() {
+        let agent = agent();
+        let mcp: Vec<KnownServer> = vec![("sleep".into(), vec!["3602".into()])];
+        let found = unexpected_descendants(agent.id(), &mcp);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].ends_with("sleep 3601"), "{found:?}");
+        // Both configured: nothing unexpected.
+        let both: Vec<KnownServer> = vec![
+            ("/bin/sleep".into(), vec!["3601".into()]),
+            ("sleep".into(), vec!["3602".into()]),
+        ];
+        assert_eq!(
+            unexpected_descendants(agent.id(), &both),
+            Vec::<String>::new()
+        );
+        end(agent);
+    }
+
+    #[test]
+    fn a_server_run_through_an_interpreter_still_counts_as_configured() {
+        let argv = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let npx = argv(&["node", "/opt/homebrew/bin/npx", "-y", "server"]);
+        assert!(started_as(&npx, "npx", &argv(&["-y", "server"])));
+        assert!(!started_as(&npx, "npx", &argv(&["-y", "other"])));
+        assert!(started_as(
+            &argv(&["/x/zeron-engine", "mcp-proxy"]),
+            "/x/zeron-engine",
+            &argv(&["mcp-proxy"])
+        ));
+        assert!(!started_as(
+            &argv(&["/bin/zsh", "-c", "npm run dev"]),
+            "npx",
+            &[]
+        ));
+    }
+}

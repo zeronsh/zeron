@@ -170,6 +170,18 @@ fn no_conversation(text: &str) -> bool {
     text.contains("No conversation found")
 }
 
+/// The first Claude CLI live-verified to report every background task it
+/// holds with `background_tasks_changed` (agents and shells:
+/// `background.rs`, 2.1.312; held an idle stop off in the measurement rig
+/// on 2.1.322).
+const REPORTS_BACKGROUND_SINCE: semver::Version = semver::Version::new(2, 1, 312);
+
+/// Whether a CLI of `version` reports its background work: an unknown
+/// version is treated as not.
+fn reports_background(version: Option<&semver::Version>) -> bool {
+    version.is_some_and(|version| *version >= REPORTS_BACKGROUND_SINCE)
+}
+
 /// Shown when a chat's Claude session could not be restored.
 const SESSION_LOST: &str = "The previous Claude session could not be restored, so this chat \
      continues in a new one without its earlier context.";
@@ -892,9 +904,16 @@ impl Harness for ClaudeHarness {
     /// `--resume` brings the session back whole (live-verified 2.1.322
     /// against a replay server: the resumed request carries every earlier
     /// turn), and teardown never signals mid login refresh
-    /// ([`refresh_lock::settle`]).
+    /// ([`refresh_lock::settle`]). Only for a CLI known to report its
+    /// background work (`background_tasks_changed`,
+    /// [`REPORTS_BACKGROUND_SINCE`]): the host's other guard against
+    /// stopping one mid-work. Blocking: may ask the CLI its version once.
     fn stops_when_idle(&self) -> bool {
-        true
+        reports_background(
+            self.executable_path()
+                .and_then(|path| crate::executable::binary_version(&path))
+                .as_ref(),
+        )
     }
     fn display_name(&self) -> &str {
         "Claude Code"
@@ -1124,6 +1143,8 @@ impl ClaudeHarness {
             stderr_tail,
             mcp_config,
         } = Self::launch(&exe, &request, title_only)?;
+        // The host looks at what this process runs before stopping it idle.
+        controls.turn.set_agent_pid(child.id());
 
         let lock_dir = refresh_lock::config_dir_for(&request.env);
         if !title_only {
@@ -1511,6 +1532,7 @@ async fn run_session(session: Session) {
                     stdin = runtime.stdin;
                     stderr_tail = runtime.stderr_tail;
                     _mcp_config = runtime.mcp_config;
+                    turn.set_agent_pid(child.id());
                 }
                 Err(error) => {
                     let _ = event_tx.send(Err(error)).await;
@@ -2048,6 +2070,7 @@ async fn run_session(session: Session) {
     }
     stdin.close_for_teardown();
     child.shutdown_with(torn_down, kill_grace).await;
+    turn.set_agent_pid(None);
     if let Some(handle) = escalation {
         handle.abort();
     }
@@ -2742,6 +2765,18 @@ mod resolution_tests {
 #[cfg(test)]
 mod mcp_injection_tests {
     use super::*;
+
+    /// Stopped while idle only where the CLI is known to report its
+    /// background work; an unknown version isn't.
+    #[test]
+    fn idle_stops_need_a_cli_that_reports_its_background_work() {
+        let v = |text: &str| semver::Version::parse(text).unwrap();
+        assert!(reports_background(Some(&v("2.1.312"))));
+        assert!(reports_background(Some(&v("2.1.322"))));
+        assert!(reports_background(Some(&v("2.2.0"))));
+        assert!(!reports_background(Some(&v("2.1.311"))));
+        assert!(!reports_background(None));
+    }
 
     fn engine_served() -> zeron_proto::McpServer {
         zeron_proto::McpServer {
