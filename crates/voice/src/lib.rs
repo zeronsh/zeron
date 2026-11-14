@@ -256,10 +256,9 @@ impl Recognizer {
         static LOGS: std::sync::Once = std::sync::Once::new();
         LOGS.call_once(transcribe_cpp::init_logging);
         let failed = |e: transcribe_cpp::Error| anyhow::anyhow!("Could not load {}: {e}", m.name);
-        let mut session = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
+        let session = transcribe_cpp::Model::load(dir.join(&m.files[0].name))
             .and_then(|model| model.session())
             .map_err(failed)?;
-        session.set_cancel_token(&ABORT);
         let language = match m
             .files
             .iter()
@@ -283,6 +282,20 @@ impl Recognizer {
         Ok(Self { session, language })
     }
     pub fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
+        self.transcribe_until(samples, rate, &Cancel::new())
+    }
+    /// As `transcribe`, and `cancel` stops it mid-decode (language ID's
+    /// too): it returns at once.
+    pub fn transcribe_until(
+        &mut self,
+        samples: Vec<f32>,
+        rate: u32,
+        cancel: &Cancel,
+    ) -> Result<String> {
+        self.session.set_cancel_token(cancel);
+        if let Some((detect, _, _)) = &mut self.language {
+            detect.set_cancel_token(cancel);
+        }
         if !(8_000..=192_000).contains(&rate) {
             bail!("Unsupported microphone sample rate")
         }
@@ -590,10 +603,13 @@ pub enum Event {
     Final(String),
     Failed(String),
 }
+/// A session's cancel: the capture loop reads it, and a decode under way
+/// (the model's and language ID's) stops on it.
+type Cancel = transcribe_cpp::CancelToken;
 struct Job {
     dir: std::path::PathBuf,
     stop: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
+    cancel: Cancel,
     level: Arc<AtomicU32>,
     device: Option<String>,
     events: std::sync::mpsc::SyncSender<Event>,
@@ -625,7 +641,7 @@ fn record<C: Recording>(
     job: &Job,
     start: impl FnOnce() -> Result<C>,
 ) -> Result<Option<(Vec<f32>, u32)>> {
-    if job.cancel.load(Ordering::Acquire) || job.stop.load(Ordering::Acquire) {
+    if job.cancel.is_cancelled() || job.stop.load(Ordering::Acquire) {
         return Ok(None);
     }
     let capture = start()?;
@@ -636,12 +652,12 @@ fn record<C: Recording>(
     while !capture.flowing()
         && opened.elapsed() < WARM_UP
         && !job.stop.load(Ordering::Acquire)
-        && !job.cancel.load(Ordering::Acquire)
+        && !job.cancel.is_cancelled()
         && !capture.ended()
     {
         std::thread::sleep(Duration::from_millis(5));
     }
-    if job.cancel.load(Ordering::Acquire) {
+    if job.cancel.is_cancelled() {
         return Ok(None);
     }
     if !job.stop.load(Ordering::Acquire) {
@@ -649,13 +665,13 @@ fn record<C: Recording>(
     }
     let started = Instant::now();
     while !job.stop.load(Ordering::Acquire)
-        && !job.cancel.load(Ordering::Acquire)
+        && !job.cancel.is_cancelled()
         && !capture.ended()
         && started.elapsed().as_secs() < MAX_SECONDS as u64
     {
         std::thread::sleep(Duration::from_millis(10));
     }
-    if job.cancel.load(Ordering::Acquire) {
+    if job.cancel.is_cancelled() {
         return Ok(None);
     }
     let audio = capture.finish()?; // Close the microphone before waiting for the model.
@@ -672,7 +688,7 @@ where
     C: Recording,
     F: FnOnce(Vec<f32>, u32) -> Result<String>,
 {
-    if job.cancel.load(Ordering::Acquire) {
+    if job.cancel.is_cancelled() {
         return Ok(None);
     }
     std::thread::scope(|scope| {
@@ -681,10 +697,10 @@ where
             .spawn_scoped(scope, || record(job, start))?;
         // If native loading unwinds, scope teardown still has to close capture
         // before joining it. Normal cancellation uses the same signal.
-        struct CancelOnDrop<'a>(&'a AtomicBool);
+        struct CancelOnDrop<'a>(&'a Cancel);
         impl Drop for CancelOnDrop<'_> {
             fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
+                self.0.cancel();
             }
         }
         let _close_capture = CancelOnDrop(&job.cancel);
@@ -692,20 +708,20 @@ where
         // A load failure must stop capture even if the user has not pressed Stop.
         // Keep the admission guard until the stream has actually been dropped.
         if model.is_err() {
-            job.cancel.store(true, Ordering::Release);
+            job.cancel.cancel();
         }
         let audio = capture
             .join()
             .map_err(|_| anyhow::anyhow!("Microphone worker failed"))?;
         let transcribe = model?;
-        if job.cancel.load(Ordering::Acquire) {
+        if job.cancel.is_cancelled() {
             return Ok(None);
         }
         let Some((samples, rate)) = audio? else {
             return Ok(Some(String::new()));
         };
         let text = transcribe(samples, rate)?;
-        Ok((!job.cancel.load(Ordering::Acquire)).then_some(text))
+        Ok((!job.cancel.is_cancelled()).then_some(text))
     })
 }
 
@@ -759,11 +775,12 @@ pub fn keep_ready(time: Option<Duration>) {
 
 /// What the worker transcribes with: a model loaded from its folder.
 trait Model {
-    fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String>;
+    /// Stops mid-decode once `cancel` is.
+    fn transcribe(&mut self, samples: Vec<f32>, rate: u32, cancel: &Cancel) -> Result<String>;
 }
 impl Model for Recognizer {
-    fn transcribe(&mut self, samples: Vec<f32>, rate: u32) -> Result<String> {
-        Recognizer::transcribe(self, samples, rate)
+    fn transcribe(&mut self, samples: Vec<f32>, rate: u32, cancel: &Cancel) -> Result<String> {
+        self.transcribe_until(samples, rate, cancel)
     }
 }
 
@@ -800,6 +817,10 @@ fn serve<C: Recording, M: Model>(
             }
             Err(_) => break,
         };
+        if EXITING.load(Ordering::Acquire) {
+            // (Queued as Zeron quits: it ends before it starts.)
+            job.cancel.cancel();
+        }
         *running.lock().unwrap_or_else(|e| e.into_inner()) = Some(job.cancel.clone());
         // A native panic must not take down the worker, and with it every
         // later session, until the app restarts.
@@ -817,7 +838,8 @@ fn serve<C: Recording, M: Model>(
                         cached = Some((job.dir.clone(), model));
                     }
                     let model = &mut cached.as_mut().unwrap().1;
-                    Ok(move |samples, rate| model.transcribe(samples, rate))
+                    let cancel = job.cancel.clone();
+                    Ok(move |samples, rate| model.transcribe(samples, rate, &cancel))
                 },
             )
         }))
@@ -847,7 +869,7 @@ fn serve<C: Recording, M: Model>(
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
+    cancel: Cancel,
     level: Arc<AtomicU32>,
     events: std::sync::mpsc::Receiver<Event>,
 }
@@ -870,7 +892,7 @@ impl Session {
             tx
         });
         let stop = Arc::new(AtomicBool::new(false));
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Cancel::new();
         let level = Arc::new(AtomicU32::new(0));
         let (tx, events) = std::sync::mpsc::sync_channel(4);
         if sender
@@ -910,20 +932,17 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Release);
+        self.cancel.cancel();
     }
 }
 pub fn busy() -> bool {
     BUSY.load(Ordering::Acquire)
 }
 
-/// Stops every decode as Zeron exits (`release_models`).
-static ABORT: std::sync::LazyLock<transcribe_cpp::CancelToken> =
-    std::sync::LazyLock::new(transcribe_cpp::CancelToken::new);
 /// Zeron is exiting: no model stays loaded after a job.
 static EXITING: AtomicBool = AtomicBool::new(false);
-/// The job the worker runs now: its cancel flag, for `release_models`.
-type Running = Mutex<Option<Arc<AtomicBool>>>;
+/// The job the worker runs now: its cancel, for `release_models`.
+type Running = Mutex<Option<Cancel>>;
 static RUNNING: Running = Mutex::new(None);
 
 /// Frees the loaded model before the process goes: a decode under way stops,
@@ -935,24 +954,18 @@ static RUNNING: Running = Mutex::new(None);
 pub fn release_models() {
     EXITING.store(true, Ordering::Release);
     if let Some(worker) = WORKER.get() {
-        release(worker, &RUNNING, &ABORT, Duration::from_secs(2));
+        release(worker, &RUNNING, Duration::from_secs(2));
     }
 }
-fn release(
-    worker: &std::sync::mpsc::SyncSender<Command>,
-    running: &Running,
-    abort: &transcribe_cpp::CancelToken,
-    within: Duration,
-) {
+fn release(worker: &std::sync::mpsc::SyncSender<Command>, running: &Running, within: Duration) {
     // A recording under way ends (nothing comes of it), a decode stops.
     if let Some(job) = running.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        job.store(true, Ordering::Release);
+        job.cancel();
     }
-    abort.cancel();
     let until = Instant::now() + within;
     let (done, released) = std::sync::mpsc::sync_channel(1);
     let mut command = Command::Unload(done);
-    // (A job may be queued ahead: it ends at once, the decode aborted.)
+    // (A job may be queued ahead: Zeron exiting, it ends before it starts.)
     loop {
         match worker.try_send(command) {
             Ok(()) => break,
