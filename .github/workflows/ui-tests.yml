@@ -33,7 +33,7 @@ env:
 jobs:
   # Every Linux Rust test that is not UI: one build, one nextest run (see
   # scripts/ci/test-core.sh), including the voice protocol and transport tests
-  # that need no audio stack.
+  # and zeron-voice's dictation tests (fake microphones and models).
   core-tests:
     if: inputs.core
     runs-on: ubuntu-24.04
@@ -44,7 +44,10 @@ jobs:
         with:
           rust-cache: core
           save-rust-cache: 'true'
-      - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
+          # zeron-voice builds transcribe.cpp (CMake) and CPAL (ALSA).
+          apt-cache: core
+          apt-packages: libasound2-dev pkg-config cmake
+      - name: Harness, engine, sync, update, doc, preview, MCP and voice tests
         run: scripts/ci/test-core.sh
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''

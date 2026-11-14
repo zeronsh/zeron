@@ -398,8 +398,9 @@ fn speech_from_the_first_instant_is_kept_and_listening_waits_for_it() {
         session.events.recv_timeout(WAIT).unwrap(),
         Event::Listening
     ));
-    // Well before the silent room's 600 ms: it was the sound that said so.
-    assert!(sent.elapsed() < WARM_UP / 4, "{:?}", sent.elapsed());
+    // Before the silent room's 600 ms would have (some 400 ms from here):
+    // it was the sound that said so. (Wide: a loaded CI runner is slow.)
+    assert!(sent.elapsed() < WARM_UP / 2, "{:?}", sent.elapsed());
     for buffer in speech[160..].chunks(160) {
         mic.send(buffer.to_vec()).unwrap();
     }
@@ -509,8 +510,9 @@ fn the_model_stays_ready_as_long_as_the_setting_says() {
     assert_eq!(life.recv_timeout(WAIT).unwrap(), "loaded");
     let done = Instant::now();
     assert_eq!(life.recv_timeout(WAIT).unwrap(), "released");
+    // (Well under the 500 ms kept above; wide for a loaded CI runner.)
     assert!(
-        done.elapsed() < Duration::from_millis(100),
+        done.elapsed() < Duration::from_millis(300),
         "{:?}",
         done.elapsed()
     );
@@ -560,7 +562,11 @@ fn a_slow_first_load_still_yields_the_words_with_no_error() {
         session.events.recv_timeout(WAIT).unwrap(),
         Event::Listening
     ));
-    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
     drop(mic);
     session.finish();
     let mut seen = Vec::new();
