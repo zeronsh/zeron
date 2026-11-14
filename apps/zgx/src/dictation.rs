@@ -134,11 +134,13 @@ impl Service {
         Self {
             models,
             session: None,
-            open: Box::new(|dir, device| match zeron_voice::Session::start(dir, device) {
-                Ok(session) => Ok(Box::new(session) as Box<dyn Recording>),
-                Err(_) if zeron_voice::busy() => Err(None),
-                Err(e) => Err(Some(e.to_string())),
-            }),
+            open: Box::new(
+                |dir, device| match zeron_voice::Session::start(dir, device) {
+                    Ok(session) => Ok(Box::new(session) as Box<dyn Recording>),
+                    Err(_) if zeron_voice::busy() => Err(None),
+                    Err(e) => Err(Some(e.to_string())),
+                },
+            ),
             waiting: None,
             access: Box::new(access),
             asking: None,
@@ -206,19 +208,25 @@ impl Service {
     fn finalizing(&mut self) {
         let recorded = self.listening.map_or(Duration::ZERO, |at| at.elapsed());
         let per_second = if self.slow { 3 } else { 1 };
-        self.deadline
-            .get_or_insert_with(|| Instant::now() + Duration::from_secs(30) + recorded * per_second);
+        self.deadline.get_or_insert_with(|| {
+            Instant::now() + Duration::from_secs(30) + recorded * per_second
+        });
     }
     /// The folder of the model `args` names (`model`, an id; none or empty:
     /// the default). One it doesn't offer is an error, never another's folder.
     fn dir(&self, args: &Json) -> Result<PathBuf, String> {
-        let models_dir = self.models.as_ref().ok_or("Zeron's data folder isn't known")?;
+        let models_dir = self
+            .models
+            .as_ref()
+            .ok_or("Zeron's data folder isn't known")?;
         let id = match args["model"].as_str().filter(|id| !id.is_empty()) {
-            Some(id) => zeron_voice::models()
-                .into_iter()
-                .find(|m| m.id == id)
-                .ok_or("No such speech model")?
-                .id,
+            Some(id) => {
+                zeron_voice::models()
+                    .into_iter()
+                    .find(|m| m.id == id)
+                    .ok_or("No such speech model")?
+                    .id
+            }
             None => zeron_voice::manifest().id,
         };
         Ok(models_dir.join(id))
@@ -231,7 +239,10 @@ impl Service {
     }
     /// The models on offer, the default first, and which are here.
     fn status(&self) -> Result<Json, String> {
-        let models = self.models.as_ref().ok_or("Zeron's data folder isn't known")?;
+        let models = self
+            .models
+            .as_ref()
+            .ok_or("Zeron's data folder isn't known")?;
         let list: Vec<Json> = zeron_voice::models()
             .into_iter()
             .map(|m| {
@@ -315,8 +326,7 @@ impl Service {
             let _ = tell.send(Download::Done(result));
         });
         self.download = Some(DownloadJob { cancel, events });
-        self.state =
-            json!({"phase":"downloading", "bytes":0, "total":total});
+        self.state = json!({"phase":"downloading", "bytes":0, "total":total});
         Ok(self.state.clone())
     }
     fn remove(&mut self, args: &Json) -> Result<(), String> {
@@ -424,7 +434,8 @@ impl Service {
             self.deadline = None;
             self.state["phase"] = json!("failed");
             self.state["late"] = json!(true);
-            self.state["error"] = json!("Transcription is taking long. The words will land if they come.");
+            self.state["error"] =
+                json!("Transcription is taking long. The words will land if they come.");
         }
         if ended {
             self.session = None;
@@ -675,7 +686,10 @@ mod tests {
         s.poll();
         assert_eq!(s.take_levels(), None);
         let wait = s.poll_wait();
-        assert!(wait <= Duration::from_millis(61) && wait > Duration::ZERO, "{wait:?}");
+        assert!(
+            wait <= Duration::from_millis(61) && wait > Duration::ZERO,
+            "{wait:?}"
+        );
         std::thread::sleep(meter::STEP);
         s.poll();
         let bars = s.take_levels().unwrap();
@@ -699,7 +713,9 @@ mod tests {
         assert_eq!(s.state["phase"], "listening");
         s.cancel();
         assert!(cancelled.get());
-        events.borrow_mut().push_back(Event::Final("private".into()));
+        events
+            .borrow_mut()
+            .push_back(Event::Final("private".into()));
         s.poll();
         assert!(s.state["text"].is_null());
     }
@@ -720,7 +736,10 @@ mod tests {
         s.slow = true;
         s.stop();
         let due = s.deadline.unwrap() - Instant::now();
-        assert!(due > Duration::from_secs(205) && due < Duration::from_secs(211), "{due:?}");
+        assert!(
+            due > Duration::from_secs(205) && due < Duration::from_secs(211),
+            "{due:?}"
+        );
         // Overdue: said, but the words that come late still land.
         let (mut s, events, cancelled, _) = service();
         s.stop();
@@ -729,7 +748,9 @@ mod tests {
         assert!(!cancelled.get());
         assert_eq!(s.state["phase"], "failed");
         assert_eq!(s.state["late"], true);
-        events.borrow_mut().push_back(Event::Final("late words".into()));
+        events
+            .borrow_mut()
+            .push_back(Event::Final("late words".into()));
         s.poll();
         assert_eq!(s.state["phase"], "final");
         assert_eq!(s.state["text"], "late words");
@@ -741,7 +762,10 @@ mod tests {
         let dir = root.path().join(&m.id);
         std::fs::create_dir_all(&dir).unwrap();
         for f in &m.files {
-            std::fs::File::create(dir.join(&f.name)).unwrap().set_len(f.size).unwrap();
+            std::fs::File::create(dir.join(&f.name))
+                .unwrap()
+                .set_len(f.size)
+                .unwrap();
         }
         std::fs::write(dir.join("verified"), m.marker()).unwrap();
         root
@@ -800,7 +824,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         s.poll();
         assert_eq!(s.state["phase"], "failed");
-        assert!(s.state["error"].as_str().unwrap().contains("System Settings"));
+        assert!(
+            s.state["error"]
+                .as_str()
+                .unwrap()
+                .contains("System Settings")
+        );
         assert_eq!(opened.get(), 0);
         assert!(!s.needs_poll());
         // Let go before the answer: nothing, even once it's granted.
@@ -899,7 +928,9 @@ mod tests {
                 async move { Ok::<_, String>(json_value(&state)) }
             });
             host.action("dictation.guard", |_: Value| {});
-            host.function("dictation.composing", move |_| composing(leased.borrow().as_ref()));
+            host.function("dictation.composing", move |_| {
+                composing(leased.borrow().as_ref())
+            });
             host
         });
         app.ui.scene.borrow_mut().resize(960., 700.);
@@ -923,8 +954,11 @@ mod tests {
             if modifiers == chord {
                 assert!(app.host.run_command("shell.dictate"));
             } else {
-                let result =
-                    app.ui.dispatch(InputEvent::KeyDown { key: d.clone(), modifiers, repeat });
+                let result = app.ui.dispatch(InputEvent::KeyDown {
+                    key: d.clone(),
+                    modifiers,
+                    repeat,
+                });
                 if !result.default_prevented && !modifiers.control && !modifiers.meta {
                     app.ui.dispatch(InputEvent::Text("d".into()));
                 }
@@ -945,7 +979,10 @@ mod tests {
         for _ in 0..3 {
             press(&mut app, Modifiers::default(), true);
         }
-        app.ui.dispatch(InputEvent::KeyUp { key: d.clone(), modifiers: Modifiers::default() });
+        app.ui.dispatch(InputEvent::KeyUp {
+            key: d.clone(),
+            modifiers: Modifiers::default(),
+        });
         app.settle();
         app.host.run_command("final");
         app.settle();
@@ -968,7 +1005,8 @@ mod tests {
         // Listening, then typed on, an IME's composition included.
         assert!(app.host.run_command("begin"));
         app.settle();
-        app.ui.dispatch(zgx::input::InputEvent::Text("there".into()));
+        app.ui
+            .dispatch(zgx::input::InputEvent::Text("there".into()));
         editor.set_composition("正在", None, &[]);
         editor.set_composition("", None, &[]);
         app.settle();
@@ -991,9 +1029,18 @@ mod tests {
         app.host.run_command("final");
         app.settle();
         app.frames(3);
-        assert_eq!(editor.editor.borrow().preedit().map(|p| p.text.to_string()).as_deref(), Some("正在"));
+        assert_eq!(
+            editor
+                .editor
+                .borrow()
+                .preedit()
+                .map(|p| p.text.to_string())
+                .as_deref(),
+            Some("正在")
+        );
         assert_eq!(text(&editor), "Hello there");
-        app.ui.dispatch(zgx::input::InputEvent::ImeCommit("正在".into()));
+        app.ui
+            .dispatch(zgx::input::InputEvent::ImeCommit("正在".into()));
         app.settle();
         std::thread::sleep(Duration::from_millis(150));
         app.frames(10);
@@ -1014,4 +1061,3 @@ mod tests {
         assert!(EditorLease::new(editor.clone()).is_none());
     }
 }
-
